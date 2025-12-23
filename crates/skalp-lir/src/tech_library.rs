@@ -116,9 +116,143 @@ pub struct LibraryCell {
 /// Timing characteristics for a cell
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CellTiming {
-    /// Timing arcs: maps "input_pin->output_pin" to timing arc
+    /// Timing arcs: maps "input_pin->output_pin" to timing arc (typical/default corner)
     #[serde(default)]
     pub arcs: HashMap<String, TimingArc>,
+    /// Corner-specific timing overrides
+    #[serde(default)]
+    pub corners: HashMap<TimingCorner, CornerTiming>,
+}
+
+/// Corner-specific timing data
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CornerTiming {
+    /// Operating conditions for this corner
+    #[serde(default)]
+    pub conditions: Option<CornerConditions>,
+    /// Timing arcs for this corner (overrides default arcs)
+    #[serde(default)]
+    pub arcs: HashMap<String, TimingArc>,
+    /// Setup time override (for sequential cells)
+    #[serde(default)]
+    pub setup_ps: Option<u32>,
+    /// Hold time override (for sequential cells)
+    #[serde(default)]
+    pub hold_ps: Option<u32>,
+    /// Clock-to-Q override (for sequential cells)
+    #[serde(default)]
+    pub clk_to_q_ps: Option<u32>,
+}
+
+/// Operating conditions for a timing corner
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CornerConditions {
+    /// Temperature in Celsius
+    pub temperature_c: f64,
+    /// Voltage in volts
+    pub voltage_v: f64,
+}
+
+/// Timing corner enumeration (SPICE-style naming)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum TimingCorner {
+    /// Typical-Typical (nominal)
+    #[serde(rename = "tt")]
+    TT,
+    /// Slow-Slow (worst case for setup, high temperature)
+    #[serde(rename = "ss")]
+    SS,
+    /// Fast-Fast (worst case for hold, low temperature)
+    #[serde(rename = "ff")]
+    FF,
+    /// Slow NMOS, Fast PMOS
+    #[serde(rename = "sf")]
+    SF,
+    /// Fast NMOS, Slow PMOS
+    #[serde(rename = "fs")]
+    FS,
+    /// Slow-Slow at low voltage (ultra-worst case)
+    #[serde(rename = "ss_lv")]
+    SSLV,
+    /// Fast-Fast at high voltage
+    #[serde(rename = "ff_hv")]
+    FFHV,
+}
+
+impl TimingCorner {
+    /// Get default operating conditions for this corner
+    pub fn default_conditions(&self) -> CornerConditions {
+        match self {
+            TimingCorner::TT => CornerConditions {
+                temperature_c: 25.0,
+                voltage_v: 1.0,
+            },
+            TimingCorner::SS => CornerConditions {
+                temperature_c: 125.0,
+                voltage_v: 0.9,
+            },
+            TimingCorner::FF => CornerConditions {
+                temperature_c: -40.0,
+                voltage_v: 1.1,
+            },
+            TimingCorner::SF => CornerConditions {
+                temperature_c: 25.0,
+                voltage_v: 1.0,
+            },
+            TimingCorner::FS => CornerConditions {
+                temperature_c: 25.0,
+                voltage_v: 1.0,
+            },
+            TimingCorner::SSLV => CornerConditions {
+                temperature_c: 125.0,
+                voltage_v: 0.81,
+            },
+            TimingCorner::FFHV => CornerConditions {
+                temperature_c: -40.0,
+                voltage_v: 1.21,
+            },
+        }
+    }
+
+    /// Get corner name as string
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            TimingCorner::TT => "tt",
+            TimingCorner::SS => "ss",
+            TimingCorner::FF => "ff",
+            TimingCorner::SF => "sf",
+            TimingCorner::FS => "fs",
+            TimingCorner::SSLV => "ss_lv",
+            TimingCorner::FFHV => "ff_hv",
+        }
+    }
+
+    /// Is this a setup-critical corner (slow)?
+    pub fn is_setup_critical(&self) -> bool {
+        matches!(self, TimingCorner::SS | TimingCorner::SSLV)
+    }
+
+    /// Is this a hold-critical corner (fast)?
+    pub fn is_hold_critical(&self) -> bool {
+        matches!(self, TimingCorner::FF | TimingCorner::FFHV)
+    }
+}
+
+impl std::str::FromStr for TimingCorner {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "tt" | "typical" => Ok(TimingCorner::TT),
+            "ss" | "slow" => Ok(TimingCorner::SS),
+            "ff" | "fast" => Ok(TimingCorner::FF),
+            "sf" => Ok(TimingCorner::SF),
+            "fs" => Ok(TimingCorner::FS),
+            "ss_lv" | "sslv" => Ok(TimingCorner::SSLV),
+            "ff_hv" | "ffhv" => Ok(TimingCorner::FFHV),
+            _ => Err(format!("Unknown timing corner: {}", s)),
+        }
+    }
 }
 
 /// A timing arc from input to output
@@ -157,6 +291,61 @@ impl TimingArc {
     /// Calculate average delay for a given load capacitance
     pub fn avg_delay_ps(&self, load_ff: f64) -> f64 {
         (self.rise_delay_ps(load_ff) + self.fall_delay_ps(load_ff)) / 2.0
+    }
+
+    /// Scale timing arc by a factor (for derating)
+    pub fn scaled(&self, factor: f64) -> Self {
+        Self {
+            rise_base_ps: (self.rise_base_ps as f64 * factor) as u32,
+            rise_slope_ps_per_ff: self.rise_slope_ps_per_ff * factor,
+            fall_base_ps: (self.fall_base_ps as f64 * factor) as u32,
+            fall_slope_ps_per_ff: self.fall_slope_ps_per_ff * factor,
+        }
+    }
+}
+
+impl CellTiming {
+    /// Get timing arc for a specific corner
+    ///
+    /// Returns corner-specific timing if available, otherwise falls back to default.
+    pub fn get_arc(&self, arc_name: &str, corner: Option<TimingCorner>) -> Option<&TimingArc> {
+        if let Some(c) = corner {
+            // Try corner-specific first
+            if let Some(corner_timing) = self.corners.get(&c) {
+                if let Some(arc) = corner_timing.arcs.get(arc_name) {
+                    return Some(arc);
+                }
+            }
+        }
+        // Fall back to default
+        self.arcs.get(arc_name)
+    }
+
+    /// Get all timing arcs for a specific corner
+    pub fn get_arcs(&self, corner: Option<TimingCorner>) -> &HashMap<String, TimingArc> {
+        if let Some(c) = corner {
+            if let Some(corner_timing) = self.corners.get(&c) {
+                if !corner_timing.arcs.is_empty() {
+                    return &corner_timing.arcs;
+                }
+            }
+        }
+        &self.arcs
+    }
+
+    /// Get list of available corners (including default TT)
+    pub fn available_corners(&self) -> Vec<TimingCorner> {
+        let mut corners: Vec<TimingCorner> = self.corners.keys().copied().collect();
+        if !corners.contains(&TimingCorner::TT) && !self.arcs.is_empty() {
+            corners.insert(0, TimingCorner::TT);
+        }
+        corners.sort_by_key(|c| c.as_str());
+        corners
+    }
+
+    /// Check if timing data exists for a specific corner
+    pub fn has_corner(&self, corner: TimingCorner) -> bool {
+        self.corners.contains_key(&corner) || (corner == TimingCorner::TT && !self.arcs.is_empty())
     }
 }
 
@@ -1171,6 +1360,378 @@ impl TechLibrary {
 }
 
 // ============================================================================
+// Multi-Corner Library Set
+// ============================================================================
+
+/// A set of technology libraries for multi-corner analysis
+///
+/// Supports two usage patterns:
+/// 1. Single library file with embedded corner-specific timing
+/// 2. Multiple library files (one per corner) via .sklibset manifest
+///
+/// # Example .sklibset manifest:
+/// ```toml
+/// [library_set]
+/// name = "sky130_fd_sc_hd"
+/// process = "sky130"
+///
+/// [corners.tt]
+/// file = "sky130_tt.sklib"
+/// temperature_c = 25.0
+/// voltage_v = 1.8
+///
+/// [corners.ss]
+/// file = "sky130_ss.sklib"
+/// temperature_c = 125.0
+/// voltage_v = 1.62
+/// ```
+#[derive(Debug, Clone)]
+pub struct LibrarySet {
+    /// Library set name
+    pub name: String,
+    /// Process technology name
+    pub process: Option<String>,
+    /// Base library (contains all cells, with default/typical timing)
+    base_library: TechLibrary,
+    /// Corner-specific libraries (may be loaded from separate files)
+    corner_libraries: HashMap<TimingCorner, TechLibrary>,
+    /// Corner operating conditions
+    corner_conditions: HashMap<TimingCorner, CornerConditions>,
+}
+
+impl LibrarySet {
+    /// Create a new library set from a base library
+    pub fn new(base: TechLibrary) -> Self {
+        Self {
+            name: base.name.clone(),
+            process: None,
+            base_library: base,
+            corner_libraries: HashMap::new(),
+            corner_conditions: HashMap::new(),
+        }
+    }
+
+    /// Create a library set from a single library with embedded corner data
+    pub fn from_single_library(library: TechLibrary) -> Self {
+        let mut set = Self::new(library);
+        // Extract available corners from cell timing data
+        set.extract_embedded_corners();
+        set
+    }
+
+    /// Extract corner information from embedded cell timing data
+    fn extract_embedded_corners(&mut self) {
+        let mut corners_found: std::collections::HashSet<TimingCorner> =
+            std::collections::HashSet::new();
+
+        for cell in self.base_library.cells.values() {
+            if let Some(timing) = &cell.timing {
+                for corner in timing.corners.keys() {
+                    corners_found.insert(*corner);
+                }
+            }
+        }
+
+        // Set default conditions for found corners
+        for corner in corners_found {
+            self.corner_conditions
+                .insert(corner, corner.default_conditions());
+        }
+    }
+
+    /// Load a library set from a .sklibset manifest file
+    pub fn load_from_manifest<P: AsRef<Path>>(path: P) -> Result<Self, LibraryLoadError> {
+        let content = fs::read_to_string(path.as_ref())
+            .map_err(|e| LibraryLoadError::IoError(e.to_string()))?;
+
+        let manifest: TomlLibrarySetManifest =
+            toml::from_str(&content).map_err(|e| LibraryLoadError::ParseError(e.to_string()))?;
+
+        let base_dir = path.as_ref().parent().unwrap_or(Path::new("."));
+        manifest.into_library_set(base_dir)
+    }
+
+    /// Add a corner-specific library
+    pub fn add_corner(
+        &mut self,
+        corner: TimingCorner,
+        library: TechLibrary,
+        conditions: CornerConditions,
+    ) {
+        self.corner_libraries.insert(corner, library);
+        self.corner_conditions.insert(corner, conditions);
+    }
+
+    /// Get the base (typical) library
+    pub fn base(&self) -> &TechLibrary {
+        &self.base_library
+    }
+
+    /// Get a library for a specific corner
+    ///
+    /// Returns the corner-specific library if available, otherwise the base library.
+    pub fn library_for_corner(&self, corner: TimingCorner) -> &TechLibrary {
+        self.corner_libraries
+            .get(&corner)
+            .unwrap_or(&self.base_library)
+    }
+
+    /// Get operating conditions for a corner
+    pub fn conditions_for_corner(&self, corner: TimingCorner) -> Option<&CornerConditions> {
+        self.corner_conditions.get(&corner)
+    }
+
+    /// Get available corners
+    pub fn available_corners(&self) -> Vec<TimingCorner> {
+        let mut corners: Vec<TimingCorner> = self.corner_conditions.keys().copied().collect();
+        if corners.is_empty() {
+            corners.push(TimingCorner::TT);
+        }
+        corners.sort_by_key(|c| c.as_str());
+        corners
+    }
+
+    /// Check if library set has data for a specific corner
+    pub fn has_corner(&self, corner: TimingCorner) -> bool {
+        self.corner_libraries.contains_key(&corner)
+            || self.corner_conditions.contains_key(&corner)
+            || corner == TimingCorner::TT
+    }
+
+    /// Get cell timing for a specific corner
+    ///
+    /// Looks up corner-specific timing, falling back through:
+    /// 1. Corner-specific library (if separate file loaded)
+    /// 2. Embedded corner timing in base library cell
+    /// 3. Default timing from base library
+    pub fn get_cell_timing(
+        &self,
+        cell_name: &str,
+        corner: TimingCorner,
+    ) -> Option<CellTimingView<'_>> {
+        // First try corner-specific library
+        if let Some(corner_lib) = self.corner_libraries.get(&corner) {
+            if let Some(cell) = corner_lib.get_cell(cell_name) {
+                return Some(CellTimingView {
+                    cell,
+                    corner: Some(corner),
+                    is_from_corner_lib: true,
+                });
+            }
+        }
+
+        // Fall back to base library (possibly with embedded corner data)
+        if let Some(cell) = self.base_library.get_cell(cell_name) {
+            return Some(CellTimingView {
+                cell,
+                corner: Some(corner),
+                is_from_corner_lib: false,
+            });
+        }
+
+        None
+    }
+
+    /// Get timing arc delay for a specific corner
+    pub fn get_arc_delay(
+        &self,
+        cell_name: &str,
+        arc_name: &str,
+        corner: TimingCorner,
+        load_ff: f64,
+    ) -> Option<(f64, f64)> {
+        let view = self.get_cell_timing(cell_name, corner)?;
+        let timing = view.cell.timing.as_ref()?;
+
+        let arc = if view.is_from_corner_lib {
+            // From separate corner library - use default arcs
+            timing.arcs.get(arc_name)?
+        } else {
+            // From base library - try corner-specific first
+            timing.get_arc(arc_name, Some(corner))?
+        };
+
+        Some((arc.rise_delay_ps(load_ff), arc.fall_delay_ps(load_ff)))
+    }
+
+    /// Run multi-corner timing check
+    ///
+    /// Returns worst-case delays across specified corners.
+    pub fn worst_case_delay(
+        &self,
+        cell_name: &str,
+        arc_name: &str,
+        corners: &[TimingCorner],
+        load_ff: f64,
+    ) -> Option<MultiCornerDelay> {
+        let mut worst_rise = 0.0f64;
+        let mut worst_fall = 0.0f64;
+        let mut best_rise = f64::MAX;
+        let mut best_fall = f64::MAX;
+        let mut worst_rise_corner = TimingCorner::TT;
+        let mut worst_fall_corner = TimingCorner::TT;
+        let mut best_rise_corner = TimingCorner::TT;
+        let mut best_fall_corner = TimingCorner::TT;
+
+        for &corner in corners {
+            if let Some((rise, fall)) = self.get_arc_delay(cell_name, arc_name, corner, load_ff) {
+                if rise > worst_rise {
+                    worst_rise = rise;
+                    worst_rise_corner = corner;
+                }
+                if fall > worst_fall {
+                    worst_fall = fall;
+                    worst_fall_corner = corner;
+                }
+                if rise < best_rise {
+                    best_rise = rise;
+                    best_rise_corner = corner;
+                }
+                if fall < best_fall {
+                    best_fall = fall;
+                    best_fall_corner = corner;
+                }
+            }
+        }
+
+        if worst_rise > 0.0 {
+            Some(MultiCornerDelay {
+                worst_rise,
+                worst_fall,
+                best_rise,
+                best_fall,
+                worst_rise_corner,
+                worst_fall_corner,
+                best_rise_corner,
+                best_fall_corner,
+            })
+        } else {
+            None
+        }
+    }
+}
+
+/// View into cell timing for a specific corner
+pub struct CellTimingView<'a> {
+    /// Reference to the cell
+    pub cell: &'a LibraryCell,
+    /// Corner being viewed
+    pub corner: Option<TimingCorner>,
+    /// Whether timing comes from separate corner library file
+    pub is_from_corner_lib: bool,
+}
+
+/// Multi-corner delay analysis result
+#[derive(Debug, Clone)]
+pub struct MultiCornerDelay {
+    /// Worst-case rise delay
+    pub worst_rise: f64,
+    /// Worst-case fall delay
+    pub worst_fall: f64,
+    /// Best-case rise delay
+    pub best_rise: f64,
+    /// Best-case fall delay
+    pub best_fall: f64,
+    /// Corner with worst rise delay
+    pub worst_rise_corner: TimingCorner,
+    /// Corner with worst fall delay
+    pub worst_fall_corner: TimingCorner,
+    /// Corner with best rise delay
+    pub best_rise_corner: TimingCorner,
+    /// Corner with best fall delay
+    pub best_fall_corner: TimingCorner,
+}
+
+impl MultiCornerDelay {
+    /// Get worst-case delay (max of rise and fall)
+    pub fn worst(&self) -> f64 {
+        self.worst_rise.max(self.worst_fall)
+    }
+
+    /// Get best-case delay (min of rise and fall)
+    pub fn best(&self) -> f64 {
+        self.best_rise.min(self.best_fall)
+    }
+
+    /// Get delay spread (worst - best)
+    pub fn spread(&self) -> f64 {
+        self.worst() - self.best()
+    }
+}
+
+// ============================================================================
+// TOML Schema for .sklibset manifest files
+// ============================================================================
+
+/// TOML representation of a library set manifest
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TomlLibrarySetManifest {
+    library_set: TomlLibrarySetMeta,
+    #[serde(default)]
+    corners: HashMap<String, TomlCornerDef>,
+}
+
+/// Library set metadata
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TomlLibrarySetMeta {
+    name: String,
+    #[serde(default)]
+    process: Option<String>,
+    #[serde(default)]
+    base_file: Option<String>,
+}
+
+/// Corner definition in manifest
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TomlCornerDef {
+    file: String,
+    #[serde(default)]
+    temperature_c: Option<f64>,
+    #[serde(default)]
+    voltage_v: Option<f64>,
+}
+
+impl TomlLibrarySetManifest {
+    fn into_library_set(self, base_dir: &Path) -> Result<LibrarySet, LibraryLoadError> {
+        // Load base library (first corner or explicit base_file)
+        let base_lib = if let Some(base_file) = &self.library_set.base_file {
+            TechLibrary::load_from_file(base_dir.join(base_file))?
+        } else if let Some((_, first_corner)) = self.corners.iter().next() {
+            TechLibrary::load_from_file(base_dir.join(&first_corner.file))?
+        } else {
+            return Err(LibraryLoadError::ValidationError(
+                "No base library or corners specified".to_string(),
+            ));
+        };
+
+        let mut set = LibrarySet::new(base_lib);
+        set.name = self.library_set.name;
+        set.process = self.library_set.process;
+
+        // Load corner-specific libraries
+        for (corner_name, corner_def) in self.corners {
+            let corner: TimingCorner = corner_name.parse().map_err(|_| {
+                LibraryLoadError::ValidationError(format!("Unknown corner: {}", corner_name))
+            })?;
+
+            let lib = TechLibrary::load_from_file(base_dir.join(&corner_def.file))?;
+            let conditions = CornerConditions {
+                temperature_c: corner_def
+                    .temperature_c
+                    .unwrap_or(corner.default_conditions().temperature_c),
+                voltage_v: corner_def
+                    .voltage_v
+                    .unwrap_or(corner.default_conditions().voltage_v),
+            };
+
+            set.add_corner(corner, lib, conditions);
+        }
+
+        Ok(set)
+    }
+}
+
+// ============================================================================
 // TOML Schema for .skalib files
 // ============================================================================
 
@@ -1343,8 +1904,35 @@ struct TomlCell {
 /// Timing information in TOML format
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct TomlCellTiming {
+    /// Default/typical timing arcs
     #[serde(default)]
     arcs: Vec<TomlTimingArc>,
+    /// Corner-specific timing overrides
+    #[serde(default)]
+    corners: HashMap<String, TomlCornerTiming>,
+}
+
+/// Corner-specific timing in TOML format
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TomlCornerTiming {
+    /// Temperature for this corner (optional, uses default if not specified)
+    #[serde(default)]
+    temperature_c: Option<f64>,
+    /// Voltage for this corner (optional, uses default if not specified)
+    #[serde(default)]
+    voltage_v: Option<f64>,
+    /// Timing arcs for this corner
+    #[serde(default)]
+    arcs: Vec<TomlTimingArc>,
+    /// Setup time override
+    #[serde(default)]
+    setup_ps: Option<u32>,
+    /// Hold time override
+    #[serde(default)]
+    hold_ps: Option<u32>,
+    /// Clock-to-Q override
+    #[serde(default)]
+    clk_to_q_ps: Option<u32>,
 }
 
 /// Timing arc in TOML format
@@ -1439,6 +2027,7 @@ impl TomlCell {
 
         // Parse timing arcs
         let timing = self.timing.map(|t| {
+            // Parse default/typical arcs
             let mut arcs = HashMap::new();
             for arc in t.arcs {
                 arcs.insert(
@@ -1451,7 +2040,52 @@ impl TomlCell {
                     },
                 );
             }
-            CellTiming { arcs }
+
+            // Parse corner-specific timing
+            let mut corners = HashMap::new();
+            for (corner_name, corner_data) in t.corners {
+                if let Ok(corner) = corner_name.parse::<TimingCorner>() {
+                    let mut corner_arcs = HashMap::new();
+                    for arc in corner_data.arcs {
+                        corner_arcs.insert(
+                            arc.arc,
+                            TimingArc {
+                                rise_base_ps: arc.rise_base_ps,
+                                rise_slope_ps_per_ff: arc.rise_slope_ps_per_ff,
+                                fall_base_ps: arc.fall_base_ps,
+                                fall_slope_ps_per_ff: arc.fall_slope_ps_per_ff,
+                            },
+                        );
+                    }
+
+                    let conditions =
+                        if corner_data.temperature_c.is_some() || corner_data.voltage_v.is_some() {
+                            Some(CornerConditions {
+                                temperature_c: corner_data
+                                    .temperature_c
+                                    .unwrap_or(corner.default_conditions().temperature_c),
+                                voltage_v: corner_data
+                                    .voltage_v
+                                    .unwrap_or(corner.default_conditions().voltage_v),
+                            })
+                        } else {
+                            None
+                        };
+
+                    corners.insert(
+                        corner,
+                        CornerTiming {
+                            conditions,
+                            arcs: corner_arcs,
+                            setup_ps: corner_data.setup_ps,
+                            hold_ps: corner_data.hold_ps,
+                            clk_to_q_ps: corner_data.clk_to_q_ps,
+                        },
+                    );
+                }
+            }
+
+            CellTiming { arcs, corners }
         });
 
         // Parse failure modes
@@ -1499,8 +2133,9 @@ impl TomlCell {
 
     /// Create TOML cell from LibraryCell
     fn from_library_cell(cell: &LibraryCell) -> Self {
-        let timing = cell.timing.as_ref().map(|t| TomlCellTiming {
-            arcs: t
+        let timing = cell.timing.as_ref().map(|t| {
+            // Convert default arcs
+            let arcs: Vec<TomlTimingArc> = t
                 .arcs
                 .iter()
                 .map(|(arc, ta)| TomlTimingArc {
@@ -1510,7 +2145,40 @@ impl TomlCell {
                     fall_base_ps: ta.fall_base_ps,
                     fall_slope_ps_per_ff: ta.fall_slope_ps_per_ff,
                 })
-                .collect(),
+                .collect();
+
+            // Convert corner-specific timing
+            let corners: HashMap<String, TomlCornerTiming> = t
+                .corners
+                .iter()
+                .map(|(corner, ct)| {
+                    let corner_arcs: Vec<TomlTimingArc> = ct
+                        .arcs
+                        .iter()
+                        .map(|(arc, ta)| TomlTimingArc {
+                            arc: arc.clone(),
+                            rise_base_ps: ta.rise_base_ps,
+                            rise_slope_ps_per_ff: ta.rise_slope_ps_per_ff,
+                            fall_base_ps: ta.fall_base_ps,
+                            fall_slope_ps_per_ff: ta.fall_slope_ps_per_ff,
+                        })
+                        .collect();
+
+                    (
+                        corner.as_str().to_string(),
+                        TomlCornerTiming {
+                            temperature_c: ct.conditions.as_ref().map(|c| c.temperature_c),
+                            voltage_v: ct.conditions.as_ref().map(|c| c.voltage_v),
+                            arcs: corner_arcs,
+                            setup_ps: ct.setup_ps,
+                            hold_ps: ct.hold_ps,
+                            clk_to_q_ps: ct.clk_to_q_ps,
+                        },
+                    )
+                })
+                .collect();
+
+            TomlCellTiming { arcs, corners }
         });
 
         let failure_modes: Vec<TomlFailureMode> = cell
