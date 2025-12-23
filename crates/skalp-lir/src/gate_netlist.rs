@@ -626,6 +626,8 @@ impl GateNetlist {
     ///
     /// This is useful for cleaning up redundant cells that were created during
     /// technology mapping but whose outputs are never used.
+    ///
+    /// Note: Blackbox cells and sequential cells are never considered dead.
     pub fn remove_dead_cells(&mut self) -> usize {
         use std::collections::HashSet;
 
@@ -638,8 +640,19 @@ impl GateNetlist {
             .iter()
             .filter(|cell| {
                 // A cell is dead if all its outputs have no fanout and aren't primary outputs
-                // Sequential cells (latches) are never considered dead
+                // Sequential cells (latches/FFs) are never considered dead
                 if cell.clock.is_some() {
+                    return false;
+                }
+
+                // Blackbox cells (vendor IP) are never considered dead
+                // They represent external IP that must be preserved
+                if cell.cell_type.starts_with("BLACKBOX_")
+                    || cell
+                        .source_op
+                        .as_ref()
+                        .is_some_and(|op| op.starts_with("blackbox:"))
+                {
                     return false;
                 }
 
@@ -776,7 +789,14 @@ impl GateNetlist {
         // Cell instantiations
         output.push_str("    // Cell instances\n");
         for cell in &self.cells {
-            output.push_str(&format!("    {} U{} (\n", cell.cell_type, cell.id.0));
+            // For blackbox cells, use the original IP name without BLACKBOX_ prefix
+            let cell_type_display = if cell.cell_type.starts_with("BLACKBOX_") {
+                // Strip the BLACKBOX_ prefix for cleaner output
+                &cell.cell_type["BLACKBOX_".len()..]
+            } else {
+                &cell.cell_type
+            };
+            output.push_str(&format!("    {} U{} (\n", cell_type_display, cell.id.0));
 
             // Collect all port connections
             let mut connections = Vec::new();
@@ -784,14 +804,16 @@ impl GateNetlist {
             // Add input connections
             for (i, input_id) in cell.inputs.iter().enumerate() {
                 let net_name = &self.nets[input_id.0 as usize].name;
-                let pin_name = get_input_pin_name(&cell.cell_type, i);
+                // For blackbox cells, derive pin name from net name
+                let pin_name = get_input_pin_name_with_net(&cell.cell_type, i, Some(net_name));
                 connections.push(format!("        .{}({})", pin_name, net_name));
             }
 
             // Add output connections
             for (i, output_id) in cell.outputs.iter().enumerate() {
                 let net_name = &self.nets[output_id.0 as usize].name;
-                let pin_name = get_output_pin_name(&cell.cell_type, i);
+                // For blackbox cells, derive pin name from net name
+                let pin_name = get_output_pin_name_with_net(&cell.cell_type, i, Some(net_name));
                 connections.push(format!("        .{}({})", pin_name, net_name));
             }
 
@@ -984,6 +1006,25 @@ impl GateNetlist {
 
 /// Get input pin name for a cell type
 fn get_input_pin_name(cell_type: &str, index: usize) -> String {
+    get_input_pin_name_with_net(cell_type, index, None)
+}
+
+/// Get input pin name, optionally using the net name for blackbox cells
+fn get_input_pin_name_with_net(cell_type: &str, index: usize, net_name: Option<&str>) -> String {
+    // For BLACKBOX cells, extract the port name from the net name
+    if cell_type.starts_with("BLACKBOX_") {
+        if let Some(name) = net_name {
+            // Net names are like "top.pll.clk_ref" - extract the last component
+            if let Some(port_name) = name.rsplit('.').next() {
+                // Strip any bit index like [0]
+                let port_name = port_name.split('[').next().unwrap_or(port_name);
+                return port_name.to_string();
+            }
+        }
+        // Fallback: use generic names
+        return format!("I{}", index);
+    }
+
     // Common naming conventions for standard cells
     let base = cell_type.split('_').next().unwrap_or(cell_type);
 
@@ -1032,6 +1073,29 @@ fn get_input_pin_name(cell_type: &str, index: usize) -> String {
 
 /// Get output pin name for a cell type
 fn get_output_pin_name(cell_type: &str, index: usize) -> String {
+    get_output_pin_name_with_net(cell_type, index, None)
+}
+
+/// Get output pin name, optionally using the net name for blackbox cells
+fn get_output_pin_name_with_net(cell_type: &str, index: usize, net_name: Option<&str>) -> String {
+    // For BLACKBOX cells, extract the port name from the net name
+    if cell_type.starts_with("BLACKBOX_") {
+        if let Some(name) = net_name {
+            // Net names are like "top.pll.clk_out" - extract the last component
+            if let Some(port_name) = name.rsplit('.').next() {
+                // Strip any bit index like [0]
+                let port_name = port_name.split('[').next().unwrap_or(port_name);
+                return port_name.to_string();
+            }
+        }
+        // Fallback: use generic names
+        if index == 0 {
+            return "Y".to_string();
+        } else {
+            return format!("Y{}", index);
+        }
+    }
+
     let base = cell_type.split('_').next().unwrap_or(cell_type);
 
     match base {

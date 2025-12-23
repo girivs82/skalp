@@ -454,6 +454,17 @@ pub enum CellFunction {
 
     // Custom/vendor-specific
     Custom(String),
+
+    /// Blackbox cell (vendor IP, analog macro, etc.)
+    /// Contains the cell name and port information
+    Blackbox {
+        /// The blackbox cell/module name
+        name: String,
+        /// Input port names
+        inputs: Vec<String>,
+        /// Output port names
+        outputs: Vec<String>,
+    },
 }
 
 impl CellFunction {
@@ -580,6 +591,9 @@ impl CellFunction {
                 vec!["core_vout".into(), "pgood".into()],
             ),
             CellFunction::Custom(_) => (Vec::new(), Vec::new()),
+            CellFunction::Blackbox {
+                inputs, outputs, ..
+            } => (inputs.clone(), outputs.clone()),
         }
     }
 
@@ -1665,6 +1679,7 @@ fn format_cell_function(f: &CellFunction) -> String {
         CellFunction::AnalogPad => "analog_pad".to_string(),
         CellFunction::PowerPadLdo => "power_pad_ldo".to_string(),
         CellFunction::Custom(s) => s.clone(),
+        CellFunction::Blackbox { name, .. } => format!("blackbox:{}", name),
     }
 }
 

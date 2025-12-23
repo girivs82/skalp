@@ -770,6 +770,17 @@ impl<'a> AigBuilder<'a> {
                 // Unknown cell - just pass through first input
                 inputs.first().copied().unwrap_or(AigLit::false_lit())
             }
+
+            CellFunction::Blackbox { name, .. } => {
+                // Blackbox cells should not be converted to AIG - they should be
+                // preserved as-is in the gate netlist. If we reach here, it means
+                // the synthesis flow incorrectly tried to synthesize a blackbox.
+                panic!(
+                    "Cannot convert blackbox cell '{}' to AIG. \
+                     Blackboxes should be preserved in the gate netlist.",
+                    name
+                );
+            }
         };
 
         // Map cell outputs to AIG literals

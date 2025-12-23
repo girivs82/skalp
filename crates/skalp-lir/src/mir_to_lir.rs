@@ -43,6 +43,25 @@ fn safety_context_to_lir_info(ctx: &SafetyContext) -> LirSafetyInfo {
     }
 }
 
+/// Information about a blackbox module (vendor IP, analog macro, etc.)
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct BlackboxInfo {
+    /// The IP/cell name (e.g., "PLL_ADV", "IOBUF")
+    pub cell_name: String,
+    /// Vendor type for RTL generation
+    pub vendor: Option<String>,
+    /// Input port names in order
+    pub inputs: Vec<String>,
+    /// Output port names in order
+    pub outputs: Vec<String>,
+    /// InOut port names (bidirectional)
+    pub inouts: Vec<String>,
+    /// Port widths (port_name -> width)
+    pub port_widths: HashMap<String, u32>,
+    /// Additional parameters for the cell instance
+    pub parameters: Vec<(String, String)>,
+}
+
 /// Result of MIR to LIR transformation
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct MirToLirResult {
@@ -56,6 +75,10 @@ pub struct MirToLirResult {
     /// When set, the tech mapper should load the netlist from this file instead of synthesizing
     #[serde(skip_serializing_if = "Option::is_none")]
     pub compiled_ip_path: Option<String>,
+    /// Blackbox info (if this module is a vendor IP or analog macro)
+    /// When set, the tech mapper should create a blackbox cell instead of synthesizing
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub blackbox_info: Option<BlackboxInfo>,
 }
 
 /// Backward-compatible type alias
@@ -143,6 +166,7 @@ impl MirToLirTransform {
             stats,
             warnings: std::mem::take(&mut self.warnings),
             compiled_ip_path: None,
+            blackbox_info: None,
         }
     }
 
@@ -1372,7 +1396,83 @@ fn load_compiled_ip_as_lir(
             module.name, config.skb_path
         )],
         compiled_ip_path: Some(resolved_path.to_string_lossy().to_string()),
+        blackbox_info: None,
     })
+}
+
+/// Create a placeholder LIR for a blackbox/vendor IP module
+///
+/// This creates a minimal LIR with just port interfaces. The tech mapper
+/// will create a Blackbox cell for this module instead of synthesizing it.
+fn create_blackbox_lir_placeholder(
+    module: &Module,
+    vendor_config: &skalp_frontend::hir::VendorIpConfig,
+) -> MirToLirResult {
+    use crate::lir::Lir;
+
+    // Create minimal LIR with port interfaces
+    let mut lir = Lir::new(module.name.clone());
+
+    let mut inputs = Vec::new();
+    let mut outputs = Vec::new();
+    let mut inouts = Vec::new();
+    let mut port_widths = HashMap::new();
+
+    // Add port signals
+    for port in &module.ports {
+        let width = MirToLirTransform::get_type_width(&port.port_type);
+        port_widths.insert(port.name.clone(), width);
+
+        match port.direction {
+            PortDirection::Input => {
+                let signal_id = lir.add_input(port.name.clone(), width);
+                inputs.push(port.name.clone());
+
+                // Track clock and reset signals
+                if matches!(port.port_type, DataType::Clock { .. }) {
+                    lir.clocks.push(signal_id);
+                }
+                if matches!(port.port_type, DataType::Reset { .. }) {
+                    lir.resets.push(signal_id);
+                }
+            }
+            PortDirection::Output => {
+                lir.add_output(port.name.clone(), width);
+                outputs.push(port.name.clone());
+            }
+            PortDirection::InOut => {
+                // InOut ports are both input and output
+                let signal_id = lir.add_input(port.name.clone(), width);
+                lir.outputs.push(signal_id);
+                lir.signals[signal_id.0 as usize].is_output = true;
+                inouts.push(port.name.clone());
+            }
+        }
+    }
+
+    let stats = LirStats::from_lir(&lir);
+
+    // Create blackbox info
+    let blackbox_info = BlackboxInfo {
+        cell_name: vendor_config.ip_name.clone(),
+        vendor: Some(format!("{:?}", vendor_config.vendor)),
+        inputs,
+        outputs,
+        inouts,
+        port_widths,
+        parameters: vendor_config.parameters.clone(),
+    };
+
+    MirToLirResult {
+        lir,
+        stats,
+        warnings: vec![format!(
+            "Module '{}' is a blackbox (vendor IP: {})",
+            module.name, vendor_config.ip_name
+        )],
+        compiled_ip_path: None,
+        blackbox_info: Some(blackbox_info),
+    }
 }
 
 /// Lower entire MIR hierarchy to per-instance LIR
@@ -1440,8 +1540,16 @@ fn elaborate_instance(
     parent_connections: &HashMap<String, PortConnectionInfo>,
     result: &mut HierarchicalMirToLirResult,
 ) {
-    // Check if this module is a compiled IP (blackbox with pre-compiled netlist)
-    let lir_result = if let Some(ref config) = module.compiled_ip_config {
+    // Check if this module is a vendor IP (blackbox - don't synthesize internals)
+    let lir_result = if let Some(ref vendor_config) = module.vendor_ip_config {
+        // This is a vendor IP / blackbox - create a placeholder LIR result
+        // The actual blackbox cell will be created during tech mapping
+        eprintln!(
+            "🔌 VENDOR_IP: Module '{}' is a blackbox (ip={}), skipping internal elaboration",
+            module.name, vendor_config.ip_name
+        );
+        create_blackbox_lir_placeholder(module, vendor_config)
+    } else if let Some(ref config) = module.compiled_ip_config {
         // Load the compiled IP from the .skb file
         match load_compiled_ip_as_lir(config, module) {
             Ok(lir_result) => lir_result,

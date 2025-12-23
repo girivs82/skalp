@@ -1623,6 +1623,13 @@ pub fn map_hierarchical_to_gates(
                     map_lir_to_gates_optimized(&inst_lir.lir_result.lir, library)
                 }
             }
+        } else if let Some(ref blackbox_info) = inst_lir.lir_result.blackbox_info {
+            // This is a blackbox/vendor IP - create a netlist with a single blackbox cell
+            eprintln!(
+                "🔌 BLACKBOX: Creating blackbox cell '{}' for instance '{}'",
+                blackbox_info.cell_name, path
+            );
+            create_blackbox_netlist(blackbox_info, &inst_lir.module_name)
         } else {
             // Normal synthesis path
             map_lir_to_gates_optimized(&inst_lir.lir_result.lir, library)
@@ -1662,6 +1669,170 @@ pub fn map_hierarchical_to_gates(
     }
 
     result
+}
+
+/// Create a GateNetlist containing a single blackbox cell
+///
+/// This is used for vendor IP modules that should not be synthesized.
+/// The blackbox cell preserves the port interface and can be instantiated
+/// in the final output.
+fn create_blackbox_netlist(
+    blackbox_info: &crate::mir_to_lir::BlackboxInfo,
+    module_name: &str,
+) -> TechMapResult {
+    let library_name = "blackbox".to_string();
+    let mut netlist = GateNetlist::new(module_name.to_string(), library_name.clone());
+
+    // Create nets for all ports
+    let mut input_nets = Vec::new();
+    let mut output_nets = Vec::new();
+
+    // Create input port nets
+    for input_name in &blackbox_info.inputs {
+        let width = blackbox_info
+            .port_widths
+            .get(input_name)
+            .copied()
+            .unwrap_or(1);
+        for bit in 0..width {
+            let net_name = if width == 1 {
+                input_name.clone()
+            } else {
+                format!("{}[{}]", input_name, bit)
+            };
+            let net = GateNet {
+                id: GateNetId(netlist.nets.len() as u32),
+                name: net_name,
+                driver: None,
+                driver_pin: None,
+                fanout: Vec::new(),
+                is_input: true,
+                is_output: false,
+                is_clock: input_name.contains("clk") || input_name.contains("clock"),
+                is_reset: input_name.contains("rst") || input_name.contains("reset"),
+                is_detection: false,
+                detection_config: None,
+            };
+            input_nets.push(net.id);
+            netlist.inputs.push(net.id);
+            netlist.nets.push(net);
+        }
+    }
+
+    // Create output port nets
+    for output_name in &blackbox_info.outputs {
+        let width = blackbox_info
+            .port_widths
+            .get(output_name)
+            .copied()
+            .unwrap_or(1);
+        for bit in 0..width {
+            let net_name = if width == 1 {
+                output_name.clone()
+            } else {
+                format!("{}[{}]", output_name, bit)
+            };
+            let net = GateNet {
+                id: GateNetId(netlist.nets.len() as u32),
+                name: net_name,
+                driver: None,
+                driver_pin: None,
+                fanout: Vec::new(),
+                is_input: false,
+                is_output: true,
+                is_clock: false,
+                is_reset: false,
+                is_detection: false,
+                detection_config: None,
+            };
+            output_nets.push(net.id);
+            netlist.outputs.push(net.id);
+            netlist.nets.push(net);
+        }
+    }
+
+    // Create inout port nets (both input and output)
+    for inout_name in &blackbox_info.inouts {
+        let width = blackbox_info
+            .port_widths
+            .get(inout_name)
+            .copied()
+            .unwrap_or(1);
+        for bit in 0..width {
+            let net_name = if width == 1 {
+                inout_name.clone()
+            } else {
+                format!("{}[{}]", inout_name, bit)
+            };
+            let net = GateNet {
+                id: GateNetId(netlist.nets.len() as u32),
+                name: net_name,
+                driver: None,
+                driver_pin: None,
+                fanout: Vec::new(),
+                is_input: true,
+                is_output: true,
+                is_clock: false,
+                is_reset: false,
+                is_detection: false,
+                detection_config: None,
+            };
+            input_nets.push(net.id);
+            output_nets.push(net.id);
+            netlist.inputs.push(net.id);
+            netlist.outputs.push(net.id);
+            netlist.nets.push(net);
+        }
+    }
+
+    // Create the blackbox cell using the Blackbox CellFunction
+    let blackbox_cell = Cell {
+        id: CellId(0),
+        cell_type: format!("BLACKBOX_{}", blackbox_info.cell_name),
+        library: library_name,
+        fit: 0.0, // Unknown FIT for blackbox
+        failure_modes: Vec::new(),
+        inputs: input_nets.clone(),
+        outputs: output_nets.clone(),
+        path: format!("{}.{}", module_name, blackbox_info.cell_name),
+        clock: None,
+        reset: None,
+        source_op: Some(format!("blackbox:{}", blackbox_info.cell_name)),
+        safety_classification: CellSafetyClassification::Functional,
+    };
+    netlist.cells.push(blackbox_cell);
+
+    // Update net drivers to point to the blackbox cell
+    for (pin_idx, &output_id) in output_nets.iter().enumerate() {
+        if let Some(net) = netlist.get_net_mut(output_id) {
+            net.driver = Some(CellId(0));
+            net.driver_pin = Some(pin_idx);
+        }
+    }
+
+    // Update fanout for input nets
+    for (pin_idx, &input_id) in input_nets.iter().enumerate() {
+        if let Some(net) = netlist.get_net_mut(input_id) {
+            net.fanout.push((CellId(0), pin_idx));
+        }
+    }
+
+    let total_nets = netlist.nets.len();
+
+    TechMapResult {
+        netlist,
+        stats: TechMapStats {
+            nodes_processed: 0,
+            cells_created: 1,
+            nets_created: total_nets,
+            direct_mappings: 1,
+            decomposed_mappings: 0,
+        },
+        warnings: vec![format!(
+            "Created blackbox cell '{}' for vendor IP",
+            blackbox_info.cell_name
+        )],
+    }
 }
 
 // ============================================================================
