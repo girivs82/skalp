@@ -3,7 +3,8 @@
 //! Complete native ASIC flow without external dependencies:
 //! - Standard cell library mapping
 //! - Native placement and routing
-//! - Clock tree synthesis
+//! - Clock tree synthesis (CTS)
+//! - Reset tree synthesis (RTS)
 //! - GDSII generation
 //! - Design rule checking
 
@@ -21,6 +22,7 @@ pub mod interactive;
 pub mod placement;
 pub mod routing;
 pub mod routing_guide;
+pub mod rts;
 pub mod sdc;
 pub mod sky130;
 pub mod timing;
