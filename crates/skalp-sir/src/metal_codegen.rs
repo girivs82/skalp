@@ -1145,13 +1145,38 @@ impl<'a> MetalShaderGenerator<'a> {
                     // BUG FIX #155: For non-float operations, if an operand is float-typed,
                     // convert it to its bit representation using as_type<uint>().
                     // This ensures float signals are treated as their IEEE 754 bit patterns.
-                    let left_expr = if left_is_float {
+                    //
+                    // BUG FIX #156: EXCEPT for comparison operations (Lt, Lte, Gt, Gte, Eq, Neq)
+                    // when BOTH operands are float-typed. In this case, we need proper IEEE 754
+                    // float comparison semantics, not bit pattern comparison.
+                    // Example: -Infinity (0xFF800000) < +Infinity (0x7F800000)
+                    //   - As uint: FALSE (0xFF800000 > 0x7F800000 due to sign bit)
+                    //   - As float: TRUE (correct IEEE 754 behavior)
+                    let is_integer_comparison = matches!(
+                        op,
+                        BinaryOperation::Lt
+                            | BinaryOperation::Lte
+                            | BinaryOperation::Gt
+                            | BinaryOperation::Gte
+                            | BinaryOperation::Eq
+                            | BinaryOperation::Neq
+                    );
+                    let needs_float_comparison =
+                        is_integer_comparison && left_is_float && right_is_float;
+
+                    let left_expr = if needs_float_comparison {
+                        // Keep as float for proper IEEE 754 comparison
+                        format!("signals->{}", self.sanitize_name(left))
+                    } else if left_is_float {
                         format!("as_type<uint>(signals->{})", self.sanitize_name(left))
                     } else {
                         format!("signals->{}", self.sanitize_name(left))
                     };
 
-                    let right_expr = if right_is_float {
+                    let right_expr = if needs_float_comparison {
+                        // Keep as float for proper IEEE 754 comparison
+                        format!("signals->{}", self.sanitize_name(right))
+                    } else if right_is_float {
                         format!("as_type<uint>(signals->{})", self.sanitize_name(right))
                     } else {
                         format!("signals->{}", self.sanitize_name(right))
