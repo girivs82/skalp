@@ -695,30 +695,76 @@ impl GateOptimizer {
             }
         }
 
-        // Apply net replacements to output port list
-        // This handles the case where a buffer driving an output is removed
-        for output in &mut netlist.outputs {
-            let original = *output;
-            // Get the original output port name before replacement
-            let original_name = netlist
-                .nets
-                .get(original.0 as usize)
-                .map(|n| n.name.clone());
+        // Handle output ports specially - NEVER replace output port net IDs
+        // Output ports are part of the module interface and must keep their original net IDs.
+        // If an output was originally driven by a cell that got optimized away (folded to constant),
+        // we add a TIE cell to drive the output net directly.
 
-            while let Some(&replacement) = self.net_replacements.get(output) {
-                *output = replacement;
+        // Build a set of output net IDs for quick lookup
+        let output_nets: std::collections::HashSet<GateNetId> =
+            netlist.outputs.iter().copied().collect();
+
+        // For each output, check if its driver was removed and it needs a TIE cell
+        let mut tie_cells_to_add: Vec<(GateNetId, bool)> = Vec::new();
+        for &output_net in &netlist.outputs {
+            // Check if this output needs a TIE cell
+            // An output needs a TIE cell if:
+            // 1. It has a replacement chain that ends at a constant, OR
+            // 2. Its driver cell was removed
+            let mut current = output_net;
+            let mut ends_at_constant = false;
+            let mut const_value = false;
+
+            while let Some(&replacement) = self.net_replacements.get(&current) {
+                if let Some(&val) = self.constants.get(&replacement) {
+                    ends_at_constant = true;
+                    const_value = val;
+                    break;
+                }
+                current = replacement;
             }
-            // If replaced, mark the new net as output and preserve the output port name
-            if *output != original {
-                if let Some(net) = netlist.nets.get_mut(output.0 as usize) {
-                    net.is_output = true;
-                    // Preserve the output port name - this is critical for correct port mapping
-                    if let Some(name) = original_name {
-                        net.name = name;
-                    }
+
+            // Also check if output directly maps to a constant
+            if !ends_at_constant {
+                if let Some(&val) = self.constants.get(&output_net) {
+                    ends_at_constant = true;
+                    const_value = val;
                 }
             }
+
+            if ends_at_constant {
+                tie_cells_to_add.push((output_net, const_value));
+            }
         }
+
+        // Add TIE cells to drive constant-valued outputs
+        for (net_id, is_high) in tie_cells_to_add {
+            let cell_type = if is_high { "TIE_HIGH" } else { "TIE_LOW" };
+            let cell_id = CellId(netlist.cells.len() as u32);
+            let net_name = netlist
+                .nets
+                .get(net_id.0 as usize)
+                .map(|n| n.name.clone())
+                .unwrap_or_else(|| format!("net_{}", net_id.0));
+
+            let cell = Cell::new_comb(
+                cell_id,
+                cell_type.to_string(),
+                netlist.library_name.clone(),
+                0.01, // FIT for tie cell
+                format!("{}.tie", net_name),
+                vec![],
+                vec![net_id],
+            );
+            netlist.cells.push(cell);
+        }
+
+        // Remove all output nets from net_replacements - we never replace output port IDs
+        for &output_net in &output_nets {
+            self.net_replacements.remove(&output_net);
+        }
+
+        // Note: We do NOT modify netlist.outputs at all. Output port IDs are fixed.
 
         // Update net fanout information
         for net in &mut netlist.nets {
@@ -775,9 +821,12 @@ mod tests {
         let mut optimizer = GateOptimizer::new();
         let stats = optimizer.optimize(&mut netlist);
 
-        // Both cells should be removed (TIE_LO and AND2)
-        assert_eq!(stats.cells_removed, 2);
-        assert_eq!(netlist.cells.len(), 0);
+        // TIE_LO and AND2 are removed, but a new TIE_LOW is added to drive the output
+        // Net change: 2 removed - 1 added = 1 net cells removed
+        assert_eq!(stats.cells_removed, 1);
+        // The output port needs a driver, so there should be 1 TIE_LOW cell
+        assert_eq!(netlist.cells.len(), 1);
+        assert_eq!(netlist.cells[0].cell_type, "TIE_LOW");
     }
 
     #[test]
