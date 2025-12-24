@@ -693,109 +693,199 @@ impl MirToLirTransform {
         let right_width = self.infer_expression_width(right);
         let operand_width = left_width.max(right_width);
 
-        let left_signal = self.transform_expression(left, operand_width);
-        let right_signal = self.transform_expression(right, operand_width);
+        // For arithmetic operations, use expected_width for operands to ensure
+        // proper width propagation from assignment target (e.g., bit[32] x = 5 + 3
+        // should compute 5 + 3 as 32-bit, not 3-bit which would overflow)
+        let arithmetic_operand_width = expected_width.max(operand_width);
 
-        let (word_op, result_width) = match op {
-            // Arithmetic
-            BinaryOp::Add => (
-                LirOp::Add {
-                    width: operand_width,
-                    has_carry: expected_width > operand_width,
-                },
-                expected_width,
-            ),
-            BinaryOp::Sub => (
-                LirOp::Sub {
-                    width: operand_width,
-                    has_borrow: false,
-                },
-                operand_width,
-            ),
-            BinaryOp::Mul => (
-                LirOp::Mul {
-                    width: operand_width,
-                    result_width: expected_width,
-                },
-                expected_width,
-            ),
+        let (left_signal, right_signal, word_op, result_width) = match op {
+            // Arithmetic - use expected_width for operands
+            BinaryOp::Add => {
+                let left_sig = self.transform_expression(left, arithmetic_operand_width);
+                let right_sig = self.transform_expression(right, arithmetic_operand_width);
+                (
+                    left_sig,
+                    right_sig,
+                    LirOp::Add {
+                        width: arithmetic_operand_width,
+                        has_carry: false, // No extra carry needed, width already accounts for it
+                    },
+                    expected_width,
+                )
+            }
+            BinaryOp::Sub => {
+                let left_sig = self.transform_expression(left, arithmetic_operand_width);
+                let right_sig = self.transform_expression(right, arithmetic_operand_width);
+                (
+                    left_sig,
+                    right_sig,
+                    LirOp::Sub {
+                        width: arithmetic_operand_width,
+                        has_borrow: false,
+                    },
+                    expected_width,
+                )
+            }
+            BinaryOp::Mul => {
+                let left_sig = self.transform_expression(left, arithmetic_operand_width);
+                let right_sig = self.transform_expression(right, arithmetic_operand_width);
+                (
+                    left_sig,
+                    right_sig,
+                    LirOp::Mul {
+                        width: arithmetic_operand_width,
+                        result_width: expected_width,
+                    },
+                    expected_width,
+                )
+            }
 
-            // Bitwise logic
-            BinaryOp::And | BinaryOp::BitwiseAnd | BinaryOp::LogicalAnd => (
-                LirOp::And {
-                    width: operand_width,
-                },
-                operand_width,
-            ),
-            BinaryOp::Or | BinaryOp::BitwiseOr | BinaryOp::LogicalOr => (
-                LirOp::Or {
-                    width: operand_width,
-                },
-                operand_width,
-            ),
-            BinaryOp::Xor | BinaryOp::BitwiseXor => (
-                LirOp::Xor {
-                    width: operand_width,
-                },
-                operand_width,
-            ),
+            // Bitwise logic - use inferred operand width
+            BinaryOp::And | BinaryOp::BitwiseAnd | BinaryOp::LogicalAnd => {
+                let left_sig = self.transform_expression(left, operand_width);
+                let right_sig = self.transform_expression(right, operand_width);
+                (
+                    left_sig,
+                    right_sig,
+                    LirOp::And {
+                        width: operand_width,
+                    },
+                    operand_width,
+                )
+            }
+            BinaryOp::Or | BinaryOp::BitwiseOr | BinaryOp::LogicalOr => {
+                let left_sig = self.transform_expression(left, operand_width);
+                let right_sig = self.transform_expression(right, operand_width);
+                (
+                    left_sig,
+                    right_sig,
+                    LirOp::Or {
+                        width: operand_width,
+                    },
+                    operand_width,
+                )
+            }
+            BinaryOp::Xor | BinaryOp::BitwiseXor => {
+                let left_sig = self.transform_expression(left, operand_width);
+                let right_sig = self.transform_expression(right, operand_width);
+                (
+                    left_sig,
+                    right_sig,
+                    LirOp::Xor {
+                        width: operand_width,
+                    },
+                    operand_width,
+                )
+            }
 
             // Comparison (result is 1 bit)
-            BinaryOp::Equal => (
-                LirOp::Eq {
-                    width: operand_width,
-                },
-                1,
-            ),
-            BinaryOp::NotEqual => (
-                LirOp::Ne {
-                    width: operand_width,
-                },
-                1,
-            ),
-            BinaryOp::Less => (
-                LirOp::Lt {
-                    width: operand_width,
-                },
-                1,
-            ),
-            BinaryOp::LessEqual => (
-                LirOp::Le {
-                    width: operand_width,
-                },
-                1,
-            ),
-            BinaryOp::Greater => (
-                LirOp::Gt {
-                    width: operand_width,
-                },
-                1,
-            ),
-            BinaryOp::GreaterEqual => (
-                LirOp::Ge {
-                    width: operand_width,
-                },
-                1,
-            ),
+            BinaryOp::Equal => {
+                let left_sig = self.transform_expression(left, operand_width);
+                let right_sig = self.transform_expression(right, operand_width);
+                (
+                    left_sig,
+                    right_sig,
+                    LirOp::Eq {
+                        width: operand_width,
+                    },
+                    1,
+                )
+            }
+            BinaryOp::NotEqual => {
+                let left_sig = self.transform_expression(left, operand_width);
+                let right_sig = self.transform_expression(right, operand_width);
+                (
+                    left_sig,
+                    right_sig,
+                    LirOp::Ne {
+                        width: operand_width,
+                    },
+                    1,
+                )
+            }
+            BinaryOp::Less => {
+                let left_sig = self.transform_expression(left, operand_width);
+                let right_sig = self.transform_expression(right, operand_width);
+                (
+                    left_sig,
+                    right_sig,
+                    LirOp::Lt {
+                        width: operand_width,
+                    },
+                    1,
+                )
+            }
+            BinaryOp::LessEqual => {
+                let left_sig = self.transform_expression(left, operand_width);
+                let right_sig = self.transform_expression(right, operand_width);
+                (
+                    left_sig,
+                    right_sig,
+                    LirOp::Le {
+                        width: operand_width,
+                    },
+                    1,
+                )
+            }
+            BinaryOp::Greater => {
+                let left_sig = self.transform_expression(left, operand_width);
+                let right_sig = self.transform_expression(right, operand_width);
+                (
+                    left_sig,
+                    right_sig,
+                    LirOp::Gt {
+                        width: operand_width,
+                    },
+                    1,
+                )
+            }
+            BinaryOp::GreaterEqual => {
+                let left_sig = self.transform_expression(left, operand_width);
+                let right_sig = self.transform_expression(right, operand_width);
+                (
+                    left_sig,
+                    right_sig,
+                    LirOp::Ge {
+                        width: operand_width,
+                    },
+                    1,
+                )
+            }
 
             // Shifts
-            BinaryOp::LeftShift => (
-                LirOp::Shl {
-                    width: operand_width,
-                },
-                operand_width,
-            ),
-            BinaryOp::RightShift => (
-                LirOp::Shr {
-                    width: operand_width,
-                },
-                operand_width,
-            ),
+            BinaryOp::LeftShift => {
+                let left_sig = self.transform_expression(left, operand_width);
+                let right_sig = self.transform_expression(right, operand_width);
+                (
+                    left_sig,
+                    right_sig,
+                    LirOp::Shl {
+                        width: operand_width,
+                    },
+                    operand_width,
+                )
+            }
+            BinaryOp::RightShift => {
+                let left_sig = self.transform_expression(left, operand_width);
+                let right_sig = self.transform_expression(right, operand_width);
+                (
+                    left_sig,
+                    right_sig,
+                    LirOp::Shr {
+                        width: operand_width,
+                    },
+                    operand_width,
+                )
+            }
 
             _ => {
                 self.warnings
                     .push(format!("Unsupported binary op: {:?}", op));
+                let left_sig = self.transform_expression(left, operand_width);
+                let right_sig = self.transform_expression(right, operand_width);
                 (
+                    left_sig,
+                    right_sig,
                     LirOp::Buffer {
                         width: operand_width,
                     },
