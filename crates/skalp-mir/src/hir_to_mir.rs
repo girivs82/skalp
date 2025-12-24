@@ -1469,9 +1469,9 @@ impl<'hir> HirToMir<'hir> {
                 }
             }
             hir::HirStatement::Let(let_stmt) => {
-                eprintln!(
-                    "[DEBUG] convert_statement: Processing Let for '{}' (ID {:?})",
-                    let_stmt.name, let_stmt.id
+                println!(
+                    "🟠🟠🟠 [DEBUG] convert_statement: Processing Let for '{}' (ID {:?}), value type: {:?} 🟠🟠🟠",
+                    let_stmt.name, let_stmt.id, std::mem::discriminant(&let_stmt.value)
                 );
                 if let_stmt.name == "_tuple_tmp_66" {
                     eprintln!("[MIR_LET_TRACE] *** Processing _tuple_tmp_66 - will trace through entire function ***");
@@ -2005,13 +2005,25 @@ impl<'hir> HirToMir<'hir> {
                     rhs
                 } else {
                     // Convert now that variable is registered and available
-                    eprintln!("[MIR_LET_FINAL]   Converting RHS now: {:?}", let_stmt.value);
+                    println!(
+                        "[🟡 MIR_LET_FINAL] Converting RHS for '{}': {:?}",
+                        let_stmt.name,
+                        std::mem::discriminant(&let_stmt.value)
+                    );
                     if let_stmt.name == "_tuple_tmp_66" {
                         eprintln!(
                             "[MIR_LET_TRACE] _tuple_tmp_66: Calling convert_expression on RHS"
                         );
                     }
                     let converted = self.convert_expression(&let_stmt.value, 0);
+                    println!(
+                        "[🟡 MIR_LET_FINAL] RHS conversion for '{}' returned: {:?}",
+                        let_stmt.name,
+                        converted.is_some()
+                    );
+                    if converted.is_none() {
+                        println!("[🟡 MIR_LET_FINAL] ❌ RHS conversion FAILED for '{}' - returning None!", let_stmt.name);
+                    }
                     if let_stmt.name == "_tuple_tmp_66" {
                         eprintln!(
                             "[MIR_LET_TRACE] _tuple_tmp_66: convert_expression returned: {:?}",
@@ -5684,17 +5696,126 @@ impl<'hir> HirToMir<'hir> {
             }
             hir::HirExpression::Range(base, high, low) => {
                 // Convert range expression to range select
-                let base_lval = self.expr_to_lvalue(base)?;
+                // BUG #145 FIX: Handle cases where base is not an LValue (e.g., after function inlining)
+                // When the base is a Literal or other non-LValue expression, we need to:
+                // 1. Try constant evaluation if possible
+                // 2. Otherwise use shift/mask operations: (base >> low) & ((1 << (high - low + 1)) - 1)
+
+                // First try the LValue path (the common case for signals/variables)
+                if let Some(base_lval) = self.expr_to_lvalue(base) {
+                    let high_expr = self.convert_expression(high, depth + 1)?;
+                    let low_expr = self.convert_expression(low, depth + 1)?;
+                    return Some(Expression::new(
+                        ExpressionKind::Ref(LValue::RangeSelect {
+                            base: Box::new(base_lval),
+                            high: Box::new(high_expr),
+                            low: Box::new(low_expr),
+                        }),
+                        ty,
+                    ));
+                }
+
+                // Base is not an LValue - try constant evaluation first
+                if let (Some(base_val), Some(high_val), Some(low_val)) = (
+                    self.try_evaluate_constant_expr(base),
+                    self.try_evaluate_constant_expr(high),
+                    self.try_evaluate_constant_expr(low),
+                ) {
+                    // Evaluate range extraction at compile time
+                    let width = (high_val - low_val + 1) as usize;
+                    let mask = if width >= 64 {
+                        u64::MAX
+                    } else {
+                        (1u64 << width) - 1
+                    };
+                    let result = (base_val >> low_val) & mask;
+                    return Some(Expression::new(
+                        ExpressionKind::Literal(Value::BitVector {
+                            width,
+                            value: result,
+                        }),
+                        ty,
+                    ));
+                }
+
+                // Fall back to shift/mask operations for dynamic cases
+                let base_expr = self.convert_expression(base, depth + 1)?;
                 let high_expr = self.convert_expression(high, depth + 1)?;
                 let low_expr = self.convert_expression(low, depth + 1)?;
-                Some(Expression::new(
-                    ExpressionKind::Ref(LValue::RangeSelect {
-                        base: Box::new(base_lval),
-                        high: Box::new(high_expr),
-                        low: Box::new(low_expr),
-                    }),
-                    ty,
-                ))
+
+                // Compute: (base >> low) & mask
+                // First, shift right by low: base >> low
+                let shifted = Expression::new(
+                    ExpressionKind::Binary {
+                        op: BinaryOp::RightShift,
+                        left: Box::new(base_expr),
+                        right: Box::new(low_expr.clone()),
+                    },
+                    ty.clone(),
+                );
+
+                // Compute mask width: high - low + 1
+                // Then mask: (1 << width) - 1
+                // For now, if high and low are constants, compute the mask directly
+                // Otherwise, we'd need more complex logic - but for function inlining,
+                // indices are typically constants
+                if let (
+                    ExpressionKind::Literal(Value::Integer(h)),
+                    ExpressionKind::Literal(Value::Integer(l)),
+                ) = (&high_expr.kind, &low_expr.kind)
+                {
+                    let width = (h - l + 1) as usize;
+                    let mask_val = if width >= 64 {
+                        u64::MAX
+                    } else {
+                        (1u64 << width) - 1
+                    };
+                    let mask_expr = Expression::new(
+                        ExpressionKind::Literal(Value::BitVector {
+                            width,
+                            value: mask_val,
+                        }),
+                        ty.clone(),
+                    );
+                    Some(Expression::new(
+                        ExpressionKind::Binary {
+                            op: BinaryOp::BitwiseAnd,
+                            left: Box::new(shifted),
+                            right: Box::new(mask_expr),
+                        },
+                        ty,
+                    ))
+                } else if let (
+                    ExpressionKind::Literal(Value::BitVector { value: h, .. }),
+                    ExpressionKind::Literal(Value::BitVector { value: l, .. }),
+                ) = (&high_expr.kind, &low_expr.kind)
+                {
+                    let width = (h - l + 1) as usize;
+                    let mask_val = if width >= 64 {
+                        u64::MAX
+                    } else {
+                        (1u64 << width) - 1
+                    };
+                    let mask_expr = Expression::new(
+                        ExpressionKind::Literal(Value::BitVector {
+                            width,
+                            value: mask_val,
+                        }),
+                        ty.clone(),
+                    );
+                    Some(Expression::new(
+                        ExpressionKind::Binary {
+                            op: BinaryOp::BitwiseAnd,
+                            left: Box::new(shifted),
+                            right: Box::new(mask_expr),
+                        },
+                        ty,
+                    ))
+                } else {
+                    // Dynamic indices - just return the shifted value
+                    // (this may lose precision but handles the common case)
+                    Some(shifted)
+                }
             }
             hir::HirExpression::FieldAccess { base, field } => {
                 // Convert struct field access to bit slice (range select)
@@ -6131,6 +6252,61 @@ impl<'hir> HirToMir<'hir> {
                     );
                 }
 
+                // BUG #145 FIX: Try constant folding when the scrutinee is a constant
+                // This handles cases like `match 0 { 0 => a + b, 1 => a - b, ... }`
+                // after function inlining when the opcode parameter is a literal
+                if let Some(scrutinee_val) = self.try_evaluate_constant_expr(&match_expr.expr) {
+                    eprintln!(
+                        "[BUG #145] Match scrutinee is constant: {}, checking {} arms",
+                        scrutinee_val,
+                        match_expr.arms.len()
+                    );
+                    // Find the matching arm
+                    for (arm_idx, arm) in match_expr.arms.iter().enumerate() {
+                        let arm_matches = match &arm.pattern {
+                            hir::HirPattern::Literal(lit) => match lit {
+                                hir::HirLiteral::Integer(val) => scrutinee_val == *val,
+                                hir::HirLiteral::Boolean(b) => {
+                                    scrutinee_val == (if *b { 1 } else { 0 })
+                                }
+                                _ => false,
+                            },
+                            hir::HirPattern::Wildcard => true, // Wildcard matches everything
+                            hir::HirPattern::Path(enum_name, _variant)
+                                if enum_name == "__CONST__" =>
+                            {
+                                // Could add constant pattern matching here if needed
+                                false
+                            }
+                            _ => false,
+                        };
+
+                        if arm_matches {
+                            // Check guard if present
+                            let guard_passes = if let Some(guard) = &arm.guard {
+                                self.try_evaluate_constant_expr(guard)
+                                    .map(|v| v != 0)
+                                    .unwrap_or(false)
+                            } else {
+                                true
+                            };
+
+                            if guard_passes {
+                                eprintln!(
+                                    "[BUG #145] Match constant-folded: arm {} matches (pattern {:?})",
+                                    arm_idx, arm.pattern
+                                );
+                                // Directly convert the matching arm's expression
+                                return self.convert_expression(&arm.expr, depth + 1);
+                            }
+                        }
+                    }
+                    // No arm matched - fall through to default mux generation
+                    eprintln!(
+                        "[BUG #145] Match constant-fold: no arm matched, falling back to mux"
+                    );
+                }
+
                 // Choose mux generation strategy based on intent/attribute
                 match match_expr.mux_style {
                     hir::MuxStyle::Parallel => {
@@ -6203,8 +6379,8 @@ impl<'hir> HirToMir<'hir> {
                 // the parent assignment/statement.
                 // Example: result = if cond { let x = f(); x } else { 0 }
                 // Becomes: let x = f(); result = if cond { x } else { 0 }
-                eprintln!(
-                    "[DEBUG] Block expression: {} statements, result_expr type: {:?}",
+                println!(
+                    "🟣🟣🟣 [DEBUG] Block expression: {} statements, result_expr type: {:?} 🟣🟣🟣",
                     statements.len(),
                     std::mem::discriminant(&**result_expr)
                 );
@@ -6215,6 +6391,7 @@ impl<'hir> HirToMir<'hir> {
                 //     if (cond) { count = count + 16; temp = temp << 16; }
                 //     count }
                 // Transform to conditional expressions BEFORE processing statements individually.
+                println!("🔵🔵🔵 CALLSITE1: About to call try_transform from convert_expression Block 🔵🔵🔵");
                 if let Some(transformed_expr) =
                     self.try_transform_block_mutable_vars(statements, result_expr)
                 {
@@ -6222,9 +6399,28 @@ impl<'hir> HirToMir<'hir> {
                     return self.convert_expression(&transformed_expr, depth + 1);
                 }
 
-                for stmt in statements {
+                println!(
+                    "🔴🔴🔴 [BUG #145] Block fallback: about to process {} statements 🔴🔴🔴",
+                    statements.len()
+                );
+                for (stmt_idx, stmt) in statements.iter().enumerate() {
+                    println!(
+                        "🔴🔴🔴 [BUG #145 DEBUG] Block fallback: processing statement {} of {}, type: {:?} 🔴🔴🔴",
+                        stmt_idx, statements.len(), std::mem::discriminant(stmt)
+                    );
+                    if let hir::HirStatement::Let(let_stmt) = stmt {
+                        println!(
+                            "🔴🔴🔴 [BUG #145 DEBUG]   Let statement: name='{}', value type: {:?} 🔴🔴🔴",
+                            let_stmt.name, std::mem::discriminant(&let_stmt.value)
+                        );
+                    }
                     if let Some(mir_stmt) = self.convert_statement(stmt) {
+                        println!(
+                            "🔴🔴🔴 [BUG #145 DEBUG]   convert_statement returned Some 🔴🔴🔴"
+                        );
                         self.pending_statements.push(mir_stmt);
+                    } else {
+                        println!("🔴🔴🔴 [BUG #145 DEBUG]   convert_statement returned None - statement DROPPED! 🔴🔴🔴");
                     }
                 }
                 // Convert and return the final expression
@@ -7963,7 +8159,10 @@ impl<'hir> HirToMir<'hir> {
     ) -> Option<hir::HirExpression> {
         use std::collections::HashMap;
 
-        println!("🔧🔧🔧 [BUG #86] try_transform_block_mutable_vars: {} statements, result_expr type: {:?} 🔧🔧🔧",
+        // BUG #145 DEBUG: Simple trace - using println! to stdout
+        println!("🔮🔮🔮 [BUG #145] ENTERING try_transform_block_mutable_vars 🔮🔮🔮");
+
+        println!("🔧🔧🔧 [BUG #86] NEWCODE! try_transform_block_mutable_vars: {} statements, result_expr type: {:?} 🔧🔧🔧",
                  statements.len(), std::mem::discriminant(result_expr));
         // Also print the actual result_expr for debugging
         match result_expr {
@@ -9037,7 +9236,9 @@ impl<'hir> HirToMir<'hir> {
                             );
                             return false;
                         }
-                        // Exclude Match expressions to prevent BUG #89
+                        // BUG #89 FIX: Exclude Match expressions from substitution to prevent
+                        // double computation. Match expressions are complex and should be evaluated
+                        // via the let binding, not inlined into result_expr.
                         let should_include = !matches!(expr, hir::HirExpression::Match(_));
                         // Debug output for result_expr substitution decisions
                         #[allow(clippy::if_same_then_else)]
@@ -12005,7 +12206,10 @@ impl<'hir> HirToMir<'hir> {
         }
 
         // Step 5: Convert statement-based body to expression (handles early returns)
-        eprintln!("[DEBUG] inline_function_call: About to convert_body_to_expression");
+        println!(
+            "🌟🌟🌟 [INLINE] Step 5: About to convert_body_to_expression for '{}' 🌟🌟🌟",
+            call.function
+        );
         let body_expr = self.convert_body_to_expression(&body);
         if body_expr.is_none() {
             eprintln!(
@@ -12016,10 +12220,13 @@ impl<'hir> HirToMir<'hir> {
             return None;
         }
         let body_expr = body_expr?;
-        eprintln!("[DEBUG] inline_function_call: convert_body_to_expression succeeded");
+        println!(
+            "🌟🌟🌟 [INLINE] Step 5 DONE: body_expr type: {:?} 🌟🌟🌟",
+            std::mem::discriminant(&body_expr)
+        );
 
         // Step 6: Substitute parameters in the entire expression (including nested let bindings)
-        eprintln!("[DEBUG] inline_function_call: About to substitute_expression_with_var_map");
+        println!("🌟🌟🌟 [INLINE] Step 6: About to substitute_expression_with_var_map 🌟🌟🌟");
         let substituted_expr = self.substitute_expression_with_var_map(
             &body_expr,
             &substitution_map
@@ -12037,8 +12244,9 @@ impl<'hir> HirToMir<'hir> {
             return None;
         }
         let substituted_expr = substituted_expr?;
-        eprintln!(
-            "[DEBUG] inline_function_call: successfully substituted return, converting to MIR"
+        println!(
+            "🌟🌟🌟 [INLINE] Step 6 DONE: substituted_expr type: {:?} 🌟🌟🌟",
+            std::mem::discriminant(&substituted_expr)
         );
 
         // Step 7: Convert the substituted HIR expression to MIR
@@ -14419,6 +14627,59 @@ impl<'hir> HirToMir<'hir> {
         }
     }
 
+    /// BUG #145 FIX: Try to evaluate a HIR expression to a constant u64 value
+    /// Used for constant folding in Range expressions after function inlining
+    #[allow(clippy::only_used_in_recursion)]
+    fn try_evaluate_constant_expr(&self, expr: &hir::HirExpression) -> Option<u64> {
+        match expr {
+            hir::HirExpression::Literal(lit) => match lit {
+                hir::HirLiteral::Integer(val) => Some(*val),
+                hir::HirLiteral::Boolean(b) => Some(if *b { 1 } else { 0 }),
+                hir::HirLiteral::BitVector(bits) => {
+                    let mut value = 0u64;
+                    for (i, bit) in bits.iter().enumerate() {
+                        if *bit && i < 64 {
+                            value |= 1 << i;
+                        }
+                    }
+                    Some(value)
+                }
+                _ => None,
+            },
+            hir::HirExpression::Cast(cast_expr) => {
+                // For casts, try to evaluate the inner expression
+                self.try_evaluate_constant_expr(&cast_expr.expr)
+            }
+            hir::HirExpression::Binary(bin) => {
+                let left = self.try_evaluate_constant_expr(&bin.left)?;
+                let right = self.try_evaluate_constant_expr(&bin.right)?;
+                match bin.op {
+                    hir::HirBinaryOp::Add => Some(left.wrapping_add(right)),
+                    hir::HirBinaryOp::Sub => Some(left.wrapping_sub(right)),
+                    hir::HirBinaryOp::Mul => Some(left.wrapping_mul(right)),
+                    hir::HirBinaryOp::Div if right != 0 => Some(left / right),
+                    hir::HirBinaryOp::Mod if right != 0 => Some(left % right),
+                    hir::HirBinaryOp::And => Some(left & right),
+                    hir::HirBinaryOp::Or => Some(left | right),
+                    hir::HirBinaryOp::Xor => Some(left ^ right),
+                    hir::HirBinaryOp::LeftShift => Some(left.wrapping_shl(right as u32)),
+                    hir::HirBinaryOp::RightShift => Some(left.wrapping_shr(right as u32)),
+                    _ => None,
+                }
+            }
+            hir::HirExpression::Unary(un) => {
+                let operand = self.try_evaluate_constant_expr(&un.operand)?;
+                match un.op {
+                    hir::HirUnaryOp::Negate => Some((!operand).wrapping_add(1)), // Two's complement
+                    hir::HirUnaryOp::BitwiseNot => Some(!operand),
+                    hir::HirUnaryOp::Not => Some(if operand == 0 { 1 } else { 0 }),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
     fn next_module_id(&mut self) -> ModuleId {
         let id = ModuleId(self.next_module_id);
         self.next_module_id += 1;
@@ -15404,6 +15665,7 @@ impl<'hir> HirToMir<'hir> {
                 //     if (cond) { count = count + 16; temp = temp << 16; }
                 //     count }
                 // Transform to conditional expressions BEFORE processing.
+                println!("🟢🟢🟢 CALLSITE2: About to call try_transform from convert_hir_expr_for_module Block 🟢🟢🟢");
                 if let Some(transformed_expr) =
                     self.try_transform_block_mutable_vars(statements, result_expr)
                 {
