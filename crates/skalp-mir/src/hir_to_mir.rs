@@ -700,8 +700,6 @@ impl<'hir> HirToMir<'hir> {
                         self.variable_map.insert(hir_var.id, var_id);
 
                         let mir_var_type = self.convert_type(&hir_var.var_type);
-                        eprintln!("[BUG #65/#66 DEBUG] impl_block.variables: name={}, hir_type={:?}, mir_type={:?}",
-                            hir_var.name, hir_var.var_type, mir_var_type);
                         let variable = Variable {
                             id: var_id,
                             name: hir_var.name.clone(),
@@ -712,10 +710,6 @@ impl<'hir> HirToMir<'hir> {
                                 .and_then(|expr| self.convert_literal_expr(expr)),
                             span: None,
                         };
-                        eprintln!(
-                            "[BUG #71 PUSH LOC1] Pushing variable: id={:?}, name={}",
-                            var_id, hir_var.name
-                        );
                         module.variables.push(variable);
                     }
 
@@ -3204,44 +3198,23 @@ impl<'hir> HirToMir<'hir> {
         &mut self,
         assign: &hir::HirAssignment,
     ) -> Vec<ContinuousAssign> {
-        eprintln!(
-            "[CONVERT_EXPANDED] Called with LHS={:?}, RHS={:?}",
-            std::mem::discriminant(&assign.lhs),
-            std::mem::discriminant(&assign.rhs)
-        );
-
         // Only combinational assignments become continuous assigns
         if !matches!(
             assign.assignment_type,
             hir::HirAssignmentType::Combinational
         ) {
-            eprintln!("[CONVERT_EXPANDED] Skipping: not combinational");
             return vec![];
         }
 
         // BUG FIX #13-16, #21-23: Detect entity instantiation via struct literal assignment
         // Pattern: variable = EntityName { ... }
         // If LHS is a Variable and RHS is a StructLiteral matching an entity, create module instance
-        println!(
-            "🔍🔍🔍 [HIERARCHICAL_CHECK] LHS type: {:?}, RHS type: {:?} 🔍🔍🔍",
-            std::mem::discriminant(&assign.lhs),
-            std::mem::discriminant(&assign.rhs)
-        );
         if let (hir::HirLValue::Variable(var_id), hir::HirExpression::StructLiteral(struct_lit)) =
             (&assign.lhs, &assign.rhs)
         {
-            eprintln!(
-                "[HIERARCHICAL_CHECK] LHS is Variable({:?}), RHS is StructLiteral({})",
-                var_id, struct_lit.type_name
-            );
             // Check if this type_name matches an entity
             if let Some(hir) = self.hir.as_ref() {
                 if let Some(entity) = hir.entities.iter().find(|e| e.name == struct_lit.type_name) {
-                    eprintln!(
-                        "[HIERARCHICAL] Detected entity instantiation in assignment: {} = {} {{ ... }}",
-                        var_id.0, struct_lit.type_name
-                    );
-
                     // Get the module ID for this entity
                     if let Some(&module_id) = self.entity_map.get(&entity.id) {
                         // Get the variable name from dynamic_variables or create one
@@ -3271,11 +3244,6 @@ impl<'hir> HirToMir<'hir> {
                                 // Propagate detection config from sub-module port
                                 let detection_cfg = port.detection_config.clone();
 
-                                eprintln!(
-                                    "[HIERARCHICAL] Creating output signal '{}' (id={}) for port '{}' (detection={})",
-                                    signal_name, signal_id.0, port.name, detection_cfg.is_some()
-                                );
-
                                 // Track this output port
                                 output_ports.insert(port.name.clone(), signal_id);
                                 output_signals.push((
@@ -3299,11 +3267,6 @@ impl<'hir> HirToMir<'hir> {
                         self.entity_instance_outputs.insert(*var_id, output_ports);
                         self.entity_instance_info
                             .insert(*var_id, (instance_name.clone(), module_id));
-
-                        eprintln!(
-                            "[HIERARCHICAL] Stored entity instance '{}' (var {:?}) with {} output ports",
-                            instance_name, var_id, self.entity_instance_outputs.get(var_id).map(|m| m.len()).unwrap_or(0)
-                        );
 
                         // Create the module instance
                         let instance = ModuleInstance {
@@ -3329,42 +3292,19 @@ impl<'hir> HirToMir<'hir> {
         // CRITICAL FIX for Bug #9: Try to expand array index read assignments first
         // This handles cases like: rd_data = mem[index]
         // This is the RHS counterpart to Bug #8 (array index writes)
-        eprintln!("[CONVERT_EXPANDED] Trying array index read expansion...");
         if let Some(assigns) = self.try_expand_array_index_read_assignment(assign) {
-            eprintln!(
-                "[CONVERT_EXPANDED] ✓ Array index read expansion returned Some with {} assigns",
-                assigns.len()
-            );
             return assigns;
         }
-        eprintln!("[CONVERT_EXPANDED] Array index read expansion returned None");
 
         // BUG FIX #91: Try to expand tuple signal = function call assignments
-        eprintln!("[CONVERT_EXPANDED] Trying tuple call expansion...");
         if let Some(assigns) = self.try_expand_tuple_call_continuous_assignment(assign) {
-            eprintln!(
-                "[CONVERT_EXPANDED] ✓ Tuple call expansion returned Some with {} assigns",
-                assigns.len()
-            );
             return assigns;
         }
-        eprintln!("[CONVERT_EXPANDED] Tuple call expansion returned None");
 
         // Try to expand struct-to-struct assignments
-        eprintln!("[CONVERT_EXPANDED] Trying struct expansion...");
         if let Some(assigns) = self.try_expand_struct_continuous_assignment(assign) {
-            eprintln!(
-                "[CONVERT_EXPANDED] ✓ Struct expansion returned Some with {} assigns",
-                assigns.len()
-            );
             return assigns;
         }
-        eprintln!("[CONVERT_EXPANDED] Struct expansion returned None");
-
-        eprintln!(
-            "[DEBUG] Trying to convert continuous assignment, RHS type: {:?}",
-            std::mem::discriminant(&assign.rhs)
-        );
 
         // Fall back to single assignment
         if let Some(single) = self.convert_continuous_assignment(assign) {
@@ -3379,7 +3319,22 @@ impl<'hir> HirToMir<'hir> {
                 hir::HirLValue::Port(id) => {
                     format!("port_{}", id.0)
                 }
-                _ => "unknown_lhs".to_string(),
+                hir::HirLValue::Variable(id) => {
+                    format!("variable_{}", id.0)
+                }
+                hir::HirLValue::Range(base, ..) => {
+                    format!("range[base={:?}]", std::mem::discriminant(&**base))
+                }
+                hir::HirLValue::FieldAccess { base, field } => {
+                    format!(
+                        "field_access[base={:?}.{}]",
+                        std::mem::discriminant(&**base),
+                        field
+                    )
+                }
+                hir::HirLValue::Index(base, ..) => {
+                    format!("index[base={:?}]", std::mem::discriminant(&**base))
+                }
             };
 
             let rhs_desc = match &assign.rhs {
@@ -3388,6 +3343,13 @@ impl<'hir> HirToMir<'hir> {
                         "function call to '{}' with {} arguments",
                         call.function,
                         call.args.len()
+                    )
+                }
+                hir::HirExpression::Cast(cast) => {
+                    format!(
+                        "Cast(inner={:?}, target={:?})",
+                        std::mem::discriminant(&*cast.expr),
+                        cast.target_type
                     )
                 }
                 _ => format!(
@@ -3422,7 +3384,6 @@ impl<'hir> HirToMir<'hir> {
         &mut self,
         assign: &hir::HirAssignment,
     ) -> Option<ContinuousAssign> {
-        println!("🚨🚨🚨 CONTINUOUS ASSIGN CONVERSION STARTING 🚨🚨🚨");
         // Only combinational assignments become continuous assigns
         if !matches!(
             assign.assignment_type,
@@ -3431,46 +3392,10 @@ impl<'hir> HirToMir<'hir> {
             return None;
         }
 
-        let lhs = self.convert_lvalue(&assign.lhs);
-        if lhs.is_none() {
-            eprintln!(
-                "[DEBUG] convert_lvalue returned None for LHS: {:?}",
-                std::mem::discriminant(&assign.lhs)
-            );
-            return None;
-        }
-        let lhs = lhs?;
-        eprintln!(
-            "[DEBUG] LHS converted successfully: {:?}",
-            std::mem::discriminant(&lhs)
-        );
+        let lhs = self.convert_lvalue(&assign.lhs)?;
 
-        let rhs = self.convert_expression(&assign.rhs, 0);
-        if rhs.is_none() {
-            eprintln!(
-                "❌ [BUG #85 - ASSIGNMENT DROPPED] convert_expression returned None for RHS: {:?}",
-                std::mem::discriminant(&assign.rhs)
-            );
-            // BUG #85: Provide detailed error for function call failures
-            if let hir::HirExpression::Call(call) = &assign.rhs {
-                eprintln!(
-                    "❌ [BUG #85] Assignment RHS is function call to '{}' with {} args",
-                    call.function,
-                    call.args.len()
-                );
-                eprintln!(
-                    "❌ [BUG #85] This assignment will be DROPPED, leaving signal without driver!"
-                );
-                eprintln!(
-                    "❌ [BUG #85] LHS type: {:?}",
-                    std::mem::discriminant(&assign.lhs)
-                );
-            }
-            return None;
-        }
-        let rhs = rhs?;
+        let rhs = self.convert_expression(&assign.rhs, 0)?;
 
-        eprintln!("[DEBUG] Continuous assignment successful!");
         Some(ContinuousAssign {
             lhs,
             rhs,
@@ -3484,19 +3409,6 @@ impl<'hir> HirToMir<'hir> {
         &mut self,
         assign: &hir::HirAssignment,
     ) -> Option<Vec<ContinuousAssign>> {
-        // Debug: Check what we're looking at
-        let is_call_rhs = matches!(&assign.rhs, hir::HirExpression::Call(_));
-        if is_call_rhs {
-            println!(
-                "🔍🔍🔍 BUG91_CONT_CHECK: LHS type={:?}, is_call=true 🔍🔍🔍",
-                std::mem::discriminant(&assign.lhs)
-            );
-            if let hir::HirLValue::Signal(id) = &assign.lhs {
-                println!("🔍🔍🔍 BUG91_CONT_CHECK: Signal id={}, flattened_signals.len={}, contains={}  🔍🔍🔍",
-                         id.0, self.flattened_signals.len(), self.flattened_signals.contains_key(id));
-            }
-        }
-
         // Check if LHS is a tuple signal (has multiple flattened fields)
         let lhs_flattened = match &assign.lhs {
             hir::HirLValue::Signal(id) => {
@@ -3518,9 +3430,7 @@ impl<'hir> HirToMir<'hir> {
             hir::HirExpression::Call(c) => c,
             _ => return None, // Not a call RHS
         };
-
-        println!("🔧🔧🔧 BUG91_TUPLE_CALL_CONT: Expanding tuple = {}(...) with {} flattened fields 🔧🔧🔧",
-                 call.function, lhs_flattened.len());
+        let _ = call; // Silence unused variable warning
 
         // Convert the call expression - this triggers HYBRID and creates module instance
         let rhs_expr = self.convert_expression(&assign.rhs, 0)?;
@@ -3528,7 +3438,6 @@ impl<'hir> HirToMir<'hir> {
         // The call conversion should have created pending module instances
         let pending_count = self.pending_module_instances.len();
         if pending_count == 0 {
-            println!("🔧🔧🔧 BUG91_TUPLE_CALL_CONT: No pending instances - call may have been inlined 🔧🔧🔧");
             // Handle inlined call that returns Concat
             if let ExpressionKind::Concat(elements) = &rhs_expr.kind {
                 if elements.len() == lhs_flattened.len() {
@@ -3549,11 +3458,6 @@ impl<'hir> HirToMir<'hir> {
 
         // BUG FIX #92: Get all result_signal_ids from the pending instance (now a Vec)
         let (result_signal_ids, _, _, _, _, _) = &self.pending_module_instances[pending_count - 1];
-
-        println!(
-            "🔧🔧🔧 BUG91_TUPLE_CALL_CONT: Module instance has {} result signals 🔧🔧🔧",
-            result_signal_ids.len()
-        );
 
         // Create continuous assignments for each flattened field
         let mut assigns = Vec::new();
@@ -3577,10 +3481,6 @@ impl<'hir> HirToMir<'hir> {
                 ))),
                 span: None,
             });
-            println!(
-                "🔧🔧🔧 BUG91_TUPLE_CALL_CONT: field_{} = result_{} 🔧🔧🔧",
-                flat_field.id, idx
-            );
         }
 
         Some(assigns)
@@ -4202,15 +4102,26 @@ impl<'hir> HirToMir<'hir> {
         let result = match lval {
             hir::HirLValue::Signal(id) => self.signal_map.get(id).map(|&id| LValue::Signal(id)),
             hir::HirLValue::Variable(id) => {
-                // BUG #20 FIX: Check variable_map first, then fall back to dynamic_variables
-                // Same as expr_to_lvalue - dynamic variables need to be accessible as LValues
-                if let Some(&mir_id) = self.variable_map.get(id) {
-                    Some(LValue::Variable(mir_id))
-                } else if let Some((mir_id, _, _)) = self.dynamic_variables.get(id) {
-                    Some(LValue::Variable(*mir_id))
+                // BUG #153 FIX: Check context_variable_map first (for match arm/function inlining contexts)
+                // Then check variable_map and dynamic_variables as fallbacks
+                // This matches the lookup order in convert_expression for Variable
+                let mir_id = if let Some(context) = self.get_current_context() {
+                    let context_key = (Some(context.clone()), *id);
+                    if let Some(&mir_id) = self.context_variable_map.get(&context_key) {
+                        Some(mir_id)
+                    } else {
+                        None
+                    }
                 } else {
                     None
-                }
+                };
+
+                // Fallback to variable_map and dynamic_variables
+                let mir_id = mir_id
+                    .or_else(|| self.variable_map.get(id).copied())
+                    .or_else(|| self.dynamic_variables.get(id).map(|(mir_id, _, _)| *mir_id));
+
+                mir_id.map(LValue::Variable)
             }
             hir::HirLValue::Port(id) => self.port_map.get(id).map(|&id| LValue::Port(id)),
             hir::HirLValue::Index(base, index) => {
@@ -4368,10 +4279,6 @@ impl<'hir> HirToMir<'hir> {
         expr: &hir::HirExpression,
         depth: usize,
     ) -> Option<Expression> {
-        println!(
-            "🚨🚨🚨 CONVERT_EXPRESSION CALLED: {:?} 🚨🚨🚨",
-            std::mem::discriminant(expr)
-        );
         // Guard against stack overflow on deeply nested expressions
         if depth > MAX_EXPRESSION_RECURSION_DEPTH {
             panic!(
@@ -4380,20 +4287,9 @@ impl<'hir> HirToMir<'hir> {
             );
         }
 
-        eprintln!(
-            "[BUG #74 CONVERT_EXPR] convert_expression called with discriminant: {:?}, depth: {}",
-            std::mem::discriminant(expr),
-            depth
-        );
-
         // BUG #76 FIX: Infer type first for proper type propagation
         let ty = self.infer_hir_expression_type(expr, depth);
-        eprintln!("[BUG #76] Inferred type for expr: {:?}", ty);
 
-        println!(
-            "🔷🔷🔷 ENTERING MATCH FOR EXPR: {:?} 🔷🔷🔷",
-            std::mem::discriminant(expr)
-        );
         match expr {
             hir::HirExpression::Literal(lit) => self
                 .convert_literal(lit)
@@ -12446,12 +12342,28 @@ impl<'hir> HirToMir<'hir> {
         //
         // BUG #71 FIX: BUT don't remove variables that have been preserved to dynamic_variables!
         // These variables (preserved by BUG #68) need to persist for use in pending statements.
-        for var_id in var_id_to_name.keys() {
-            // Only remove if NOT in dynamic_variables (not preserved)
-            if !self.dynamic_variables.contains_key(var_id) {
-                self.variable_map.remove(var_id);
-            }
-        }
+        //
+        // BUG #153 FIX: Don't remove variables that existed in variable_map BEFORE this function
+        // inlining. The var_id_to_name map contains HIR VariableIds from the inlined function,
+        // but these IDs might collide with entity-level variables that were registered earlier.
+        // We should only remove variables that were ADDED during this inlining.
+        //
+        // NOTE: Since we now use context_variable_map for all context-aware lookups (line 1967),
+        // and entity-level variables are protected by entry().or_insert() (line 1967),
+        // we should NOT need to remove anything from variable_map here. The context-specific
+        // variables are stored in context_variable_map, not variable_map.
+        //
+        // ACTUALLY: The safest fix is to simply NOT remove anything from variable_map.
+        // Entity-level variables need to persist, and function-local variables are looked up
+        // via context_variable_map. Removing from variable_map can only cause problems.
+        //
+        // DISABLED: The original removal logic is commented out to fix BUG #153
+        // for var_id in var_id_to_name.keys() {
+        //     // Only remove if NOT in dynamic_variables (not preserved)
+        //     if !self.dynamic_variables.contains_key(var_id) {
+        //         self.variable_map.remove(var_id);
+        //     }
+        // }
 
         // ARCHITECTURAL FIX: Pop the inlining context before returning
         self.inlining_context_stack.pop();
