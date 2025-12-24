@@ -1431,7 +1431,7 @@ fn simulate_design(
 fn simulate_behavioral(source_file: &PathBuf, cycles: u64, use_gpu: bool) -> Result<()> {
     use skalp_frontend::parse_and_build_hir_from_file;
     use skalp_mir::MirCompiler;
-    use skalp_sir::convert_mir_to_sir;
+    use skalp_sir::convert_mir_to_sir_with_hierarchy;
 
     println!("🔧 Behavioral Simulation (HIR → MIR → SIR)");
     println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
@@ -1456,9 +1456,9 @@ fn simulate_behavioral(source_file: &PathBuf, cycles: u64, use_gpu: bool) -> Res
         anyhow::bail!("No modules found in compiled design");
     }
 
-    // Convert to SIR
+    // Convert to SIR with full hierarchy support (for synthesized function modules)
     info!("Converting to SIR...");
-    let sir = convert_mir_to_sir(&mir.modules[0]);
+    let sir = convert_mir_to_sir_with_hierarchy(&mir, &mir.modules[0]);
 
     println!("📊 Design Statistics:");
     println!("   Inputs: {}", sir.inputs.len());
