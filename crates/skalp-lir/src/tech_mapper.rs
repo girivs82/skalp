@@ -506,6 +506,12 @@ impl<'a> TechMapper<'a> {
                 self.map_bit_select(&input_nets, &output_nets, &node.path);
             }
 
+            // Concat: concatenate multiple inputs
+            // This is a wiring operation - each output bit comes from an input bit
+            LirOp::Concat { widths } => {
+                self.map_concat(widths, &input_nets, &output_nets, &node.path);
+            }
+
             _ => {
                 self.warnings
                     .push(format!("Unsupported operation: {:?}", node.op));
@@ -1002,6 +1008,71 @@ impl<'a> TechMapper<'a> {
             cell.source_op = Some("RangeSelect".to_string());
             cell.failure_modes = buf_info.failure_modes.clone();
             self.add_cell(cell);
+        }
+
+        self.stats.direct_mappings += 1;
+    }
+
+    /// Map concat: concatenate multiple inputs into output
+    ///
+    /// The widths vector specifies the width of each input.
+    /// Inputs are concatenated with first input in the low bits.
+    /// For example, {a[2:0], b[1:0]} produces output[4:0] = {b[1:0], a[2:0]}
+    /// (b is high bits, a is low bits - standard Verilog/SystemVerilog concat order)
+    fn map_concat(
+        &mut self,
+        widths: &[u32],
+        inputs: &[Vec<GateNetId>],
+        outputs: &[GateNetId],
+        path: &str,
+    ) {
+        if inputs.is_empty() {
+            self.warnings.push("Concat: no inputs".to_string());
+            return;
+        }
+
+        // Get buffer cell info for explicit wiring
+        let buf_info = self.get_cell_info(&CellFunction::Buf);
+
+        // Concatenate inputs from low to high bits
+        // First input goes to low bits, last input goes to high bits
+        let mut out_bit = 0;
+        for (i, (&width, input)) in widths.iter().zip(inputs.iter()).enumerate() {
+            for bit in 0..width as usize {
+                let src = input.get(bit).copied().unwrap_or_else(|| {
+                    self.warnings.push(format!(
+                        "Concat: input {} bit {} out of range (width {})",
+                        i,
+                        bit,
+                        input.len()
+                    ));
+                    input.first().copied().unwrap_or(GateNetId(0))
+                });
+                let dst = outputs.get(out_bit).copied().unwrap_or_else(|| {
+                    self.warnings.push(format!(
+                        "Concat: output bit {} out of range (width {})",
+                        out_bit,
+                        outputs.len()
+                    ));
+                    outputs.first().copied().unwrap_or(GateNetId(0))
+                });
+
+                // Use buffer for explicit connection
+                let mut cell = Cell::new_comb(
+                    CellId(0),
+                    buf_info.name.clone(),
+                    self.library.name.clone(),
+                    buf_info.fit,
+                    format!("{}.concat_bit{}", path, out_bit),
+                    vec![src],
+                    vec![dst],
+                );
+                cell.source_op = Some("Concat".to_string());
+                cell.failure_modes = buf_info.failure_modes.clone();
+                self.add_cell(cell);
+
+                out_bit += 1;
+            }
         }
 
         self.stats.direct_mappings += 1;

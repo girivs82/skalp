@@ -1947,31 +1947,18 @@ impl<'hir> HirToMir<'hir> {
                             let_stmt.id, context, new_id
                         );
                         self.context_variable_map.insert(context_key, new_id);
-                        // BUG #71 FIX: Also add to variable_map so pending statements can find it
-                        // This is needed because pending statements only have the MIR ID and need
-                        // to reverse-lookup the HIR ID to find the variable in dynamic_variables
-                        if new_id.0 >= 148 && new_id.0 <= 150 {
-                            eprintln!(
-                                "[BUG #71 INSERT] BEFORE insert: variable_map size={}",
-                                self.variable_map.len()
-                            );
-                            eprintln!(
-                                "[BUG #71 INSERT] Inserting HIR {:?} -> MIR {:?} into variable_map",
-                                let_stmt.id, new_id
-                            );
-                        }
-                        self.variable_map.insert(let_stmt.id, new_id);
-                        if new_id.0 >= 148 && new_id.0 <= 150 {
-                            eprintln!(
-                                "[BUG #71 INSERT] AFTER insert: variable_map size={}",
-                                self.variable_map.len()
-                            );
-                            eprintln!(
-                                "[BUG #71 INSERT] Verify: variable_map contains {:?}? {}",
-                                let_stmt.id,
-                                self.variable_map.contains_key(&let_stmt.id)
-                            );
-                        }
+                        // BUG #149 FIX: Do NOT insert into variable_map if there's already an entry
+                        // When in a context (match arm or function inlining), the inlined function's
+                        // variables may have the same HIR VariableId as the caller's variables.
+                        // Overwriting variable_map causes the RHS of the inlined let statement to
+                        // incorrectly reference the new variable instead of the original one.
+                        // Example: let a = data1[31:0] where a's HIR ID = data1's HIR ID = 0
+                        //   Before: variable_map[0] = MIR 0 (data1)
+                        //   After (broken): variable_map[0] = MIR 2 (a) - WRONG!
+                        //   RHS Variable(0) now resolves to a instead of data1, creating circular ref
+                        // BUG #149 FIX: Only insert if there's no existing entry
+                        // The context_variable_map will be used for context-specific lookups
+                        self.variable_map.entry(let_stmt.id).or_insert(new_id);
                     } else {
                         self.variable_map.insert(let_stmt.id, new_id);
                     }
@@ -7623,7 +7610,7 @@ impl<'hir> HirToMir<'hir> {
             }
         }
 
-        eprintln!(
+        println!(
             "[DEBUG] convert_body_to_expression: {} let bindings, {} remaining stmts",
             let_bindings.len(),
             remaining_stmts.len()
@@ -7691,6 +7678,16 @@ impl<'hir> HirToMir<'hir> {
         }
 
         // Convert the remaining statements to an expression
+        println!(
+            "[DEBUG] About to match remaining_stmts: {} stmts",
+            remaining_stmts.len()
+        );
+        if !remaining_stmts.is_empty() {
+            println!(
+                "[DEBUG]   First stmt type: {:?}",
+                std::mem::discriminant(&remaining_stmts[0])
+            );
+        }
         let body_expr = match remaining_stmts {
             // Single return statement with expression
             [hir::HirStatement::Return(Some(expr))] => Some(expr.clone()),
@@ -7707,7 +7704,10 @@ impl<'hir> HirToMir<'hir> {
             [hir::HirStatement::If(if_stmt)] => self.convert_if_stmt_to_expr(if_stmt),
 
             // Match expression as final statement - convert to HIR match expression
-            [hir::HirStatement::Match(match_stmt)] => self.convert_match_stmt_to_expr(match_stmt),
+            [hir::HirStatement::Match(match_stmt)] => {
+                println!("[DEBUG] HIT: Single Match statement pattern - calling convert_match_stmt_to_expr");
+                self.convert_match_stmt_to_expr(match_stmt)
+            }
 
             // Multiple statements - need to convert to block expression
             // This happens when function has statements followed by return
@@ -7795,18 +7795,18 @@ impl<'hir> HirToMir<'hir> {
 
             // Other cases not yet supported
             _ => {
-                eprintln!("convert_body_to_expression: unsupported statement pattern");
-                eprintln!("  Remaining statements: {:?}", remaining_stmts.len());
+                println!("convert_body_to_expression: unsupported statement pattern");
+                println!("  Remaining statements: {:?}", remaining_stmts.len());
                 if !remaining_stmts.is_empty() {
-                    eprintln!(
+                    println!(
                         "  First statement type: {:?}",
                         std::mem::discriminant(&remaining_stmts[0])
                     );
                     match &remaining_stmts[0] {
                         hir::HirStatement::Return(opt) => {
-                            eprintln!("    Return statement with expr: {}", opt.is_some());
+                            println!("    Return statement with expr: {}", opt.is_some());
                         }
-                        other => eprintln!("    Statement variant: {:?}", other),
+                        other => println!("    Statement variant: {:?}", other),
                     }
                 }
                 None
@@ -8591,12 +8591,25 @@ impl<'hir> HirToMir<'hir> {
         match_stmt: &hir::HirMatchStatement,
     ) -> Option<hir::HirExpression> {
         // Convert each arm from statement form to expression form
+        println!(
+            "[DEBUG] convert_match_stmt_to_expr: {} arms",
+            match_stmt.arms.len()
+        );
         let arms: Option<Vec<_>> = match_stmt
             .arms
             .iter()
-            .map(|arm| {
+            .enumerate()
+            .map(|(i, arm)| {
+                println!("[DEBUG] convert_match_stmt_to_expr: arm {} has {} statements", i, arm.statements.len());
+                for (j, stmt) in arm.statements.iter().enumerate() {
+                    println!("[DEBUG]   stmt[{}]: {:?}", j, std::mem::discriminant(stmt));
+                }
                 // Convert arm's statements to an expression
-                let expr = self.convert_body_to_expression(&arm.statements)?;
+                let expr = self.convert_body_to_expression(&arm.statements);
+                if expr.is_none() {
+                    println!("[DEBUG] convert_match_stmt_to_expr: arm {} convert_body_to_expression FAILED!", i);
+                }
+                let expr = expr?;
                 Some(hir::HirMatchArmExpr {
                     pattern: arm.pattern.clone(),
                     guard: arm.guard.clone(),
@@ -8792,7 +8805,7 @@ impl<'hir> HirToMir<'hir> {
         var_id_to_name: &HashMap<hir::VariableId, String>,
     ) -> Option<hir::HirExpression> {
         let is_block = matches!(expr, hir::HirExpression::Block { .. });
-        eprintln!(
+        println!(
             "[DEBUG] substitute_expression_with_var_map: expr type: {:?}, is_block: {}",
             std::mem::discriminant(expr),
             is_block
@@ -8803,7 +8816,7 @@ impl<'hir> HirToMir<'hir> {
             hir::HirExpression::GenericParam(name) => {
                 if let Some(arg_expr) = param_map.get(name) {
                     // Clone the argument expression
-                    eprintln!(
+                    println!(
                         "[DEBUG] GenericParam substitution: '{}' -> {:?}",
                         name,
                         std::mem::discriminant(&**arg_expr)
@@ -8811,7 +8824,7 @@ impl<'hir> HirToMir<'hir> {
                     Some((*arg_expr).clone())
                 } else {
                     // Not a function parameter, keep as-is
-                    eprintln!(
+                    println!(
                         "[DEBUG] GenericParam substitution: '{}' NOT FOUND in param_map, keeping as-is",
                         name
                     );
@@ -8954,7 +8967,7 @@ impl<'hir> HirToMir<'hir> {
 
             // Match expression - substitute all parts
             hir::HirExpression::Match(match_expr) => {
-                eprintln!(
+                println!(
                     "[DEBUG] substitute_expression_with_var_map: Match expression with {} arms",
                     match_expr.arms.len()
                 );
@@ -8969,9 +8982,11 @@ impl<'hir> HirToMir<'hir> {
                 // Substitute in each arm
                 let mut arms = Vec::new();
                 for (i, arm) in match_expr.arms.iter().enumerate() {
-                    eprintln!(
-                        "[DEBUG] Match: processing arm {}, pattern: {:?}",
-                        i, arm.pattern
+                    println!(
+                        "[DEBUG] Match: processing arm {}, pattern: {:?}, expr type: {:?}",
+                        i,
+                        arm.pattern,
+                        std::mem::discriminant(&arm.expr)
                     );
 
                     let guard = if let Some(guard_expr) = &arm.guard {
@@ -9026,10 +9041,21 @@ impl<'hir> HirToMir<'hir> {
                 statements,
                 result_expr,
             } => {
-                eprintln!(
-                    "[DEBUG] **MATCHED** Block substitution: {} statements",
-                    statements.len()
+                println!(
+                    "[DEBUG] **MATCHED** Block substitution: {} statements, param_map has {} entries",
+                    statements.len(),
+                    param_map.len()
                 );
+                if statements.is_empty() {
+                    println!(
+                        "[DEBUG]   param_map keys: {:?}",
+                        param_map.keys().collect::<Vec<_>>()
+                    );
+                    println!(
+                        "[DEBUG]   result_expr type: {:?}",
+                        std::mem::discriminant(&**result_expr)
+                    );
+                }
                 // BUG FIX #18: Use owned HashMap for local variables to allow incremental updates
                 // This allows each statement to reference previously defined local variables
                 let mut local_var_map: std::collections::HashMap<String, hir::HirExpression> =
@@ -9266,6 +9292,19 @@ impl<'hir> HirToMir<'hir> {
                 for (k, v) in param_map {
                     filtered_local_map.insert(k.clone(), *v);
                 }
+                if statements.is_empty() {
+                    println!(
+                        "[DEBUG]   filtered_local_map after merge: {:?}",
+                        filtered_local_map.keys().collect::<Vec<_>>()
+                    );
+                    println!(
+                        "[DEBUG]   result_expr type: {:?}",
+                        std::mem::discriminant(&**result_expr)
+                    );
+                    if let hir::HirExpression::Range(base, _, _) = &**result_expr {
+                        println!("[DEBUG]   result_expr is Range with base: {:?}", base);
+                    }
+                }
 
                 let substituted_result = Box::new(self.substitute_expression_with_var_map(
                     result_expr,
@@ -9312,7 +9351,7 @@ impl<'hir> HirToMir<'hir> {
 
             // Range expression - substitute base, high, and low
             hir::HirExpression::Range(base, high, low) => {
-                eprintln!(
+                println!(
                     "[DEBUG] Range substitution: base type {:?}",
                     std::mem::discriminant(&**base)
                 );
@@ -9405,7 +9444,7 @@ impl<'hir> HirToMir<'hir> {
 
             // Cast expression - substitute the inner expression
             hir::HirExpression::Cast(cast) => {
-                eprintln!(
+                println!(
                     "[DEBUG] Cast substitution: inner expr type: {:?}, target type: {:?}",
                     std::mem::discriminant(&*cast.expr),
                     cast.target_type
@@ -11349,6 +11388,16 @@ impl<'hir> HirToMir<'hir> {
                 hir::HirExpression::Index(Box::new(sub_base), Box::new(sub_index))
             }
 
+            // BUG FIX #146: Range (bit slice) - substitute in base, high, and low expressions
+            // Without this, Range(GenericParam("data1"), high, low) was not being substituted,
+            // causing function parameters to remain as GenericParam and then fall back to 0.
+            hir::HirExpression::Range(base, high, low) => {
+                let sub_base = self.substitute_hir_expr_with_map(base, name_map);
+                let sub_high = self.substitute_hir_expr_with_map(high, name_map);
+                let sub_low = self.substitute_hir_expr_with_map(low, name_map);
+                hir::HirExpression::Range(Box::new(sub_base), Box::new(sub_high), Box::new(sub_low))
+            }
+
             // Everything else - return as-is
             _ => expr.clone(),
         }
@@ -11468,6 +11517,14 @@ impl<'hir> HirToMir<'hir> {
                 let sub_base = self.substitute_var_ids_in_expr(base, var_id_map);
                 let sub_index = self.substitute_var_ids_in_expr(index, var_id_map);
                 hir::HirExpression::Index(Box::new(sub_base), Box::new(sub_index))
+            }
+
+            // BUG FIX #146: Range - substitute in base, high, and low expressions
+            hir::HirExpression::Range(base, high, low) => {
+                let sub_base = self.substitute_var_ids_in_expr(base, var_id_map);
+                let sub_high = self.substitute_var_ids_in_expr(high, var_id_map);
+                let sub_low = self.substitute_var_ids_in_expr(low, var_id_map);
+                hir::HirExpression::Range(Box::new(sub_base), Box::new(sub_high), Box::new(sub_low))
             }
 
             // BUG FIX #106 + #120: Block - recursively process statements and result_expr
@@ -11851,6 +11908,17 @@ impl<'hir> HirToMir<'hir> {
                 hir::HirExpression::Index(Box::new(sub_base), Box::new(sub_index))
             }
 
+            // BUG FIX #146: Range - substitute in base, high, and low expressions
+            hir::HirExpression::Range(base, high, low) => {
+                let sub_base =
+                    self.substitute_var_ids_in_expr_filtered(base, var_id_map, local_var_ids);
+                let sub_high =
+                    self.substitute_var_ids_in_expr_filtered(high, var_id_map, local_var_ids);
+                let sub_low =
+                    self.substitute_var_ids_in_expr_filtered(low, var_id_map, local_var_ids);
+                hir::HirExpression::Range(Box::new(sub_base), Box::new(sub_high), Box::new(sub_low))
+            }
+
             // Everything else - return as-is
             _ => expr.clone(),
         }
@@ -11903,6 +11971,12 @@ impl<'hir> HirToMir<'hir> {
             hir::HirExpression::Index(base, index) => {
                 Self::collect_variable_ids_from_expr(base, var_ids);
                 Self::collect_variable_ids_from_expr(index, var_ids);
+            }
+            // BUG FIX #146: Range - collect from base, high, and low
+            hir::HirExpression::Range(base, high, low) => {
+                Self::collect_variable_ids_from_expr(base, var_ids);
+                Self::collect_variable_ids_from_expr(high, var_ids);
+                Self::collect_variable_ids_from_expr(low, var_ids);
             }
             _ => {}
         }
@@ -12277,6 +12351,54 @@ impl<'hir> HirToMir<'hir> {
             "[BUG #IMPORT_MATCH] inline_function_call '{}': Before convert_expression, match_arm_prefix={:?}",
             call.function, self.match_arm_prefix
         );
+        // DEBUG: Check if substituted_expr still contains GenericParam
+        fn check_for_generic_param(expr: &hir::HirExpression, path: &str) {
+            match expr {
+                hir::HirExpression::GenericParam(name) => {
+                    println!("🚨 FOUND GenericParam('{}') at {}", name, path);
+                }
+                hir::HirExpression::Range(base, high, low) => {
+                    check_for_generic_param(base, &format!("{}.Range.base", path));
+                    check_for_generic_param(high, &format!("{}.Range.high", path));
+                    check_for_generic_param(low, &format!("{}.Range.low", path));
+                }
+                hir::HirExpression::Block {
+                    statements,
+                    result_expr,
+                } => {
+                    for (i, stmt) in statements.iter().enumerate() {
+                        if let hir::HirStatement::Let(let_stmt) = stmt {
+                            check_for_generic_param(
+                                &let_stmt.value,
+                                &format!("{}.Block.let[{}]", path, i),
+                            );
+                        }
+                    }
+                    check_for_generic_param(result_expr, &format!("{}.Block.result", path));
+                }
+                hir::HirExpression::Match(m) => {
+                    check_for_generic_param(&m.expr, &format!("{}.Match.expr", path));
+                    for (i, arm) in m.arms.iter().enumerate() {
+                        check_for_generic_param(&arm.expr, &format!("{}.Match.arm[{}]", path, i));
+                    }
+                }
+                hir::HirExpression::If(if_expr) => {
+                    check_for_generic_param(&if_expr.condition, &format!("{}.If.cond", path));
+                    check_for_generic_param(&if_expr.then_expr, &format!("{}.If.then", path));
+                    check_for_generic_param(&if_expr.else_expr, &format!("{}.If.else", path));
+                }
+                hir::HirExpression::Binary(bin) => {
+                    check_for_generic_param(&bin.left, &format!("{}.Binary.left", path));
+                    check_for_generic_param(&bin.right, &format!("{}.Binary.right", path));
+                }
+                hir::HirExpression::Cast(cast) => {
+                    check_for_generic_param(&cast.expr, &format!("{}.Cast.expr", path));
+                }
+                _ => {}
+            }
+        }
+        println!("🔍 Checking substituted_expr for remaining GenericParams...");
+        check_for_generic_param(&substituted_expr, "root");
         let result = self.convert_expression(&substituted_expr, 0);
 
         // BUG #76 FIX: Annotate the result expression with the function's return type

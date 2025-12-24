@@ -598,6 +598,15 @@ impl GateOptimizer {
         let mut live_nets: HashSet<GateNetId> = HashSet::new();
         let mut live_cells: HashSet<CellId> = HashSet::new();
 
+        // Build driver map from ALL cells, including those marked for removal
+        // We need to trace through the full driver chain to find live cells
+        let mut driver_map: HashMap<GateNetId, CellId> = HashMap::new();
+        for cell in &netlist.cells {
+            for &out in &cell.outputs {
+                driver_map.insert(out, cell.id);
+            }
+        }
+
         // Start with primary outputs and detection signals
         // Follow net_replacements to find the actual nets
         for &net_id in &netlist.outputs {
@@ -608,16 +617,6 @@ impl GateOptimizer {
             if net.is_detection {
                 let resolved = self.resolve_net(net.id);
                 live_nets.insert(resolved);
-            }
-        }
-
-        // Build driver map: net_id -> cell that drives it (not in cells_to_remove)
-        let mut driver_map: HashMap<GateNetId, CellId> = HashMap::new();
-        for cell in &netlist.cells {
-            if !self.cells_to_remove.contains(&cell.id) {
-                for &out in &cell.outputs {
-                    driver_map.insert(out, cell.id);
-                }
             }
         }
 

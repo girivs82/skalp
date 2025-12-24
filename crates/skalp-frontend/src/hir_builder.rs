@@ -1114,11 +1114,20 @@ impl HirBuilderContext {
                     }
                 }
                 SyntaxKind::LetStmt => {
+                    eprintln!("[HIR_IMPL_DEBUG] Processing LetStmt");
                     // Let bindings in impl blocks are treated as variables with combinational assignments
                     // Handle both simple let and tuple destructuring
                     let let_stmts = self.build_let_statements_from_node(&child);
+                    eprintln!(
+                        "[HIR_IMPL_DEBUG] LetStmt produced {} statements",
+                        let_stmts.len()
+                    );
                     for stmt in let_stmts {
                         if let HirStatement::Let(let_stmt) = stmt {
+                            eprintln!(
+                                "[HIR_IMPL_DEBUG] Processing let binding '{}' (id: {:?})",
+                                let_stmt.name, let_stmt.id
+                            );
                             // BUG #65/#66 DEBUG: Log if creating variable with Float16 type
                             if matches!(let_stmt.var_type, HirType::Float16) {
                                 eprintln!("[BUG #65/#66 FOUND IT IN HIR!] Creating HIR variable '{}' with Float16 type", let_stmt.name);
@@ -3720,7 +3729,8 @@ impl HirBuilderContext {
                     .filter_map(|elem| elem.into_token())
                     .find(|t| t.kind() == SyntaxKind::Ident)
                     .map(|t| t.text().to_string())
-            })?;
+            });
+        let name = name?;
 
         // Extract optional type annotation
         let explicit_type = node
@@ -3763,6 +3773,8 @@ impl HirBuilderContext {
                         | SyntaxKind::TupleExpr
                         | SyntaxKind::CastExpr // CRITICAL FIX (Bug #38): Support cast expressions in let bindings
                         | SyntaxKind::StructLiteral // BUG FIX #71: Support struct literal expressions in let bindings
+                        | SyntaxKind::ArrayLiteral // BUG FIX #148: Support array/concat literals in let bindings
+                        | SyntaxKind::ConcatExpr // BUG FIX #148: Support concat expressions in let bindings
                 )
             })
             .collect();
@@ -3776,13 +3788,6 @@ impl HirBuilderContext {
                     .find(|n| n.kind() == SyntaxKind::UnaryExpr)
             })
             .or_else(|| expr_children.last());
-
-        // BUG #71 DEBUG: Log StructLiteral let statements
-        if let Some(vn) = value_node {
-            if vn.kind() == SyntaxKind::StructLiteral {
-                eprintln!("[HIR_LET_DEBUG] Processing let {} with StructLiteral", name);
-            }
-        }
 
         // WORKAROUND for parser bug: When the value_node is a CastExpr, the parser may have
         // created the source expression as a SIBLING instead of a child of CastExpr.
@@ -3953,7 +3958,10 @@ impl HirBuilderContext {
                     .and_then(|n| self.build_expression(&n))
             });
 
-        // Find statements (after the arrow)
+        // Find statements or expression (after the arrow)
+        // BUG FIX #147: Match arms can have either:
+        // 1. A list of statements (for block-style arms)
+        // 2. A single expression (for expression-style arms like `0 => a + b`)
         let mut statements = Vec::new();
         for child in node.children() {
             match child.kind() {
@@ -3963,6 +3971,26 @@ impl HirBuilderContext {
                 | SyntaxKind::BlockStmt => {
                     if let Some(stmt) = self.build_statement(&child) {
                         statements.push(stmt);
+                    }
+                }
+                // BUG FIX #147: Handle expression arms (e.g., `0 => a + b`)
+                // When the arm body is just an expression, wrap it in HirStatement::Expression
+                SyntaxKind::LiteralExpr
+                | SyntaxKind::IdentExpr
+                | SyntaxKind::BinaryExpr
+                | SyntaxKind::UnaryExpr
+                | SyntaxKind::FieldExpr
+                | SyntaxKind::IndexExpr
+                | SyntaxKind::PathExpr
+                | SyntaxKind::ParenExpr
+                | SyntaxKind::IfExpr
+                | SyntaxKind::MatchExpr
+                | SyntaxKind::CallExpr
+                | SyntaxKind::ArrayLiteral
+                | SyntaxKind::BlockExpr => {
+                    if let Some(expr) = self.build_expression(&child) {
+                        // Wrap the expression as an Expression statement (implicit return)
+                        statements.push(HirStatement::Expression(expr));
                     }
                 }
                 _ => {}
@@ -4733,6 +4761,10 @@ impl HirBuilderContext {
         // Look up symbol FIRST - user-defined symbols (ports, signals, variables) take
         // precedence over builtin functions. This allows users to name ports "min", "max", etc.
         if let Some(symbol) = self.symbols.lookup(&name) {
+            eprintln!(
+                "[HIR_IDENT_DEBUG] build_ident_expr: '{}' FOUND in symbol table -> {:?}",
+                name, symbol
+            );
             match symbol {
                 SymbolId::Port(id) => {
                     // For ports in expressions, use port reference
@@ -4767,6 +4799,10 @@ impl HirBuilderContext {
             // Treat unresolved identifiers as generic parameters or function parameters
             // This allows const function parameters to be referenced in function bodies
             // They will be bound during const evaluation
+            eprintln!(
+                "[HIR_IDENT_DEBUG] build_ident_expr: '{}' NOT FOUND -> treating as GenericParam",
+                name
+            );
             Some(HirExpression::GenericParam(name))
         }
     }

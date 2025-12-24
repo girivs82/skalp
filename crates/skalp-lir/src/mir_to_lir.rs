@@ -18,7 +18,7 @@ use crate::lir::{Lir, LirOp, LirSafetyInfo, LirSignalId, LirStats};
 use skalp_mir::mir::{
     AssignmentKind, BinaryOp, Block, ContinuousAssign, DataType, EdgeType, Expression,
     ExpressionKind, LValue, Module, PortDirection, PortId, Process, ProcessKind, ReduceOp,
-    SafetyContext, SensitivityList, SignalId, Statement, UnaryOp, Value,
+    SafetyContext, SensitivityList, SignalId, Statement, UnaryOp, Value, Variable, VariableId,
 };
 use std::collections::HashMap;
 
@@ -92,6 +92,10 @@ pub struct MirToLirTransform {
     port_to_signal: HashMap<PortId, LirSignalId>,
     /// Mapping from SignalId to signal ID
     signal_to_lir_signal: HashMap<SignalId, LirSignalId>,
+    /// Mapping from VariableId to signal ID (BUG #150 FIX)
+    variable_to_signal: HashMap<VariableId, LirSignalId>,
+    /// Width of each variable (BUG #150 FIX)
+    variable_widths: HashMap<VariableId, u32>,
     /// Width of each port/signal
     port_widths: HashMap<PortId, u32>,
     signal_widths: HashMap<SignalId, u32>,
@@ -114,6 +118,8 @@ impl MirToLirTransform {
             lir: Lir::new(module_name.to_string()),
             port_to_signal: HashMap::new(),
             signal_to_lir_signal: HashMap::new(),
+            variable_to_signal: HashMap::new(),
+            variable_widths: HashMap::new(),
             port_widths: HashMap::new(),
             signal_widths: HashMap::new(),
             hierarchy_path: "top".to_string(),
@@ -143,6 +149,14 @@ impl MirToLirTransform {
         // Phase 2: Create signals for all internal signals
         for signal in &module.signals {
             self.create_internal_signal(signal);
+        }
+
+        // Phase 2b: Create signals for all variables (BUG #150 FIX)
+        // Variables in MIR are intermediate values from let bindings.
+        // They need to be transformed to LIR signals so that subsequent
+        // assignments can reference them.
+        for variable in &module.variables {
+            self.create_variable_signal(variable);
         }
 
         // Phase 3: Transform continuous assignments
@@ -229,6 +243,21 @@ impl MirToLirTransform {
             );
             self.lir.mark_as_detection(signal_id);
         }
+    }
+
+    /// Create a signal for a variable (BUG #150 FIX)
+    ///
+    /// Variables in MIR are intermediate values from let bindings.
+    /// They need to be converted to LIR signals so that assignments
+    /// to variables can be properly converted and subsequent references
+    /// to those variables will resolve correctly.
+    fn create_variable_signal(&mut self, variable: &Variable) {
+        let width = Self::get_type_width(&variable.var_type);
+        self.variable_widths.insert(variable.id, width);
+
+        // Create a signal for the variable
+        let signal_id = self.lir.add_signal(format!("_v_{}", variable.name), width);
+        self.variable_to_signal.insert(variable.id, signal_id);
     }
 
     /// Transform a continuous assignment
@@ -1045,11 +1074,15 @@ impl MirToLirTransform {
                     self.alloc_temp_signal(1)
                 }),
             LValue::Variable(var_id) => {
-                // Variables become temporary signals
-                let signal = self.alloc_temp_signal(1);
-                self.warnings
-                    .push(format!("Variable {:?} treated as temp signal", var_id));
-                signal
+                // BUG #150 FIX: Look up variable in the variable_to_signal map
+                self.variable_to_signal
+                    .get(var_id)
+                    .copied()
+                    .unwrap_or_else(|| {
+                        self.warnings
+                            .push(format!("Unknown variable: {:?}", var_id));
+                        self.alloc_temp_signal(1)
+                    })
             }
             LValue::BitSelect { base, index } => {
                 let base_signal = self.get_lvalue_signal(base);
@@ -1136,7 +1169,8 @@ impl MirToLirTransform {
         match lvalue {
             LValue::Port(port_id) => self.port_widths.get(port_id).copied().unwrap_or(1),
             LValue::Signal(signal_id) => self.signal_widths.get(signal_id).copied().unwrap_or(1),
-            LValue::Variable(_) => 1,
+            // BUG #150 FIX: Look up variable width from the variable_widths map
+            LValue::Variable(var_id) => self.variable_widths.get(var_id).copied().unwrap_or(1),
             LValue::BitSelect { .. } => 1,
             LValue::RangeSelect { high, low, .. } => {
                 if let (
@@ -1228,6 +1262,8 @@ impl MirToLirTransform {
         match lvalue {
             LValue::Port(port_id) => self.port_to_signal.get(port_id).copied(),
             LValue::Signal(signal_id) => self.signal_to_lir_signal.get(signal_id).copied(),
+            // BUG #150 FIX: Also look up variables
+            LValue::Variable(var_id) => self.variable_to_signal.get(var_id).copied(),
             _ => None,
         }
     }
