@@ -12,6 +12,36 @@ use skalp_frontend::span::SourceSpan;
 use skalp_frontend::types::Width;
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::OnceLock;
+
+/// Check if debug output is enabled (set SKALP_MIR_DEBUG=1 to enable)
+/// This is cached to avoid repeated environment variable lookups
+fn debug_enabled() -> bool {
+    static DEBUG: OnceLock<bool> = OnceLock::new();
+    *DEBUG.get_or_init(|| {
+        std::env::var("SKALP_MIR_DEBUG")
+            .map(|v| v == "1")
+            .unwrap_or(false)
+    })
+}
+
+/// Debug print macro that only prints when SKALP_MIR_DEBUG=1
+macro_rules! debug_println {
+    ($($arg:tt)*) => {
+        if debug_enabled() {
+            println!($($arg)*);
+        }
+    };
+}
+
+/// Debug eprint macro that only prints when SKALP_MIR_DEBUG=1
+macro_rules! debug_eprintln {
+    ($($arg:tt)*) => {
+        if debug_enabled() {
+            eprintln!($($arg)*);
+        }
+    };
+}
 
 /// Maximum recursion depth for type inference and expression annotation
 /// This prevents stack overflow on deeply nested expressions like {{{{{...}}}}}
@@ -310,7 +340,7 @@ impl<'hir> HirToMir<'hir> {
             // Propagate vendor IP configuration from HIR entity to MIR module
             if let Some(ref config) = entity.vendor_ip_config {
                 module.vendor_ip_config = Some(config.clone());
-                eprintln!("🔧 VENDOR_IP: Propagating vendor_ip_config (ip={}, vendor={:?}) to entity '{}'",
+                debug_println!("🔧 VENDOR_IP: Propagating vendor_ip_config (ip={}, vendor={:?}) to entity '{}'",
                          config.ip_name, config.vendor, entity.name);
             }
 
@@ -747,14 +777,14 @@ impl<'hir> HirToMir<'hir> {
                             name, hir_type
                         );
                         let mir_type = self.convert_type(&hir_type);
-                        eprintln!("[DEBUG]   -> mir_type={:?}", mir_type);
+                        debug_println!("[DEBUG]   -> mir_type={:?}", mir_type);
                         // BUG #71 DEBUG
                         if name.contains("edge1")
                             || name.contains("edge2")
                             || name.contains("_h")
                             || name.contains("_s")
                         {
-                            eprintln!("[BUG #71 EVENT BLOCK VAR] Adding variable '{}' (MIR {:?}): HIR={:?} -> MIR={:?}",
+                            debug_println!("[BUG #71 EVENT BLOCK VAR] Adding variable '{}' (MIR {:?}): HIR={:?} -> MIR={:?}",
                                 name, mir_var_id, hir_type, mir_type);
                         }
                         let variable = Variable {
@@ -924,7 +954,7 @@ impl<'hir> HirToMir<'hir> {
                             idx,
                             self.variable_map.len()
                         );
-                        eprintln!("[BUG #71 AFTER ASSIGNMENT {}] Checking if HIR VariableId(5) is in variable_map: {}",
+                        debug_println!("[BUG #71 AFTER ASSIGNMENT {}] Checking if HIR VariableId(5) is in variable_map: {}",
                             idx, self.variable_map.contains_key(&hir::VariableId(5)));
 
                         // BUGFIX: First, scan pending_statements for any variables that need to be declared
@@ -948,7 +978,7 @@ impl<'hir> HirToMir<'hir> {
                             "[BUG #71 BEFORE PENDING LOOP] variable_map size={}",
                             self.variable_map.len()
                         );
-                        eprintln!("[BUG #71 BEFORE PENDING LOOP] Checking if HIR VariableId(5) is in variable_map: {}",
+                        debug_println!("[BUG #71 BEFORE PENDING LOOP] Checking if HIR VariableId(5) is in variable_map: {}",
                             self.variable_map.contains_key(&hir::VariableId(5)));
 
                         for pending_stmt in &pending_stmts_snapshot {
@@ -976,7 +1006,7 @@ impl<'hir> HirToMir<'hir> {
 
                                         // BUG #71 DEBUG: Check if var_148 is in dynamic_variables
                                         if var_id.0 == 148 {
-                                            eprintln!("[BUG #71 DYN_VAR LOOKUP] Searching for MIR {:?} in dynamic_variables (size={})",
+                                            debug_println!("[BUG #71 DYN_VAR LOOKUP] Searching for MIR {:?} in dynamic_variables (size={})",
                                                 var_id, self.dynamic_variables.len());
                                             let found = self
                                                 .dynamic_variables
@@ -987,7 +1017,7 @@ impl<'hir> HirToMir<'hir> {
                                                 found
                                             );
                                             if !found {
-                                                eprintln!("[BUG #71 DYN_VAR LOOKUP] Listing all variables with 'edge' in name:");
+                                                debug_println!("[BUG #71 DYN_VAR LOOKUP] Listing all variables with 'edge' in name:");
                                                 for (mir_id, name, hir_type) in
                                                     self.dynamic_variables.values()
                                                 {
@@ -1012,7 +1042,7 @@ impl<'hir> HirToMir<'hir> {
                                         {
                                             // Found in dynamic_variables - use its declared type
                                             let mir_type = self.convert_type(&hir_type);
-                                            eprintln!("[BUG #65/#66 DEBUG] Using dyn_var: var_id={}, name={}, hir_type={:?}, mir_type={:?}",
+                                            debug_println!("[BUG #65/#66 DEBUG] Using dyn_var: var_id={}, name={}, hir_type={:?}, mir_type={:?}",
                                                     var_id.0, name, hir_type, mir_type);
                                             // BUG #71 DEBUG
                                             if name.contains("edge1")
@@ -1020,7 +1050,7 @@ impl<'hir> HirToMir<'hir> {
                                                 || name.contains("_h")
                                                 || name.contains("_s")
                                             {
-                                                eprintln!("[BUG #71 PENDING VAR] Variable '{}' (from pending_statements): HIR={:?} -> MIR={:?}",
+                                                debug_println!("[BUG #71 PENDING VAR] Variable '{}' (from pending_statements): HIR={:?} -> MIR={:?}",
                                                     name, hir_type, mir_type);
                                             }
                                             (name, mir_type)
@@ -1060,7 +1090,7 @@ impl<'hir> HirToMir<'hir> {
                                                 || var_name.contains("_h")
                                                 || var_name.contains("_s")
                                             {
-                                                eprintln!("[BUG #71 PENDING VAR INFERRED] Variable '{}' (from pending_statements, TYPE INFERRED): inferred_type={:?}",
+                                                debug_println!("[BUG #71 PENDING VAR INFERRED] Variable '{}' (from pending_statements, TYPE INFERRED): inferred_type={:?}",
                                                     var_name, var_type);
                                             }
                                             (var_name, var_type)
@@ -1073,7 +1103,7 @@ impl<'hir> HirToMir<'hir> {
                                             initial: None,
                                             span: None,
                                         };
-                                        eprintln!("[BUG #71 PUSH LOC3] Pushing pending variable: id={:?}, name={}", var_id, var_name);
+                                        debug_println!("[BUG #71 PUSH LOC3] Pushing pending variable: id={:?}, name={}", var_id, var_name);
                                         module.variables.push(variable);
                                     }
                                 }
@@ -1088,16 +1118,16 @@ impl<'hir> HirToMir<'hir> {
                         for (mir_var_id, name, hir_type) in dynamic_vars {
                             // Check if this variable is already in the module
                             if !module.variables.iter().any(|v| v.id == mir_var_id) {
-                                eprintln!("[DEBUG] Adding dynamic variable (in impl): name={}, hir_type={:?}", name, hir_type);
+                                debug_println!("[DEBUG] Adding dynamic variable (in impl): name={}, hir_type={:?}", name, hir_type);
                                 let mir_type = self.convert_type(&hir_type);
-                                eprintln!("[DEBUG]   -> mir_type={:?}", mir_type);
+                                debug_println!("[DEBUG]   -> mir_type={:?}", mir_type);
                                 // BUG #71 DEBUG: Check if this is one of the problematic variables
                                 if name.contains("edge1")
                                     || name.contains("edge2")
                                     || name.contains("_h")
                                     || name.contains("_s")
                                 {
-                                    eprintln!("[BUG #71 DYNAMIC VAR] Variable '{}' (MIR {:?}): HIR={:?} -> MIR={:?}",
+                                    debug_println!("[BUG #71 DYNAMIC VAR] Variable '{}' (MIR {:?}): HIR={:?} -> MIR={:?}",
                                         name, mir_var_id, hir_type, mir_type);
                                 }
                                 let variable = Variable {
@@ -1107,7 +1137,7 @@ impl<'hir> HirToMir<'hir> {
                                     initial: None,
                                     span: None,
                                 };
-                                eprintln!("[BUG #71 PUSH LOC4] Pushing assignment-dynamic variable: id={:?}, name={}", mir_var_id, name);
+                                debug_println!("[BUG #71 PUSH LOC4] Pushing assignment-dynamic variable: id={:?}, name={}", mir_var_id, name);
                                 module.variables.push(variable);
                             }
                         }
@@ -1425,7 +1455,7 @@ impl<'hir> HirToMir<'hir> {
                         span: None,
                     }))
                 } else {
-                    eprintln!("[WARN] Failed to convert assert condition, skipping assertion");
+                    debug_println!("[WARN] Failed to convert assert condition, skipping assertion");
                     None
                 }
             }
@@ -1445,7 +1475,9 @@ impl<'hir> HirToMir<'hir> {
                         span: None,
                     }))
                 } else {
-                    eprintln!("[WARN] Failed to convert cover property, skipping cover statement");
+                    debug_println!(
+                        "[WARN] Failed to convert cover property, skipping cover statement"
+                    );
                     None
                 }
             }
@@ -1458,7 +1490,9 @@ impl<'hir> HirToMir<'hir> {
                         span: None,
                     }))
                 } else {
-                    eprintln!("[WARN] Failed to convert assume condition, skipping assumption");
+                    debug_println!(
+                        "[WARN] Failed to convert assume condition, skipping assumption"
+                    );
                     None
                 }
             }
@@ -1468,7 +1502,7 @@ impl<'hir> HirToMir<'hir> {
                     let_stmt.name, let_stmt.id, std::mem::discriminant(&let_stmt.value)
                 );
                 if let_stmt.name == "_tuple_tmp_66" {
-                    eprintln!("[MIR_LET_TRACE] *** Processing _tuple_tmp_66 - will trace through entire function ***");
+                    debug_println!("[MIR_LET_TRACE] *** Processing _tuple_tmp_66 - will trace through entire function ***");
                 }
 
                 // BUG FIX #13-16, #21-23: Detect entity instantiation via struct literal syntax
@@ -1606,10 +1640,10 @@ impl<'hir> HirToMir<'hir> {
                 let var_id = if let Some(context) = self.get_current_context() {
                     let context_key = (Some(context.clone()), let_stmt.id);
                     if let Some(&id) = self.context_variable_map.get(&context_key) {
-                        eprintln!("[DEBUG] Let '{}' (ID {:?}): Found in context_variable_map for '{}' as MIR ID={:?}", let_stmt.name, let_stmt.id, context, id);
+                        debug_println!("[DEBUG] Let '{}' (ID {:?}): Found in context_variable_map for '{}' as MIR ID={:?}", let_stmt.name, let_stmt.id, context, id);
                         id
                     } else {
-                        eprintln!("[DEBUG] Let '{}' (ID {:?}): NOT in context_variable_map for '{}', will check variable_map", let_stmt.name, let_stmt.id, context);
+                        debug_println!("[DEBUG] Let '{}' (ID {:?}): NOT in context_variable_map for '{}', will check variable_map", let_stmt.name, let_stmt.id, context);
                         VariableId(u32::MAX) // Will check variable_map next
                     }
                 } else if let Some(&id) = self.variable_map.get(&let_stmt.id) {
@@ -1627,7 +1661,7 @@ impl<'hir> HirToMir<'hir> {
                             self.dynamic_variables.get(&let_stmt.id)
                         {
                             let wrong_prefix = !existing_name.starts_with(prefix);
-                            eprintln!("[DEBUG] Let '{}': match_arm_prefix={}, existing_name={}, wrong_prefix={}",
+                            debug_println!("[DEBUG] Let '{}': match_arm_prefix={}, existing_name={}, wrong_prefix={}",
                                 let_stmt.name, prefix, existing_name, wrong_prefix);
                             wrong_prefix
                         } else {
@@ -1648,7 +1682,7 @@ impl<'hir> HirToMir<'hir> {
                     };
 
                     if should_create_new {
-                        eprintln!("[DEBUG] Let '{}': Will create new variable (wrong prefix or not in dynamic_variables)", let_stmt.name);
+                        debug_println!("[DEBUG] Let '{}': Will create new variable (wrong prefix or not in dynamic_variables)", let_stmt.name);
                         // Don't reuse the existing variable, fall through to create a new one
                         VariableId(u32::MAX) // Sentinel value that won't match any existing variable
                     } else {
@@ -1706,15 +1740,17 @@ impl<'hir> HirToMir<'hir> {
                         } else {
                             false
                         };
-                        eprintln!("[DEBUG] Let '{}': FieldAccess.field={}, base type={:?}, base_is_dynamic={}", let_stmt.name, field, discriminant, is_dynamic);
+                        debug_println!("[DEBUG] Let '{}': FieldAccess.field={}, base type={:?}, base_is_dynamic={}", let_stmt.name, field, discriminant, is_dynamic);
                         (is_block, Some(discriminant), true, is_dynamic)
                     } else {
                         (false, None, false, false)
                     };
                 if let_stmt.name == "rw" && let_stmt.id == hir::VariableId(70) {
-                    eprintln!("[DEBUG] Let 'rw' (70): RHS type {:?}, rhs_is_field_access={}, base_is_block={}, base_type={:?}",
+                    debug_println!("[DEBUG] Let 'rw' (70): RHS type {:?}, rhs_is_field_access={}, base_is_block={}, base_type={:?}",
                         std::mem::discriminant(&let_stmt.value), rhs_is_field_access, base_is_block, base_type);
-                    eprintln!("[DEBUG] Let 'rw' (70): should_convert_first will be calculated...");
+                    debug_println!(
+                        "[DEBUG] Let 'rw' (70): should_convert_first will be calculated..."
+                    );
                 }
                 let is_tuple_element_extraction = matches!(
                     &let_stmt.value,
@@ -1742,7 +1778,7 @@ impl<'hir> HirToMir<'hir> {
                 }
 
                 if let_stmt.name == "rw" && let_stmt.id == hir::VariableId(70) {
-                    eprintln!("[DEBUG] Let 'rw' (70): is_tuple_element_extraction={}, in_match_context={}, should_convert_first={}",
+                    debug_println!("[DEBUG] Let 'rw' (70): is_tuple_element_extraction={}, in_match_context={}, should_convert_first={}",
                         is_tuple_element_extraction, in_match_context, should_convert_first);
                 }
 
@@ -1754,7 +1790,7 @@ impl<'hir> HirToMir<'hir> {
                         );
                     }
                     if let_stmt.name == "_tuple_tmp_66" {
-                        eprintln!("[MIR_LET_TRACE] _tuple_tmp_66: should_convert_first=true, converting RHS now");
+                        debug_println!("[MIR_LET_TRACE] _tuple_tmp_66: should_convert_first=true, converting RHS now");
                     }
                     if let_stmt.name.contains("_tuple_tmp_76") {
                         println!(
@@ -1769,7 +1805,7 @@ impl<'hir> HirToMir<'hir> {
                 } else {
                     // Complex expression: will convert after variable registration
                     if let_stmt.name == "_tuple_tmp_66" {
-                        eprintln!("[MIR_LET_TRACE] _tuple_tmp_66: should_convert_first=false, using placeholder");
+                        debug_println!("[MIR_LET_TRACE] _tuple_tmp_66: should_convert_first=false, using placeholder");
                     }
                     (
                         Expression::with_unknown_type(ExpressionKind::Literal(Value::Integer(0))),
@@ -1779,15 +1815,32 @@ impl<'hir> HirToMir<'hir> {
 
                 let var_id = if var_id == VariableId(u32::MAX) {
                     if let_stmt.name == "_tuple_tmp_66" {
-                        eprintln!("[MIR_LET_TRACE] _tuple_tmp_66: var_id is u32::MAX, creating new variable");
+                        debug_println!("[MIR_LET_TRACE] _tuple_tmp_66: var_id is u32::MAX, creating new variable");
                     }
                     // Apply match arm prefix if we're in a match arm context
                     // This prevents variable name collisions between different match arms
                     // IMPORTANT: Do this BEFORE checking for duplicates so we check the correct name
-                    let var_name = if let Some(ref prefix) = self.match_arm_prefix {
-                        format!("{}_{}", prefix, let_stmt.name)
-                    } else {
-                        let_stmt.name.clone()
+                    //
+                    // BUG FIX #154: Also include inlining context ID to prevent variable name
+                    // collisions when the same function is inlined multiple times.
+                    // Without this, `let result = ...` in two different calls to the same function
+                    // would share the same variable, causing incorrect behavior.
+                    let var_name = {
+                        let mut name = let_stmt.name.clone();
+
+                        // Add inlining context prefix if we're inside an inlined function
+                        // This ensures each function call site gets unique variable names
+                        if !self.inlining_context_stack.is_empty() {
+                            let context_id = self.inlining_context_stack.last().unwrap();
+                            name = format!("{}_ic{}", name, context_id);
+                        }
+
+                        // Add match arm prefix if we're in a match arm context
+                        if let Some(ref prefix) = self.match_arm_prefix {
+                            name = format!("{}_{}", prefix, name);
+                        }
+
+                        name
                     };
 
                     // Check if we already have a dynamic variable with this name
@@ -1844,7 +1897,7 @@ impl<'hir> HirToMir<'hir> {
                             );
                             // BUG #71 FIX: For complex RHS with tuple type placeholders, try to infer from RHS after conversion
                             if matches!(let_stmt.var_type, hir::HirType::Nat(32)) {
-                                eprintln!("[BUG #71] Variable '{}': HIR type is Nat(32) placeholder - will need to infer from RHS later", var_name);
+                                debug_println!("[BUG #71] Variable '{}': HIR type is Nat(32) placeholder - will need to infer from RHS later", var_name);
                             }
                             let_stmt.var_type.clone()
                         };
@@ -1982,7 +2035,7 @@ impl<'hir> HirToMir<'hir> {
                 );
                 let final_rhs = if needs_type_inference {
                     // Already converted
-                    eprintln!("[MIR_LET_FINAL]   Using already converted RHS");
+                    debug_println!("[MIR_LET_FINAL]   Using already converted RHS");
                     rhs
                 } else {
                     // Convert now that variable is registered and available
@@ -2003,7 +2056,7 @@ impl<'hir> HirToMir<'hir> {
                         converted.is_some()
                     );
                     if converted.is_none() {
-                        println!("[🟡 MIR_LET_FINAL] ❌ RHS conversion FAILED for '{}' - returning None!", let_stmt.name);
+                        debug_println!("[🟡 MIR_LET_FINAL] ❌ RHS conversion FAILED for '{}' - returning None!", let_stmt.name);
                     }
                     if let_stmt.name == "_tuple_tmp_66" {
                         eprintln!(
@@ -2011,11 +2064,11 @@ impl<'hir> HirToMir<'hir> {
                             converted.is_some()
                         );
                         if converted.is_none() {
-                            eprintln!("[MIR_LET_TRACE] _tuple_tmp_66: convert_expression returned None - returning None from convert_statement!");
+                            debug_println!("[MIR_LET_TRACE] _tuple_tmp_66: convert_expression returned None - returning None from convert_statement!");
                         }
                     }
                     let converted = converted?; // This will return None if conversion failed
-                    eprintln!("[MIR_LET_FINAL]   Converted RHS: {:?}", converted);
+                    debug_println!("[MIR_LET_FINAL]   Converted RHS: {:?}", converted);
                     converted
                 };
 
@@ -2071,7 +2124,7 @@ impl<'hir> HirToMir<'hir> {
                 // in default mode. For preserve mode, they should be handled by
                 // a separate generate block conversion path.
                 // TODO: Implement generate block MIR conversion for preserve mode
-                eprintln!("[WARNING] GenerateFor statement reached MIR - should have been elaborated at HIR level");
+                debug_println!("[WARNING] GenerateFor statement reached MIR - should have been elaborated at HIR level");
                 None
             }
             hir::HirStatement::GenerateIf(_gen_if) => {
@@ -2079,7 +2132,7 @@ impl<'hir> HirToMir<'hir> {
                 // in default mode. For preserve mode, they should be handled by
                 // a separate generate block conversion path.
                 // TODO: Implement generate block MIR conversion for preserve mode
-                eprintln!("[WARNING] GenerateIf statement reached MIR - should have been elaborated at HIR level");
+                debug_println!("[WARNING] GenerateIf statement reached MIR - should have been elaborated at HIR level");
                 None
             }
             hir::HirStatement::GenerateMatch(_gen_match) => {
@@ -2087,7 +2140,7 @@ impl<'hir> HirToMir<'hir> {
                 // in default mode. For preserve mode, they should be handled by
                 // a separate generate block conversion path.
                 // TODO: Implement generate block MIR conversion for preserve mode
-                eprintln!("[WARNING] GenerateMatch statement reached MIR - should have been elaborated at HIR level");
+                debug_println!("[WARNING] GenerateMatch statement reached MIR - should have been elaborated at HIR level");
                 None
             }
         }
@@ -2123,7 +2176,7 @@ impl<'hir> HirToMir<'hir> {
             hir::PipelineStyle::Retimed => {
                 // For now, retimed behaves like manual - actual retiming
                 // would require timing analysis which is a later pass
-                eprintln!("[PIPELINE] Retimed style: using manual register insertion (timing analysis TODO)");
+                debug_println!("[PIPELINE] Retimed style: using manual register insertion (timing analysis TODO)");
                 self.convert_pipeline_manual_stages(pipeline)
             }
         }
@@ -2353,7 +2406,7 @@ impl<'hir> HirToMir<'hir> {
         );
         let lhs = match self.convert_lvalue(&assign.lhs) {
             Some(l) => {
-                eprintln!("[CONVERT_ASSIGNMENT] ✓ convert_lvalue succeeded");
+                debug_println!("[CONVERT_ASSIGNMENT] ✓ convert_lvalue succeeded");
                 l
             }
             None => {
@@ -2369,11 +2422,11 @@ impl<'hir> HirToMir<'hir> {
         );
         let rhs = match self.convert_expression(&assign.rhs, 0) {
             Some(r) => {
-                eprintln!("[CONVERT_ASSIGNMENT] ✓ convert_expression succeeded");
+                debug_println!("[CONVERT_ASSIGNMENT] ✓ convert_expression succeeded");
                 r
             }
             None => {
-                eprintln!("[CONVERT_ASSIGNMENT] ❌ convert_expression FAILED - assignment will be dropped!");
+                debug_println!("[CONVERT_ASSIGNMENT] ❌ convert_expression FAILED - assignment will be dropped!");
                 return None;
             }
         };
@@ -3928,7 +3981,7 @@ impl<'hir> HirToMir<'hir> {
                 } else {
                     // TODO: Implement proper partial unrolling with outer loop
                     // For now, just convert to regular loop
-                    eprintln!("[unroll_for_loop] Partial unroll not fully implemented, falling back to loop");
+                    debug_println!("[unroll_for_loop] Partial unroll not fully implemented, falling back to loop");
                     self.convert_for_statement(for_stmt)
                 }
             }
@@ -4225,11 +4278,11 @@ impl<'hir> HirToMir<'hir> {
         match property {
             hir::HirProperty::Expression(expr) => self.convert_expression(expr, 0),
             hir::HirProperty::Sequence(_) => {
-                eprintln!("[WARN] Sequence properties not yet supported in SVA generation");
+                debug_println!("[WARN] Sequence properties not yet supported in SVA generation");
                 None
             }
             hir::HirProperty::Implication { .. } => {
-                eprintln!("[WARN] Implication properties not yet supported in SVA generation");
+                debug_println!("[WARN] Implication properties not yet supported in SVA generation");
                 None
             }
             hir::HirProperty::OverlappingImplication { .. } => {
@@ -4239,31 +4292,35 @@ impl<'hir> HirToMir<'hir> {
                 None
             }
             hir::HirProperty::And(_, _) => {
-                eprintln!("[WARN] And property types not yet supported in SVA generation");
+                debug_println!("[WARN] And property types not yet supported in SVA generation");
                 None
             }
             hir::HirProperty::Or(_, _) => {
-                eprintln!("[WARN] Or property types not yet supported in SVA generation");
+                debug_println!("[WARN] Or property types not yet supported in SVA generation");
                 None
             }
             hir::HirProperty::Not(_) => {
-                eprintln!("[WARN] Not property types not yet supported in SVA generation");
+                debug_println!("[WARN] Not property types not yet supported in SVA generation");
                 None
             }
             hir::HirProperty::Always(_) => {
-                eprintln!("[WARN] Always property types not yet supported in SVA generation");
+                debug_println!("[WARN] Always property types not yet supported in SVA generation");
                 None
             }
             hir::HirProperty::Eventually(_) => {
-                eprintln!("[WARN] Eventually property types not yet supported in SVA generation");
+                debug_println!(
+                    "[WARN] Eventually property types not yet supported in SVA generation"
+                );
                 None
             }
             hir::HirProperty::Until { .. } => {
-                eprintln!("[WARN] Until property types not yet supported in SVA generation");
+                debug_println!("[WARN] Until property types not yet supported in SVA generation");
                 None
             }
             hir::HirProperty::Throughout { .. } => {
-                eprintln!("[WARN] Throughout property types not yet supported in SVA generation");
+                debug_println!(
+                    "[WARN] Throughout property types not yet supported in SVA generation"
+                );
                 None
             }
             hir::HirProperty::Clocked { property, .. } => {
@@ -4501,8 +4558,8 @@ impl<'hir> HirToMir<'hir> {
                         "[MIR_LOGICAL_DEBUG] Converting {:?} expression at depth {}",
                         binary.op, depth
                     );
-                    eprintln!("[MIR_LOGICAL_DEBUG]   left: {:?}", binary.left);
-                    eprintln!("[MIR_LOGICAL_DEBUG]   right: {:?}", binary.right);
+                    debug_println!("[MIR_LOGICAL_DEBUG]   left: {:?}", binary.left);
+                    debug_println!("[MIR_LOGICAL_DEBUG]   right: {:?}", binary.right);
                 }
                 let left = self.convert_expression(&binary.left, depth + 1)?;
                 let right = self.convert_expression(&binary.right, depth + 1)?;
@@ -4510,9 +4567,9 @@ impl<'hir> HirToMir<'hir> {
                     binary.op,
                     hir::HirBinaryOp::LogicalAnd | hir::HirBinaryOp::LogicalOr
                 ) {
-                    eprintln!("[MIR_LOGICAL_DEBUG] After conversion:");
-                    eprintln!("[MIR_LOGICAL_DEBUG]   left MIR: {:?}", left.kind);
-                    eprintln!("[MIR_LOGICAL_DEBUG]   right MIR: {:?}", right.kind);
+                    debug_println!("[MIR_LOGICAL_DEBUG] After conversion:");
+                    debug_println!("[MIR_LOGICAL_DEBUG]   left MIR: {:?}", left.kind);
+                    debug_println!("[MIR_LOGICAL_DEBUG]   right MIR: {:?}", right.kind);
                 }
                 let left = Box::new(left);
                 let right = Box::new(right);
@@ -4593,7 +4650,9 @@ impl<'hir> HirToMir<'hir> {
                                 );
                                 let left_result = self.convert_expression(&call.args[0], depth + 1);
                                 if left_result.is_none() {
-                                    eprintln!("[MIR_CALL] FP add: left argument conversion FAILED");
+                                    debug_println!(
+                                        "[MIR_CALL] FP add: left argument conversion FAILED"
+                                    );
                                     return None;
                                 }
                                 let left = Box::new(left_result?);
@@ -4606,7 +4665,7 @@ impl<'hir> HirToMir<'hir> {
                                     return None;
                                 }
                                 let right = Box::new(right_result?);
-                                eprintln!("[MIR_CALL] FP add conversion succeeded");
+                                debug_println!("[MIR_CALL] FP add conversion succeeded");
                                 return Some(Expression::new(
                                     ExpressionKind::Binary {
                                         op: BinaryOp::FAdd,
@@ -4795,7 +4854,7 @@ impl<'hir> HirToMir<'hir> {
                     // that don't have easily-inferable types, so is_fp_method check fails.
                     // Explicitly check for fp_* function names as a fallback.
                     if call.function.starts_with("fp_") {
-                        eprintln!("[MIR_CALL] Detected fp_* function: {}", call.function);
+                        debug_println!("[MIR_CALL] Detected fp_* function: {}", call.function);
                         match call.function.as_str() {
                             "fp_lt" if call.args.len() == 2 => {
                                 let left =
@@ -4895,7 +4954,10 @@ impl<'hir> HirToMir<'hir> {
                                 ));
                             }
                             _ => {
-                                eprintln!("[MIR_CALL] Unknown fp_* function: {}", call.function);
+                                debug_println!(
+                                    "[MIR_CALL] Unknown fp_* function: {}",
+                                    call.function
+                                );
                                 // Fall through to inlining
                             }
                         }
@@ -5067,7 +5129,7 @@ impl<'hir> HirToMir<'hir> {
                         true // Default to inline if function not found
                     }
                 } else {
-                    eprintln!("[HYBRID] No HIR available, defaulting to inline");
+                    debug_println!("[HYBRID] No HIR available, defaulting to inline");
                     true // Default to inline if no HIR
                 };
 
@@ -5105,9 +5167,9 @@ impl<'hir> HirToMir<'hir> {
                             "❌ [BUG #85] Call '{}' inlining FAILED - returning None to caller!",
                             call.function
                         );
-                        eprintln!("❌ [BUG #85] This will cause any assignment with this call as RHS to be DROPPED!");
+                        debug_eprintln!("❌ [BUG #85] This will cause any assignment with this call as RHS to be DROPPED!");
                     } else {
-                        eprintln!("[MIR_CALL] Call '{}' inlining succeeded", call.function);
+                        debug_println!("[MIR_CALL] Call '{}' inlining succeeded", call.function);
                     }
                     result
                 } else {
@@ -5125,7 +5187,7 @@ impl<'hir> HirToMir<'hir> {
                     let module_id = if let Some(&existing_module_id) =
                         self.function_map.get(&call.function)
                     {
-                        println!("✅✅✅ [HYBRID] Module for '{}' already synthesized (module_id={}) ✅✅✅",
+                        debug_println!("✅✅✅ [HYBRID] Module for '{}' already synthesized (module_id={}) ✅✅✅",
                                   call.function, existing_module_id.0);
                         eprintln!(
                             "[HYBRID] ✓ Module for '{}' already synthesized (module_id={})",
@@ -5161,7 +5223,7 @@ impl<'hir> HirToMir<'hir> {
                         if let Some(func) = func {
                             self.synthesize_function_as_module(func)
                         } else {
-                            eprintln!("❌ [HYBRID ERROR] Cannot synthesize '{}' - function not found in HIR!",
+                            debug_eprintln!("❌ [HYBRID ERROR] Cannot synthesize '{}' - function not found in HIR!",
                                       call.function);
                             return None;
                         }
@@ -5196,7 +5258,7 @@ impl<'hir> HirToMir<'hir> {
                             None // No return type
                         })
                     } else {
-                        eprintln!("❌ [HYBRID ERROR] No HIR available!");
+                        debug_eprintln!("❌ [HYBRID ERROR] No HIR available!");
                         None // Fallback
                     };
 
@@ -5210,7 +5272,7 @@ impl<'hir> HirToMir<'hir> {
                         result_signal_ids.push(self.next_signal_id());
                     }
 
-                    eprintln!("[HYBRID] Pre-allocated {} result signal(s) {:?} for call to '{}' (tuple_size={})",
+                    debug_println!("[HYBRID] Pre-allocated {} result signal(s) {:?} for call to '{}' (tuple_size={})",
                               num_result_signals, result_signal_ids.iter().map(|s| s.0).collect::<Vec<_>>(),
                               call.function, tuple_size);
 
@@ -5236,10 +5298,13 @@ impl<'hir> HirToMir<'hir> {
                                     self.dynamic_variable_rhs.keys().collect::<Vec<_>>()
                                 );
                                 if let Some(rhs_expr) = self.dynamic_variable_rhs.get(var_id) {
-                                    eprintln!("[HYBRID] Expanding variable {:?} to its RHS expression for module arg", var_id);
+                                    debug_println!("[HYBRID] Expanding variable {:?} to its RHS expression for module arg", var_id);
                                     arg_expr = rhs_expr.clone();
                                 } else {
-                                    eprintln!("[HYBRID_RHS] No RHS found for var {:?}!", var_id);
+                                    debug_println!(
+                                        "[HYBRID_RHS] No RHS found for var {:?}!",
+                                        var_id
+                                    );
                                 }
                             }
                             arg_exprs.push(arg_expr);
@@ -5281,7 +5346,7 @@ impl<'hir> HirToMir<'hir> {
                                 )))
                             })
                             .collect();
-                        eprintln!("[HYBRID] ✓ Returning Concat of {} result signals for tuple (forward order)", concat_elements.len());
+                        debug_println!("[HYBRID] ✓ Returning Concat of {} result signals for tuple (forward order)", concat_elements.len());
                         Some(Expression::with_unknown_type(ExpressionKind::Concat(
                             concat_elements,
                         )))
@@ -5708,7 +5773,7 @@ impl<'hir> HirToMir<'hir> {
                     std::mem::discriminant(&**base)
                 );
                 if let hir::HirExpression::Variable(var_id) = &**base {
-                    eprintln!("[BUG #71 FIELD]   Base is Variable({})", var_id.0);
+                    debug_println!("[BUG #71 FIELD]   Base is Variable({})", var_id.0);
                     // Check if this variable is in dynamic_variables (tuple temporary)
                     if let Some((mir_id, name, hir_type)) = self.dynamic_variables.get(var_id) {
                         eprintln!(
@@ -5716,7 +5781,7 @@ impl<'hir> HirToMir<'hir> {
                             name, hir_type
                         );
                         if matches!(hir_type, hir::HirType::Tuple(_)) {
-                            eprintln!("[BUG #71 FIELD]   ✅ This is a TUPLE variable!");
+                            debug_println!("[BUG #71 FIELD]   ✅ This is a TUPLE variable!");
                         }
                     }
                 }
@@ -5831,7 +5896,7 @@ impl<'hir> HirToMir<'hir> {
                 }
 
                 if expressions.len() == 1 {
-                    eprintln!("[DEBUG] Concat has only 1 element, unwrapping");
+                    debug_println!("[DEBUG] Concat has only 1 element, unwrapping");
                     return self.convert_expression(&expressions[0], depth + 1);
                 }
 
@@ -5845,7 +5910,7 @@ impl<'hir> HirToMir<'hir> {
                         std::mem::discriminant(expr)
                     );
                     if let hir::HirExpression::Variable(var_id) = expr {
-                        eprintln!("[DEBUG] Concat element {} is Variable({:?})", idx, var_id);
+                        debug_println!("[DEBUG] Concat element {} is Variable({:?})", idx, var_id);
                         eprintln!(
                             "[DEBUG]   variable_map contains: {}",
                             self.variable_map.contains_key(var_id)
@@ -5906,7 +5971,9 @@ impl<'hir> HirToMir<'hir> {
                 // are added to pending_statements (to be emitted as global assignments).
                 // We must preserve these variables across branch isolation so that the
                 // result expression can reference them.
-                eprintln!("[IF_DEBUG] ========== STARTING IF EXPRESSION CONVERSION ==========");
+                debug_println!(
+                    "[IF_DEBUG] ========== STARTING IF EXPRESSION CONVERSION =========="
+                );
                 eprintln!(
                     "[IF_DEBUG] Converting If-expression condition, type: {:?}",
                     std::mem::discriminant(&*if_expr.condition)
@@ -5920,7 +5987,7 @@ impl<'hir> HirToMir<'hir> {
                 }
                 let cond = self.convert_expression(&if_expr.condition, depth + 1);
                 if cond.is_none() {
-                    eprintln!("[IF_DEBUG] ❌ CONDITION conversion FAILED");
+                    debug_println!("[IF_DEBUG] ❌ CONDITION conversion FAILED");
                     return None;
                 }
                 let cond = cond?;
@@ -5953,9 +6020,9 @@ impl<'hir> HirToMir<'hir> {
                     return None;
                 }
                 let then_expr = then_expr?;
-                eprintln!("[IF_DEBUG] ✅ THEN branch converted successfully");
+                debug_println!("[IF_DEBUG] ✅ THEN branch converted successfully");
 
-                eprintln!("[DEBUG] If-expr: then_expr = {:?}", then_expr);
+                debug_println!("[DEBUG] If-expr: then_expr = {:?}", then_expr);
 
                 // BUG FIX #63/#68: Capture variables created in then-branch before restoring
                 // We need to track ALL new variables from BOTH branches for nested if/else.
@@ -5994,7 +6061,7 @@ impl<'hir> HirToMir<'hir> {
                     );
                 }
                 if let hir::HirExpression::If(_) = &*if_expr.else_expr {
-                    eprintln!("[IF_DEBUG]   Else-expr is nested If (else-if chain)");
+                    debug_println!("[IF_DEBUG]   Else-expr is nested If (else-if chain)");
                 }
                 let else_expr = self.convert_expression(&if_expr.else_expr, depth + 1);
                 if else_expr.is_none() {
@@ -6005,7 +6072,7 @@ impl<'hir> HirToMir<'hir> {
                     return None;
                 }
                 let else_expr = else_expr?;
-                eprintln!("[IF_DEBUG] ✅ ELSE branch converted successfully");
+                debug_println!("[IF_DEBUG] ✅ ELSE branch converted successfully");
 
                 // BUG FIX #63/#68: After both branches are processed, restore to the original state
                 // BUT preserve NEW variables created during branch processing from BOTH branches.
@@ -6048,7 +6115,7 @@ impl<'hir> HirToMir<'hir> {
                 // Preserve new variables from then-branch
                 for (hir_var_id, (mir_var_id, name, hir_type)) in then_branch_vars.iter() {
                     if !saved_dynamic_vars.contains_key(hir_var_id) {
-                        eprintln!("[BUG #68] Preserving variable from then-branch: HIR {:?} -> MIR {:?} ({})",
+                        debug_println!("[BUG #68] Preserving variable from then-branch: HIR {:?} -> MIR {:?} ({})",
                             hir_var_id, mir_var_id, name);
                         restored_vars
                             .insert(*hir_var_id, (*mir_var_id, name.clone(), hir_type.clone()));
@@ -6061,7 +6128,7 @@ impl<'hir> HirToMir<'hir> {
                     if !saved_dynamic_vars.contains_key(hir_var_id)
                         && !restored_vars.contains_key(hir_var_id)
                     {
-                        eprintln!("[BUG #68] Preserving variable from else-branch: HIR {:?} -> MIR {:?} ({})",
+                        debug_println!("[BUG #68] Preserving variable from else-branch: HIR {:?} -> MIR {:?} ({})",
                             hir_var_id, mir_var_id, name);
                         restored_vars
                             .insert(*hir_var_id, (*mir_var_id, name.clone(), hir_type.clone()));
@@ -6069,7 +6136,7 @@ impl<'hir> HirToMir<'hir> {
                     }
                 }
 
-                eprintln!("[BUG #68] If-expression restoration: saved {} vars, then-branch {} vars, else-branch {} vars, preserved {} new vars",
+                debug_println!("[BUG #68] If-expression restoration: saved {} vars, then-branch {} vars, else-branch {} vars, preserved {} new vars",
                     saved_dynamic_vars.len(), then_branch_vars.len(), self.dynamic_variables.len(), preserved_count);
 
                 // BUG #71 DEBUG: Check if edge1 is in restored_vars before assignment
@@ -6107,8 +6174,8 @@ impl<'hir> HirToMir<'hir> {
                 let then_expr = Box::new(then_expr);
                 let else_expr = Box::new(else_expr);
 
-                eprintln!("[IF_DEBUG] ✅ IF EXPRESSION CONVERSION COMPLETED SUCCESSFULLY");
-                eprintln!("[IF_DEBUG] ========================================");
+                debug_println!("[IF_DEBUG] ✅ IF EXPRESSION CONVERSION COMPLETED SUCCESSFULLY");
+                debug_println!("[IF_DEBUG] ========================================");
                 Some(Expression::new(
                     ExpressionKind::Conditional {
                         cond,
@@ -6223,7 +6290,7 @@ impl<'hir> HirToMir<'hir> {
                         _ => 0,
                     };
                     if inner_width == 32 {
-                        eprintln!("[BUG #65/#66 FIX] Correcting Cast from {:?} (width={}) to Float16 → Float32", inner_type, inner_width);
+                        debug_println!("[BUG #65/#66 FIX] Correcting Cast from {:?} (width={}) to Float16 → Float32", inner_type, inner_width);
                         target_type = DataType::Float32;
                     }
                 }
@@ -6274,11 +6341,13 @@ impl<'hir> HirToMir<'hir> {
                 //     if (cond) { count = count + 16; temp = temp << 16; }
                 //     count }
                 // Transform to conditional expressions BEFORE processing statements individually.
-                println!("🔵🔵🔵 CALLSITE1: About to call try_transform from convert_expression Block 🔵🔵🔵");
+                debug_println!("🔵🔵🔵 CALLSITE1: About to call try_transform from convert_expression Block 🔵🔵🔵");
                 if let Some(transformed_expr) =
                     self.try_transform_block_mutable_vars(statements, result_expr)
                 {
-                    eprintln!("[BUG #86] Block expression: transformed mutable variable pattern");
+                    debug_println!(
+                        "[BUG #86] Block expression: transformed mutable variable pattern"
+                    );
                     return self.convert_expression(&transformed_expr, depth + 1);
                 }
 
@@ -6303,7 +6372,7 @@ impl<'hir> HirToMir<'hir> {
                         );
                         self.pending_statements.push(mir_stmt);
                     } else {
-                        println!("🔴🔴🔴 [BUG #145 DEBUG]   convert_statement returned None - statement DROPPED! 🔴🔴🔴");
+                        debug_println!("🔴🔴🔴 [BUG #145 DEBUG]   convert_statement returned None - statement DROPPED! 🔴🔴🔴");
                     }
                 }
                 // Convert and return the final expression
@@ -6332,7 +6401,7 @@ impl<'hir> HirToMir<'hir> {
                         self.dynamic_variables.contains_key(var_id)
                     );
                     if let Some((mir_id, name, _)) = self.dynamic_variables.get(var_id) {
-                        eprintln!("[DEBUG] Block expression: Found in dynamic_variables as {} (MIR ID {:?})", name, mir_id);
+                        debug_println!("[DEBUG] Block expression: Found in dynamic_variables as {} (MIR ID {:?})", name, mir_id);
                     }
                 }
                 let result = self.convert_expression(result_expr, depth + 1);
@@ -6781,7 +6850,7 @@ impl<'hir> HirToMir<'hir> {
             });
         }
 
-        eprintln!("[PARALLEL_MUX] Generated OR-of-ANDs expression");
+        debug_println!("[PARALLEL_MUX] Generated OR-of-ANDs expression");
         Some(result)
     }
 
@@ -6809,7 +6878,7 @@ impl<'hir> HirToMir<'hir> {
 
         // Convert the match value expression in module context
         let match_value_expr = self.convert_hir_expr_for_module(match_value, ctx, depth)?;
-        println!("🔴🔴🔴 [PARALLEL_MUX_MODULE] match_value_expr converted 🔴🔴🔴");
+        debug_println!("🔴🔴🔴 [PARALLEL_MUX_MODULE] match_value_expr converted 🔴🔴🔴");
 
         // Find the default arm (wildcard pattern)
         let mut default_value: Option<Expression> = None;
@@ -6982,7 +7051,7 @@ impl<'hir> HirToMir<'hir> {
         let mut result: Option<Expression> = None;
 
         for (arm_idx, arm_data) in arm_data_list.into_iter().enumerate() {
-            println!("🔴🔴🔴 [PARALLEL_MUX_MODULE] Pass 2: Arm {} creating conditional with max_width={} 🔴🔴🔴", arm_idx, max_width);
+            debug_println!("🔴🔴🔴 [PARALLEL_MUX_MODULE] Pass 2: Arm {} creating conditional with max_width={} 🔴🔴🔴", arm_idx, max_width);
 
             // Create zero constant with MAX width (not arm-specific width)
             let zero = Expression::literal(Value::Integer(0), unified_type.clone());
@@ -7022,7 +7091,7 @@ impl<'hir> HirToMir<'hir> {
             }
         }
 
-        eprintln!("[PARALLEL_MUX_MODULE] Generated OR-of-ANDs expression (module context)");
+        debug_println!("[PARALLEL_MUX_MODULE] Generated OR-of-ANDs expression (module context)");
         result
     }
 
@@ -7422,7 +7491,7 @@ impl<'hir> HirToMir<'hir> {
     /// This handles the case where early returns have been transformed into nested if-else
     fn convert_body_to_expression(&self, body: &[hir::HirStatement]) -> Option<hir::HirExpression> {
         if body.is_empty() {
-            eprintln!("[DEBUG] convert_body_to_expression: empty body");
+            debug_println!("[DEBUG] convert_body_to_expression: empty body");
             return None;
         }
 
@@ -7431,7 +7500,7 @@ impl<'hir> HirToMir<'hir> {
             body.len()
         );
         for (i, stmt) in body.iter().enumerate() {
-            eprintln!("[DEBUG]   stmt[{}]: {:?}", i, std::mem::discriminant(stmt));
+            debug_println!("[DEBUG]   stmt[{}]: {:?}", i, std::mem::discriminant(stmt));
         }
 
         // Collect all let bindings
@@ -7460,7 +7529,7 @@ impl<'hir> HirToMir<'hir> {
                 // BUG #135 FIX: Also extract Assignments that initialize new variables
                 // These appear when `let mut val = x;` is converted to Assignment(val, x) during compilation
                 Some(hir::HirStatement::Assignment(assign)) => {
-                    println!("[BUG #135 TRACE] Found Assignment to {:?}", assign.lhs);
+                    debug_println!("[BUG #135 TRACE] Found Assignment to {:?}", assign.lhs);
                     if let hir::HirLValue::Variable(var_id) = &assign.lhs {
                         println!(
                             "[BUG #135 TRACE]   -> Variable {:?}, in_seen={}",
@@ -7489,7 +7558,7 @@ impl<'hir> HirToMir<'hir> {
                         }
                     }
                     // Assignment to existing variable - stop extraction
-                    println!("[BUG #135 TRACE] Breaking: Assignment to existing var");
+                    debug_println!("[BUG #135 TRACE] Breaking: Assignment to existing var");
                     break;
                 }
                 Some(other) => {
@@ -7500,7 +7569,7 @@ impl<'hir> HirToMir<'hir> {
                     break;
                 }
                 None => {
-                    println!("[BUG #135 TRACE] No more statements");
+                    debug_println!("[BUG #135 TRACE] No more statements");
                     break;
                 }
             }
@@ -7522,7 +7591,7 @@ impl<'hir> HirToMir<'hir> {
             );
             match first_non_let {
                 hir::HirStatement::Assignment(assign) => {
-                    eprintln!("[BUG #135 DEBUG]   -> Assignment to {:?}", assign.lhs);
+                    debug_println!("[BUG #135 DEBUG]   -> Assignment to {:?}", assign.lhs);
                 }
                 hir::HirStatement::Let(let_stmt) => {
                     eprintln!(
@@ -7531,10 +7600,10 @@ impl<'hir> HirToMir<'hir> {
                     );
                 }
                 hir::HirStatement::If(_) => {
-                    eprintln!("[BUG #135 DEBUG]   -> If statement");
+                    debug_println!("[BUG #135 DEBUG]   -> If statement");
                 }
                 _ => {
-                    eprintln!("[BUG #135 DEBUG]   -> Other statement type");
+                    debug_println!("[BUG #135 DEBUG]   -> Other statement type");
                 }
             }
         }
@@ -7601,7 +7670,7 @@ impl<'hir> HirToMir<'hir> {
 
             // Match expression as final statement - convert to HIR match expression
             [hir::HirStatement::Match(match_stmt)] => {
-                println!("[DEBUG] HIT: Single Match statement pattern - calling convert_match_stmt_to_expr");
+                debug_println!("[DEBUG] HIT: Single Match statement pattern - calling convert_match_stmt_to_expr");
                 self.convert_match_stmt_to_expr(match_stmt)
             }
 
@@ -7620,11 +7689,11 @@ impl<'hir> HirToMir<'hir> {
                             "[BUG #135]   -> Let '{}' - why wasn't it extracted?",
                             ls.name
                         ),
-                        hir::HirStatement::If(_) => println!("[BUG #135]   -> If statement"),
+                        hir::HirStatement::If(_) => debug_println!("[BUG #135]   -> If statement"),
                         hir::HirStatement::Assignment(a) => {
-                            println!("[BUG #135]   -> Assignment to {:?}", a.lhs)
+                            debug_println!("[BUG #135]   -> Assignment to {:?}", a.lhs)
                         }
-                        _ => println!("[BUG #135]   -> Other"),
+                        _ => debug_println!("[BUG #135]   -> Other"),
                     }
                 }
                 // Check if last statement is a return
@@ -7658,13 +7727,13 @@ impl<'hir> HirToMir<'hir> {
                 //   { let mut count = 0; if (cond) { count = 16; } count }
                 // The final `count` is an Expression statement, not Return
                 else if let Some(hir::HirStatement::Expression(result_expr)) = stmts.last() {
-                    eprintln!("[BUG #86] Multiple statements with final Expression - trying mutable var pattern");
+                    debug_println!("[BUG #86] Multiple statements with final Expression - trying mutable var pattern");
                     if let Some(mutable_var_expr) = self.try_convert_mutable_var_pattern(
                         &stmts[..stmts.len() - 1], // statements before final expression
                         result_expr,
                         &let_bindings,
                     ) {
-                        eprintln!("[BUG #86] Successfully converted mutable variable pattern (Expression) to if-expression");
+                        debug_println!("[BUG #86] Successfully converted mutable variable pattern (Expression) to if-expression");
                         return Some(mutable_var_expr);
                     }
 
@@ -7747,7 +7816,7 @@ impl<'hir> HirToMir<'hir> {
     ) -> Option<hir::HirExpression> {
         use std::collections::HashMap;
 
-        println!("🔵🔵🔵 [BUG #86] try_convert_mutable_var_pattern: {} stmts before return, {} let bindings 🔵🔵🔵",
+        debug_println!("🔵🔵🔵 [BUG #86] try_convert_mutable_var_pattern: {} stmts before return, {} let bindings 🔵🔵🔵",
                  stmts_before_return.len(), let_bindings.len());
         println!(
             "🔵🔵🔵 [BUG #86] return_expr type: {:?} 🔵🔵🔵",
@@ -7836,13 +7905,13 @@ impl<'hir> HirToMir<'hir> {
 
         // If no mutable variables, this isn't our pattern
         if var_exprs.is_empty() {
-            eprintln!("[BUG #86] No mutable variables found");
+            debug_println!("[BUG #86] No mutable variables found");
             return None;
         }
 
         // Check that returned variable is mutable
         if !var_exprs.contains_key(&returned_var_id) {
-            eprintln!("[BUG #86] Returned variable is not mutable");
+            debug_println!("[BUG #86] Returned variable is not mutable");
             return None;
         }
 
@@ -7882,7 +7951,7 @@ impl<'hir> HirToMir<'hir> {
                         else_expr: Box::new(current_value),
                     });
 
-                    eprintln!("[BUG #86] Created conditional for var {:?}", var_id);
+                    debug_println!("[BUG #86] Created conditional for var {:?}", var_id);
                     var_exprs.insert(*var_id, new_expr);
                 }
             }
@@ -7891,12 +7960,12 @@ impl<'hir> HirToMir<'hir> {
         if modified {
             // Return the final expression for the returned variable
             let inner_result = var_exprs.get(&returned_var_id).cloned();
-            eprintln!("[BUG #86] Successfully converted mutable variable pattern");
+            debug_println!("[BUG #86] Successfully converted mutable variable pattern");
 
             // BUG #134 FIX: If original return was Cast(Variable), wrap result in Cast
             match (inner_result, outer_cast) {
                 (Some(expr), Some(target_type)) => {
-                    eprintln!("[BUG #134] Wrapping result in Cast to {:?}", target_type);
+                    debug_println!("[BUG #134] Wrapping result in Cast to {:?}", target_type);
                     Some(hir::HirExpression::Cast(hir::HirCastExpr {
                         expr: Box::new(expr),
                         target_type,
@@ -7906,7 +7975,7 @@ impl<'hir> HirToMir<'hir> {
                 (None, _) => None,
             }
         } else {
-            eprintln!("[BUG #86] No if statements modified any variables");
+            debug_println!("[BUG #86] No if statements modified any variables");
             None
         }
     }
@@ -8056,9 +8125,9 @@ impl<'hir> HirToMir<'hir> {
         use std::collections::HashMap;
 
         // BUG #145 DEBUG: Simple trace - using println! to stdout
-        println!("🔮🔮🔮 [BUG #145] ENTERING try_transform_block_mutable_vars 🔮🔮🔮");
+        debug_println!("🔮🔮🔮 [BUG #145] ENTERING try_transform_block_mutable_vars 🔮🔮🔮");
 
-        println!("🔧🔧🔧 [BUG #86] NEWCODE! try_transform_block_mutable_vars: {} statements, result_expr type: {:?} 🔧🔧🔧",
+        debug_println!("🔧🔧🔧 [BUG #86] NEWCODE! try_transform_block_mutable_vars: {} statements, result_expr type: {:?} 🔧🔧🔧",
                  statements.len(), std::mem::discriminant(result_expr));
         // Also print the actual result_expr for debugging
         match result_expr {
@@ -8070,7 +8139,7 @@ impl<'hir> HirToMir<'hir> {
                 "🔧🔧🔧 [BUG #86] result_expr is Cast, inner: {:?} 🔧🔧🔧",
                 std::mem::discriminant(&*cast.expr)
             ),
-            other => println!("🔧🔧🔧 [BUG #86] result_expr is {:?} 🔧🔧🔧", other),
+            other => debug_println!("🔧🔧🔧 [BUG #86] result_expr is {:?} 🔧🔧🔧", other),
         }
 
         // BUG #119 FIX: Check if result expression is a variable reference, or wrapped in Cast/Range
@@ -8086,7 +8155,7 @@ impl<'hir> HirToMir<'hir> {
                     );
                     (var_id, Some(result_expr.clone()))
                 } else {
-                    println!("🔧🔧🔧 [BUG #86] Block: result_expr is Cast but no Variable inside, skipping 🔧🔧🔧");
+                    debug_println!("🔧🔧🔧 [BUG #86] Block: result_expr is Cast but no Variable inside, skipping 🔧🔧🔧");
                     return None;
                 }
             }
@@ -8099,7 +8168,7 @@ impl<'hir> HirToMir<'hir> {
                     );
                     (*var_id, Some(result_expr.clone()))
                 } else {
-                    println!("🔧🔧🔧 [BUG #86] Block: result_expr is Range but not Variable inside, skipping 🔧🔧🔧");
+                    debug_println!("🔧🔧🔧 [BUG #86] Block: result_expr is Range but not Variable inside, skipping 🔧🔧🔧");
                     return None;
                 }
             }
@@ -8114,12 +8183,12 @@ impl<'hir> HirToMir<'hir> {
                     );
                     (var_id, Some(result_expr.clone()))
                 } else {
-                    println!("🔧🔧🔧 [BUG #86] Block: result_expr is Concat but no Variable found, skipping 🔧🔧🔧");
+                    debug_println!("🔧🔧🔧 [BUG #86] Block: result_expr is Concat but no Variable found, skipping 🔧🔧🔧");
                     return None;
                 }
             }
             _ => {
-                println!("🔧🔧🔧 [BUG #86] Block: result_expr is NOT a variable (type: {:?}), skipping 🔧🔧🔧", std::mem::discriminant(result_expr));
+                debug_println!("🔧🔧🔧 [BUG #86] Block: result_expr is NOT a variable (type: {:?}), skipping 🔧🔧🔧", std::mem::discriminant(result_expr));
                 return None;
             }
         };
@@ -8156,14 +8225,14 @@ impl<'hir> HirToMir<'hir> {
             && if_statements.is_empty();
 
         if !has_if_pattern && !has_assign_pattern {
-            println!("🔧🔧🔧 [BUG #86] Block: no let bindings ({}) or no if statements ({}) or no assignments ({}), skipping 🔧🔧🔧",
+            debug_println!("🔧🔧🔧 [BUG #86] Block: no let bindings ({}) or no if statements ({}) or no assignments ({}), skipping 🔧🔧🔧",
                      let_bindings.len(), if_statements.len(), assignment_statements.len());
             return None;
         }
 
         // For now, reject if there are other statement types (could extend later)
         if has_other_statements {
-            println!("🔧🔧🔧 [BUG #86] Block: has other statement types, skipping 🔧🔧🔧");
+            debug_println!("🔧🔧🔧 [BUG #86] Block: has other statement types, skipping 🔧🔧🔧");
             return None;
         }
 
@@ -8201,7 +8270,7 @@ impl<'hir> HirToMir<'hir> {
 
         // If no mutable variables, this isn't our pattern
         if var_exprs.is_empty() {
-            println!("🔧🔧🔧 [BUG #86] Block: No mutable variables found 🔧🔧🔧");
+            debug_println!("🔧🔧🔧 [BUG #86] Block: No mutable variables found 🔧🔧🔧");
             return None;
         }
 
@@ -8243,7 +8312,7 @@ impl<'hir> HirToMir<'hir> {
                 continue;
             }
 
-            println!("🔧🔧🔧 [BUG #86] Processing if_stmt {} 🔧🔧🔧", if_idx);
+            debug_println!("🔧🔧🔧 [BUG #86] Processing if_stmt {} 🔧🔧🔧", if_idx);
             println!(
                 "🔧🔧🔧 [BUG #86]   var_exprs has {} entries 🔧🔧🔧",
                 var_exprs.len()
@@ -8332,7 +8401,7 @@ impl<'hir> HirToMir<'hir> {
         if let Some(final_expr) = result {
             // BUG #119 FIX: If there was a wrapper (Cast/Range), apply it to the final expression
             let final_result = if let Some(wrapper) = result_wrapper {
-                println!("🔧🔧🔧 [BUG #119 FIX] Applying wrapper to final expression 🔧🔧🔧");
+                debug_println!("🔧🔧🔧 [BUG #119 FIX] Applying wrapper to final expression 🔧🔧🔧");
                 Self::apply_wrapper_to_expr(&wrapper, final_expr, returned_var_id)
             } else {
                 final_expr
@@ -8453,7 +8522,7 @@ impl<'hir> HirToMir<'hir> {
             );
         }
         if let hir::HirExpression::Variable(var_id) = &if_stmt.condition {
-            eprintln!("[BUG #7]   condition is Variable: {:?}", var_id);
+            debug_println!("[BUG #7]   condition is Variable: {:?}", var_id);
         }
 
         // Recursively convert then-branch
@@ -8496,14 +8565,14 @@ impl<'hir> HirToMir<'hir> {
             .iter()
             .enumerate()
             .map(|(i, arm)| {
-                println!("[DEBUG] convert_match_stmt_to_expr: arm {} has {} statements", i, arm.statements.len());
+                debug_println!("[DEBUG] convert_match_stmt_to_expr: arm {} has {} statements", i, arm.statements.len());
                 for (j, stmt) in arm.statements.iter().enumerate() {
-                    println!("[DEBUG]   stmt[{}]: {:?}", j, std::mem::discriminant(stmt));
+                    debug_println!("[DEBUG]   stmt[{}]: {:?}", j, std::mem::discriminant(stmt));
                 }
                 // Convert arm's statements to an expression
                 let expr = self.convert_body_to_expression(&arm.statements);
                 if expr.is_none() {
-                    println!("[DEBUG] convert_match_stmt_to_expr: arm {} convert_body_to_expression FAILED!", i);
+                    debug_println!("[DEBUG] convert_match_stmt_to_expr: arm {} convert_body_to_expression FAILED!", i);
                 }
                 let expr = expr?;
                 Some(hir::HirMatchArmExpr {
@@ -8551,7 +8620,7 @@ impl<'hir> HirToMir<'hir> {
                 bindings.into_iter().map(hir::HirStatement::Let).collect();
             all_statements.extend(inner_stmts);
 
-            eprintln!("[BUG #137 FIX] build_let_expression: FLATTENING nested Block - {} let bindings + {} inner stmts = {} total",
+            debug_println!("[BUG #137 FIX] build_let_expression: FLATTENING nested Block - {} let bindings + {} inner stmts = {} total",
                      all_statements.iter().filter(|s| matches!(s, hir::HirStatement::Let(_))).count(),
                      all_statements.iter().filter(|s| matches!(s, hir::HirStatement::Assignment(_))).count(),
                      all_statements.len());
@@ -8736,7 +8805,7 @@ impl<'hir> HirToMir<'hir> {
                 );
                 // Look up variable name using the provided map (for function-local variables)
                 if let Some(var_name) = var_id_to_name.get(var_id) {
-                    eprintln!("[CONTEXT] Variable substitution: var_id={:?} -> var_name='{}', in var_id_to_name", var_id, var_name);
+                    debug_println!("[CONTEXT] Variable substitution: var_id={:?} -> var_name='{}', in var_id_to_name", var_id, var_name);
                     // Check if this variable should be substituted from param_map
                     if let Some(arg_expr) = param_map.get(var_name) {
                         eprintln!(
@@ -9198,7 +9267,7 @@ impl<'hir> HirToMir<'hir> {
                         std::mem::discriminant(&**result_expr)
                     );
                     if let hir::HirExpression::Range(base, _, _) = &**result_expr {
-                        println!("[DEBUG]   result_expr is Range with base: {:?}", base);
+                        debug_println!("[DEBUG]   result_expr is Range with base: {:?}", base);
                     }
                 }
 
@@ -9308,7 +9377,7 @@ impl<'hir> HirToMir<'hir> {
 
                 let mut substituted_args = Vec::new();
                 for (i, arg) in call.args.iter().enumerate() {
-                    eprintln!("[DEBUG] Call substitution: substituting arg[{}]", i);
+                    debug_println!("[DEBUG] Call substitution: substituting arg[{}]", i);
                     let substituted_arg =
                         self.substitute_expression_with_var_map(arg, param_map, var_id_to_name)?;
                     eprintln!(
@@ -9350,7 +9419,7 @@ impl<'hir> HirToMir<'hir> {
                     param_map,
                     var_id_to_name,
                 )?);
-                eprintln!("[DEBUG] Cast substitution: successfully substituted inner expr");
+                debug_println!("[DEBUG] Cast substitution: successfully substituted inner expr");
                 Some(hir::HirExpression::Cast(hir::HirCastExpr {
                     expr: substituted_expr,
                     target_type: cast.target_type.clone(),
@@ -9359,7 +9428,7 @@ impl<'hir> HirToMir<'hir> {
 
             // Concat expression - substitute all elements
             hir::HirExpression::Concat(elements) => {
-                eprintln!("[DEBUG] Concat substitution: {} elements", elements.len());
+                debug_println!("[DEBUG] Concat substitution: {} elements", elements.len());
                 let mut substituted_elements = Vec::new();
                 for (i, elem) in elements.iter().enumerate() {
                     eprintln!(
@@ -9674,7 +9743,7 @@ impl<'hir> HirToMir<'hir> {
             "[BUG #76 ANNOTATE]   expr.kind = {:?}",
             std::mem::discriminant(&expr.kind)
         );
-        eprintln!("[BUG #76 ANNOTATE]   expr.ty (before) = {:?}", expr.ty);
+        debug_println!("[BUG #76 ANNOTATE]   expr.ty (before) = {:?}", expr.ty);
 
         match &expr.kind {
             // If this is a Concat and the type is a Tuple, annotate each part with its element type
@@ -10288,7 +10357,7 @@ impl<'hir> HirToMir<'hir> {
         // Now process them in order, substituting as we go
         for (name, value, is_mutable) in collected_lets {
             if is_mutable {
-                eprintln!("[BUG #137 INLINE_WITH_LETS] Found MUTABLE let binding: {} - will NOT substitute in return expr", name);
+                debug_println!("[BUG #137 INLINE_WITH_LETS] Found MUTABLE let binding: {} - will NOT substitute in return expr", name);
                 mutable_var_names.insert(name.clone());
             }
             let rhs_substituted = self.substitute_hir_expr_recursively(
@@ -10298,14 +10367,14 @@ impl<'hir> HirToMir<'hir> {
                 &var_id_to_name,
             );
             if let Some(rhs) = rhs_substituted {
-                eprintln!("[BUG #136 INLINE_WITH_LETS] Collected let binding: {} (from recursive search, mutable={})", name, is_mutable);
+                debug_println!("[BUG #136 INLINE_WITH_LETS] Collected let binding: {} (from recursive search, mutable={})", name, is_mutable);
                 // BUG #137 FIX: Only add IMMUTABLE variables to let_bindings.
                 // Mutable variables should NOT be substituted - we need to preserve the Variable references
                 // so that the mutable var pattern handler can see them and convert to SSA form.
                 if !is_mutable {
                     let_bindings.insert(name, rhs);
                 } else {
-                    eprintln!("[BUG #137 FIX] NOT adding mutable var '{}' to let_bindings - preserving Variable reference", name);
+                    debug_println!("[BUG #137 FIX] NOT adding mutable var '{}' to let_bindings - preserving Variable reference", name);
                 }
             }
         }
@@ -10387,9 +10456,9 @@ impl<'hir> HirToMir<'hir> {
                         );
                         return Some(param_rhs.clone());
                     }
-                    eprintln!("[BUG #74 VARIABLE] Variable '{}' not found in lets or params, keeping as-is", name);
+                    debug_println!("[BUG #74 VARIABLE] Variable '{}' not found in lets or params, keeping as-is", name);
                 } else {
-                    eprintln!("[BUG #74 VARIABLE] Could not resolve variable name for {:?}, keeping as-is", var_id);
+                    debug_println!("[BUG #74 VARIABLE] Could not resolve variable name for {:?}, keeping as-is", var_id);
                 }
                 // If not found in either, return as-is (might be from outer scope)
                 Some(expr.clone())
@@ -10428,7 +10497,7 @@ impl<'hir> HirToMir<'hir> {
                     );
                     return Some(param_rhs.clone());
                 }
-                eprintln!("[BUG #118 GENERIC_PARAM] GenericParam '{}' not found in lets or params, keeping as-is", name);
+                debug_println!("[BUG #118 GENERIC_PARAM] GenericParam '{}' not found in lets or params, keeping as-is", name);
                 // If not found, return as-is (might be from outer scope)
                 Some(expr.clone())
             }
@@ -10534,7 +10603,7 @@ impl<'hir> HirToMir<'hir> {
                 });
 
                 if has_if_or_assignments {
-                    eprintln!("[BUG #137 FIX] Block has if/assignment statements - preserving Block structure");
+                    debug_println!("[BUG #137 FIX] Block has if/assignment statements - preserving Block structure");
 
                     // Substitute in statements (let bindings and if statements)
                     let mut substituted_stmts = Vec::new();
@@ -10558,7 +10627,7 @@ impl<'hir> HirToMir<'hir> {
                                 if !let_stmt.mutable {
                                     nested_lets.insert(let_stmt.name.clone(), rhs_sub.clone());
                                 } else {
-                                    eprintln!("[BUG #137 BLOCK FIX] NOT adding mutable var '{}' to nested_lets - preserving Variable reference in result_expr", let_stmt.name);
+                                    debug_println!("[BUG #137 BLOCK FIX] NOT adding mutable var '{}' to nested_lets - preserving Variable reference in result_expr", let_stmt.name);
                                 }
                                 substituted_stmts.push(hir::HirStatement::Let(
                                     hir::HirLetStatement {
@@ -11030,7 +11099,7 @@ impl<'hir> HirToMir<'hir> {
                     Self::collect_variable_ids_from_expr(arg_expr, &mut param_var_ids);
                 }
                 if !param_var_ids.is_empty() {
-                    println!("[BUG #103] Parameter arguments contain {} VariableIds from outer scope: {:?}",
+                    debug_println!("[BUG #103] Parameter arguments contain {} VariableIds from outer scope: {:?}",
                              param_var_ids.len(),
                              param_var_ids.iter().map(|v| v.0).collect::<Vec<_>>());
                 }
@@ -11042,7 +11111,7 @@ impl<'hir> HirToMir<'hir> {
                         if let hir::HirStatement::Let(let_stmt) = stmt {
                             // Exclude VariableIds that collide with parameter arguments
                             if param_var_ids.contains(&let_stmt.id) {
-                                println!("[BUG #103] Excluding local Variable({}) from substitution - collides with param arg",
+                                debug_println!("[BUG #103] Excluding local Variable({}) from substitution - collides with param arg",
                                          let_stmt.id.0);
                                 None
                             } else {
@@ -11561,7 +11630,7 @@ impl<'hir> HirToMir<'hir> {
             current = next;
         }
 
-        println!("[BUG #109 WARNING] substitute_var_ids_until_fixed_point: hit max iterations ({}), returning current state", max_iterations);
+        debug_println!("[BUG #109 WARNING] substitute_var_ids_until_fixed_point: hit max iterations ({}), returning current state", max_iterations);
         current
     }
 
@@ -11679,7 +11748,7 @@ impl<'hir> HirToMir<'hir> {
                     }
                 } else {
                     // This is a Variable from outer scope - do NOT substitute
-                    println!("[BUG #103 VAR_ID_FILTERED] Preserving outer-scope Variable({}) (not in local_var_ids)",
+                    debug_println!("[BUG #103 VAR_ID_FILTERED] Preserving outer-scope Variable({}) (not in local_var_ids)",
                              var_id.0);
                 }
                 expr.clone()
@@ -12039,7 +12108,7 @@ impl<'hir> HirToMir<'hir> {
         // Step 1: Find the function and clone its body to avoid borrow checker issues
         let func = match self.find_function(&call.function) {
             Some(f) => {
-                eprintln!("[DEBUG] ✓ Found function '{}'", call.function);
+                debug_println!("[DEBUG] ✓ Found function '{}'", call.function);
                 f
             }
             None => {
@@ -12047,7 +12116,7 @@ impl<'hir> HirToMir<'hir> {
                     "❌❌❌ ERROR: Function '{}' NOT FOUND during inlining! ❌❌❌",
                     call.function
                 );
-                eprintln!("[DEBUG] Available functions in HIR:");
+                debug_println!("[DEBUG] Available functions in HIR:");
                 let hir = self.hir?;
                 for (idx, f) in hir.functions.iter().enumerate() {
                     eprintln!("  {}. {}", idx + 1, f.name);
@@ -12124,7 +12193,7 @@ impl<'hir> HirToMir<'hir> {
                 call.function
             );
             self.inlining_context_stack.pop();
-            eprintln!("[CONTEXT] Popped inlining context (recursion check failed)");
+            debug_println!("[CONTEXT] Popped inlining context (recursion check failed)");
             return None;
         }
 
@@ -12137,7 +12206,7 @@ impl<'hir> HirToMir<'hir> {
                 call.args.len()
             );
             self.inlining_context_stack.pop();
-            eprintln!("[CONTEXT] Popped inlining context (arity check failed)");
+            debug_println!("[CONTEXT] Popped inlining context (arity check failed)");
             return None;
         }
 
@@ -12186,7 +12255,7 @@ impl<'hir> HirToMir<'hir> {
                 "[DEBUG] inline_function_call: convert_body_to_expression FAILED - returning None"
             );
             self.inlining_context_stack.pop();
-            eprintln!("[CONTEXT] Popped inlining context (convert_body_to_expression failed)");
+            debug_println!("[CONTEXT] Popped inlining context (convert_body_to_expression failed)");
             return None;
         }
         let body_expr = body_expr?;
@@ -12196,7 +12265,9 @@ impl<'hir> HirToMir<'hir> {
         );
 
         // Step 6: Substitute parameters in the entire expression (including nested let bindings)
-        println!("🌟🌟🌟 [INLINE] Step 6: About to substitute_expression_with_var_map 🌟🌟🌟");
+        debug_println!(
+            "🌟🌟🌟 [INLINE] Step 6: About to substitute_expression_with_var_map 🌟🌟🌟"
+        );
         let substituted_expr = self.substitute_expression_with_var_map(
             &body_expr,
             &substitution_map
@@ -12206,7 +12277,7 @@ impl<'hir> HirToMir<'hir> {
             &var_id_to_name,
         );
         if substituted_expr.is_none() {
-            eprintln!("[DEBUG] inline_function_call: substitute_expression_with_var_map FAILED - returning None");
+            debug_println!("[DEBUG] inline_function_call: substitute_expression_with_var_map FAILED - returning None");
             self.inlining_context_stack.pop();
             eprintln!(
                 "[CONTEXT] Popped inlining context (substitute_expression_with_var_map failed)"
@@ -12293,7 +12364,7 @@ impl<'hir> HirToMir<'hir> {
                 _ => {}
             }
         }
-        println!("🔍 Checking substituted_expr for remaining GenericParams...");
+        debug_println!("🔍 Checking substituted_expr for remaining GenericParams...");
         check_for_generic_param(&substituted_expr, "root");
         let result = self.convert_expression(&substituted_expr, 0);
 
@@ -12658,10 +12729,10 @@ impl<'hir> HirToMir<'hir> {
         match op {
             hir::HirBinaryOp::Add => {
                 if is_fp {
-                    eprintln!("[DEBUG] convert_binary_op: Returning BinaryOp::FAdd");
+                    debug_println!("[DEBUG] convert_binary_op: Returning BinaryOp::FAdd");
                     BinaryOp::FAdd
                 } else {
-                    eprintln!("[DEBUG] convert_binary_op: Returning BinaryOp::Add");
+                    debug_println!("[DEBUG] convert_binary_op: Returning BinaryOp::Add");
                     BinaryOp::Add
                 }
             }
@@ -13468,8 +13539,8 @@ impl<'hir> HirToMir<'hir> {
         base: &hir::HirExpression,
         field_name: &str,
     ) -> Option<Expression> {
-        eprintln!("[BUG #71 TUPLE FIELD ACCESS] convert_field_access called:");
-        eprintln!("[BUG #71 TUPLE FIELD ACCESS]   field_name='{}'", field_name);
+        debug_println!("[BUG #71 TUPLE FIELD ACCESS] convert_field_access called:");
+        debug_println!("[BUG #71 TUPLE FIELD ACCESS]   field_name='{}'", field_name);
         eprintln!(
             "[BUG #71 TUPLE FIELD ACCESS]   base expr type={:?}",
             std::mem::discriminant(base)
@@ -13699,9 +13770,11 @@ impl<'hir> HirToMir<'hir> {
                             // Debug output for tuple element extraction
                             #[allow(clippy::if_same_then_else)]
                             if result.is_some() {
-                                eprintln!("[BUG #71 TUPLE]   ✅ Successfully extracted element");
+                                debug_println!(
+                                    "[BUG #71 TUPLE]   ✅ Successfully extracted element"
+                                );
                             } else {
-                                eprintln!("[BUG #71 TUPLE]   ❌ Failed to extract element");
+                                debug_println!("[BUG #71 TUPLE]   ❌ Failed to extract element");
                             }
                             return result;
                         } else {
@@ -13795,7 +13868,7 @@ impl<'hir> HirToMir<'hir> {
                                 .map(|stmt| self.count_calls_in_statement(stmt))
                                 .sum();
                             let result = call_count > MAX_INLINE_CALL_COUNT;
-                            eprintln!("[BUG #110] Function '{}' has {} nested calls (threshold={}), should_use_module_path={}",
+                            debug_println!("[BUG #110] Function '{}' has {} nested calls (threshold={}), should_use_module_path={}",
                                 call.function, call_count, MAX_INLINE_CALL_COUNT, result);
                             result
                         } else {
@@ -13822,27 +13895,32 @@ impl<'hir> HirToMir<'hir> {
                             // Extract the specific element from the Concat
                             if let ExpressionKind::Concat(elements) = &mir_result.kind {
                                 if index < elements.len() {
-                                    eprintln!("[BUG #110] ✅ Extracted element {} from Concat of {} elements",
+                                    debug_println!("[BUG #110] ✅ Extracted element {} from Concat of {} elements",
                                         index, elements.len());
                                     return Some(elements[index].clone());
                                 } else {
-                                    eprintln!("[BUG #110] ❌ Index {} out of bounds for Concat with {} elements",
+                                    debug_println!("[BUG #110] ❌ Index {} out of bounds for Concat with {} elements",
                                         index, elements.len());
                                     return None;
                                 }
                             } else {
                                 // Single result, index 0 should return it directly
                                 if index == 0 {
-                                    eprintln!("[BUG #110] ✅ Returning single result for index 0");
+                                    debug_println!(
+                                        "[BUG #110] ✅ Returning single result for index 0"
+                                    );
                                     return Some(mir_result);
                                 } else {
-                                    eprintln!("[BUG #110] ❌ Index {} for non-tuple result", index);
+                                    debug_println!(
+                                        "[BUG #110] ❌ Index {} for non-tuple result",
+                                        index
+                                    );
                                     return None;
                                 }
                             }
                         } else {
                             // Non-numeric field name (struct field) - not supported for module path yet
-                            eprintln!("[BUG #110] ❌ Non-numeric field '{}' not supported for module path", field_name);
+                            debug_println!("[BUG #110] ❌ Non-numeric field '{}' not supported for module path", field_name);
                             return None;
                         }
                     }
@@ -13885,7 +13963,9 @@ impl<'hir> HirToMir<'hir> {
                         field: field_name.to_string(),
                     };
 
-                    eprintln!("[BUG #74 CALL IN FIELD_ACCESS] Converting FieldAccess to MIR...");
+                    debug_println!(
+                        "[BUG #74 CALL IN FIELD_ACCESS] Converting FieldAccess to MIR..."
+                    );
                     // Recursively convert the field access
                     let mir_result = self.convert_expression(&field_access, 0);
                     // Debug output for field access conversion
@@ -13895,7 +13975,7 @@ impl<'hir> HirToMir<'hir> {
                             "[BUG #74 CALL IN FIELD_ACCESS] ✅ FieldAccess conversion succeeded"
                         );
                     } else {
-                        eprintln!("[BUG #74 CALL IN FIELD_ACCESS] ❌ FieldAccess conversion returned None");
+                        debug_println!("[BUG #74 CALL IN FIELD_ACCESS] ❌ FieldAccess conversion returned None");
                     }
                     return mir_result;
                 }
@@ -13976,7 +14056,7 @@ impl<'hir> HirToMir<'hir> {
                             if let Some(fields) = self.flattened_signals.get(sig_id) {
                                 (sig_id.0, true, fields.clone())
                             } else {
-                                eprintln!("[BUG #31 ARRAY_FIELD] Signal not flattened");
+                                debug_println!("[BUG #31 ARRAY_FIELD] Signal not flattened");
                                 return None;
                             }
                         }
@@ -13984,12 +14064,14 @@ impl<'hir> HirToMir<'hir> {
                             if let Some(fields) = self.flattened_ports.get(port_id) {
                                 (port_id.0, false, fields.clone())
                             } else {
-                                eprintln!("[BUG #31 ARRAY_FIELD] Port not flattened");
+                                debug_println!("[BUG #31 ARRAY_FIELD] Port not flattened");
                                 return None;
                             }
                         }
                         _ => {
-                            eprintln!("[BUG #31 ARRAY_FIELD] Array base is not Signal or Port");
+                            debug_println!(
+                                "[BUG #31 ARRAY_FIELD] Array base is not Signal or Port"
+                            );
                             return None;
                         }
                     };
@@ -14087,7 +14169,7 @@ impl<'hir> HirToMir<'hir> {
         base: &hir::HirExpression,
         field_name: &str,
     ) -> Option<(usize, usize)> {
-        eprintln!("[BUG #70 FIELD RANGE] get_field_bit_range called: field_name='{}', base expr discriminant={:?}", field_name, std::mem::discriminant(base));
+        debug_println!("[BUG #70 FIELD RANGE] get_field_bit_range called: field_name='{}', base expr discriminant={:?}", field_name, std::mem::discriminant(base));
         // First, check if this is a vector type
         if let Some(base_type) = self.infer_hir_type(base) {
             eprintln!(
@@ -14157,10 +14239,10 @@ impl<'hir> HirToMir<'hir> {
         }
 
         // Get the struct type from the base expression
-        eprintln!("[BUG #70 FIELD RANGE] Calling get_expression_struct_type...");
+        debug_println!("[BUG #70 FIELD RANGE] Calling get_expression_struct_type...");
         let struct_type = self.get_expression_struct_type(base);
         if struct_type.is_none() {
-            eprintln!("[BUG #70 FIELD RANGE] get_expression_struct_type returned None!");
+            debug_println!("[BUG #70 FIELD RANGE] get_expression_struct_type returned None!");
             return None;
         }
         let struct_type = struct_type?;
@@ -14193,11 +14275,11 @@ impl<'hir> HirToMir<'hir> {
             .iter()
             .map(|(_, ty)| {
                 let width = self.get_hir_type_width(ty);
-                eprintln!("[BUG #70 TUPLE DEBUG]   Width calculated: {}", width);
+                debug_println!("[BUG #70 TUPLE DEBUG]   Width calculated: {}", width);
                 width
             })
             .sum();
-        eprintln!("[BUG #70 TUPLE DEBUG] Total width: {}", total_width);
+        debug_println!("[BUG #70 TUPLE DEBUG] Total width: {}", total_width);
 
         // Check if this is a tuple (fields named "_0", "_1", etc.)
         let is_tuple = fields
@@ -14463,14 +14545,14 @@ impl<'hir> HirToMir<'hir> {
                                 for field in &struct_type.fields {
                                     total_width += self.get_hir_type_width(&field.field_type);
                                 }
-                                eprintln!("[BUG #70 FIX] Custom type '{}' resolved to struct with width {}", type_name, total_width);
+                                debug_println!("[BUG #70 FIX] Custom type '{}' resolved to struct with width {}", type_name, total_width);
                                 return total_width;
                             }
                         }
                     }
                 }
                 // Fallback: Custom types default to 32 bits if not found
-                eprintln!("[BUG #70 WARNING] Custom type '{}' not found in user_defined_types, defaulting to 32 bits", type_name);
+                debug_println!("[BUG #70 WARNING] Custom type '{}' not found in user_defined_types, defaulting to 32 bits", type_name);
                 32
             }
             // Parametric types - use default widths
@@ -14758,7 +14840,7 @@ impl<'hir> HirToMir<'hir> {
                     match_expr.arms.len()
                 );
                 let scrutinee_calls = self.count_function_calls(&match_expr.expr);
-                println!("[COUNT_CALLS] Match scrutinee calls: {}", scrutinee_calls);
+                debug_println!("[COUNT_CALLS] Match scrutinee calls: {}", scrutinee_calls);
                 for (i, arm) in match_expr.arms.iter().enumerate() {
                     println!(
                         "[COUNT_CALLS] Arm {} expr type: {:?}",
@@ -14766,14 +14848,14 @@ impl<'hir> HirToMir<'hir> {
                         std::mem::discriminant(&arm.expr)
                     );
                     let arm_count = self.count_function_calls(&arm.expr);
-                    println!("[COUNT_CALLS] Arm {} count: {}", i, arm_count);
+                    debug_println!("[COUNT_CALLS] Arm {} count: {}", i, arm_count);
                 }
                 let arm_calls: usize = match_expr
                     .arms
                     .iter()
                     .map(|arm| self.count_function_calls(&arm.expr))
                     .sum();
-                println!("[COUNT_CALLS] Total arm calls: {}", arm_calls);
+                debug_println!("[COUNT_CALLS] Total arm calls: {}", arm_calls);
                 scrutinee_calls + arm_calls
             }
             hir::HirExpression::Block {
@@ -14804,7 +14886,7 @@ impl<'hir> HirToMir<'hir> {
                     std::mem::discriminant(&*cast_expr.expr)
                 );
                 let inner_count = self.count_function_calls(&cast_expr.expr);
-                println!("[COUNT_CALLS] Cast inner count: {}", inner_count);
+                debug_println!("[COUNT_CALLS] Cast inner count: {}", inner_count);
                 inner_count
             }
             hir::HirExpression::Concat(exprs) => {
@@ -14821,7 +14903,7 @@ impl<'hir> HirToMir<'hir> {
             | hir::HirExpression::Constant(_)
             | hir::HirExpression::EnumVariant { .. } => 0,
             hir::HirExpression::GenericParam(param_name) => {
-                println!("[COUNT_CALLS] GenericParam: '{}'", param_name);
+                debug_println!("[COUNT_CALLS] GenericParam: '{}'", param_name);
                 0
             }
             hir::HirExpression::Ternary {
@@ -14853,11 +14935,11 @@ impl<'hir> HirToMir<'hir> {
     fn count_calls_in_statement(&self, stmt: &hir::HirStatement) -> usize {
         let result = match stmt {
             hir::HirStatement::Let(let_stmt) => {
-                println!("[COUNT_CALLS_STMT] Let statement: {}", let_stmt.name);
+                debug_println!("[COUNT_CALLS_STMT] Let statement: {}", let_stmt.name);
                 self.count_function_calls(&let_stmt.value)
             }
             hir::HirStatement::Assignment(assign) => {
-                println!("[COUNT_CALLS_STMT] Assignment statement");
+                debug_println!("[COUNT_CALLS_STMT] Assignment statement");
                 self.count_function_calls(&assign.rhs)
             }
             hir::HirStatement::Expression(expr) => {
@@ -14868,7 +14950,7 @@ impl<'hir> HirToMir<'hir> {
                 self.count_function_calls(expr)
             }
             hir::HirStatement::If(if_stmt) => {
-                println!("[COUNT_CALLS_STMT] If statement");
+                debug_println!("[COUNT_CALLS_STMT] If statement");
                 let cond_calls = self.count_function_calls(&if_stmt.condition);
                 let then_calls: usize = if_stmt
                     .then_statements
@@ -14883,7 +14965,7 @@ impl<'hir> HirToMir<'hir> {
                 cond_calls + then_calls + else_calls
             }
             hir::HirStatement::Match(match_stmt) => {
-                println!("[COUNT_CALLS_STMT] Match statement");
+                debug_println!("[COUNT_CALLS_STMT] Match statement");
                 let scrut_calls = self.count_function_calls(&match_stmt.expr);
                 let arm_calls: usize = match_stmt
                     .arms
@@ -14917,7 +14999,7 @@ impl<'hir> HirToMir<'hir> {
                 0
             }
         };
-        println!("[COUNT_CALLS_STMT] Result: {}", result);
+        debug_println!("[COUNT_CALLS_STMT] Result: {}", result);
         result
     }
 
@@ -14981,7 +15063,7 @@ impl<'hir> HirToMir<'hir> {
         depth: usize,
     ) -> Option<Expression> {
         if depth > 100 {
-            eprintln!("    ⚠️  MIR cache conversion depth exceeded 100");
+            debug_eprintln!("    ⚠️  MIR cache conversion depth exceeded 100");
             return None;
         }
 
@@ -15083,7 +15165,7 @@ impl<'hir> HirToMir<'hir> {
     ) -> Option<Expression> {
         // Guard against infinite recursion
         if depth > 100 {
-            eprintln!("    ⚠️  Module expr conversion depth exceeded 100");
+            debug_eprintln!("    ⚠️  Module expr conversion depth exceeded 100");
             return None;
         }
 
@@ -15115,11 +15197,11 @@ impl<'hir> HirToMir<'hir> {
             // This is the key case we need to handle specially for module synthesis
             hir::HirExpression::Variable(var) => {
                 // Get the variable name from our var_id_to_name map
-                println!("🔗🔗🔗 MODULE VAR: Looking up Variable({}) 🔗🔗🔗", var.0);
+                debug_println!("🔗🔗🔗 MODULE VAR: Looking up Variable({}) 🔗🔗🔗", var.0);
                 let name = ctx.var_id_to_name.get(var).cloned();
                 if let Some(ref n) = name {
-                    println!("🔗🔗🔗 MODULE VAR: Variable({}) -> '{}' 🔗🔗🔗", var.0, n);
-                    eprintln!("    📌 Resolved Variable({}) -> '{}'", var.0, n);
+                    debug_println!("🔗🔗🔗 MODULE VAR: Variable({}) -> '{}' 🔗🔗🔗", var.0, n);
+                    debug_eprintln!("    📌 Resolved Variable({}) -> '{}'", var.0, n);
 
                     // Check if it's a parameter (maps to input port)
                     if let Some(&port_id) = ctx.param_to_port.get(n) {
@@ -15150,16 +15232,16 @@ impl<'hir> HirToMir<'hir> {
                 // The tuple temp holds the Concat of function outputs
                 if let Some(tuple_expr) = ctx.tuple_temp_to_mir.get(var) {
                     let name_str = name.as_deref().unwrap_or("?");
-                    println!("🔗🔗🔗 MODULE VAR: Variable({}) '{}' found in tuple_temp_to_mir -> {:?} 🔗🔗🔗",
+                    debug_println!("🔗🔗🔗 MODULE VAR: Variable({}) '{}' found in tuple_temp_to_mir -> {:?} 🔗🔗🔗",
                              var.0, name_str, tuple_expr.kind);
                     return Some(tuple_expr.clone());
                 }
 
                 let name_str = name.as_deref().unwrap_or("?");
-                println!("🔗🔗🔗 MODULE VAR: ⚠️ Variable({}) '{}' not found in param_to_port or var_to_signal! (ctx.func='{}') 🔗🔗🔗", var.0, name_str, ctx.func_name);
+                debug_println!("🔗🔗🔗 MODULE VAR: ⚠️ Variable({}) '{}' not found in param_to_port or var_to_signal! (ctx.func='{}') 🔗🔗🔗", var.0, name_str, ctx.func_name);
 
                 // BUG #110: Debug - print what IS in var_to_signal
-                println!("🔗🔗🔗 BUG #118 DEBUG: ctx.func='{}' has var_to_signal with {} entries: 🔗🔗🔗", ctx.func_name, ctx.var_to_signal.len());
+                debug_println!("🔗🔗🔗 BUG #118 DEBUG: ctx.func='{}' has var_to_signal with {} entries: 🔗🔗🔗", ctx.func_name, ctx.var_to_signal.len());
                 for (vid, sid) in &ctx.var_to_signal {
                     let vname = ctx
                         .var_id_to_name
@@ -15173,7 +15255,7 @@ impl<'hir> HirToMir<'hir> {
                 }
 
                 // Fallback: try to use the main expression converter
-                println!("🔗🔗🔗 MODULE VAR: ⚠️ Variable not found in module context - using fallback 🔗🔗🔗");
+                debug_println!("🔗🔗🔗 MODULE VAR: ⚠️ Variable not found in module context - using fallback 🔗🔗🔗");
                 self.convert_expression(expr, depth)
             }
 
@@ -15198,7 +15280,7 @@ impl<'hir> HirToMir<'hir> {
 
                 // Note: GenericParam should only be function parameters, not let bindings
                 // Let bindings are accessed via Variable(VariableId), not GenericParam(name)
-                println!("🔗🔗🔗 MODULE GENERIC_PARAM: ⚠️ '{}' not found in param_to_port! Using fallback. 🔗🔗🔗", param_name);
+                debug_println!("🔗🔗🔗 MODULE GENERIC_PARAM: ⚠️ '{}' not found in param_to_port! Using fallback. 🔗🔗🔗", param_name);
                 self.convert_expression(expr, depth)
             }
 
@@ -15615,10 +15697,10 @@ impl<'hir> HirToMir<'hir> {
                         std::mem::discriminant(elem)
                     );
                     if let hir::HirExpression::Variable(var_id) = elem {
-                        println!("🔵🔵🔵 BUG #126 TUPLE_LITERAL elem[{}]: Variable({}), name={:?} 🔵🔵🔵",
+                        debug_println!("🔵🔵🔵 BUG #126 TUPLE_LITERAL elem[{}]: Variable({}), name={:?} 🔵🔵🔵",
                                  idx, var_id.0, ctx.var_id_to_name.get(var_id));
                         if let Some(name) = ctx.var_id_to_name.get(var_id) {
-                            println!("🔵🔵🔵 BUG #126 TUPLE_LITERAL elem[{}]: var_to_signal[{}]={:?} 🔵🔵🔵",
+                            debug_println!("🔵🔵🔵 BUG #126 TUPLE_LITERAL elem[{}]: var_to_signal[{}]={:?} 🔵🔵🔵",
                                      idx, var_id.0, ctx.var_to_signal.get(var_id).map(|s| s.0));
                         }
                     }
@@ -15660,7 +15742,7 @@ impl<'hir> HirToMir<'hir> {
                 // Choose mux generation strategy based on intent/attribute
                 match match_expr.mux_style {
                     hir::MuxStyle::Parallel => {
-                        eprintln!("[PARALLEL_MUX_MODULE] Converting {} arms to OR-of-ANDs (module context)", match_expr.arms.len());
+                        debug_println!("[PARALLEL_MUX_MODULE] Converting {} arms to OR-of-ANDs (module context)", match_expr.arms.len());
                         // Generate OR-of-ANDs in module context
                         self.convert_match_to_parallel_mux_for_module(
                             &match_expr.expr,
@@ -15703,7 +15785,7 @@ impl<'hir> HirToMir<'hir> {
                 if let Some(transformed_expr) =
                     self.try_transform_block_mutable_vars(statements, result_expr)
                 {
-                    eprintln!("[BUG #86] MODULE_BLOCK: transformed mutable variable pattern");
+                    debug_println!("[BUG #86] MODULE_BLOCK: transformed mutable variable pattern");
                     return self.convert_hir_expr_for_module(&transformed_expr, ctx, depth + 1);
                 }
 
@@ -16231,7 +16313,7 @@ impl<'hir> HirToMir<'hir> {
                 }
             }
             _ => {
-                eprintln!("    ⚠️  Unknown primitive FP operation: {}", func_name);
+                debug_eprintln!("    ⚠️  Unknown primitive FP operation: {}", func_name);
                 None
             }
         }
@@ -16326,7 +16408,9 @@ impl<'hir> HirToMir<'hir> {
                     }
                 } else {
                     // Mismatched tuple sizes - fall back to assigning whole conditional to first port
-                    eprintln!("    ⚠️  Conditional tuple size mismatch - assigning to first port");
+                    debug_eprintln!(
+                        "    ⚠️  Conditional tuple size mismatch - assigning to first port"
+                    );
                     let assignment = ContinuousAssign {
                         lhs: LValue::Port(output_port_ids[0]),
                         rhs: expr.clone(),
@@ -16336,7 +16420,9 @@ impl<'hir> HirToMir<'hir> {
                 }
             } else {
                 // Branches aren't both tuples - assign whole conditional to first port
-                eprintln!("    ⚠️  Conditional with non-tuple branches - assigning to first port");
+                debug_eprintln!(
+                    "    ⚠️  Conditional with non-tuple branches - assigning to first port"
+                );
                 let assignment = ContinuousAssign {
                     lhs: LValue::Port(output_port_ids[0]),
                     rhs: expr.clone(),
@@ -16346,7 +16432,7 @@ impl<'hir> HirToMir<'hir> {
             }
         } else {
             // For non-tuple expressions with multiple ports, assign to first port
-            eprintln!("    ⚠️  Multiple output ports but non-tuple expression (kind={:?}) - assigning to first port",
+            debug_eprintln!("    ⚠️  Multiple output ports but non-tuple expression (kind={:?}) - assigning to first port",
                      std::mem::discriminant(&expr.kind));
             let assignment = ContinuousAssign {
                 lhs: LValue::Port(output_port_ids[0]),
@@ -16372,7 +16458,9 @@ impl<'hir> HirToMir<'hir> {
                 eprintln!("    ✓ Return expression converted and assigned to output ports");
             }
             None => {
-                eprintln!("    ❌ Failed to convert return expression - using placeholder zeros");
+                debug_eprintln!(
+                    "    ❌ Failed to convert return expression - using placeholder zeros"
+                );
                 *conversion_errors += 1;
                 // Create placeholder assignments for all output ports
                 for port_id in output_port_ids {
@@ -16896,7 +16984,9 @@ impl<'hir> HirToMir<'hir> {
                             );
                             eprintln!("    ✓ Created conditional output assignment (early return pattern)");
                         } else {
-                            eprintln!("    ❌ Failed to convert conditional return expression");
+                            debug_eprintln!(
+                                "    ❌ Failed to convert conditional return expression"
+                            );
                             conversion_errors += 1;
                         }
                     } else {
@@ -16911,7 +17001,7 @@ impl<'hir> HirToMir<'hir> {
                     }
                 } else {
                     // Multiple if statements - for now, just use the final return
-                    eprintln!("    ⚠️  Multiple if statements not fully supported - using final return only");
+                    debug_eprintln!("    ⚠️  Multiple if statements not fully supported - using final return only");
                     self.convert_return_to_output(
                         ret_expr,
                         &ctx,
@@ -16934,8 +17024,10 @@ impl<'hir> HirToMir<'hir> {
             // BUG FIX #86: Handle the case where transform_early_returns moved ALL returns inside the if/else
             // After transform: if (cond) { return A } else { ...let bindings...; return B }
             // Both returns are inside the if statement, so return_expr is None
-            println!("🔵🔵🔵 BUG #110 DEBUG: Entering Phase 3c for early return pattern 🔵🔵🔵");
-            println!("🔵🔵🔵 BUG #118 DEBUG: Phase 3c ctx.func_name='{}', var_to_signal has {} entries 🔵🔵🔵", ctx.func_name, ctx.var_to_signal.len());
+            debug_println!(
+                "🔵🔵🔵 BUG #110 DEBUG: Entering Phase 3c for early return pattern 🔵🔵🔵"
+            );
+            debug_println!("🔵🔵🔵 BUG #118 DEBUG: Phase 3c ctx.func_name='{}', var_to_signal has {} entries 🔵🔵🔵", ctx.func_name, ctx.var_to_signal.len());
             println!(
                 "🔵🔵🔵 return_expr.is_none()={}, if_return_statements.len()={} 🔵🔵🔵",
                 return_expr.is_none(),
@@ -17058,7 +17150,7 @@ impl<'hir> HirToMir<'hir> {
                     conversion_errors += 1;
                 }
             } else {
-                eprintln!("    ❌ Could not extract returns from both branches");
+                debug_eprintln!("    ❌ Could not extract returns from both branches");
                 eprintln!("      then_return: {}", then_return.is_some());
                 eprintln!("      else_return: {}", else_return.is_some());
                 conversion_errors += 1;
@@ -17365,7 +17457,7 @@ impl<'hir> HirToMir<'hir> {
                     power_domain: None,
                 };
                 module.signals.push(signal);
-                eprintln!("[HYBRID]     ✓ Created result signal '{}'", signal_name);
+                debug_println!("[HYBRID]     ✓ Created result signal '{}'", signal_name);
 
                 // Connect result signal to output port
                 let result_port_name = "result".to_string();
@@ -17393,10 +17485,10 @@ impl<'hir> HirToMir<'hir> {
             };
 
             module.instances.push(instance);
-            eprintln!("[HYBRID]     ✓ Created module instance '{}'", instance_name);
+            debug_println!("[HYBRID]     ✓ Created module instance '{}'", instance_name);
         }
 
-        eprintln!("[HYBRID] ✅ All pending module instances materialized");
+        debug_println!("[HYBRID] ✅ All pending module instances materialized");
     }
 
     /// Helper to convert HIR type to string for debugging

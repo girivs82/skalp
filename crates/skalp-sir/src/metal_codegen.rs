@@ -1141,13 +1141,28 @@ impl<'a> MetalShaderGenerator<'a> {
                         result_expr
                     ));
                 } else {
-                    // Regular integer operation - signals are always Bits now
+                    // Regular integer/bitwise operation
+                    // BUG FIX #155: For non-float operations, if an operand is float-typed,
+                    // convert it to its bit representation using as_type<uint>().
+                    // This ensures float signals are treated as their IEEE 754 bit patterns.
+                    let left_expr = if left_is_float {
+                        format!("as_type<uint>(signals->{})", self.sanitize_name(left))
+                    } else {
+                        format!("signals->{}", self.sanitize_name(left))
+                    };
+
+                    let right_expr = if right_is_float {
+                        format!("as_type<uint>(signals->{})", self.sanitize_name(right))
+                    } else {
+                        format!("signals->{}", self.sanitize_name(right))
+                    };
+
                     self.write_indented(&format!(
-                        "signals->{} = signals->{} {} signals->{};\n",
+                        "signals->{} = {} {} {};\n",
                         self.sanitize_name(output),
-                        self.sanitize_name(left),
+                        left_expr,
                         op_str,
-                        self.sanitize_name(right)
+                        right_expr
                     ));
                 }
             }
