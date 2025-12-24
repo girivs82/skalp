@@ -3,7 +3,8 @@
 //! Evaluates compile-time constant expressions for monomorphization
 
 use crate::hir::{
-    ConstantId, HirBinaryOp, HirExpression, HirFunction, HirLiteral, HirStatement, HirUnaryOp,
+    ConstantId, HirBinaryOp, HirExpression, HirFunction, HirLiteral, HirStatement, HirType,
+    HirUnaryOp,
 };
 use std::collections::HashMap;
 
@@ -340,6 +341,12 @@ impl ConstEvaluator {
                 }
             }
 
+            // Cast expressions - evaluate inner expression and convert to target type
+            HirExpression::Cast(cast_expr) => {
+                let inner_val = self.eval(&cast_expr.expr)?;
+                self.eval_cast(inner_val, &cast_expr.target_type)
+            }
+
             // Other expressions are not constant
             _ => Err(EvalError::NotConstant(format!(
                 "Expression {:?} is not constant",
@@ -628,6 +635,80 @@ impl ConstEvaluator {
                     "Reduction operators cannot be evaluated at compile time".to_string(),
                 ))
             }
+        }
+    }
+
+    /// Evaluate a cast expression
+    /// Handles type conversions including float-to-bits (IEEE 754)
+    fn eval_cast(&self, value: ConstValue, target_type: &HirType) -> Result<ConstValue, EvalError> {
+        match (value, target_type) {
+            // Float to bit[32]: Convert to IEEE 754 single-precision bit pattern
+            (ConstValue::Float(f), HirType::Bit(32)) => {
+                let f32_val = f as f32;
+                let bits = f32_val.to_bits();
+                Ok(ConstValue::Nat(bits as usize))
+            }
+
+            // Float to bit[64]: Convert to IEEE 754 double-precision bit pattern
+            (ConstValue::Float(f), HirType::Bit(64)) => {
+                let bits = f.to_bits();
+                // Store as Int since it might not fit in usize on 32-bit platforms
+                Ok(ConstValue::Int(bits as i64))
+            }
+
+            // Float to Float32/Float64: Type annotation, preserve value
+            (ConstValue::Float(f), HirType::Float32) => Ok(ConstValue::Float(f)),
+            (ConstValue::Float(f), HirType::Float64) => Ok(ConstValue::Float(f)),
+
+            // Integer to float type: Convert to float
+            (ConstValue::Nat(n), HirType::Float32 | HirType::Float64) => {
+                Ok(ConstValue::Float(n as f64))
+            }
+            (ConstValue::Int(n), HirType::Float32 | HirType::Float64) => {
+                Ok(ConstValue::Float(n as f64))
+            }
+
+            // Integer to bit[N]: Preserve value (truncate/extend as needed)
+            (ConstValue::Nat(n), HirType::Bit(width)) => {
+                let mask = if *width >= 64 {
+                    u64::MAX
+                } else {
+                    (1u64 << width) - 1
+                };
+                Ok(ConstValue::Nat((n as u64 & mask) as usize))
+            }
+            (ConstValue::Int(n), HirType::Bit(width)) => {
+                let mask = if *width >= 64 {
+                    u64::MAX
+                } else {
+                    (1u64 << width) - 1
+                };
+                Ok(ConstValue::Nat((n as u64 & mask) as usize))
+            }
+
+            // Integer type conversions
+            (ConstValue::Nat(n), HirType::Int(_)) => Ok(ConstValue::Int(n as i64)),
+            (ConstValue::Int(n), HirType::Nat(_)) => {
+                if n >= 0 {
+                    Ok(ConstValue::Nat(n as usize))
+                } else {
+                    Err(EvalError::TypeMismatch(format!(
+                        "Cannot cast negative value {} to unsigned type",
+                        n
+                    )))
+                }
+            }
+
+            // Same-type casts (identity)
+            (v @ ConstValue::Nat(_), HirType::Nat(_)) => Ok(v),
+            (v @ ConstValue::Int(_), HirType::Int(_)) => Ok(v),
+            (v @ ConstValue::Bool(_), HirType::Bool) => Ok(v),
+
+            // Unsupported cast
+            (val, ty) => Err(EvalError::TypeMismatch(format!(
+                "Cannot cast {:?} to {:?}",
+                val, ty
+            ))),
         }
     }
 }

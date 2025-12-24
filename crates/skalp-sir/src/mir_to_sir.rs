@@ -2718,6 +2718,9 @@ impl<'a> MirToSirConverter<'a> {
         value: &Value,
         target_width: Option<usize>,
     ) -> usize {
+        // BUG #157 FIX: Track if this is a float literal so we can preserve float type
+        let is_float = matches!(value, Value::Float(_));
+
         let (val, width) = match value {
             Value::Integer(i) => {
                 // BUG #76 FIX: Use target width for integer literals when provided
@@ -2734,7 +2737,13 @@ impl<'a> MirToSirConverter<'a> {
             }
             _ => (0, 1),
         };
-        self.create_constant_node(val, width)
+
+        // BUG #157 FIX: Use create_constant_node_with_type for floats to preserve type info
+        if is_float {
+            self.create_constant_node_with_type(val, width, SirType::Float32)
+        } else {
+            self.create_constant_node(val, width)
+        }
     }
 
     fn create_constant_node(&mut self, value: u64, width: usize) -> usize {
@@ -2750,6 +2759,47 @@ impl<'a> MirToSirConverter<'a> {
             name: output_signal_name,
             width,
             sir_type: SirType::Bits(width),
+            is_state: false,
+            driver_node: Some(node_id),
+            fanout_nodes: Vec::new(),
+            span: None,
+        });
+
+        let node = SirNode {
+            id: node_id,
+            kind: SirNodeKind::Constant { value, width },
+            inputs: vec![],
+            outputs: vec![output_signal],
+            clock_domain: None,
+            impl_style_hint: ImplStyleHint::default(),
+            span: None,
+        };
+
+        self.sir.combinational_nodes.push(node);
+        node_id
+    }
+
+    /// BUG #157 FIX: Create a constant node with explicit type information
+    /// Used to preserve float type for float literals so that unary negation
+    /// can detect them and use FNeg instead of integer negation
+    fn create_constant_node_with_type(
+        &mut self,
+        value: u64,
+        width: usize,
+        sir_type: SirType,
+    ) -> usize {
+        let node_id = self.next_node_id();
+
+        // Create output signal for this node
+        let output_signal_name = format!("node_{}_out", node_id);
+        let output_signal = SignalRef {
+            signal_id: output_signal_name.clone(),
+            bit_range: None,
+        };
+        self.sir.signals.push(SirSignal {
+            name: output_signal_name,
+            width,
+            sir_type,
             is_state: false,
             driver_node: Some(node_id),
             fanout_nodes: Vec::new(),

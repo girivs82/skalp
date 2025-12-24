@@ -6100,6 +6100,7 @@ impl HirBuilderContext {
         // WORKAROUND FOR PARSER BUG: Similar to binary expressions, if we have an IndexExpr,
         // the base might also be a child. For "~a[3]", we might have [IdentExpr(a), IndexExpr([3])]
         // We want to use IndexExpr, not IdentExpr
+        // BUG #157 FIX: Added CastExpr to allow expressions like "-5.0 as fp32"
         let expr_children: Vec<_> = node
             .children()
             .filter(|n| {
@@ -6117,6 +6118,7 @@ impl HirBuilderContext {
                         | SyntaxKind::MatchExpr
                         | SyntaxKind::CallExpr
                         | SyntaxKind::ArrayLiteral
+                        | SyntaxKind::CastExpr
                 )
             })
             .collect();
