@@ -153,6 +153,9 @@ pub struct HirToMir<'hir> {
     inlining_context_stack: Vec<u32>,
     /// Next inlining context ID (incremented for each function inline)
     next_inlining_context_id: u32,
+    /// BUG #160 FIX: Stack of expected return types during function inlining
+    /// When inlining a function, push its return type so concat expressions can infer widths
+    inlining_return_type_stack: Vec<Option<hir::HirType>>,
     /// Synthesized modules from functions (module instantiation instead of inlining)
     /// These modules will be added to the MIR output at the end of transformation
     synthesized_modules: Vec<Module>,
@@ -291,6 +294,7 @@ impl<'hir> HirToMir<'hir> {
             match_arm_prefix: None,
             inlining_context_stack: Vec::new(),
             next_inlining_context_id: 0,
+            inlining_return_type_stack: Vec::new(),
             synthesized_modules: Vec::new(),
             pending_module_instances: Vec::new(),
             entity_instance_outputs: HashMap::new(),
@@ -5900,6 +5904,67 @@ impl<'hir> HirToMir<'hir> {
                     return self.convert_expression(&expressions[0], depth + 1);
                 }
 
+                // BUG #160 FIX: Context-aware width inference for concat elements
+                // When we have a concat like {0, a} and know the target width,
+                // infer the width of integer literals from context.
+                //
+                // First, determine the target width from the type context
+                // Try the inferred type first, then fall back to the return type from the inlining stack
+                let target_width = self.get_type_width(&ty).or_else(|| {
+                    // If we're inside function inlining, check the return type stack
+                    if let Some(Some(ret_ty)) = self.inlining_return_type_stack.last() {
+                        match ret_ty {
+                            hir::HirType::Bit(w)
+                            | hir::HirType::Logic(w)
+                            | hir::HirType::Int(w)
+                            | hir::HirType::Nat(w) => {
+                                eprintln!(
+                                    "[BUG #160 FIX] Concat: using inlining return type width = {}",
+                                    w
+                                );
+                                Some(*w)
+                            }
+                            _ => None,
+                        }
+                    } else {
+                        None
+                    }
+                });
+
+                // Calculate widths of all non-literal elements
+                let mut known_widths: Vec<Option<u32>> = Vec::new();
+                let mut total_known_width = 0u32;
+                let mut num_unknown = 0usize;
+
+                for expr in expressions.iter() {
+                    let width = self.infer_hir_expression_width(expr);
+                    if let Some(w) = width {
+                        total_known_width += w;
+                    } else {
+                        num_unknown += 1;
+                    }
+                    known_widths.push(width);
+                }
+
+                eprintln!(
+                    "[DEBUG] Concat: target_width={:?}, total_known={}, num_unknown={}",
+                    target_width, total_known_width, num_unknown
+                );
+
+                // If we have exactly one unknown width element and know the target,
+                // we can infer the unknown width
+                let inferred_width = match (num_unknown, target_width) {
+                    (1, Some(target)) if target >= total_known_width => {
+                        Some(target - total_known_width)
+                    }
+                    _ => None,
+                };
+
+                eprintln!(
+                    "[DEBUG] Concat: inferred_width for unknown element = {:?}",
+                    inferred_width
+                );
+
                 // Convert all concat elements to MIR expressions
                 let mut mir_exprs = Vec::new();
                 for (idx, expr) in expressions.iter().enumerate() {
@@ -5920,6 +5985,23 @@ impl<'hir> HirToMir<'hir> {
                             self.dynamic_variables.contains_key(var_id)
                         );
                     }
+
+                    // BUG #160 FIX: For integer literals with unknown width, use the inferred width
+                    if let (None, Some(width)) = (known_widths[idx], inferred_width) {
+                        if let hir::HirExpression::Literal(hir::HirLiteral::Integer(val)) = expr {
+                            let width = width as usize;
+                            eprintln!(
+                                "[BUG #160 FIX] Concat: integer literal {} at index {} -> BitVector(width={}, value={})",
+                                val, idx, width, val
+                            );
+                            mir_exprs.push(Expression::new(
+                                ExpressionKind::Literal(Value::BitVector { width, value: *val }),
+                                ty.clone(),
+                            ));
+                            continue;
+                        }
+                    }
+
                     if let Some(mir_expr) = self.convert_expression(expr, depth + 1) {
                         mir_exprs.push(mir_expr);
                     } else {
@@ -9720,6 +9802,141 @@ impl<'hir> HirToMir<'hir> {
         }
     }
 
+    /// BUG #160 FIX: Get the bit width from a Type, if it's a fixed-width bit type
+    fn get_type_width(&self, ty: &Type) -> Option<u32> {
+        use skalp_frontend::types::Width;
+        match ty {
+            Type::Bit(Width::Fixed(w))
+            | Type::Logic(Width::Fixed(w))
+            | Type::Int(Width::Fixed(w))
+            | Type::Nat(Width::Fixed(w)) => Some(*w),
+            Type::Bool => Some(1),
+            _ => None,
+        }
+    }
+
+    /// BUG #160 FIX: Infer the bit width of an HIR expression
+    fn infer_hir_expression_width(&self, expr: &hir::HirExpression) -> Option<u32> {
+        match expr {
+            hir::HirExpression::Literal(lit) => {
+                match lit {
+                    hir::HirLiteral::Integer(_) => None, // Unknown width for bare integers
+                    hir::HirLiteral::BitVector(bits) => Some(bits.len() as u32),
+                    hir::HirLiteral::Boolean(_) => Some(1),
+                    _ => None,
+                }
+            }
+            hir::HirExpression::Range(_base, high, low) => {
+                // Width is high - low + 1 if both are constants
+                if let (
+                    hir::HirExpression::Literal(hir::HirLiteral::Integer(h)),
+                    hir::HirExpression::Literal(hir::HirLiteral::Integer(l)),
+                ) = (high.as_ref(), low.as_ref())
+                {
+                    Some((h - l + 1) as u32)
+                } else {
+                    None
+                }
+            }
+            hir::HirExpression::Cast(cast_expr) => {
+                // Cast has explicit target width
+                match &cast_expr.target_type {
+                    hir::HirType::Bit(w)
+                    | hir::HirType::Logic(w)
+                    | hir::HirType::Int(w)
+                    | hir::HirType::Nat(w) => Some(*w),
+                    _ => None,
+                }
+            }
+            hir::HirExpression::Variable(var_id) => {
+                // Try to look up the variable's type from dynamic_variables first
+                if let Some((
+                    _,
+                    _,
+                    hir::HirType::Bit(w)
+                    | hir::HirType::Logic(w)
+                    | hir::HirType::Int(w)
+                    | hir::HirType::Nat(w),
+                )) = self.dynamic_variables.get(var_id)
+                {
+                    return Some(*w);
+                }
+
+                // Fall through: Try to get type from HIR if available
+                if let Some(hir) = self.hir {
+                    // Look through let bindings
+                    for impl_block in &hir.implementations {
+                        for stmt in &impl_block.statements {
+                            if let hir::HirStatement::Let(let_stmt) = stmt {
+                                if let_stmt.id == *var_id {
+                                    return match &let_stmt.var_type {
+                                        hir::HirType::Bit(w)
+                                        | hir::HirType::Logic(w)
+                                        | hir::HirType::Int(w)
+                                        | hir::HirType::Nat(w) => Some(*w),
+                                        _ => None,
+                                    };
+                                }
+                            }
+                        }
+                    }
+                }
+                None
+            }
+            hir::HirExpression::Signal(signal_id) => {
+                // Look up signal type
+                if let Some(hir) = self.hir {
+                    for entity in &hir.entities {
+                        for signal in &entity.signals {
+                            if signal.id == *signal_id {
+                                return match &signal.signal_type {
+                                    hir::HirType::Bit(w)
+                                    | hir::HirType::Logic(w)
+                                    | hir::HirType::Int(w)
+                                    | hir::HirType::Nat(w) => Some(*w),
+                                    _ => None,
+                                };
+                            }
+                        }
+                    }
+                }
+                None
+            }
+            hir::HirExpression::Port(port_id) => {
+                // Look up port type
+                if let Some(hir) = self.hir {
+                    for entity in &hir.entities {
+                        for port in &entity.ports {
+                            if port.id == *port_id {
+                                return match &port.port_type {
+                                    hir::HirType::Bit(w)
+                                    | hir::HirType::Logic(w)
+                                    | hir::HirType::Int(w)
+                                    | hir::HirType::Nat(w) => Some(*w),
+                                    _ => None,
+                                };
+                            }
+                        }
+                    }
+                }
+                None
+            }
+            hir::HirExpression::Concat(parts) => {
+                // Sum of all part widths, if all parts have known widths
+                let mut total = 0u32;
+                for part in parts {
+                    if let Some(w) = self.infer_hir_expression_width(part) {
+                        total += w;
+                    } else {
+                        return None;
+                    }
+                }
+                Some(total)
+            }
+            _ => None,
+        }
+    }
+
     fn infer_function_return_type(&self, func_name: &str) -> Type {
         if let Some(hir) = self.hir {
             // Search in implementations
@@ -12388,7 +12605,11 @@ impl<'hir> HirToMir<'hir> {
         }
         debug_println!("🔍 Checking substituted_expr for remaining GenericParams...");
         check_for_generic_param(&substituted_expr, "root");
+
+        // BUG #160 FIX: Push return type before converting so concat can infer widths
+        self.inlining_return_type_stack.push(return_type.clone());
         let result = self.convert_expression(&substituted_expr, 0);
+        self.inlining_return_type_stack.pop();
 
         // BUG #76 FIX: Annotate the result expression with the function's return type
         // This allows tuple literals to have correct element widths
