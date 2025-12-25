@@ -277,7 +277,55 @@ pub fn evaluate_primitive(ptype: &PrimitiveType, inputs: &[bool]) -> Vec<bool> {
             let a = inputs.first().copied().unwrap_or(false);
             vec![a]
         }
+
+        // === Floating-Point Soft Macros ===
+        // These are 32-bit operations that take 64 inputs (a[0..31], b[0..31])
+        // and produce 32 outputs (result[0..31])
+        PrimitiveType::Fp32Add => evaluate_fp32_operation(inputs, |a, b| a + b),
+
+        PrimitiveType::Fp32Sub => evaluate_fp32_operation(inputs, |a, b| a - b),
+
+        PrimitiveType::Fp32Mul => evaluate_fp32_operation(inputs, |a, b| a * b),
+
+        PrimitiveType::Fp32Div => {
+            evaluate_fp32_operation(inputs, |a, b| if b != 0.0 { a / b } else { f32::NAN })
+        }
     }
+}
+
+/// Helper function to evaluate FP32 operations
+/// Converts 64 boolean inputs (a[0..31], b[0..31]) to two f32 values,
+/// applies the operation, and converts the result back to 32 boolean outputs
+fn evaluate_fp32_operation<F>(inputs: &[bool], op: F) -> Vec<bool>
+where
+    F: Fn(f32, f32) -> f32,
+{
+    // Extract a[0..31] from inputs[0..31]
+    let mut a_bits: u32 = 0;
+    for i in 0..32 {
+        if inputs.get(i).copied().unwrap_or(false) {
+            a_bits |= 1 << i;
+        }
+    }
+
+    // Extract b[0..31] from inputs[32..63]
+    let mut b_bits: u32 = 0;
+    for i in 0..32 {
+        if inputs.get(32 + i).copied().unwrap_or(false) {
+            b_bits |= 1 << i;
+        }
+    }
+
+    // Convert to f32 and perform operation
+    let a = f32::from_bits(a_bits);
+    let b = f32::from_bits(b_bits);
+    let result = op(a, b);
+
+    // Convert result back to bits
+    let result_bits = result.to_bits();
+
+    // Return as 32 booleans
+    (0..32).map(|i| (result_bits >> i) & 1 == 1).collect()
 }
 
 /// Evaluate a gate primitive with optional fault injection

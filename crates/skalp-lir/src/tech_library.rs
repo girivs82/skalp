@@ -579,6 +579,16 @@ pub enum CellFunction {
     FullAdder,
     Adder(u32), // N-bit adder
 
+    // Floating-Point (IEEE 754 soft macros)
+    /// FP32 Adder: result = a + b
+    FpAdd32,
+    /// FP32 Subtractor: result = a - b
+    FpSub32,
+    /// FP32 Multiplier: result = a * b
+    FpMul32,
+    /// FP32 Divider: result = a / b
+    FpDiv32,
+
     // Sequential
     Dff,
     DffR,  // DFF with reset
@@ -783,6 +793,21 @@ impl CellFunction {
             CellFunction::Blackbox {
                 inputs, outputs, ..
             } => (inputs.clone(), outputs.clone()),
+            // Floating-Point soft macros: 64 inputs (a0-a31, b0-b31), 32 outputs (y0-y31)
+            CellFunction::FpAdd32
+            | CellFunction::FpSub32
+            | CellFunction::FpMul32
+            | CellFunction::FpDiv32 => {
+                let mut inputs = Vec::with_capacity(64);
+                for i in 0..32 {
+                    inputs.push(format!("a{}", i));
+                }
+                for i in 0..32 {
+                    inputs.push(format!("b{}", i));
+                }
+                let outputs: Vec<String> = (0..32).map(|i| format!("y{}", i)).collect();
+                (inputs, outputs)
+            }
         }
     }
 
@@ -2348,6 +2373,11 @@ fn format_cell_function(f: &CellFunction) -> String {
         CellFunction::PowerPadLdo => "power_pad_ldo".to_string(),
         CellFunction::Custom(s) => s.clone(),
         CellFunction::Blackbox { name, .. } => format!("blackbox:{}", name),
+        // Floating-Point soft macros
+        CellFunction::FpAdd32 => "fp_add32".to_string(),
+        CellFunction::FpSub32 => "fp_sub32".to_string(),
+        CellFunction::FpMul32 => "fp_mul32".to_string(),
+        CellFunction::FpDiv32 => "fp_div32".to_string(),
     }
 }
 

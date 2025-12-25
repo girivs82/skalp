@@ -731,6 +731,16 @@ impl<'a> AigBuilder<'a> {
                 inputs.first().copied().unwrap_or(AigLit::false_lit())
             }
 
+            // FP32 operations - soft macros that bypass AIG synthesis
+            CellFunction::FpAdd32
+            | CellFunction::FpSub32
+            | CellFunction::FpMul32
+            | CellFunction::FpDiv32 => {
+                // FP operations are handled as soft macros and not decomposed to AIGs
+                // The SIR evaluator handles them as behavioral primitives
+                inputs.first().copied().unwrap_or(AigLit::false_lit())
+            }
+
             // I/O Pads - these are physical interface cells, pass through signal
             // InputPad: pad → core (data flows from external to internal)
             CellFunction::InputPad => {

@@ -270,7 +270,14 @@ impl MirToLirTransform {
             let const_val = match initial_value {
                 Value::Integer(i) => *i as u64,
                 Value::BitVector { value, .. } => *value,
-                Value::Float(f) => f.to_bits(),
+                // BUG #165 FIX: Use width to determine if we should convert to f32 or f64
+                Value::Float(f) => {
+                    if width <= 32 {
+                        (*f as f32).to_bits() as u64
+                    } else {
+                        f.to_bits()
+                    }
+                }
                 _ => 0,
             };
 
@@ -996,6 +1003,56 @@ impl MirToLirTransform {
                 )
             }
 
+            // Floating-Point Arithmetic (IEEE 754)
+            BinaryOp::FAdd => {
+                let left_sig = self.transform_expression(left, operand_width);
+                let right_sig = self.transform_expression(right, operand_width);
+                (
+                    left_sig,
+                    right_sig,
+                    LirOp::FpAdd {
+                        width: operand_width,
+                    },
+                    operand_width,
+                )
+            }
+            BinaryOp::FSub => {
+                let left_sig = self.transform_expression(left, operand_width);
+                let right_sig = self.transform_expression(right, operand_width);
+                (
+                    left_sig,
+                    right_sig,
+                    LirOp::FpSub {
+                        width: operand_width,
+                    },
+                    operand_width,
+                )
+            }
+            BinaryOp::FMul => {
+                let left_sig = self.transform_expression(left, operand_width);
+                let right_sig = self.transform_expression(right, operand_width);
+                (
+                    left_sig,
+                    right_sig,
+                    LirOp::FpMul {
+                        width: operand_width,
+                    },
+                    operand_width,
+                )
+            }
+            BinaryOp::FDiv => {
+                let left_sig = self.transform_expression(left, operand_width);
+                let right_sig = self.transform_expression(right, operand_width);
+                (
+                    left_sig,
+                    right_sig,
+                    LirOp::FpDiv {
+                        width: operand_width,
+                    },
+                    operand_width,
+                )
+            }
+
             _ => {
                 self.warnings
                     .push(format!("Unsupported binary op: {:?}", op));
@@ -1125,6 +1182,15 @@ impl MirToLirTransform {
                 width: bw,
                 value: v,
             } => (*v, *bw as u32),
+            // BUG #164 FIX: Handle Float literals by converting to their bit representation
+            // If width is 32, treat as fp32; if width is 64, treat as fp64
+            Value::Float(f) => {
+                if width <= 32 {
+                    ((*f as f32).to_bits() as u64, width)
+                } else {
+                    (f.to_bits(), width)
+                }
+            }
             _ => (0, width),
         };
 
@@ -1321,6 +1387,9 @@ impl MirToLirTransform {
                     }
                 }
                 Value::BitVector { width, .. } => *width as u32,
+                // BUG #164 FIX: Float values should have 32-bit width (fp32) or 64-bit (fp64)
+                // Default to 32 bits for floating-point literals
+                Value::Float(_) => 32,
                 _ => 1,
             },
             ExpressionKind::Ref(lvalue) => self.get_lvalue_width(lvalue),
@@ -1351,6 +1420,8 @@ impl MirToLirTransform {
             ExpressionKind::Concat(exprs) => {
                 exprs.iter().map(|e| self.infer_expression_width(e)).sum()
             }
+            // BUG #164 FIX: Cast expressions should return target type width
+            ExpressionKind::Cast { target_type, .. } => self.get_datatype_width(target_type),
             _ => 1,
         }
     }

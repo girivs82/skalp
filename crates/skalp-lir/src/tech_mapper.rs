@@ -530,6 +530,44 @@ impl<'a> TechMapper<'a> {
                 self.map_sign_extend(*from, *to, &input_nets, &output_nets, &node.path);
             }
 
+            // Floating-Point operations (soft macros)
+            LirOp::FpAdd { width } => {
+                self.map_fp_operation(
+                    CellFunction::FpAdd32,
+                    *width,
+                    &input_nets,
+                    &output_nets,
+                    &node.path,
+                );
+            }
+            LirOp::FpSub { width } => {
+                self.map_fp_operation(
+                    CellFunction::FpSub32,
+                    *width,
+                    &input_nets,
+                    &output_nets,
+                    &node.path,
+                );
+            }
+            LirOp::FpMul { width } => {
+                self.map_fp_operation(
+                    CellFunction::FpMul32,
+                    *width,
+                    &input_nets,
+                    &output_nets,
+                    &node.path,
+                );
+            }
+            LirOp::FpDiv { width } => {
+                self.map_fp_operation(
+                    CellFunction::FpDiv32,
+                    *width,
+                    &input_nets,
+                    &output_nets,
+                    &node.path,
+                );
+            }
+
             _ => {
                 self.warnings
                     .push(format!("Unsupported operation: {:?}", node.op));
@@ -1461,6 +1499,73 @@ impl<'a> TechMapper<'a> {
             cell.failure_modes = buf_info.failure_modes.clone();
             self.add_cell(cell);
         }
+
+        self.stats.direct_mappings += 1;
+    }
+
+    /// Map a floating-point operation as a soft-macro cell
+    ///
+    /// FP operations are mapped as single cells with all 32 input bits for A,
+    /// all 32 input bits for B, and all 32 output bits. These cells represent
+    /// IEEE 754 floating-point operations that can be:
+    /// - Simulated at gate level using software FP computation
+    /// - Replaced with actual FP IP during physical implementation
+    fn map_fp_operation(
+        &mut self,
+        function: CellFunction,
+        width: u32,
+        inputs: &[Vec<GateNetId>],
+        outputs: &[GateNetId],
+        path: &str,
+    ) {
+        if inputs.len() < 2 {
+            self.warnings
+                .push(format!("FP operation needs 2 inputs, got {}", inputs.len()));
+            return;
+        }
+
+        // Collect all input nets (A and B operands)
+        let mut all_inputs: Vec<GateNetId> = Vec::new();
+
+        // Add all bits of operand A
+        for bit in 0..width as usize {
+            let net = inputs[0].get(bit).copied().unwrap_or(inputs[0][0]);
+            all_inputs.push(net);
+        }
+
+        // Add all bits of operand B
+        for bit in 0..width as usize {
+            let net = inputs[1].get(bit).copied().unwrap_or(inputs[1][0]);
+            all_inputs.push(net);
+        }
+
+        // Collect all output nets
+        let mut all_outputs: Vec<GateNetId> = Vec::new();
+        for bit in 0..width as usize {
+            let net = outputs.get(bit).copied().unwrap_or(outputs[0]);
+            all_outputs.push(net);
+        }
+
+        // Create the soft-macro cell
+        let cell_name = match function {
+            CellFunction::FpAdd32 => "FP32_ADD",
+            CellFunction::FpSub32 => "FP32_SUB",
+            CellFunction::FpMul32 => "FP32_MUL",
+            CellFunction::FpDiv32 => "FP32_DIV",
+            _ => "FP32_UNKNOWN",
+        };
+
+        let mut cell = Cell::new_comb(
+            CellId(0),
+            cell_name.to_string(),
+            self.library.name.clone(),
+            100.0, // Higher FIT for complex FP unit
+            format!("{}.fp_op", path),
+            all_inputs,
+            all_outputs,
+        );
+        cell.source_op = Some(format!("{:?}", function));
+        self.add_cell(cell);
 
         self.stats.direct_mappings += 1;
     }

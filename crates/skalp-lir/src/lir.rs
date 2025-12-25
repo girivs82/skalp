@@ -102,6 +102,16 @@ pub enum PrimitiveType {
     /// Comparator bit (inputs: [a, b, lt_in, eq_in], outputs: [lt_out, eq_out])
     CompBit,
 
+    // === Floating-Point (soft macros for IEEE 754) ===
+    /// FP32 addition (inputs: [a[0..31], b[0..31]], outputs: [result[0..31]])
+    Fp32Add,
+    /// FP32 subtraction (inputs: [a[0..31], b[0..31]], outputs: [result[0..31]])
+    Fp32Sub,
+    /// FP32 multiplication (inputs: [a[0..31], b[0..31]], outputs: [result[0..31]])
+    Fp32Mul,
+    /// FP32 division (inputs: [a[0..31], b[0..31]], outputs: [result[0..31]])
+    Fp32Div,
+
     // === Memory Elements (for SRAM/register file modeling) ===
     /// Single-bit memory cell (higher SEU susceptibility)
     MemCell,
@@ -220,6 +230,11 @@ impl PrimitiveType {
             }
             PrimitiveType::PowerSwitch { .. } => 1,
             PrimitiveType::AlwaysOnBuf => 1,
+            // FP32 operations: 32 bits for A + 32 bits for B = 64 inputs
+            PrimitiveType::Fp32Add
+            | PrimitiveType::Fp32Sub
+            | PrimitiveType::Fp32Mul
+            | PrimitiveType::Fp32Div => 64,
         }
     }
 
@@ -230,6 +245,11 @@ impl PrimitiveType {
             PrimitiveType::FullAdder => 2,
             PrimitiveType::CompBit => 2,
             PrimitiveType::PowerSwitch { .. } => 0,
+            // FP32 operations have 32 output bits
+            PrimitiveType::Fp32Add
+            | PrimitiveType::Fp32Sub
+            | PrimitiveType::Fp32Mul
+            | PrimitiveType::Fp32Div => 32,
             _ => 1,
         }
     }
@@ -267,6 +287,11 @@ impl PrimitiveType {
             PrimitiveType::RetentionDff { .. } => 1.5,
             PrimitiveType::PowerSwitch { .. } => 0.5,
             PrimitiveType::AlwaysOnBuf => 0.1,
+            // FP32 operations are complex - high FIT rate
+            PrimitiveType::Fp32Add => 100.0,
+            PrimitiveType::Fp32Sub => 100.0,
+            PrimitiveType::Fp32Mul => 150.0,
+            PrimitiveType::Fp32Div => 200.0,
         }
     }
 
@@ -311,6 +336,10 @@ impl PrimitiveType {
             PrimitiveType::RetentionDff { .. } => "RETDFF",
             PrimitiveType::PowerSwitch { .. } => "PWRSW",
             PrimitiveType::AlwaysOnBuf => "AONBUF",
+            PrimitiveType::Fp32Add => "FP32ADD",
+            PrimitiveType::Fp32Sub => "FP32SUB",
+            PrimitiveType::Fp32Mul => "FP32MUL",
+            PrimitiveType::Fp32Div => "FP32DIV",
         }
     }
 }
@@ -519,6 +548,16 @@ pub enum LirOp {
     /// Multiplication: result = a * b
     Mul { width: u32, result_width: u32 },
 
+    // === Floating-Point Arithmetic ===
+    /// FP32 Addition: result = a + b (IEEE 754)
+    FpAdd { width: u32 },
+    /// FP32 Subtraction: result = a - b (IEEE 754)
+    FpSub { width: u32 },
+    /// FP32 Multiplication: result = a * b (IEEE 754)
+    FpMul { width: u32 },
+    /// FP32 Division: result = a / b (IEEE 754)
+    FpDiv { width: u32 },
+
     // === Bitwise Logic ===
     /// Bitwise AND
     And { width: u32 },
@@ -632,6 +671,10 @@ impl LirOp {
                 }
             }
             LirOp::Mul { result_width, .. } => *result_width,
+            LirOp::FpAdd { width }
+            | LirOp::FpSub { width }
+            | LirOp::FpMul { width }
+            | LirOp::FpDiv { width } => *width, // FP operations preserve width
             LirOp::And { width }
             | LirOp::Or { width }
             | LirOp::Xor { width }
@@ -676,6 +719,10 @@ impl LirOp {
             LirOp::Add { .. }
             | LirOp::Sub { .. }
             | LirOp::Mul { .. }
+            | LirOp::FpAdd { .. }
+            | LirOp::FpSub { .. }
+            | LirOp::FpMul { .. }
+            | LirOp::FpDiv { .. }
             | LirOp::And { .. }
             | LirOp::Or { .. }
             | LirOp::Xor { .. }

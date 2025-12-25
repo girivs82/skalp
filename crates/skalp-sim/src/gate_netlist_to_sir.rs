@@ -327,6 +327,13 @@ impl GateNetlistToSirConverter {
             "HA" | "HALFADDER" => PrimitiveType::HalfAdder,
             "FA" | "FULLADDER" => PrimitiveType::FullAdder,
 
+            // Floating-Point (soft macros)
+            "FP32" => PrimitiveType::Fp32Add, // Default to add for generic FP32
+            "FP32ADD" | "FPADD32" => PrimitiveType::Fp32Add,
+            "FP32SUB" | "FPSUB32" => PrimitiveType::Fp32Sub,
+            "FP32MUL" | "FPMUL32" => PrimitiveType::Fp32Mul,
+            "FP32DIV" | "FPDIV32" => PrimitiveType::Fp32Div,
+
             // Sequential - D Flip-Flops
             "DFF" | "DFFRQ" => PrimitiveType::DffP, // Rising edge, async reset
             "DFFN" | "DFFRN" => PrimitiveType::DffN, // Active-low reset
