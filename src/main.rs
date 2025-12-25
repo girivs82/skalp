@@ -34,6 +34,8 @@ pub struct OptimizationOptions {
     pub ml_policy_path: Option<PathBuf>,
     /// Directory to collect training data
     pub training_data_dir: Option<PathBuf>,
+    /// Gate optimization level (0=none, 1=basic, 2=full)
+    pub gate_opt_level: u8,
 }
 
 /// SKALP - Intent-driven hardware synthesis
@@ -122,6 +124,19 @@ enum Commands {
         /// If not specified, uses the built-in generic ASIC library
         #[arg(long, value_name = "PATH")]
         library: Option<PathBuf>,
+
+        // === Gate-Level Optimization ===
+        /// Gate optimization level (0=none, 1=basic, 2=full). Default: 1
+        /// -O0 skips gate optimization (useful for debugging)
+        /// -O1 runs constant folding, buffer removal, DCE
+        /// -O2 runs all optimizations including advanced passes
+        #[arg(
+            short = 'O',
+            long = "gate-opt",
+            value_name = "LEVEL",
+            default_value = "1"
+        )]
+        gate_opt_level: u8,
     },
 
     /// Simulate the design
@@ -140,6 +155,15 @@ enum Commands {
         /// Use GPU acceleration
         #[arg(long)]
         gpu: bool,
+
+        /// Gate optimization level for gate-level simulation (0=none, 1=basic, 2=full). Default: 1
+        #[arg(
+            short = 'O',
+            long = "gate-opt",
+            value_name = "LEVEL",
+            default_value = "1"
+        )]
+        gate_opt_level: u8,
     },
 
     /// Synthesize for FPGA target
@@ -449,6 +473,7 @@ fn main() -> Result<()> {
             ml_policy,
             collect_training_data,
             library,
+            gate_opt_level,
         } => {
             let source_file = source.unwrap_or_else(|| PathBuf::from("src/main.sk"));
 
@@ -472,6 +497,7 @@ fn main() -> Result<()> {
                 ml_guided,
                 ml_policy_path: ml_policy,
                 training_data_dir: collect_training_data,
+                gate_opt_level,
             };
 
             build_design(
@@ -489,8 +515,15 @@ fn main() -> Result<()> {
             duration,
             gate_level,
             gpu,
+            gate_opt_level,
         } => {
-            simulate_design(&design, duration.as_deref(), gate_level, gpu)?;
+            simulate_design(
+                &design,
+                duration.as_deref(),
+                gate_level,
+                gpu,
+                gate_opt_level,
+            )?;
         }
 
         Commands::Synth {
@@ -872,8 +905,12 @@ fn build_design(
                 // Lower MIR module to LIR
                 let lir_result = lower_mir_module_to_lir(top_module);
 
-                // Map to gate netlist with optimizations
-                let tech_result = skalp_lir::map_lir_to_gates_optimized(&lir_result.lir, &library);
+                // Map to gate netlist with configurable optimization level
+                let tech_result = skalp_lir::map_lir_to_gates_with_opt_level(
+                    &lir_result.lir,
+                    &library,
+                    optimization_options.gate_opt_level,
+                );
                 let gate_netlist = tech_result.netlist;
 
                 // Apply synthesis optimization if requested
@@ -1369,6 +1406,7 @@ fn simulate_design(
     duration: Option<&str>,
     gate_level: bool,
     use_gpu: bool,
+    gate_opt_level: u8,
 ) -> Result<()> {
     use skalp_mir::Mir;
     use skalp_sir::convert_mir_to_sir;
@@ -1395,7 +1433,7 @@ fn simulate_design(
         Some("sk") | Some("skalp") => {
             // Source file - compile it
             if gate_level {
-                simulate_gate_level(design_file, cycles, use_gpu)
+                simulate_gate_level(design_file, cycles, use_gpu, gate_opt_level)
             } else {
                 simulate_behavioral(design_file, cycles, use_gpu)
             }
@@ -1471,7 +1509,12 @@ fn simulate_behavioral(source_file: &PathBuf, cycles: u64, use_gpu: bool) -> Res
 }
 
 /// Gate-level simulation: HIR → MIR → LIR → GateNetlist → SIR → Simulation
-fn simulate_gate_level(source_file: &PathBuf, cycles: u64, use_gpu: bool) -> Result<()> {
+fn simulate_gate_level(
+    source_file: &PathBuf,
+    cycles: u64,
+    use_gpu: bool,
+    gate_opt_level: u8,
+) -> Result<()> {
     use skalp_frontend::parse_and_build_hir_from_file;
     use skalp_lir::get_stdlib_library;
     use skalp_sim::{convert_gate_netlist_to_sir, HwAccel, UnifiedSimConfig, UnifiedSimulator};
@@ -1479,6 +1522,11 @@ fn simulate_gate_level(source_file: &PathBuf, cycles: u64, use_gpu: bool) -> Res
     println!("🔬 Gate-Level Simulation");
     println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
     println!("Source: {:?}", source_file);
+    if gate_opt_level == 0 {
+        println!("Optimization: DISABLED (-O0)");
+    } else {
+        println!("Optimization: level {}", gate_opt_level);
+    }
     println!();
 
     // Parse and build HIR
@@ -1536,9 +1584,10 @@ fn simulate_gate_level(source_file: &PathBuf, cycles: u64, use_gpu: bool) -> Res
             .first()
             .ok_or_else(|| anyhow::anyhow!("No modules found in design"))?;
 
-        // Lower to LIR and tech-map
+        // Lower to LIR and tech-map with configurable optimization
         let lir_result = skalp_lir::lower_mir_module_to_lir(top_module);
-        let tech_result = skalp_lir::map_lir_to_gates_optimized(&lir_result.lir, &library);
+        let tech_result =
+            skalp_lir::map_lir_to_gates_with_opt_level(&lir_result.lir, &library, gate_opt_level);
         tech_result.netlist
     };
 

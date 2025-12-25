@@ -7212,11 +7212,33 @@ impl<'hir> HirToMir<'hir> {
     }
 
     /// Convert literal expression (for initial values)
+    ///
+    /// BUG #158 FIX: Also handles Cast expressions that wrap literals.
+    /// For example: `100 as bit[256]` should extract the value 100.
     fn convert_literal_expr(&mut self, expr: &hir::HirExpression) -> Option<Value> {
-        if let hir::HirExpression::Literal(lit) = expr {
-            self.convert_literal(lit)
-        } else {
-            None
+        match expr {
+            hir::HirExpression::Literal(lit) => self.convert_literal(lit),
+            // BUG #158 FIX: Handle Cast expressions wrapping literals
+            // e.g., `100 as bit[256]` or `(-5.0 as fp32) as bit[32]`
+            hir::HirExpression::Cast(cast_expr) => {
+                // Recursively extract the literal value from the inner expression
+                self.convert_literal_expr(&cast_expr.expr)
+            }
+            // BUG #158 FIX: Handle Unary expressions (for negative literals)
+            // e.g., `-5.0` is Unary { op: Negate, operand: Literal(5.0) }
+            hir::HirExpression::Unary(unary) => {
+                if let Some(inner_val) = self.convert_literal_expr(&unary.operand) {
+                    match (&unary.op, inner_val) {
+                        (hir::HirUnaryOp::Negate, Value::Integer(i)) => Some(Value::Integer(-i)),
+                        (hir::HirUnaryOp::Negate, Value::Float(f)) => Some(Value::Float(-f)),
+                        (hir::HirUnaryOp::Not, Value::Integer(i)) => Some(Value::Integer(!i)),
+                        _ => None,
+                    }
+                } else {
+                    None
+                }
+            }
+            _ => None,
         }
     }
 

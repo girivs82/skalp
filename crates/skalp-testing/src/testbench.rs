@@ -26,7 +26,10 @@
 use crate::cache::{collect_dependencies, CompilationCache};
 use anyhow::Result;
 use skalp_mir::MirCompiler;
-use skalp_sim::{SimulationConfig, Simulator};
+use skalp_sim::{
+    convert_gate_netlist_to_sir, HwAccel, SimLevel, SimulationConfig, Simulator, UnifiedSimConfig,
+    UnifiedSimulator,
+};
 use skalp_sir::convert_mir_to_sir_with_hierarchy;
 use std::collections::HashMap;
 use std::path::Path;
@@ -670,4 +673,339 @@ macro_rules! test_vector {
             (inputs, outputs)
         }
     };
+}
+
+// ============================================================================
+// Gate-Level Testbench
+// ============================================================================
+
+/// Gate-level testbench for technology-mapped verification
+///
+/// This testbench compiles designs through the full synthesis flow:
+/// HIR → MIR → LIR → GateNetlist → SIR
+///
+/// The simulation uses primitive gates (AND, OR, NOT, DFF, etc.) instead of
+/// behavioral constructs, providing more accurate timing and area verification.
+///
+/// # Example
+/// ```rust,no_run
+/// use skalp_testing::testbench::*;
+///
+/// #[test]
+/// fn test_counter_gates() {
+///     let mut tb = GateLevelTestbench::new("examples/counter.sk").unwrap();
+///
+///     // Reset
+///     tb.set("rst", 1u8);
+///     tb.clock(2);
+///     tb.set("rst", 0u8);
+///
+///     // Count up
+///     tb.clock(5);
+///     assert_eq!(tb.get_u32("count"), 5);
+/// }
+/// ```
+pub struct GateLevelTestbench {
+    sim: UnifiedSimulator,
+    pending_inputs: HashMap<String, u64>,
+    cycle_count: u64,
+}
+
+impl GateLevelTestbench {
+    /// Create a new gate-level testbench from a SKALP source file
+    pub fn new(source_path: &str) -> Result<Self> {
+        let use_gpu = std::env::var("SKALP_SIM_MODE")
+            .map(|v| v.to_lowercase() != "cpu")
+            .unwrap_or(true);
+
+        let config = UnifiedSimConfig {
+            level: SimLevel::GateLevel,
+            hw_accel: if use_gpu { HwAccel::Auto } else { HwAccel::Cpu },
+            max_cycles: 1_000_000,
+            capture_waveforms: true,
+        };
+
+        Self::with_config(source_path, config)
+    }
+
+    /// Create a new gate-level testbench with custom config
+    pub fn with_config(source_path: &str, config: UnifiedSimConfig) -> Result<Self> {
+        use skalp_frontend::parse_and_build_hir_from_file;
+        use skalp_lir::{
+            get_stdlib_library, lower_mir_hierarchical, lower_mir_module_to_lir,
+            map_hierarchical_to_gates, map_lir_to_gates_optimized,
+        };
+        use std::time::Instant;
+
+        let start_total = Instant::now();
+        eprintln!(
+            "⏱️  [GATE-LEVEL TB] Starting gate-level compilation of '{}'",
+            source_path
+        );
+
+        let path = Path::new(source_path);
+
+        // Parse and build HIR
+        let start_hir = Instant::now();
+        let hir = parse_and_build_hir_from_file(path)?;
+        eprintln!(
+            "⏱️  [GATE-LEVEL TB] HIR parsing completed in {:?}",
+            start_hir.elapsed()
+        );
+
+        // Compile to MIR
+        let start_mir = Instant::now();
+        let compiler = MirCompiler::new();
+        let mir = compiler
+            .compile_to_mir(&hir)
+            .map_err(|e| anyhow::anyhow!("MIR compilation failed: {}", e))?;
+        eprintln!(
+            "⏱️  [GATE-LEVEL TB] MIR compilation completed in {:?}",
+            start_mir.elapsed()
+        );
+
+        // Load technology library
+        let library = get_stdlib_library("generic_asic")
+            .map_err(|e| anyhow::anyhow!("Failed to load technology library: {:?}", e))?;
+
+        // Check if design has hierarchy
+        let has_hierarchy =
+            mir.modules.len() > 1 || mir.modules.iter().any(|m| !m.instances.is_empty());
+
+        // Lower to LIR and tech-map to GateNetlist
+        let start_lir = Instant::now();
+        let netlist = if has_hierarchy {
+            eprintln!(
+                "⏱️  [GATE-LEVEL TB] Using hierarchical synthesis ({} modules)",
+                mir.modules.len()
+            );
+
+            let hier_lir = lower_mir_hierarchical(&mir);
+            let hier_netlist = map_hierarchical_to_gates(&hier_lir, &library);
+            hier_netlist.flatten()
+        } else {
+            eprintln!("⏱️  [GATE-LEVEL TB] Using flat synthesis (single module)");
+
+            let top_module = mir
+                .modules
+                .first()
+                .ok_or_else(|| anyhow::anyhow!("No modules found in design"))?;
+
+            let lir_result = lower_mir_module_to_lir(top_module);
+            let tech_result = map_lir_to_gates_optimized(&lir_result.lir, &library);
+            tech_result.netlist
+        };
+        eprintln!(
+            "⏱️  [GATE-LEVEL TB] Gate netlist completed in {:?} ({} cells, {} nets)",
+            start_lir.elapsed(),
+            netlist.cells.len(),
+            netlist.nets.len()
+        );
+
+        // Convert GateNetlist to SIR for simulation
+        let start_sir = Instant::now();
+        let sir_result = convert_gate_netlist_to_sir(&netlist);
+        eprintln!(
+            "⏱️  [GATE-LEVEL TB] SIR conversion completed in {:?} ({} primitives)",
+            start_sir.elapsed(),
+            sir_result.stats.primitives_created
+        );
+
+        // Create and initialize unified simulator
+        let start_sim = Instant::now();
+        let mut sim = UnifiedSimulator::new(config)
+            .map_err(|e| anyhow::anyhow!("Failed to create simulator: {}", e))?;
+
+        sim.load_gate_level(&sir_result.sir)
+            .map_err(|e| anyhow::anyhow!("Failed to load design: {}", e))?;
+
+        eprintln!(
+            "⏱️  [GATE-LEVEL TB] Simulator initialized in {:?} (device: {})",
+            start_sim.elapsed(),
+            sim.device_info()
+        );
+        eprintln!(
+            "⏱️  [GATE-LEVEL TB] ✅ Total gate-level testbench creation time: {:?}",
+            start_total.elapsed()
+        );
+
+        Ok(Self {
+            sim,
+            pending_inputs: HashMap::new(),
+            cycle_count: 0,
+        })
+    }
+
+    /// Set an input signal value (chainable)
+    pub fn set(&mut self, signal: &str, value: impl IntoSignalValue) -> &mut Self {
+        let bytes = value.into_bytes();
+        // Convert bytes to u64
+        let val = bytes_to_u64(&bytes);
+        self.pending_inputs.insert(signal.to_string(), val);
+        self
+    }
+
+    /// Apply pending inputs and run for N clock cycles (uses default clock "clk")
+    pub fn clock(&mut self, cycles: usize) -> &mut Self {
+        self.clock_signal("clk", cycles)
+    }
+
+    /// Apply pending inputs and run for N cycles on a specific clock signal
+    pub fn clock_signal(&mut self, clock_name: &str, cycles: usize) -> &mut Self {
+        // Apply all pending inputs
+        for (signal, value) in self.pending_inputs.drain() {
+            self.sim.set_input(&signal, value);
+        }
+
+        // Run clock cycles
+        for _ in 0..cycles {
+            self.sim.set_input(clock_name, 0);
+            self.sim.step();
+            self.sim.set_input(clock_name, 1);
+            self.sim.step();
+            self.cycle_count += 1;
+        }
+
+        self
+    }
+
+    /// Apply pending inputs and step the simulation once
+    pub fn step(&mut self) -> &mut Self {
+        for (signal, value) in self.pending_inputs.drain() {
+            self.sim.set_input(&signal, value);
+        }
+        self.sim.step();
+        self
+    }
+
+    /// Get an output value as u32
+    ///
+    /// Handles both packed signals (e.g., "result") and bit-blasted signals
+    /// (e.g., "result[0]", "result[1]", ..., "result[31]").
+    pub fn get_u32(&mut self, signal: &str) -> u32 {
+        // If there are pending inputs, apply them and step
+        if !self.pending_inputs.is_empty() {
+            self.step();
+        }
+
+        // Try direct lookup first
+        if let Some(val) = self.sim.get_output(signal) {
+            return val as u32;
+        }
+
+        // Try bit-blasted signals
+        self.get_bitblasted_value(signal, 32) as u32
+    }
+
+    /// Get an output value as u64
+    ///
+    /// Handles both packed signals and bit-blasted signals.
+    pub fn get_u64(&mut self, signal: &str) -> u64 {
+        if !self.pending_inputs.is_empty() {
+            self.step();
+        }
+
+        // Try direct lookup first
+        if let Some(val) = self.sim.get_output(signal) {
+            return val;
+        }
+
+        // Try bit-blasted signals
+        self.get_bitblasted_value(signal, 64)
+    }
+
+    /// Get a bit-blasted signal value (e.g., "signal[0]", "signal[1]", ...)
+    fn get_bitblasted_value(&self, signal: &str, max_bits: usize) -> u64 {
+        let mut result = 0u64;
+
+        for bit in 0..max_bits {
+            let bit_signal = format!("{}[{}]", signal, bit);
+            if let Some(val) = self.sim.get_output(&bit_signal) {
+                if val != 0 {
+                    result |= 1u64 << bit;
+                }
+            } else {
+                // If we can't find this bit, stop looking for more
+                // (handles signals that are less than max_bits wide)
+                if bit > 0 {
+                    break;
+                }
+            }
+        }
+
+        result
+    }
+
+    /// Expect an output signal to have a specific value
+    pub fn expect(&mut self, signal: &str, expected: impl IntoSignalValue) -> &mut Self {
+        let expected_bytes = expected.into_bytes();
+        let expected_u64 = bytes_to_u64(&expected_bytes);
+        let actual = self.sim.get_output(signal).unwrap_or(0);
+
+        assert_eq!(
+            actual, expected_u64,
+            "Signal '{}' mismatch at cycle {}: expected 0x{:x}, got 0x{:x}",
+            signal, self.cycle_count, expected_u64, actual
+        );
+
+        self
+    }
+
+    /// Expect a fp32 output with tolerance
+    pub fn expect_fp32(&mut self, signal: &str, expected: f32, tolerance: f32) -> &mut Self {
+        let actual_bits = self.sim.get_output(signal).unwrap_or(0) as u32;
+        let actual = f32::from_bits(actual_bits);
+        let diff = (actual - expected).abs();
+
+        assert!(
+            diff <= tolerance,
+            "Signal '{}' fp32 mismatch at cycle {}: expected {}, got {} (diff: {}, tolerance: {})",
+            signal,
+            self.cycle_count,
+            expected,
+            actual,
+            diff,
+            tolerance
+        );
+
+        self
+    }
+
+    /// Apply reset for N cycles
+    pub fn reset(&mut self, cycles: usize) -> &mut Self {
+        self.set("rst", 1u8);
+        self.clock(cycles);
+        self.set("rst", 0u8);
+        self.clock(1);
+        self
+    }
+
+    /// Get the current cycle count
+    pub fn cycles(&self) -> u64 {
+        self.cycle_count
+    }
+
+    /// Get device info (CPU or GPU)
+    pub fn device_info(&self) -> String {
+        self.sim.device_info()
+    }
+
+    /// Get input port names
+    pub fn get_input_names(&self) -> Vec<String> {
+        self.sim.get_input_names()
+    }
+
+    /// Get output port names
+    pub fn get_output_names(&self) -> Vec<String> {
+        self.sim.get_output_names()
+    }
+}
+
+/// Helper function to convert bytes to u64 (little-endian)
+fn bytes_to_u64(bytes: &[u8]) -> u64 {
+    let mut result = 0u64;
+    for (i, &byte) in bytes.iter().take(8).enumerate() {
+        result |= (byte as u64) << (i * 8);
+    }
+    result
 }

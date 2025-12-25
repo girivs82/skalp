@@ -108,6 +108,43 @@ impl GateOptimizer {
         }
     }
 
+    /// Enable/disable constant folding pass
+    pub fn set_enable_constant_folding(&mut self, enable: bool) {
+        self.enable_constant_folding = enable;
+    }
+
+    /// Enable/disable dead code elimination pass
+    pub fn set_enable_dce(&mut self, enable: bool) {
+        self.enable_dce = enable;
+    }
+
+    /// Enable/disable boolean simplification pass
+    pub fn set_enable_boolean_simp(&mut self, enable: bool) {
+        self.enable_boolean_simp = enable;
+    }
+
+    /// Enable/disable MUX optimization pass
+    pub fn set_enable_mux_opt(&mut self, enable: bool) {
+        self.enable_mux_opt = enable;
+    }
+
+    /// Enable/disable buffer removal pass
+    pub fn set_enable_buffer_removal(&mut self, enable: bool) {
+        self.enable_buffer_removal = enable;
+    }
+
+    /// Enable/disable double inverter removal (convenience method)
+    pub fn set_enable_double_inverter_removal(&mut self, enable: bool) {
+        // Double inverter removal is part of boolean simplification
+        self.enable_boolean_simp = enable;
+    }
+
+    /// Enable/disable identity removal (convenience method)
+    pub fn set_enable_identity_removal(&mut self, enable: bool) {
+        // Identity removal is part of boolean simplification
+        self.enable_boolean_simp = enable;
+    }
+
     /// Run all enabled optimization passes
     pub fn optimize(&mut self, netlist: &mut GateNetlist) -> OptimizationStats {
         let cells_before = netlist.cells.len();

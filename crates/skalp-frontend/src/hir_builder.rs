@@ -805,11 +805,12 @@ impl HirBuilderContext {
                         for stmt in let_stmts {
                             if let HirStatement::Let(let_stmt) = stmt {
                                 // Create a signal for the let binding
+                                // BUG #158 FIX: Store the initial value for gate-level synthesis
                                 let signal = HirSignal {
                                     id: SignalId(let_stmt.id.0), // Reuse the variable ID as signal ID
                                     name: let_stmt.name.clone(),
                                     signal_type: let_stmt.var_type.clone(),
-                                    initial_value: None,
+                                    initial_value: Some(let_stmt.value.clone()),
                                     clock_domain: None,
                                     span: self.make_span(&child),
                                     memory_config: None,
@@ -1134,11 +1135,13 @@ impl HirBuilderContext {
                             }
 
                             // Create a variable for the let binding
+                            // BUG #158 FIX: Store the initial value so that constants can be
+                            // properly synthesized to TIE cells in gate-level synthesis
                             let variable = HirVariable {
                                 id: let_stmt.id,
                                 name: let_stmt.name.clone(),
                                 var_type: let_stmt.var_type.clone(),
-                                initial_value: None,
+                                initial_value: Some(let_stmt.value.clone()),
                                 span: self.make_span(&child),
                             };
 

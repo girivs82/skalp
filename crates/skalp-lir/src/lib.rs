@@ -77,8 +77,9 @@ pub use tech_library::{
 
 // Technology mapper
 pub use tech_mapper::{
-    map_hierarchical_to_gates, map_lir_to_gates, map_lir_to_gates_optimized, map_word_lir_to_gates,
-    TechMapResult, TechMapStats, TechMapper,
+    map_hierarchical_to_gates, map_lir_to_gates, map_lir_to_gates_optimized,
+    map_lir_to_gates_with_opt_level, map_word_lir_to_gates, TechMapResult, TechMapStats,
+    TechMapper,
 };
 
 // Structural pattern detection for safety mechanisms

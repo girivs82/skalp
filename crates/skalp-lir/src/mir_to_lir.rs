@@ -251,6 +251,10 @@ impl MirToLirTransform {
     /// They need to be converted to LIR signals so that assignments
     /// to variables can be properly converted and subsequent references
     /// to those variables will resolve correctly.
+    ///
+    /// BUG #158 FIX: If the variable has an initial value (from `let a = 100`),
+    /// we must create a constant LIR node to drive the signal. Otherwise, the
+    /// signal will be floating and won't synthesize to proper TIE cells.
     fn create_variable_signal(&mut self, variable: &Variable) {
         let width = Self::get_type_width(&variable.var_type);
         self.variable_widths.insert(variable.id, width);
@@ -258,6 +262,28 @@ impl MirToLirTransform {
         // Create a signal for the variable
         let signal_id = self.lir.add_signal(format!("_v_{}", variable.name), width);
         self.variable_to_signal.insert(variable.id, signal_id);
+
+        // BUG #158 FIX: If the variable has an initial value, create a constant
+        // to drive the signal. This ensures constants like `let a = 100` get
+        // synthesized to TIE_HIGH/TIE_LOW cells in the gate netlist.
+        if let Some(ref initial_value) = variable.initial {
+            let const_val = match initial_value {
+                Value::Integer(i) => *i as u64,
+                Value::BitVector { value, .. } => *value,
+                Value::Float(f) => f.to_bits(),
+                _ => 0,
+            };
+
+            self.lir.add_node(
+                LirOp::Constant {
+                    width,
+                    value: const_val,
+                },
+                vec![],
+                signal_id,
+                format!("{}.var_{}_init", self.hierarchy_path, variable.name),
+            );
+        }
     }
 
     /// Transform a continuous assignment
@@ -701,6 +727,68 @@ impl MirToLirTransform {
                     format!("{}.concat", self.hierarchy_path),
                 );
                 out
+            }
+            ExpressionKind::Cast { expr, target_type } => {
+                // Get source width and target width
+                let source_width = self.infer_expression_width(expr);
+                let target_width = self.get_datatype_width(target_type);
+
+                // Transform the inner expression
+                let source_signal = self.transform_expression(expr, source_width);
+
+                if target_width == source_width {
+                    // Same width - just pass through
+                    source_signal
+                } else if target_width > source_width {
+                    // Widening - use ZeroExtend (unsigned) or SignExtend (signed)
+                    let out = self.alloc_temp_signal(target_width);
+                    let is_signed = matches!(
+                        target_type,
+                        DataType::Int(_)
+                            | DataType::IntParam { .. }
+                            | DataType::IntExpr { .. }
+                            | DataType::Float16
+                            | DataType::Float32
+                            | DataType::Float64
+                    );
+
+                    if is_signed {
+                        self.lir.add_node(
+                            LirOp::SignExtend {
+                                from: source_width,
+                                to: target_width,
+                            },
+                            vec![source_signal],
+                            out,
+                            format!("{}.sext", self.hierarchy_path),
+                        );
+                    } else {
+                        self.lir.add_node(
+                            LirOp::ZeroExtend {
+                                from: source_width,
+                                to: target_width,
+                            },
+                            vec![source_signal],
+                            out,
+                            format!("{}.zext", self.hierarchy_path),
+                        );
+                    }
+                    out
+                } else {
+                    // Narrowing - use RangeSelect (truncation)
+                    let out = self.alloc_temp_signal(target_width);
+                    self.lir.add_node(
+                        LirOp::RangeSelect {
+                            width: source_width,
+                            high: target_width - 1,
+                            low: 0,
+                        },
+                        vec![source_signal],
+                        out,
+                        format!("{}.trunc", self.hierarchy_path),
+                    );
+                    out
+                }
             }
             _ => {
                 self.warnings
@@ -1161,6 +1249,39 @@ impl MirToLirTransform {
                 );
                 out
             }
+        }
+    }
+
+    /// Get width of a DataType
+    #[allow(clippy::only_used_in_recursion)]
+    fn get_datatype_width(&self, dtype: &DataType) -> u32 {
+        match dtype {
+            DataType::Bit(w) | DataType::Logic(w) | DataType::Int(w) | DataType::Nat(w) => {
+                *w as u32
+            }
+            DataType::Bool => 1,
+            DataType::Clock { .. } | DataType::Reset { .. } | DataType::Event => 1,
+            DataType::Float16 => 16,
+            DataType::Float32 => 32,
+            DataType::Float64 => 64,
+            // Parametric types use their default value
+            DataType::BitParam { default, .. }
+            | DataType::LogicParam { default, .. }
+            | DataType::IntParam { default, .. }
+            | DataType::NatParam { default, .. }
+            | DataType::BitExpr { default, .. }
+            | DataType::LogicExpr { default, .. }
+            | DataType::IntExpr { default, .. }
+            | DataType::NatExpr { default, .. } => *default as u32,
+            // Vector types
+            DataType::Vec2(elem) => 2 * self.get_datatype_width(elem),
+            DataType::Vec3(elem) => 3 * self.get_datatype_width(elem),
+            DataType::Vec4(elem) => 4 * self.get_datatype_width(elem),
+            // Array type: element width * count
+            DataType::Array(elem, count) => self.get_datatype_width(elem) * (*count as u32),
+            // Complex types - would need more detailed handling
+            // In practice, casts to/from struct/enum/union types are rare
+            DataType::Struct(_) | DataType::Enum(_) | DataType::Union(_) => 32,
         }
     }
 

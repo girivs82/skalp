@@ -256,9 +256,17 @@ impl GpuGateRuntime {
             .iter()
             .map(|p| {
                 let mut inputs = [0u32; 4];
-                for (i, inp) in p.inputs.iter().take(4).enumerate() {
-                    inputs[i] = inp.0;
+
+                // For Constant primitives, store the constant value directly in inputs[0]
+                // instead of a signal index. The shader will handle this specially.
+                if let PrimitiveType::Constant { value } = &p.ptype {
+                    inputs[0] = if *value { 1 } else { 0 };
+                } else {
+                    for (i, inp) in p.inputs.iter().take(4).enumerate() {
+                        inputs[i] = inp.0;
+                    }
                 }
+
                 GpuPrimitive {
                     ptype: encode_ptype(&p.ptype),
                     inputs,
@@ -439,7 +447,14 @@ kernel void eval_combinational(
     // Skip sequential primitives in this kernel
     if (prim.is_sequential != 0) return;
 
-    // Get input values
+    // Handle constant primitives specially - the constant value is stored
+    // directly in inputs[0] (not as a signal index)
+    if (prim.ptype == PTYPE_CONST) {
+        signals_out[prim.output] = prim.inputs[0];
+        return;
+    }
+
+    // Get input values from signals array
     uint in0 = signals_in[prim.inputs[0]];
     uint in1 = (prim.num_inputs > 1) ? signals_in[prim.inputs[1]] : 0;
     uint in2 = (prim.num_inputs > 2) ? signals_in[prim.inputs[2]] : 0;
@@ -631,6 +646,7 @@ kernel void eval_sequential(
 
     /// Step simulation by one cycle
     pub fn step(&mut self) {
+        println!("[GPU] step() called, use_gpu={}", self.use_gpu);
         if self.use_gpu {
             self.step_gpu();
         } else {
@@ -641,65 +657,192 @@ kernel void eval_sequential(
 
     /// Step simulation on GPU
     fn step_gpu(&mut self) {
-        let (src_buf, dst_buf) = if self.current_buffer_is_a {
-            (&self.signal_buffer_a, &self.signal_buffer_b)
-        } else {
-            (&self.signal_buffer_b, &self.signal_buffer_a)
-        };
-
         let Some(prim_buf) = &self.primitive_buffer else {
             return;
         };
-        let Some(src) = src_buf else { return };
-        let Some(dst) = dst_buf else { return };
+        let Some(buf_a) = &self.signal_buffer_a else {
+            return;
+        };
+        let Some(buf_b) = &self.signal_buffer_b else {
+            return;
+        };
 
-        // Copy current state to destination (for signals not modified by primitives)
-        unsafe {
-            let src_ptr = src.contents() as *const u32;
-            let dst_ptr = dst.contents() as *mut u32;
-            std::ptr::copy_nonoverlapping(src_ptr, dst_ptr, self.num_signals.max(1));
-        }
-
-        // Detect clock edges
+        // Detect clock edges before we start modifying signals
         let clock_mask = self.detect_clock_edges_gpu();
 
-        // Evaluate combinational logic
-        if let Some(pipeline) = &self.comb_pipeline {
-            let command_buffer = self.command_queue.new_command_buffer();
-            let encoder = command_buffer.new_compute_command_encoder();
-
-            encoder.set_compute_pipeline_state(pipeline);
-            encoder.set_buffer(0, Some(prim_buf), 0);
-            encoder.set_buffer(1, Some(src), 0);
-            encoder.set_buffer(2, Some(dst), 0);
-
-            let num_prims = self.primitives.len() as u32;
-            encoder.set_bytes(
-                3,
-                std::mem::size_of::<u32>() as u64,
-                &num_prims as *const u32 as _,
+        // Debug: Print constant primitives
+        if std::env::var("SKALP_DEBUG_GPU").is_ok() {
+            println!(
+                "[GPU] step_gpu called, {} primitives",
+                self.primitives.len()
             );
+            for (i, prim) in self.primitives.iter().enumerate() {
+                if matches!(&prim.ptype, PrimitiveType::Constant { .. }) {
+                    println!(
+                        "[GPU] Primitive {}: Constant {:?}, output_id={:?}",
+                        i, prim.ptype, prim.outputs
+                    );
+                }
+            }
+        }
 
-            let thread_group_size = MTLSize::new(64, 1, 1);
-            let grid_size = MTLSize::new(self.primitives.len().max(1) as u64, 1, 1);
+        // Iterate combinational logic until convergence
+        // Multi-level circuits (like ripple-carry adders) need multiple passes
+        const MAX_ITERATIONS: usize = 100;
 
-            encoder.dispatch_threads(grid_size, thread_group_size);
-            encoder.end_encoding();
+        for _iter in 0..MAX_ITERATIONS {
+            let (src, dst) = if self.current_buffer_is_a {
+                (buf_a, buf_b)
+            } else {
+                (buf_b, buf_a)
+            };
 
-            command_buffer.commit();
-            command_buffer.wait_until_completed();
+            // Copy current state to destination (for signals not modified by primitives)
+            unsafe {
+                let src_ptr = src.contents() as *const u32;
+                let dst_ptr = dst.contents() as *mut u32;
+                std::ptr::copy_nonoverlapping(src_ptr, dst_ptr, self.num_signals.max(1));
+            }
+
+            // Evaluate combinational logic
+            if let Some(pipeline) = &self.comb_pipeline {
+                let command_buffer = self.command_queue.new_command_buffer();
+                let encoder = command_buffer.new_compute_command_encoder();
+
+                encoder.set_compute_pipeline_state(pipeline);
+                encoder.set_buffer(0, Some(prim_buf), 0);
+                encoder.set_buffer(1, Some(src), 0);
+                encoder.set_buffer(2, Some(dst), 0);
+
+                let num_prims = self.primitives.len() as u32;
+                encoder.set_bytes(
+                    3,
+                    std::mem::size_of::<u32>() as u64,
+                    &num_prims as *const u32 as _,
+                );
+
+                let thread_group_size = MTLSize::new(64, 1, 1);
+                let grid_size = MTLSize::new(self.primitives.len().max(1) as u64, 1, 1);
+
+                encoder.dispatch_threads(grid_size, thread_group_size);
+                encoder.end_encoding();
+
+                command_buffer.commit();
+                command_buffer.wait_until_completed();
+            }
+
+            // Check for convergence: compare src and dst buffers
+            let converged = unsafe {
+                let src_ptr = src.contents() as *const u32;
+                let dst_ptr = dst.contents() as *const u32;
+                let src_slice = std::slice::from_raw_parts(src_ptr, self.num_signals.max(1));
+                let dst_slice = std::slice::from_raw_parts(dst_ptr, self.num_signals.max(1));
+                src_slice == dst_slice
+            };
+
+            // Swap buffers for next iteration
+            self.current_buffer_is_a = !self.current_buffer_is_a;
+
+            if converged {
+                if std::env::var("SKALP_DEBUG_GPU").is_ok() {
+                    println!("[GPU] Converged after {} iterations", _iter + 1);
+                }
+                break;
+            }
+        }
+
+        // Debug: Print output signal values
+        if std::env::var("SKALP_DEBUG_GPU").is_ok() {
+            let current_buf = if self.current_buffer_is_a {
+                buf_a
+            } else {
+                buf_b
+            };
+
+            // Check what primitives write to add_result signals (IDs 2-33)
+            println!("[GPU] Primitives writing to signals 2-33 (add_result):");
+            for (i, prim) in self.primitives.iter().enumerate() {
+                for out_id in &prim.outputs {
+                    if out_id.0 >= 2 && out_id.0 <= 33 {
+                        println!(
+                            "[GPU]   Prim {}: {:?} -> signal {}, inputs={:?}",
+                            i, prim.ptype, out_id.0, prim.inputs
+                        );
+                    }
+                }
+            }
+
+            // Check output range of all primitives
+            let mut min_out = u32::MAX;
+            let mut max_out = 0u32;
+            for prim in &self.primitives {
+                for out_id in &prim.outputs {
+                    min_out = min_out.min(out_id.0);
+                    max_out = max_out.max(out_id.0);
+                }
+            }
+            println!("[GPU] Primitive output range: {} to {}", min_out, max_out);
+
+            // Check first 10 non-constant primitives
+            println!("[GPU] First 10 non-constant primitives:");
+            let mut count = 0;
+            for (i, prim) in self.primitives.iter().enumerate() {
+                if !matches!(&prim.ptype, PrimitiveType::Constant { .. }) && count < 10 {
+                    println!(
+                        "[GPU]   Prim {}: {:?} -> {:?}, inputs={:?}",
+                        i, prim.ptype, prim.outputs, prim.inputs
+                    );
+                    count += 1;
+                }
+            }
+
+            // Check constant output signals
+            println!("[GPU] Checking constant output signals in buffer:");
+            for prim in &self.primitives {
+                if let PrimitiveType::Constant { value } = &prim.ptype {
+                    if let Some(out_id) = prim.outputs.first() {
+                        let buf_val = unsafe {
+                            let ptr = current_buf.contents() as *const u32;
+                            *ptr.add(out_id.0 as usize)
+                        };
+                        if *value {
+                            println!(
+                                "[GPU]   CONST TRUE -> signal {} = {} (expected 1)",
+                                out_id.0, buf_val
+                            );
+                        }
+                    }
+                }
+            }
+
+            for (name, id) in &self.signal_name_to_id {
+                if name.contains("add_result") || name.contains("sub_result") {
+                    let val = unsafe {
+                        let ptr = current_buf.contents() as *const u32;
+                        *ptr.add(id.0 as usize)
+                    };
+                    println!("[GPU] Signal '{}' (id={}) = {}", name, id.0, val);
+                }
+            }
         }
 
         // Evaluate sequential logic on clock edges
         if clock_mask != 0 {
+            // Get current buffer (after combinational convergence)
+            let current_buf = if self.current_buffer_is_a {
+                buf_a
+            } else {
+                buf_b
+            };
+
             if let Some(pipeline) = &self.seq_pipeline {
                 let command_buffer = self.command_queue.new_command_buffer();
                 let encoder = command_buffer.new_compute_command_encoder();
 
                 encoder.set_compute_pipeline_state(pipeline);
                 encoder.set_buffer(0, Some(prim_buf), 0);
-                encoder.set_buffer(1, Some(dst), 0); // Read from dst (post-comb)
-                encoder.set_buffer(2, Some(dst), 0); // Write to same dst
+                encoder.set_buffer(1, Some(current_buf), 0); // Read from current
+                encoder.set_buffer(2, Some(current_buf), 0); // Write to same
 
                 let num_prims = self.primitives.len() as u32;
                 encoder.set_bytes(
@@ -723,9 +866,6 @@ kernel void eval_sequential(
                 command_buffer.wait_until_completed();
             }
         }
-
-        // Swap buffers
-        self.current_buffer_is_a = !self.current_buffer_is_a;
 
         // Update previous clock values
         self.update_prev_clocks_gpu();
@@ -794,31 +934,51 @@ kernel void eval_sequential(
             }
         }
 
-        // Evaluate combinational primitives
-        for prim in &self.primitives.clone() {
-            if prim.is_sequential {
-                continue;
+        // Evaluate combinational primitives until convergence
+        // Multi-level circuits need multiple passes to propagate signals
+        const MAX_ITERATIONS: usize = 100;
+        for _iter in 0..MAX_ITERATIONS {
+            let mut changed = false;
+
+            for prim in &self.primitives.clone() {
+                if prim.is_sequential {
+                    continue;
+                }
+
+                let input_values: Vec<bool> = prim
+                    .inputs
+                    .iter()
+                    .filter_map(|sig_id| {
+                        self.cpu_signals
+                            .get(&sig_id.0)
+                            .and_then(|v| v.first().copied())
+                    })
+                    .collect();
+
+                let output_values = evaluate_primitive(&prim.ptype, &input_values);
+
+                for (i, out_id) in prim.outputs.iter().enumerate() {
+                    if let Some(&value) = output_values.get(i) {
+                        let old_value = self
+                            .cpu_signals
+                            .get(&out_id.0)
+                            .and_then(|v| v.first().copied())
+                            .unwrap_or(false);
+
+                        if value != old_value {
+                            changed = true;
+                        }
+
+                        let width = self.signal_widths.get(&out_id.0).copied().unwrap_or(1);
+                        let mut bits = vec![false; width];
+                        bits[0] = value;
+                        self.cpu_signals.insert(out_id.0, bits);
+                    }
+                }
             }
 
-            let input_values: Vec<bool> = prim
-                .inputs
-                .iter()
-                .filter_map(|sig_id| {
-                    self.cpu_signals
-                        .get(&sig_id.0)
-                        .and_then(|v| v.first().copied())
-                })
-                .collect();
-
-            let output_values = evaluate_primitive(&prim.ptype, &input_values);
-
-            for (i, out_id) in prim.outputs.iter().enumerate() {
-                if let Some(&value) = output_values.get(i) {
-                    let width = self.signal_widths.get(&out_id.0).copied().unwrap_or(1);
-                    let mut bits = vec![false; width];
-                    bits[0] = value;
-                    self.cpu_signals.insert(out_id.0, bits);
-                }
+            if !changed {
+                break;
             }
         }
 

@@ -63,7 +63,11 @@ impl GateNetlistToSirConverter {
         self.convert_nets(&netlist.nets, &mut sir.top_module);
 
         // Phase 2: Convert cells to primitives
-        let (comb_ops, seq_ops) = self.convert_cells(&netlist.cells);
+        let (mut comb_ops, seq_ops) = self.convert_cells(&netlist.cells);
+
+        // Phase 2.5: Create buffer primitives for output ports that have drivers
+        // This ensures output ports are connected to their driving nets
+        self.create_output_buffers(netlist, &mut comb_ops);
 
         // Phase 3: Build combinational and sequential blocks
         self.build_blocks(&mut sir.top_module, comb_ops, seq_ops, netlist);
@@ -182,6 +186,93 @@ impl GateNetlistToSirConverter {
         }
 
         (comb_ops, seq_ops)
+    }
+
+    /// Create buffer primitives for output ports that have drivers
+    ///
+    /// In the gate netlist, output ports may be driven by internal nets via assignments
+    /// like `output_port = internal_signal;`. We need to create buffer primitives to
+    /// connect the driver output to the output port signal.
+    fn create_output_buffers(&mut self, netlist: &GateNetlist, comb_ops: &mut Vec<SirOperation>) {
+        // Debug: List all output ports and their driver status
+        if std::env::var("SKALP_DEBUG_GPU").is_ok() {
+            // Print cell ID range in netlist
+            let min_id = netlist.cells.iter().map(|c| c.id.0).min().unwrap_or(0);
+            let max_id = netlist.cells.iter().map(|c| c.id.0).max().unwrap_or(0);
+            println!(
+                "[SIR] Netlist has {} cells with IDs from {} to {}",
+                netlist.cells.len(),
+                min_id,
+                max_id
+            );
+
+            println!("[SIR] Output port analysis:");
+            for net in &netlist.nets {
+                if net.is_output && net.name.contains("add_result[0]") {
+                    let driver_info = if let Some(driver_id) = &net.driver {
+                        if let Some(cell) = netlist.cells.iter().find(|c| c.id == *driver_id) {
+                            format!("cell_type={}, outputs={:?}", cell.cell_type, cell.outputs)
+                        } else {
+                            format!("CELL {} NOT FOUND in netlist", driver_id.0)
+                        }
+                    } else {
+                        "NO DRIVER".to_string()
+                    };
+                    println!(
+                        "[SIR]   Output '{}' (net_id={:?}): driver={:?}, {}",
+                        net.name, net.id, net.driver, driver_info
+                    );
+                }
+            }
+        }
+
+        for net in &netlist.nets {
+            // Only process output ports that have a driver
+            if net.is_output && net.driver.is_some() {
+                let output_signal_id = match self.net_to_signal.get(&net.id) {
+                    Some(id) => *id,
+                    None => continue,
+                };
+
+                // Find the driver cell and its output net
+                let driver_cell_id = net.driver.unwrap();
+                let driver_pin = net.driver_pin.unwrap_or(0);
+
+                // Find the driver cell to get its output net
+                if let Some(driver_cell) = netlist.cells.iter().find(|c| c.id == driver_cell_id) {
+                    if let Some(&driver_output_net_id) = driver_cell.outputs.get(driver_pin) {
+                        // Get the signal ID for the driver's output
+                        if let Some(&driver_signal_id) =
+                            self.net_to_signal.get(&driver_output_net_id)
+                        {
+                            // Only create buffer if the driver output is different from the output port
+                            if driver_signal_id != output_signal_id {
+                                // Create a buffer primitive: driver_output -> output_port
+                                let primitive_id = PrimitiveId(self.next_primitive_id);
+                                self.next_primitive_id += 1;
+
+                                let buffer_op = SirOperation::Primitive {
+                                    id: primitive_id,
+                                    ptype: PrimitiveType::Buf,
+                                    inputs: vec![driver_signal_id],
+                                    outputs: vec![output_signal_id],
+                                    path: format!("output_buffer_{}", net.name),
+                                };
+
+                                if std::env::var("SKALP_DEBUG_GPU").is_ok() {
+                                    println!(
+                                        "[SIR]   Created buffer for output '{}': {} -> {}",
+                                        net.name, driver_signal_id.0, output_signal_id.0
+                                    );
+                                }
+
+                                comb_ops.push(buffer_op);
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// Map library cell type name to PrimitiveType

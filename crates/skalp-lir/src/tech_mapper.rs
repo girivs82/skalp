@@ -314,6 +314,14 @@ impl<'a> TechMapper<'a> {
                 self.map_subtractor(*width, &input_nets, &output_nets, &node.path);
             }
 
+            // Multiplier
+            LirOp::Mul {
+                width,
+                result_width,
+            } => {
+                self.map_multiplier(*width, *result_width, &input_nets, &output_nets, &node.path);
+            }
+
             // Multiplexer
             LirOp::Mux2 { width } => {
                 self.map_mux2(*width, &input_nets, &output_nets, &node.path);
@@ -510,6 +518,16 @@ impl<'a> TechMapper<'a> {
             // This is a wiring operation - each output bit comes from an input bit
             LirOp::Concat { widths } => {
                 self.map_concat(widths, &input_nets, &output_nets, &node.path);
+            }
+
+            // Zero extend: copy lower bits, pad upper bits with zero
+            LirOp::ZeroExtend { from, to } => {
+                self.map_zero_extend(*from, *to, &input_nets, &output_nets, &node.path);
+            }
+
+            // Sign extend: copy lower bits, extend sign bit to upper bits
+            LirOp::SignExtend { from, to } => {
+                self.map_sign_extend(*from, *to, &input_nets, &output_nets, &node.path);
             }
 
             _ => {
@@ -741,12 +759,24 @@ impl<'a> TechMapper<'a> {
             inv_b.push(not_b);
         }
 
-        // Create constant 1 for initial carry
+        // Create constant 1 for initial carry (carry_in = 1 for two's complement subtraction)
         let const_1 = self.alloc_net_id();
         self.netlist
             .add_net(GateNet::new(const_1, format!("{}.const_1", path)));
         self.stats.nets_created += 1;
-        // Note: We'd need a tie-high cell here, but we'll just use it as a signal
+
+        // Add TIE_HIGH cell to drive the constant 1 net
+        let mut tie_cell = Cell::new_comb(
+            CellId(0),
+            "TIE_HIGH".to_string(),
+            self.library.name.clone(),
+            0.01,
+            format!("{}.tie_high", path),
+            vec![],
+            vec![const_1],
+        );
+        tie_cell.source_op = Some("Constant".to_string());
+        self.add_cell(tie_cell);
 
         let mut carry_net = const_1;
 
@@ -773,6 +803,202 @@ impl<'a> TechMapper<'a> {
             self.add_cell(cell);
 
             carry_net = cout;
+        }
+
+        self.stats.decomposed_mappings += 1;
+    }
+
+    /// Map a multiplier using shift-and-add algorithm
+    /// result = a * b, where both inputs have 'width' bits and result has 'result_width' bits
+    fn map_multiplier(
+        &mut self,
+        width: u32,
+        result_width: u32,
+        inputs: &[Vec<GateNetId>],
+        outputs: &[GateNetId],
+        path: &str,
+    ) {
+        if inputs.len() < 2 {
+            self.warnings
+                .push(format!("Multiplier needs 2 inputs, got {}", inputs.len()));
+            return;
+        }
+
+        let and_info = self.get_cell_info(&CellFunction::And2);
+        let ha_info = self.get_cell_info(&CellFunction::HalfAdder);
+        let fa_info = self.get_cell_info(&CellFunction::FullAdder);
+
+        // Create partial products: pp[i][j] = a[j] & b[i]
+        // This creates a grid of AND gates
+        let mut partial_products: Vec<Vec<GateNetId>> = Vec::new();
+
+        for i in 0..width as usize {
+            let mut row: Vec<GateNetId> = Vec::new();
+            let b_i = inputs[1].get(i).copied().unwrap_or(inputs[1][0]);
+
+            for j in 0..width as usize {
+                let a_j = inputs[0].get(j).copied().unwrap_or(inputs[0][0]);
+                let pp = self.alloc_net_id();
+                self.netlist
+                    .add_net(GateNet::new(pp, format!("{}.pp_{}_{}", path, i, j)));
+                self.stats.nets_created += 1;
+
+                let mut cell = Cell::new_comb(
+                    CellId(0),
+                    and_info.name.clone(),
+                    self.library.name.clone(),
+                    and_info.fit,
+                    format!("{}.pp_and_{}_{}", path, i, j),
+                    vec![a_j, b_i],
+                    vec![pp],
+                );
+                cell.source_op = Some("PartialProduct".to_string());
+                self.add_cell(cell);
+                row.push(pp);
+            }
+            partial_products.push(row);
+        }
+
+        // Now we need to add up all partial products with proper shifting
+        // pp[0] contributes to bits 0..width
+        // pp[1] contributes to bits 1..width+1
+        // etc.
+
+        // Create a result accumulator that we'll build up
+        // We'll use a ripple-carry array multiplier approach
+
+        // Initialize result with partial product 0 (no shift)
+        let mut current_sum: Vec<GateNetId> = Vec::new();
+
+        // Extend pp[0] to result_width with zeros (TIE_LOW)
+        // Need j for both indexing and cell naming
+        #[allow(clippy::needless_range_loop)]
+        for j in 0..result_width as usize {
+            if j < width as usize {
+                current_sum.push(partial_products[0][j]);
+            } else {
+                // Need a tie-low for zero extension
+                let zero = self.alloc_net_id();
+                self.netlist
+                    .add_net(GateNet::new(zero, format!("{}.zero_{}", path, j)));
+                self.stats.nets_created += 1;
+
+                let mut tie_cell = Cell::new_comb(
+                    CellId(0),
+                    "TIE_LOW".to_string(),
+                    self.library.name.clone(),
+                    0.01,
+                    format!("{}.tie_low_{}", path, j),
+                    vec![],
+                    vec![zero],
+                );
+                tie_cell.source_op = Some("Constant".to_string());
+                self.add_cell(tie_cell);
+                current_sum.push(zero);
+            }
+        }
+
+        // Add each subsequent partial product (shifted by its index)
+        // We need both the index i (for shift calculations) and partial_products[i]
+        #[allow(clippy::needless_range_loop)]
+        for i in 1..width as usize {
+            let mut next_sum: Vec<GateNetId> = Vec::new();
+            let mut carry: Option<GateNetId> = None;
+
+            for j in 0..result_width as usize {
+                // Get the partial product bit (shifted by i)
+                let pp_bit = if j >= i && j - i < width as usize {
+                    partial_products[i][j - i]
+                } else {
+                    // Zero for bits outside the partial product range
+                    let zero = self.alloc_net_id();
+                    self.netlist
+                        .add_net(GateNet::new(zero, format!("{}.zero_{}_{}", path, i, j)));
+                    self.stats.nets_created += 1;
+
+                    let mut tie_cell = Cell::new_comb(
+                        CellId(0),
+                        "TIE_LOW".to_string(),
+                        self.library.name.clone(),
+                        0.01,
+                        format!("{}.tie_low_{}_{}", path, i, j),
+                        vec![],
+                        vec![zero],
+                    );
+                    tie_cell.source_op = Some("Constant".to_string());
+                    self.add_cell(tie_cell);
+                    zero
+                };
+
+                let sum_bit = current_sum.get(j).copied().unwrap_or(current_sum[0]);
+
+                // Create sum and carry output nets
+                let new_sum = self.alloc_net_id();
+                self.netlist
+                    .add_net(GateNet::new(new_sum, format!("{}.sum_{}_{}", path, i, j)));
+                self.stats.nets_created += 1;
+
+                let new_carry = self.alloc_net_id();
+                self.netlist.add_net(GateNet::new(
+                    new_carry,
+                    format!("{}.carry_{}_{}", path, i, j),
+                ));
+                self.stats.nets_created += 1;
+
+                if let Some(cin) = carry {
+                    // Full adder: sum_bit + pp_bit + carry_in
+                    let mut cell = Cell::new_comb(
+                        CellId(0),
+                        fa_info.name.clone(),
+                        self.library.name.clone(),
+                        fa_info.fit,
+                        format!("{}.fa_{}_{}", path, i, j),
+                        vec![sum_bit, pp_bit, cin],
+                        vec![new_sum, new_carry],
+                    );
+                    cell.source_op = Some("FullAdder".to_string());
+                    cell.failure_modes = fa_info.failure_modes.clone();
+                    self.add_cell(cell);
+                } else {
+                    // Half adder for first bit (no carry in)
+                    let mut cell = Cell::new_comb(
+                        CellId(0),
+                        ha_info.name.clone(),
+                        self.library.name.clone(),
+                        ha_info.fit,
+                        format!("{}.ha_{}_{}", path, i, j),
+                        vec![sum_bit, pp_bit],
+                        vec![new_sum, new_carry],
+                    );
+                    cell.source_op = Some("HalfAdder".to_string());
+                    cell.failure_modes = ha_info.failure_modes.clone();
+                    self.add_cell(cell);
+                }
+
+                next_sum.push(new_sum);
+                carry = Some(new_carry);
+            }
+
+            current_sum = next_sum;
+        }
+
+        // Connect final sum to outputs
+        for (j, &out) in outputs.iter().enumerate().take(result_width as usize) {
+            if j < current_sum.len() {
+                // Create a buffer to connect internal sum to output
+                let buf_info = self.get_cell_info(&CellFunction::Buf);
+                let mut cell = Cell::new_comb(
+                    CellId(0),
+                    buf_info.name.clone(),
+                    self.library.name.clone(),
+                    buf_info.fit,
+                    format!("{}.out_buf_{}", path, j),
+                    vec![current_sum[j]],
+                    vec![out],
+                );
+                cell.source_op = Some("Buffer".to_string());
+                self.add_cell(cell);
+            }
         }
 
         self.stats.decomposed_mappings += 1;
@@ -1073,6 +1299,166 @@ impl<'a> TechMapper<'a> {
 
                 out_bit += 1;
             }
+        }
+
+        self.stats.direct_mappings += 1;
+    }
+
+    /// Map zero extend: copy lower bits, pad upper bits with zero
+    fn map_zero_extend(
+        &mut self,
+        from: u32,
+        to: u32,
+        inputs: &[Vec<GateNetId>],
+        outputs: &[GateNetId],
+        path: &str,
+    ) {
+        if inputs.is_empty() {
+            self.warnings.push("ZeroExtend: no inputs".to_string());
+            return;
+        }
+
+        let input = &inputs[0];
+        let buf_info = self.get_cell_info(&CellFunction::Buf);
+
+        // Copy lower bits using buffers
+        for bit in 0..from as usize {
+            let src = input.get(bit).copied().unwrap_or_else(|| {
+                self.warnings.push(format!(
+                    "ZeroExtend: input bit {} out of range (from={})",
+                    bit, from
+                ));
+                input.first().copied().unwrap_or(GateNetId(0))
+            });
+            let dst = outputs.get(bit).copied().unwrap_or_else(|| {
+                self.warnings.push(format!(
+                    "ZeroExtend: output bit {} out of range (to={})",
+                    bit, to
+                ));
+                outputs.first().copied().unwrap_or(GateNetId(0))
+            });
+
+            let mut cell = Cell::new_comb(
+                CellId(0),
+                buf_info.name.clone(),
+                self.library.name.clone(),
+                buf_info.fit,
+                format!("{}.zext_bit{}", path, bit),
+                vec![src],
+                vec![dst],
+            );
+            cell.source_op = Some("ZeroExtend".to_string());
+            cell.failure_modes = buf_info.failure_modes.clone();
+            self.add_cell(cell);
+        }
+
+        // Pad upper bits with TIE_LOW
+        for bit in from as usize..to as usize {
+            let dst = outputs.get(bit).copied().unwrap_or_else(|| {
+                self.warnings.push(format!(
+                    "ZeroExtend: output bit {} out of range (to={})",
+                    bit, to
+                ));
+                outputs.first().copied().unwrap_or(GateNetId(0))
+            });
+
+            let mut cell = Cell::new_comb(
+                CellId(0),
+                "TIE_LOW".to_string(),
+                self.library.name.clone(),
+                0.01,
+                format!("{}.zext_zero{}", path, bit),
+                vec![],
+                vec![dst],
+            );
+            cell.source_op = Some("ZeroExtend".to_string());
+            self.add_cell(cell);
+        }
+
+        self.stats.direct_mappings += 1;
+    }
+
+    /// Map sign extend: copy lower bits, extend sign bit to upper bits
+    fn map_sign_extend(
+        &mut self,
+        from: u32,
+        to: u32,
+        inputs: &[Vec<GateNetId>],
+        outputs: &[GateNetId],
+        path: &str,
+    ) {
+        if inputs.is_empty() || from == 0 {
+            self.warnings
+                .push("SignExtend: no inputs or from=0".to_string());
+            return;
+        }
+
+        let input = &inputs[0];
+        let buf_info = self.get_cell_info(&CellFunction::Buf);
+
+        // Get the sign bit (highest bit of input)
+        let sign_bit = input.get((from - 1) as usize).copied().unwrap_or_else(|| {
+            self.warnings.push(format!(
+                "SignExtend: sign bit {} out of range (from={})",
+                from - 1,
+                from
+            ));
+            input.first().copied().unwrap_or(GateNetId(0))
+        });
+
+        // Copy lower bits using buffers
+        for bit in 0..from as usize {
+            let src = input.get(bit).copied().unwrap_or_else(|| {
+                self.warnings.push(format!(
+                    "SignExtend: input bit {} out of range (from={})",
+                    bit, from
+                ));
+                input.first().copied().unwrap_or(GateNetId(0))
+            });
+            let dst = outputs.get(bit).copied().unwrap_or_else(|| {
+                self.warnings.push(format!(
+                    "SignExtend: output bit {} out of range (to={})",
+                    bit, to
+                ));
+                outputs.first().copied().unwrap_or(GateNetId(0))
+            });
+
+            let mut cell = Cell::new_comb(
+                CellId(0),
+                buf_info.name.clone(),
+                self.library.name.clone(),
+                buf_info.fit,
+                format!("{}.sext_bit{}", path, bit),
+                vec![src],
+                vec![dst],
+            );
+            cell.source_op = Some("SignExtend".to_string());
+            cell.failure_modes = buf_info.failure_modes.clone();
+            self.add_cell(cell);
+        }
+
+        // Extend sign bit to upper bits using buffers
+        for bit in from as usize..to as usize {
+            let dst = outputs.get(bit).copied().unwrap_or_else(|| {
+                self.warnings.push(format!(
+                    "SignExtend: output bit {} out of range (to={})",
+                    bit, to
+                ));
+                outputs.first().copied().unwrap_or(GateNetId(0))
+            });
+
+            let mut cell = Cell::new_comb(
+                CellId(0),
+                buf_info.name.clone(),
+                self.library.name.clone(),
+                buf_info.fit,
+                format!("{}.sext_sign{}", path, bit),
+                vec![sign_bit],
+                vec![dst],
+            );
+            cell.source_op = Some("SignExtend".to_string());
+            cell.failure_modes = buf_info.failure_modes.clone();
+            self.add_cell(cell);
         }
 
         self.stats.direct_mappings += 1;
@@ -1459,8 +1845,7 @@ impl<'a> TechMapper<'a> {
 
     /// Map a constant
     fn map_constant(&mut self, width: u32, value: u64, outputs: &[GateNetId], path: &str) {
-        // Constants are typically implemented with tie-high/tie-low cells
-        // For simplicity, we just mark the nets as driven by constants
+        // Constants are implemented with tie-high/tie-low cells
         for bit in 0..width as usize {
             let bit_val = (value >> bit) & 1 != 0;
             let y = outputs.get(bit).copied().unwrap_or(GateNetId(0));
@@ -1630,6 +2015,62 @@ pub fn map_lir_to_gates_optimized(lir: &Lir, library: &TechLibrary) -> TechMapRe
     if opt_stats.cells_removed > 0 {
         result.warnings.push(format!(
             "Optimization: removed {} cells ({} → {}), FIT {} → {}",
+            opt_stats.cells_removed,
+            opt_stats.cells_before,
+            opt_stats.cells_after,
+            opt_stats.fit_before,
+            opt_stats.fit_after
+        ));
+    }
+
+    result
+}
+
+/// Map a Lir to GateNetlist with configurable gate-level optimization
+///
+/// opt_level controls the optimization passes:
+/// - 0: No optimization (raw tech mapping output)
+/// - 1: Basic optimization (constant folding, buffer removal, DCE)
+/// - 2+: Full optimization (all passes)
+pub fn map_lir_to_gates_with_opt_level(
+    lir: &Lir,
+    library: &TechLibrary,
+    opt_level: u8,
+) -> TechMapResult {
+    use crate::gate_optimizer::GateOptimizer;
+
+    let mut mapper = TechMapper::new(library);
+    let mut result = mapper.map(lir);
+
+    if opt_level == 0 {
+        // No optimization - return raw tech mapping output
+        return result;
+    }
+
+    // Run gate-level optimizations
+    let mut optimizer = GateOptimizer::new();
+
+    if opt_level == 1 {
+        // Basic optimization only
+        optimizer.set_enable_constant_folding(true);
+        optimizer.set_enable_buffer_removal(true);
+        optimizer.set_enable_dce(true);
+        optimizer.set_enable_double_inverter_removal(true);
+        optimizer.set_enable_identity_removal(true);
+    }
+    // opt_level >= 2 uses all optimizations (default)
+
+    let opt_stats = optimizer.optimize(&mut result.netlist);
+
+    // Update stats with optimization info
+    result.stats.cells_created = result.netlist.cells.len();
+    result.stats.nets_created = result.netlist.nets.len();
+
+    // Add optimization summary to warnings (as info)
+    if opt_stats.cells_removed > 0 {
+        result.warnings.push(format!(
+            "Optimization (level {}): removed {} cells ({} → {}), FIT {} → {}",
+            opt_level,
             opt_stats.cells_removed,
             opt_stats.cells_before,
             opt_stats.cells_after,
