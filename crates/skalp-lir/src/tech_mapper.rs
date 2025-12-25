@@ -1242,9 +1242,10 @@ impl<'a> TechMapper<'a> {
     /// Map concat: concatenate multiple inputs into output
     ///
     /// The widths vector specifies the width of each input.
-    /// Inputs are concatenated with first input in the low bits.
-    /// For example, {a[2:0], b[1:0]} produces output[4:0] = {b[1:0], a[2:0]}
-    /// (b is high bits, a is low bits - standard Verilog/SystemVerilog concat order)
+    /// In Verilog/SKALP, {a, b} means a is in MSB position and b is in LSB position.
+    /// So for {a[2:0], b[1:0]} producing output[4:0]:
+    ///   - b[1:0] (last input) goes to output[1:0] (LSB)
+    ///   - a[2:0] (first input) goes to output[4:2] (MSB)
     fn map_concat(
         &mut self,
         widths: &[u32],
@@ -1260,10 +1261,10 @@ impl<'a> TechMapper<'a> {
         // Get buffer cell info for explicit wiring
         let buf_info = self.get_cell_info(&CellFunction::Buf);
 
-        // Concatenate inputs from low to high bits
-        // First input goes to low bits, last input goes to high bits
+        // Process inputs in REVERSE order to match Verilog convention:
+        // Last input goes to low bits, first input goes to high bits
         let mut out_bit = 0;
-        for (i, (&width, input)) in widths.iter().zip(inputs.iter()).enumerate() {
+        for (i, (&width, input)) in widths.iter().zip(inputs.iter()).enumerate().rev() {
             for bit in 0..width as usize {
                 let src = input.get(bit).copied().unwrap_or_else(|| {
                     self.warnings.push(format!(

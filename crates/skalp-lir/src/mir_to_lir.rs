@@ -713,10 +713,11 @@ impl MirToLirTransform {
                 let mut widths = Vec::new();
                 let mut signals = Vec::new();
 
-                for e in exprs {
+                for e in exprs.iter() {
                     let w = self.infer_expression_width(e);
                     widths.push(w);
-                    signals.push(self.transform_expression(e, w));
+                    let sig = self.transform_expression(e, w);
+                    signals.push(sig);
                 }
 
                 let out = self.alloc_temp_signal(widths.iter().sum());

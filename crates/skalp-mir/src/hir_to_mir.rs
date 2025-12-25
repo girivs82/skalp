@@ -1121,8 +1121,9 @@ impl<'hir> HirToMir<'hir> {
                             self.dynamic_variables.values().cloned().collect();
                         for (mir_var_id, name, hir_type) in dynamic_vars {
                             // Check if this variable is already in the module
-                            if !module.variables.iter().any(|v| v.id == mir_var_id) {
-                                debug_println!("[DEBUG] Adding dynamic variable (in impl): name={}, hir_type={:?}", name, hir_type);
+                            let already_in = module.variables.iter().any(|v| v.id == mir_var_id);
+                            if !already_in {
+                                println!("[DEBUG] Adding dynamic variable (in impl): name={}, hir_type={:?}", name, hir_type);
                                 let mir_type = self.convert_type(&hir_type);
                                 debug_println!("[DEBUG]   -> mir_type={:?}", mir_type);
                                 // BUG #71 DEBUG: Check if this is one of the problematic variables
@@ -5968,32 +5969,10 @@ impl<'hir> HirToMir<'hir> {
                 // Convert all concat elements to MIR expressions
                 let mut mir_exprs = Vec::new();
                 for (idx, expr) in expressions.iter().enumerate() {
-                    eprintln!(
-                        "[DEBUG] Concat: converting element {} of {}, type: {:?}",
-                        idx,
-                        expressions.len(),
-                        std::mem::discriminant(expr)
-                    );
-                    if let hir::HirExpression::Variable(var_id) = expr {
-                        debug_println!("[DEBUG] Concat element {} is Variable({:?})", idx, var_id);
-                        eprintln!(
-                            "[DEBUG]   variable_map contains: {}",
-                            self.variable_map.contains_key(var_id)
-                        );
-                        eprintln!(
-                            "[DEBUG]   dynamic_variables contains: {}",
-                            self.dynamic_variables.contains_key(var_id)
-                        );
-                    }
-
                     // BUG #160 FIX: For integer literals with unknown width, use the inferred width
                     if let (None, Some(width)) = (known_widths[idx], inferred_width) {
                         if let hir::HirExpression::Literal(hir::HirLiteral::Integer(val)) = expr {
                             let width = width as usize;
-                            eprintln!(
-                                "[BUG #160 FIX] Concat: integer literal {} at index {} -> BitVector(width={}, value={})",
-                                val, idx, width, val
-                            );
                             mir_exprs.push(Expression::new(
                                 ExpressionKind::Literal(Value::BitVector { width, value: *val }),
                                 ty.clone(),
@@ -6005,11 +5984,6 @@ impl<'hir> HirToMir<'hir> {
                     if let Some(mir_expr) = self.convert_expression(expr, depth + 1) {
                         mir_exprs.push(mir_expr);
                     } else {
-                        eprintln!(
-                            "[DEBUG] Concat: failed to convert element {}, type: {:?}",
-                            idx,
-                            std::mem::discriminant(expr)
-                        );
                         return None;
                     }
                 }
@@ -6433,74 +6407,13 @@ impl<'hir> HirToMir<'hir> {
                     return self.convert_expression(&transformed_expr, depth + 1);
                 }
 
-                println!(
-                    "🔴🔴🔴 [BUG #145] Block fallback: about to process {} statements 🔴🔴🔴",
-                    statements.len()
-                );
-                for (stmt_idx, stmt) in statements.iter().enumerate() {
-                    println!(
-                        "🔴🔴🔴 [BUG #145 DEBUG] Block fallback: processing statement {} of {}, type: {:?} 🔴🔴🔴",
-                        stmt_idx, statements.len(), std::mem::discriminant(stmt)
-                    );
-                    if let hir::HirStatement::Let(let_stmt) = stmt {
-                        println!(
-                            "🔴🔴🔴 [BUG #145 DEBUG]   Let statement: name='{}', value type: {:?} 🔴🔴🔴",
-                            let_stmt.name, std::mem::discriminant(&let_stmt.value)
-                        );
-                    }
+                for stmt in statements.iter() {
                     if let Some(mir_stmt) = self.convert_statement(stmt) {
-                        println!(
-                            "🔴🔴🔴 [BUG #145 DEBUG]   convert_statement returned Some 🔴🔴🔴"
-                        );
                         self.pending_statements.push(mir_stmt);
-                    } else {
-                        debug_println!("🔴🔴🔴 [BUG #145 DEBUG]   convert_statement returned None - statement DROPPED! 🔴🔴🔴");
                     }
                 }
                 // Convert and return the final expression
-                eprintln!(
-                    "[DEBUG] Block expression: About to convert result_expr, type: {:?}",
-                    std::mem::discriminant(&**result_expr)
-                );
-                eprintln!(
-                    "[DEBUG] Block expression: Current dynamic_variables: {:?}",
-                    self.dynamic_variables
-                        .iter()
-                        .map(|(_, (_, name, _))| name.as_str())
-                        .collect::<Vec<_>>()
-                );
-                if let hir::HirExpression::Variable(var_id) = &**result_expr {
-                    eprintln!(
-                        "[DEBUG] Block expression: result_expr is Variable({:?})",
-                        var_id
-                    );
-                    eprintln!(
-                        "[DEBUG] Block expression: variable_map contains: {:?}",
-                        self.variable_map.contains_key(var_id)
-                    );
-                    eprintln!(
-                        "[DEBUG] Block expression: dynamic_variables contains: {:?}",
-                        self.dynamic_variables.contains_key(var_id)
-                    );
-                    if let Some((mir_id, name, _)) = self.dynamic_variables.get(var_id) {
-                        debug_println!("[DEBUG] Block expression: Found in dynamic_variables as {} (MIR ID {:?})", name, mir_id);
-                    }
-                }
-                let result = self.convert_expression(result_expr, depth + 1);
-                // Debug output for block expression conversion
-                #[allow(clippy::if_same_then_else)]
-                if result.is_none() {
-                    eprintln!(
-                        "[DEBUG] Block expression: result_expr conversion failed, type: {:?}",
-                        std::mem::discriminant(&**result_expr)
-                    );
-                } else {
-                    eprintln!(
-                        "[DEBUG] Block expression: result_expr converted to MIR type: {:?}",
-                        std::mem::discriminant(&result.as_ref().unwrap().kind)
-                    );
-                }
-                result
+                self.convert_expression(result_expr, depth + 1)
             }
         }
     }
