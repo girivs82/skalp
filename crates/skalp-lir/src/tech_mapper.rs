@@ -1667,11 +1667,13 @@ impl<'a> TechMapper<'a> {
         let inv_info = self.get_cell_info(&CellFunction::Inv);
         let xnor_info = self.get_cell_info(&CellFunction::Xnor2);
 
-        // Start from MSB and work down
-        // prev_lt carries whether a < b based on higher bits
+        // Start from LSB and work up
+        // prev_lt carries whether a[i-1:0] < b[i-1:0] based on lower bits
+        // Formula: lt_i = lt_bit_i | (eq_i & prev_lt)
+        // where lt_bit_i = ~a[i] & b[i] (a < b at this bit position)
         let mut prev_lt = None; // None means 0 (not less than so far)
 
-        for i in (0..width as usize).rev() {
+        for i in 0..width as usize {
             let a_bit = a.get(i).copied().unwrap_or(a[0]);
             let b_bit = b.get(i).copied().unwrap_or(b[0]);
 
@@ -1721,9 +1723,9 @@ impl<'a> TechMapper<'a> {
 
             // Combine with previous result:
             // lt_i = lt_bit_i | (eq_i & prev_lt)
-            // But if this is the MSB, prev_lt is 0 so lt_i = lt_bit_i
-            let lt_net = if i == width as usize - 1 {
-                // MSB: lt = lt_bit
+            // At LSB (i==0), prev_lt is 0 so lt_0 = lt_bit_0
+            let lt_net = if i == 0 {
+                // LSB: lt = lt_bit (no previous result)
                 lt_bit_net
             } else if let Some(prev_lt_net) = prev_lt {
                 // Combine: lt = lt_bit | (eq & prev_lt)
@@ -1742,8 +1744,8 @@ impl<'a> TechMapper<'a> {
                 );
                 self.add_cell(and_cell);
 
-                let combined = if i == 0 {
-                    y // Use output net for final result
+                let combined = if i == width as usize - 1 {
+                    y // Use output net for final result at MSB
                 } else {
                     self.netlist.add_net(GateNet::new(
                         GateNetId(0),
