@@ -223,6 +223,10 @@ struct SymbolTable {
     /// BUG FIX #67: Track function return types to properly infer tuple types
     function_return_types: HashMap<String, HirType>,
 
+    /// BUG FIX #166: Track generic parameter types (function parameters)
+    /// Maps parameter names to their types for proper type inference in match/if expressions
+    generic_param_types: HashMap<String, HirType>,
+
     /// Current scope for nested lookups
     scopes: Vec<HashMap<String, SymbolId>>,
 }
@@ -1632,6 +1636,11 @@ impl HirBuilderContext {
         for param in &params {
             self.symbols
                 .add_to_scope(&param.name, SymbolId::GenericParam(param.name.clone()));
+            // BUG FIX #166: Register parameter types for type inference
+            // This allows infer_expression_type to resolve GenericParam types correctly
+            self.symbols
+                .generic_param_types
+                .insert(param.name.clone(), param.param_type.clone());
         }
 
         // Build function body (statements from block)
@@ -1647,6 +1656,11 @@ impl HirBuilderContext {
 
         // Pop the function parameter scope
         self.symbols.exit_scope();
+
+        // BUG FIX #166: Clean up parameter types to avoid leaking into outer scope
+        for param in &params {
+            self.symbols.generic_param_types.remove(&param.name);
+        }
 
         // Register function in symbol table
         self.symbols.add_to_scope(&name, SymbolId::Function(id));
@@ -10724,6 +10738,7 @@ impl SymbolTable {
             signal_types: HashMap::new(),          // BUG FIX #5
             port_types: HashMap::new(),            // BUG FIX #5
             function_return_types: HashMap::new(), // BUG FIX #67
+            generic_param_types: HashMap::new(),   // BUG FIX #166
             scopes: vec![HashMap::new()],          // Start with global scope
         }
     }
@@ -11379,12 +11394,16 @@ impl HirBuilderContext {
                 HirType::Nat(32)
             }
 
-            // BUG FIX #5: Handle GenericParam (function parameters)
+            // BUG FIX #5 + #166: Handle GenericParam (function parameters)
             HirExpression::GenericParam(name) => {
-                // Function parameters might be represented as GenericParam
-                // Look up in variable types by name
-                // This is a workaround until we have better parameter tracking
-                HirType::Nat(32) // Will be improved when we track param types properly
+                // BUG FIX #166: Look up parameter type from registered types
+                // This is critical for proper type inference in match/if expressions
+                // Without this, expressions like `a + b` where a: bit[256] would be inferred as 32-bit
+                self.symbols
+                    .generic_param_types
+                    .get(name)
+                    .cloned()
+                    .unwrap_or(HirType::Nat(32)) // Fallback to Nat(32) if not found
             }
 
             // Literals: infer from value
