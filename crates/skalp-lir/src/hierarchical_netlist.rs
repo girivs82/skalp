@@ -288,9 +288,39 @@ impl HierarchicalNetlist {
                         }
                     }
                     PortConnection::Constant(value) => {
-                        // Create tie cell for constant
+                        // Create tie cell(s) for constant
+                        // BUG #168 FIX: Check if child port has bit-indexed nets
                         let net_name = format!("{}.{}", path, port_name);
-                        result.add_tie_cell(&net_name, *value);
+                        let child_bits = result.find_bit_indexed_nets(&net_name);
+
+                        eprintln!(
+                            "[STITCH]   Looking for '{}' - found {} bit-indexed nets",
+                            net_name,
+                            child_bits.len()
+                        );
+
+                        if !child_bits.is_empty() {
+                            // Multi-bit port: create a tie cell for each bit
+                            eprintln!(
+                                "[STITCH]   Constant 0x{:X} -> {} ({} bits)",
+                                value,
+                                net_name,
+                                child_bits.len()
+                            );
+                            for (bit_idx, bit_net_name) in &child_bits {
+                                let bit_value = (value >> bit_idx) & 1;
+                                result.add_tie_cell(bit_net_name, bit_value);
+                            }
+                        } else if result.get_net(&net_name).is_some() {
+                            // Single net exists - use simple tie cell
+                            result.add_tie_cell(&net_name, *value);
+                        } else {
+                            // Net doesn't exist - this might be an unused connection
+                            eprintln!(
+                                "[STITCH]   ✗ Constant 0x{:X} -> {} (net not found)",
+                                value, net_name
+                            );
+                        }
                     }
                     PortConnection::ChildPort(child_path, child_port) => {
                         // Direct connection between instances
