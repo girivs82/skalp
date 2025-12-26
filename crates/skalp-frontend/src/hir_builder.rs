@@ -5638,25 +5638,48 @@ impl HirBuilderContext {
         }
 
         // Find the expression child
-        let expr_child = node.children().find(|n| {
-            matches!(
-                n.kind(),
-                SyntaxKind::LiteralExpr
-                    | SyntaxKind::IdentExpr
-                    | SyntaxKind::BinaryExpr
-                    | SyntaxKind::UnaryExpr
-                    | SyntaxKind::CallExpr
-                    | SyntaxKind::FieldExpr
-                    | SyntaxKind::IndexExpr
-                    | SyntaxKind::PathExpr
-                    | SyntaxKind::ParenExpr
-                    | SyntaxKind::IfExpr
-                    | SyntaxKind::MatchExpr
-                    | SyntaxKind::StructLiteral
-                    | SyntaxKind::ArrayLiteral
-                    | SyntaxKind::CastExpr // BUG FIX #71 Part 3: Support cast expressions in struct field initializers
-            )
-        });
+        // BUG #173 FIX: The parser may create IdentExpr and IndexExpr as siblings
+        // (e.g., data[31:0] becomes [IdentExpr(data), IndexExpr([31:0])]).
+        // We should prefer IndexExpr/FieldExpr when both exist, as build_expression
+        // for IndexExpr will properly combine with the preceding IdentExpr.
+        let expr_children: Vec<_> = node
+            .children()
+            .filter(|n| {
+                matches!(
+                    n.kind(),
+                    SyntaxKind::LiteralExpr
+                        | SyntaxKind::IdentExpr
+                        | SyntaxKind::BinaryExpr
+                        | SyntaxKind::UnaryExpr
+                        | SyntaxKind::CallExpr
+                        | SyntaxKind::FieldExpr
+                        | SyntaxKind::IndexExpr
+                        | SyntaxKind::PathExpr
+                        | SyntaxKind::ParenExpr
+                        | SyntaxKind::IfExpr
+                        | SyntaxKind::MatchExpr
+                        | SyntaxKind::StructLiteral
+                        | SyntaxKind::ArrayLiteral
+                        | SyntaxKind::CastExpr
+                )
+            })
+            .collect();
+
+        // Prefer IndexExpr/FieldExpr over IdentExpr when both exist (parser splits data[31:0] into two nodes)
+        let expr_child = if expr_children.len() > 1 {
+            expr_children
+                .iter()
+                .find(|n| {
+                    matches!(
+                        n.kind(),
+                        SyntaxKind::IndexExpr | SyntaxKind::FieldExpr | SyntaxKind::BinaryExpr
+                    )
+                })
+                .cloned()
+                .or_else(|| expr_children.first().cloned())
+        } else {
+            expr_children.first().cloned()
+        };
 
         if expr_child.is_none() {
             eprintln!(

@@ -305,6 +305,136 @@ entity BlackBoxIp { ... }
 
 **Impact**: Medium. Seamlessly wrap vendor IP cores in Skalp entities.
 
+### 8. No Struct/Record Types - **REQUESTED** (Dec 2025)
+```skalp
+// WANTED: Struct types for data packing/unpacking
+struct FpArgs {
+    a: bit[32],
+    b: bit[32],
+    c: bit[32],
+}
+
+struct Vec3 {
+    x: fp32,
+    y: fp32,
+    z: fp32,
+}
+
+// Usage - eliminates manual bit slicing
+fn exec_l2(opcode: bit[6], args: FpArgs) -> bit[32] {
+    match opcode {
+        23 => fp_add(args.a, args.b),
+        24 => fp_mul(args.a, args.b),
+        ...
+    }
+}
+
+// Automatic packing/unpacking
+let args: FpArgs = data[95:0] as FpArgs;
+let packed: bit[96] = args as bit[96];
+```
+**Status**: Not implemented. Would eliminate ~30% of CLE boilerplate (manual `data[31:0]`, `data[63:32]` slicing).
+
+**Impact**: High. The CLE has hundreds of lines of manual bit packing/unpacking.
+
+### 9. No Enum Types with Values - **REQUESTED** (Dec 2025)
+```skalp
+// WANTED: Enum types with explicit discriminant values
+enum L0Opcode: bit[6] {
+    ADD = 0,
+    SUB = 1,
+    MUL = 2,
+    AND = 3,
+    OR = 4,
+    XOR = 5,
+}
+
+enum L2Opcode: bit[6] {
+    FP_ADD = 23,
+    FP_MUL = 24,
+    FP_FMA = 25,
+    FP_DIV = 26,
+    FP_SQRT = 27,
+}
+
+// Usage - no more magic numbers
+fn exec_l0_l1(opcode: L0Opcode, a: bit[256], b: bit[256]) -> bit[256] {
+    match opcode {
+        L0Opcode::ADD => a + b,
+        L0Opcode::SUB => a - b,
+        ...
+    }
+}
+```
+**Status**: Not implemented. Would eliminate magic number opcodes throughout CLE (~15% clarity improvement).
+
+**Impact**: High. Self-documenting code, compile-time opcode validation.
+
+### 10. No Tuple Return Types - **REQUESTED** (Dec 2025)
+```skalp
+// WANTED: Multiple return values without manual packing
+fn ray_aabb_intersect(ray: Ray, aabb: AABB) -> (bit[32], bit[32], bit) {
+    // ... compute t_near, t_far, hit ...
+    return (t_near, t_far, hit)
+}
+
+// Usage - destructuring assignment
+let (t_near, t_far, hit) = ray_aabb_intersect(ray, aabb);
+
+// Current workaround: pack into bit[256], manually extract
+let result = exec_l4_l5(47, ray_data, aabb_data);
+let t_near = result[31:0];
+let t_far = result[63:32];
+let hit = result[95:64];
+```
+**Status**: Not implemented. Would eliminate manual result packing/unpacking (~10% code reduction).
+
+**Impact**: Medium. Cleaner APIs for multi-output functions.
+
+### 11. Implicit FP32 Type Conversion - **REQUESTED** (Dec 2025)
+```skalp
+// WANTED: fp32 as first-class type with implicit bit conversion at boundaries
+fn fp_mul(a: fp32, b: fp32) -> fp32 {
+    return a * b  // No explicit casts needed
+}
+
+// Current workaround: explicit casts everywhere
+fn fp_mul(a: bit[32], b: bit[32]) -> bit[32] {
+    return ((a as fp32) * (b as fp32)) as bit[32]
+}
+```
+**Status**: Not implemented. Would reduce cast verbosity (~10% code reduction).
+
+**Impact**: Medium. More natural FP32 code.
+
+### 12. Built-in Test Framework - **REQUESTED** (Dec 2025)
+```skalp
+// WANTED: Test attribute with assertions
+#[test]
+fn test_l0_add() {
+    assert_eq!(exec_l0_l1::<32>(0, 100, 25), 125);
+    assert_eq!(exec_l0_l1::<32>(1, 100, 25), 75);
+}
+
+#[test]
+fn test_fp_mul() {
+    let result = fp_mul(0x40000000, 0x40400000);  // 2.0 * 3.0
+    assert_eq!(result, 0x40C00000);  // 6.0
+}
+
+// Current workaround: manual test scaffolding
+entity TestL0 {
+    out l0_pass: bit
+}
+impl TestL0 {
+    let result = exec_l0_l1::<32>(0, 100, 25);
+    l0_pass = if result == 125 { 1 } else { 0 };
+}
+```
+**Status**: Not implemented. Would streamline test development.
+
+**Impact**: Medium. Faster test iteration, clearer test intent.
+
 ---
 
 ## Comparison to Alternatives (Updated Dec 2025)
@@ -367,7 +497,12 @@ entity BlackBoxIp { ... }
 6. ~~**Priority 6**: Power intent (retention, isolation, level shifters)~~ ✅ **DONE** (Dec 2025)
 7. ~~**Priority 7**: Vendor IP integration~~ ✅ **DONE** (Dec 2025)
 
-**ALL USER FEEDBACK ITEMS COMPLETE** 🎉
+**New Priorities (Dec 2025 - Karythra CLE Feedback):**
+8. **Priority 8**: Struct/Record types - High impact (~30% code reduction)
+9. **Priority 9**: Enum types with values - High impact (self-documenting opcodes)
+10. **Priority 10**: Tuple return types - Medium impact (cleaner multi-output APIs)
+11. **Priority 11**: Implicit FP32 type conversion - Medium impact (less cast verbosity)
+12. **Priority 12**: Built-in test framework - Medium impact (faster test iteration)
 
 ### For Skalp Users:
 1. **Use pipeline annotations** on timing-critical functions - the backend handles register insertion

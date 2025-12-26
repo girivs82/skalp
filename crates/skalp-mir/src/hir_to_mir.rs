@@ -6504,6 +6504,22 @@ impl<'hir> HirToMir<'hir> {
             }
         }
 
+        // BUG #173 FIX: Search in user_defined_types for top-level struct declarations
+        if struct_type.is_none() {
+            for udt in &hir.user_defined_types {
+                if let hir::HirType::Struct(ref st) = &udt.type_def {
+                    if st.name == type_name {
+                        struct_type = Some(st);
+                        eprintln!(
+                            "[DEBUG] convert_struct_literal: found struct '{}' in user_defined_types",
+                            type_name
+                        );
+                        break;
+                    }
+                }
+            }
+        }
+
         let struct_def = struct_type?;
 
         // Convert field values and pack them into a bit vector
@@ -6519,15 +6535,32 @@ impl<'hir> HirToMir<'hir> {
             field_exprs.push(field_expr);
         }
 
-        // For simplicity, if there's only one field, return that expression
-        // For multiple fields, we'd need proper concatenation support in MIR
-        // TODO: Implement proper struct packing in MIR
+        // BUG #173 FIX: Use Concat for multi-field structs
+        // Struct fields are packed in declaration order, similar to tuple literals
+        // Single-field struct: return that expression directly
+        // Multi-field struct: concatenate all fields
+        if field_exprs.is_empty() {
+            return None;
+        }
+
         if field_exprs.len() == 1 {
             Some(field_exprs.into_iter().next().unwrap())
         } else {
-            // For now, return the first field as a placeholder
-            // This is a limitation that will need proper struct support in MIR
-            field_exprs.into_iter().next()
+            // BUG #173 FIX: Reverse field order for Verilog concat semantics
+            // In Verilog, {a, b, c} places 'a' at MSB and 'c' at LSB
+            // But struct field access expects first field at LSB
+            // So struct { a, b, c } should become {c, b, a} in Verilog
+            // This way: field_a is at bits [0:width_a), field_b at [width_a:width_a+width_b), etc.
+            let mut reversed_exprs = field_exprs;
+            reversed_exprs.reverse();
+            eprintln!(
+                "[DEBUG] convert_struct_literal: creating Concat with {} fields (reversed) for '{}'",
+                reversed_exprs.len(),
+                type_name
+            );
+            Some(Expression::with_unknown_type(ExpressionKind::Concat(
+                reversed_exprs,
+            )))
         }
     }
 
