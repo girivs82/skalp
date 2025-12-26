@@ -14808,6 +14808,19 @@ impl<'hir> HirToMir<'hir> {
         // Find the enum type in the HIR
         let hir = self.hir?;
 
+        // BUG #174 FIX: First search in user_defined_types for top-level enum declarations
+        for udt in &hir.user_defined_types {
+            if let hir::HirType::Enum(ref enum_def) = &udt.type_def {
+                if enum_def.name == enum_type {
+                    eprintln!(
+                        "[DEBUG] resolve_enum_variant_value: found enum '{}' in user_defined_types",
+                        enum_type
+                    );
+                    return self.find_variant_value(enum_def, variant);
+                }
+            }
+        }
+
         // Look through all entities and implementations to find the enum type
         for entity in &hir.entities {
             for port in &entity.ports {
@@ -14830,6 +14843,10 @@ impl<'hir> HirToMir<'hir> {
         }
 
         // If not found, return default value 0
+        eprintln!(
+            "[DEBUG] resolve_enum_variant_value: enum '{}' NOT FOUND, returning 0",
+            enum_type
+        );
         Some(Expression::with_unknown_type(ExpressionKind::Literal(
             Value::Integer(0),
         )))

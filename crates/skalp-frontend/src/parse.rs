@@ -3524,6 +3524,7 @@ impl<'a> ParseState<'a> {
     }
 
     /// Parse enum declaration
+    /// Supports: enum Name { variants } or enum Name: BaseType { variants }
     fn parse_enum_decl(&mut self) {
         self.start_node(SyntaxKind::EnumDecl);
 
@@ -3536,6 +3537,13 @@ impl<'a> ParseState<'a> {
         // Optional generic parameters
         if self.at(SyntaxKind::Lt) {
             self.parse_generic_params();
+        }
+
+        // Optional base type annotation: `: bit[6]`
+        // This specifies the underlying type for enum discriminants
+        if self.at(SyntaxKind::Colon) {
+            self.bump(); // consume ':'
+            self.parse_type(); // parse the base type (e.g., bit[6])
         }
 
         // Enum body

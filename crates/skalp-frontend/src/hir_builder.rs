@@ -10616,6 +10616,7 @@ impl HirBuilderContext {
     }
 
     /// Build enum type from syntax node
+    /// Supports: enum Name { variants } or enum Name: BaseType { variants }
     fn build_enum_type(&mut self, node: &SyntaxNode) -> Option<HirEnumType> {
         let name = self.extract_name(node)?;
         let mut variants = Vec::new();
@@ -10629,13 +10630,29 @@ impl HirBuilderContext {
             }
         }
 
-        // Default base type is nat[32]
-        let base_type = Box::new(HirType::Nat(32));
+        // Extract base type from type annotation (e.g., `: bit[6]`)
+        // If no type annotation, default to nat[32]
+        let base_type = node
+            .children()
+            .find(|n| {
+                matches!(
+                    n.kind(),
+                    SyntaxKind::BitType
+                        | SyntaxKind::NatType
+                        | SyntaxKind::IntType
+                        | SyntaxKind::LogicType
+                        | SyntaxKind::TypeExpr
+                        | SyntaxKind::IdentType
+                        | SyntaxKind::CustomType
+                )
+            })
+            .map(|type_node| self.extract_hir_type(&type_node))
+            .unwrap_or(HirType::Nat(32));
 
         Some(HirEnumType {
             name,
             variants,
-            base_type,
+            base_type: Box::new(base_type),
         })
     }
 
