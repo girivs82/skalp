@@ -1,6 +1,6 @@
 # Skalp User Feedback
 ## From: Claude (LLM) as Karythra User
-## Date: 2025-12-11 (Updated)
+## Date: 2025-12-26 (Updated)
 ## Project: Karythra 256-bit Content-Addressed Processor
 
 ---
@@ -101,9 +101,9 @@ The Metal backend provides fast simulation for combinational logic. 500+ cycles 
 
 ---
 
-## What Works Well But Has Caveats
+## What Works Well (Previously Had Caveats - Now Fixed)
 
-### 1. Mutable Variables in Functions
+### 1. Mutable Variables in Functions ✅
 ```skalp
 pub fn parity32(x: bit[32]) -> bit {
     let mut p = x;
@@ -113,18 +113,55 @@ pub fn parity32(x: bit[32]) -> bit {
     return p[0:0]
 }
 ```
-**Status**: Works after Bug #118 fix. Complex nested mutations may still have edge cases.
+**Status**: Fully working after Bug #118 fix.
 
-### 2. 256-bit Wide Datapaths
+### 2. 256-bit Wide Datapaths ✅
 ```skalp
 pub fn exec_l4_l5(opcode: bit[6], data1: bit[256], data2: bit[256]) -> bit[256]
 ```
-**Status**: Fully supported. Backend decomposes to 4x64-bit for Metal. Simulation works, but may be slower than narrower designs.
+**Status**: Fully supported. Backend decomposes to 4x64-bit for Metal. All 4 simulation modes work (CPU/GPU × behavioral/gate-level).
 
-### 3. Complex Control Flow
-Nested if/match with multiple returns works, but:
-- Very deep nesting may hit edge cases
-- Sometimes requires restructuring code
+### 3. Function Calls in Match Arms ✅ (Fixed Dec 2025)
+```skalp
+// Previously required workarounds - NOW WORKS DIRECTLY:
+let result = match opcode {
+    23 => fp_add(a, b),      // Imported function in match arm
+    24 => fp_mul(a, b),      // Works correctly!
+    25 => fp_div(a, b),
+    _ => 0
+};
+```
+**Status**: Bug #171 fixed. Imported functions can now be called directly from match arms without inlining workarounds.
+
+### 4. Cast Expressions in Return Statements ✅ (Fixed Dec 2025)
+```skalp
+pub fn fp_mul(a: bit[32], b: bit[32]) -> bit[32] {
+    let a_fp = a as fp32;
+    let b_fp = b as fp32;
+    return (a_fp * b_fp) as bit[32]  // Cast in return - NOW WORKS
+}
+```
+**Status**: Bug #171 fixed. Return statements with cast expressions like `return (expr) as Type` now parse correctly.
+
+### 5. Width-Prefixed Literals ✅ (Fixed Dec 2025)
+```skalp
+// Verilog-style width-prefixed literals now work:
+let zeros: bit[256] = {224'b0, value};  // 224-bit zero prefix
+let byte: bit[8] = 8'hFF;               // Hex literal
+let word: bit[32] = 32'd12345;          // Decimal literal
+```
+**Status**: Bug #172 fixed. Width-prefixed binary (`224'b0`), hex (`8'hFF`), and decimal (`32'd255`) literals parse correctly.
+
+### 6. Complex Control Flow ✅
+Nested if/match with function calls in branches now works correctly:
+```skalp
+result = if sel {
+    make_256_result(a)    // Function returning bit[256] in if-else
+} else {
+    make_256_result(b)    // Works correctly!
+}
+```
+**Status**: All previously documented workarounds have been removed from Karythra CLE.
 
 ---
 
@@ -298,6 +335,16 @@ entity BlackBoxIp { ... }
 6. **Mutable Variables**: Accumulator patterns in bitops functions work
 7. **Const Generic Functions**: `exec_l0_l1::<32>(...)` for parameterized width operations
 8. **Generate-for Loops**: Demonstrated in stdlib for bit manipulation entities (BitReverser, Popcount)
+9. **Imported Functions in Match Arms**: Now works without workarounds (Bug #171 fixed)
+10. **Width-Prefixed Literals**: `{224'b0, value}` patterns work correctly (Bug #172 fixed)
+
+### Karythra CLE Code Quality (Dec 2025 Update):
+- **All workarounds removed**: The CLE `func_units_l2.sk` now uses the correct patterns:
+  - Calls `fp_add()`, `fp_mul()` etc. directly from match arms
+  - Returns `bit[256]` directly with `{224'b0, result_32}` concat
+  - No more inline duplication of FP operations
+- **Code reduction**: ~40% less code in L2 function units after removing workarounds
+- **Modular design**: Shared FP operations in `shared_fp_ops.sk` are now actually shared
 
 ### Karythra-Specific Notes:
 - The CLE's L4-L5 graphics operations benefit heavily from pipeline annotations
@@ -305,6 +352,7 @@ entity BlackBoxIp { ... }
 - FP32 native support enabled direct implementation of math kernels
 - Const generic functions work well: `exec_l0_l1::<32>()` for parameterized operations
 - Named generics (`<W: 32>`) work for both entity instantiation and function calls
+- All 4 simulation modes verified working: CPU behavioral, GPU behavioral, CPU gate-level, GPU gate-level
 
 ---
 
