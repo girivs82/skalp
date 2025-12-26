@@ -12275,17 +12275,26 @@ impl<'hir> HirToMir<'hir> {
             call.args.len()
         );
 
+        // BUG FIX #177: Check if a user-defined function exists BEFORE assuming it's an FP method
+        // This prevents user-defined functions named "add", "sub", etc. from being incorrectly
+        // treated as floating-point methods. User-defined functions take priority.
+        let has_user_defined_function = self.find_function(&call.function).is_some();
+
         // BUG FIX #69: Don't attempt to inline FP built-in methods
         // FP methods should be handled by convert_expression's FP method detection.
         // If we reach here for an FP method, treat it as an FP operation directly.
         // This handles cases where type inference fails during nested inlining.
-        let is_binary_fp_method = matches!(
-            call.function.as_str(),
-            "add" | "sub" | "mul" | "div" | "lt" | "gt" | "le" | "ge" | "eq" | "ne"
-        ) && call.args.len() == 2;
+        // BUT ONLY if there's no user-defined function with this name (BUG #177 FIX)
+        let is_binary_fp_method = !has_user_defined_function
+            && matches!(
+                call.function.as_str(),
+                "add" | "sub" | "mul" | "div" | "lt" | "gt" | "le" | "ge" | "eq" | "ne"
+            )
+            && call.args.len() == 2;
 
-        let is_unary_fp_method =
-            matches!(call.function.as_str(), "neg" | "abs" | "sqrt") && call.args.len() == 1;
+        let is_unary_fp_method = !has_user_defined_function
+            && matches!(call.function.as_str(), "neg" | "abs" | "sqrt")
+            && call.args.len() == 1;
 
         if is_binary_fp_method || is_unary_fp_method {
             eprintln!(

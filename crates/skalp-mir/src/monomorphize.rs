@@ -119,8 +119,21 @@ impl TypeSubstitution {
             }
 
             // Type expressions that may contain parameters
-            HirType::BitExpr(expr) => HirType::BitExpr(Box::new(self.substitute_expression(expr))),
+            // BUG #178 FIX: Try to resolve BitExpr(GenericParam) to concrete Bit type
+            HirType::BitExpr(expr) => {
+                if let Some(concrete_type) = self.substitute_type_for_bit_expr(expr) {
+                    concrete_type
+                } else {
+                    HirType::BitExpr(Box::new(self.substitute_expression(expr)))
+                }
+            }
             HirType::LogicExpr(expr) => {
+                // Similar handling for LogicExpr
+                if let hir::HirExpression::GenericParam(param_name) = expr.as_ref() {
+                    if let Some(ConcreteType::ConstValue(width)) = self.mappings.get(param_name) {
+                        return HirType::Logic(*width as u32);
+                    }
+                }
                 HirType::LogicExpr(Box::new(self.substitute_expression(expr)))
             }
 
@@ -315,8 +328,45 @@ impl TypeSubstitution {
                 base: Box::new(self.substitute_expression(base)),
                 field: field.clone(),
             },
+            // BUG #178 FIX: Handle GenericParam references in expressions
+            // When a generic parameter is used in an expression (e.g., bit[W]),
+            // substitute it with the concrete value
+            hir::HirExpression::GenericParam(param_name) => {
+                if let Some(concrete) = self.mappings.get(param_name) {
+                    match concrete {
+                        ConcreteType::ConstValue(value) => {
+                            // Replace with a literal expression
+                            hir::HirExpression::Literal(hir::HirLiteral::Integer(*value))
+                        }
+                        ConcreteType::Type(_) => {
+                            // Type parameters in expressions - keep as is for now
+                            expr.clone()
+                        }
+                    }
+                } else {
+                    expr.clone()
+                }
+            }
             // Leaf expressions - no substitution needed
             _ => expr.clone(),
+        }
+    }
+
+    /// Substitute a type, handling BitExpr with GenericParam specially
+    /// BUG #178 FIX: Convert BitExpr(GenericParam("W")) to Bit(32) when W=32
+    fn substitute_type_for_bit_expr(&self, expr: &hir::HirExpression) -> Option<HirType> {
+        match expr {
+            hir::HirExpression::GenericParam(param_name) => {
+                if let Some(ConcreteType::ConstValue(width)) = self.mappings.get(param_name) {
+                    Some(HirType::Bit(*width as u32))
+                } else {
+                    None
+                }
+            }
+            hir::HirExpression::Literal(hir::HirLiteral::Integer(value)) => {
+                Some(HirType::Bit(*value as u32))
+            }
+            _ => None,
         }
     }
 }

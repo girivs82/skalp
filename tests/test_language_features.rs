@@ -344,7 +344,6 @@ impl<const SIZE: nat> AddressDecoder<SIZE> {
 // ============================================================================
 
 #[test]
-#[ignore = "known bug: comparison operators not generating correct SystemVerilog"]
 fn test_comparison_operators() {
     let source = r#"
 entity TestComparison {
@@ -362,7 +361,7 @@ impl TestComparison {
     eq = (a == b) as bit
     ne = (a != b) as bit
     lt = (a < b) as bit
-    le = (a = b) as bit
+    le = (a <= b) as bit
     gt = (a > b) as bit
     ge = (a >= b) as bit
 }

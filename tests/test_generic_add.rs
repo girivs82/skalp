@@ -11,7 +11,6 @@ mod test_generics {
     use skalp_mir::Monomorphizer;
 
     #[test]
-    #[ignore = "known bug: generic parameter types not fully resolved after monomorphization"]
     fn test_generic_add_basic() {
         let skalp_code = r#"
     // Generic addition function with const width parameter
