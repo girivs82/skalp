@@ -109,6 +109,8 @@ pub struct MirToLirTransform {
     reset_signals: Vec<LirSignalId>,
     /// Counter for generating unique signal names
     temp_counter: u32,
+    /// Counter for generating unique node names
+    node_counter: u32,
 }
 
 impl MirToLirTransform {
@@ -127,6 +129,7 @@ impl MirToLirTransform {
             clock_signals: Vec::new(),
             reset_signals: Vec::new(),
             temp_counter: 0,
+            node_counter: 0,
         }
     }
 
@@ -744,58 +747,62 @@ impl MirToLirTransform {
                 // Transform the inner expression
                 let source_signal = self.transform_expression(expr, source_width);
 
-                if target_width == source_width {
-                    // Same width - just pass through
-                    source_signal
-                } else if target_width > source_width {
-                    // Widening - use ZeroExtend (unsigned) or SignExtend (signed)
-                    let out = self.alloc_temp_signal(target_width);
-                    let is_signed = matches!(
-                        target_type,
-                        DataType::Int(_)
-                            | DataType::IntParam { .. }
-                            | DataType::IntExpr { .. }
-                            | DataType::Float16
-                            | DataType::Float32
-                            | DataType::Float64
-                    );
-
-                    if is_signed {
-                        self.lir.add_node(
-                            LirOp::SignExtend {
-                                from: source_width,
-                                to: target_width,
-                            },
-                            vec![source_signal],
-                            out,
-                            format!("{}.sext", self.hierarchy_path),
-                        );
-                    } else {
-                        self.lir.add_node(
-                            LirOp::ZeroExtend {
-                                from: source_width,
-                                to: target_width,
-                            },
-                            vec![source_signal],
-                            out,
-                            format!("{}.zext", self.hierarchy_path),
-                        );
+                match target_width.cmp(&source_width) {
+                    std::cmp::Ordering::Equal => {
+                        // Same width - just pass through
+                        source_signal
                     }
-                    out
-                } else {
-                    // Narrowing - use RangeSelect (truncation)
-                    let out = self.alloc_temp_signal(target_width);
-                    self.lir.add_node(
-                        LirOp::RangeSelect {
-                            width: source_width,
-                            high: target_width - 1,
-                            low: 0,
-                        },
-                        vec![source_signal],
-                        out,
-                        format!("{}.trunc", self.hierarchy_path),
-                    );
-                    out
+                    std::cmp::Ordering::Greater => {
+                        // Widening - use ZeroExtend (unsigned) or SignExtend (signed)
+                        let out = self.alloc_temp_signal(target_width);
+                        let is_signed = matches!(
+                            target_type,
+                            DataType::Int(_)
+                                | DataType::IntParam { .. }
+                                | DataType::IntExpr { .. }
+                                | DataType::Float16
+                                | DataType::Float32
+                                | DataType::Float64
+                        );
+
+                        if is_signed {
+                            self.lir.add_node(
+                                LirOp::SignExtend {
+                                    from: source_width,
+                                    to: target_width,
+                                },
+                                vec![source_signal],
+                                out,
+                                format!("{}.sext", self.hierarchy_path),
+                            );
+                        } else {
+                            self.lir.add_node(
+                                LirOp::ZeroExtend {
+                                    from: source_width,
+                                    to: target_width,
+                                },
+                                vec![source_signal],
+                                out,
+                                format!("{}.zext", self.hierarchy_path),
+                            );
+                        }
+                        out
+                    }
+                    std::cmp::Ordering::Less => {
+                        // Narrowing - use RangeSelect (truncation)
+                        let out = self.alloc_temp_signal(target_width);
+                        self.lir.add_node(
+                            LirOp::RangeSelect {
+                                width: source_width,
+                                high: target_width - 1,
+                                low: 0,
+                            },
+                            vec![source_signal],
+                            out,
+                            format!("{}.trunc", self.hierarchy_path),
+                        );
+                        out
+                    }
                 }
             }
             _ => {
@@ -1070,11 +1077,13 @@ impl MirToLirTransform {
         };
 
         let out = self.alloc_temp_signal(result_width);
+        let node_id = self.node_counter;
+        self.node_counter += 1;
         self.lir.add_node(
             word_op,
             vec![left_signal, right_signal],
             out,
-            format!("{}.{:?}", self.hierarchy_path, op),
+            format!("{}.{:?}_{}", self.hierarchy_path, op, node_id),
         );
         out
     }
@@ -1889,14 +1898,33 @@ fn elaborate_instance(
     // Collect child instance paths
     let mut children: Vec<String> = Vec::new();
 
+    eprintln!(
+        "[ELABORATE] Module '{}' at path '{}' has {} instances",
+        module.name,
+        instance_path,
+        module.instances.len()
+    );
+
     // Process child instances
     for inst in &module.instances {
+        eprintln!(
+            "[ELABORATE]   Processing child instance '{}' -> module_id={}",
+            inst.name, inst.module.0
+        );
         let child_path = format!("{}.{}", instance_path, inst.name);
         children.push(child_path.clone());
 
         // Find child module by ID
         if let Some(child_mod) = module_map.get(&inst.module).copied() {
             // Extract connection info using parent module for name lookup
+            eprintln!(
+                "[ELABORATE]   Instance '{}' has {} connections:",
+                inst.name,
+                inst.connections.len()
+            );
+            for (port_name, expr) in &inst.connections {
+                eprintln!("[ELABORATE]     {} -> {:?}", port_name, expr.kind);
+            }
             let child_connections = extract_connection_info(&inst.connections, module);
 
             // Recursively elaborate child
@@ -1930,6 +1958,7 @@ fn elaborate_instance(
 
 /// Extract connection information from port connections
 /// Uses the parent module to look up actual signal/port names by ID
+/// BUG #168 FIX: Also resolves variable references to their constant values when possible
 fn extract_connection_info(
     connections: &HashMap<String, Expression>,
     parent_module: &Module,
@@ -1959,6 +1988,22 @@ fn extract_connection_info(
                         let bit_idx = extract_const_index(index).unwrap_or(0);
                         PortConnectionInfo::BitSelect(base_name, bit_idx)
                     }
+                    LValue::Variable(var_id) => {
+                        // BUG #168 FIX: Try to resolve variable to its constant value
+                        // This handles cases where a let binding with a constant value
+                        // is passed as an argument to a module instance
+                        if let Some(const_val) = lookup_variable_constant(parent_module, *var_id) {
+                            eprintln!(
+                                "[EXTRACT_CONN] BUG #168 FIX: Resolved var_{} to constant 0x{:X}",
+                                var_id.0, const_val
+                            );
+                            PortConnectionInfo::Constant(const_val)
+                        } else {
+                            // Fall back to signal reference
+                            let signal_name = lvalue_to_name_with_module(lvalue, parent_module);
+                            PortConnectionInfo::Signal(signal_name)
+                        }
+                    }
                     _ => {
                         // Simple signal reference
                         let signal_name = lvalue_to_name_with_module(lvalue, parent_module);
@@ -1977,6 +2022,93 @@ fn extract_connection_info(
     result
 }
 
+/// BUG #168 FIX: Look up a variable's constant value from the module
+/// Returns Some(value) if the variable is assigned a constant, None otherwise
+fn lookup_variable_constant(module: &Module, var_id: VariableId) -> Option<u64> {
+    eprintln!(
+        "[LOOKUP_VAR] Looking for var_{} in module '{}' ({} assignments, {} processes)",
+        var_id.0,
+        module.name,
+        module.assignments.len(),
+        module.processes.len()
+    );
+
+    // Search through continuous assignments
+    for (idx, assign) in module.assignments.iter().enumerate() {
+        if let LValue::Variable(id) = &assign.lhs {
+            if *id == var_id {
+                let value = extract_constant_value(&assign.rhs);
+                eprintln!(
+                    "[LOOKUP_VAR] Found var_{} in continuous assignment #{} -> {:?}",
+                    var_id.0, idx, value
+                );
+                return value;
+            }
+        }
+    }
+
+    // Search through process blocks
+    for (proc_idx, process) in module.processes.iter().enumerate() {
+        for stmt in &process.body.statements {
+            if let Some(value) = find_variable_constant_in_stmt(stmt, var_id) {
+                eprintln!(
+                    "[LOOKUP_VAR] Found var_{} in process #{} -> 0x{:X}",
+                    var_id.0, proc_idx, value
+                );
+                return Some(value);
+            }
+        }
+    }
+
+    eprintln!(
+        "[LOOKUP_VAR] var_{} NOT FOUND in module '{}'",
+        var_id.0, module.name
+    );
+    None
+}
+
+/// Helper to recursively search for a variable's constant assignment in a statement
+fn find_variable_constant_in_stmt(stmt: &Statement, var_id: VariableId) -> Option<u64> {
+    match stmt {
+        Statement::Assignment(assign) => {
+            // Check if this is an assignment to our variable
+            if let LValue::Variable(id) = &assign.lhs {
+                if *id == var_id {
+                    // Check if RHS is a constant
+                    return extract_constant_value(&assign.rhs);
+                }
+            }
+            None
+        }
+        Statement::Block(block) => {
+            // Search through block statements
+            for inner_stmt in &block.statements {
+                if let Some(value) = find_variable_constant_in_stmt(inner_stmt, var_id) {
+                    return Some(value);
+                }
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+/// Extract a constant value from an expression if it's a literal
+fn extract_constant_value(expr: &Expression) -> Option<u64> {
+    match &expr.kind {
+        ExpressionKind::Literal(value) => Some(value_to_u64(value)),
+        ExpressionKind::Cast { expr: inner, .. } => {
+            // Handle casts like (3.0 as fp32) as bit[32]
+            extract_constant_value(inner)
+        }
+        ExpressionKind::Unary { operand, .. } => {
+            // Handle unary operations (might be casts)
+            extract_constant_value(operand)
+        }
+        _ => None,
+    }
+}
+
 /// Extract a constant index value from an expression
 fn extract_const_index(expr: &Expression) -> Option<usize> {
     match &expr.kind {
@@ -1987,11 +2119,17 @@ fn extract_const_index(expr: &Expression) -> Option<usize> {
 }
 
 /// Convert a Value to u64
+/// For Float values, converts to IEEE 754 bit representation (not truncation)
 fn value_to_u64(value: &Value) -> u64 {
     match value {
         Value::Integer(i) => *i as u64,
         Value::BitVector { value, .. } => *value,
-        Value::Float(f) => *f as u64,
+        Value::Float(f) => {
+            // BUG #168 FIX: Convert float to IEEE 754 bit representation
+            // For fp32 (single precision), the bits are in the lower 32 bits
+            let f32_val = *f as f32;
+            f32_val.to_bits() as u64
+        }
         _ => 0, // Default for String, HighZ, Unknown
     }
 }

@@ -587,6 +587,18 @@ impl GateNetlist {
     /// Rebuild driver and fanout information from cells
     /// Useful after net merging to ensure connectivity is accurate
     pub fn rebuild_net_connectivity(&mut self) {
+        // Count tie cells before rebuild
+        let tie_cells: Vec<_> = self
+            .cells
+            .iter()
+            .filter(|c| c.cell_type.starts_with("TIE"))
+            .map(|c| (c.id.0, &c.cell_type, c.outputs.first().cloned()))
+            .collect();
+        eprintln!(
+            "[REBUILD_CONN] Found {} tie cells before rebuild",
+            tie_cells.len()
+        );
+
         // Clear all existing driver/fanout info
         for net in &mut self.nets {
             net.driver = None;
@@ -610,6 +622,11 @@ impl GateNetlist {
                 }
             }
         }
+
+        eprintln!(
+            "[REBUILD_CONN] Rebuild complete, {} total cells",
+            self.cells.len()
+        );
     }
 
     /// Get a mutable net by ID
@@ -653,6 +670,12 @@ impl GateNetlist {
                         .as_ref()
                         .is_some_and(|op| op.starts_with("blackbox:"))
                 {
+                    return false;
+                }
+
+                // TIE cells (constant generators) must be preserved
+                // They drive constant values to child module ports
+                if cell.cell_type.starts_with("TIE") {
                     return false;
                 }
 

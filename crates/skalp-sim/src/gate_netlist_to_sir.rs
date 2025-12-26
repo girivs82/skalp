@@ -369,10 +369,11 @@ impl GateNetlistToSirConverter {
             },
 
             // Tie cells (constant generators)
-            "TIE" | "TIEH" | "TIEHI" | "TIEHIGH" | "VCC" | "ONE" => {
+            // TIE1 = logic high, TIE0 = logic low (common naming convention)
+            "TIE" | "TIE1" | "TIEH" | "TIEHI" | "TIEHIGH" | "VCC" | "ONE" => {
                 PrimitiveType::Constant { value: true }
             }
-            "TIEL" | "TIELO" | "TIELOW" | "GND" | "ZERO" => {
+            "TIE0" | "TIEL" | "TIELO" | "TIELOW" | "GND" | "ZERO" => {
                 PrimitiveType::Constant { value: false }
             }
 
