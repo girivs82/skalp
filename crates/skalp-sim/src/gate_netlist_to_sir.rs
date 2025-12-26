@@ -287,6 +287,21 @@ impl GateNetlistToSirConverter {
             return PrimitiveType::Constant { value: false };
         }
 
+        // Check for FP32 cells before stripping suffix (FP32_ADD, FP32_MUL, etc.)
+        // These have underscores that are part of the cell name, not drive strength suffixes
+        if upper.starts_with("FP32_ADD") || upper.starts_with("FPADD32") {
+            return PrimitiveType::Fp32Add;
+        }
+        if upper.starts_with("FP32_SUB") || upper.starts_with("FPSUB32") {
+            return PrimitiveType::Fp32Sub;
+        }
+        if upper.starts_with("FP32_MUL") || upper.starts_with("FPMUL32") {
+            return PrimitiveType::Fp32Mul;
+        }
+        if upper.starts_with("FP32_DIV") || upper.starts_with("FPDIV32") {
+            return PrimitiveType::Fp32Div;
+        }
+
         // Normalize cell type (remove drive strength suffix like "_X1", "_X2")
         let base_type = cell_type
             .split('_')
@@ -328,11 +343,12 @@ impl GateNetlistToSirConverter {
             "FA" | "FULLADDER" => PrimitiveType::FullAdder,
 
             // Floating-Point (soft macros)
+            // Accept both underscore (FP32_MUL) and no-underscore (FP32MUL) versions
             "FP32" => PrimitiveType::Fp32Add, // Default to add for generic FP32
-            "FP32ADD" | "FPADD32" => PrimitiveType::Fp32Add,
-            "FP32SUB" | "FPSUB32" => PrimitiveType::Fp32Sub,
-            "FP32MUL" | "FPMUL32" => PrimitiveType::Fp32Mul,
-            "FP32DIV" | "FPDIV32" => PrimitiveType::Fp32Div,
+            "FP32ADD" | "FP32_ADD" | "FPADD32" => PrimitiveType::Fp32Add,
+            "FP32SUB" | "FP32_SUB" | "FPSUB32" => PrimitiveType::Fp32Sub,
+            "FP32MUL" | "FP32_MUL" | "FPMUL32" => PrimitiveType::Fp32Mul,
+            "FP32DIV" | "FP32_DIV" | "FPDIV32" => PrimitiveType::Fp32Div,
 
             // Sequential - D Flip-Flops
             "DFF" | "DFFRQ" => PrimitiveType::DffP, // Rising edge, async reset
