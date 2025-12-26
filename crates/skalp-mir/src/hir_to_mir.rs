@@ -6679,6 +6679,10 @@ impl<'hir> HirToMir<'hir> {
                     None
                 }
                 hir::HirPattern::Path(enum_name, variant) => {
+                    eprintln!(
+                        "[DEBUG] HirPattern::Path matched: {}::{}",
+                        enum_name, variant
+                    );
                     // BUG #33 FIX: Check if this is a constant pattern marked with "__CONST__"
                     if enum_name == "__CONST__" {
                         // This is a constant reference - resolve it to its value
@@ -6695,6 +6699,10 @@ impl<'hir> HirToMir<'hir> {
                         }
                     } else {
                         // Regular enum pattern - resolve to the enum variant value
+                        eprintln!(
+                            "[DEBUG] Calling resolve_enum_variant_value for {}::{}",
+                            enum_name, variant
+                        );
                         if let Some(variant_value) =
                             self.resolve_enum_variant_value(enum_name, variant)
                         {
@@ -14806,37 +14814,68 @@ impl<'hir> HirToMir<'hir> {
     /// Resolve enum variant to its integer value
     fn resolve_enum_variant_value(&self, enum_type: &str, variant: &str) -> Option<Expression> {
         // Find the enum type in the HIR
-        let hir = self.hir?;
-
-        // BUG #174 FIX: First search in user_defined_types for top-level enum declarations
-        for udt in &hir.user_defined_types {
-            if let hir::HirType::Enum(ref enum_def) = &udt.type_def {
-                if enum_def.name == enum_type {
-                    eprintln!(
-                        "[DEBUG] resolve_enum_variant_value: found enum '{}' in user_defined_types",
-                        enum_type
-                    );
-                    return self.find_variant_value(enum_def, variant);
-                }
-            }
-        }
-
-        // Look through all entities and implementations to find the enum type
-        for entity in &hir.entities {
-            for port in &entity.ports {
-                if let hir::HirType::Enum(ref enum_def) = &port.port_type {
+        if let Some(hir) = self.hir {
+            // BUG #174 FIX: First search in user_defined_types for top-level enum declarations
+            for udt in &hir.user_defined_types {
+                if let hir::HirType::Enum(ref enum_def) = &udt.type_def {
                     if enum_def.name == enum_type {
                         return self.find_variant_value(enum_def, variant);
                     }
                 }
             }
+
+            // Look through all entities and implementations to find the enum type
+            for entity in &hir.entities {
+                for port in &entity.ports {
+                    if let hir::HirType::Enum(ref enum_def) = &port.port_type {
+                        if enum_def.name == enum_type {
+                            return self.find_variant_value(enum_def, variant);
+                        }
+                    }
+                }
+            }
+
+            for impl_block in &hir.implementations {
+                for signal in &impl_block.signals {
+                    if let hir::HirType::Enum(ref enum_def) = &signal.signal_type {
+                        if enum_def.name == enum_type {
+                            return self.find_variant_value(enum_def, variant);
+                        }
+                    }
+                }
+            }
         }
 
-        for impl_block in &hir.implementations {
-            for signal in &impl_block.signals {
-                if let hir::HirType::Enum(ref enum_def) = &signal.signal_type {
+        // BUG #175 FIX: Search in imported modules' HIRs for enum definitions
+        // This is needed when functions from imported modules use enums defined in those modules
+        for module_hir in self.module_hirs.values() {
+            // Search in user_defined_types
+            for udt in &module_hir.user_defined_types {
+                if let hir::HirType::Enum(ref enum_def) = &udt.type_def {
                     if enum_def.name == enum_type {
                         return self.find_variant_value(enum_def, variant);
+                    }
+                }
+            }
+
+            // Search in entities
+            for entity in &module_hir.entities {
+                for port in &entity.ports {
+                    if let hir::HirType::Enum(ref enum_def) = &port.port_type {
+                        if enum_def.name == enum_type {
+                            return self.find_variant_value(enum_def, variant);
+                        }
+                    }
+                }
+            }
+
+            // Search in implementations
+            for impl_block in &module_hir.implementations {
+                for signal in &impl_block.signals {
+                    if let hir::HirType::Enum(ref enum_def) = &signal.signal_type {
+                        if enum_def.name == enum_type {
+                            return self.find_variant_value(enum_def, variant);
+                        }
                     }
                 }
             }
@@ -14844,8 +14883,9 @@ impl<'hir> HirToMir<'hir> {
 
         // If not found, return default value 0
         eprintln!(
-            "[DEBUG] resolve_enum_variant_value: enum '{}' NOT FOUND, returning 0",
-            enum_type
+            "[DEBUG] resolve_enum_variant_value: enum '{}' NOT FOUND in current HIR or {} imported modules, returning 0",
+            enum_type,
+            self.module_hirs.len()
         );
         Some(Expression::with_unknown_type(ExpressionKind::Literal(
             Value::Integer(0),
@@ -14854,23 +14894,44 @@ impl<'hir> HirToMir<'hir> {
 
     /// Find the value of a specific variant in an enum
     fn find_variant_value(&self, enum_def: &hir::HirEnumType, variant: &str) -> Option<Expression> {
+        eprintln!(
+            "[DEBUG] find_variant_value: looking for '{}' in enum '{}' with {} variants",
+            variant,
+            enum_def.name,
+            enum_def.variants.len()
+        );
         for (index, enum_variant) in enum_def.variants.iter().enumerate() {
+            eprintln!(
+                "[DEBUG]   variant[{}]: name='{}', has_value={}",
+                index,
+                enum_variant.name,
+                enum_variant.value.is_some()
+            );
             if enum_variant.name == variant {
                 // If the variant has an explicit value, use it
                 if let Some(ref value_expr) = enum_variant.value {
+                    eprintln!("[DEBUG]   found variant with explicit value");
                     if let Some(value) = self.convert_literal_expr_immutable(value_expr) {
+                        eprintln!("[DEBUG]   converted value: {:?}", value);
                         return Some(Expression::with_unknown_type(ExpressionKind::Literal(
                             value,
                         )));
+                    } else {
+                        eprintln!("[DEBUG]   FAILED to convert value expression");
                     }
                 }
                 // Otherwise, use the index
+                eprintln!("[DEBUG]   using index {} as fallback", index);
                 return Some(Expression::with_unknown_type(ExpressionKind::Literal(
                     Value::Integer(index as i64),
                 )));
             }
         }
         // Variant not found, return 0
+        eprintln!(
+            "[DEBUG] find_variant_value: variant '{}' NOT FOUND in enum '{}'",
+            variant, enum_def.name
+        );
         Some(Expression::with_unknown_type(ExpressionKind::Literal(
             Value::Integer(0),
         )))

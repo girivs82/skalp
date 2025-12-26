@@ -759,13 +759,16 @@ fn build_design(
     library_path: Option<&PathBuf>,
 ) -> Result<()> {
     use skalp_codegen::systemverilog::generate_systemverilog_from_mir;
-    use skalp_frontend::parse_and_build_hir_from_file;
+    use skalp_frontend::parse_and_build_compilation_context;
 
     info!("Building design from {:?} to {}", source, target);
 
     // Parse, build HIR with module resolution
     info!("Parsing SKALP source and building HIR with module resolution...");
-    let hir = parse_and_build_hir_from_file(source).context("Failed to parse and build HIR")?;
+    let context =
+        parse_and_build_compilation_context(source).context("Failed to parse and build HIR")?;
+    let hir = context.main_hir;
+    let module_hirs = context.module_hirs;
 
     // Run safety analysis if enabled
     if let Some(ref safety_opts) = safety_options {
@@ -785,8 +788,9 @@ fn build_design(
     let compiler = skalp_mir::MirCompiler::new()
         .with_optimization_level(skalp_mir::OptimizationLevel::None)
         .with_verbose(true); // Enable verbose output for CDC analysis
+                             // BUG #175 FIX: Pass module_hirs for proper enum resolution in imported functions
     let mir = compiler
-        .compile_to_mir(&hir)
+        .compile_to_mir_with_modules(&hir, &module_hirs)
         .map_err(|e| anyhow::anyhow!("Failed to compile HIR to MIR with CDC analysis: {}", e))?;
 
     // Create output directory
