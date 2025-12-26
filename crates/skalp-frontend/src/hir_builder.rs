@@ -6675,8 +6675,34 @@ impl HirBuilderContext {
                         | SyntaxKind::ConcatExpr
                 ) =>
                 {
-                    // This is an expression - it becomes the result
-                    result_expr = self.build_expression(&child);
+                    // BUG #170 FIX: Handle case where CastExpr is a sibling of the expression
+                    // it should wrap (parser creates "ParenExpr CastExpr" as siblings instead
+                    // of nesting ParenExpr inside CastExpr)
+                    if child.kind() == SyntaxKind::CastExpr {
+                        if let Some(built_expr) = self.build_expression(&child) {
+                            result_expr = Some(built_expr);
+                        } else if let Some(prev_expr) = result_expr.take() {
+                            // CastExpr has no expression child - combine with previous result_expr
+                            // Extract just the TypeAnnotation from the CastExpr
+                            if let Some(target_type) = child
+                                .children()
+                                .find(|n| n.kind() == SyntaxKind::TypeAnnotation)
+                                .map(|type_node| self.build_hir_type(&type_node))
+                            {
+                                result_expr = Some(HirExpression::Cast(HirCastExpr {
+                                    expr: Box::new(prev_expr),
+                                    target_type,
+                                }));
+                            } else {
+                                // No type annotation found, restore the previous expression
+                                result_expr = Some(prev_expr);
+                            }
+                        }
+                        // If neither works, result_expr stays None
+                    } else {
+                        // Normal case: just build the expression
+                        result_expr = self.build_expression(&child);
+                    }
                 }
                 _ => {
                     // Unknown node kind - skip
