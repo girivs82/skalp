@@ -2077,38 +2077,84 @@ impl HirBuilderContext {
             }
             SyntaxKind::ReturnStmt => {
                 // Return statement: return [expr]
-                // NOTE: Reverse children to get the LAST expression child, not the first.
-                // The parser sometimes creates both simple (IdentExpr) and complex (BinaryExpr) nodes,
-                // and we want the most complete expression.
+                // BUG #171 FIX: Handle case where parser creates sibling nodes for cast expressions
+                // Example: "return (a_fp * b_fp) as bit[32]" creates:
+                //   ReturnStmt
+                //     ParenExpr
+                //     CastExpr (contains only TypeAnnotation, not the expression)
+                // We need to combine these into Cast(ParenExpr, Type)
+
                 let children: Vec<_> = node.children().collect();
 
-                // Find the last expression child (in case there are multiple)
-                let expr_node = children
-                    .iter()
-                    .rev() // IMPORTANT: Reverse to get the last match, not the first
-                    .find(|n| {
-                        matches!(
-                            n.kind(),
-                            SyntaxKind::LiteralExpr
-                                | SyntaxKind::IdentExpr
-                                | SyntaxKind::BinaryExpr
-                                | SyntaxKind::UnaryExpr
-                                | SyntaxKind::FieldExpr
-                                | SyntaxKind::IndexExpr
-                                | SyntaxKind::PathExpr
-                                | SyntaxKind::ParenExpr
-                                | SyntaxKind::IfExpr
-                                | SyntaxKind::MatchExpr
-                                | SyntaxKind::CallExpr
-                                | SyntaxKind::ArrayLiteral
-                                | SyntaxKind::TupleExpr // CRITICAL FIX: Support tuple returns
-                                | SyntaxKind::ConcatExpr // CRITICAL FIX: Support concatenation returns
-                                | SyntaxKind::CastExpr // Also support cast expressions in returns
-                                | SyntaxKind::StructLiteral // Also support struct literals in returns
-                        )
-                    });
+                // Check for sibling expression + CastExpr pattern
+                let has_cast = children.iter().any(|n| n.kind() == SyntaxKind::CastExpr);
+                let non_cast_expr = children.iter().find(|n| {
+                    matches!(
+                        n.kind(),
+                        SyntaxKind::LiteralExpr
+                            | SyntaxKind::IdentExpr
+                            | SyntaxKind::BinaryExpr
+                            | SyntaxKind::UnaryExpr
+                            | SyntaxKind::FieldExpr
+                            | SyntaxKind::IndexExpr
+                            | SyntaxKind::PathExpr
+                            | SyntaxKind::ParenExpr
+                            | SyntaxKind::IfExpr
+                            | SyntaxKind::MatchExpr
+                            | SyntaxKind::CallExpr
+                            | SyntaxKind::ArrayLiteral
+                            | SyntaxKind::TupleExpr
+                            | SyntaxKind::ConcatExpr
+                            | SyntaxKind::StructLiteral
+                    )
+                });
 
-                let expr = expr_node.and_then(|n| self.build_expression(n));
+                let expr = if let (true, Some(expr_node)) = (has_cast, non_cast_expr) {
+                    // Try building the CastExpr directly first
+                    let cast_node = children.iter().find(|n| n.kind() == SyntaxKind::CastExpr);
+                    if let Some(cast) = cast_node {
+                        if let Some(built_cast) = self.build_expression(cast) {
+                            // CastExpr was self-contained, use it directly
+                            Some(built_cast)
+                        } else {
+                            // CastExpr doesn't contain its expression - combine with sibling
+                            // Use build_cast_from_parts to combine expression + cast
+                            self.build_cast_from_parts(expr_node, cast)
+                        }
+                    } else {
+                        // No cast node found (shouldn't happen given has_cast check)
+                        self.build_expression(expr_node)
+                    }
+                } else {
+                    // No sibling cast pattern - use standard logic
+                    // Find the last expression child (in case there are multiple)
+                    children
+                        .iter()
+                        .rev() // IMPORTANT: Reverse to get the last match, not the first
+                        .find(|n| {
+                            matches!(
+                                n.kind(),
+                                SyntaxKind::LiteralExpr
+                                    | SyntaxKind::IdentExpr
+                                    | SyntaxKind::BinaryExpr
+                                    | SyntaxKind::UnaryExpr
+                                    | SyntaxKind::FieldExpr
+                                    | SyntaxKind::IndexExpr
+                                    | SyntaxKind::PathExpr
+                                    | SyntaxKind::ParenExpr
+                                    | SyntaxKind::IfExpr
+                                    | SyntaxKind::MatchExpr
+                                    | SyntaxKind::CallExpr
+                                    | SyntaxKind::ArrayLiteral
+                                    | SyntaxKind::TupleExpr
+                                    | SyntaxKind::ConcatExpr
+                                    | SyntaxKind::CastExpr
+                                    | SyntaxKind::StructLiteral
+                            )
+                        })
+                        .and_then(|n| self.build_expression(n))
+                };
+
                 Some(HirStatement::Return(expr))
             }
             SyntaxKind::ExprStmt => {
@@ -4727,8 +4773,67 @@ impl HirBuilderContext {
             match token.kind() {
                 SyntaxKind::IntLiteral => {
                     let text = token.as_token().map(|t| t.text())?;
-                    let value = text.parse::<u64>().ok()?;
-                    Some(HirExpression::Literal(HirLiteral::Integer(value)))
+                    // BUG #172 FIX: Handle Verilog-style width-prefixed literals like 224'b0, 8'hFF
+                    // These are tokenized as IntLiteral but contain width prefix
+                    if text.contains("'b") || text.contains("'B") {
+                        // Binary width-prefixed: e.g., "224'b0" means 224 bits of binary 0
+                        if let Some(idx) = text.find("'b").or_else(|| text.find("'B")) {
+                            let width_str = &text[..idx];
+                            let width: u32 = width_str.parse().ok()?;
+                            let binary_str = &text[idx + 2..];
+                            // Parse the binary digits, pad/truncate to width
+                            let digits = binary_str.replace('_', "");
+                            let mut bits = Vec::with_capacity(width as usize);
+                            // Parse binary digits (LSB first)
+                            for ch in digits.chars().rev() {
+                                if bits.len() >= width as usize {
+                                    break;
+                                }
+                                bits.push(ch == '1');
+                            }
+                            // Pad with zeros if necessary
+                            while bits.len() < width as usize {
+                                bits.push(false);
+                            }
+                            return Some(HirExpression::Literal(HirLiteral::BitVector(bits)));
+                        }
+                        None
+                    } else if text.contains("'h") || text.contains("'H") {
+                        // Hex width-prefixed: e.g., "8'hFF" means 8 bits of hex FF
+                        if let Some(idx) = text.find("'h").or_else(|| text.find("'H")) {
+                            let width_str = &text[..idx];
+                            let width: u32 = width_str.parse().ok()?;
+                            let hex_str = &text[idx + 2..];
+                            // Parse hex value
+                            let value = u64::from_str_radix(&hex_str.replace('_', ""), 16).ok()?;
+                            // Convert to bits
+                            let mut bits = Vec::with_capacity(width as usize);
+                            for i in 0..width {
+                                bits.push((value >> i) & 1 == 1);
+                            }
+                            return Some(HirExpression::Literal(HirLiteral::BitVector(bits)));
+                        }
+                        None
+                    } else if text.contains("'d") || text.contains("'D") {
+                        // Decimal width-prefixed: e.g., "8'd255" means 8 bits of decimal 255
+                        if let Some(idx) = text.find("'d").or_else(|| text.find("'D")) {
+                            let width_str = &text[..idx];
+                            let width: u32 = width_str.parse().ok()?;
+                            let dec_str = &text[idx + 2..];
+                            let value: u64 = dec_str.replace('_', "").parse().ok()?;
+                            // Convert to bits
+                            let mut bits = Vec::with_capacity(width as usize);
+                            for i in 0..width {
+                                bits.push((value >> i) & 1 == 1);
+                            }
+                            return Some(HirExpression::Literal(HirLiteral::BitVector(bits)));
+                        }
+                        None
+                    } else {
+                        // Regular integer literal
+                        let value = text.parse::<u64>().ok()?;
+                        Some(HirExpression::Literal(HirLiteral::Integer(value)))
+                    }
                 }
                 SyntaxKind::BinLiteral => {
                     let text = token.as_token().map(|t| t.text())?;
