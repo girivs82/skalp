@@ -103,8 +103,10 @@ struct GpuPrimitive {
     inputs: [u32; 4],
     /// Number of inputs
     num_inputs: u32,
-    /// Output signal index
-    output: u32,
+    /// Output signal indices (up to 2 for HalfAdder/FullAdder: [sum, carry])
+    outputs: [u32; 2],
+    /// Number of outputs (1 for most gates, 2 for adders)
+    num_outputs: u32,
     /// Is sequential (DFF)?
     is_sequential: u32,
     /// Clock signal index (for sequential)
@@ -267,11 +269,18 @@ impl GpuGateRuntime {
                     }
                 }
 
+                // Build outputs array (up to 2 for HalfAdder/FullAdder)
+                let mut outputs = [0u32; 2];
+                for (i, out) in p.outputs.iter().take(2).enumerate() {
+                    outputs[i] = out.0;
+                }
+
                 GpuPrimitive {
                     ptype: encode_ptype(&p.ptype),
                     inputs,
                     num_inputs: p.inputs.len() as u32,
-                    output: p.outputs.first().map(|o| o.0).unwrap_or(0),
+                    outputs,
+                    num_outputs: p.outputs.len().min(2) as u32,
                     is_sequential: if p.is_sequential { 1 } else { 0 },
                     clock: p.clock.map(|c| c.0).unwrap_or(0),
                 }
@@ -382,7 +391,8 @@ struct Primitive {
     uint ptype;
     uint inputs[4];
     uint num_inputs;
-    uint output;
+    uint outputs[2];    // up to 2 outputs (for HalfAdder/FullAdder: [sum, carry])
+    uint num_outputs;
     uint is_sequential;
     uint clock;
 };
@@ -450,7 +460,7 @@ kernel void eval_combinational(
     // Handle constant primitives specially - the constant value is stored
     // directly in inputs[0] (not as a signal index)
     if (prim.ptype == PTYPE_CONST) {
-        signals_out[prim.output] = prim.inputs[0];
+        signals_out[prim.outputs[0]] = prim.inputs[0];
         return;
     }
 
@@ -463,8 +473,18 @@ kernel void eval_combinational(
     // Evaluate gate
     uint result = eval_gate(prim.ptype, in0, in1, in2, in3, prim.num_inputs);
 
-    // Store result
-    signals_out[prim.output] = result;
+    // Store result(s)
+    // For HalfAdder/FullAdder, result is packed: sum in bit 0, carry in bit 1
+    if (prim.ptype == PTYPE_HALF_ADDER || prim.ptype == PTYPE_FULL_ADDER) {
+        // Write sum (bit 0) to outputs[0]
+        signals_out[prim.outputs[0]] = result & 1;
+        // Write carry (bit 1) to outputs[1] if present
+        if (prim.num_outputs > 1) {
+            signals_out[prim.outputs[1]] = (result >> 1) & 1;
+        }
+    } else {
+        signals_out[prim.outputs[0]] = result;
+    }
 }
 
 // Kernel: Evaluate sequential primitives on clock edge
@@ -489,7 +509,7 @@ kernel void eval_sequential(
     // DFF: output = D input (inputs[1] is D, inputs[0] is clk)
     if (prim.ptype == PTYPE_DFF_P || prim.ptype == PTYPE_DFF_N) {
         uint d_input = signals_in[prim.inputs[1]];
-        signals_out[prim.output] = d_input;
+        signals_out[prim.outputs[0]] = d_input;
     }
 }
 "#
@@ -731,6 +751,10 @@ kernel void eval_sequential(
                 command_buffer.wait_until_completed();
             }
 
+            // Evaluate FP32 primitives on CPU (they need 64 inputs and 32 outputs, not supported in GPU kernel)
+            // This must be done during the convergence loop so subsequent primitives can use the results
+            self.evaluate_fp32_primitives_cpu(dst);
+
             // Check for convergence: compare src and dst buffers
             let converged = unsafe {
                 let src_ptr = src.contents() as *const u32;
@@ -913,6 +937,79 @@ kernel void eval_sequential(
                     *ptr.add(clock_id.0 as usize) != 0
                 };
                 self.prev_clocks.insert(clock_id.0, curr);
+            }
+        }
+    }
+
+    /// Evaluate FP32 primitives on CPU
+    /// FP32 primitives have 64 inputs (a[0..31], b[0..31]) and 32 outputs,
+    /// which is not supported by the GPU kernel designed for 1-bit operations.
+    fn evaluate_fp32_primitives_cpu(&self, buf: &Buffer) {
+        // Find and evaluate FP32 primitives
+        for prim in &self.primitives {
+            let op: Option<fn(f32, f32) -> f32> = match &prim.ptype {
+                PrimitiveType::Fp32Add => Some(|a, b| a + b),
+                PrimitiveType::Fp32Sub => Some(|a, b| a - b),
+                PrimitiveType::Fp32Mul => Some(|a, b| a * b),
+                PrimitiveType::Fp32Div => Some(|a, b| if b != 0.0 { a / b } else { f32::NAN }),
+                _ => None,
+            };
+
+            if let Some(fp_op) = op {
+                // Read 64 input bits from GPU buffer
+                let mut inputs = Vec::with_capacity(64);
+                for &sig_id in &prim.inputs {
+                    let val = unsafe {
+                        let ptr = buf.contents() as *const u32;
+                        *ptr.add(sig_id.0 as usize) != 0
+                    };
+                    inputs.push(val);
+                }
+
+                // Ensure we have 64 inputs (pad with false if needed)
+                inputs.resize(64, false);
+
+                // Extract a[0..31] from inputs[0..31]
+                let mut a_bits: u32 = 0;
+                for i in 0..32 {
+                    if inputs[i] {
+                        a_bits |= 1 << i;
+                    }
+                }
+
+                // Extract b[0..31] from inputs[32..63]
+                let mut b_bits: u32 = 0;
+                for i in 0..32 {
+                    if inputs[32 + i] {
+                        b_bits |= 1 << i;
+                    }
+                }
+
+                // Convert to f32 and perform operation
+                let a = f32::from_bits(a_bits);
+                let b = f32::from_bits(b_bits);
+                let result = fp_op(a, b);
+                let result_bits = result.to_bits();
+
+                // Write 32 output bits to GPU buffer
+                for (i, &out_id) in prim.outputs.iter().enumerate() {
+                    if i < 32 {
+                        let bit = (result_bits >> i) & 1;
+                        unsafe {
+                            let ptr = buf.contents() as *mut u32;
+                            *ptr.add(out_id.0 as usize) = bit;
+                        }
+                    }
+                }
+
+                if std::env::var("SKALP_DEBUG_GPU").is_ok() {
+                    println!(
+                        "[GPU] FP32 CPU eval: {:?}({}, {}) = {} (0x{:08X}), {} inputs, {} outputs, out_ids[0..4]={:?}",
+                        prim.ptype, a, b, result, result_bits,
+                        prim.inputs.len(), prim.outputs.len(),
+                        prim.outputs.iter().take(4).map(|s| s.0).collect::<Vec<_>>()
+                    );
+                }
             }
         }
     }
