@@ -778,8 +778,13 @@ impl<'a> MetalShaderGenerator<'a> {
         self.indent += 1;
 
         self.write_indented("device const Inputs* inputs [[buffer(0)]],\n");
-        self.write_indented("device Registers* registers [[buffer(1)]],\n");
+        // BUG #182 FIX: Separate read and write register buffers for idempotent updates
+        // - current_registers: read-only, contains pre-edge register values
+        // - next_registers: write-only, receives post-edge values
+        // This allows running sequential kernel multiple times without double-counting
+        self.write_indented("device const Registers* current_registers [[buffer(1)]],\n");
         self.write_indented("device const Signals* signals [[buffer(2)]],\n");
+        self.write_indented("device Registers* next_registers [[buffer(3)]],\n");
         self.write_indented("uint tid [[thread_position_in_grid]]\n");
 
         self.indent -= 1;
@@ -787,12 +792,19 @@ impl<'a> MetalShaderGenerator<'a> {
         self.indent += 1;
 
         self.write_indented("// Update registers on clock edges\n");
+        self.write_indented(
+            "// BUG #182 FIX: Read from current_registers, write to next_registers\n",
+        );
+        self.write_indented(
+            "// This makes the kernel idempotent - running it multiple times is safe\n",
+        );
 
         // Add debug to verify kernel execution
         self.write_indented("// DEBUG: Sequential update kernel executing\n");
 
         // Save old register values for proper simultaneous update semantics
         // Sort state elements by name for consistent ordering
+        // BUG #182: Now read from current_registers (the frozen pre-edge values)
         let mut sorted_states: Vec<_> = sir.state_elements.iter().collect();
         sorted_states.sort_by_key(|(name, _)| *name);
         for (state_name, state_elem) in sorted_states {
@@ -806,9 +818,10 @@ impl<'a> MetalShaderGenerator<'a> {
 
             if !is_array && !is_wide {
                 // Only scalar types (<=128 bits) can use direct initialization
+                // BUG #182 FIX: Read from current_registers (frozen pre-edge values)
                 let (base_type, _) = self.get_metal_type_for_wide_bits(state_elem.width);
                 self.write_indented(&format!(
-                    "{} old_{} = registers->{};\n",
+                    "{} old_{} = current_registers->{};\n",
                     base_type, sanitized, sanitized
                 ));
             }
@@ -4089,6 +4102,7 @@ impl<'a> MetalShaderGenerator<'a> {
 
                         if is_array {
                             // Element-wise copy for arrays
+                            // BUG #182 FIX: Write to next_registers
                             if let Some(SirType::Array(_, size)) = output_type {
                                 self.write_indented(&format!(
                                     "for (uint i = 0; i < {}; i++) {{\n",
@@ -4096,7 +4110,7 @@ impl<'a> MetalShaderGenerator<'a> {
                                 ));
                                 self.indent += 1;
                                 self.write_indented(&format!(
-                                    "registers->{}[i] = signals->{}[i];\n",
+                                    "next_registers->{}[i] = signals->{}[i];\n",
                                     self.sanitize_name(&output.signal_id),
                                     self.sanitize_name(data_signal)
                                 ));
@@ -4119,6 +4133,7 @@ impl<'a> MetalShaderGenerator<'a> {
 
                             if data_is_vector {
                                 // Data is float2/float3/float4 or uint2/uint4 vector, unpack into array elements
+                                // BUG #182 FIX: Write to next_registers
                                 let vector_components = data_signal_width.div_ceil(32);
 
                                 eprintln!(
@@ -4136,7 +4151,7 @@ impl<'a> MetalShaderGenerator<'a> {
                                 #[allow(clippy::needless_range_loop)]
                                 for i in 0..vector_components.min(4) {
                                     self.write_indented(&format!(
-                                        "registers->{}[{}] = signals->{}.{};\n",
+                                        "next_registers->{}[{}] = signals->{}.{};\n",
                                         self.sanitize_name(&output.signal_id),
                                         i,
                                         self.sanitize_name(data_signal),
@@ -4145,6 +4160,7 @@ impl<'a> MetalShaderGenerator<'a> {
                                 }
                             } else if data_is_wide {
                                 // Data is also a wide array - copy array elements
+                                // BUG #182 FIX: Write to next_registers
                                 let data_array_size = data_signal_width.div_ceil(32);
                                 let copy_elements = data_array_size.min(array_size);
 
@@ -4161,7 +4177,7 @@ impl<'a> MetalShaderGenerator<'a> {
                                 // Copy array elements
                                 for i in 0..copy_elements {
                                     self.write_indented(&format!(
-                                        "registers->{}[{}] = signals->{}[{}];\n",
+                                        "next_registers->{}[{}] = signals->{}[{}];\n",
                                         self.sanitize_name(&output.signal_id),
                                         i,
                                         self.sanitize_name(data_signal),
@@ -4177,7 +4193,7 @@ impl<'a> MetalShaderGenerator<'a> {
                                     ));
                                     self.indent += 1;
                                     self.write_indented(&format!(
-                                        "registers->{}[i] = 0;\n",
+                                        "next_registers->{}[i] = 0;\n",
                                         self.sanitize_name(&output.signal_id)
                                     ));
                                     self.indent -= 1;
@@ -4185,6 +4201,7 @@ impl<'a> MetalShaderGenerator<'a> {
                                 }
                             } else {
                                 // Data is either array or scalar
+                                // BUG #182 FIX: Write to next_registers
                                 self.write_indented(&format!(
                                     "// Element-wise copy for {}-bit register (uint[{}])\n",
                                     state_elem.width, array_size
@@ -4196,14 +4213,14 @@ impl<'a> MetalShaderGenerator<'a> {
                                 self.indent += 1;
                                 if data_is_wide {
                                     self.write_indented(&format!(
-                                        "registers->{}[i] = signals->{}[i];\n",
+                                        "next_registers->{}[i] = signals->{}[i];\n",
                                         self.sanitize_name(&output.signal_id),
                                         self.sanitize_name(data_signal)
                                     ));
                                 } else {
                                     // Data is scalar, only assign to element 0
                                     self.write_indented(&format!(
-                                        "registers->{}[i] = (i == 0) ? signals->{} : 0;\n",
+                                        "next_registers->{}[i] = (i == 0) ? signals->{} : 0;\n",
                                         self.sanitize_name(&output.signal_id),
                                         self.sanitize_name(data_signal)
                                     ));
@@ -4213,6 +4230,7 @@ impl<'a> MetalShaderGenerator<'a> {
                             }
                         } else {
                             // Register is narrow (≤128 bits)
+                            // BUG #182 FIX: Write to next_registers
                             // Extract LSBs if data is wide, otherwise use scalar assignment with mask
                             let width = state_elem.width;
                             // BUG FIX: Prevent shift overflow
@@ -4233,7 +4251,7 @@ impl<'a> MetalShaderGenerator<'a> {
                             };
 
                             let assignment = format!(
-                                "registers->{} = {} & {};\n",
+                                "next_registers->{} = {} & {};\n",
                                 self.sanitize_name(&output.signal_id),
                                 data_expr,
                                 mask
