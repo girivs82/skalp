@@ -205,6 +205,10 @@ impl<'hir> InstantiationCollector<'hir> {
         // Set current implementation context
         self.current_impl = Some(implementation);
 
+        // Register implementation's constants for const identifier resolution
+        // This enables `const WIDTH: nat = 32; let adder = Adder<WIDTH> { ... }`
+        self.evaluator.register_constants(&implementation.constants);
+
         // Collect from all module instances
         for instance in &implementation.instances {
             self.collect_from_instance(instance);

@@ -118,6 +118,9 @@ pub struct ConstEvaluator {
     user_fns: HashMap<String, HirFunction>,
     /// Constant definitions (ID -> value expression)
     constants: HashMap<ConstantId, HirExpression>,
+    /// Named constant definitions (name -> value expression)
+    /// Used for resolving const identifiers in generic arguments
+    named_constants: HashMap<String, HirExpression>,
     /// Enum definitions (enum name -> enum type with variants)
     enums: HashMap<String, HirEnumType>,
     /// Recursion depth (for preventing infinite recursion)
@@ -193,6 +196,7 @@ impl ConstEvaluator {
             builtin_fns,
             user_fns: HashMap::new(),
             constants: HashMap::new(),
+            named_constants: HashMap::new(),
             enums: HashMap::new(),
             recursion_depth: 0,
         }
@@ -227,9 +231,14 @@ impl ConstEvaluator {
         }
     }
 
-    /// Register a constant definition
+    /// Register a constant definition by ID
     pub fn register_constant(&mut self, id: ConstantId, value_expr: HirExpression) {
         self.constants.insert(id, value_expr);
+    }
+
+    /// Register a named constant definition (for resolving const identifiers in generic args)
+    pub fn register_named_constant(&mut self, name: String, value_expr: HirExpression) {
+        self.named_constants.insert(name, value_expr);
     }
 
     /// Register multiple constant definitions
@@ -237,6 +246,9 @@ impl ConstEvaluator {
         for const_decl in consts {
             self.constants
                 .insert(const_decl.id, const_decl.value.clone());
+            // Also register by name for identifier resolution in generic args
+            self.named_constants
+                .insert(const_decl.name.clone(), const_decl.value.clone());
         }
     }
 
@@ -263,12 +275,18 @@ impl ConstEvaluator {
             // Literals are trivially constant
             HirExpression::Literal(lit) => self.eval_literal(lit),
 
-            // Generic parameter reference - look up in bindings
-            HirExpression::GenericParam(name) => self
-                .const_bindings
-                .get(name)
-                .cloned()
-                .ok_or_else(|| EvalError::UndefinedSymbol(name.clone())),
+            // Generic parameter reference - look up in bindings first, then named constants
+            HirExpression::GenericParam(name) => {
+                // First check const_bindings (for generic params during monomorphization)
+                if let Some(value) = self.const_bindings.get(name) {
+                    return Ok(value.clone());
+                }
+                // Then check named_constants (for `const WIDTH: nat = 32` declarations)
+                if let Some(value_expr) = self.named_constants.get(name).cloned() {
+                    return self.eval(&value_expr);
+                }
+                Err(EvalError::UndefinedSymbol(name.clone()))
+            }
 
             // Constant reference - look up constant value and recursively evaluate
             HirExpression::Constant(id) => {
@@ -1245,6 +1263,99 @@ mod tests {
             base: Box::new(HirExpression::GenericParam("F".to_string())),
             field: "total_bits".to_string(),
         };
+        assert_eq!(eval.eval(&expr).unwrap(), ConstValue::Nat(32));
+    }
+
+    #[test]
+    fn test_named_constant_resolution() {
+        // Test that named constants registered via register_constants can be
+        // resolved when referenced as GenericParam
+        let mut eval = ConstEvaluator::new();
+
+        // Simulate: const WIDTH: nat = 32;
+        let width_const = crate::hir::HirConstant {
+            id: crate::hir::ConstantId(1),
+            name: "WIDTH".to_string(),
+            const_type: HirType::Nat(0),
+            value: HirExpression::Literal(HirLiteral::Integer(32)),
+        };
+
+        eval.register_constants(&[width_const]);
+
+        // GenericParam("WIDTH") should resolve to 32
+        let expr = HirExpression::GenericParam("WIDTH".to_string());
+        assert_eq!(eval.eval(&expr).unwrap(), ConstValue::Nat(32));
+    }
+
+    #[test]
+    fn test_named_constant_in_expression() {
+        // Test that named constants can be used in expressions
+        // e.g., DEPTH * 2 where DEPTH is a const
+        let mut eval = ConstEvaluator::new();
+
+        // const DEPTH: nat = 16;
+        let depth_const = crate::hir::HirConstant {
+            id: crate::hir::ConstantId(2),
+            name: "DEPTH".to_string(),
+            const_type: HirType::Nat(0),
+            value: HirExpression::Literal(HirLiteral::Integer(16)),
+        };
+
+        eval.register_constants(&[depth_const]);
+
+        // DEPTH * 2 = 32
+        let expr = HirExpression::Binary(HirBinaryExpr {
+            op: HirBinaryOp::Mul,
+            left: Box::new(HirExpression::GenericParam("DEPTH".to_string())),
+            right: Box::new(HirExpression::Literal(HirLiteral::Integer(2))),
+        });
+        assert_eq!(eval.eval(&expr).unwrap(), ConstValue::Nat(32));
+    }
+
+    #[test]
+    fn test_bound_param_takes_precedence_over_named_constant() {
+        // When a parameter is both bound (during monomorphization) and exists
+        // as a named constant, the bound value should take precedence
+        let mut eval = ConstEvaluator::new();
+
+        // const WIDTH: nat = 32;
+        let width_const = crate::hir::HirConstant {
+            id: crate::hir::ConstantId(3),
+            name: "WIDTH".to_string(),
+            const_type: HirType::Nat(0),
+            value: HirExpression::Literal(HirLiteral::Integer(32)),
+        };
+        eval.register_constants(&[width_const]);
+
+        // But during monomorphization, WIDTH is bound to 64
+        eval.bind("WIDTH".to_string(), ConstValue::Nat(64));
+
+        // WIDTH should resolve to 64 (bound value), not 32 (constant)
+        let expr = HirExpression::GenericParam("WIDTH".to_string());
+        assert_eq!(eval.eval(&expr).unwrap(), ConstValue::Nat(64));
+    }
+
+    #[test]
+    fn test_named_constant_with_computed_value() {
+        // Test that constants with computed values are evaluated correctly
+        let mut eval = ConstEvaluator::new();
+
+        // const BITS: nat = 8 * 4;
+        let bits_const = crate::hir::HirConstant {
+            id: crate::hir::ConstantId(4),
+            name: "BITS".to_string(),
+            const_type: HirType::Nat(0),
+            value: HirExpression::Binary(HirBinaryExpr {
+                op: HirBinaryOp::Mul,
+                left: Box::new(HirExpression::Literal(HirLiteral::Integer(8))),
+                right: Box::new(HirExpression::Literal(HirLiteral::Integer(4))),
+            }),
+        };
+
+        eval.register_constants(&[bits_const]);
+
+        // BITS should resolve to 32
+        let expr = HirExpression::GenericParam("BITS".to_string());
         assert_eq!(eval.eval(&expr).unwrap(), ConstValue::Nat(32));
     }
 }
