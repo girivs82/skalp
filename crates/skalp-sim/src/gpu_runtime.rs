@@ -304,6 +304,85 @@ impl GpuRuntime {
         }
     }
 
+    fn debug_print_state(&self, label: &str) {
+        if let Some(register_buffer) = &self.register_buffer {
+            let ptr = register_buffer.contents() as *const u32;
+            // Print first few registers
+            let reg0 = unsafe { *ptr.offset(0) };
+            let reg1 = unsafe { *ptr.offset(1) };
+            let reg2 = unsafe { *ptr.offset(2) };
+            let reg3 = unsafe { *ptr.offset(3) };
+            let reg4 = unsafe { *ptr.offset(4) };
+            let reg5 = unsafe { *ptr.offset(5) };
+            eprintln!(
+                "[{}] regs: [0]={:#x} [1]={:#x} [2]={:#x} [3]={:#x} [4]={:#x} [5]={:#x}",
+                label, reg0, reg1, reg2, reg3, reg4, reg5
+            );
+        }
+        if let Some(signal_buffer) = &self.signal_buffer {
+            let ptr = signal_buffer.contents() as *const u32;
+            // Print first few signals (outputs are at the beginning)
+            let sig0 = unsafe { *ptr.offset(0) };
+            let sig1 = unsafe { *ptr.offset(1) };
+            let sig2 = unsafe { *ptr.offset(2) };
+            let sig3 = unsafe { *ptr.offset(3) };
+            eprintln!(
+                "[{}] sigs: [0]={:#x} [1]={:#x} [2]={:#x} [3]={:#x}",
+                label, sig0, sig1, sig2, sig3
+            );
+        }
+    }
+
+    fn debug_print_state_detailed(&self, label: &str) {
+        println!("=== {} ===", label);
+        // Print inputs
+        if let Some(input_buffer) = &self.input_buffer {
+            let ptr = input_buffer.contents() as *const u32;
+            let mut inputs = Vec::new();
+            for i in 0..8 {
+                inputs.push(unsafe { *ptr.offset(i) });
+            }
+            println!("  Inputs: {:?}", inputs);
+        }
+        // Print registers
+        if let Some(register_buffer) = &self.register_buffer {
+            let ptr = register_buffer.contents() as *const u32;
+            let mut regs = Vec::new();
+            for i in 0..8 {
+                regs.push(unsafe { *ptr.offset(i) });
+            }
+            println!("  Registers: {:?}", regs);
+        }
+        // Print shadow registers
+        if let Some(shadow_buffer) = &self.shadow_register_buffer {
+            let ptr = shadow_buffer.contents() as *const u32;
+            let mut shadow = Vec::new();
+            for i in 0..8 {
+                shadow.push(unsafe { *ptr.offset(i) });
+            }
+            println!("  Shadow: {:?}", shadow);
+        }
+        // Print first 10 signals (outputs are at beginning: vertex_ready, output_valid, ...)
+        if let Some(signal_buffer) = &self.signal_buffer {
+            let ptr = signal_buffer.contents() as *const u32;
+            let mut sigs = Vec::new();
+            for i in 0..10 {
+                sigs.push(unsafe { *ptr.offset(i) });
+            }
+            println!("  Signals[0-9]: {:?}", sigs);
+            println!("  vertex_ready={}, output_valid={}", sigs[0], sigs[1]);
+        }
+        // Print output buffer
+        if let Some(output_buffer) = &self.output_buffer {
+            let ptr = output_buffer.contents() as *const u32;
+            let mut outputs = Vec::new();
+            for i in 0..10 {
+                outputs.push(unsafe { *ptr.offset(i) });
+            }
+            println!("  Outputs: {:?}", outputs);
+        }
+    }
+
     async fn execute_combinational(&mut self) -> Result<(), SimulationError> {
         // Get the number of combinational cones from the module
         let cone_count = if let Some(module) = &self.module {
@@ -626,45 +705,59 @@ impl SimulationRuntime for GpuRuntime {
     }
 
     async fn step(&mut self) -> SimulationResult<SimulationState> {
-        // BUG #182 FIX: ITERATIVE CONVERGENCE EXECUTION WITH FROZEN SNAPSHOT
+        // BUG #182 FIX: SINGLE SEQUENTIAL UPDATE WITH POST-UPDATE COMBINATIONAL PASS
         //
-        // The GPU uses double-buffered registers to make sequential updates idempotent:
-        // - At the start of step(), we create a frozen snapshot of registers
-        // - Sequential kernel reads from frozen snapshot, writes to working registers
-        // - This ensures all sequential updates see the same pre-edge register values
+        // For correct simulation semantics:
+        // 1. Combinational computes signals using OLD register values
+        // 2. Sequential updates ALL registers based on those signals (runs ONCE per edge)
+        // 3. Final Combinational recomputes outputs using NEW register values
         //
-        // This allows us to iterate until convergence:
-        // 1. Create frozen snapshot of current registers
-        // 2. Combinational: compute signals from working registers
-        // 3. Sequential: read frozen snapshot, write to working registers (idempotent)
-        // 4. Combinational: recompute signals with updated working registers
-        // 5. Repeat 3-4 if needed
+        // The key insight is that state machines should only transition ONCE per clock
+        // edge. Running sequential twice would cause the state machine to see its own
+        // updated value and potentially transition again, which is incorrect.
         //
-        // This handles state machine → FIFO write dependencies correctly:
-        // - Iteration 1: state machine updates, wr_en still uses old state
-        // - Iteration 2: wr_en recomputed with new state, FIFO write happens
+        // For FWFT (First Word Fall Through) semantics like FIFOs, we need the final
+        // combinational pass to reflect the new register values in the outputs.
 
-        // BUG #182 FIX: Use snapshot-based sequential updates for idempotent execution
-        // However, running multiple iterations causes FIFO memory writes to happen multiple
-        // times (because the write address changes between iterations). For now, we use a
-        // single iteration which handles most cases correctly.
-        //
-        // TODO: For full BUG #182 support (state machine → FIFO write dependencies), we need
-        // to implement dependency-ordered sequential execution where state machines update
-        // before FIFO control logic, or track which memory slots have been written per step.
-
-        // Create frozen snapshot of current registers BEFORE any updates
-        // This snapshot is what sequential logic will read from (pre-edge values)
+        // Create snapshot of current registers for the sequential kernel to read from
+        // This ensures sequential reads consistent pre-edge values while writing new values
         self.create_register_snapshot();
 
-        // Phase 1: Initial combinational pass
+        let debug_phases = std::env::var("SKALP_DEBUG_PHASES").is_ok();
+        if debug_phases {
+            eprintln!(">>> STEP() called, cycle {} <<<", self.current_cycle);
+        }
+        use std::io::Write;
+        let _ = std::io::stdout().flush();
+
+        // === PHASE 1: Initial update pass ===
+        // Combinational: compute signals from working registers (still have old values)
+        if debug_phases {
+            eprintln!("=== PHASE 1: Combinational (old state) ===");
+            self.debug_print_state("before phase 1 comb");
+        }
         self.execute_combinational().await?;
 
-        // Phase 2: Sequential logic reads from FROZEN snapshot, writes to working registers
+        // Sequential: state machines update based on old signals
+        // (reads frozen snapshot, writes to working buffer)
+        if debug_phases {
+            eprintln!("=== PHASE 1: Sequential ===");
+        }
         self.execute_sequential().await?;
+        if debug_phases {
+            self.debug_print_state("after phase 1 seq");
+        }
 
-        // Phase 3: Recompute combinational with updated working register values (FWFT)
+        // === FINAL COMBINATIONAL: Output update pass ===
+        // Recompute combinational outputs to reflect NEW register values
+        // This provides FWFT (First Word Fall Through) semantics
+        if debug_phases {
+            eprintln!("=== FINAL: Combinational (new state) ===");
+        }
         self.execute_combinational().await?;
+        if debug_phases {
+            self.debug_print_state("after final comb");
+        }
 
         // Capture outputs after convergence
         self.capture_outputs()?;
