@@ -299,12 +299,16 @@ impl GpuRuntime {
         // Check if we have any clock edges by looking at current vs prev clock values
         let mut has_edge = false;
         if let Some(module) = &self.module {
+            // BUG #179 FIX: Track input offset to read from correct buffer position
+            // Previously this always read from offset 0, causing only the first clock to be detected
+            let mut input_offset = 0usize;
             for input in &module.inputs {
                 if input.name.contains("clk") || input.name.contains("clock") {
                     // Check if this clock has changed
                     if let Some(input_buffer) = &self.input_buffer {
                         let ptr = input_buffer.contents() as *const u32;
-                        let current_value = unsafe { *ptr } != 0;
+                        // BUG #179 FIX: Read from correct offset for this input
+                        let current_value = unsafe { *ptr.add(input_offset) } != 0;
                         let prev_value = self
                             .clock_manager
                             .clocks
@@ -318,6 +322,8 @@ impl GpuRuntime {
                         }
                     }
                 }
+                // Advance offset by input width (in u32 words)
+                input_offset += (input.width + 31) / 32;
             }
         }
 

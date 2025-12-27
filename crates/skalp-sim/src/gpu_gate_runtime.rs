@@ -275,6 +275,12 @@ impl GpuGateRuntime {
                     outputs[i] = out.0;
                 }
 
+                // BUG #179 FIX: Map clock signal ID to clock INDEX (0, 1, 2, ...)
+                // This must match the indexing used in detect_clock_edges_gpu
+                let clock_idx = p.clock.map(|c| {
+                    self.clock_signals.iter().position(|cs| cs.0 == c.0).unwrap_or(0) as u32
+                }).unwrap_or(0);
+
                 GpuPrimitive {
                     ptype: encode_ptype(&p.ptype),
                     inputs,
@@ -282,7 +288,7 @@ impl GpuGateRuntime {
                     outputs,
                     num_outputs: p.outputs.len().min(2) as u32,
                     is_sequential: if p.is_sequential { 1 } else { 0 },
-                    clock: p.clock.map(|c| c.0).unwrap_or(0),
+                    clock: clock_idx,
                 }
             })
             .collect();
@@ -896,6 +902,8 @@ kernel void eval_sequential(
     }
 
     /// Detect clock edges (returns bitmask)
+    /// BUG #179 FIX: Use clock INDEX (0, 1, 2, ...) instead of raw signal ID for bitmask
+    /// This prevents overflow when signal IDs >= 32
     fn detect_clock_edges_gpu(&self) -> u32 {
         let mut mask = 0u32;
         let buffer = if self.current_buffer_is_a {
@@ -905,16 +913,16 @@ kernel void eval_sequential(
         };
 
         if let Some(buf) = buffer {
-            for clock_id in &self.clock_signals {
+            for (clock_idx, clock_id) in self.clock_signals.iter().enumerate() {
                 let prev = self.prev_clocks.get(&clock_id.0).copied().unwrap_or(false);
                 let curr = unsafe {
                     let ptr = buf.contents() as *const u32;
                     *ptr.add(clock_id.0 as usize) != 0
                 };
 
-                // Rising edge
-                if !prev && curr {
-                    mask |= 1 << clock_id.0;
+                // Rising edge - use clock_idx instead of clock_id.0
+                if !prev && curr && clock_idx < 32 {
+                    mask |= 1 << clock_idx;
                 }
             }
         }
