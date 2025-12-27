@@ -3721,6 +3721,19 @@ impl<'a> ParseState<'a> {
             self.bump();
             self.finish_node();
         }
+        // Check if it's a path expression (e.g., OptimizationIntent::Latency)
+        // This handles enum variants as generic const parameters
+        else if self.current_kind() == Some(SyntaxKind::Ident)
+            && self.peek_kind(1) == Some(SyntaxKind::ColonColon)
+            && self.peek_kind(2) == Some(SyntaxKind::Ident)
+        {
+            // Parse as path expression: Type::Variant
+            self.start_node(SyntaxKind::PathExpr);
+            self.bump(); // type name
+            self.expect(SyntaxKind::ColonColon); // ::
+            self.expect(SyntaxKind::Ident); // variant name
+            self.finish_node();
+        }
         // Check if it's an identifier that looks like a const arg (not followed by type syntax)
         else if self.current_kind() == Some(SyntaxKind::Ident) {
             // Look ahead to see if this identifier is followed by type-like syntax
@@ -3746,7 +3759,7 @@ impl<'a> ParseState<'a> {
     }
 
     /// Parse the value part of a named argument
-    /// Can be a literal, identifier, or type
+    /// Can be a literal, identifier, path expression, or type
     fn parse_named_arg_value(&mut self) {
         // Check if it's a literal or boolean keyword
         if self.current_kind().is_some_and(|k| k.is_literal())
@@ -3757,6 +3770,19 @@ impl<'a> ParseState<'a> {
         {
             self.start_node(SyntaxKind::LiteralExpr);
             self.bump();
+            self.finish_node();
+        }
+        // Check if it's a path expression (e.g., OptimizationIntent::Latency)
+        // This handles enum variants as generic const parameters
+        else if self.current_kind() == Some(SyntaxKind::Ident)
+            && self.peek_kind(1) == Some(SyntaxKind::ColonColon)
+            && self.peek_kind(2) == Some(SyntaxKind::Ident)
+        {
+            // Parse as path expression: Type::Variant
+            self.start_node(SyntaxKind::PathExpr);
+            self.bump(); // type name
+            self.expect(SyntaxKind::ColonColon); // ::
+            self.expect(SyntaxKind::Ident); // variant name
             self.finish_node();
         }
         // Check if it's an identifier

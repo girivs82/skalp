@@ -523,11 +523,24 @@ impl<'hir> MonomorphizationEngine<'hir> {
         }
     }
 
-    /// Create a const evaluator with current constants registered
+    /// Create a const evaluator with current constants and enums registered
     fn create_evaluator_with_constants(&self) -> ConstEvaluator {
         let mut eval = ConstEvaluator::new();
         eval.register_constants(&self.current_constants);
+        // Register enums for enum variant resolution
+        if let Some(hir) = self.hir {
+            self.register_enums_to_evaluator(&mut eval, hir);
+        }
         eval
+    }
+
+    /// Extract and register enum types from HIR to a const evaluator
+    fn register_enums_to_evaluator(&self, eval: &mut ConstEvaluator, hir: &Hir) {
+        for user_type in &hir.user_defined_types {
+            if let HirType::Enum(enum_type) = &user_type.type_def {
+                eval.register_enum(enum_type.as_ref().clone());
+            }
+        }
     }
 
     /// Resolve a custom type to its actual definition
@@ -959,6 +972,10 @@ impl<'hir> MonomorphizationEngine<'hir> {
         // Evaluate instance's generic arguments
         let mut const_args = HashMap::new();
         let mut evaluator = ConstEvaluator::new();
+        // Register enums for enum variant resolution in generic args
+        if let Some(hir) = self.hir {
+            self.register_enums_to_evaluator(&mut evaluator, hir);
+        }
 
         for (i, arg) in instance.generic_args.iter().enumerate() {
             if i >= entity.generics.len() {

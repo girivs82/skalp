@@ -173,9 +173,17 @@ impl<'hir> InstantiationCollector<'hir> {
             entities.insert(entity.id, entity.clone());
         }
 
+        // Create evaluator and register enums for enum variant resolution
+        let mut evaluator = ConstEvaluator::new();
+        for user_type in &hir.user_defined_types {
+            if let crate::hir::HirType::Enum(enum_type) = &user_type.type_def {
+                evaluator.register_enum(enum_type.as_ref().clone());
+            }
+        }
+
         Self {
             instantiations: HashSet::new(),
-            evaluator: ConstEvaluator::new(),
+            evaluator,
             entities,
             hir,
             current_impl: None,

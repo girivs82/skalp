@@ -3,8 +3,8 @@
 //! Evaluates compile-time constant expressions for monomorphization
 
 use crate::hir::{
-    ConstantId, HirBinaryOp, HirExpression, HirFunction, HirLiteral, HirStatement, HirType,
-    HirUnaryOp,
+    ConstantId, HirBinaryOp, HirEnumType, HirExpression, HirFunction, HirLiteral, HirStatement,
+    HirType, HirUnaryOp,
 };
 use std::collections::HashMap;
 
@@ -118,6 +118,8 @@ pub struct ConstEvaluator {
     user_fns: HashMap<String, HirFunction>,
     /// Constant definitions (ID -> value expression)
     constants: HashMap<ConstantId, HirExpression>,
+    /// Enum definitions (enum name -> enum type with variants)
+    enums: HashMap<String, HirEnumType>,
     /// Recursion depth (for preventing infinite recursion)
     recursion_depth: usize,
 }
@@ -191,6 +193,7 @@ impl ConstEvaluator {
             builtin_fns,
             user_fns: HashMap::new(),
             constants: HashMap::new(),
+            enums: HashMap::new(),
             recursion_depth: 0,
         }
     }
@@ -234,6 +237,18 @@ impl ConstEvaluator {
         for const_decl in consts {
             self.constants
                 .insert(const_decl.id, const_decl.value.clone());
+        }
+    }
+
+    /// Register an enum definition for variant lookups
+    pub fn register_enum(&mut self, enum_type: HirEnumType) {
+        self.enums.insert(enum_type.name.clone(), enum_type);
+    }
+
+    /// Register multiple enum definitions
+    pub fn register_enums(&mut self, enums: &[HirEnumType]) {
+        for enum_type in enums {
+            self.register_enum(enum_type.clone());
         }
     }
 
@@ -345,6 +360,45 @@ impl ConstEvaluator {
             HirExpression::Cast(cast_expr) => {
                 let inner_val = self.eval(&cast_expr.expr)?;
                 self.eval_cast(inner_val, &cast_expr.target_type)
+            }
+
+            // Enum variant - look up the variant value from enum definition
+            HirExpression::EnumVariant { enum_type, variant } => {
+                // Look up enum definition and extract the value expression (clone to avoid borrow issues)
+                let value_info = self.enums.get(enum_type).and_then(|enum_def| {
+                    for (idx, v) in enum_def.variants.iter().enumerate() {
+                        if v.name == *variant {
+                            // Return either the explicit value expression or the implicit index
+                            return Some((v.value.clone(), idx));
+                        }
+                    }
+                    None
+                });
+
+                match value_info {
+                    Some((Some(value_expr), _)) => {
+                        // Evaluate the explicit value expression
+                        self.eval(&value_expr)
+                    }
+                    Some((None, idx)) => {
+                        // Use implicit index as value
+                        Ok(ConstValue::Nat(idx))
+                    }
+                    None => {
+                        // Check if enum type exists
+                        if self.enums.contains_key(enum_type) {
+                            Err(EvalError::UndefinedSymbol(format!(
+                                "Enum variant '{}' not found in '{}'",
+                                variant, enum_type
+                            )))
+                        } else {
+                            Err(EvalError::UndefinedSymbol(format!(
+                                "Enum type '{}' not found",
+                                enum_type
+                            )))
+                        }
+                    }
+                }
             }
 
             // Other expressions are not constant
