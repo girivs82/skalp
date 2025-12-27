@@ -749,7 +749,7 @@ fn test_intent_propagation() {
     let source = r#"
         @intent(latency: 4_cycles)
         impl Parent {
-            inst child: Child { }
+            let child = Child { }
         }
     "#;
     let hir = build_hir(source);
@@ -806,7 +806,7 @@ impl Precise {
 // Test intent propagation
 @intent(optimize: Area)
 impl Parent {
-    inst child: Child { }  // Child inherits Area optimization
+    let child = Child { }  // Child inherits Area optimization
 }
 ```
 

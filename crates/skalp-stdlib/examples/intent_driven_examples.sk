@@ -57,7 +57,7 @@ entity FFT1024_Fast {
 }
 
 impl FFT1024_Fast {
-    inst fft: FFT<1024, IEEE754_32, FAST_INTENT> {
+    let fft = FFT<1024, IEEE754_32, FAST_INTENT> {
         x = x,
         clk = clk,
         valid_in = valid_in,
@@ -75,7 +75,7 @@ entity FFT1024_Small {
 }
 
 impl FFT1024_Small {
-    inst fft: FFT<1024, IEEE754_32, SMALL_INTENT> {
+    let fft = FFT<1024, IEEE754_32, SMALL_INTENT> {
         x = x,
         clk = clk,
         valid_in = valid_in,
@@ -173,7 +173,7 @@ entity MatMul4x4Video {
 }
 
 impl MatMul4x4Video {
-    inst matmul: MatMul<4, 4, 4, IEEE754_32, VIDEO_INTENT> {
+    let matmul = MatMul<4, 4, 4, IEEE754_32, VIDEO_INTENT> {
         a = a,
         b = b,
         clk = clk,
@@ -331,19 +331,19 @@ entity VideoPipeline<const H: nat, const W: nat, intent I: Intent> {
 
 impl<const H: nat, const W: nat, intent I> VideoPipeline<H, W, I> {
     // Color space conversion inherits intent
-    inst csc: ColorSpaceConvert<H, W, IEEE754_32, I> {
+    let csc = ColorSpaceConvert<H, W, IEEE754_32, I> {
         rgb = rgb_in,
         clk = clk
     }
 
     // Edge detection inherits intent
-    inst edge: SobelEdgeDetect<H, W, IEEE754_32, I> {
+    let edge = SobelEdgeDetect<H, W, IEEE754_32, I> {
         image = csc.yuv,
         clk = clk
     }
 
     // Blur filter inherits intent
-    inst blur: GaussianBlur<H, W, 5, IEEE754_32, I> {
+    let blur = GaussianBlur<H, W, 5, IEEE754_32, I> {
         image = edge.edges,
         clk = clk,
         result => processed_out
@@ -374,7 +374,7 @@ impl VideoPipeline1080p {
         // ... other fields from HIGH_THROUGHPUT_INTENT
     }
 
-    inst pipeline: VideoPipeline<1080, 1920, HT_VIDEO_INTENT> {
+    let pipeline = VideoPipeline<1080, 1920, HT_VIDEO_INTENT> {
         rgb_in = rgb_in,
         clk = clk,
         processed_out => processed_out
@@ -389,7 +389,7 @@ entity VideoPipeline720p {
 }
 
 impl VideoPipeline720p {
-    inst pipeline: VideoPipeline<720, 1280, LOW_POWER_INTENT> {
+    let pipeline = VideoPipeline<720, 1280, LOW_POWER_INTENT> {
         rgb_in = rgb_in,
         clk = clk,
         processed_out => processed_out

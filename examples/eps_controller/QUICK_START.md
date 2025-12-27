@@ -103,7 +103,7 @@ Overall: SPFM 99.2%, LFM 91.8%, PMHF 8.7 FIT
 
 #### 1. TMR (Triple Modular Redundancy)
 ```skalp
-inst tmr: TmrVoter<16, 50> {
+let tmr = TmrVoter<16, 50> {
     channel_a: torque_sensor_a,
     channel_b: torque_sensor_b,
     channel_c: torque_sensor_c,
@@ -127,7 +127,7 @@ signal mismatch = |primary - golden| > threshold;
 
 #### 3. Watchdog Timer
 ```skalp
-inst watchdog: Watchdog<1000, 'clk> { ... };
+let watchdog = Watchdog<1000, 'clk> { ... };
 ```
 - Monitors control loop
 - Timeout if not refreshed
@@ -135,7 +135,7 @@ inst watchdog: Watchdog<1000, 'clk> { ... };
 
 #### 4. CRC-8 Protection
 ```skalp
-inst crc: CrcGenerator<16> {
+let crc = CrcGenerator<16> {
     data: motor_torque,
 };
 ```

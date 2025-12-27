@@ -328,19 +328,19 @@ impl MultiStageWatchdog<FAST_TIMEOUT, SLOW_TIMEOUT, SYS_TIMEOUT, 'clk> {
     // Instantiate Three Watchdogs
     // ========================================================================
 
-    inst fast_wd: Watchdog<FAST_TIMEOUT, 'clk> {
+    let fast_wd = Watchdog<FAST_TIMEOUT, 'clk> {
         clk: clk,
         reset: reset,
         refresh: fast_refresh,
     };
 
-    inst slow_wd: Watchdog<SLOW_TIMEOUT, 'clk> {
+    let slow_wd = Watchdog<SLOW_TIMEOUT, 'clk> {
         clk: clk,
         reset: reset,
         refresh: slow_refresh,
     };
 
-    inst sys_wd: Watchdog<SYS_TIMEOUT, 'clk> {
+    let sys_wd = Watchdog<SYS_TIMEOUT, 'clk> {
         clk: clk,
         reset: reset,
         refresh: sys_refresh,
@@ -377,7 +377,7 @@ entity WatchdogWithSafeState<TIMEOUT: nat, 'clk> {
 }
 
 impl WatchdogWithSafeState<TIMEOUT, 'clk> {
-    inst wd: Watchdog<TIMEOUT, 'clk> {
+    let wd = Watchdog<TIMEOUT, 'clk> {
         clk: clk,
         reset: reset,
         refresh: refresh,

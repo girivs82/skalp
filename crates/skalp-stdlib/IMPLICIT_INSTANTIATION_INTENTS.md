@@ -46,8 +46,8 @@ impl Example {
 
 **Generated hardware:**
 ```
-inst sqrt_0: FP32Sqrt { x = x, result => result1 }
-inst sqrt_1: FP32Sqrt { x = y, result => result2 }
+let sqrt_0 = FP32Sqrt { x = x, result => result1 }
+let sqrt_1 = FP32Sqrt { x = y, result => result2 }
 ```
 
 **Rationale:** Matches user expectation - two separate computations happen in parallel.
@@ -73,7 +73,7 @@ signal sqrt_input: fp32
 signal sqrt_output: fp32
 signal sqrt_select: bit  // Which input to process
 
-inst shared_sqrt: FP32Sqrt {
+let shared_sqrt = FP32Sqrt {
     x = sqrt_input,
     result => sqrt_output
 }
@@ -187,7 +187,7 @@ on(clk.rise) {
     result <= stage_7
 }
 
-inst sqrt_inst: FP32Sqrt {
+let sqrt_inst = FP32Sqrt {
     x = stage_0,
     result => stage_1
 }

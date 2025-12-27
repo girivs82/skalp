@@ -67,7 +67,7 @@ impl EpsController<'clk> {
     // Expected DC: 99%+
 
     #[safety_mechanism(type: tmr, covers: torque_sensors)]
-    inst tmr: TmrVoterWithHistory<16, 50, 10, 'clk> {
+    let tmr = TmrVoterWithHistory<16, 50, 10, 'clk> {
         clk: clk,
         reset: reset,
         channel_a: torque_sensor_a,
@@ -106,7 +106,7 @@ impl EpsController<'clk> {
     // Expected DC: 90%+
 
     #[safety_mechanism(type: watchdog, covers: control_loop)]
-    inst watchdog: WatchdogWithSafeState<1000, 'clk> {
+    let watchdog = WatchdogWithSafeState<1000, 'clk> {
         clk: clk,
         reset: reset,
         refresh: (ctrl_state != STATE_INIT),  // Refresh in active states
@@ -276,7 +276,7 @@ impl EpsController<'clk> {
     // Expected DC: 99%+
 
     #[safety_mechanism(type: crc, covers: output_communication)]
-    inst crc_gen: CrcGenerator<16> {
+    let crc_gen = CrcGenerator<16> {
         data: primary_torque,
     };
 
@@ -341,7 +341,7 @@ impl EpsController<'clk> {
     // This is where we bind the safety goal to the actual design signals.
     // The compiler will validate that all signals are bound correctly.
 
-    inst steering_safety: SteeringTorqueSafety {
+    let steering_safety = SteeringTorqueSafety {
         // Input sensors (three channels)
         torque_sensor_a: torque_sensor_a,
         torque_sensor_b: torque_sensor_b,
@@ -397,7 +397,7 @@ impl EpsController<'clk> {
     signal rtc_fault_sig: bit = (rtc_torque_calc > 5000);
 
     // Bind return-to-center safety goal
-    inst rtc_safety: ReturnToCenterSafety {
+    let rtc_safety = ReturnToCenterSafety {
         handwheel_angle: handwheel_angle,
         vehicle_speed: vehicle_speed,
         rtc_torque: rtc_torque_calc,

@@ -208,13 +208,13 @@ entity ParentModule<intent I: Intent> {
 
 impl<intent I> ParentModule<I> {
     // Child inherits parent's intent automatically
-    inst sqrt_unit: FP32Sqrt<I> {
+    let sqrt_unit = FP32Sqrt<I> {
         x = data.next(),
         result => intermediate
     }
 
     // Override with modified intent
-    inst normalize_unit: Vec3Normalize<I + Intent{accuracy: High}> {
+    let normalize_unit = Vec3Normalize<I + Intent{accuracy: High}> {
         v = vector_data,
         normalized => result
     }
@@ -237,8 +237,8 @@ impl<intent I> ComplexPipeline<I> {
     }
 
     // Use refined intents
-    inst critical: CriticalOp<CriticalIntent> { }
-    inst non_critical: NonCriticalOp<NonCriticalIntent> { }
+    let critical = CriticalOp<CriticalIntent> { }
+    let non_critical = NonCriticalOp<NonCriticalIntent> { }
 }
 ```
 
@@ -764,10 +764,10 @@ where
 // Usage
 @intent(latency: 3_cycles)
 impl Example {
-    inst fast: FastProcessor<CurrentIntent> { }  // ✓ OK
+    let fast = FastProcessor<CurrentIntent> { }  // ✓ OK
 
     @intent(latency: 10_cycles)
-    inst slow: FastProcessor<CurrentIntent> { }  // ❌ ERROR: intent violation
+    let slow = FastProcessor<CurrentIntent> { }  // ❌ ERROR: intent violation
 }
 ```
 
@@ -809,8 +809,8 @@ entity MyModule<intent I: Intent = DEFAULT_INTENT> {
 
 // Usage
 impl Example {
-    inst m1: MyModule { }              // Uses DEFAULT_INTENT
-    inst m2: MyModule<FastIntent> { }  // Uses custom intent
+    let m1 = MyModule { }              // Uses DEFAULT_INTENT
+    let m2 = MyModule<FastIntent> { }  // Uses custom intent
 }
 ```
 

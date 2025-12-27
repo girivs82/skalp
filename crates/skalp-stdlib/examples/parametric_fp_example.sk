@@ -73,7 +73,7 @@ entity FP32Add {
 }
 
 impl FP32Add {
-    inst add: FpAdd<IEEE754_32> {
+    let add = FpAdd<IEEE754_32> {
         a = a,
         b = b,
         result => result
@@ -88,7 +88,7 @@ entity BF16Add {
 }
 
 impl BF16Add {
-    inst add: FpAdd<BFLOAT16> {
+    let add = FpAdd<BFLOAT16> {
         a = a,
         b = b,
         result => result
@@ -121,7 +121,7 @@ entity Vec3Fp32Dot {
 }
 
 impl Vec3Fp32Dot {
-    inst dot: VecDot<IEEE754_32, 3> {
+    let dot = VecDot<IEEE754_32, 3> {
         a = a,
         b = b,
         result => result
@@ -155,7 +155,7 @@ entity FP24Add {
 }
 
 impl FP24Add {
-    inst add: FpAdd<FP24_CUSTOM> {
+    let add = FpAdd<FP24_CUSTOM> {
         a = a,
         b = b,
         result => result

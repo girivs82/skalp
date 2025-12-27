@@ -392,14 +392,14 @@ Design your controller with safety mechanisms:
 impl EpsController<'clk> {
     // Safety Mechanism: TMR
     #[safety_mechanism(type: tmr, covers: torque_sensors)]
-    inst tmr: TmrVoter<16, 50> { ... };
+    let tmr = TmrVoter<16, 50> { ... };
 
     // Safety Mechanism: Golden Model
     #[safety_mechanism(type: diversity, covers: computation)]
     signal golden_torque: bit[16] = compute_expected(...);
 
     // Bind safety goal
-    inst safety: SteeringTorqueSafety {
+    let safety = SteeringTorqueSafety {
         torque_sensor_a: torque_sensor_a,
         motor_torque: motor_torque_reg,
         // ... all signals bound
@@ -622,7 +622,7 @@ SPFM: 23.4% ❌ FAIL (need 99.0%)
 
 ```skalp
 #[safety_mechanism(type: tmr)]
-inst tmr: TmrVoter<16, 50> { ... };
+let tmr = TmrVoter<16, 50> { ... };
 ```
 
 ```bash
@@ -658,10 +658,10 @@ SPFM: 94.2% ❌ FAIL (need 99.0%)
 
 ```skalp
 #[safety_mechanism(type: watchdog)]
-inst watchdog: Watchdog<1000, 'clk> { ... };
+let watchdog = Watchdog<1000, 'clk> { ... };
 
 #[safety_mechanism(type: crc)]
-inst crc: CrcGenerator<16> { ... };
+let crc = CrcGenerator<16> { ... };
 ```
 
 ```bash
@@ -770,13 +770,13 @@ Different components can have different ASILs:
 
 ```skalp
 // Main steering: ASIL-D
-inst steering: EpsController { ... };
+let steering = EpsController { ... };
 
 // Return-to-center: ASIL-B (lower criticality)
-inst rtc: RtcController { ... };
+let rtc = RtcController { ... };
 
 // Telemetry: QM (non-safety)
-inst telemetry: TelemetryLogger { ... };
+let telemetry = TelemetryLogger { ... };
 ```
 
 Run separate analyses:

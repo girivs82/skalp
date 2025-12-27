@@ -63,7 +63,7 @@ entity DotProduct {
 
 impl DotProduct {
     // Use stdlib entity
-    inst compute_dot: Vec3Dot<fp32> {
+    let compute_dot = Vec3Dot<fp32> {
         a = a,
         b = b,
         result => dot
@@ -121,7 +121,7 @@ entity PhysicsStep {
 
 impl PhysicsStep {
     // Scalar multiplication
-    inst scaled_vel: Vec3Scale<fp32> {
+    let scaled_vel = Vec3Scale<fp32> {
         v = velocity,
         s = dt
     }
@@ -147,8 +147,8 @@ impl<T> GenericVectorAdd<T> {
 }
 
 // Use with different types:
-// inst fp_add: GenericVectorAdd<fp32> { ... }
-// inst int_add: GenericVectorAdd<bit<16>> { ... }
+// let fp_add = GenericVectorAdd<fp32> { ... }
+// let int_add = GenericVectorAdd<bit<16>> { ... }
 ```
 
 ## Available Operations
@@ -226,7 +226,7 @@ entity VectorMagnitudeSq {
 
 impl VectorMagnitudeSq {
     // Magnitude squared = dot(v, v)
-    inst dot_self: Vec3Dot<fp32> {
+    let dot_self = Vec3Dot<fp32> {
         a = v,
         b = v,
         result => mag_sq
@@ -245,13 +245,13 @@ entity DistanceSq {
 
 impl DistanceSq {
     // Compute a - b
-    inst diff: Vec3Sub<fp32> {
+    let diff = Vec3Sub<fp32> {
         a = a,
         b = b
     }
 
     // Compute |a - b|²
-    inst mag: VectorMagnitudeSq {
+    let mag = VectorMagnitudeSq {
         v = diff.result,
         mag_sq => dist_sq
     }

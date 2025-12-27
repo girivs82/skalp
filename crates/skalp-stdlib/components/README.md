@@ -159,7 +159,7 @@ entity MyDesign {
 
 impl MyDesign {
     // Instantiate FP adder as submodule
-    inst adder: FP32Add {
+    let adder = FP32Add {
         a = a,
         b = b,
         result => sum

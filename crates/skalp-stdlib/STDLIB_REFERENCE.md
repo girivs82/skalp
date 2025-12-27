@@ -175,7 +175,7 @@ entity FloatAdderExplicit {
 
 impl FloatAdderExplicit {
     // Instantiate FP adder entity explicitly
-    inst adder: FP32Add {
+    let adder = FP32Add {
         a = a,
         b = b,
         result => result
@@ -333,7 +333,7 @@ out result: fp32
 
 **Implementation:**
 ```skalp
-inst adder: FP32Add {
+let adder = FP32Add {
     a = a,
     b = {~b[31], b[30:0]},  // Flip sign bit
     result => result
@@ -390,7 +390,7 @@ impl Vec3Adder {
     result = a + b
 
     // Option 2: Explicit entity instantiation
-    // inst add: Vec3Add<fp32> {
+    // let add = Vec3Add<fp32> {
     //     a = a,
     //     b = b,
     //     result => result
@@ -416,7 +416,7 @@ entity DotProductExample {
 
 impl DotProductExample {
     // Instantiate dot product entity
-    inst dot: Vec3Dot<fp32> {
+    let dot = Vec3Dot<fp32> {
         a = a,
         b = b,
         result => dot_result
@@ -435,7 +435,7 @@ entity Normalize {
 
 impl Normalize {
     // Compute length squared
-    inst len_sq: Vec3LengthSq {
+    let len_sq = Vec3LengthSq {
         v = v
     }
 
@@ -463,34 +463,34 @@ entity RaySphereIntersection {
 
 impl RaySphereIntersection {
     // Vector from ray origin to sphere center
-    inst compute_oc: Vec3Sub<fp32> {
+    let compute_oc = Vec3Sub<fp32> {
         a = ray_origin,
         b = sphere_center
     }
 
     // Compute coefficients for quadratic equation
-    inst compute_a: Vec3Dot<fp32> {
+    let compute_a = Vec3Dot<fp32> {
         a = ray_direction,
         b = ray_direction
     }
 
-    inst compute_half_b: Vec3Dot<fp32> {
+    let compute_half_b = Vec3Dot<fp32> {
         a = compute_oc.result,
         b = ray_direction
     }
 
-    inst compute_c_part1: Vec3Dot<fp32> {
+    let compute_c_part1 = Vec3Dot<fp32> {
         a = compute_oc.result,
         b = compute_oc.result
     }
 
     // Radius squared
-    inst radius_sq: FP32Mul {
+    let radius_sq = FP32Mul {
         a = sphere_radius,
         b = sphere_radius
     }
 
-    inst compute_c: FP32Sub {
+    let compute_c = FP32Sub {
         a = compute_c_part1.result,
         b = radius_sq.result
     }
@@ -599,8 +599,8 @@ entity Vec2Add<T> where T: Synthesizable {
 }
 
 // Can instantiate with different types:
-inst fp_add: Vec2Add<fp32> { /* ... */ }
-inst int_add: Vec2Add<bit<16>> { /* ... */ }
+let fp_add = Vec2Add<fp32> { /* ... */ }
+let int_add = Vec2Add<bit<16>> { /* ... */ }
 ```
 
 ### Trait System (Defined, Not Yet Fully Integrated)
@@ -644,13 +644,13 @@ entity Vec3Clamp {
 
 impl Vec3Clamp {
     // First clamp to minimum using max
-    inst clamped_min: Vec3Max {
+    let clamped_min = Vec3Max {
         a = v,
         b = min_val
     }
 
     // Then clamp to maximum using min
-    inst clamped: Vec3Min {
+    let clamped = Vec3Min {
         a = clamped_min.result,
         b = max_val,
         result => result

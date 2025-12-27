@@ -309,7 +309,7 @@ impl<const F: FloatFormat> FpAdd<F> {
 
 // Instantiation
 entity Top {
-    inst adder: FpAdd<IEEE754_32> { ... }
+    let adder = FpAdd<IEEE754_32> { ... }
 }
 ```
 
@@ -328,7 +328,7 @@ impl FpAdd_fp32 {
 
 // Updated instance
 entity Top {
-    inst adder: FpAdd_fp32 { ... }
+    let adder = FpAdd_fp32 { ... }
 }
 ```
 
@@ -353,11 +353,11 @@ impl<const F, intent I> Sqrt<F, I> {
 
 // Instantiations
 entity TopFast {
-    inst s: Sqrt<IEEE754_32, FAST_INTENT> { ... }
+    let s = Sqrt<IEEE754_32, FAST_INTENT> { ... }
 }
 
 entity TopSmall {
-    inst s: Sqrt<IEEE754_32, SMALL_INTENT> { ... }
+    let s = Sqrt<IEEE754_32, SMALL_INTENT> { ... }
 }
 ```
 
@@ -385,11 +385,11 @@ impl Sqrt_fp32_SMALL {
 
 // Updated instances
 entity TopFast {
-    inst s: Sqrt_fp32_FAST { ... }
+    let s = Sqrt_fp32_FAST { ... }
 }
 
 entity TopSmall {
-    inst s: Sqrt_fp32_SMALL { ... }
+    let s = Sqrt_fp32_SMALL { ... }
 }
 ```
 
@@ -414,7 +414,7 @@ where T: Numeric
 
 // Instantiation
 entity Top {
-    inst v: Vec<fp32, 4> { ... }
+    let v = Vec<fp32, 4> { ... }
 }
 ```
 
@@ -436,7 +436,7 @@ impl Vec_fp32_4 {
 }
 
 entity Top {
-    inst v: Vec_fp32_4 { ... }
+    let v = Vec_fp32_4 { ... }
 }
 ```
 
@@ -543,7 +543,7 @@ entity Top {
    error: wrong number of type arguments
      --> examples/top.sk:5:10
       |
-   5  |     inst a: FpAdd<fp32, fp16> { ... }
+   5  |     let a = FpAdd<fp32, fp16> { ... }
       |              ^^^^^^^^^^^^^^^^ expected 1 type argument, found 2
    ```
 

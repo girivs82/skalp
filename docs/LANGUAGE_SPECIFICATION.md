@@ -2117,7 +2117,7 @@ where
 // Compile-time validation
 @intent(latency: 20_cycles)  // ❌ ERROR: violates constraint
 impl Example {
-    inst hp: HighPerformanceModule<CurrentIntent> { }
+    let hp = HighPerformanceModule<CurrentIntent> { }
 }
 ```
 

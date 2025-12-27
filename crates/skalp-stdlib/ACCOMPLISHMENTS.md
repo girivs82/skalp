@@ -136,12 +136,12 @@ Building complex operations from simple primitives:
 
 ```skalp
 impl FP32Clamp {
-    inst clamped_min: FP32Max {
+    let clamped_min = FP32Max {
         a = value,
         b = min_val
     }
 
-    inst clamped: FP32Min {
+    let clamped = FP32Min {
         a = clamped_min.result,
         b = max_val,
         result => result
@@ -174,9 +174,9 @@ result = if result_is_nan { nan }
 Natural hardware mapping:
 
 ```skalp
-inst step1: Operation1 { ... }
-inst step2: Operation2 { input = step1.result }
-inst step3: Operation3 { input = step2.result, result => output }
+let step1 = Operation1 { ... }
+let step2 = Operation2 { input = step1.result }
+let step3 = Operation3 { input = step2.result, result => output }
 ```
 
 ### 5. Complex Algorithms
@@ -184,9 +184,9 @@ Newton-Raphson iteration, Snell's law, etc.:
 
 ```skalp
 // Newton-Raphson for sqrt
-inst div: FP32Div { a = x, b = y_old }
-inst sum: FP32Add { a = y_old, b = div.result }
-inst refined: FP32Mul { a = half, b = sum.result }
+let div = FP32Div { a = x, b = y_old }
+let sum = FP32Add { a = y_old, b = div.result }
+let refined = FP32Mul { a = half, b = sum.result }
 ```
 
 ---

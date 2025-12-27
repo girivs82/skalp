@@ -46,7 +46,7 @@ entity FP32Accumulator {
 }
 
 impl FP32Accumulator {
-    inst acc: Accumulator<fp32, 8> {
+    let acc = Accumulator<fp32, 8> {
         data = data,
         clk = clk,
         reset = reset,
@@ -62,7 +62,7 @@ entity I32Accumulator {
 }
 
 impl I32Accumulator {
-    inst acc: Accumulator<i32, 8> {
+    let acc = Accumulator<i32, 8> {
         data = data,
         clk = clk,
         reset = reset,
@@ -78,7 +78,7 @@ entity Q16_16Accumulator {
 }
 
 impl Q16_16Accumulator {
-    inst acc: Accumulator<q16_16, 8> {
+    let acc = Accumulator<q16_16, 8> {
         data = data,
         clk = clk,
         reset = reset,
@@ -135,7 +135,7 @@ entity FP32FIR8 {
 }
 
 impl FP32FIR8 {
-    inst fir: FIRFilter<fp32, 8> {
+    let fir = FIRFilter<fp32, 8> {
         x = x,
         coeffs = coeffs,
         clk = clk,
@@ -152,7 +152,7 @@ entity Q16_16FIR8 {
 }
 
 impl Q16_16FIR8 {
-    inst fir: FIRFilter<q16_16, 8> {
+    let fir = FIRFilter<q16_16, 8> {
         x = x,
         coeffs = coeffs,
         clk = clk,
@@ -278,7 +278,7 @@ entity Mat3x3Fp32VecMul {
 }
 
 impl Mat3x3Fp32VecMul {
-    inst mul: MatVecMul<fp32, 3, 3> {
+    let mul = MatVecMul<fp32, 3, 3> {
         matrix = matrix,
         vector = vector,
         result => result
@@ -329,7 +329,7 @@ where
 }
 
 impl<T> SatAdd<T> {
-    inst sat: NumericSatAdd<T> {
+    let sat = NumericSatAdd<T> {
         a = a,
         b = b,
         result => result
@@ -402,7 +402,7 @@ entity FP32ToQ16_16 {
 }
 
 impl FP32ToQ16_16 {
-    inst convert: NumericConvert<fp32, q16_16> {
+    let convert = NumericConvert<fp32, q16_16> {
         value = value,
         result => result
     }

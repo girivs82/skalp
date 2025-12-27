@@ -96,7 +96,7 @@ entity CriticalModule {
 
 @intent(latency: max(4_cycles))  // ❌ ERROR: Conflict!
 impl Parent {
-    inst critical: CriticalModule {  // Requires 8, parent allows max 4
+    let critical = CriticalModule {  // Requires 8, parent allows max 4
         x = input,
         result => output
     }
@@ -108,7 +108,7 @@ impl Parent {
 error: intent conflict - latency constraint violation
   --> parent.sk:5:10
    |
-5  |     inst critical: CriticalModule {
+5  |     let critical = CriticalModule {
    |          ^^^^^^^^ requires min(8_cycles)
    |
 note: parent intent is max(4_cycles)
@@ -371,14 +371,14 @@ Intents propagate through multiple levels:
 ```skalp
 @intent(optimize: latency)
 impl TopLevel {
-    inst middle: MiddleLevel {
+    let middle = MiddleLevel {
         input = data
     }
 }
 
 @intent(optimize: latency)  // Inherited from TopLevel
 impl MiddleLevel {
-    inst bottom: BottomLevel {  // Propagates further
+    let bottom = BottomLevel {  // Propagates further
         input = input
     }
 }

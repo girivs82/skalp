@@ -1305,7 +1305,7 @@ impl IsolationConfig {
 /// signal voted_pressure: bit[12] = median(pressure_a, pressure_b, pressure_c);
 ///
 /// #[implements(BrakingSafety::DataIntegrity)]
-/// inst crc: Crc8Checker { ... }
+/// let crc = Crc8Checker { ... }
 /// ```
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SafetyConfig {

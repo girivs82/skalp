@@ -233,7 +233,7 @@ impl CrcProtectedComm<WIDTH, 'clk> {
     // ========================================================================
 
     // Generate CRC for transmit data
-    inst tx_crc_gen: CrcGenerator<WIDTH> {
+    let tx_crc_gen = CrcGenerator<WIDTH> {
         data: tx_data,
     };
 
@@ -249,7 +249,7 @@ impl CrcProtectedComm<WIDTH, 'clk> {
     signal rx_crc_part: bit[8] = rx_frame[7 : 0];
 
     // Check CRC
-    inst rx_crc_check: CrcChecker<WIDTH> {
+    let rx_crc_check = CrcChecker<WIDTH> {
         data: rx_data_part,
         received_crc: rx_crc_part,
     };

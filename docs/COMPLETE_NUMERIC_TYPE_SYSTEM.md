@@ -746,7 +746,7 @@ impl<T, const TAPS: nat, intent I> FIRFilter<T, I> {
 
 // FP32 filter for high precision
 @intent(profile: "high_precision")
-inst fir_fp32: FIRFilter<fp32, 64> {
+let fir_fp32 = FIRFilter<fp32, 64> {
     clk = clk,
     sample = audio_in_fp32,
     result => audio_out_fp32
@@ -754,7 +754,7 @@ inst fir_fp32: FIRFilter<fp32, 64> {
 
 // Fixed-point filter for efficient implementation
 @intent(profile: "low_power", overflow: saturate)
-inst fir_fixed: FIRFilter<q16_16, 64> {
+let fir_fixed = FIRFilter<q16_16, 64> {
     clk = clk,
     sample = audio_in_fixed,
     result => audio_out_fixed
@@ -762,7 +762,7 @@ inst fir_fixed: FIRFilter<q16_16, 64> {
 
 // Integer filter for simple processing
 @intent(profile: "minimal_area")
-inst fir_int: FIRFilter<i16, 32> {
+let fir_int = FIRFilter<i16, 32> {
     clk = clk,
     sample = audio_in_int,
     result => audio_out_int
@@ -770,7 +770,7 @@ inst fir_int: FIRFilter<i16, 32> {
 
 // BFloat16 for ML accelerators
 @intent(profile: "ml_optimized", map_to_dsp: true)
-inst fir_bf16: FIRFilter<bf16, 128> {
+let fir_bf16 = FIRFilter<bf16, 128> {
     clk = clk,
     sample = ml_feature_in,
     result => ml_feature_out

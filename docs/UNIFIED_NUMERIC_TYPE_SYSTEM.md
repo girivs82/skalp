@@ -417,7 +417,7 @@ impl<const F: FloatFormat, const N: nat, intent I>
     VecNormalize<F, N, I>
 {
     // Compute length squared
-    inst dot: VecDot<fp<F>, N, I> {
+    let dot = VecDot<fp<F>, N, I> {
         a = v,
         b = v,
         result => len_sq
@@ -426,13 +426,13 @@ impl<const F: FloatFormat, const N: nat, intent I>
     // Compute reciprocal square root or square root
     signal inv_len = if I.latency < 8 {
         // Fast path: rsqrt directly
-        inst rsqrt: Rsqrt<F, I> {
+        let rsqrt = Rsqrt<F, I> {
             x = len_sq,
             result => inv_len
         }
     } else {
         // Accurate path: sqrt then reciprocal
-        inst sqrt_op: Sqrt<F, I> {
+        let sqrt_op = Sqrt<F, I> {
             x = len_sq,
             result => len
         }
@@ -440,7 +440,7 @@ impl<const F: FloatFormat, const N: nat, intent I>
     }
 
     // Scale vector
-    inst scale: VecScale<fp<F>, N, I> {
+    let scale = VecScale<fp<F>, N, I> {
         v = v,
         s = inv_len,
         result => normalized
@@ -491,7 +491,7 @@ impl<const F: FloatFormat, const ROWS: nat, const COLS: nat, intent I>
     @unroll(factor: UNROLL_FACTOR)
     for row in 0..ROWS {
         // Dot product of matrix row with vector
-        inst dot: VecDot<fp<F>, COLS, I> {
+        let dot = VecDot<fp<F>, COLS, I> {
             a = m[row],
             b = v,
             result => result[row]
@@ -829,7 +829,7 @@ impl<const F: FloatFormat, const VEC_DIM: nat, intent I>
 
 // Standard FP32 3D graphics
 @intent(profile: "high_quality")
-inst pipeline_3d_fp32: GraphicsPipeline<IEEE754_32, 3> {
+let pipeline_3d_fp32 = GraphicsPipeline<IEEE754_32, 3> {
     position = pos_fp32,
     normal = norm_fp32,
     color => color_out
@@ -837,7 +837,7 @@ inst pipeline_3d_fp32: GraphicsPipeline<IEEE754_32, 3> {
 
 // Low-precision FP16 for mobile
 @intent(profile: "low_power")
-inst pipeline_3d_fp16: GraphicsPipeline<IEEE754_16, 3> {
+let pipeline_3d_fp16 = GraphicsPipeline<IEEE754_16, 3> {
     position = pos_fp16,
     normal = norm_fp16,
     color => color_out
@@ -845,7 +845,7 @@ inst pipeline_3d_fp16: GraphicsPipeline<IEEE754_16, 3> {
 
 // BF16 for ML accelerators
 @intent(profile: "ml_optimized")
-inst pipeline_3d_bf16: GraphicsPipeline<BFLOAT16, 3> {
+let pipeline_3d_bf16 = GraphicsPipeline<BFLOAT16, 3> {
     position = pos_bf16,
     normal = norm_bf16,
     color => color_out
@@ -853,7 +853,7 @@ inst pipeline_3d_bf16: GraphicsPipeline<BFLOAT16, 3> {
 
 // 2D lighting (no specular)
 @intent(profile: "minimal")
-inst pipeline_2d_fp32: GraphicsPipeline<IEEE754_32, 2> {
+let pipeline_2d_fp32 = GraphicsPipeline<IEEE754_32, 2> {
     position = pos_2d,
     normal = norm_2d,
     color => color_out

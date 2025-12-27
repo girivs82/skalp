@@ -101,7 +101,7 @@ impl VectorExample {
     sum = a + b
 
     // Dot product using entity
-    inst dot: Vec3Dot<fp32> {
+    let dot = Vec3Dot<fp32> {
         a = a,
         b = b,
         result => dot_product
@@ -139,7 +139,7 @@ entity MyDesign {
 
 impl MyDesign {
     // Instantiate a FIFO from stdlib
-    inst buffer: FIFO<DEPTH=16, WIDTH=8> {
+    let buffer = FIFO<DEPTH=16, WIDTH=8> {
         clk = clk,
         write_enable = 1,
         write_data = data_in,

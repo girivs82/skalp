@@ -48,13 +48,13 @@ impl PhongShading {
     //=========================================================================
 
     // Vector from surface to light
-    inst light_dir_unnorm: Vec3Sub<fp32> {
+    let light_dir_unnorm = Vec3Sub<fp32> {
         a = light_pos,
         b = position
     }
 
     // Normalize light direction
-    inst light_dir: Vec3Normalize {
+    let light_dir = Vec3Normalize {
         v = light_dir_unnorm.result
     }
 
@@ -65,12 +65,12 @@ impl PhongShading {
     // Ambient = k_ambient * ambient_color * light_intensity
     signal ambient_scaled: vec3<fp32> = ambient_color  // Simplified
 
-    inst ambient_intensity: Vec3Scale<fp32> {
+    let ambient_intensity = Vec3Scale<fp32> {
         v = ambient_scaled,
         s = k_ambient
     }
 
-    inst ambient_light: Vec3Scale<fp32> {
+    let ambient_light = Vec3Scale<fp32> {
         v = ambient_intensity.result,
         s = light_intensity
     }
@@ -80,7 +80,7 @@ impl PhongShading {
     //=========================================================================
 
     // Compute dot(normal, light_dir)
-    inst n_dot_l: Vec3Dot<fp32> {
+    let n_dot_l = Vec3Dot<fp32> {
         a = normal,
         b = light_dir.normalized
     }
@@ -89,24 +89,24 @@ impl PhongShading {
     signal zero: fp32 = 32'h00000000
     signal one: fp32 = 32'h3F800000
 
-    inst diffuse_factor: FP32Clamp {
+    let diffuse_factor = FP32Clamp {
         value = n_dot_l.result,
         min_val = zero,
         max_val = one
     }
 
     // Diffuse = k_diffuse * diffuse_color * max(0, dot(N, L)) * light_intensity
-    inst diffuse_scaled: Vec3Scale<fp32> {
+    let diffuse_scaled = Vec3Scale<fp32> {
         v = diffuse_color,
         s = k_diffuse
     }
 
-    inst diffuse_factor_vec: Vec3Scale<fp32> {
+    let diffuse_factor_vec = Vec3Scale<fp32> {
         v = diffuse_scaled.result,
         s = diffuse_factor.result
     }
 
-    inst diffuse_light: Vec3Scale<fp32> {
+    let diffuse_light = Vec3Scale<fp32> {
         v = diffuse_factor_vec.result,
         s = light_intensity
     }
@@ -123,24 +123,24 @@ impl PhongShading {
         z: zero
     }
 
-    inst neg_light_dir: Vec3Sub<fp32> {
+    let neg_light_dir = Vec3Sub<fp32> {
         a = zero_vec,
         b = light_dir.normalized
     }
 
-    inst reflect_dir: Vec3Reflect {
+    let reflect_dir = Vec3Reflect {
         v = neg_light_dir.result,
         n = normal
     }
 
     // Compute dot(reflect_dir, view_dir)
-    inst r_dot_v: Vec3Dot<fp32> {
+    let r_dot_v = Vec3Dot<fp32> {
         a = reflect_dir.reflected,
         b = view_dir
     }
 
     // Clamp to [0, 1]
-    inst spec_base: FP32Clamp {
+    let spec_base = FP32Clamp {
         value = r_dot_v.result,
         min_val = zero,
         max_val = one
@@ -150,23 +150,23 @@ impl PhongShading {
     // For simplicity, we'll approximate with multiplication
     // Real implementation would use: pow(spec_base, shininess)
     // For now: spec^2 for demonstration
-    inst spec_squared: FP32Mul {
+    let spec_squared = FP32Mul {
         a = spec_base.result,
         b = spec_base.result
     }
 
     // Specular = k_specular * specular_color * spec_factor * light_intensity
-    inst spec_scaled: Vec3Scale<fp32> {
+    let spec_scaled = Vec3Scale<fp32> {
         v = specular_color,
         s = k_specular
     }
 
-    inst spec_factor_vec: Vec3Scale<fp32> {
+    let spec_factor_vec = Vec3Scale<fp32> {
         v = spec_scaled.result,
         s = spec_squared.result
     }
 
-    inst specular_light: Vec3Scale<fp32> {
+    let specular_light = Vec3Scale<fp32> {
         v = spec_factor_vec.result,
         s = light_intensity
     }
@@ -176,19 +176,19 @@ impl PhongShading {
     //=========================================================================
 
     // Combine ambient + diffuse
-    inst ambient_plus_diffuse: Vec3Add<fp32> {
+    let ambient_plus_diffuse = Vec3Add<fp32> {
         a = ambient_light.result,
         b = diffuse_light.result
     }
 
     // Add specular
-    inst total_light: Vec3Add<fp32> {
+    let total_light = Vec3Add<fp32> {
         a = ambient_plus_diffuse.result,
         b = specular_light.result
     }
 
     // Multiply by light color (component-wise)
-    inst colored: Vec3Mul<fp32> {
+    let colored = Vec3Mul<fp32> {
         a = total_light.result,
         b = light_color
     }
@@ -200,7 +200,7 @@ impl PhongShading {
         z: one
     }
 
-    inst final_color: Vec3Clamp {
+    let final_color = Vec3Clamp {
         v = colored.result,
         min_val = zero_vec,
         max_val = one_vec,
@@ -229,27 +229,27 @@ entity BlinnPhongShading {
 
 impl BlinnPhongShading {
     // Compute light direction
-    inst light_vec: Vec3Sub<fp32> {
+    let light_vec = Vec3Sub<fp32> {
         a = light_pos,
         b = position
     }
 
-    inst light_dir: Vec3Normalize {
+    let light_dir = Vec3Normalize {
         v = light_vec.result
     }
 
     // Compute halfway vector: H = normalize(L + V)
-    inst half_vec_unnorm: Vec3Add<fp32> {
+    let half_vec_unnorm = Vec3Add<fp32> {
         a = light_dir.normalized,
         b = view_dir
     }
 
-    inst half_vec: Vec3Normalize {
+    let half_vec = Vec3Normalize {
         v = half_vec_unnorm.result
     }
 
     // Diffuse component
-    inst n_dot_l: Vec3Dot<fp32> {
+    let n_dot_l = Vec3Dot<fp32> {
         a = normal,
         b = light_dir.normalized
     }
@@ -257,50 +257,50 @@ impl BlinnPhongShading {
     signal zero: fp32 = 32'h00000000
     signal one: fp32 = 32'h3F800000
 
-    inst diffuse: FP32Clamp {
+    let diffuse = FP32Clamp {
         value = n_dot_l.result,
         min_val = zero,
         max_val = one
     }
 
     // Specular component using halfway vector
-    inst n_dot_h: Vec3Dot<fp32> {
+    let n_dot_h = Vec3Dot<fp32> {
         a = normal,
         b = half_vec.normalized
     }
 
-    inst spec_base: FP32Clamp {
+    let spec_base = FP32Clamp {
         value = n_dot_h.result,
         min_val = zero,
         max_val = one
     }
 
     // Approximate power with multiplication (spec^2)
-    inst specular: FP32Mul {
+    let specular = FP32Mul {
         a = spec_base.result,
         b = spec_base.result
     }
 
     // Combine diffuse and specular
-    inst combined_factor: FP32Add {
+    let combined_factor = FP32Add {
         a = diffuse.result,
         b = specular.result
     }
 
     // Scale material color
-    inst scaled_material: Vec3Scale<fp32> {
+    let scaled_material = Vec3Scale<fp32> {
         v = material_color,
         s = combined_factor.result
     }
 
     // Multiply by light color
-    inst lit_color: Vec3Mul<fp32> {
+    let lit_color = Vec3Mul<fp32> {
         a = scaled_material.result,
         b = light_color
     }
 
     // Scale by intensity
-    inst final_scaled: Vec3Scale<fp32> {
+    let final_scaled = Vec3Scale<fp32> {
         v = lit_color.result,
         s = light_intensity
     }
@@ -318,7 +318,7 @@ impl BlinnPhongShading {
         z: one
     }
 
-    inst saturated: Vec3Clamp {
+    let saturated = Vec3Clamp {
         v = final_scaled.result,
         min_val = zero_vec,
         max_val = one_vec,

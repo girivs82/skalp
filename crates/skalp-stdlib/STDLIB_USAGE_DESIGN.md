@@ -34,7 +34,7 @@ entity MyDesign {
 }
 
 impl MyDesign {
-    inst norm: Vec3Normalize {
+    let norm = Vec3Normalize {
         v = v,
         normalized => normalized
     }
@@ -71,7 +71,7 @@ entity MyDesign {
 }
 
 impl MyDesign {
-    inst norm: Vec3Normalize {  // Automatically resolved
+    let norm = Vec3Normalize {  // Automatically resolved
         v = v,
         normalized => normalized
     }
@@ -108,7 +108,7 @@ entity MyDesign {
 }
 
 impl MyDesign {
-    inst norm: Vec3Normalize {
+    let norm = Vec3Normalize {
         v = v,
         normalized => normalized
     }
@@ -141,7 +141,7 @@ entity MyDesign {
 }
 
 impl MyDesign {
-    inst norm: Vec3Normalize {
+    let norm = Vec3Normalize {
         v = v,
         normalized => normalized
     }
@@ -188,7 +188,7 @@ impl MyShader {
     signal negated: vec3<fp32> = -view
 
     // Use stdlib entity (imported above)
-    inst refl: Vec3Reflect {
+    let refl = Vec3Reflect {
         v = negated,
         n = normal,
         reflected => reflected
@@ -425,12 +425,12 @@ impl RayTracer {
     signal dir_normalized: vec3<fp32> = ray_dir  // Will use stdlib internally
 
     // Stdlib entities require import (above)
-    inst norm: Vec3Normalize {
+    let norm = Vec3Normalize {
         v = dir_normalized,
         normalized => dir_normalized
     }
 
-    inst refl: Vec3Reflect {
+    let refl = Vec3Reflect {
         v = dir_normalized,
         n = normal,
         reflected => reflected

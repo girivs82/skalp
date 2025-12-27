@@ -51,7 +51,7 @@ impl RaySphereIntersection {
     //=========================================================================
     // Step 1: Compute oc = ray_origin - sphere_center
     //=========================================================================
-    inst compute_oc: Vec3Sub<fp32> {
+    let compute_oc = Vec3Sub<fp32> {
         a = ray_origin,
         b = sphere_center
     }
@@ -64,7 +64,7 @@ impl RaySphereIntersection {
 
     // a = dot(ray_direction, ray_direction)
     // For normalized direction, this should be 1.0, but we compute it anyway
-    inst compute_a: Vec3Dot<fp32> {
+    let compute_a = Vec3Dot<fp32> {
         a = ray_direction,
         b = ray_direction
     }
@@ -72,7 +72,7 @@ impl RaySphereIntersection {
     signal a: fp32 = compute_a.result
 
     // b = 2 * dot(oc, ray_direction)
-    inst compute_half_b: Vec3Dot<fp32> {
+    let compute_half_b = Vec3Dot<fp32> {
         a = oc,
         b = ray_direction
     }
@@ -82,21 +82,21 @@ impl RaySphereIntersection {
     signal half_b: fp32 = compute_half_b.result
 
     // c = dot(oc, oc) - radius²
-    inst compute_oc_length_sq: Vec3Dot<fp32> {
+    let compute_oc_length_sq = Vec3Dot<fp32> {
         a = oc,
         b = oc
     }
 
     signal oc_length_sq: fp32 = compute_oc_length_sq.result
 
-    inst radius_sq_mul: FP32Mul {
+    let radius_sq_mul = FP32Mul {
         a = sphere_radius,
         b = sphere_radius
     }
 
     signal radius_sq: fp32 = radius_sq_mul.result
 
-    inst compute_c: FP32Sub {
+    let compute_c = FP32Sub {
         a = oc_length_sq,
         b = radius_sq
     }
@@ -107,17 +107,17 @@ impl RaySphereIntersection {
     // Step 3: Compute discriminant = half_b² - a*c
     //=========================================================================
 
-    inst half_b_sq: FP32Mul {
+    let half_b_sq = FP32Mul {
         a = half_b,
         b = half_b
     }
 
-    inst a_times_c: FP32Mul {
+    let a_times_c = FP32Mul {
         a = a,
         b = c
     }
 
-    inst discriminant_calc: FP32Sub {
+    let discriminant_calc = FP32Sub {
         a = half_b_sq.result,
         b = a_times_c.result
     }
@@ -131,7 +131,7 @@ impl RaySphereIntersection {
     // Create zero constant for comparison
     signal zero_fp: fp32 = 32'h00000000  // +0.0
 
-    inst disc_compare: FP32Compare {
+    let disc_compare = FP32Compare {
         a = discriminant,
         b = zero_fp
     }
@@ -151,12 +151,12 @@ impl RaySphereIntersection {
     // t = (-half_b ± sqrt(discriminant)) / a
     signal neg_half_b: fp32 = zero_fp - half_b  // PLACEHOLDER - should use FP32Sub
 
-    inst t_near_calc: FP32Sub {
+    let t_near_calc = FP32Sub {
         a = neg_half_b,
         b = sqrt_disc
     }
 
-    inst t_far_calc: FP32Add {
+    let t_far_calc = FP32Add {
         a = neg_half_b,
         b = sqrt_disc
     }
@@ -173,12 +173,12 @@ impl RaySphereIntersection {
     // Step 6: Compute hit point = ray_origin + t_near * ray_direction
     //=========================================================================
 
-    inst scaled_dir: Vec3Scale<fp32> {
+    let scaled_dir = Vec3Scale<fp32> {
         v = ray_direction,
         s = t_near
     }
 
-    inst compute_hit_point: Vec3Add<fp32> {
+    let compute_hit_point = Vec3Add<fp32> {
         a = ray_origin,
         b = scaled_dir.result
     }
@@ -193,7 +193,7 @@ impl RaySphereIntersection {
     // Step 7: Compute surface normal = (hit_point - sphere_center) / radius
     //=========================================================================
 
-    inst normal_unnorm: Vec3Sub<fp32> {
+    let normal_unnorm = Vec3Sub<fp32> {
         a = hit_point,
         b = sphere_center
     }
@@ -222,13 +222,13 @@ entity RaySphereHitTest {
 
 impl RaySphereHitTest {
     // Vector from ray origin to sphere center
-    inst oc: Vec3Sub<fp32> {
+    let oc = Vec3Sub<fp32> {
         a = ray_origin,
         b = sphere_center
     }
 
     // Project oc onto ray direction
-    inst projection: Vec3Dot<fp32> {
+    let projection = Vec3Dot<fp32> {
         a = oc.result,
         b = ray_direction
     }
@@ -236,34 +236,34 @@ impl RaySphereHitTest {
     signal t_closest: fp32 = projection.result
 
     // Closest point on ray to sphere center
-    inst closest_point_offset: Vec3Scale<fp32> {
+    let closest_point_offset = Vec3Scale<fp32> {
         v = ray_direction,
         s = t_closest
     }
 
-    inst closest_point: Vec3Add<fp32> {
+    let closest_point = Vec3Add<fp32> {
         a = ray_origin,
         b = closest_point_offset.result
     }
 
     // Distance from sphere center to closest point
-    inst distance_vec: Vec3Sub<fp32> {
+    let distance_vec = Vec3Sub<fp32> {
         a = sphere_center,
         b = closest_point.result
     }
 
-    inst distance_sq: Vec3LengthSq {
+    let distance_sq = Vec3LengthSq {
         v = distance_vec.result
     }
 
     // Radius squared
-    inst radius_sq: FP32Mul {
+    let radius_sq = FP32Mul {
         a = sphere_radius,
         b = sphere_radius
     }
 
     // Hit if distance = radius
-    inst compare: FP32Compare {
+    let compare = FP32Compare {
         a = distance_sq.result,
         b = radius_sq.result
     }
@@ -295,28 +295,28 @@ entity RayMultiSphereHitTest {
 }
 
 impl RayMultiSphereHitTest {
-    inst test0: RaySphereHitTest {
+    let test0 = RaySphereHitTest {
         ray_origin = ray_origin,
         ray_direction = ray_direction,
         sphere_center = sphere0_center,
         sphere_radius = sphere0_radius
     }
 
-    inst test1: RaySphereHitTest {
+    let test1 = RaySphereHitTest {
         ray_origin = ray_origin,
         ray_direction = ray_direction,
         sphere_center = sphere1_center,
         sphere_radius = sphere1_radius
     }
 
-    inst test2: RaySphereHitTest {
+    let test2 = RaySphereHitTest {
         ray_origin = ray_origin,
         ray_direction = ray_direction,
         sphere_center = sphere2_center,
         sphere_radius = sphere2_radius
     }
 
-    inst test3: RaySphereHitTest {
+    let test3 = RaySphereHitTest {
         ray_origin = ray_origin,
         ray_direction = ray_direction,
         sphere_center = sphere3_center,

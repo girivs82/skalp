@@ -569,12 +569,12 @@ Complex operations built from simpler ones:
 
 ```skalp
 impl FP32Clamp {
-    inst clamped_min: FP32Max {
+    let clamped_min = FP32Max {
         a = value,
         b = min_val
     }
 
-    inst clamped: FP32Min {
+    let clamped = FP32Min {
         a = clamped_min.result,
         b = max_val,
         result => result
@@ -603,9 +603,9 @@ result = if result_is_nan {
 Natural hardware mapping:
 
 ```skalp
-inst step1: Operation1 { ... }
-inst step2: Operation2 { input = step1.result }
-inst step3: Operation3 { input = step2.result, result => final_output }
+let step1 = Operation1 { ... }
+let step2 = Operation2 { input = step1.result }
+let step3 = Operation3 { input = step2.result, result => final_output }
 ```
 
 ---

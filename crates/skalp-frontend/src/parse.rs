@@ -6625,7 +6625,7 @@ impl ParseState<'_> {
         self.finish_node();
     }
 
-    /// Parse safety entity instance: inst name: EntityType
+    /// Parse safety entity instance: instances name: EntityType
     fn parse_safety_entity_instance(&mut self) {
         self.start_node(SyntaxKind::SafetyEntityInstance);
         self.expect(SyntaxKind::InstancesKw);

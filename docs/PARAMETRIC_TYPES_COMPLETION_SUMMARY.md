@@ -409,9 +409,9 @@ const fn is_fully_pipelined(i: Intent) -> bool
 
    impl VideoPipeline {
        // All submodules inherit intent I
-       inst csc: ColorSpaceConvert<H, W, IEEE754_32, I> { ... }
-       inst edge: SobelEdgeDetect<H, W, IEEE754_32, I> { ... }
-       inst blur: GaussianBlur<H, W, 5, IEEE754_32, I> { ... }
+       let csc = ColorSpaceConvert<H, W, IEEE754_32, I> { ... }
+       let edge = SobelEdgeDetect<H, W, IEEE754_32, I> { ... }
+       let blur = GaussianBlur<H, W, 5, IEEE754_32, I> { ... }
    }
    ```
    - **1080p Instance:** Custom `HT_VIDEO_INTENT` for high throughput

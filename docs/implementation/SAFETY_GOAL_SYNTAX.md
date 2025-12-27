@@ -20,7 +20,7 @@ Skalp's safety goal system provides a clean separation between safety requiremen
 ┌─────────────────────────────────────────────────────────────────┐
 │ DESIGN (entity + impl)                                          │
 │ Owner: Design Engineer                                          │
-│ Contains: RTL + inst safety: Goal { signal mappings }           │
+│ Contains: RTL + let safety = Goal { signal mappings }           │
 │ Familiar instantiation syntax for binding                       │
 └─────────────────────────────┬───────────────────────────────────┘
                               │
@@ -205,7 +205,7 @@ impl BrakeController<'clk> {
 
     // === SAFETY GOAL INSTANTIATION ===
     // Binds abstract signals to concrete implementation
-    inst safety: BrakingSafety {
+    let safety = BrakingSafety {
         // Interface ports
         brake_command: brake_req,
         brake_pressure: voted_pressure,
@@ -246,7 +246,7 @@ The compiler validates that all safety goal signals are bound:
 error[SAFETY002]: incomplete safety goal binding
   --> src/brake_controller.sk:25:5
    |
-25 |     inst safety: BrakingSafety {
+25 |     let safety = BrakingSafety {
    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^
    |
    = note: missing binding for signal `datapath_expected`
@@ -259,9 +259,9 @@ Only entities with a safety goal instantiation are analyzed:
 
 ```skalp
 entity Top {
-    inst brake_main: BrakeController { ... }  // Has inst safety: -> analyzed
-    inst brake_aux: BrakeController { ... }   // Has inst safety: -> analyzed
-    inst brake_test: BrakeController { ... }  // No inst safety: -> QM (not analyzed)
+    let brake_main = BrakeController { ... }  // Has let safety = -> analyzed
+    let brake_aux = BrakeController { ... }   // Has let safety = -> analyzed
+    let brake_test = BrakeController { ... }  // No let safety = -> QM (not analyzed)
 }
 ```
 
@@ -514,15 +514,15 @@ impl Controller<'clk> {
 
     // CRC checker
     #[safety_mechanism(type: crc)]
-    inst crc_check: Crc8Checker { ... }
+    let crc_check = Crc8Checker { ... }
 
     // ECC decoder
     #[safety_mechanism(type: ecc)]
-    inst ecc: EccDecoder { ... }
+    let ecc = EccDecoder { ... }
 
     // Watchdog
     #[safety_mechanism(type: watchdog)]
-    inst wdog: Watchdog { ... }
+    let wdog = Watchdog { ... }
 
     // Lockstep comparator
     #[safety_mechanism(type: lockstep)]
@@ -556,7 +556,7 @@ impl Controller<'clk> {
 
 When you run `skalp build --safety`, the compiler:
 
-1. Identifies all `inst safety: <Goal>` bindings
+1. Identifies all `let safety = <Goal>` bindings
 2. Enumerates fault sites in covered design
 3. Injects faults and simulates
 4. Evaluates failure effect conditions
@@ -570,7 +570,7 @@ $ skalp build --safety
 
 Safety Analysis: BrakingSafety (ASIL-D)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Design: top.brake_main (via inst safety: BrakingSafety)
+Design: top.brake_main (via let safety = BrakingSafety)
 Primitives: 124,500
 Fault sites: 373,500
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -625,7 +625,7 @@ safety_entity BrakingControl implements BrakingSafety {
 ```skalp
 // New: inst safety in design
 impl BrakeController<'clk> {
-    inst safety: BrakingSafety {
+    let safety = BrakingSafety {
         // Signal mappings
         ...
     }
@@ -635,7 +635,7 @@ impl BrakeController<'clk> {
 **What's removed:**
 - `safety_entity` - no longer needed
 - Manual `fmea` blocks - auto-generated
-- Manual `covers` - determined by which entities have `inst safety:`
+- Manual `covers` - determined by which entities have `let safety = SafetyGoal { ... }`
 - DC overrides - DC is measured, not specified
 
 **What's kept:**
@@ -656,7 +656,7 @@ impl BrakeController<'clk> {
 | Failure effect | `failure_effects { name: condition }` |
 | Severity | `severity { name: S1/S2/S3 }` |
 | Targets | `target { spfm: >= 99.0 }` |
-| Bind goal to design | `inst safety: Goal { mappings }` |
+| Bind goal to design | `let safety = Goal { mappings }` |
 | Mark safety mechanism | `#[safety_mechanism(type: tmr)]` |
 | Temporal operator | `@operator(args)` |
 | Duration qualifier | `cond for > N_cycles` |

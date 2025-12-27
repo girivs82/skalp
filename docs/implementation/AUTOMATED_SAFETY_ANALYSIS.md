@@ -333,13 +333,13 @@ failure_effects {
 entity BrakeController {
     // Mark safety mechanisms for DC measurement
     #[safety_mechanism(type: tmr, covers: datapath)]
-    inst voter: TmrVoter { ... }
+    let voter = TmrVoter { ... }
 
     #[safety_mechanism(type: ecc, covers: memory)]
-    inst ecc: EccChecker { ... }
+    let ecc = EccChecker { ... }
 
     #[safety_mechanism(type: watchdog, covers: cpu)]
-    inst wdog: Watchdog { ... }
+    let wdog = Watchdog { ... }
 }
 ```
 

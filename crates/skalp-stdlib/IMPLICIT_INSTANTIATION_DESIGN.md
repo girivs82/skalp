@@ -14,10 +14,10 @@ entity MyDesign {
 }
 
 impl MyDesign {
-    inst s: FP32Sqrt {
-        x = x,
-        result => result
+    let s = FP32Sqrt {
+        x: x,
     }
+    result = s.result
 }
 ```
 
@@ -93,17 +93,17 @@ impl MyShader {
     signal len: fp32 = length(position)
 
     // Explicit - complex configuration, multiple outputs
-    inst phong: PhongShading {
-        position = position,
-        normal = normal,
-        view_dir = view_dir,
-        light_pos = light_pos,
-        light_color = light_color,
-        light_intensity = intensity,
-        material_color = material,
-        shininess = 32.0,
-        color => output_color
+    let phong = PhongShading {
+        position: position,
+        normal: normal,
+        view_dir: view_dir,
+        light_pos: light_pos,
+        light_color: light_color,
+        light_intensity: intensity,
+        material_color: material,
+        shininess: 32.0,
     }
+    output_color = phong.color
 }
 ```
 
@@ -255,10 +255,10 @@ signal result: fp32 = sqrt(x)  // Type forces fp32 version
 
 **Option 3: Explicit instantiation**
 ```skalp
-inst s: FP32Sqrt {
-    x = x,
-    result => result
+let s = FP32Sqrt {
+    x: x,
 }
+result = s.result
 ```
 
 ### User-Defined Functions
@@ -344,16 +344,15 @@ impl RayTracer {
     signal refl: vec3<fp32> = reflect(normalized_dir, normal)
 
     // Explicit instantiation for complex multi-output operations
-    // (still requires explicit inst with port mapping)
-    inst intersection: RaySphereIntersection {
-        ray_origin = hit_point,
-        ray_dir = refl,
-        sphere_center = sphere_pos,
-        sphere_radius = sphere_r,
-        hit => has_hit,
-        t => hit_distance,
-        normal => hit_normal
+    let intersection = RaySphereIntersection {
+        ray_origin: hit_point,
+        ray_dir: refl,
+        sphere_center: sphere_pos,
+        sphere_radius: sphere_r,
     }
+    has_hit = intersection.hit
+    hit_distance = intersection.t
+    hit_normal = intersection.normal
 
     reflected_ray = refl
 }
@@ -373,15 +372,15 @@ signal result: fp32 = sqrt(x)
 signal (quotient, remainder) = divmod(a, b)  // Error: use explicit inst
 ```
 
-For multiple outputs, use explicit `inst`:
+For multiple outputs, use explicit `let`:
 
 ```skalp
-inst dm: DivMod {
-    a = a,
-    b = b,
-    quotient => q,
-    remainder => r
+let dm = DivMod {
+    a: a,
+    b: b,
 }
+q = dm.quotient
+r = dm.remainder
 ```
 
 ### No Named Parameters
@@ -678,23 +677,23 @@ entity Shader {
 
 impl Shader {
     // Normalize view direction
-    inst view_norm: Vec3Normalize {
-        v = view_dir,
-        normalized => view_normalized
+    let view_norm = Vec3Normalize {
+        v: view_dir,
     }
+    signal view_normalized: vec3<fp32> = view_norm.normalized
 
     // Normalize normal
-    inst normal_norm: Vec3Normalize {
-        v = normal,
-        normalized => normal_normalized
+    let normal_norm = Vec3Normalize {
+        v: normal,
     }
+    signal normal_normalized: vec3<fp32> = normal_norm.normalized
 
     // Reflect
-    inst refl: Vec3Reflect {
-        v = view_normalized,
-        n = normal_normalized,
-        reflected => reflected
+    let refl = Vec3Reflect {
+        v: view_normalized,
+        n: normal_normalized,
     }
+    reflected = refl.reflected
 }
 ```
 
@@ -739,12 +738,13 @@ Once imported, you choose *how* to instantiate:
 
 **Option 1: Implicit (function-like)**
 ```skalp
-signal result: fp32 = sqrt(x)               // Compiler creates inst implicitly
+signal result: fp32 = sqrt(x)               // Compiler creates instance implicitly
 ```
 
 **Option 2: Explicit (port mapping)**
 ```skalp
-inst s: FP32Sqrt { x = x, result => result } // Manual inst with ports
+let s = FP32Sqrt { x: x }
+result = s.result
 ```
 
 ### When to Use Each
@@ -825,7 +825,7 @@ This design works in conjunction with STDLIB_USAGE_DESIGN.md:
 
 **Both are needed:**
 1. `use` statement brings `sqrt` into namespace
-2. Implicit instantiation lets you write `sqrt(x)` instead of `inst s: FP32Sqrt { x = x, result => result }`
+2. Implicit instantiation lets you write `sqrt(x)` instead of `let s = FP32Sqrt { x: x }; result = s.result`
 
 ## Conclusion
 

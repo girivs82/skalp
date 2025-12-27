@@ -173,7 +173,7 @@ impl TmrVoterWithHistory<WIDTH, TOLERANCE, HISTORY_DEPTH, 'clk> {
     // Instantiate Base TMR Voter
     // ========================================================================
 
-    inst voter: TmrVoter<WIDTH, TOLERANCE> {
+    let voter = TmrVoter<WIDTH, TOLERANCE> {
         channel_a: channel_a,
         channel_b: channel_b,
         channel_c: channel_c,
@@ -225,7 +225,7 @@ entity TmrVoter16 {
 }
 
 impl TmrVoter16 {
-    inst voter: TmrVoter<16, 50> {
+    let voter = TmrVoter<16, 50> {
         channel_a: channel_a,
         channel_b: channel_b,
         channel_c: channel_c,
@@ -248,7 +248,7 @@ entity TmrVoter12 {
 }
 
 impl TmrVoter12 {
-    inst voter: TmrVoter<12, 20> {
+    let voter = TmrVoter<12, 20> {
         channel_a: channel_a,
         channel_b: channel_b,
         channel_c: channel_c,

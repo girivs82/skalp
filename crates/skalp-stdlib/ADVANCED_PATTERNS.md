@@ -65,7 +65,7 @@ entity MyDesign {
 
 impl MyDesign {
     // Instantiate Vec3Add with T = fp32
-    inst adder: Vec3Add<fp32> {
+    let adder = Vec3Add<fp32> {
         a = a,
         b = b,
         result => sum
@@ -396,7 +396,7 @@ entity RaySphereIntersection {
 
 impl RaySphereIntersection {
     // Step 1: Vector subtraction
-    inst compute_oc: Vec3Sub<fp32> {
+    let compute_oc = Vec3Sub<fp32> {
         a = ray_origin,
         b = sphere_center
     }
@@ -404,7 +404,7 @@ impl RaySphereIntersection {
     signal oc: vec3<fp32> = compute_oc.result
 
     // Step 2: Dot product
-    inst compute_a: Vec3Dot<fp32> {
+    let compute_a = Vec3Dot<fp32> {
         a = ray_direction,
         b = ray_direction
     }
@@ -412,13 +412,13 @@ impl RaySphereIntersection {
     signal a: fp32 = compute_a.result
 
     // Step 3: More dot products
-    inst compute_half_b: Vec3Dot<fp32> {
+    let compute_half_b = Vec3Dot<fp32> {
         a = oc,
         b = ray_direction
     }
 
     // Step 4: FP multiplication
-    inst radius_sq_mul: FP32Mul {
+    let radius_sq_mul = FP32Mul {
         a = sphere_radius,
         b = sphere_radius
     }
@@ -445,13 +445,13 @@ entity Vec3Clamp {
 
 impl Vec3Clamp {
     // First clamp to minimum
-    inst clamped_min: Vec3Max {
+    let clamped_min = Vec3Max {
         a = v,
         b = min_val
     }
 
     // Then clamp to maximum
-    inst clamped: Vec3Min {
+    let clamped = Vec3Min {
         a = clamped_min.result,
         b = max_val,
         result => result
@@ -564,7 +564,7 @@ impl<V, T> VectorGeometry<V, T> {
 | **Default Implementations** | `fn clamp()` | Reduce code duplication |
 | **Trait Bounds** | `where T: Synthesizable` | Ensure hardware compatibility |
 | **Trait Composition** | `FloatVector: Vector` | Hierarchical capabilities |
-| **Module Composition** | `inst adder: FP32Add` | Build complex from simple |
+| **Module Composition** | `let adder = FP32Add` | Build complex from simple |
 | **Const Generics** | `const N: nat` | Parameterize by size |
 
 ---
@@ -627,9 +627,9 @@ Build complex designs from simple, tested components:
 
 ```skalp
 entity RayTracer {
-    inst intersection: RaySphereIntersection { ... }
-    inst shading: PhongShading { ... }
-    inst compositor: Blend { ... }
+    let intersection = RaySphereIntersection { ... }
+    let shading = PhongShading { ... }
+    let compositor = Blend { ... }
 }
 ```
 
