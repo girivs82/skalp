@@ -219,21 +219,59 @@ impl GpuRuntime {
             let mut signal_offset = 0usize;
             let mut output_offset = 0usize;
 
+            let debug = std::env::var("SKALP_DEBUG_OUTPUT").is_ok();
+
+            // Unconditional debug to verify capture_outputs is being called
             // Outputs are at the beginning of the signal buffer
             for output in &module.outputs {
                 let metal_size = self.get_metal_type_size(output.width);
+
                 unsafe {
-                    std::ptr::copy_nonoverlapping(
-                        signal_ptr.add(signal_offset),
-                        output_ptr.add(output_offset),
-                        metal_size,
-                    );
+                    // BUG #181 FIX: Apply bit width masking before copying
+                    // Metal shader NOT operations (~x) produce 32-bit NOT, but for
+                    // narrower signals we need to mask to the proper bit width
+                    if output.width < 32 {
+                        let raw_value = *(signal_ptr.add(signal_offset) as *const u32);
+                        let mask = (1u32 << output.width) - 1;
+                        let masked_value = raw_value & mask;
+                        *(output_ptr.add(output_offset) as *mut u32) = masked_value;
+                    } else {
+                        std::ptr::copy_nonoverlapping(
+                            signal_ptr.add(signal_offset),
+                            output_ptr.add(output_offset),
+                            metal_size,
+                        );
+                    }
                 }
                 signal_offset += metal_size;
                 output_offset += metal_size;
             }
         }
         Ok(())
+    }
+
+    /// BUG #180 FIX: Update clock manager's previous_value to match current input buffer values
+    /// This ensures that on the next step(), if the clock hasn't changed, no edge is detected.
+    fn update_clock_previous_values(&mut self) {
+        if let Some(module) = &self.module {
+            if let Some(input_buffer) = &self.input_buffer {
+                let ptr = input_buffer.contents() as *const u32;
+                let mut input_offset = 0usize;
+
+                for input in &module.inputs {
+                    if input.name.contains("clk") || input.name.contains("clock") {
+                        // Read current clock value from input buffer
+                        let current_value = unsafe { *ptr.add(input_offset) } != 0;
+                        // Update clock manager so previous_value = current_value
+                        // This is done by calling set_clock with the SAME value,
+                        // which will shift current_value to previous_value
+                        self.clock_manager.set_clock(&input.name, current_value);
+                    }
+                    // Advance offset by input width (in u32 words)
+                    input_offset += (input.width + 31) / 32;
+                }
+            }
+        }
     }
 
     async fn execute_combinational(&mut self) -> Result<(), SimulationError> {
@@ -295,7 +333,13 @@ impl GpuRuntime {
         Ok(())
     }
 
+    /// Execute sequential kernel with edge detection
     async fn execute_sequential(&mut self) -> Result<(), SimulationError> {
+        self.execute_sequential_with_edges(false).await
+    }
+
+    /// Execute sequential kernel, optionally forcing execution even without detected edges
+    async fn execute_sequential_with_edges(&mut self, force: bool) -> Result<(), SimulationError> {
         // Check if we have any clock edges by looking at current vs prev clock values
         let mut has_edge = false;
         if let Some(module) = &self.module {
@@ -327,7 +371,8 @@ impl GpuRuntime {
             }
         }
 
-        if !has_edge {
+        // Skip if no edges detected and not forcing execution
+        if !has_edge && !force {
             return Ok(());
         }
 
@@ -475,7 +520,6 @@ impl GpuRuntime {
 #[async_trait]
 impl SimulationRuntime for GpuRuntime {
     async fn initialize(&mut self, module: &SirModule) -> SimulationResult<()> {
-        eprintln!("🚀🚀🚀 GPU RUNTIME INITIALIZE CALLED 🚀🚀🚀");
         self.module = Some(module.clone());
 
         // Register clocks from the module
@@ -536,29 +580,40 @@ impl SimulationRuntime for GpuRuntime {
     }
 
     async fn step(&mut self) -> SimulationResult<SimulationState> {
-        // CRITICAL THREE-PHASE EXECUTION for correct FIFO semantics:
+        // THREE-PHASE EXECUTION for correct FWFT (First-Word-Fall-Through) FIFO semantics:
+        //
+        // Phase 1: Combinational logic computes values using current register state
+        // Phase 2: Sequential logic updates registers on clock edge
+        // Phase 3: Combinational logic recomputes outputs with new register values
+        //
+        // KNOWN LIMITATION (BUG #182): Complex designs with state machines that control
+        // FIFO writes in the same clock cycle may not simulate correctly. This is because
+        // the GPU evaluates all signals atomically, while CPU simulation evaluates them
+        // sequentially within each clock cycle. The simpler AsyncFifo tests pass, but
+        // the multi-clock graphics pipeline test may fail on GPU.
+        // Workaround: Use SKALP_SIM_MODE=cpu for complex multi-domain designs.
 
-        // Phase 1: Combinational logic computes values that will be sampled by flip-flops
-        // This ensures that when we read from state elements in sequential assignments,
-        // we get the OLD values (before the clock edge updates them)
+        // Phase 1: Combinational logic computes values using current register state
         self.execute_combinational().await?;
 
         // Phase 2: Sequential logic updates registers on clock edge
-        // Flip-flops sample their data inputs (computed in phase 1) and update register values
         self.execute_sequential().await?;
 
-        // Phase 3: Re-execute combinational logic to update outputs based on new register state
-        // CRITICAL: For FIFOs, when rd_ptr increments in phase 2, rd_data must immediately
-        // reflect mem[new_rd_ptr] due to combinational propagation. This is standard FWFT
-        // (First-Word-Fall-Through) semantics where combinational outputs update in the same cycle.
+        // Phase 3: Re-execute combinational logic with new register values (FWFT)
         self.execute_combinational().await?;
 
-        // FIXED: Capture outputs AFTER phase 3 (AFTER sequential update and re-evaluation)
-        // This provides correct FIFO semantics where outputs reflect the post-clock state.
-        // Verified working with AsyncFifo test - reads sequential values correctly.
+        // Capture outputs after all phases complete
         self.capture_outputs()?;
 
         self.current_cycle += 1;
+
+        // BUG #180 FIX: Update clock manager's previous_value to current value
+        // This ensures that on the next step(), if the clock hasn't changed,
+        // we won't incorrectly detect a rising edge again.
+        // Without this fix, the clock_manager's previous_value only gets updated
+        // when set_input() is called, so if the testbench doesn't call set_input()
+        // between steps, we'd incorrectly detect edges on every step.
+        self.update_clock_previous_values();
 
         // Debug: Print register values when they have meaningful data
         // Disabled debug output - enable by changing false to true
@@ -709,6 +764,13 @@ impl SimulationRuntime for GpuRuntime {
                                 output_ptr.add(offset),
                                 value.as_mut_ptr(),
                                 bytes_needed.min(metal_size),
+                            );
+                        }
+                        // DEBUG: Print what we read for multi-clock debugging
+                        if std::env::var("SKALP_DEBUG_OUTPUT").is_ok() {
+                            eprintln!(
+                                "[DEBUG get_output] name='{}' width={} metal_size={} bytes_needed={} offset={} value={:?}",
+                                name, output.width, metal_size, bytes_needed, offset, value
                             );
                         }
                         return Ok(value);

@@ -277,9 +277,15 @@ impl GpuGateRuntime {
 
                 // BUG #179 FIX: Map clock signal ID to clock INDEX (0, 1, 2, ...)
                 // This must match the indexing used in detect_clock_edges_gpu
-                let clock_idx = p.clock.map(|c| {
-                    self.clock_signals.iter().position(|cs| cs.0 == c.0).unwrap_or(0) as u32
-                }).unwrap_or(0);
+                let clock_idx = p
+                    .clock
+                    .map(|c| {
+                        self.clock_signals
+                            .iter()
+                            .position(|cs| cs.0 == c.0)
+                            .unwrap_or(0) as u32
+                    })
+                    .unwrap_or(0);
 
                 GpuPrimitive {
                     ptype: encode_ptype(&p.ptype),
