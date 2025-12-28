@@ -998,6 +998,14 @@ pub struct VendorIpConfig {
     pub unconnected: Vec<String>,
     /// Port name mapping: entity_port -> ip_port (for when names differ)
     pub port_map: Vec<(String, String)>,
+    /// Clock definitions: (port_name, frequency_mhz)
+    pub clocks: Vec<(String, f64)>,
+    /// Async clock groups: pairs of clock names that are asynchronous
+    pub async_groups: Vec<(String, String)>,
+    /// Input delays: (port, delay_ns, clock)
+    pub input_delays: Vec<(String, f64, String)>,
+    /// Output delays: (port, delay_ns, clock)
+    pub output_delays: Vec<(String, f64, String)>,
 }
 
 /// Supported FPGA vendors

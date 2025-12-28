@@ -758,7 +758,9 @@ fn build_design(
     optimization_options: OptimizationOptions,
     library_path: Option<&PathBuf>,
 ) -> Result<()> {
-    use skalp_codegen::systemverilog::generate_systemverilog_from_mir;
+    use skalp_codegen::systemverilog::{
+        generate_constraints_toml, generate_systemverilog_from_mir,
+    };
     use skalp_frontend::parse_and_build_compilation_context;
 
     info!("Building design from {:?} to {}", source, target);
@@ -804,6 +806,14 @@ fn build_design(
             let sv_code = generate_systemverilog_from_mir(&mir)?;
             let output_path = output_dir.join("design.sv");
             fs::write(&output_path, sv_code)?;
+
+            // Generate constraints.toml if any timing constraints are defined
+            if let Some(constraints) = generate_constraints_toml(&mir) {
+                let constraints_path = output_dir.join("constraints.toml");
+                fs::write(&constraints_path, constraints)?;
+                info!("Timing constraints written to {:?}", constraints_path);
+            }
+
             output_path
         }
         "v" | "verilog" => {

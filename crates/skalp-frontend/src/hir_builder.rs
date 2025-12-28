@@ -8048,6 +8048,10 @@ impl HirBuilderContext {
         let mut tie_high: Vec<String> = Vec::new();
         let mut unconnected: Vec<String> = Vec::new();
         let mut port_map: Vec<(String, String)> = Vec::new();
+        let mut clocks: Vec<(String, f64)> = Vec::new();
+        let mut async_groups: Vec<(String, String)> = Vec::new();
+        let mut input_delays: Vec<(String, f64, String)> = Vec::new();
+        let mut output_delays: Vec<(String, f64, String)> = Vec::new();
 
         // Track current key as owned String to support unknown IP parameters
         let mut current_key: Option<String> = None;
@@ -8092,6 +8096,19 @@ impl HirBuilderContext {
                     }
                     "port_map" | "portmap" | "map" => {
                         current_key = Some("port_map".to_string());
+                    }
+                    // Timing constraint keys
+                    "clocks" | "clock" => {
+                        current_key = Some("clocks".to_string());
+                    }
+                    "async_groups" | "async" | "async_clocks" => {
+                        current_key = Some("async_groups".to_string());
+                    }
+                    "input_delays" | "input_delay" => {
+                        current_key = Some("input_delays".to_string());
+                    }
+                    "output_delays" | "output_delay" => {
+                        current_key = Some("output_delays".to_string());
                     }
                     // Vendor type values
                     "xilinx" | "amd" => {
@@ -8185,6 +8202,63 @@ impl HirBuilderContext {
                         }
                         current_key = None;
                     }
+                    Some("clocks") => {
+                        // Clock definitions: "clk1:100,clk2:200" (port:freq_mhz)
+                        for clock_def in unquoted.split(',') {
+                            let parts: Vec<&str> = clock_def.trim().split(':').collect();
+                            if parts.len() == 2 {
+                                if let Ok(freq) = parts[1].trim().parse::<f64>() {
+                                    clocks.push((parts[0].trim().to_string(), freq));
+                                }
+                            }
+                        }
+                        current_key = None;
+                    }
+                    Some("async_groups") => {
+                        // Async clock pairs: "clk1:clk2,clk3:clk4"
+                        for pair in unquoted.split(',') {
+                            let parts: Vec<&str> = pair.trim().split(':').collect();
+                            if parts.len() == 2 {
+                                async_groups.push((
+                                    parts[0].trim().to_string(),
+                                    parts[1].trim().to_string(),
+                                ));
+                            }
+                        }
+                        current_key = None;
+                    }
+                    Some("input_delays") => {
+                        // Input delays: "port:delay_ns:clock,..."
+                        for delay_def in unquoted.split(',') {
+                            let parts: Vec<&str> = delay_def.trim().split(':').collect();
+                            if parts.len() == 3 {
+                                if let Ok(delay) = parts[1].trim().parse::<f64>() {
+                                    input_delays.push((
+                                        parts[0].trim().to_string(),
+                                        delay,
+                                        parts[2].trim().to_string(),
+                                    ));
+                                }
+                            }
+                        }
+                        current_key = None;
+                    }
+                    Some("output_delays") => {
+                        // Output delays: "port:delay_ns:clock,..."
+                        for delay_def in unquoted.split(',') {
+                            let parts: Vec<&str> = delay_def.trim().split(':').collect();
+                            if parts.len() == 3 {
+                                if let Ok(delay) = parts[1].trim().parse::<f64>() {
+                                    output_delays.push((
+                                        parts[0].trim().to_string(),
+                                        delay,
+                                        parts[2].trim().to_string(),
+                                    ));
+                                }
+                            }
+                        }
+                        current_key = None;
+                    }
                     Some(_) => {
                         // Unknown key with string value - treat as IP parameter
                         // Preserve quotes for string values in generated code
@@ -8250,6 +8324,10 @@ impl HirBuilderContext {
             tie_high,
             unconnected,
             port_map,
+            clocks,
+            async_groups,
+            input_delays,
+            output_delays,
         })
     }
 
