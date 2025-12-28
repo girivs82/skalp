@@ -996,6 +996,8 @@ pub struct VendorIpConfig {
     pub tie_high: Vec<String>,
     /// Ports to leave unconnected (for unused IP outputs)
     pub unconnected: Vec<String>,
+    /// Port name mapping: entity_port -> ip_port (for when names differ)
+    pub port_map: Vec<(String, String)>,
 }
 
 /// Supported FPGA vendors

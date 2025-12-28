@@ -8047,6 +8047,7 @@ impl HirBuilderContext {
         let mut tie_low: Vec<String> = Vec::new();
         let mut tie_high: Vec<String> = Vec::new();
         let mut unconnected: Vec<String> = Vec::new();
+        let mut port_map: Vec<(String, String)> = Vec::new();
 
         // Track current key as owned String to support unknown IP parameters
         let mut current_key: Option<String> = None;
@@ -8088,6 +8089,9 @@ impl HirBuilderContext {
                     }
                     "unconnected" | "nc" | "open" => {
                         current_key = Some("unconnected".to_string());
+                    }
+                    "port_map" | "portmap" | "map" => {
+                        current_key = Some("port_map".to_string());
                     }
                     // Vendor type values
                     "xilinx" | "amd" => {
@@ -8167,6 +8171,20 @@ impl HirBuilderContext {
                         unconnected = unquoted.split(',').map(|s| s.trim().to_string()).collect();
                         current_key = None;
                     }
+                    Some("port_map") => {
+                        // Comma-separated list of entity:ip port mappings
+                        // Format: "entity_port:ip_port,entity_port2:ip_port2"
+                        for mapping in unquoted.split(',') {
+                            let parts: Vec<&str> = mapping.trim().split(':').collect();
+                            if parts.len() == 2 {
+                                port_map.push((
+                                    parts[0].trim().to_string(),
+                                    parts[1].trim().to_string(),
+                                ));
+                            }
+                        }
+                        current_key = None;
+                    }
                     Some(_) => {
                         // Unknown key with string value - treat as IP parameter
                         // Preserve quotes for string values in generated code
@@ -8231,6 +8249,7 @@ impl HirBuilderContext {
             tie_low,
             tie_high,
             unconnected,
+            port_map,
         })
     }
 

@@ -3236,11 +3236,25 @@ fn generate_vendor_ip_wrapper(
         // Instance name
         sv.push_str(&format!("{}_inst (\n", mir_module.name));
 
-        // Connect ports (entity ports to IP ports)
+        // Build a map for port aliasing (entity_port -> ip_port)
+        let port_mapping: std::collections::HashMap<&str, &str> = vendor_config
+            .port_map
+            .iter()
+            .map(|(entity, ip)| (entity.as_str(), ip.as_str()))
+            .collect();
+
+        // Connect ports (entity ports to IP ports, with optional aliasing)
         let mut all_connections: Vec<String> = mir_module
             .ports
             .iter()
-            .map(|p| format!("        .{}({})", p.name, p.name))
+            .map(|p| {
+                // Use mapped IP port name if available, otherwise use entity port name
+                let ip_port_name = match port_mapping.get(p.name.as_str()) {
+                    Some(mapped) => *mapped,
+                    None => p.name.as_str(),
+                };
+                format!("        .{}({})", ip_port_name, p.name)
+            })
             .collect();
 
         // Add tie-low connections (unused IP inputs tied to 0)
