@@ -13,6 +13,17 @@
 //! - **CPU**: Always available, uses `GateLevelSimulator` for gate-level
 //! - **GPU**: Uses Metal on macOS via `GpuGateRuntime`
 //!
+//! # Pipeline Annotations
+//!
+//! When synthesis performs register retiming, the behavioral model may have
+//! different latency than the gate-level implementation. Pipeline annotations
+//! can be loaded to adjust behavioral simulation to match gate-level timing.
+//!
+//! ```ignore
+//! let mut sim = UnifiedSimulator::new(config)?;
+//! sim.load_pipeline_annotations("build/pipeline_annotations.toml")?;
+//! ```
+//!
 //! # Example
 //!
 //! ```ignore
@@ -34,7 +45,9 @@
 //! let result = sim.get_output("y");
 //! ```
 
-use std::collections::HashMap;
+use skalp_lir::synth::PipelineAnnotations;
+use std::collections::{HashMap, VecDeque};
+use std::path::Path;
 
 /// Simulation abstraction level
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -99,6 +112,13 @@ pub struct UnifiedSimulator {
     backend: SimulatorBackend,
     waveforms: Vec<SimulationSnapshot>,
     current_cycle: u64,
+    /// Pipeline annotations loaded from synthesis
+    pipeline_annotations: Option<PipelineAnnotations>,
+    /// Output delay buffers for latency adjustment
+    /// Each output has a VecDeque that acts as a delay line
+    output_delay_buffers: HashMap<String, VecDeque<u64>>,
+    /// Latency adjustment per output (in cycles)
+    latency_adjustments: HashMap<String, u32>,
 }
 
 /// Internal backend enum to hold the actual simulator
@@ -120,7 +140,87 @@ impl UnifiedSimulator {
             backend: SimulatorBackend::Uninitialized,
             waveforms: Vec::new(),
             current_cycle: 0,
+            pipeline_annotations: None,
+            output_delay_buffers: HashMap::new(),
+            latency_adjustments: HashMap::new(),
         })
+    }
+
+    /// Load pipeline annotations from a TOML file
+    ///
+    /// Pipeline annotations describe latency adjustments needed to match
+    /// behavioral simulation with gate-level timing after register retiming.
+    ///
+    /// # Arguments
+    /// * `path` - Path to the `pipeline_annotations.toml` file
+    ///
+    /// # Example
+    /// ```ignore
+    /// sim.load_pipeline_annotations("build/pipeline_annotations.toml")?;
+    /// ```
+    pub fn load_pipeline_annotations<P: AsRef<Path>>(&mut self, path: P) -> Result<(), String> {
+        let annotations = PipelineAnnotations::read_toml(path.as_ref())
+            .map_err(|e| format!("Failed to read pipeline annotations: {}", e))?;
+
+        // Extract total latency adjustment per module
+        for module in &annotations.modules {
+            let adjustment = module
+                .final_latency_cycles
+                .saturating_sub(module.original_latency_cycles);
+
+            if adjustment > 0 {
+                // Apply the latency adjustment to all outputs of this module
+                // For now, we use the module name as a prefix for outputs
+                self.latency_adjustments
+                    .insert(module.name.clone(), adjustment);
+
+                eprintln!(
+                    "[SIM] Pipeline latency adjustment: {} = +{} cycles",
+                    module.name, adjustment
+                );
+            }
+        }
+
+        if annotations.has_retiming() {
+            eprintln!(
+                "[SIM] Loaded pipeline annotations: {}",
+                annotations.summary()
+            );
+        }
+
+        self.pipeline_annotations = Some(annotations);
+        Ok(())
+    }
+
+    /// Set latency adjustment for a specific output
+    ///
+    /// This allows manual override of latency adjustments for testing
+    /// or when annotations are not available.
+    pub fn set_output_latency(&mut self, output_name: &str, cycles: u32) {
+        if cycles > 0 {
+            self.latency_adjustments
+                .insert(output_name.to_string(), cycles);
+            // Initialize the delay buffer with zeros
+            let mut buffer = VecDeque::with_capacity(cycles as usize + 1);
+            for _ in 0..cycles {
+                buffer.push_back(0);
+            }
+            self.output_delay_buffers
+                .insert(output_name.to_string(), buffer);
+        } else {
+            self.latency_adjustments.remove(output_name);
+            self.output_delay_buffers.remove(output_name);
+        }
+    }
+
+    /// Get total latency adjustment applied
+    pub fn total_latency_adjustment(&self) -> u32 {
+        self.latency_adjustments.values().sum()
+    }
+
+    /// Check if pipeline annotations are loaded
+    pub fn has_pipeline_annotations(&self) -> bool {
+        self.pipeline_annotations.is_some()
     }
 
     /// Load a gate-level SIR for simulation
@@ -197,8 +297,27 @@ impl UnifiedSimulator {
         }
     }
 
-    /// Get an output value (as u64)
+    /// Get an output value (as u64), with latency adjustment applied
+    ///
+    /// If pipeline annotations have been loaded and this output has a
+    /// latency adjustment, the delayed value is returned. Otherwise,
+    /// returns the current (raw) value.
     pub fn get_output(&self, name: &str) -> Option<u64> {
+        // Check if this output has a delay buffer with values
+        if let Some(buffer) = self.output_delay_buffers.get(name) {
+            // Return the oldest value in the buffer (front)
+            return buffer.front().copied();
+        }
+
+        // No latency adjustment, return raw value
+        self.get_output_raw(name)
+    }
+
+    /// Get the raw (non-delayed) output value
+    ///
+    /// This bypasses any latency adjustment and returns the actual
+    /// current output value from the simulation backend.
+    pub fn get_output_raw(&self, name: &str) -> Option<u64> {
         match &self.backend {
             SimulatorBackend::Uninitialized => None,
             SimulatorBackend::GateLevelCpu(sim) => sim.get_output(name).map(|bits| {
@@ -249,6 +368,32 @@ impl UnifiedSimulator {
         }
 
         self.current_cycle += 1;
+
+        // Update delay buffers for latency adjustment
+        // Push current raw values, pop oldest values
+        for (output_name, delay) in &self.latency_adjustments {
+            if let Some(raw_value) = self.get_output_raw(output_name) {
+                let buffer = self
+                    .output_delay_buffers
+                    .entry(output_name.clone())
+                    .or_insert_with(|| {
+                        // Initialize buffer with zeros for the delay depth
+                        let mut buf = VecDeque::with_capacity(*delay as usize + 1);
+                        for _ in 0..*delay {
+                            buf.push_back(0);
+                        }
+                        buf
+                    });
+
+                // Push new value at back
+                buffer.push_back(raw_value);
+
+                // Pop oldest value from front (maintains delay)
+                if buffer.len() > *delay as usize {
+                    buffer.pop_front();
+                }
+            }
+        }
 
         // Capture waveform if enabled
         if self.config.capture_waveforms {
@@ -307,6 +452,18 @@ impl UnifiedSimulator {
         }
         self.current_cycle = 0;
         self.waveforms.clear();
+
+        // Reset delay buffers to zeros (maintaining the same depth)
+        for (output_name, delay) in &self.latency_adjustments {
+            let buffer = self
+                .output_delay_buffers
+                .entry(output_name.clone())
+                .or_default();
+            buffer.clear();
+            for _ in 0..*delay {
+                buffer.push_back(0);
+            }
+        }
     }
 
     /// Get current cycle count
@@ -363,5 +520,45 @@ mod tests {
         };
         let sim = UnifiedSimulator::new(config);
         assert!(sim.is_ok());
+    }
+
+    #[test]
+    fn test_latency_adjustment() {
+        let config = UnifiedSimConfig::default();
+        let mut sim = UnifiedSimulator::new(config).unwrap();
+
+        // Set a 2-cycle latency adjustment for output "count"
+        sim.set_output_latency("count", 2);
+
+        // Verify the adjustment is stored
+        assert_eq!(sim.total_latency_adjustment(), 2);
+        assert!(!sim.has_pipeline_annotations()); // No file loaded
+
+        // Verify the delay buffer is initialized
+        assert!(sim.output_delay_buffers.contains_key("count"));
+        assert_eq!(sim.output_delay_buffers.get("count").unwrap().len(), 2);
+
+        // Remove the adjustment
+        sim.set_output_latency("count", 0);
+        assert_eq!(sim.total_latency_adjustment(), 0);
+    }
+
+    #[test]
+    fn test_delay_buffer_behavior() {
+        let config = UnifiedSimConfig::default();
+        let mut sim = UnifiedSimulator::new(config).unwrap();
+
+        // Set a 2-cycle latency for "out1"
+        sim.set_output_latency("out1", 2);
+
+        // Initially, buffer should be [0, 0]
+        let buffer = sim.output_delay_buffers.get("out1").unwrap();
+        assert_eq!(buffer.len(), 2);
+        assert_eq!(*buffer.front().unwrap(), 0);
+
+        // Reset should reinitialize the buffers
+        sim.reset();
+        let buffer = sim.output_delay_buffers.get("out1").unwrap();
+        assert_eq!(buffer.len(), 2);
     }
 }

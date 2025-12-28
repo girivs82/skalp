@@ -34,6 +34,7 @@ pub mod lir;
 pub mod mir_to_lir;
 pub mod netlist;
 pub mod pattern_detector;
+pub mod pipeline_annotations;
 pub mod primitives;
 pub mod synth;
 pub mod tech_library;

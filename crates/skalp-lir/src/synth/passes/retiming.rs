@@ -30,6 +30,7 @@
 //! - Some registers cannot be moved (I/O boundaries)
 
 use super::{Pass, PassResult};
+use crate::pipeline_annotations::{ModuleAnnotations, PipelineAnnotations, PipelineStage};
 use crate::synth::{Aig, AigLit, AigNode, AigNodeId};
 use std::collections::{HashMap, HashSet};
 
@@ -149,6 +150,8 @@ impl RetimingStats {
 pub struct Retiming {
     config: RetimingConfig,
     stats: RetimingStats,
+    /// Annotations tracking pipeline stages added during retiming
+    annotations: ModuleAnnotations,
 }
 
 impl Default for Retiming {
@@ -163,6 +166,7 @@ impl Retiming {
         Self {
             config: RetimingConfig::default(),
             stats: RetimingStats::default(),
+            annotations: ModuleAnnotations::new("unknown".to_string()),
         }
     }
 
@@ -171,12 +175,23 @@ impl Retiming {
         Self {
             config,
             stats: RetimingStats::default(),
+            annotations: ModuleAnnotations::new("unknown".to_string()),
         }
     }
 
     /// Get statistics from last run
     pub fn stats(&self) -> &RetimingStats {
         &self.stats
+    }
+
+    /// Get annotations from last run
+    pub fn annotations(&self) -> &ModuleAnnotations {
+        &self.annotations
+    }
+
+    /// Take ownership of annotations (for collecting into PipelineAnnotations)
+    pub fn take_annotations(&mut self) -> ModuleAnnotations {
+        std::mem::take(&mut self.annotations)
     }
 
     /// Compute timing for all nodes
@@ -397,7 +412,12 @@ impl Retiming {
 
     /// Apply forward retiming to a latch
     /// This moves the latch from before its fanout gates to after them
-    fn apply_forward_retiming(&self, aig: &mut Aig, latch_id: AigNodeId) -> bool {
+    fn apply_forward_retiming(
+        &mut self,
+        aig: &mut Aig,
+        latch_id: AigNodeId,
+        timing: &HashMap<AigNodeId, NodeTiming>,
+    ) -> bool {
         // Get latch info
         let latch_node = match aig.get_node(latch_id) {
             Some(AigNode::Latch {
@@ -429,20 +449,51 @@ impl Retiming {
         // Original: data -> [LATCH] -> AND -> output
         // After:    data -> AND -> [LATCH] -> output
         //
-        // This is complex because we need to:
-        // 1. Replace the latch output with the latch data input
-        // 2. Add new latches after each fanout AND gate
-        //
-        // For now, we'll implement a simplified version that just
-        // marks potential moves. Full implementation would require
-        // rebuilding the AIG.
+        // Record the pipeline stage annotation
+        let arrival = timing.get(&latch_id).map(|t| t.arrival).unwrap_or(0.0);
+
+        let signal_name = format!("latch_{}", latch_id.0);
+        let reason = format!(
+            "Forward retiming: arrival {:.1}ps exceeds target {:.1}ps",
+            arrival, self.config.target_period
+        );
+
+        self.annotations.add_stage(PipelineStage::with_details(
+            signal_name,
+            reason,
+            1,
+            "forward",
+            arrival,
+        ));
 
         // This is a placeholder - full implementation would restructure the AIG
         true
     }
 
     /// Apply backward retiming to a latch
-    fn apply_backward_retiming(&self, aig: &mut Aig, latch_id: AigNodeId) -> bool {
+    fn apply_backward_retiming(
+        &mut self,
+        aig: &mut Aig,
+        latch_id: AigNodeId,
+        timing: &HashMap<AigNodeId, NodeTiming>,
+    ) -> bool {
+        // Record the pipeline stage annotation
+        let arrival = timing.get(&latch_id).map(|t| t.arrival).unwrap_or(0.0);
+
+        let signal_name = format!("latch_{}", latch_id.0);
+        let reason = format!(
+            "Backward retiming: arrival {:.1}ps exceeds target {:.1}ps",
+            arrival, self.config.target_period
+        );
+
+        self.annotations.add_stage(PipelineStage::with_details(
+            signal_name,
+            reason,
+            1,
+            "backward",
+            arrival,
+        ));
+
         // Similar to forward, but moving latches backward
         // This is even more complex due to initial value computation
         true
@@ -467,7 +518,7 @@ impl Retiming {
 
         // Try forward retiming first (simpler)
         for latch_id in forward_candidates {
-            if self.apply_forward_retiming(aig, latch_id) {
+            if self.apply_forward_retiming(aig, latch_id, &timing) {
                 self.stats.forward_moves += 1;
                 made_change = true;
                 break; // One move per iteration for stability
@@ -477,7 +528,7 @@ impl Retiming {
         // Try backward retiming if forward didn't help
         if !made_change {
             for latch_id in backward_candidates {
-                if self.apply_backward_retiming(aig, latch_id) {
+                if self.apply_backward_retiming(aig, latch_id, &timing) {
                     self.stats.backward_moves += 1;
                     made_change = true;
                     break;
@@ -498,8 +549,9 @@ impl Pass for Retiming {
         let mut result = PassResult::new(self.name());
         result.record_before(aig);
 
-        // Reset stats
+        // Reset stats and annotations
         self.stats = RetimingStats::default();
+        self.annotations = ModuleAnnotations::new(aig.name.clone());
 
         // Compute initial timing
         let initial_timing = self.compute_timing(aig);
@@ -513,6 +565,9 @@ impl Pass for Retiming {
             result.add_extra("status", "no_latches");
             return result;
         }
+
+        // Set original latency (number of existing latches gives an approximation)
+        self.annotations.original_latency_cycles = aig.latch_count() as u32;
 
         // Iteratively retime
         for iter in 0..self.config.max_iterations {
@@ -536,6 +591,15 @@ impl Pass for Retiming {
         let final_timing = self.compute_timing(aig);
         self.stats.final_delay = self.get_critical_delay(aig, &final_timing);
 
+        // Update final latency in annotations
+        self.annotations.final_latency_cycles = self.annotations.original_latency_cycles
+            + self
+                .annotations
+                .pipeline_stages
+                .iter()
+                .map(|s| s.cycles_added)
+                .sum::<u32>();
+
         result.record_after(aig);
         result.add_extra(
             "original_delay",
@@ -545,6 +609,16 @@ impl Pass for Retiming {
         result.add_extra("forward_moves", &self.stats.forward_moves.to_string());
         result.add_extra("backward_moves", &self.stats.backward_moves.to_string());
         result.add_extra("timing_met", &self.stats.timing_met.to_string());
+        result.add_extra(
+            "cycles_added",
+            &self
+                .annotations
+                .pipeline_stages
+                .iter()
+                .map(|s| s.cycles_added)
+                .sum::<u32>()
+                .to_string(),
+        );
 
         result
     }

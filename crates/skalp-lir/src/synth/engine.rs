@@ -25,6 +25,7 @@ use super::sta::{Sta, StaResult};
 use super::timing::{TimePs, TimingConstraints};
 use super::{Aig, AigBuilder, AigWriter};
 use crate::gate_netlist::GateNetlist;
+use crate::pipeline_annotations::{ModuleAnnotations, PipelineAnnotations};
 use crate::tech_library::TechLibrary;
 use rayon::prelude::*;
 use std::time::Instant;
@@ -149,6 +150,8 @@ pub struct SynthEngine {
     timing_result: Option<StaResult>,
     /// Mapping result
     mapping_result: Option<MappingResult>,
+    /// Pipeline annotations from retiming passes
+    pipeline_annotations: PipelineAnnotations,
     /// Total optimization time
     total_time_ms: u64,
 }
@@ -168,6 +171,7 @@ impl SynthEngine {
             pass_results: Vec::new(),
             timing_result: None,
             mapping_result: None,
+            pipeline_annotations: PipelineAnnotations::new(),
             total_time_ms: 0,
         }
     }
@@ -309,6 +313,23 @@ impl SynthEngine {
 
         self.total_time_ms = start.elapsed().as_millis() as u64;
 
+        // Build pipeline annotations with metadata
+        let annotations = if self.pipeline_annotations.has_retiming() {
+            let mut annotations = std::mem::take(&mut self.pipeline_annotations);
+            if let Some(period) = self.config.target_period {
+                annotations.metadata.target_frequency_mhz = 1_000_000.0 / period;
+                // ps to MHz
+            }
+            if let Some(ref timing) = self.timing_result {
+                // Use wns (worst negative slack) - more negative means longer critical path
+                annotations.metadata.original_critical_path_ps = -timing.wns;
+                annotations.metadata.timing_met = timing.is_timing_met();
+            }
+            Some(annotations)
+        } else {
+            None
+        };
+
         SynthResult {
             netlist: optimized,
             initial_and_count: initial_stats.and_count,
@@ -318,6 +339,7 @@ impl SynthEngine {
             pass_results: self.pass_results.clone(),
             timing_result: self.timing_result.clone(),
             mapping_result: self.mapping_result.clone(),
+            pipeline_annotations: annotations,
             total_time_ms: self.total_time_ms,
         }
     }
@@ -368,6 +390,9 @@ impl SynthEngine {
         self.pass_results = best_result.pass_results.clone();
         self.timing_result = best_result.timing_result.clone();
         self.mapping_result = best_result.mapping_result.clone();
+        if let Some(ref annotations) = best_result.pipeline_annotations {
+            self.pipeline_annotations = annotations.clone();
+        }
         self.total_time_ms = total_time;
 
         best_result
@@ -667,13 +692,25 @@ impl SynthEngine {
                     config.target_period = period;
                 }
                 let mut pass = Retiming::with_config(config);
-                Some(pass.run(aig))
+                let result = pass.run(aig);
+                // Extract annotations from retiming pass
+                let annotations = pass.take_annotations();
+                if !annotations.pipeline_stages.is_empty() {
+                    self.pipeline_annotations.add_module(annotations);
+                }
+                Some(result)
             }
             "retiming_hf" => {
                 // High-frequency retiming (aggressive)
                 let config = RetimingConfig::high_frequency();
                 let mut pass = Retiming::with_config(config);
-                Some(pass.run(aig))
+                let result = pass.run(aig);
+                // Extract annotations from retiming pass
+                let annotations = pass.take_annotations();
+                if !annotations.pipeline_stages.is_empty() {
+                    self.pipeline_annotations.add_module(annotations);
+                }
+                Some(result)
             }
             "resub" => {
                 // Resubstitution: re-express nodes using existing divisors
@@ -828,6 +865,8 @@ pub struct SynthResult {
     pub timing_result: Option<StaResult>,
     /// Technology mapping result
     pub mapping_result: Option<MappingResult>,
+    /// Pipeline annotations from retiming passes
+    pub pipeline_annotations: Option<PipelineAnnotations>,
     /// Total time in milliseconds
     pub total_time_ms: u64,
 }
@@ -940,6 +979,7 @@ mod tests {
             pass_results: Vec::new(),
             timing_result: None,
             mapping_result: None,
+            pipeline_annotations: None,
             total_time_ms: 50,
         };
 

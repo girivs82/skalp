@@ -56,6 +56,11 @@ pub use datapath::{
     AdderConfig, AdderOptimizer, AdderStats, DatapathConfig, DatapathOp, DatapathStats,
 };
 pub use engine::{SynthConfig, SynthEngine, SynthPreset, SynthResult};
+
+// Re-export pipeline annotations for external use
+pub use crate::pipeline_annotations::{
+    ModuleAnnotations, PathLatency, PipelineAnnotations, PipelineStage, SynthesisMetadata,
+};
 pub use liberty::{create_basic_library, LibertyLibrary};
 pub use mapping::{
     size_cells, size_cells_for_area, size_cells_for_timing, CellMatcher, CellSizer,

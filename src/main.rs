@@ -933,7 +933,21 @@ fn build_design(
                     || optimization_options.ml_guided
                 {
                     info!("Running synthesis optimization...");
-                    apply_synthesis_optimization(&gate_netlist, &library, &optimization_options)?
+                    let synth_result = apply_synthesis_optimization(
+                        &gate_netlist,
+                        &library,
+                        &optimization_options,
+                    )?;
+
+                    // Output pipeline annotations if retiming was performed
+                    if let Some(ref annotations) = synth_result.pipeline_annotations {
+                        let annotations_path = output_dir.join("pipeline_annotations.toml");
+                        annotations.write_toml(&annotations_path)?;
+                        info!("Pipeline annotations written to {:?}", annotations_path);
+                        info!("  {}", annotations.summary());
+                    }
+
+                    synth_result.netlist
                 } else {
                     gate_netlist
                 }
@@ -1033,10 +1047,23 @@ fn apply_synthesis_optimization(
     netlist: &skalp_lir::GateNetlist,
     library: &skalp_lir::TechLibrary,
     options: &OptimizationOptions,
-) -> Result<skalp_lir::GateNetlist> {
+) -> Result<skalp_lir::synth::SynthResult> {
     // Use ML-guided optimization if requested
     if options.ml_guided {
-        return apply_ml_synthesis_optimization(netlist, library, options);
+        // ML optimization returns only netlist, wrap in SynthResult
+        let ml_netlist = apply_ml_synthesis_optimization(netlist, library, options)?;
+        return Ok(skalp_lir::synth::SynthResult {
+            netlist: ml_netlist,
+            initial_and_count: 0,
+            final_and_count: 0,
+            initial_levels: 0,
+            final_levels: 0,
+            pass_results: vec![],
+            timing_result: None,
+            mapping_result: None,
+            pipeline_annotations: None,
+            total_time_ms: 0,
+        });
     }
 
     use skalp_lir::synth::SynthEngine;
@@ -1062,7 +1089,7 @@ fn apply_synthesis_optimization(
         info!("  {}", pass_result);
     }
 
-    Ok(result.netlist)
+    Ok(result)
 }
 
 /// Apply ML-guided synthesis optimization
@@ -1344,8 +1371,14 @@ fn compile_to_ip(
             preset: Some(preset.to_string()),
             ..Default::default()
         };
-        netlist = apply_synthesis_optimization(&netlist, &library, &opt_options)?;
+        let synth_result = apply_synthesis_optimization(&netlist, &library, &opt_options)?;
+        netlist = synth_result.netlist;
         println!("   Optimized: {} gates", netlist.cells.len());
+
+        // Log pipeline annotations if retiming was performed
+        if let Some(ref annotations) = synth_result.pipeline_annotations {
+            println!("   Pipeline annotations: {}", annotations.summary());
+        }
     }
 
     // Create CompiledIp
