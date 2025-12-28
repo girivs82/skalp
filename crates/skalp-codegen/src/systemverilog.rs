@@ -3202,8 +3202,19 @@ fn generate_vendor_ip_wrapper(
 
         sv.push_str(&format!("    {} ", ip_module_name));
 
-        // Add parameter overrides if we have generic parameters
-        if !mir_module.parameters.is_empty() {
+        // Add IP-specific parameters from vendor_ip attribute
+        // These are passed through as-is to the vendor IP (e.g., FIFO_DEPTH = 1024)
+        if !vendor_config.parameters.is_empty() {
+            sv.push_str("#(\n");
+            let param_connections: Vec<String> = vendor_config
+                .parameters
+                .iter()
+                .map(|(key, value)| format!("        .{}({})", key, value))
+                .collect();
+            sv.push_str(&param_connections.join(",\n"));
+            sv.push_str("\n    ) ");
+        } else if !mir_module.parameters.is_empty() {
+            // Fallback to module generic parameters if no IP-specific params
             sv.push_str("#(\n");
             let param_connections: Vec<String> = mir_module
                 .parameters

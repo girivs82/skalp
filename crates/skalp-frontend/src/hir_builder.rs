@@ -8037,14 +8037,16 @@ impl HirBuilderContext {
         })?;
 
         // Parse key=value pairs or simple string argument
+        // Any unrecognized key=value becomes an IP parameter (passed to vendor tools)
         let mut ip_name: Option<String> = None;
         let mut library: Option<String> = None;
         let mut version: Option<String> = None;
         let mut black_box = matches!(vendor, VendorType::Generic);
-        let parameters: Vec<(String, String)> = Vec::new();
+        let mut parameters: Vec<(String, String)> = Vec::new();
         let mut explicit_vendor: Option<VendorType> = None;
 
-        let mut current_key: Option<&str> = None;
+        // Track current key as owned String to support unknown IP parameters
+        let mut current_key: Option<String> = None;
 
         for token in tokens.iter() {
             // Handle both Ident tokens and keyword tokens that can be used as identifiers
@@ -8055,54 +8057,70 @@ impl HirBuilderContext {
             if is_ident_like {
                 let text = token.text();
                 match text {
-                    // Key names
+                    // Known key names (Skalp-specific)
                     "name" | "ip_name" | "ip" => {
-                        current_key = Some("name");
+                        current_key = Some("name".to_string());
                     }
                     "library" | "lib" => {
-                        current_key = Some("library");
+                        current_key = Some("library".to_string());
                     }
                     "version" | "ver" => {
-                        current_key = Some("version");
+                        current_key = Some("version".to_string());
                     }
                     "vendor" => {
-                        current_key = Some("vendor");
+                        current_key = Some("vendor".to_string());
                     }
                     "black_box" | "blackbox" => {
-                        current_key = Some("black_box");
-                    }
-                    "param" | "parameter" => {
-                        current_key = Some("param");
+                        current_key = Some("black_box".to_string());
                     }
                     // Vendor type values
                     "xilinx" | "amd" => {
-                        if current_key == Some("vendor") {
+                        if current_key.as_deref() == Some("vendor") {
                             explicit_vendor = Some(VendorType::Xilinx);
+                            current_key = None;
+                        } else if current_key.is_some() {
+                            // Value for an IP parameter
+                            let key = current_key.take().unwrap();
+                            parameters.push((key, text.to_string()));
                         }
-                        current_key = None;
                     }
                     "intel" | "altera" => {
-                        if current_key == Some("vendor") {
+                        if current_key.as_deref() == Some("vendor") {
                             explicit_vendor = Some(VendorType::Intel);
+                            current_key = None;
+                        } else if current_key.is_some() {
+                            let key = current_key.take().unwrap();
+                            parameters.push((key, text.to_string()));
                         }
-                        current_key = None;
                     }
                     "lattice" => {
-                        if current_key == Some("vendor") {
+                        if current_key.as_deref() == Some("vendor") {
                             explicit_vendor = Some(VendorType::Lattice);
+                            current_key = None;
+                        } else if current_key.is_some() {
+                            let key = current_key.take().unwrap();
+                            parameters.push((key, text.to_string()));
                         }
-                        current_key = None;
                     }
                     // Skip attribute name identifiers
                     "xilinx_ip" | "intel_ip" | "altera_ip" | "lattice_ip" | "vendor_ip" => {}
-                    // Unknown identifier (could be a value for generic vendor_ip)
-                    _ => {}
+                    // Unknown identifier - either a key or a value
+                    _ => {
+                        if current_key.is_some() {
+                            // It's a value for the current key (e.g., an enum value)
+                            let key = current_key.take().unwrap();
+                            parameters.push((key, text.to_string()));
+                        } else {
+                            // It's a new key (IP parameter name like FIFO_DEPTH)
+                            current_key = Some(text.to_string());
+                        }
+                    }
                 }
             } else if token.kind() == SyntaxKind::StringLiteral {
                 // String values
                 let text = token.text();
                 let unquoted = text.trim_matches('"').to_string();
-                match current_key {
+                match current_key.as_deref() {
                     Some("name") => {
                         ip_name = Some(unquoted);
                         current_key = None;
@@ -8115,9 +8133,11 @@ impl HirBuilderContext {
                         version = Some(unquoted);
                         current_key = None;
                     }
-                    Some("param") => {
-                        // TODO: Handle parameter key-value pairs
-                        current_key = None;
+                    Some(_) => {
+                        // Unknown key with string value - treat as IP parameter
+                        // Preserve quotes for string values in generated code
+                        let key = current_key.take().unwrap();
+                        parameters.push((key, format!("\"{}\"", unquoted)));
                     }
                     None => {
                         // First string without key is assumed to be ip_name
@@ -8125,13 +8145,25 @@ impl HirBuilderContext {
                             ip_name = Some(unquoted);
                         }
                     }
-                    _ => {}
                 }
-            } else if (token.kind() == SyntaxKind::TrueKw || token.kind() == SyntaxKind::FalseKw)
-                && current_key == Some("black_box")
-            {
-                black_box = token.kind() == SyntaxKind::TrueKw;
-                current_key = None;
+            } else if token.kind() == SyntaxKind::IntLiteral {
+                // Integer values for IP parameters (e.g., FIFO_DEPTH = 1024)
+                if let Some(key) = current_key.take() {
+                    parameters.push((key, token.text().to_string()));
+                }
+            } else if token.kind() == SyntaxKind::TrueKw || token.kind() == SyntaxKind::FalseKw {
+                if current_key.as_deref() == Some("black_box") {
+                    black_box = token.kind() == SyntaxKind::TrueKw;
+                    current_key = None;
+                } else if let Some(key) = current_key.take() {
+                    // Boolean value for IP parameter
+                    let value = if token.kind() == SyntaxKind::TrueKw {
+                        "1"
+                    } else {
+                        "0"
+                    };
+                    parameters.push((key, value.to_string()));
+                }
             }
         }
 
