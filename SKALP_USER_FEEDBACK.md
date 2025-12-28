@@ -96,7 +96,32 @@ let result = generic_add::<W: 32>(x, y)
 let result2 = exec_l0_l1::<W: 32>(opcode, data1, data2)
 ```
 
-### 7. GPU-Accelerated Simulation
+### 7. Const Identifiers as Generic Parameters
+```skalp
+// Define constants once
+pub const WORD_SIZE: nat = 32;
+pub const DATA_WIDTH: nat = 256;
+
+// Use in generic arguments - no magic numbers!
+l0_l1_result = exec_l0_l1::<WORD_SIZE>(function_sel, data1, data2)
+
+// Works for entity instantiation too
+let fifo = Fifo<DATA_WIDTH> { ... }
+```
+**Impact**: Eliminates magic numbers in generic arguments. Centralizes configuration.
+
+### 8. Clock Lifetime Parameters for Domain Tracking
+```skalp
+// Define clock domains at entity level
+entity KarythraCLE<'fabric, 'fu> {
+    in clk_fabric: clock<'fabric>  // 2.5 GHz fabric clock
+    in clk_fu: clock<'fu>          // 5.0 GHz function unit clock
+    ...
+}
+```
+**Impact**: Type-level clock domain tracking. Enables CDC analysis and prevents accidental domain crossings.
+
+### 9. GPU-Accelerated Simulation
 The Metal backend provides fast simulation for combinational logic. 500+ cycles of Karythra's CLE runs in ~50-100 seconds - fast enough for TDD iteration.
 
 ---
@@ -337,36 +362,39 @@ let packed: bit[96] = args as bit[96];
 
 **Impact**: High. The CLE has hundreds of lines of manual bit packing/unpacking.
 
-### 9. No Enum Types with Values - **REQUESTED** (Dec 2025)
+### 9. ~~No Enum Types with Values~~ ✅ **DONE** (Dec 2025)
 ```skalp
-// WANTED: Enum types with explicit discriminant values
-enum L0Opcode: bit[6] {
-    ADD = 0,
-    SUB = 1,
-    MUL = 2,
-    AND = 3,
-    OR = 4,
-    XOR = 5,
+// NOW SUPPORTED: Enum types with explicit discriminant values
+pub enum L0L1Opcode: bit[6] {
+    ADD_8     = 0,
+    SUB_8     = 1,
+    MUL_8     = 2,
+    AND_8     = 3,
+    OR_8      = 4,
+    XOR_8     = 5,
 }
 
-enum L2Opcode: bit[6] {
-    FP_ADD = 23,
-    FP_MUL = 24,
-    FP_FMA = 25,
-    FP_DIV = 26,
-    FP_SQRT = 27,
+pub enum L2Opcode: bit[6] {
+    FP32_ADD  = 23,
+    FP32_MUL  = 24,
+    FP32_MAC  = 25,
+    FP32_DIV  = 26,
+    FP32_SQRT = 27,
 }
 
-// Usage - no more magic numbers
-fn exec_l0_l1(opcode: L0Opcode, a: bit[256], b: bit[256]) -> bit[256] {
+// Usage in match expressions - self-documenting!
+pub fn exec_l0_l1<const W: nat>(opcode: bit[6], a: bit[256], b: bit[256]) -> bit[256] {
     match opcode {
-        L0Opcode::ADD => a + b,
-        L0Opcode::SUB => a - b,
-        ...
+        L0L1Opcode::ADD_8 => { ... }
+        L0L1Opcode::SUB_8 => { ... }
+        _ => 0
     }
 }
+
+// Enum variants as generic const params also work:
+let entity = SomeEntity<Mode::Fast> { ... }
 ```
-**Status**: Not implemented. Would eliminate magic number opcodes throughout CLE (~15% clarity improvement).
+**Status**: Fully implemented ✅. Karythra CLE now uses typed opcode enums throughout.
 
 **Impact**: High. Self-documenting code, compile-time opcode validation.
 
@@ -463,10 +491,13 @@ impl TestL0 {
 4. **Bitops Library**: `clz32`, `popcount32`, `parity32` - all synthesizable
 5. **Match-based Dispatch**: CLE function unit opcode dispatch compiles cleanly
 6. **Mutable Variables**: Accumulator patterns in bitops functions work
-7. **Const Generic Functions**: `exec_l0_l1::<32>(...)` for parameterized width operations
+7. **Const Generic Functions**: `exec_l0_l1::<WORD_SIZE>(...)` for parameterized width operations
 8. **Generate-for Loops**: Demonstrated in stdlib for bit manipulation entities (BitReverser, Popcount)
 9. **Imported Functions in Match Arms**: Now works without workarounds (Bug #171 fixed)
 10. **Width-Prefixed Literals**: `{224'b0, value}` patterns work correctly (Bug #172 fixed)
+11. **Enum Types with Values**: `L0L1Opcode::ADD_8`, `L2Opcode::FP32_MUL` etc. for self-documenting opcodes
+12. **Const Identifiers as Generic Params**: `exec_l0_l1::<WORD_SIZE>` instead of magic `<32>`
+13. **Clock Lifetime Parameters**: `entity KarythraCLE<'fabric, 'fu>` for clock domain tracking
 
 ### Karythra CLE Code Quality (Dec 2025 Update):
 - **All workarounds removed**: The CLE `func_units_l2.sk` now uses the correct patterns:
@@ -480,7 +511,9 @@ impl TestL0 {
 - The CLE's L4-L5 graphics operations benefit heavily from pipeline annotations
 - 256-bit datapath support was essential for content-addressed model
 - FP32 native support enabled direct implementation of math kernels
-- Const generic functions work well: `exec_l0_l1::<32>()` for parameterized operations
+- Const identifiers as generic params: `exec_l0_l1::<WORD_SIZE>()` eliminates magic numbers
+- Clock lifetime parameters: `entity KarythraCLE<'fabric, 'fu>` enables proper domain tracking
+- Typed opcode enums: `L0L1Opcode::ADD_8`, `L2Opcode::FP32_MUL` for self-documenting code
 - Named generics (`<W: 32>`) work for both entity instantiation and function calls
 - All 4 simulation modes verified working: CPU behavioral, GPU behavioral, CPU gate-level, GPU gate-level
 
@@ -499,10 +532,14 @@ impl TestL0 {
 
 **New Priorities (Dec 2025 - Karythra CLE Feedback):**
 8. **Priority 8**: Struct/Record types - High impact (~30% code reduction)
-9. **Priority 9**: Enum types with values - High impact (self-documenting opcodes)
+9. ~~**Priority 9**: Enum types with values~~ ✅ **DONE** (Dec 2025)
 10. **Priority 10**: Tuple return types - Medium impact (cleaner multi-output APIs)
 11. **Priority 11**: Implicit FP32 type conversion - Medium impact (less cast verbosity)
 12. **Priority 12**: Built-in test framework - Medium impact (faster test iteration)
+
+**Also Implemented (Dec 2025):**
+- Const identifiers as generic parameters (`exec_l0_l1::<WORD_SIZE>`)
+- Clock lifetime parameters (`entity Foo<'clk>` with `clock<'clk>`)
 
 ### For Skalp Users:
 1. **Use pipeline annotations** on timing-critical functions - the backend handles register insertion
