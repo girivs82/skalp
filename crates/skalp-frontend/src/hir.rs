@@ -990,6 +990,12 @@ pub struct VendorIpConfig {
     pub black_box: bool,
     /// Additional vendor-specific parameters as key-value pairs
     pub parameters: Vec<(String, String)>,
+    /// Ports to tie to logic 0 (for unused IP inputs)
+    pub tie_low: Vec<String>,
+    /// Ports to tie to logic 1 (for unused IP inputs)
+    pub tie_high: Vec<String>,
+    /// Ports to leave unconnected (for unused IP outputs)
+    pub unconnected: Vec<String>,
 }
 
 /// Supported FPGA vendors

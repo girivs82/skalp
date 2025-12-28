@@ -3236,13 +3236,29 @@ fn generate_vendor_ip_wrapper(
         // Instance name
         sv.push_str(&format!("{}_inst (\n", mir_module.name));
 
-        // Connect ports
-        let port_connections: Vec<String> = mir_module
+        // Connect ports (entity ports to IP ports)
+        let mut all_connections: Vec<String> = mir_module
             .ports
             .iter()
             .map(|p| format!("        .{}({})", p.name, p.name))
             .collect();
-        sv.push_str(&port_connections.join(",\n"));
+
+        // Add tie-low connections (unused IP inputs tied to 0)
+        for port in &vendor_config.tie_low {
+            all_connections.push(format!("        .{}(1'b0)", port));
+        }
+
+        // Add tie-high connections (unused IP inputs tied to 1)
+        for port in &vendor_config.tie_high {
+            all_connections.push(format!("        .{}(1'b1)", port));
+        }
+
+        // Add unconnected ports (unused IP outputs left open)
+        for port in &vendor_config.unconnected {
+            all_connections.push(format!("        .{}()", port));
+        }
+
+        sv.push_str(&all_connections.join(",\n"));
 
         sv.push_str("\n    );\n");
     }

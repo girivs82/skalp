@@ -8044,9 +8044,15 @@ impl HirBuilderContext {
         let mut black_box = matches!(vendor, VendorType::Generic);
         let mut parameters: Vec<(String, String)> = Vec::new();
         let mut explicit_vendor: Option<VendorType> = None;
+        let mut tie_low: Vec<String> = Vec::new();
+        let mut tie_high: Vec<String> = Vec::new();
+        let mut unconnected: Vec<String> = Vec::new();
 
         // Track current key as owned String to support unknown IP parameters
         let mut current_key: Option<String> = None;
+        // Track if we're inside a list (for tie_low = [a, b, c] syntax)
+        let mut in_list: bool = false;
+        let mut current_list: Vec<String> = Vec::new();
 
         for token in tokens.iter() {
             // Handle both Ident tokens and keyword tokens that can be used as identifiers
@@ -8072,6 +8078,16 @@ impl HirBuilderContext {
                     }
                     "black_box" | "blackbox" => {
                         current_key = Some("black_box".to_string());
+                    }
+                    // Port tie-off keys
+                    "tie_low" | "tielow" | "tie_0" | "tie0" => {
+                        current_key = Some("tie_low".to_string());
+                    }
+                    "tie_high" | "tiehigh" | "tie_1" | "tie1" => {
+                        current_key = Some("tie_high".to_string());
+                    }
+                    "unconnected" | "nc" | "open" => {
+                        current_key = Some("unconnected".to_string());
                     }
                     // Vendor type values
                     "xilinx" | "amd" => {
@@ -8106,7 +8122,10 @@ impl HirBuilderContext {
                     "xilinx_ip" | "intel_ip" | "altera_ip" | "lattice_ip" | "vendor_ip" => {}
                     // Unknown identifier - either a key or a value
                     _ => {
-                        if current_key.is_some() {
+                        if in_list {
+                            // Collecting items in a list like [rst, sleep, ...]
+                            current_list.push(text.to_string());
+                        } else if current_key.is_some() {
                             // It's a value for the current key (e.g., an enum value)
                             let key = current_key.take().unwrap();
                             parameters.push((key, text.to_string()));
@@ -8131,6 +8150,21 @@ impl HirBuilderContext {
                     }
                     Some("version") => {
                         version = Some(unquoted);
+                        current_key = None;
+                    }
+                    Some("tie_low") => {
+                        // Comma-separated list of ports to tie low
+                        tie_low = unquoted.split(',').map(|s| s.trim().to_string()).collect();
+                        current_key = None;
+                    }
+                    Some("tie_high") => {
+                        // Comma-separated list of ports to tie high
+                        tie_high = unquoted.split(',').map(|s| s.trim().to_string()).collect();
+                        current_key = None;
+                    }
+                    Some("unconnected") => {
+                        // Comma-separated list of ports to leave unconnected
+                        unconnected = unquoted.split(',').map(|s| s.trim().to_string()).collect();
                         current_key = None;
                     }
                     Some(_) => {
@@ -8164,6 +8198,23 @@ impl HirBuilderContext {
                     };
                     parameters.push((key, value.to_string()));
                 }
+            } else if token.kind() == SyntaxKind::LBracket {
+                // Start of a list (e.g., tie_low = [rst, sleep])
+                in_list = true;
+                current_list.clear();
+            } else if token.kind() == SyntaxKind::RBracket {
+                // End of a list - assign to the appropriate vector
+                in_list = false;
+                if let Some(key) = current_key.take() {
+                    match key.as_str() {
+                        "tie_low" => tie_low = std::mem::take(&mut current_list),
+                        "tie_high" => tie_high = std::mem::take(&mut current_list),
+                        "unconnected" => unconnected = std::mem::take(&mut current_list),
+                        _ => {
+                            // Unknown list key - ignore for now
+                        }
+                    }
+                }
             }
         }
 
@@ -8177,6 +8228,9 @@ impl HirBuilderContext {
             version,
             black_box,
             parameters,
+            tie_low,
+            tie_high,
+            unconnected,
         })
     }
 
