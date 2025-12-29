@@ -705,6 +705,8 @@ impl NclSimulator {
             "XNOR2" | "XNOR" => PrimitiveType::Xnor,
             "MUX2" => PrimitiveType::Mux2,
             "MUX4" => PrimitiveType::Mux4,
+            "HA" | "HALFADDER" | "HALF_ADDER" => PrimitiveType::HalfAdder,
+            "FA" | "FULLADDER" | "FULL_ADDER" => PrimitiveType::FullAdder,
             "TIE_HIGH" | "TIEH" | "VDD" => PrimitiveType::Constant { value: true },
             "TIE_LOW" | "TIEL" | "GND" | "VSS" => PrimitiveType::Constant { value: false },
             _ => {

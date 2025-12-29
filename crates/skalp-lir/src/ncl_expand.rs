@@ -282,19 +282,32 @@ impl NclExpander {
 
     /// Expand an NCL multiplier
     /// Simplified approach: compute mul using true rails, derive false rail from NOT(true)
-    fn expand_mul(&mut self, a: DualRailPair, b: DualRailPair, dest: DualRailPair, width: u32) {
+    fn expand_mul(
+        &mut self,
+        a: DualRailPair,
+        b: DualRailPair,
+        dest: DualRailPair,
+        input_width: u32,
+        result_width: u32,
+    ) {
         // Simplified approach: compute multiply using true rails, then derive false rail
         // This is an approximation - proper NCL multiplier would use threshold gates
         self.alloc_node(
             LirOp::Mul {
-                width,
-                result_width: width * 2, // Full width for multiplication
+                width: input_width,
+                result_width,
             },
             vec![a.t, b.t],
             dest.t,
         );
         // For false rail, invert the true rail (approximation)
-        self.alloc_node(LirOp::Not { width }, vec![dest.t], dest.f);
+        self.alloc_node(
+            LirOp::Not {
+                width: result_width,
+            },
+            vec![dest.t],
+            dest.f,
+        );
     }
 
     /// Expand an NCL less-than comparator
@@ -519,12 +532,14 @@ pub fn expand_to_ncl(lir: &Lir, config: &NclConfig) -> NclExpandResult {
                     }
                 }
             }
-            LirOp::Mul { width, .. } => {
+            LirOp::Mul { result_width, .. } => {
                 if node.inputs.len() >= 2 {
                     let a = expander.dual_rail_map.get(&node.inputs[0]).copied();
                     let b = expander.dual_rail_map.get(&node.inputs[1]).copied();
+                    // Get actual input width from the input signals
+                    let input_width = lir.signals[node.inputs[0].0 as usize].width;
                     if let (Some(a), Some(b), Some(dest)) = (a, b, output_pair) {
-                        expander.expand_mul(a, b, dest, *width);
+                        expander.expand_mul(a, b, dest, input_width, *result_width);
                     }
                 }
             }
