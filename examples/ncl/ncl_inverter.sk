@@ -1,0 +1,16 @@
+// NCL Inverter - Simplest async circuit example
+//
+// This async entity demonstrates dual-rail logic inversion.
+// The NOT operation in NCL simply swaps the true and false rails.
+
+async entity NclInverter {
+    in a: bit[1]
+    out y: bit[1]
+}
+
+impl NclInverter {
+    // In NCL, NOT swaps the rails:
+    // a_t -> y_f
+    // a_f -> y_t
+    y = ~a
+}

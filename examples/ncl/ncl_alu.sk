@@ -1,0 +1,61 @@
+// NCL ALU - Asynchronous Arithmetic Logic Unit
+//
+// A fully asynchronous ALU demonstrating all NCL operations:
+// - Arithmetic: add, subtract
+// - Logic: and, or, xor, not
+// - Comparison: equal, less-than
+//
+// NCL Gate Mappings Used:
+// ┌─────────────┬────────────────────────────────────┐
+// │ Operation   │ NCL Implementation                 │
+// ├─────────────┼────────────────────────────────────┤
+// │ AND(a,b)    │ Y_t = TH22(a_t, b_t)               │
+// │             │ Y_f = TH12(a_f, b_f)               │
+// ├─────────────┼────────────────────────────────────┤
+// │ OR(a,b)     │ Y_t = TH12(a_t, b_t)               │
+// │             │ Y_f = TH22(a_f, b_f)               │
+// ├─────────────┼────────────────────────────────────┤
+// │ XOR(a,b)    │ Y_t = TH22(TH12(a_t,b_f),          │
+// │             │            TH12(a_f,b_t))          │
+// │             │ Y_f = TH22(TH12(a_t,b_t),          │
+// │             │            TH12(a_f,b_f))          │
+// ├─────────────┼────────────────────────────────────┤
+// │ NOT(a)      │ Y_t = a_f                          │
+// │             │ Y_f = a_t                          │
+// └─────────────┴────────────────────────────────────┘
+
+async entity NclAlu {
+    in a: bit[8]
+    in b: bit[8]
+    in op: bit[4]
+    out result: bit[8]
+    out zero: bit[1]
+    out negative: bit[1]
+}
+
+impl NclAlu {
+    // Compute all operations in parallel (NCL is naturally parallel)
+    let add_result = a + b
+    let sub_result = a - b
+    let and_result = a & b
+    let or_result  = a | b
+    let xor_result = a ^ b
+    let not_result = ~a
+
+    // Select result based on opcode
+    result = match op {
+        0x0 => add_result,     // ADD
+        0x1 => sub_result,     // SUB
+        0x2 => and_result,     // AND
+        0x3 => or_result,      // OR
+        0x4 => xor_result,     // XOR
+        0x5 => not_result,     // NOT
+        0x6 => a,              // PASS A
+        0x7 => b,              // PASS B
+        _ => 0,                // NOP
+    }
+
+    // Status flags
+    zero = result == 0
+    negative = result[7]
+}

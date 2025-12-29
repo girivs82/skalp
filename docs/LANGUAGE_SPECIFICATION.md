@@ -70,13 +70,14 @@ This specification uses the following notation:
 SKALP uses a minimal set of 43 keywords, each with a specific purpose:
 
 ```
-// Core Hardware Description (11)
+// Core Hardware Description (13)
 entity impl signal var const
 in out inout on if else
+async barrier
 
-// Type System (8)
+// Type System (9)
 bit bool clock reset type stream
-struct enum
+struct enum ncl
 
 // Boolean Literals (2)
 true false
@@ -93,8 +94,8 @@ match for
 // Design Intent (3)
 intent flow requirement
 
-// Testbench Only (5)
-async await fn return let
+// Testbench Only (4)
+await fn return let
 
 // Type Conversion (1)
 as
@@ -122,7 +123,13 @@ assert
 - `signal` vs `var`: Signals are hardware wires/registers, vars are procedural variables
 - `let` vs `var` (testbench): `let` for immutable bindings, `var` for mutable
 - `assert` vs `requirement`: Assertions are runtime checks, requirements are formal contracts
-- `async`/`await`: Only for testbenches, never in synthesizable hardware
+- `async entity` vs `entity`: Async entities are clockless NCL circuits
+- `await`: Only for testbenches, never in synthesizable hardware
+
+**NCL (Null Convention Logic) Keywords:**
+- `async`: Modifier for clockless asynchronous entity declarations
+- `barrier`: Pipeline stage boundary with completion detection
+- `ncl<N>`: Explicit dual-rail type for N logical bits (2N physical wires)
 
 ### 2.2 Identifiers
 
@@ -1292,7 +1299,79 @@ impl Adder {
 }
 ```
 
-### 5.3 Entity Instantiation and Hierarchical Design
+### 5.3 Async Entity Declaration (NCL)
+
+NCL (Null Convention Logic) entities are declared with the `async` keyword and synthesize to clockless asynchronous circuits using dual-rail encoding and threshold gates.
+
+```rust
+// Async (NCL) entity - no clock, self-timed
+async entity NclAdder {
+    in a: bit[8]
+    in b: bit[8]
+    out sum: bit[8]
+    out carry: bit
+}
+
+impl NclAdder {
+    // Logic is automatically transformed to dual-rail NCL
+    let result = a +: b
+    sum = result[7:0]
+    carry = result[8]
+}
+```
+
+#### Barrier Statement (Pipeline Stages)
+
+The `barrier` statement marks pipeline stage boundaries with completion detection:
+
+```rust
+async entity NclPipeline {
+    in data: bit[32]
+    out result: bit[32]
+}
+
+impl NclPipeline {
+    // Stage 1
+    let stage1 = data * 2
+
+    barrier  // Completion detection inserted here
+
+    // Stage 2
+    let stage2 = stage1 + 1
+
+    barrier  // Completion detection inserted here
+
+    // Stage 3
+    result = stage2 & 0xFFFF
+}
+```
+
+#### Explicit NCL Types
+
+Use `ncl<N>` for explicit dual-rail type declarations:
+
+```rust
+async entity NclMux {
+    in sel: ncl<1>      // 1 logical bit = 2 wires
+    in a: ncl<8>        // 8 logical bits = 16 wires
+    in b: ncl<8>
+    out y: ncl<8>
+}
+```
+
+#### NCL Synthesis
+
+| SKALP Operation | NCL Implementation |
+|-----------------|-------------------|
+| `a & b` | TH22(a_t,b_t) / TH12(a_f,b_f) |
+| `a \| b` | TH12(a_t,b_t) / TH22(a_f,b_f) |
+| `~a` | a_f / a_t (rail swap) |
+| `a + b` | NCL full-adder chain |
+| `a * b` | NCL AND array + adder tree |
+
+See [NCL Documentation](NCL_ASYNC_CIRCUITS.md) for complete details.
+
+### 5.4 Entity Instantiation and Hierarchical Design
 
 #### Basic Instantiation
 

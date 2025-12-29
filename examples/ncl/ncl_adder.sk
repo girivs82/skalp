@@ -1,0 +1,25 @@
+// NCL 8-bit Adder - Asynchronous ripple-carry adder
+//
+// Demonstrates NCL arithmetic. The adder uses:
+// - TH22 gates for AND operations (carry generation)
+// - TH12 gates for OR operations (carry propagation)
+// - XOR using TH22/TH12 combinations (sum computation)
+//
+// Each bit position has dual-rail encoding, so an 8-bit adder
+// uses 16 wires for each operand and 16 wires for the result.
+
+async entity NclAdder8 {
+    in a: bit[8]
+    in b: bit[8]
+    out sum: bit[8]
+    out carry: bit[1]
+}
+
+impl NclAdder8 {
+    // Widening addition to capture carry
+    let result: bit[9] = a +: b
+
+    // Split result into sum and carry
+    sum = result[7:0]
+    carry = result[8]
+}

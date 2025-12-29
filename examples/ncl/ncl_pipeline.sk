@@ -1,0 +1,54 @@
+// NCL Pipelined Processor - Multi-stage async pipeline
+//
+// This example demonstrates NCL pipelining using barrier statements.
+// Each barrier inserts completion detection logic that:
+// 1. Waits for all signals in the stage to become valid DATA
+// 2. Signals completion to downstream stages
+// 3. Enables wavefront propagation through the pipeline
+//
+// Unlike clocked pipelines, NCL pipelines:
+// - Have data-dependent latency (faster paths complete sooner)
+// - Achieve maximum throughput automatically
+// - Require no timing closure or clock distribution
+
+async entity NclPipeline {
+    in data: bit[32]
+    in opcode: bit[4]
+    out result: bit[32]
+    out valid: bit[1]
+}
+
+impl NclPipeline {
+    // ============================================
+    // Stage 1: Decode and prepare
+    // ============================================
+    let decoded_op = opcode[1:0]
+    let operand = data
+
+    barrier  // Completion detection: wait for decode
+
+    // ============================================
+    // Stage 2: Execute operation
+    // ============================================
+    let exec_result: bit[32] = match decoded_op {
+        0b00 => operand + 1,           // Increment
+        0b01 => operand - 1,           // Decrement
+        0b10 => operand << 1,          // Shift left
+        0b11 => operand >> 1,          // Shift right
+    }
+
+    barrier  // Completion detection: wait for execute
+
+    // ============================================
+    // Stage 3: Post-process and output
+    // ============================================
+    let masked = exec_result & 0xFFFF_FFFF
+
+    barrier  // Completion detection: wait for post-process
+
+    // ============================================
+    // Stage 4: Output
+    // ============================================
+    result = masked
+    valid = 1
+}

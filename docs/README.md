@@ -131,6 +131,42 @@ docs/
 
 ---
 
+## 🔬 Advanced Features
+
+### Asynchronous Circuits (NCL)
+
+SKALP supports **Null Convention Logic (NCL)** for clockless asynchronous circuit design:
+
+- [**NCL Async Circuits**](NCL_ASYNC_CIRCUITS.md) - Complete NCL documentation
+- [**NCL Examples**](../examples/ncl/) - Working async circuit examples
+
+**Key features:**
+- `async entity` - Declare clockless modules
+- `barrier` - Pipeline stage boundaries with completion detection
+- Dual-rail encoding with THmn threshold gates
+- Wavefront-based simulation
+
+```skalp
+async entity NclAdder {
+    in a: bit[8]
+    in b: bit[8]
+    out sum: bit[8]
+}
+
+impl NclAdder {
+    sum = a + b  // Automatically synthesized to NCL gates
+}
+```
+
+### Other Advanced Features
+
+- [**Clock Domain Crossing**](CDC_SUPPORT.md) - Safe multi-clock designs
+- [**Safety Analysis**](implementation/AUTOMATED_SAFETY_ANALYSIS.md) - ISO 26262 FMEDA
+- [**Pipeline Annotations**](PIPELINE_ANNOTATIONS.md) - Retiming and optimization
+- [**GPU Simulation**](GPU_SIMULATION.md) - Hardware-accelerated simulation
+
+---
+
 ## 📊 Documentation Status
 
 ### ✅ Complete

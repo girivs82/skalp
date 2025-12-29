@@ -1,10 +1,64 @@
 # What's New in SKALP
 
-**Last Updated:** 2025-12-22
+**Last Updated:** 2025-12-29
 
 ---
 
-## 🏗️ Hierarchical Gate-Level Synthesis (NEW)
+## ⚡ NCL Asynchronous Circuit Support (NEW)
+
+**Status:** ✅ Complete
+**Documentation:** [NCL Async Circuits](NCL_ASYNC_CIRCUITS.md)
+
+SKALP now supports **Null Convention Logic (NCL)** for clockless asynchronous circuit design. NCL circuits use dual-rail encoding and threshold gates (THmn) for delay-insensitive, self-timed operation.
+
+### Features
+
+- **`async entity`**: Declare clockless NCL modules
+- **`barrier`**: Pipeline stage boundaries with completion detection
+- **Automatic Dual-Rail Transformation**: Boolean logic → NCL gate pairs
+- **THmn Threshold Gates**: TH12, TH22, TH23, TH33, TH34, TH44, etc.
+- **Wavefront Simulation**: Full NULL/DATA cycle simulation
+- **Verilog Generation**: Automatic NCL cell library generation
+
+### NCL Benefits
+
+| Feature | Benefit |
+|---------|---------|
+| No clock | Zero clock distribution power, no timing closure |
+| Dual-rail | Self-checking, naturally delay-insensitive |
+| Completion detection | Automatic flow control, maximum throughput |
+| Hysteresis gates | Noise immunity, radiation tolerance |
+
+### Example
+
+```skalp
+async entity NclPipeline {
+    in data: bit[32]
+    out result: bit[32]
+}
+
+impl NclPipeline {
+    let stage1 = data * 2
+    barrier                    // Completion detection
+    let stage2 = stage1 + 1
+    barrier                    // Completion detection
+    result = stage2
+}
+```
+
+### NCL Gate Mappings
+
+| Operation | True Rail | False Rail |
+|-----------|-----------|------------|
+| AND(a,b) | TH22(a_t, b_t) | TH12(a_f, b_f) |
+| OR(a,b) | TH12(a_t, b_t) | TH22(a_f, b_f) |
+| NOT(a) | a_f | a_t |
+
+See [NCL Documentation](NCL_ASYNC_CIRCUITS.md) for complete details.
+
+---
+
+## 🏗️ Hierarchical Gate-Level Synthesis
 
 **Status:** ✅ Complete
 **CLI Flags:** `--target gates`
