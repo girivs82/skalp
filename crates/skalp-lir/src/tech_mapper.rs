@@ -242,6 +242,16 @@ impl<'a> TechMapper<'a> {
         nets
     }
 
+    /// Check if a signal name indicates a true rail in NCL (ends with _t)
+    fn is_ncl_true_rail(signal_name: &str) -> bool {
+        signal_name.ends_with("_t") || signal_name.contains("_t[") || signal_name.ends_with("_t]")
+    }
+
+    /// Check if a signal name indicates a false rail in NCL (ends with _f)
+    fn is_ncl_false_rail(signal_name: &str) -> bool {
+        signal_name.ends_with("_f") || signal_name.contains("_f[") || signal_name.ends_with("_f]")
+    }
+
     /// Map a single node to cells
     fn map_node(&mut self, node: &LirNode, word_lir: &Lir) {
         let input_nets = self.get_input_nets(&node.inputs);
@@ -249,23 +259,56 @@ impl<'a> TechMapper<'a> {
 
         match &node.op {
             // Simple logic gates - decompose to per-bit operations
+            // For NCL: detect dual-rail patterns and use TH22/TH12 instead
             LirOp::And { width } => {
-                self.map_bitwise_gate(
-                    CellFunction::And2,
-                    *width,
-                    &input_nets,
-                    &output_nets,
-                    &node.path,
-                );
+                // Check if this is an NCL operation by looking at signal names
+                let output_signal = &word_lir.signals[node.output.0 as usize];
+                let is_ncl_t = Self::is_ncl_true_rail(&output_signal.name);
+                let is_ncl_f = Self::is_ncl_false_rail(&output_signal.name);
+
+                if is_ncl_t || is_ncl_f {
+                    // NCL AND on dual rails → C-element (Muller gate)
+                    // C-element: Q = (a & b) | (Q & (a | b))
+                    // Built from standard gates with feedback
+                    self.map_c_element(*width, &input_nets, &output_nets, &node.path);
+                } else {
+                    // Regular AND
+                    self.map_bitwise_gate(
+                        CellFunction::And2,
+                        *width,
+                        &input_nets,
+                        &output_nets,
+                        &node.path,
+                    );
+                }
             }
             LirOp::Or { width } => {
-                self.map_bitwise_gate(
-                    CellFunction::Or2,
-                    *width,
-                    &input_nets,
-                    &output_nets,
-                    &node.path,
-                );
+                // Check if this is an NCL operation by looking at signal names
+                let output_signal = &word_lir.signals[node.output.0 as usize];
+                let is_ncl_t = Self::is_ncl_true_rail(&output_signal.name);
+                let is_ncl_f = Self::is_ncl_false_rail(&output_signal.name);
+
+                if is_ncl_f || is_ncl_t {
+                    // NCL OR on dual rails - use standard OR
+                    // In NCL data flow, TH12 behavior is equivalent to OR
+                    // (hysteresis only matters during NULL phase which simulation handles)
+                    self.map_bitwise_gate(
+                        CellFunction::Or2,
+                        *width,
+                        &input_nets,
+                        &output_nets,
+                        &node.path,
+                    );
+                } else {
+                    // Regular OR
+                    self.map_bitwise_gate(
+                        CellFunction::Or2,
+                        *width,
+                        &input_nets,
+                        &output_nets,
+                        &node.path,
+                    );
+                }
             }
             LirOp::Xor { width } => {
                 self.map_bitwise_gate(
@@ -1554,6 +1597,126 @@ impl<'a> TechMapper<'a> {
         }
 
         self.stats.direct_mappings += 1;
+    }
+
+    /// Map a Muller C-element (TH22) using standard gates
+    ///
+    /// The C-element is the fundamental building block of NCL async circuits.
+    /// It implements: Q = (a AND b) OR (Q AND (a OR b))
+    ///
+    /// This creates a state-holding element where:
+    /// - Output goes HIGH when both inputs are HIGH
+    /// - Output goes LOW when both inputs are LOW
+    /// - Output HOLDS previous value otherwise (hysteresis)
+    ///
+    /// Implementation uses 4 standard gates:
+    /// ```text
+    ///     a ──┬──[AND2]──┐
+    ///         │          │
+    ///     b ──┘          ├──[OR2]─── Q
+    ///                    │           │
+    ///     a ──[OR2]──[AND2]──────────│
+    ///         │                      │
+    ///     b ──┘                      │
+    ///         ┌──────────────────────┘ (feedback)
+    ///         v
+    /// ```
+    fn map_c_element(
+        &mut self,
+        width: u32,
+        inputs: &[Vec<GateNetId>],
+        outputs: &[GateNetId],
+        path: &str,
+    ) {
+        if inputs.len() < 2 {
+            self.warnings.push("C-element needs 2 inputs".to_string());
+            return;
+        }
+
+        let and_info = self.get_cell_info(&CellFunction::And2);
+        let or_info = self.get_cell_info(&CellFunction::Or2);
+
+        for bit in 0..width as usize {
+            let a = inputs[0].get(bit).copied().unwrap_or(inputs[0][0]);
+            let b = inputs[1].get(bit).copied().unwrap_or(inputs[1][0]);
+            let q = outputs.get(bit).copied().unwrap_or(GateNetId(0));
+
+            // Create intermediate nets
+            let ab_and_net = self.alloc_net_id();
+            self.netlist.add_net(GateNet::new(
+                ab_and_net,
+                format!("{}.c_elem{}.ab_and", path, bit),
+            ));
+
+            let ab_or_net = self.alloc_net_id();
+            self.netlist.add_net(GateNet::new(
+                ab_or_net,
+                format!("{}.c_elem{}.ab_or", path, bit),
+            ));
+
+            let q_and_or_net = self.alloc_net_id();
+            self.netlist.add_net(GateNet::new(
+                q_and_or_net,
+                format!("{}.c_elem{}.q_and_or", path, bit),
+            ));
+
+            // Gate 1: ab_and = a AND b
+            let mut cell1 = Cell::new_comb(
+                CellId(0),
+                and_info.name.clone(),
+                self.library.name.clone(),
+                and_info.fit,
+                format!("{}.c_elem{}.and1", path, bit),
+                vec![a, b],
+                vec![ab_and_net],
+            );
+            cell1.source_op = Some("C-element_AND_AB".to_string());
+            self.add_cell(cell1);
+
+            // Gate 2: ab_or = a OR b
+            let mut cell2 = Cell::new_comb(
+                CellId(0),
+                or_info.name.clone(),
+                self.library.name.clone(),
+                or_info.fit,
+                format!("{}.c_elem{}.or1", path, bit),
+                vec![a, b],
+                vec![ab_or_net],
+            );
+            cell2.source_op = Some("C-element_OR_AB".to_string());
+            self.add_cell(cell2);
+
+            // Gate 3: q_and_or = Q AND (a OR b) - feedback from output
+            // Note: Q is the output net, creating a combinational feedback loop
+            let mut cell3 = Cell::new_comb(
+                CellId(0),
+                and_info.name.clone(),
+                self.library.name.clone(),
+                and_info.fit,
+                format!("{}.c_elem{}.and2", path, bit),
+                vec![q, ab_or_net],
+                vec![q_and_or_net],
+            );
+            cell3.source_op = Some("C-element_AND_Q_OR".to_string());
+            self.add_cell(cell3);
+
+            // Gate 4: Q = (a AND b) OR (Q AND (a OR b))
+            let mut cell4 = Cell::new_comb(
+                CellId(0),
+                or_info.name.clone(),
+                self.library.name.clone(),
+                or_info.fit,
+                format!("{}.c_elem{}.or2", path, bit),
+                vec![ab_and_net, q_and_or_net],
+                vec![q],
+            );
+            cell4.source_op = Some("C-element_OUTPUT".to_string());
+            self.add_cell(cell4);
+
+            self.stats.cells_created += 4;
+        }
+
+        self.stats.decomposed_mappings += 1;
     }
 
     /// Map a floating-point operation as a soft-macro cell
