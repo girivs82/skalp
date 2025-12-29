@@ -33,6 +33,7 @@ pub mod hierarchical_netlist;
 pub mod lir;
 pub mod mir_to_lir;
 pub mod ncl_expand;
+pub mod ncl_optimizer;
 pub mod netlist;
 pub mod pattern_detector;
 pub mod pipeline_annotations;
@@ -92,6 +93,9 @@ pub use pattern_detector::{
 
 // Gate optimizer
 pub use gate_optimizer::{GateOptimizer, OptimizationStats, PassStats};
+
+// NCL optimizer
+pub use ncl_optimizer::{NclOptConfig, NclOptStats, NclOptimizer};
 
 // Hierarchical netlist (for per-entity synthesis)
 pub use hierarchical_netlist::{
