@@ -30,6 +30,8 @@ pub mod gpu_fault_simulator;
 #[cfg(target_os = "macos")]
 pub mod gpu_gate_runtime;
 #[cfg(target_os = "macos")]
+pub mod gpu_ncl_runtime;
+#[cfg(target_os = "macos")]
 pub mod gpu_runtime;
 pub mod ncl_sim;
 pub mod simulator;
@@ -60,6 +62,8 @@ pub use gpu_fault_simulator::{GpuFaultCampaignConfig, GpuFaultSimulator};
 #[cfg(target_os = "macos")]
 pub use gpu_gate_runtime::GpuGateRuntime;
 #[cfg(target_os = "macos")]
+pub use gpu_ncl_runtime::GpuNclRuntime;
+#[cfg(target_os = "macos")]
 pub use gpu_runtime::{GpuDevice, GpuRuntime};
 pub use simulator::{SimulationConfig, SimulationResult, Simulator};
 pub use testbench::{TestResult, TestVector, Testbench};
@@ -68,5 +72,7 @@ pub use ncl_sim::{
     evaluate_thmn_stateful, NclGateState, NclPhase, NclSimConfig, NclSimStats, NclSimulator,
     NclValue,
 };
-pub use unified_runtime::{HwAccel, SimLevel, UnifiedSimConfig, UnifiedSimulator};
+pub use unified_runtime::{
+    CircuitMode, HwAccel, SimLevel, UnifiedSimConfig, UnifiedSimResult, UnifiedSimulator,
+};
 pub use waveform::{Signal as WaveformSignal, Waveform};

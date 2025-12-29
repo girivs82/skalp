@@ -164,6 +164,13 @@ enum Commands {
             default_value = "1"
         )]
         gate_opt_level: u8,
+
+        /// Simulate as NCL (Null Convention Logic) async circuit
+        ///
+        /// Uses proper THmn threshold gate evaluation with hysteresis
+        /// and wavefront propagation instead of clock-based simulation.
+        #[arg(long)]
+        ncl: bool,
     },
 
     /// Synthesize for FPGA target
@@ -516,6 +523,7 @@ fn main() -> Result<()> {
             gate_level,
             gpu,
             gate_opt_level,
+            ncl,
         } => {
             simulate_design(
                 &design,
@@ -523,6 +531,7 @@ fn main() -> Result<()> {
                 gate_level,
                 gpu,
                 gate_opt_level,
+                ncl,
             )?;
         }
 
@@ -1445,22 +1454,24 @@ fn compile_to_ip(
 
 /// Simulate design
 ///
-/// Supports two simulation paths:
+/// Supports three simulation paths:
 /// - Behavioral (default): HIR → MIR → SIR (fast, functional)
 /// - Gate-level (--gate-level): HIR → MIR → LIR → SIR (gate-level primitives, fault injection ready)
+/// - NCL (--ncl): Async NCL simulation with THmn gates and wavefront propagation
 fn simulate_design(
     design_file: &PathBuf,
     duration: Option<&str>,
     gate_level: bool,
     use_gpu: bool,
     gate_opt_level: u8,
+    ncl_mode: bool,
 ) -> Result<()> {
     use skalp_mir::Mir;
     use skalp_sir::convert_mir_to_sir;
 
     info!("Loading design from {:?}", design_file);
 
-    // Parse duration (default 1000 cycles)
+    // Parse duration (default 1000 cycles for sync, max_iterations for NCL)
     let cycles = if let Some(dur) = duration {
         if dur.ends_with("ns") {
             dur.trim_end_matches("ns").parse::<u64>()? / 10 // Assume 10ns clock
@@ -1479,7 +1490,9 @@ fn simulate_design(
     match extension {
         Some("sk") | Some("skalp") => {
             // Source file - compile it
-            if gate_level {
+            if ncl_mode {
+                simulate_ncl(design_file, cycles, use_gpu, gate_opt_level)
+            } else if gate_level {
                 simulate_gate_level(design_file, cycles, use_gpu, gate_opt_level)
             } else {
                 simulate_behavioral(design_file, cycles, use_gpu)
@@ -1688,6 +1701,7 @@ fn simulate_gate_level(
         hw_accel: if use_gpu { HwAccel::Gpu } else { HwAccel::Cpu },
         max_cycles: cycles,
         capture_waveforms: true,
+        ..Default::default()
     };
 
     // Create and initialize unified simulator
@@ -1728,6 +1742,128 @@ fn simulate_gate_level(
     }
 
     println!("\n✅ Gate-level simulation complete!");
+
+    Ok(())
+}
+
+/// NCL (Null Convention Logic) async simulation
+///
+/// Compiles the design to GateNetlist with NCL expansion, then simulates
+/// using proper THmn threshold gate evaluation with hysteresis.
+fn simulate_ncl(
+    source_file: &PathBuf,
+    max_iterations: u64,
+    use_gpu: bool,
+    gate_opt_level: u8,
+) -> Result<()> {
+    use skalp_frontend::parse_and_build_hir_from_file;
+    use skalp_lir::{get_stdlib_library, lower_mir_module_to_lir, map_lir_to_gates_with_opt_level};
+    use skalp_sim::{CircuitMode, HwAccel, UnifiedSimConfig, UnifiedSimulator};
+
+    println!("🔬 NCL (Async) Gate-Level Simulation");
+    println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    println!("Source: {:?}", source_file);
+    println!("Mode: NCL (Null Convention Logic)");
+    println!();
+
+    // Parse and build HIR
+    println!("📖 Parsing design...");
+    let hir = parse_and_build_hir_from_file(source_file).context("Failed to parse source")?;
+
+    // Lower to MIR
+    println!("🔧 Lowering to MIR...");
+    let compiler =
+        skalp_mir::MirCompiler::new().with_optimization_level(skalp_mir::OptimizationLevel::None);
+    let mir = compiler
+        .compile_to_mir(&hir)
+        .map_err(|e| anyhow::anyhow!("MIR compilation failed: {}", e))?;
+
+    if mir.modules.is_empty() {
+        anyhow::bail!("No modules found in compiled design");
+    }
+
+    let module = &mir.modules[0];
+    println!("   Module: {}", module.name);
+
+    // Lower MIR to LIR
+    println!("🔩 Converting to LIR...");
+    let lir_result = lower_mir_module_to_lir(module);
+    println!("   LIR nodes: {}", lir_result.lir.nodes.len());
+
+    // Get tech library and map to gates
+    println!("🔧 Technology mapping...");
+    let library =
+        get_stdlib_library("generic_asic").context("Failed to load default technology library")?;
+
+    let tech_result = map_lir_to_gates_with_opt_level(&lir_result.lir, &library, gate_opt_level);
+
+    let gate_netlist = tech_result.netlist;
+    println!(
+        "   Gate netlist: {} cells, {} nets",
+        gate_netlist.cells.len(),
+        gate_netlist.nets.len()
+    );
+
+    // Count THmn gates (these are created by NCL expansion)
+    let thmn_count = gate_netlist
+        .cells
+        .iter()
+        .filter(|c| c.cell_type.starts_with("TH"))
+        .count();
+    if thmn_count > 0 {
+        println!("   THmn gates: {}", thmn_count);
+    }
+
+    // Create NCL simulator config
+    let config = UnifiedSimConfig {
+        level: skalp_sim::SimLevel::GateLevel,
+        circuit_mode: CircuitMode::Ncl,
+        hw_accel: if use_gpu { HwAccel::Gpu } else { HwAccel::Cpu },
+        max_iterations: max_iterations as u32,
+        capture_waveforms: true,
+        ncl_debug: false,
+        ..Default::default()
+    };
+
+    // Create and initialize simulator
+    println!("\n🔧 Running NCL simulation...");
+    let mut simulator = UnifiedSimulator::new(config)
+        .map_err(|e| anyhow::anyhow!("Failed to create simulator: {}", e))?;
+
+    simulator
+        .load_ncl_gate_level(gate_netlist)
+        .map_err(|e| anyhow::anyhow!("Failed to load NCL netlist: {}", e))?;
+
+    println!("   Device: {}", simulator.device_info());
+
+    // For NCL, we run until stable instead of a fixed number of cycles
+    println!(
+        "   Running until stable (max {} iterations)...",
+        max_iterations
+    );
+
+    let result = simulator.run_until_stable();
+
+    println!("\n📊 NCL Simulation Results:");
+    println!("   Iterations: {}", result.iterations);
+    println!("   Wavefronts: {}", result.wavefronts);
+    println!("   Stable: {}", result.is_stable);
+
+    if let Some(stats) = simulator.get_ncl_stats() {
+        println!("   Phase: {:?}", stats.phase);
+        println!("   Data wavefronts: {}", stats.data_wavefronts);
+        println!("   Null wavefronts: {}", stats.null_wavefronts);
+    }
+
+    if simulator.is_ncl_complete() {
+        println!("   Output status: Complete (all DATA)");
+    } else if simulator.is_ncl_null() {
+        println!("   Output status: NULL (spacer)");
+    } else {
+        println!("   Output status: Transitioning");
+    }
+
+    println!("\n✅ NCL simulation complete!");
 
     Ok(())
 }

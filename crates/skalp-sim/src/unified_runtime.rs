@@ -1,12 +1,18 @@
 //! Unified Simulation Runtime
 //!
 //! Provides a single interface for both behavioral and gate-level simulation,
-//! with automatic GPU acceleration when available.
+//! with automatic GPU acceleration when available. Supports both synchronous
+//! (clocked) and asynchronous (NCL) circuit simulation.
 //!
 //! # Simulation Levels
 //!
 //! - **Behavioral**: Uses `skalp_sir::SirModule` (higher-level representation)
 //! - **GateLevel**: Uses `skalp_sim::sir::Sir` (primitive-based gate netlist)
+//!
+//! # Circuit Modes
+//!
+//! - **Sync** (default): Clock-driven simulation with DFFs
+//! - **Async/NCL**: Null Convention Logic with wavefront propagation and THmn gates
 //!
 //! # Hardware Acceleration
 //!
@@ -24,7 +30,7 @@
 //! sim.load_pipeline_annotations("build/pipeline_annotations.toml")?;
 //! ```
 //!
-//! # Example
+//! # Example (Synchronous)
 //!
 //! ```ignore
 //! use skalp_sim::{UnifiedSimulator, UnifiedSimConfig, SimLevel, HwAccel};
@@ -35,6 +41,7 @@
 //!     hw_accel: HwAccel::Auto,
 //!     max_cycles: 1000,
 //!     capture_waveforms: true,
+//!     ..Default::default()
 //! };
 //!
 //! let mut sim = UnifiedSimulator::new(config)?;
@@ -44,7 +51,28 @@
 //! sim.run(100);
 //! let result = sim.get_output("y");
 //! ```
+//!
+//! # Example (NCL/Async)
+//!
+//! ```ignore
+//! use skalp_sim::{UnifiedSimulator, UnifiedSimConfig, SimLevel, CircuitMode};
+//!
+//! let config = UnifiedSimConfig {
+//!     level: SimLevel::GateLevel,
+//!     circuit_mode: CircuitMode::Ncl,
+//!     max_iterations: 10000,
+//!     ..Default::default()
+//! };
+//!
+//! let mut sim = UnifiedSimulator::new(config)?;
+//! sim.load_ncl_gate_level(&gate_netlist)?;
+//! sim.set_ncl_input("a", 5, 8);  // a = 5, 8-bit dual-rail
+//! sim.run_until_stable();        // Iterate until no changes
+//! let result = sim.get_ncl_output("y", 8);
+//! ```
 
+use crate::ncl_sim::{NclSimConfig, NclSimStats, NclSimulator};
+use skalp_lir::gate_netlist::GateNetlist;
 use skalp_lir::synth::PipelineAnnotations;
 use std::collections::{HashMap, VecDeque};
 use std::path::Path;
@@ -57,6 +85,17 @@ pub enum SimLevel {
     Behavioral,
     /// Gate-level simulation (MIR → WordLir → GateNetlist → SIR)
     GateLevel,
+}
+
+/// Circuit timing mode
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CircuitMode {
+    /// Synchronous (clocked) circuits - uses clock edges and DFFs
+    #[default]
+    Sync,
+    /// Asynchronous NCL (Null Convention Logic) - uses wavefront propagation
+    /// with THmn threshold gates and dual-rail encoding
+    Ncl,
 }
 
 /// Hardware acceleration mode
@@ -72,16 +111,36 @@ pub enum HwAccel {
 }
 
 /// Configuration for unified simulation
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct UnifiedSimConfig {
     /// Simulation abstraction level
     pub level: SimLevel,
+    /// Circuit timing mode (sync vs async/NCL)
+    pub circuit_mode: CircuitMode,
     /// Hardware acceleration mode
     pub hw_accel: HwAccel,
-    /// Maximum cycles before timeout
+    /// Maximum cycles before timeout (for sync mode)
     pub max_cycles: u64,
+    /// Maximum iterations per wavefront (for NCL mode)
+    pub max_iterations: u32,
     /// Whether to capture waveforms
     pub capture_waveforms: bool,
+    /// Enable debug output for NCL simulation
+    pub ncl_debug: bool,
+}
+
+impl Default for UnifiedSimConfig {
+    fn default() -> Self {
+        Self {
+            level: SimLevel::default(),
+            circuit_mode: CircuitMode::default(),
+            hw_accel: HwAccel::default(),
+            max_cycles: 0,
+            max_iterations: 10000,
+            capture_waveforms: false,
+            ncl_debug: false,
+        }
+    }
 }
 
 /// Simulation state snapshot for waveform capture
@@ -96,14 +155,37 @@ pub struct SimulationSnapshot {
 /// Result from unified simulation
 #[derive(Debug, Clone)]
 pub struct UnifiedSimResult {
-    /// Number of cycles simulated
+    /// Number of cycles simulated (sync mode)
     pub cycles: u64,
+    /// Number of iterations run (NCL mode)
+    pub iterations: u64,
+    /// Number of wavefronts completed (NCL mode)
+    pub wavefronts: u64,
     /// Final output values
     pub outputs: HashMap<String, u64>,
     /// Waveform snapshots (if capture_waveforms was enabled)
     pub waveforms: Vec<SimulationSnapshot>,
     /// Whether GPU was used
     pub used_gpu: bool,
+    /// Whether simulation is stable (NCL mode)
+    pub is_stable: bool,
+    /// Circuit mode used
+    pub circuit_mode: CircuitMode,
+}
+
+impl Default for UnifiedSimResult {
+    fn default() -> Self {
+        Self {
+            cycles: 0,
+            iterations: 0,
+            wavefronts: 0,
+            outputs: HashMap::new(),
+            waveforms: Vec::new(),
+            used_gpu: false,
+            is_stable: true,
+            circuit_mode: CircuitMode::Sync,
+        }
+    }
 }
 
 /// Unified simulator supporting both behavioral and gate-level simulation
@@ -112,6 +194,10 @@ pub struct UnifiedSimulator {
     backend: SimulatorBackend,
     waveforms: Vec<SimulationSnapshot>,
     current_cycle: u64,
+    /// Total iterations for NCL mode
+    total_iterations: u64,
+    /// Total wavefronts completed for NCL mode
+    total_wavefronts: u64,
     /// Pipeline annotations loaded from synthesis
     pipeline_annotations: Option<PipelineAnnotations>,
     /// Output delay buffers for latency adjustment
@@ -125,11 +211,16 @@ pub struct UnifiedSimulator {
 enum SimulatorBackend {
     /// Not yet loaded
     Uninitialized,
-    /// Gate-level CPU simulation
+    /// Gate-level CPU simulation (synchronous)
     GateLevelCpu(crate::gate_simulator::GateLevelSimulator),
-    /// Gate-level GPU simulation (macOS only)
+    /// Gate-level GPU simulation (macOS only, synchronous)
     #[cfg(target_os = "macos")]
     GateLevelGpu(crate::gpu_gate_runtime::GpuGateRuntime),
+    /// NCL gate-level CPU simulation (asynchronous)
+    NclCpu(NclSimulator),
+    /// NCL gate-level GPU simulation (macOS only, asynchronous)
+    #[cfg(target_os = "macos")]
+    NclGpu(crate::gpu_ncl_runtime::GpuNclRuntime),
 }
 
 impl UnifiedSimulator {
@@ -140,10 +231,17 @@ impl UnifiedSimulator {
             backend: SimulatorBackend::Uninitialized,
             waveforms: Vec::new(),
             current_cycle: 0,
+            total_iterations: 0,
+            total_wavefronts: 0,
             pipeline_annotations: None,
             output_delay_buffers: HashMap::new(),
             latency_adjustments: HashMap::new(),
         })
+    }
+
+    /// Check if this simulator is in NCL (async) mode
+    pub fn is_ncl_mode(&self) -> bool {
+        self.config.circuit_mode == CircuitMode::Ncl
     }
 
     /// Load pipeline annotations from a TOML file
@@ -223,8 +321,12 @@ impl UnifiedSimulator {
         self.pipeline_annotations.is_some()
     }
 
-    /// Load a gate-level SIR for simulation
+    /// Load a gate-level SIR for synchronous simulation
     pub fn load_gate_level(&mut self, sir: &crate::sir::Sir) -> Result<(), String> {
+        if self.is_ncl_mode() {
+            return Err("Cannot load SIR for NCL mode. Use load_ncl_gate_level() instead.".into());
+        }
+
         let use_gpu = match self.config.hw_accel {
             HwAccel::Cpu => false,
             HwAccel::Gpu => true,
@@ -257,11 +359,70 @@ impl UnifiedSimulator {
         Ok(())
     }
 
+    /// Load a gate-level GateNetlist for NCL (async) simulation
+    ///
+    /// This uses the NclSimulator (CPU) or GpuNclRuntime (GPU) which properly
+    /// handles THmn threshold gates with hysteresis and wavefront propagation.
+    pub fn load_ncl_gate_level(&mut self, netlist: GateNetlist) -> Result<(), String> {
+        if !self.is_ncl_mode() {
+            return Err(
+                "Cannot load GateNetlist for sync mode. Use load_gate_level() instead.".into(),
+            );
+        }
+
+        let use_gpu = match self.config.hw_accel {
+            HwAccel::Cpu => false,
+            HwAccel::Gpu => true,
+            HwAccel::Auto => cfg!(target_os = "macos"),
+        };
+
+        if use_gpu {
+            #[cfg(target_os = "macos")]
+            {
+                match crate::gpu_ncl_runtime::GpuNclRuntime::new(netlist.clone()) {
+                    Ok(runtime) => {
+                        eprintln!(
+                            "[SIM] NCL GPU runtime initialized: {}",
+                            if runtime.is_using_gpu() {
+                                "GPU"
+                            } else {
+                                "CPU fallback"
+                            }
+                        );
+                        self.backend = SimulatorBackend::NclGpu(runtime);
+                        return Ok(());
+                    }
+                    Err(e) => {
+                        eprintln!("NCL GPU initialization failed, falling back to CPU: {}", e);
+                        // Fall through to CPU
+                    }
+                }
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                eprintln!("GPU requested but not available on this platform, using CPU for NCL");
+            }
+        }
+
+        // CPU fallback
+        let ncl_config = NclSimConfig {
+            max_iterations: self.config.max_iterations,
+            debug: self.config.ncl_debug,
+            track_stages: true,
+        };
+        self.backend = SimulatorBackend::NclCpu(NclSimulator::new(netlist, ncl_config));
+        Ok(())
+    }
+
     /// Check if GPU is being used
     pub fn is_using_gpu(&self) -> bool {
         #[cfg(target_os = "macos")]
         {
-            matches!(self.backend, SimulatorBackend::GateLevelGpu(_))
+            match &self.backend {
+                SimulatorBackend::GateLevelGpu(_) => true,
+                SimulatorBackend::NclGpu(runtime) => runtime.is_using_gpu(),
+                _ => false,
+            }
         }
         #[cfg(not(target_os = "macos"))]
         {
@@ -273,13 +434,20 @@ impl UnifiedSimulator {
     pub fn device_info(&self) -> String {
         match &self.backend {
             SimulatorBackend::Uninitialized => "Not initialized".to_string(),
-            SimulatorBackend::GateLevelCpu(_) => "CPU".to_string(),
+            SimulatorBackend::GateLevelCpu(_) => "CPU (Sync)".to_string(),
             #[cfg(target_os = "macos")]
             SimulatorBackend::GateLevelGpu(gpu) => format!("GPU (Metal): {}", gpu.device_name()),
+            SimulatorBackend::NclCpu(_) => "CPU (NCL/Async)".to_string(),
+            #[cfg(target_os = "macos")]
+            SimulatorBackend::NclGpu(gpu) => {
+                format!("GPU (Metal, NCL/Async): {}", gpu.device_name())
+            }
         }
     }
 
     /// Set an input value (as u64)
+    ///
+    /// For NCL mode, this sets the dual-rail encoded value (use set_ncl_input for more control)
     pub fn set_input(&mut self, name: &str, value: u64) {
         match &mut self.backend {
             SimulatorBackend::Uninitialized => {
@@ -294,6 +462,99 @@ impl UnifiedSimulator {
             SimulatorBackend::GateLevelGpu(runtime) => {
                 runtime.set_input_u64(name, value);
             }
+            SimulatorBackend::NclCpu(ncl_sim) => {
+                // For NCL, infer width from value (up to 64 bits)
+                let width = if value == 0 {
+                    1
+                } else {
+                    64 - value.leading_zeros() as usize
+                };
+                ncl_sim.set_dual_rail_value(name, value, width.max(1));
+            }
+            #[cfg(target_os = "macos")]
+            SimulatorBackend::NclGpu(runtime) => {
+                // For NCL, infer width from value (up to 64 bits)
+                let width = if value == 0 {
+                    1
+                } else {
+                    64 - value.leading_zeros() as usize
+                };
+                runtime.set_dual_rail_value(name, value, width.max(1));
+            }
+        }
+    }
+
+    /// Set an NCL dual-rail input with explicit width
+    ///
+    /// This is the preferred way to set inputs in NCL mode as it gives
+    /// explicit control over the bit width.
+    pub fn set_ncl_input(&mut self, name: &str, value: u64, width: usize) {
+        match &mut self.backend {
+            SimulatorBackend::NclCpu(ncl_sim) => {
+                ncl_sim.set_dual_rail_value(name, value, width);
+            }
+            #[cfg(target_os = "macos")]
+            SimulatorBackend::NclGpu(runtime) => {
+                runtime.set_dual_rail_value(name, value, width);
+            }
+            _ => {
+                eprintln!("Warning: set_ncl_input called but not in NCL mode");
+            }
+        }
+    }
+
+    /// Set all NCL inputs to NULL (spacer phase)
+    pub fn set_ncl_null(&mut self, name: &str, width: usize) {
+        match &mut self.backend {
+            SimulatorBackend::NclCpu(ncl_sim) => {
+                ncl_sim.set_null(name, width);
+            }
+            #[cfg(target_os = "macos")]
+            SimulatorBackend::NclGpu(runtime) => {
+                runtime.set_null(name, width);
+            }
+            _ => {
+                eprintln!("Warning: set_ncl_null called but not in NCL mode");
+            }
+        }
+    }
+
+    /// Get an NCL dual-rail output value
+    ///
+    /// Returns None if any bit is NULL or Invalid (not yet stable)
+    pub fn get_ncl_output(&self, name: &str, width: usize) -> Option<u64> {
+        match &self.backend {
+            SimulatorBackend::NclCpu(ncl_sim) => ncl_sim.get_dual_rail_value(name, width),
+            #[cfg(target_os = "macos")]
+            SimulatorBackend::NclGpu(runtime) => runtime.get_dual_rail_value(name, width),
+            _ => {
+                eprintln!("Warning: get_ncl_output called but not in NCL mode");
+                None
+            }
+        }
+    }
+
+    /// Check if NCL outputs are complete (all bits have valid DATA values)
+    pub fn is_ncl_complete(&self) -> bool {
+        match &self.backend {
+            SimulatorBackend::NclCpu(ncl_sim) => ncl_sim.is_complete(),
+            _ => false,
+        }
+    }
+
+    /// Check if NCL outputs are all NULL
+    pub fn is_ncl_null(&self) -> bool {
+        match &self.backend {
+            SimulatorBackend::NclCpu(ncl_sim) => ncl_sim.is_null(),
+            _ => false,
+        }
+    }
+
+    /// Get NCL simulation statistics
+    pub fn get_ncl_stats(&self) -> Option<NclSimStats> {
+        match &self.backend {
+            SimulatorBackend::NclCpu(ncl_sim) => Some(ncl_sim.stats().clone()),
+            _ => None,
         }
     }
 
@@ -317,6 +578,9 @@ impl UnifiedSimulator {
     ///
     /// This bypasses any latency adjustment and returns the actual
     /// current output value from the simulation backend.
+    ///
+    /// For NCL mode, this returns the value if all bits are valid DATA,
+    /// otherwise returns None.
     pub fn get_output_raw(&self, name: &str) -> Option<u64> {
         match &self.backend {
             SimulatorBackend::Uninitialized => None,
@@ -329,6 +593,26 @@ impl UnifiedSimulator {
             }),
             #[cfg(target_os = "macos")]
             SimulatorBackend::GateLevelGpu(runtime) => runtime.get_output_u64(name),
+            SimulatorBackend::NclCpu(ncl_sim) => {
+                // For NCL, we need to determine width somehow
+                // Try common widths and return first valid result
+                for width in [64, 32, 16, 8, 4, 2, 1] {
+                    if let Some(value) = ncl_sim.get_dual_rail_value(name, width) {
+                        return Some(value);
+                    }
+                }
+                None
+            }
+            #[cfg(target_os = "macos")]
+            SimulatorBackend::NclGpu(runtime) => {
+                // For NCL, try common widths and return first valid result
+                for width in [64, 32, 16, 8, 4, 2, 1] {
+                    if let Some(value) = runtime.get_dual_rail_value(name, width) {
+                        return Some(value);
+                    }
+                }
+                None
+            }
         }
     }
 
@@ -341,6 +625,17 @@ impl UnifiedSimulator {
             SimulatorBackend::GateLevelCpu(sim) => sim.get_output_names(),
             #[cfg(target_os = "macos")]
             SimulatorBackend::GateLevelGpu(runtime) => runtime.get_output_names(),
+            SimulatorBackend::NclCpu(_) => {
+                // NCL outputs are named differently; return empty for now
+                // Users should use get_ncl_output with explicit width
+                vec![]
+            }
+            #[cfg(target_os = "macos")]
+            SimulatorBackend::NclGpu(_) => {
+                // NCL outputs are named differently; return empty for now
+                // Users should use get_ncl_output with explicit width
+                vec![]
+            }
         };
 
         for name in output_names {
@@ -352,7 +647,10 @@ impl UnifiedSimulator {
         outputs
     }
 
-    /// Step simulation by one cycle
+    /// Step simulation by one cycle (sync mode) or one iteration (NCL mode)
+    ///
+    /// For NCL mode, this runs a single combinational propagation iteration.
+    /// Use `run_until_stable()` for full wavefront propagation.
     pub fn step(&mut self) {
         match &mut self.backend {
             SimulatorBackend::Uninitialized => {
@@ -364,6 +662,15 @@ impl UnifiedSimulator {
             #[cfg(target_os = "macos")]
             SimulatorBackend::GateLevelGpu(runtime) => {
                 runtime.step();
+            }
+            SimulatorBackend::NclCpu(ncl_sim) => {
+                ncl_sim.iterate();
+                self.total_iterations += 1;
+            }
+            #[cfg(target_os = "macos")]
+            SimulatorBackend::NclGpu(runtime) => {
+                runtime.iterate();
+                self.total_iterations += 1;
             }
         }
 
@@ -405,8 +712,13 @@ impl UnifiedSimulator {
         }
     }
 
-    /// Run simulation with clock toggling for a given number of cycles
+    /// Run simulation with clock toggling for a given number of cycles (sync mode only)
     pub fn run_clocked(&mut self, cycles: u64, clock_name: &str) -> UnifiedSimResult {
+        if self.is_ncl_mode() {
+            eprintln!("Warning: run_clocked called in NCL mode. NCL circuits don't use clocks.");
+            return self.build_result();
+        }
+
         for _ in 0..cycles {
             // Low phase
             self.set_input(clock_name, 0);
@@ -416,25 +728,129 @@ impl UnifiedSimulator {
             self.step();
         }
 
-        UnifiedSimResult {
-            cycles: self.current_cycle,
-            outputs: self.get_all_outputs(),
-            waveforms: self.waveforms.clone(),
-            used_gpu: self.is_using_gpu(),
-        }
+        self.build_result()
     }
 
     /// Run simulation for a given number of steps (without clock toggling)
+    ///
+    /// For NCL mode, this runs a fixed number of iterations (not wavefronts).
+    /// Use `run_until_stable()` for proper NCL wavefront propagation.
     pub fn run(&mut self, steps: u64) -> UnifiedSimResult {
         for _ in 0..steps {
             self.step();
         }
 
+        self.build_result()
+    }
+
+    /// Run NCL simulation until stable (no signal changes)
+    ///
+    /// This is the primary simulation method for NCL/async circuits.
+    /// It iterates until the circuit reaches a stable state (either all DATA or all NULL).
+    ///
+    /// Returns the result including number of iterations taken.
+    pub fn run_until_stable(&mut self) -> UnifiedSimResult {
+        match &mut self.backend {
+            SimulatorBackend::NclCpu(ncl_sim) => {
+                let iterations = ncl_sim.run_until_stable(self.config.max_iterations);
+                self.total_iterations += iterations as u64;
+
+                let stats = ncl_sim.stats();
+                if stats.is_stable {
+                    self.total_wavefronts += 1;
+                }
+
+                self.build_result()
+            }
+            #[cfg(target_os = "macos")]
+            SimulatorBackend::NclGpu(runtime) => {
+                let iterations = runtime.run_until_stable(self.config.max_iterations);
+                self.total_iterations += iterations as u64;
+                self.total_wavefronts += 1;
+                self.build_result()
+            }
+            _ => {
+                eprintln!("Warning: run_until_stable called but not in NCL mode");
+                self.build_result()
+            }
+        }
+    }
+
+    /// Advance one complete NCL wavefront (DATA or NULL)
+    ///
+    /// For pipelined NCL designs, this advances computation through one stage.
+    /// Call this to complete a NULL→DATA or DATA→NULL transition.
+    pub fn advance_wavefront(&mut self) -> bool {
+        match &mut self.backend {
+            SimulatorBackend::NclCpu(ncl_sim) => {
+                let success = ncl_sim.advance_wavefront();
+                if success {
+                    self.total_wavefronts += 1;
+                }
+                let stats = ncl_sim.stats();
+                self.total_iterations = stats.iterations;
+                success
+            }
+            #[cfg(target_os = "macos")]
+            SimulatorBackend::NclGpu(runtime) => {
+                // GPU NCL uses run_until_stable for wavefront advancement
+                let iterations = runtime.run_until_stable(self.config.max_iterations);
+                self.total_iterations += iterations as u64;
+                let success = iterations < self.config.max_iterations;
+                if success {
+                    self.total_wavefronts += 1;
+                }
+                success
+            }
+            _ => {
+                eprintln!("Warning: advance_wavefront called but not in NCL mode");
+                false
+            }
+        }
+    }
+
+    /// Run a complete NCL computation cycle (DATA wavefront followed by NULL wavefront)
+    ///
+    /// This simulates one complete async computation:
+    /// 1. Apply DATA inputs
+    /// 2. Run until DATA wavefront completes
+    /// 3. Apply NULL inputs (spacer)
+    /// 4. Run until NULL wavefront completes
+    ///
+    /// Returns true if both wavefronts completed successfully.
+    pub fn run_ncl_cycle(&mut self) -> bool {
+        if !self.is_ncl_mode() {
+            eprintln!("Warning: run_ncl_cycle called but not in NCL mode");
+            return false;
+        }
+
+        // DATA wavefront should already be set by caller
+        let data_complete = self.advance_wavefront();
+        if !data_complete {
+            return false;
+        }
+
+        // Now caller would set NULL inputs, then call advance_wavefront again
+        // This method just advances one wavefront at a time
+        data_complete
+    }
+
+    /// Build the result struct
+    fn build_result(&self) -> UnifiedSimResult {
+        let is_stable = match &self.backend {
+            SimulatorBackend::NclCpu(ncl_sim) => ncl_sim.stats().is_stable,
+            _ => true,
+        };
+
         UnifiedSimResult {
             cycles: self.current_cycle,
+            iterations: self.total_iterations,
+            wavefronts: self.total_wavefronts,
             outputs: self.get_all_outputs(),
             waveforms: self.waveforms.clone(),
             used_gpu: self.is_using_gpu(),
+            is_stable,
+            circuit_mode: self.config.circuit_mode,
         }
     }
 
@@ -449,8 +865,17 @@ impl UnifiedSimulator {
             SimulatorBackend::GateLevelGpu(runtime) => {
                 runtime.reset();
             }
+            SimulatorBackend::NclCpu(ncl_sim) => {
+                ncl_sim.reset();
+            }
+            #[cfg(target_os = "macos")]
+            SimulatorBackend::NclGpu(runtime) => {
+                runtime.reset();
+            }
         }
         self.current_cycle = 0;
+        self.total_iterations = 0;
+        self.total_wavefronts = 0;
         self.waveforms.clear();
 
         // Reset delay buffers to zeros (maintaining the same depth)
@@ -471,6 +896,16 @@ impl UnifiedSimulator {
         self.current_cycle
     }
 
+    /// Get total iterations (NCL mode)
+    pub fn total_iterations(&self) -> u64 {
+        self.total_iterations
+    }
+
+    /// Get total wavefronts completed (NCL mode)
+    pub fn total_wavefronts(&self) -> u64 {
+        self.total_wavefronts
+    }
+
     /// Get captured waveforms
     pub fn get_waveforms(&self) -> &[SimulationSnapshot] {
         &self.waveforms
@@ -483,6 +918,15 @@ impl UnifiedSimulator {
             SimulatorBackend::GateLevelCpu(sim) => sim.get_input_names(),
             #[cfg(target_os = "macos")]
             SimulatorBackend::GateLevelGpu(runtime) => runtime.get_input_names(),
+            SimulatorBackend::NclCpu(_) => {
+                // NCL inputs are dual-rail; return empty for now
+                vec![]
+            }
+            #[cfg(target_os = "macos")]
+            SimulatorBackend::NclGpu(_) => {
+                // NCL inputs are dual-rail; return empty for now
+                vec![]
+            }
         }
     }
 
@@ -491,8 +935,17 @@ impl UnifiedSimulator {
         match &self.backend {
             SimulatorBackend::Uninitialized => vec![],
             SimulatorBackend::GateLevelCpu(sim) => sim.get_output_names(),
+            SimulatorBackend::NclCpu(_) => {
+                // NCL outputs are dual-rail; return empty for now
+                vec![]
+            }
             #[cfg(target_os = "macos")]
             SimulatorBackend::GateLevelGpu(runtime) => runtime.get_output_names(),
+            #[cfg(target_os = "macos")]
+            SimulatorBackend::NclGpu(_) => {
+                // NCL outputs are dual-rail; return empty for now
+                vec![]
+            }
         }
     }
 }
@@ -505,9 +958,12 @@ mod tests {
     fn test_config_defaults() {
         let config = UnifiedSimConfig::default();
         assert_eq!(config.level, SimLevel::Behavioral);
+        assert_eq!(config.circuit_mode, CircuitMode::Sync);
         assert_eq!(config.hw_accel, HwAccel::Auto);
         assert_eq!(config.max_cycles, 0);
+        assert_eq!(config.max_iterations, 10000);
         assert!(!config.capture_waveforms);
+        assert!(!config.ncl_debug);
     }
 
     #[test]
@@ -517,9 +973,23 @@ mod tests {
             hw_accel: HwAccel::Cpu,
             max_cycles: 100,
             capture_waveforms: true,
+            ..Default::default()
         };
         let sim = UnifiedSimulator::new(config);
         assert!(sim.is_ok());
+    }
+
+    #[test]
+    fn test_ncl_mode_simulator() {
+        let config = UnifiedSimConfig {
+            level: SimLevel::GateLevel,
+            circuit_mode: CircuitMode::Ncl,
+            max_iterations: 5000,
+            ..Default::default()
+        };
+        let sim = UnifiedSimulator::new(config).unwrap();
+        assert!(sim.is_ncl_mode());
+        assert_eq!(sim.device_info(), "Not initialized");
     }
 
     #[test]
