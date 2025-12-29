@@ -723,6 +723,7 @@ impl GateLevelTestbench {
             hw_accel: if use_gpu { HwAccel::Auto } else { HwAccel::Cpu },
             max_cycles: 1_000_000,
             capture_waveforms: true,
+            ..Default::default()
         };
 
         Self::with_config(source_path, config)

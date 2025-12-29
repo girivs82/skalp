@@ -114,6 +114,9 @@ enum NclPrimitiveType {
     Mux2 = 9,
     Const0 = 10,
     Const1 = 11,
+    // Arithmetic cells
+    HalfAdder = 12,
+    FullAdder = 13,
 
     // NCL threshold gates (stateful - need hysteresis)
     Th12 = 20,
@@ -141,7 +144,7 @@ struct GpuNclCell {
     inputs: [u32; 8],
     /// Number of inputs
     num_inputs: u32,
-    /// Output net index
+    /// Primary output net index (sum for adders)
     output: u32,
     /// State index (-1 if no state needed)
     state_index: i32,
@@ -149,8 +152,8 @@ struct GpuNclCell {
     threshold_m: u32,
     /// For generic THmn: n inputs
     threshold_n: u32,
-    /// Padding for alignment
-    _padding: u32,
+    /// Secondary output net index (carry for adders, 0xFFFFFFFF if unused)
+    output2: u32,
 }
 
 #[cfg(target_os = "macos")]
@@ -290,8 +293,11 @@ impl GpuNclRuntime {
             return NclPrimitiveType::NclCompletion;
         }
 
+        // Strip library suffix (e.g., "AND2_X1" -> "AND2")
+        let base_type = upper.split('_').next().unwrap_or(&upper).to_string();
+
         // Standard gates
-        match upper.as_str() {
+        match base_type.as_str() {
             "AND2" => NclPrimitiveType::And2,
             "AND3" => NclPrimitiveType::And3,
             "AND4" => NclPrimitiveType::And4,
@@ -302,9 +308,25 @@ impl GpuNclRuntime {
             "INV" | "NOT" => NclPrimitiveType::Inv,
             "BUF" | "BUFFER" => NclPrimitiveType::Buf,
             "MUX2" => NclPrimitiveType::Mux2,
-            "TIE_HIGH" | "TIEH" | "VDD" => NclPrimitiveType::Const1,
-            "TIE_LOW" | "TIEL" | "GND" | "VSS" => NclPrimitiveType::Const0,
-            _ => NclPrimitiveType::Buf, // Default
+            "TIE" | "TIEH" | "VDD" if upper.contains("HIGH") => NclPrimitiveType::Const1,
+            "TIE" | "TIEL" | "GND" | "VSS" if !upper.contains("HIGH") => NclPrimitiveType::Const0,
+            // Arithmetic cells
+            "HA" | "HALFADDER" | "HALF" => NclPrimitiveType::HalfAdder,
+            "FA" | "FULLADDER" | "FULL" => NclPrimitiveType::FullAdder,
+            _ => {
+                // Check for full name match for tie cells
+                if upper.starts_with("TIE_HIGH") || upper == "TIEH" || upper == "VDD" {
+                    NclPrimitiveType::Const1
+                } else if upper.starts_with("TIE_LOW")
+                    || upper == "TIEL"
+                    || upper == "GND"
+                    || upper == "VSS"
+                {
+                    NclPrimitiveType::Const0
+                } else {
+                    NclPrimitiveType::Buf // Default
+                }
+            }
         }
     }
 
@@ -357,6 +379,9 @@ impl GpuNclRuntime {
                     (0, 0)
                 };
 
+                // Get secondary output for multi-output cells (HA/FA carry)
+                let output2 = cell.outputs.get(1).map(|&o| o as u32).unwrap_or(0xFFFFFFFF);
+
                 let gpu_cell = GpuNclCell {
                     ptype: cell.ptype as u32,
                     inputs,
@@ -365,7 +390,7 @@ impl GpuNclRuntime {
                     state_index: cell.state_index,
                     threshold_m,
                     threshold_n,
-                    _padding: 0,
+                    output2,
                 };
 
                 unsafe {
@@ -444,6 +469,9 @@ constant uint PTYPE_BUF = 8;
 constant uint PTYPE_MUX2 = 9;
 constant uint PTYPE_CONST0 = 10;
 constant uint PTYPE_CONST1 = 11;
+// Arithmetic cells
+constant uint PTYPE_HALFADDER = 12;
+constant uint PTYPE_FULLADDER = 13;
 
 // THmn threshold gates (stateful)
 constant uint PTYPE_TH12 = 20;
@@ -467,7 +495,7 @@ struct NclCell {
     int state_index;
     uint threshold_m;
     uint threshold_n;
-    uint _padding;
+    uint output2;  // Secondary output for multi-output cells (carry for adders)
 };
 
 // Evaluate THmn gate with hysteresis
@@ -523,6 +551,10 @@ uint eval_comb_gate(uint ptype, uint in0, uint in1, uint in2, uint in3) {
         case PTYPE_MUX2: return (in2 == 0) ? in0 : in1;
         case PTYPE_CONST0: return 0;
         case PTYPE_CONST1: return 1;
+        // Arithmetic: HalfAdder sum = a XOR b
+        case PTYPE_HALFADDER: return in0 ^ in1;
+        // Arithmetic: FullAdder sum = a XOR b XOR cin
+        case PTYPE_FULLADDER: return in0 ^ in1 ^ in2;
         default: return 0;
     }
 }
@@ -620,12 +652,31 @@ kernel void eval_ncl(
         result = eval_comb_gate(ptype, in0, in1, in2, in3);
     }
 
-    // Write output and check for change
+    // Write primary output and check for change
     uint old_value = signals_out[cell.output];
     signals_out[cell.output] = result;
 
     if (old_value != result) {
         atomic_fetch_add_explicit(change_count, 1, memory_order_relaxed);
+    }
+
+    // Handle secondary output for multi-output cells (HalfAdder, FullAdder)
+    if (cell.output2 != 0xFFFFFFFF) {
+        uint carry = 0;
+        if (ptype == PTYPE_HALFADDER) {
+            // HalfAdder carry = a AND b
+            carry = in0 & in1;
+        } else if (ptype == PTYPE_FULLADDER) {
+            // FullAdder carry = (a AND b) OR (cin AND (a XOR b))
+            carry = (in0 & in1) | (in2 & (in0 ^ in1));
+        }
+
+        uint old_carry = signals_out[cell.output2];
+        signals_out[cell.output2] = carry;
+
+        if (old_carry != carry) {
+            atomic_fetch_add_explicit(change_count, 1, memory_order_relaxed);
+        }
     }
 }
 "#
@@ -681,12 +732,19 @@ kernel void eval_ncl(
     }
 
     /// Set a dual-rail input value
+    ///
+    /// The layout is: t rails first [0..width), then f rails [width..2*width)
     pub fn set_dual_rail_value(&mut self, name: &str, value: u64, width: usize) {
         if let Some(nets) = self.signal_name_to_nets.get(name).cloned() {
+            // Determine actual width from signal nets (t rails + f rails)
+            let actual_width = nets.len() / 2;
+            let width = width.min(actual_width);
+
             for bit in 0..width {
                 let bit_value = (value >> bit) & 1 != 0;
-                let t_idx = bit * 2;
-                let f_idx = bit * 2 + 1;
+                // Layout: [t0, t1, ..., tN-1, f0, f1, ..., fN-1]
+                let t_idx = bit;
+                let f_idx = actual_width + bit;
 
                 if let Some(&t_net) = nets.get(t_idx) {
                     self.set_net(t_net, bit_value);
@@ -699,11 +757,18 @@ kernel void eval_ncl(
     }
 
     /// Set all inputs to NULL (both rails low)
+    ///
+    /// The layout is: t rails first [0..width), then f rails [width..2*width)
     pub fn set_null(&mut self, name: &str, width: usize) {
         if let Some(nets) = self.signal_name_to_nets.get(name).cloned() {
+            // Determine actual width from signal nets
+            let actual_width = nets.len() / 2;
+            let width = width.min(actual_width);
+
             for bit in 0..width {
-                let t_idx = bit * 2;
-                let f_idx = bit * 2 + 1;
+                // Layout: [t0, t1, ..., tN-1, f0, f1, ..., fN-1]
+                let t_idx = bit;
+                let f_idx = actual_width + bit;
 
                 if let Some(&t_net) = nets.get(t_idx) {
                     self.set_net(t_net, false);
@@ -716,13 +781,20 @@ kernel void eval_ncl(
     }
 
     /// Get a dual-rail output value
+    ///
+    /// The layout is: t rails first [0..width), then f rails [width..2*width)
     pub fn get_dual_rail_value(&self, name: &str, width: usize) -> Option<u64> {
         let nets = self.signal_name_to_nets.get(name)?;
         let mut result = 0u64;
 
+        // Determine actual width from signal nets
+        let actual_width = nets.len() / 2;
+        let width = width.min(actual_width);
+
         for bit in 0..width {
-            let t_idx = bit * 2;
-            let f_idx = bit * 2 + 1;
+            // Layout: [t0, t1, ..., tN-1, f0, f1, ..., fN-1]
+            let t_idx = bit;
+            let f_idx = actual_width + bit;
 
             let t = nets.get(t_idx).map(|&n| self.get_net(n)).unwrap_or(false);
             let f = nets.get(f_idx).map(|&n| self.get_net(n)).unwrap_or(false);
@@ -893,6 +965,23 @@ kernel void eval_ncl(
                 }
                 NclPrimitiveType::Const0 => false,
                 NclPrimitiveType::Const1 => true,
+                NclPrimitiveType::HalfAdder => {
+                    // HalfAdder: sum = a XOR b, carry = a AND b
+                    // For single output, we return sum (first output)
+                    // Carry is handled via second output below
+                    let a = inputs.first().copied().unwrap_or(false);
+                    let b = inputs.get(1).copied().unwrap_or(false);
+                    a ^ b // sum
+                }
+                NclPrimitiveType::FullAdder => {
+                    // FullAdder: sum = a XOR b XOR cin, cout = (a AND b) OR (cin AND (a XOR b))
+                    // For single output, we return sum (first output)
+                    // Carry is handled via second output below
+                    let a = inputs.first().copied().unwrap_or(false);
+                    let b = inputs.get(1).copied().unwrap_or(false);
+                    let cin = inputs.get(2).copied().unwrap_or(false);
+                    a ^ b ^ cin // sum
+                }
                 NclPrimitiveType::Th12
                 | NclPrimitiveType::Th22
                 | NclPrimitiveType::Th13
@@ -967,6 +1056,7 @@ kernel void eval_ncl(
                 }
             };
 
+            // Write outputs
             if let Some(&out_idx) = cell.outputs.first() {
                 let old_value = self.cpu_net_values.get(out_idx).copied().unwrap_or(false);
                 if old_value != result {
@@ -974,6 +1064,34 @@ kernel void eval_ncl(
                 }
                 if let Some(val) = self.cpu_net_values.get_mut(out_idx) {
                     *val = result;
+                }
+            }
+
+            // Handle multi-output cells (HalfAdder, FullAdder have carry as second output)
+            if cell.outputs.len() > 1 {
+                let carry = match cell.ptype {
+                    NclPrimitiveType::HalfAdder => {
+                        let a = inputs.first().copied().unwrap_or(false);
+                        let b = inputs.get(1).copied().unwrap_or(false);
+                        a && b // carry
+                    }
+                    NclPrimitiveType::FullAdder => {
+                        let a = inputs.first().copied().unwrap_or(false);
+                        let b = inputs.get(1).copied().unwrap_or(false);
+                        let cin = inputs.get(2).copied().unwrap_or(false);
+                        (a && b) || (cin && (a ^ b)) // carry out
+                    }
+                    _ => false, // Other multi-output cells don't need special handling
+                };
+
+                if let Some(&carry_idx) = cell.outputs.get(1) {
+                    let old_carry = self.cpu_net_values.get(carry_idx).copied().unwrap_or(false);
+                    if old_carry != carry {
+                        changes += 1;
+                    }
+                    if let Some(val) = self.cpu_net_values.get_mut(carry_idx) {
+                        *val = carry;
+                    }
                 }
             }
         }
@@ -1045,23 +1163,36 @@ kernel void eval_ncl(
 }
 
 /// Strip bit suffix from signal name
+///
+/// For multi-bit dual-rail signals, we need to handle patterns like:
+/// - `signal[0]` → `signal`
+/// - `signal_t0` → `signal`
+/// - `signal_t[0]` → `signal` (both suffixes)
 fn strip_bit_suffix(name: &str) -> String {
-    // Handle [N] suffix
-    if let Some(bracket_pos) = name.find('[') {
-        return name[..bracket_pos].to_string();
+    let mut result = name.to_string();
+
+    // Step 1: Strip [N] suffix if present
+    if let Some(bracket_pos) = result.find('[') {
+        result = result[..bracket_pos].to_string();
     }
 
-    // Handle _tN or _fN suffix (dual-rail)
-    if let Some(underscore_pos) = name.rfind('_') {
-        let suffix = &name[underscore_pos + 1..];
-        if (suffix.starts_with('t') || suffix.starts_with('f'))
+    // Step 2: Strip _t or _f suffix for dual-rail signals
+    // Handle both `_t` and `_tN` patterns
+    if let Some(underscore_pos) = result.rfind('_') {
+        let suffix = &result[underscore_pos + 1..];
+        // Check for bare _t or _f
+        if suffix == "t" || suffix == "f" {
+            result = result[..underscore_pos].to_string();
+        }
+        // Check for _tN or _fN where N is digits
+        else if (suffix.starts_with('t') || suffix.starts_with('f'))
             && suffix[1..].chars().all(|c| c.is_ascii_digit())
         {
-            return name[..underscore_pos].to_string();
+            result = result[..underscore_pos].to_string();
         }
     }
 
-    name.to_string()
+    result
 }
 
 /// Parse THmn pattern from cell type string
