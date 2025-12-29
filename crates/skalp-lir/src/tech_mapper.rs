@@ -267,10 +267,22 @@ impl<'a> TechMapper<'a> {
                 let is_ncl_f = Self::is_ncl_false_rail(&output_signal.name);
 
                 if is_ncl_t || is_ncl_f {
-                    // NCL AND on dual rails → C-element (Muller gate)
-                    // C-element: Q = (a & b) | (Q & (a | b))
-                    // Built from standard gates with feedback
-                    self.map_c_element(*width, &input_nets, &output_nets, &node.path);
+                    // NCL AND on dual rails → C-element (TH22)
+                    // Check if library has native TH22 cells
+                    if self.library.find_best_cell(&CellFunction::Th22).is_some() {
+                        // Use native TH22 from library
+                        self.map_bitwise_gate(
+                            CellFunction::Th22,
+                            *width,
+                            &input_nets,
+                            &output_nets,
+                            &node.path,
+                        );
+                    } else {
+                        // Synthesize C-element from standard gates
+                        // C-element: Q = (a & b) | (Q & (a | b))
+                        self.map_c_element(*width, &input_nets, &output_nets, &node.path);
+                    }
                 } else {
                     // Regular AND
                     self.map_bitwise_gate(
@@ -289,16 +301,29 @@ impl<'a> TechMapper<'a> {
                 let is_ncl_f = Self::is_ncl_false_rail(&output_signal.name);
 
                 if is_ncl_f || is_ncl_t {
-                    // NCL OR on dual rails - use standard OR
-                    // In NCL data flow, TH12 behavior is equivalent to OR
-                    // (hysteresis only matters during NULL phase which simulation handles)
-                    self.map_bitwise_gate(
-                        CellFunction::Or2,
-                        *width,
-                        &input_nets,
-                        &output_nets,
-                        &node.path,
-                    );
+                    // NCL OR on dual rails → TH12 (1-of-2)
+                    // Check if library has native TH12 cells
+                    if self.library.find_best_cell(&CellFunction::Th12).is_some() {
+                        // Use native TH12 from library
+                        self.map_bitwise_gate(
+                            CellFunction::Th12,
+                            *width,
+                            &input_nets,
+                            &output_nets,
+                            &node.path,
+                        );
+                    } else {
+                        // Fall back to standard OR
+                        // In NCL data flow, TH12 behavior is approximated by OR
+                        // (full hysteresis handled by C-elements in the circuit)
+                        self.map_bitwise_gate(
+                            CellFunction::Or2,
+                            *width,
+                            &input_nets,
+                            &output_nets,
+                            &node.path,
+                        );
+                    }
                 } else {
                     // Regular OR
                     self.map_bitwise_gate(
