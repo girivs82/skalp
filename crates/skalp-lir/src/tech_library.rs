@@ -2357,6 +2357,16 @@ fn parse_cell_function(s: &str) -> Result<CellFunction, LibraryLoadError> {
         "always_on_buf" | "aob" => Ok(CellFunction::AlwaysOnBuf),
         "tie_high" | "tieh" => Ok(CellFunction::TieHigh),
         "tie_low" | "tiel" => Ok(CellFunction::TieLow),
+        // NCL Threshold gates
+        "th12" => Ok(CellFunction::Th12),
+        "th22" => Ok(CellFunction::Th22),
+        "th13" => Ok(CellFunction::Th13),
+        "th23" => Ok(CellFunction::Th23),
+        "th33" => Ok(CellFunction::Th33),
+        "th14" => Ok(CellFunction::Th14),
+        "th24" => Ok(CellFunction::Th24),
+        "th34" => Ok(CellFunction::Th34),
+        "th44" => Ok(CellFunction::Th44),
         // I/O Pads
         "input_pad" | "ipad" => Ok(CellFunction::InputPad),
         "output_pad" | "opad" => Ok(CellFunction::OutputPad),
