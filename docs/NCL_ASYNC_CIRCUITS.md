@@ -457,6 +457,130 @@ impl NclFSM {
 
 ---
 
+## NCL Optimization
+
+Unlike synchronous circuits that use AIG (And-Inverter Graph) optimization, NCL circuits require specialized optimizations that preserve dual-rail encoding and threshold gate semantics.
+
+### Why Standard Optimizations Don't Apply
+
+| Aspect | AIG (Sync) | NCL (Async) |
+|--------|-----------|-------------|
+| Encoding | Single-rail | Dual-rail (must preserve) |
+| Gates | Stateless AND/INV | Stateful THmn with hysteresis |
+| NOT | Inverter gate | Rail swap (zero gates) |
+| Constraints | Timing only | NULL/DATA wavefront semantics |
+
+### NCL Optimization Passes
+
+SKALP includes an NCL-specific optimizer (`NclOptimizer`) with six passes:
+
+| Pass | Description | Typical Reduction |
+|------|-------------|-------------------|
+| **Constant Propagation** | Propagate DATA_TRUE/DATA_FALSE through THmn | Variable |
+| **Idempotent Collapse** | TH12(a,a)→a, TH22(a,a)→a | 5-15% |
+| **NOT Propagation** | Push NOT through graph (De Morgan for NCL) | 10-20% |
+| **Threshold Gate Merging** | TH22(TH22,TH22)→TH44 | 20-50% |
+| **Completion Sharing** | Share identical completion trees | 30-70% |
+| **Dead Rail Elimination** | Remove unused dual-rail signals | Variable |
+
+### NCL Algebraic Identities
+
+The optimizer exploits these NCL-specific identities:
+
+```
+// Idempotent rules
+TH12(a, a) = a
+TH22(a, a) = a
+TH1n(a, a, ..., a) = a
+
+// Constant propagation
+TH12(a, 1) = 1
+TH22(a, 0) = 0
+TH12(0, 0) = 0
+TH22(1, 1) = 1
+
+// De Morgan for NCL (NOT propagation)
+TH22(NOT(a), NOT(b)) = NOT(TH12(a, b))
+TH12(NOT(a), NOT(b)) = NOT(TH22(a, b))
+
+// Threshold gate merging
+TH22(TH22(a,b), TH22(c,d)) → TH44(a,b,c,d)  // When no reconvergent fanout
+TH12(TH12(a,b), TH12(c,d)) → TH14(a,b,c,d)
+```
+
+### Using the NCL Optimizer
+
+```rust
+use skalp_lir::{NclOptimizer, NclOptConfig, GateNetlist};
+
+// Default optimization (all passes enabled)
+let mut opt = NclOptimizer::new();
+let stats = opt.optimize(&mut netlist);
+
+println!("Original gates: {}", stats.original_gates);
+println!("Final gates: {}", stats.final_gates);
+println!("Reduction: {:.1}%", stats.reduction_percent());
+
+// Custom configuration
+let config = NclOptConfig {
+    propagate_not: true,
+    merge_threshold_gates: true,
+    eliminate_dead_rails: true,
+    propagate_constants: true,
+    collapse_idempotent: true,
+    share_completion: true,
+    balance_completion: true,
+    max_threshold_inputs: 4,  // Allow up to TH44
+};
+let mut opt = NclOptimizer::with_config(config);
+let stats = opt.optimize(&mut netlist);
+```
+
+### Optimization Statistics
+
+The optimizer reports detailed statistics:
+
+```rust
+pub struct NclOptStats {
+    pub not_eliminated: usize,       // NOTs removed by rail swap
+    pub gates_merged: usize,         // THmn gates merged
+    pub dead_rails_eliminated: usize, // Unused rails removed
+    pub constants_propagated: usize,  // Constants folded
+    pub idempotent_collapsed: usize,  // TH(a,a) collapsed
+    pub completions_shared: usize,    // Completion trees shared
+    pub original_gates: usize,
+    pub final_gates: usize,
+}
+```
+
+### Optimization Example
+
+Before optimization:
+```
+// Inefficient NCL for AND-OR pattern
+TH22(a_t, b_t) → and_t
+TH12(a_f, b_f) → and_f
+TH22(and_t, and_t) → dup_t    // Idempotent!
+TH12(c_t, d_t) → or_t
+TH22(c_f, d_f) → or_f
+NCL_COMPLETION(and_t, and_f) → comp1
+NCL_COMPLETION(and_t, and_f) → comp2  // Duplicate!
+```
+
+After optimization:
+```
+// Optimized NCL
+TH22(a_t, b_t) → and_t
+TH12(a_f, b_f) → and_f
+// dup_t removed (was idempotent TH22(and_t, and_t))
+TH12(c_t, d_t) → or_t
+TH22(c_f, d_f) → or_f
+NCL_COMPLETION(and_t, and_f) → comp1
+// comp2 removed (shared with comp1)
+```
+
+---
+
 ## Design Guidelines
 
 ### When to Use NCL
