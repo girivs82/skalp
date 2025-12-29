@@ -303,6 +303,15 @@ impl<'a> TechMapper<'a> {
                     &node.path,
                 );
             }
+            LirOp::Buf { width } | LirOp::Buffer { width } => {
+                self.map_unary_gate(
+                    CellFunction::Buf,
+                    *width,
+                    &input_nets,
+                    &output_nets,
+                    &node.path,
+                );
+            }
 
             // Adder - ripple carry chain
             LirOp::Add { width, has_carry } => {
@@ -444,17 +453,6 @@ impl<'a> TechMapper<'a> {
                     &node.path,
                     clock_net,
                     reset_net,
-                );
-            }
-
-            // Buffer
-            LirOp::Buffer { width } => {
-                self.map_unary_gate(
-                    CellFunction::Buf,
-                    *width,
-                    &input_nets,
-                    &output_nets,
-                    &node.path,
                 );
             }
 
@@ -3337,8 +3335,18 @@ impl<'a> TechMapper<'a> {
         let mut bit_completes = Vec::new();
 
         for i in 0..width as usize {
-            let in_t = inputs[0].get(i * 2).copied().unwrap_or(GateNetId(0));
-            let in_f = inputs[0].get(i * 2 + 1).copied().unwrap_or(GateNetId(0));
+            // inputs[i*2] contains the t rail nets, inputs[i*2+1] contains the f rail nets
+            // Each input is a separate signal from the NCL expansion
+            let in_t = inputs
+                .get(i * 2)
+                .and_then(|v| v.first())
+                .copied()
+                .unwrap_or(GateNetId(0));
+            let in_f = inputs
+                .get(i * 2 + 1)
+                .and_then(|v| v.first())
+                .copied()
+                .unwrap_or(GateNetId(0));
 
             let bit_complete = self.alloc_net_id();
             self.netlist.add_net(GateNet::new(

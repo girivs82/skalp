@@ -668,6 +668,9 @@ pub enum LirOp {
     Nand { width: u32 },
     /// Bitwise NOR
     Nor { width: u32 },
+    /// Buffer (identity): result = a
+    /// Used for wire connections and NCL rail swapping
+    Buf { width: u32 },
 
     // === Comparison ===
     /// Equality: result = (a == b)
@@ -820,7 +823,8 @@ impl LirOp {
             | LirOp::Xor { width }
             | LirOp::Not { width }
             | LirOp::Nand { width }
-            | LirOp::Nor { width } => *width,
+            | LirOp::Nor { width }
+            | LirOp::Buf { width } => *width,
             LirOp::Eq { .. }
             | LirOp::Ne { .. }
             | LirOp::Lt { .. }
@@ -870,6 +874,7 @@ impl LirOp {
     pub fn input_count(&self) -> usize {
         match self {
             LirOp::Not { .. }
+            | LirOp::Buf { .. }
             | LirOp::RedAnd { .. }
             | LirOp::RedOr { .. }
             | LirOp::RedXor { .. } => 1,

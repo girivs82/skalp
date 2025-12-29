@@ -385,6 +385,16 @@ impl<'hir> HirToMir<'hir> {
                 });
             }
 
+            // Propagate async (NCL) flag from HIR entity to MIR module
+            // NCL modules use dual-rail encoding and have no clocks
+            if entity.is_async {
+                module.is_async = true;
+                eprintln!(
+                    "⚡ NCL: Entity '{}' is async (will use dual-rail NCL synthesis)",
+                    entity.name
+                );
+            }
+
             // Convert generic parameters
             for hir_generic in &entity.generics {
                 let parameter = GenericParameter {

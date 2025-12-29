@@ -15,6 +15,7 @@
 
 use crate::compiled_ip::CompiledIp;
 use crate::lir::{Lir, LirOp, LirSafetyInfo, LirSignalId, LirStats};
+use crate::ncl_expand::{expand_to_ncl, NclConfig};
 use skalp_mir::mir::{
     AssignmentKind, BinaryOp, Block, ContinuousAssign, DataType, EdgeType, Expression,
     ExpressionKind, LValue, Module, PortDirection, PortId, Process, ProcessKind, ReduceOp,
@@ -176,10 +177,28 @@ impl MirToLirTransform {
         self.lir.clocks = std::mem::take(&mut self.clock_signals);
         self.lir.resets = std::mem::take(&mut self.reset_signals);
 
-        let stats = LirStats::from_lir(&self.lir);
+        // Phase 6: NCL expansion for async modules
+        // Convert synchronous LIR to dual-rail NCL logic
+        let final_lir = if module.is_async {
+            eprintln!(
+                "⚡ NCL: Expanding module '{}' to dual-rail NCL logic",
+                module.name
+            );
+            let ncl_result = expand_to_ncl(&self.lir, &NclConfig::default());
+            eprintln!(
+                "⚡ NCL: Expanded {} signals -> {} dual-rail signals",
+                self.lir.signals.len(),
+                ncl_result.lir.signals.len()
+            );
+            ncl_result.lir
+        } else {
+            self.lir.clone()
+        };
+
+        let stats = LirStats::from_lir(&final_lir);
 
         MirToLirResult {
-            lir: self.lir.clone(),
+            lir: final_lir,
             stats,
             warnings: std::mem::take(&mut self.warnings),
             compiled_ip_path: None,

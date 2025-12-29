@@ -64,7 +64,22 @@ pub struct NclExpandResult {
     pub stage_completions: Vec<LirSignalId>,
 }
 
-/// A pair of signals representing dual-rail encoding
+/// A signal representing dual-rail encoding.
+///
+/// For a W-bit logical signal, this is a 2W-bit signal where:
+/// - Bits [0, 2, 4, ...] are the true rails
+/// - Bits [1, 3, 5, ...] are the false rails
+///
+/// This allows the tech_mapper to correctly map NCL operations.
+#[derive(Debug, Clone, Copy)]
+pub struct DualRailSignal {
+    /// The combined dual-rail signal ID
+    pub id: LirSignalId,
+    /// The original logical width (actual signal width is 2x this)
+    pub logical_width: u32,
+}
+
+/// Legacy pair representation (for backward compatibility during transition)
 #[derive(Debug, Clone, Copy)]
 pub struct DualRailPair {
     /// True rail signal ID
@@ -144,56 +159,74 @@ impl NclExpander {
 
     /// Expand a single-rail AND to NCL dual-rail
     /// AND(a,b): t = TH22(a_t, b_t), f = TH12(a_f, b_f)
-    fn expand_and(&mut self, a: DualRailPair, b: DualRailPair, width: u32) -> DualRailPair {
-        let t = self.alloc_signal(format!("and_t_{}", self.next_signal_id), width);
-        let f = self.alloc_signal(format!("and_f_{}", self.next_signal_id), width);
-
-        // True rail: TH22(a_t, b_t) - both inputs must be true
-        self.alloc_node(LirOp::NclAnd { width }, vec![a.t, b.t], t);
-
-        // Actually the AND operation in NCL:
-        // - For the TRUE rail: we need a TH22 (C-element) of the true rails
-        // - For the FALSE rail: we need a TH12 (OR) of the false rails
-        // The NclAnd LirOp should handle this internally
-
-        DualRailPair { t, f }
+    /// For now, approximate with regular And/Or until TH gates are implemented
+    /// Uses the destination dual-rail pair to ensure proper signal connectivity
+    fn expand_and(&mut self, a: DualRailPair, b: DualRailPair, dest: DualRailPair, width: u32) {
+        // NCL AND:
+        // - True rail: dest.t = a_t AND b_t (approximates TH22)
+        // - False rail: dest.f = a_f OR b_f (approximates TH12)
+        self.alloc_node(LirOp::And { width }, vec![a.t, b.t], dest.t);
+        self.alloc_node(LirOp::Or { width }, vec![a.f, b.f], dest.f);
     }
 
     /// Expand a single-rail OR to NCL dual-rail
     /// OR(a,b): t = TH12(a_t, b_t), f = TH22(a_f, b_f)
-    fn expand_or(&mut self, a: DualRailPair, b: DualRailPair, width: u32) -> DualRailPair {
-        let t = self.alloc_signal(format!("or_t_{}", self.next_signal_id), width);
-        let f = self.alloc_signal(format!("or_f_{}", self.next_signal_id), width);
-
-        self.alloc_node(LirOp::NclOr { width }, vec![a.t, a.f, b.t, b.f], t);
-
-        DualRailPair { t, f }
+    /// For now, approximate with regular Or/And until TH gates are implemented
+    fn expand_or(&mut self, a: DualRailPair, b: DualRailPair, dest: DualRailPair, width: u32) {
+        // NCL OR:
+        // - True rail: dest.t = a_t OR b_t (approximates TH12)
+        // - False rail: dest.f = a_f AND b_f (approximates TH22)
+        self.alloc_node(LirOp::Or { width }, vec![a.t, b.t], dest.t);
+        self.alloc_node(LirOp::And { width }, vec![a.f, b.f], dest.f);
     }
 
     /// Expand a single-rail NOT to NCL dual-rail
     /// NOT(a): t = a_f, f = a_t (just swap rails)
-    fn expand_not(&mut self, a: DualRailPair, width: u32) -> DualRailPair {
-        let t = self.alloc_signal(format!("not_t_{}", self.next_signal_id), width);
-        let f = self.alloc_signal(format!("not_f_{}", self.next_signal_id), width);
+    /// Uses the destination dual-rail pair to ensure proper signal connectivity
+    fn expand_not(&mut self, a: DualRailPair, dest: DualRailPair, width: u32) {
+        // NCL NOT just swaps rails: dest.t gets a.f, dest.f gets a.t
+        // Create two buffer operations to implement the swap
+        // dest.t = buffer(a.f)
+        self.alloc_node(LirOp::Buf { width }, vec![a.f], dest.t);
+        // dest.f = buffer(a.t)
+        self.alloc_node(LirOp::Buf { width }, vec![a.t], dest.f);
+    }
 
-        self.alloc_node(LirOp::NclNot { width }, vec![a.t, a.f], t);
-
-        // For NOT, the output t rail is connected to input f rail, and vice versa
-        // This is handled by the NclNot operation
-        DualRailPair { t, f }
+    /// Expand a buffer (identity) to NCL dual-rail
+    /// BUF(a): t = a_t, f = a_f (copy both rails)
+    /// Uses the destination dual-rail pair to ensure proper signal connectivity
+    fn expand_buf(&mut self, a: DualRailPair, dest: DualRailPair, width: u32) {
+        // NCL buffer copies both rails: dest.t gets a.t, dest.f gets a.f
+        // dest.t = buffer(a.t)
+        self.alloc_node(LirOp::Buf { width }, vec![a.t], dest.t);
+        // dest.f = buffer(a.f)
+        self.alloc_node(LirOp::Buf { width }, vec![a.f], dest.f);
     }
 
     /// Expand XOR to NCL dual-rail
-    /// XOR is more complex:
-    /// t = TH22(TH12(a_t,b_f), TH12(a_f,b_t))
-    /// f = TH22(TH12(a_t,b_t), TH12(a_f,b_f))
-    fn expand_xor(&mut self, a: DualRailPair, b: DualRailPair, width: u32) -> DualRailPair {
-        let t = self.alloc_signal(format!("xor_t_{}", self.next_signal_id), width);
-        let f = self.alloc_signal(format!("xor_f_{}", self.next_signal_id), width);
+    /// XOR in dual-rail:
+    /// - True rail: (a_t AND b_f) OR (a_f AND b_t)
+    /// - False rail: (a_t AND b_t) OR (a_f AND b_f)
+    fn expand_xor(&mut self, a: DualRailPair, b: DualRailPair, dest: DualRailPair, width: u32) {
+        // Intermediate signals
+        let at_bf = self.alloc_signal(format!("xor_at_bf_{}", self.next_signal_id), width);
+        let af_bt = self.alloc_signal(format!("xor_af_bt_{}", self.next_signal_id), width);
+        let at_bt = self.alloc_signal(format!("xor_at_bt_{}", self.next_signal_id), width);
+        let af_bf = self.alloc_signal(format!("xor_af_bf_{}", self.next_signal_id), width);
 
-        self.alloc_node(LirOp::NclXor { width }, vec![a.t, a.f, b.t, b.f], t);
+        // a_t AND b_f
+        self.alloc_node(LirOp::And { width }, vec![a.t, b.f], at_bf);
+        // a_f AND b_t
+        self.alloc_node(LirOp::And { width }, vec![a.f, b.t], af_bt);
+        // True rail: (a_t AND b_f) OR (a_f AND b_t)
+        self.alloc_node(LirOp::Or { width }, vec![at_bf, af_bt], dest.t);
 
-        DualRailPair { t, f }
+        // a_t AND b_t
+        self.alloc_node(LirOp::And { width }, vec![a.t, b.t], at_bt);
+        // a_f AND b_f
+        self.alloc_node(LirOp::And { width }, vec![a.f, b.f], af_bf);
+        // False rail: (a_t AND b_t) OR (a_f AND b_f)
+        self.alloc_node(LirOp::Or { width }, vec![at_bt, af_bf], dest.f);
     }
 
     /// Create completion detection for a set of dual-rail signals
@@ -214,74 +247,142 @@ impl NclExpander {
     }
 
     /// Expand an NCL adder (ripple-carry)
-    fn expand_add(&mut self, a: DualRailPair, b: DualRailPair, width: u32) -> DualRailPair {
-        let t = self.alloc_signal(format!("add_t_{}", self.next_signal_id), width);
-        let f = self.alloc_signal(format!("add_f_{}", self.next_signal_id), width);
+    /// For now, use regular Add for true rail, and compute false rail as NOT(true)
+    fn expand_add(&mut self, a: DualRailPair, b: DualRailPair, dest: DualRailPair, width: u32) {
+        // Simplified approach: compute add using true rails, then derive false rail
+        // This is an approximation - proper NCL adder would use threshold gates
+        self.alloc_node(
+            LirOp::Add {
+                width,
+                has_carry: false,
+            },
+            vec![a.t, b.t],
+            dest.t,
+        );
+        // For false rail, invert the true rail (approximation)
+        self.alloc_node(LirOp::Not { width }, vec![dest.t], dest.f);
+    }
 
-        // NCL adder takes both rails of both inputs
-        self.alloc_node(LirOp::NclAdd { width }, vec![a.t, a.f, b.t, b.f], t);
-
-        DualRailPair { t, f }
+    /// Expand an NCL subtractor
+    /// Simplified approach: compute sub using true rails, derive false rail from NOT(true)
+    fn expand_sub(&mut self, a: DualRailPair, b: DualRailPair, dest: DualRailPair, width: u32) {
+        // Simplified approach: compute subtract using true rails, then derive false rail
+        // This is an approximation - proper NCL subtractor would use threshold gates
+        self.alloc_node(
+            LirOp::Sub {
+                width,
+                has_borrow: false,
+            },
+            vec![a.t, b.t],
+            dest.t,
+        );
+        // For false rail, invert the true rail (approximation)
+        self.alloc_node(LirOp::Not { width }, vec![dest.t], dest.f);
     }
 
     /// Expand an NCL multiplier
-    fn expand_mul(&mut self, a: DualRailPair, b: DualRailPair, width: u32) -> DualRailPair {
-        let t = self.alloc_signal(format!("mul_t_{}", self.next_signal_id), width);
-        let f = self.alloc_signal(format!("mul_f_{}", self.next_signal_id), width);
-
-        self.alloc_node(LirOp::NclMul { width }, vec![a.t, a.f, b.t, b.f], t);
-
-        DualRailPair { t, f }
+    /// Simplified approach: compute mul using true rails, derive false rail from NOT(true)
+    fn expand_mul(&mut self, a: DualRailPair, b: DualRailPair, dest: DualRailPair, width: u32) {
+        // Simplified approach: compute multiply using true rails, then derive false rail
+        // This is an approximation - proper NCL multiplier would use threshold gates
+        self.alloc_node(
+            LirOp::Mul {
+                width,
+                result_width: width * 2, // Full width for multiplication
+            },
+            vec![a.t, b.t],
+            dest.t,
+        );
+        // For false rail, invert the true rail (approximation)
+        self.alloc_node(LirOp::Not { width }, vec![dest.t], dest.f);
     }
 
     /// Expand an NCL less-than comparator
-    fn expand_lt(&mut self, a: DualRailPair, b: DualRailPair, width: u32) -> DualRailPair {
-        let t = self.alloc_signal(format!("lt_t_{}", self.next_signal_id), 1);
-        let f = self.alloc_signal(format!("lt_f_{}", self.next_signal_id), 1);
-
-        self.alloc_node(LirOp::NclLt { width }, vec![a.t, a.f, b.t, b.f], t);
-
-        DualRailPair { t, f }
+    /// Simplified approach: compute lt using true rails, derive false rail from NOT(true)
+    fn expand_lt(&mut self, a: DualRailPair, b: DualRailPair, dest: DualRailPair, width: u32) {
+        // Simplified approach: compute less-than using true rails
+        self.alloc_node(LirOp::Lt { width }, vec![a.t, b.t], dest.t);
+        // For false rail, invert the true rail (approximation)
+        self.alloc_node(LirOp::Not { width: 1 }, vec![dest.t], dest.f);
     }
 
     /// Expand an NCL equality comparator
-    fn expand_eq(&mut self, a: DualRailPair, b: DualRailPair, width: u32) -> DualRailPair {
-        let t = self.alloc_signal(format!("eq_t_{}", self.next_signal_id), 1);
-        let f = self.alloc_signal(format!("eq_f_{}", self.next_signal_id), 1);
-
-        self.alloc_node(LirOp::NclEq { width }, vec![a.t, a.f, b.t, b.f], t);
-
-        DualRailPair { t, f }
+    /// Simplified approach: compute eq using true rails, derive false rail from NOT(true)
+    fn expand_eq(&mut self, a: DualRailPair, b: DualRailPair, dest: DualRailPair, width: u32) {
+        // Simplified approach: compute equality using true rails
+        self.alloc_node(LirOp::Eq { width }, vec![a.t, b.t], dest.t);
+        // For false rail, invert the true rail (approximation)
+        self.alloc_node(LirOp::Not { width: 1 }, vec![dest.t], dest.f);
     }
 
     /// Expand an NCL 2:1 multiplexer
+    /// Simplified approach: compute mux using true rails, derive false rail from NOT(true)
     fn expand_mux2(
         &mut self,
         sel: DualRailPair,
         a: DualRailPair,
         b: DualRailPair,
+        dest: DualRailPair,
         width: u32,
-    ) -> DualRailPair {
-        let t = self.alloc_signal(format!("mux_t_{}", self.next_signal_id), width);
-        let f = self.alloc_signal(format!("mux_f_{}", self.next_signal_id), width);
-
-        self.alloc_node(
-            LirOp::NclMux2 { width },
-            vec![sel.t, sel.f, a.t, a.f, b.t, b.f],
-            t,
-        );
-
-        DualRailPair { t, f }
+    ) {
+        // Simplified approach: compute mux using true rails
+        self.alloc_node(LirOp::Mux2 { width }, vec![sel.t, a.t, b.t], dest.t);
+        // For false rail, invert the true rail (approximation)
+        self.alloc_node(LirOp::Not { width }, vec![dest.t], dest.f);
     }
 
     /// Expand a register to NCL register (NULL/DATA latch)
-    fn expand_reg(&mut self, d: DualRailPair, width: u32) -> DualRailPair {
-        let t = self.alloc_signal(format!("reg_t_{}", self.next_signal_id), width);
-        let f = self.alloc_signal(format!("reg_f_{}", self.next_signal_id), width);
+    /// Simplified approach: use regular register, both rails get same input treated as t/f
+    fn expand_reg(&mut self, d: DualRailPair, dest: DualRailPair, width: u32) {
+        // Simplified approach: register both rails separately
+        // This is an approximation - proper NCL register needs special handling
+        self.alloc_node(
+            LirOp::Reg {
+                width,
+                has_enable: false,
+                has_reset: false,
+                reset_value: None,
+            },
+            vec![d.t],
+            dest.t,
+        );
+        self.alloc_node(
+            LirOp::Reg {
+                width,
+                has_enable: false,
+                has_reset: false,
+                reset_value: None,
+            },
+            vec![d.f],
+            dest.f,
+        );
+    }
 
-        self.alloc_node(LirOp::NclReg { width }, vec![d.t, d.f], t);
+    /// Expand a constant to NCL dual-rail encoding
+    /// For constant value v with width w:
+    /// - t rail has bits set where v has 1s (DATA_TRUE)
+    /// - f rail has bits set where v has 0s (DATA_FALSE)
+    fn expand_constant(&mut self, value: u64, dest: DualRailPair, width: u32) {
+        // Compute the mask for the width
+        let mask = if width >= 64 {
+            u64::MAX
+        } else {
+            (1u64 << width) - 1
+        };
 
-        DualRailPair { t, f }
+        // t rail: bits that are 1 in the constant
+        self.alloc_node(LirOp::Constant { width, value }, vec![], dest.t);
+
+        // f rail: bits that are 0 in the constant (inverted)
+        let f_value = (!value) & mask;
+        self.alloc_node(
+            LirOp::Constant {
+                width,
+                value: f_value,
+            },
+            vec![],
+            dest.f,
+        );
     }
 
     /// Encode a single-rail input to dual-rail
@@ -321,6 +422,26 @@ impl NclExpander {
 pub fn expand_to_ncl(lir: &Lir, config: &NclConfig) -> NclExpandResult {
     let mut expander = NclExpander::new(&lir.name, config.clone());
 
+    // Debug: print original LIR structure
+    eprintln!("=== NCL Expand: Original LIR ===");
+    eprintln!("Signals ({}):", lir.signals.len());
+    for sig in &lir.signals {
+        eprintln!(
+            "  {:?} '{}' w={} in={} out={}",
+            sig.id, sig.name, sig.width, sig.is_input, sig.is_output
+        );
+    }
+    eprintln!("Nodes ({}):", lir.nodes.len());
+    for node in &lir.nodes {
+        eprintln!(
+            "  {:?} op={:?} inputs={:?} output={:?}",
+            node.id, node.op, node.inputs, node.output
+        );
+    }
+    eprintln!("Inputs: {:?}", lir.inputs);
+    eprintln!("Outputs: {:?}", lir.outputs);
+    eprintln!("================================");
+
     // Step 1: Create dual-rail signals for all original signals
     for signal in &lir.signals {
         let pair = expander.create_dual_rail(signal);
@@ -347,9 +468,8 @@ pub fn expand_to_ncl(lir: &Lir, config: &NclConfig) -> NclExpandResult {
                 if node.inputs.len() >= 2 {
                     let a = expander.dual_rail_map.get(&node.inputs[0]).copied();
                     let b = expander.dual_rail_map.get(&node.inputs[1]).copied();
-                    if let (Some(a), Some(b), Some(_out)) = (a, b, output_pair) {
-                        let result = expander.expand_and(a, b, *width);
-                        expander.dual_rail_map.insert(node.output, result);
+                    if let (Some(a), Some(b), Some(dest)) = (a, b, output_pair) {
+                        expander.expand_and(a, b, dest, *width);
                     }
                 }
             }
@@ -357,18 +477,18 @@ pub fn expand_to_ncl(lir: &Lir, config: &NclConfig) -> NclExpandResult {
                 if node.inputs.len() >= 2 {
                     let a = expander.dual_rail_map.get(&node.inputs[0]).copied();
                     let b = expander.dual_rail_map.get(&node.inputs[1]).copied();
-                    if let (Some(a), Some(b), Some(_out)) = (a, b, output_pair) {
-                        let result = expander.expand_or(a, b, *width);
-                        expander.dual_rail_map.insert(node.output, result);
+                    if let (Some(a), Some(b), Some(dest)) = (a, b, output_pair) {
+                        expander.expand_or(a, b, dest, *width);
                     }
                 }
             }
             LirOp::Not { width } => {
                 if !node.inputs.is_empty() {
                     let a = expander.dual_rail_map.get(&node.inputs[0]).copied();
-                    if let (Some(a), Some(_out)) = (a, output_pair) {
-                        let result = expander.expand_not(a, *width);
-                        expander.dual_rail_map.insert(node.output, result);
+                    if let (Some(a), Some(dest)) = (a, output_pair) {
+                        // Use the existing output dual-rail pair as destination
+                        expander.expand_not(a, dest, *width);
+                        // No need to update dual_rail_map - dest is already the output's pair
                     }
                 }
             }
@@ -376,9 +496,8 @@ pub fn expand_to_ncl(lir: &Lir, config: &NclConfig) -> NclExpandResult {
                 if node.inputs.len() >= 2 {
                     let a = expander.dual_rail_map.get(&node.inputs[0]).copied();
                     let b = expander.dual_rail_map.get(&node.inputs[1]).copied();
-                    if let (Some(a), Some(b), Some(_out)) = (a, b, output_pair) {
-                        let result = expander.expand_xor(a, b, *width);
-                        expander.dual_rail_map.insert(node.output, result);
+                    if let (Some(a), Some(b), Some(dest)) = (a, b, output_pair) {
+                        expander.expand_xor(a, b, dest, *width);
                     }
                 }
             }
@@ -386,9 +505,17 @@ pub fn expand_to_ncl(lir: &Lir, config: &NclConfig) -> NclExpandResult {
                 if node.inputs.len() >= 2 {
                     let a = expander.dual_rail_map.get(&node.inputs[0]).copied();
                     let b = expander.dual_rail_map.get(&node.inputs[1]).copied();
-                    if let (Some(a), Some(b), Some(_out)) = (a, b, output_pair) {
-                        let result = expander.expand_add(a, b, *width);
-                        expander.dual_rail_map.insert(node.output, result);
+                    if let (Some(a), Some(b), Some(dest)) = (a, b, output_pair) {
+                        expander.expand_add(a, b, dest, *width);
+                    }
+                }
+            }
+            LirOp::Sub { width, .. } => {
+                if node.inputs.len() >= 2 {
+                    let a = expander.dual_rail_map.get(&node.inputs[0]).copied();
+                    let b = expander.dual_rail_map.get(&node.inputs[1]).copied();
+                    if let (Some(a), Some(b), Some(dest)) = (a, b, output_pair) {
+                        expander.expand_sub(a, b, dest, *width);
                     }
                 }
             }
@@ -396,9 +523,8 @@ pub fn expand_to_ncl(lir: &Lir, config: &NclConfig) -> NclExpandResult {
                 if node.inputs.len() >= 2 {
                     let a = expander.dual_rail_map.get(&node.inputs[0]).copied();
                     let b = expander.dual_rail_map.get(&node.inputs[1]).copied();
-                    if let (Some(a), Some(b), Some(_out)) = (a, b, output_pair) {
-                        let result = expander.expand_mul(a, b, *width);
-                        expander.dual_rail_map.insert(node.output, result);
+                    if let (Some(a), Some(b), Some(dest)) = (a, b, output_pair) {
+                        expander.expand_mul(a, b, dest, *width);
                     }
                 }
             }
@@ -406,9 +532,8 @@ pub fn expand_to_ncl(lir: &Lir, config: &NclConfig) -> NclExpandResult {
                 if node.inputs.len() >= 2 {
                     let a = expander.dual_rail_map.get(&node.inputs[0]).copied();
                     let b = expander.dual_rail_map.get(&node.inputs[1]).copied();
-                    if let (Some(a), Some(b), Some(_out)) = (a, b, output_pair) {
-                        let result = expander.expand_lt(a, b, *width);
-                        expander.dual_rail_map.insert(node.output, result);
+                    if let (Some(a), Some(b), Some(dest)) = (a, b, output_pair) {
+                        expander.expand_lt(a, b, dest, *width);
                     }
                 }
             }
@@ -416,9 +541,8 @@ pub fn expand_to_ncl(lir: &Lir, config: &NclConfig) -> NclExpandResult {
                 if node.inputs.len() >= 2 {
                     let a = expander.dual_rail_map.get(&node.inputs[0]).copied();
                     let b = expander.dual_rail_map.get(&node.inputs[1]).copied();
-                    if let (Some(a), Some(b), Some(_out)) = (a, b, output_pair) {
-                        let result = expander.expand_eq(a, b, *width);
-                        expander.dual_rail_map.insert(node.output, result);
+                    if let (Some(a), Some(b), Some(dest)) = (a, b, output_pair) {
+                        expander.expand_eq(a, b, dest, *width);
                     }
                 }
             }
@@ -427,18 +551,63 @@ pub fn expand_to_ncl(lir: &Lir, config: &NclConfig) -> NclExpandResult {
                     let sel = expander.dual_rail_map.get(&node.inputs[0]).copied();
                     let a = expander.dual_rail_map.get(&node.inputs[1]).copied();
                     let b = expander.dual_rail_map.get(&node.inputs[2]).copied();
-                    if let (Some(sel), Some(a), Some(b), Some(_out)) = (sel, a, b, output_pair) {
-                        let result = expander.expand_mux2(sel, a, b, *width);
-                        expander.dual_rail_map.insert(node.output, result);
+                    if let (Some(sel), Some(a), Some(b), Some(dest)) = (sel, a, b, output_pair) {
+                        expander.expand_mux2(sel, a, b, dest, *width);
                     }
                 }
             }
             LirOp::Reg { width, .. } => {
                 if !node.inputs.is_empty() {
                     let d = expander.dual_rail_map.get(&node.inputs[0]).copied();
-                    if let (Some(d), Some(_out)) = (d, output_pair) {
-                        let result = expander.expand_reg(d, *width);
-                        expander.dual_rail_map.insert(node.output, result);
+                    if let (Some(d), Some(dest)) = (d, output_pair) {
+                        expander.expand_reg(d, dest, *width);
+                    }
+                }
+            }
+            // Buffer operations - just copy dual-rail signals
+            LirOp::Buf { width } | LirOp::Buffer { width } => {
+                if !node.inputs.is_empty() {
+                    let a = expander.dual_rail_map.get(&node.inputs[0]).copied();
+                    if let (Some(a), Some(dest)) = (a, output_pair) {
+                        // Buffer copies both rails from input to output
+                        expander.expand_buf(a, dest, *width);
+                    }
+                }
+            }
+            // Constants - create dual-rail encoding
+            LirOp::Constant { width, value } => {
+                if let Some(dest) = output_pair {
+                    expander.expand_constant(*value, dest, *width);
+                }
+            }
+            // Shifts - pass through to regular shift operations on true rail
+            LirOp::Shl { width } => {
+                if node.inputs.len() >= 2 {
+                    let a = expander.dual_rail_map.get(&node.inputs[0]).copied();
+                    let shamt = expander.dual_rail_map.get(&node.inputs[1]).copied();
+                    if let (Some(a), Some(shamt), Some(dest)) = (a, shamt, output_pair) {
+                        // Simplified: shift the true rail, invert for false rail
+                        expander.alloc_node(
+                            LirOp::Shl { width: *width },
+                            vec![a.t, shamt.t],
+                            dest.t,
+                        );
+                        expander.alloc_node(LirOp::Not { width: *width }, vec![dest.t], dest.f);
+                    }
+                }
+            }
+            LirOp::Shr { width } => {
+                if node.inputs.len() >= 2 {
+                    let a = expander.dual_rail_map.get(&node.inputs[0]).copied();
+                    let shamt = expander.dual_rail_map.get(&node.inputs[1]).copied();
+                    if let (Some(a), Some(shamt), Some(dest)) = (a, shamt, output_pair) {
+                        // Simplified: shift the true rail, invert for false rail
+                        expander.alloc_node(
+                            LirOp::Shr { width: *width },
+                            vec![a.t, shamt.t],
+                            dest.t,
+                        );
+                        expander.alloc_node(LirOp::Not { width: *width }, vec![dest.t], dest.f);
                     }
                 }
             }
@@ -533,19 +702,18 @@ mod tests {
             t: expander.alloc_signal("b_t".to_string(), 1),
             f: expander.alloc_signal("b_f".to_string(), 1),
         };
+        // Create destination signals
+        let dest = DualRailPair {
+            t: expander.alloc_signal("out_t".to_string(), 1),
+            f: expander.alloc_signal("out_f".to_string(), 1),
+        };
 
-        let result = expander.expand_and(a, b, 1);
+        expander.expand_and(a, b, dest, 1);
 
-        // Check that output signals were created
-        assert!(result.t.0 != a.t.0 && result.t.0 != b.t.0);
-        assert!(result.f.0 != a.f.0 && result.f.0 != b.f.0);
-
-        // Check that a node was created
-        assert_eq!(expander.lir.nodes.len(), 1);
-        assert!(matches!(
-            expander.lir.nodes[0].op,
-            LirOp::NclAnd { width: 1 }
-        ));
+        // Check that two nodes were created (And for t, Or for f)
+        assert_eq!(expander.lir.nodes.len(), 2);
+        assert!(matches!(expander.lir.nodes[0].op, LirOp::And { width: 1 }));
+        assert!(matches!(expander.lir.nodes[1].op, LirOp::Or { width: 1 }));
     }
 
     #[test]
@@ -557,19 +725,24 @@ mod tests {
             t: expander.alloc_signal("a_t".to_string(), 1),
             f: expander.alloc_signal("a_f".to_string(), 1),
         };
+        // Create destination signals
+        let dest = DualRailPair {
+            t: expander.alloc_signal("out_t".to_string(), 1),
+            f: expander.alloc_signal("out_f".to_string(), 1),
+        };
 
-        let result = expander.expand_not(a, 1);
+        expander.expand_not(a, dest, 1);
 
-        // NOT should create new signals that reference the swapped inputs
-        assert!(result.t.0 != a.t.0);
-        assert!(result.f.0 != a.f.0);
-
-        // Check that a NclNot node was created
-        assert_eq!(expander.lir.nodes.len(), 1);
-        assert!(matches!(
-            expander.lir.nodes[0].op,
-            LirOp::NclNot { width: 1 }
-        ));
+        // NOT should create two buffer nodes that swap the rails
+        assert_eq!(expander.lir.nodes.len(), 2);
+        assert!(matches!(expander.lir.nodes[0].op, LirOp::Buf { width: 1 }));
+        assert!(matches!(expander.lir.nodes[1].op, LirOp::Buf { width: 1 }));
+        // First buffer: a.f -> dest.t
+        assert_eq!(expander.lir.nodes[0].inputs[0], a.f);
+        assert_eq!(expander.lir.nodes[0].output, dest.t);
+        // Second buffer: a.t -> dest.f
+        assert_eq!(expander.lir.nodes[1].inputs[0], a.t);
+        assert_eq!(expander.lir.nodes[1].output, dest.f);
     }
 
     #[test]

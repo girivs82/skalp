@@ -257,13 +257,19 @@ impl NclSimulator {
     }
 
     /// Set a dual-rail NCL signal by name and bit index
-    /// For a signal "x" bit 0: x_t0 (true rail) and x_f0 (false rail)
+    /// For a signal "x" bit 0: x_t[0] (true rail) and x_f[0] (false rail)
+    ///
+    /// Storage layout: all t rails first, then all f rails
+    /// For width N: indices 0..N are t rails, indices N..2N are f rails
     pub fn set_dual_rail(&mut self, name: &str, bit: usize, value: NclValue) {
         // Extract net IDs first to avoid borrow conflict
         let (t_net, f_net) = {
             if let Some(nets) = self.input_nets.get(name) {
-                let t_idx = bit * 2;
-                let f_idx = bit * 2 + 1;
+                // Layout: [t0, t1, ..., tN-1, f0, f1, ..., fN-1]
+                // Width is half the total nets
+                let width = nets.len() / 2;
+                let t_idx = bit;
+                let f_idx = width + bit;
                 (nets.get(t_idx).copied(), nets.get(f_idx).copied())
             } else {
                 (None, None)
@@ -304,10 +310,16 @@ impl NclSimulator {
     }
 
     /// Get a dual-rail NCL signal value
+    ///
+    /// Storage layout: all t rails first, then all f rails
+    /// For width N: indices 0..N are t rails, indices N..2N are f rails
     pub fn get_dual_rail(&self, name: &str, bit: usize) -> NclValue {
         if let Some(nets) = self.output_nets.get(name) {
-            let t_idx = bit * 2;
-            let f_idx = bit * 2 + 1;
+            // Layout: [t0, t1, ..., tN-1, f0, f1, ..., fN-1]
+            // Width is half the total nets
+            let width = nets.len() / 2;
+            let t_idx = bit;
+            let f_idx = width + bit;
 
             let t = nets.get(t_idx).map(|&n| self.get_net(n)).unwrap_or(false);
             let f = nets.get(f_idx).map(|&n| self.get_net(n)).unwrap_or(false);
@@ -628,6 +640,15 @@ impl NclSimulator {
     fn parse_cell_type(&self, cell_type: &str) -> PrimitiveType {
         let upper = cell_type.to_uppercase();
 
+        // Strip common library suffixes like "_X1", "_X2", "_M" etc.
+        let base_type = if let Some(pos) = upper.rfind("_X") {
+            &upper[..pos]
+        } else if let Some(pos) = upper.rfind("_M") {
+            &upper[..pos]
+        } else {
+            &upper
+        };
+
         // Check for THmn patterns
         if upper.starts_with("TH") {
             if let Some(digits) = upper.strip_prefix("TH") {
@@ -664,8 +685,8 @@ impl NclSimulator {
             }
         }
 
-        // Common gates
-        match upper.as_str() {
+        // Common gates - use base_type which has library suffixes stripped
+        match base_type {
             "INV" | "NOT" => PrimitiveType::Inv,
             "BUF" | "BUFFER" => PrimitiveType::Buf,
             "AND2" => PrimitiveType::And { inputs: 2 },
@@ -689,7 +710,10 @@ impl NclSimulator {
             _ => {
                 // Default to buffer for unknown types
                 if self.config.debug {
-                    eprintln!("[NCL_SIM] Unknown cell type: {}", cell_type);
+                    eprintln!(
+                        "[NCL_SIM] Unknown cell type: {} (base: {})",
+                        cell_type, base_type
+                    );
                 }
                 PrimitiveType::Buf
             }
@@ -697,24 +721,35 @@ impl NclSimulator {
     }
 }
 
-/// Strip bit suffix from signal name (e.g., "data[3]" -> "data", "data_t0" -> "data")
+/// Strip bit suffix from signal name
+/// For multi-bit dual-rail signals like "a_t[0]", strips BOTH suffixes to get "a"
+/// Examples:
+/// - "data[3]" -> "data"
+/// - "data_t0" -> "data"
+/// - "a_t[0]" -> "a" (strips [0] first, then _t)
+/// - "a_f[7]" -> "a" (strips [7] first, then _f)
 fn strip_bit_suffix(name: &str) -> String {
-    // Handle [N] suffix
-    if let Some(bracket_pos) = name.find('[') {
-        return name[..bracket_pos].to_string();
+    let mut result = name.to_string();
+
+    // Step 1: Strip [N] suffix if present
+    if let Some(bracket_pos) = result.find('[') {
+        result = result[..bracket_pos].to_string();
     }
 
-    // Handle _tN or _fN suffix (dual-rail)
-    if let Some(underscore_pos) = name.rfind('_') {
-        let suffix = &name[underscore_pos + 1..];
-        if (suffix.starts_with('t') || suffix.starts_with('f'))
-            && suffix[1..].chars().all(|c| c.is_ascii_digit())
+    // Step 2: Strip _t or _f suffix for dual-rail signals
+    // Handles both "_t" (without digit) and "_t0", "_t1", etc.
+    if let Some(underscore_pos) = result.rfind('_') {
+        let suffix = &result[underscore_pos + 1..];
+        // Check for "_t" or "_f" optionally followed by digits
+        if (suffix == "t" || suffix == "f")
+            || ((suffix.starts_with('t') || suffix.starts_with('f'))
+                && suffix[1..].chars().all(|c| c.is_ascii_digit()))
         {
-            return name[..underscore_pos].to_string();
+            result = result[..underscore_pos].to_string();
         }
     }
 
-    name.to_string()
+    result
 }
 
 /// Evaluate a THmn gate with explicit previous state (for use in gate_eval.rs)
