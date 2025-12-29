@@ -332,6 +332,11 @@ impl MirToLirTransform {
                 // Transform combinational statements
                 self.transform_combinational_block(&process.body);
             }
+            ProcessKind::Async => {
+                // NCL async process - transform as combinational for now
+                // Phase 4 (ncl_expand.rs) will convert to proper NCL gates
+                self.transform_combinational_block(&process.body);
+            }
         }
     }
 
@@ -1358,6 +1363,8 @@ impl MirToLirTransform {
             // Complex types - would need more detailed handling
             // In practice, casts to/from struct/enum/union types are rare
             DataType::Struct(_) | DataType::Enum(_) | DataType::Union(_) => 32,
+            // NCL dual-rail type - physical width is 2x logical width
+            DataType::Ncl(logical_width) => (*logical_width as u32) * 2,
         }
     }
 
@@ -2285,6 +2292,8 @@ mod tests {
             power_domains: Vec::new(),
             power_domain_config: None,
             safety_context: None,
+            is_async: false,
+            barriers: Vec::new(),
         }
     }
 
@@ -2390,6 +2399,8 @@ mod tests {
             power_domains: Vec::new(),
             power_domain_config: None,
             safety_context: None,
+            is_async: false,
+            barriers: Vec::new(),
         };
 
         let result = lower_mir_module_to_word_lir(&module);
@@ -2494,6 +2505,8 @@ mod tests {
             power_domains: Vec::new(),
             power_domain_config: None,
             safety_context: None,
+            is_async: false,
+            barriers: Vec::new(),
         };
 
         let result = lower_mir_module_to_word_lir(&module);

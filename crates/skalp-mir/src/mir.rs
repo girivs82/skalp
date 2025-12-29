@@ -127,6 +127,23 @@ pub struct Module {
     /// Indicates which safety goal/mechanism this module implements
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub safety_context: Option<SafetyContext>,
+    /// Whether this is an async (NCL) module
+    /// NCL modules have no clocks and use dual-rail encoding
+    #[serde(default)]
+    pub is_async: bool,
+    /// NCL barrier stages for completion detection
+    /// Each barrier defines a point where all signals must transition through NULL
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub barriers: Vec<BarrierStage>,
+}
+
+/// NCL barrier stage for completion detection
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BarrierStage {
+    /// Unique identifier for this stage
+    pub stage_id: u32,
+    /// Signals that contribute to this stage's completion
+    pub signals: Vec<SignalId>,
 }
 
 /// Module identifier
@@ -397,6 +414,9 @@ pub enum DataType {
     Vec3(Box<DataType>),
     /// 4-component vector type (packed struct with x, y, z, w fields)
     Vec4(Box<DataType>),
+    /// NCL (Null Convention Logic) dual-rail type
+    /// Physical width is 2 * logical width (dual-rail encoding)
+    Ncl(usize),
 }
 
 /// Clock domain identifier in MIR
@@ -445,6 +465,8 @@ pub enum ProcessKind {
     Combinational,
     /// General process (always)
     General,
+    /// NCL async process (self-timed, no clock)
+    Async,
 }
 
 /// Sensitivity list for a process
@@ -1295,6 +1317,8 @@ impl Module {
             power_domains: Vec::new(),
             power_domain_config: None,
             safety_context: None,
+            is_async: false,
+            barriers: Vec::new(),
         }
     }
 }

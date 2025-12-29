@@ -2148,6 +2148,17 @@ impl<'hir> HirToMir<'hir> {
                 debug_println!("[WARNING] GenerateMatch statement reached MIR - should have been elaborated at HIR level");
                 None
             }
+            hir::HirStatement::Barrier(barrier) => {
+                // NCL barrier statement - marks pipeline stage boundary for completion detection
+                // Phase 2 will add proper BarrierStage collection; for now just track it
+                debug_println!(
+                    "[NCL] Barrier statement at stage {} (span {:?})",
+                    barrier.stage_id,
+                    barrier.span
+                );
+                // TODO: Store barrier in module's barrier list for NCL processing
+                None // Barriers don't produce direct MIR statements
+            }
         }
     }
 
@@ -13276,6 +13287,21 @@ impl<'hir> HirToMir<'hir> {
                     None => DataType::Vec3(Box::new(inner)), // Fallback
                 }
             }
+            // NCL dual-rail types (Null Convention Logic)
+            // Physical width is 2 * logical width (dual-rail encoding)
+            hir::HirType::Ncl(width) => DataType::Ncl(*width as usize),
+            hir::HirType::NclParam(_param_name) => {
+                // Parametric NCL - use default (resolution happens during monomorphization)
+                DataType::Ncl(32) // Default: 32 logical bits
+            }
+            hir::HirType::NclExpr(expr) => {
+                // Evaluate const expression for NCL width
+                if let Some(width) = self.try_eval_const_expr(expr) {
+                    DataType::Ncl(width as usize)
+                } else {
+                    DataType::Ncl(32) // Fallback: 32 logical bits
+                }
+            }
         }
     }
 
@@ -13736,6 +13762,7 @@ impl<'hir> HirToMir<'hir> {
             }
             DataType::Enum(_) => hir::HirType::Nat(32),
             DataType::Union(_) => hir::HirType::Nat(32),
+            DataType::Ncl(width) => hir::HirType::Ncl(*width as u32),
         }
     }
 
@@ -14816,6 +14843,12 @@ impl<'hir> HirToMir<'hir> {
                     .iter()
                     .map(|ty| self.get_hir_type_width(ty))
                     .sum()
+            }
+            // NCL dual-rail types - physical width is 2x logical width
+            hir::HirType::Ncl(width) => *width as usize * 2,
+            hir::HirType::NclParam(_) => 64, // Default: 32 logical bits * 2
+            hir::HirType::NclExpr(expr) => {
+                self.try_eval_const_expr(expr).unwrap_or(32) as usize * 2
             }
         }
     }

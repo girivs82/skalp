@@ -28,6 +28,7 @@ fn create_simple_entity() -> Hir {
     let entity = HirEntity {
         id: EntityId(1),
         name: "counter".to_string(),
+        is_async: false,
         visibility: HirVisibility::Private,
         generics: vec![],
         clock_domains: vec![],

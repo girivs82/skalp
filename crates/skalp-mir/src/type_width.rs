@@ -99,6 +99,9 @@ pub fn get_type_width(data_type: &DataType) -> usize {
                 ut.name
             );
         }
+
+        // NCL dual-rail type - physical width is 2x logical width
+        DataType::Ncl(logical_width) => logical_width * 2,
     }
 }
 

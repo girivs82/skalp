@@ -781,6 +781,35 @@ impl<'a> AigBuilder<'a> {
                 inputs.first().copied().unwrap_or(AigLit::false_lit())
             }
 
+            // NCL Threshold Gates - These are stateful (hysteresis) and should not be
+            // optimized through AIG. NCL circuits bypass the AIG optimization pass.
+            CellFunction::Th12
+            | CellFunction::Th22
+            | CellFunction::Th13
+            | CellFunction::Th23
+            | CellFunction::Th33
+            | CellFunction::Th14
+            | CellFunction::Th24
+            | CellFunction::Th34
+            | CellFunction::Th44
+            | CellFunction::Thmn { .. } => {
+                panic!(
+                    "Cannot convert NCL threshold gate '{:?}' to AIG. \
+                     NCL circuits use state-holding gates with hysteresis that \
+                     cannot be represented in combinational AIG. NCL designs \
+                     should bypass AIG optimization.",
+                    function
+                );
+            }
+
+            CellFunction::NclCompletion { width } => {
+                panic!(
+                    "Cannot convert NCL completion detector (width={}) to AIG. \
+                     NCL circuits should bypass AIG optimization.",
+                    width
+                );
+            }
+
             CellFunction::Blackbox { name, .. } => {
                 // Blackbox cells should not be converted to AIG - they should be
                 // preserved as-is in the gate netlist. If we reach here, it means

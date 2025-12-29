@@ -151,6 +151,7 @@ fn format_type(data_type: &DataType) -> String {
         DataType::LogicExpr { .. } => "logic[expr]".to_string(),
         DataType::IntExpr { .. } => "int[expr]".to_string(),
         DataType::NatExpr { .. } => "nat[expr]".to_string(),
+        DataType::Ncl(width) => format!("ncl<{}>", width),
     }
 }
 
@@ -216,6 +217,8 @@ mod tests {
             power_domains: vec![],
             power_domain_config: None,
             safety_context: None,
+            is_async: false,
+            barriers: vec![],
         };
 
         let mir = Mir {
@@ -274,6 +277,8 @@ mod tests {
             power_domains: vec![],
             power_domain_config: None,
             safety_context: None,
+            is_async: false,
+            barriers: vec![],
         };
 
         let mir = Mir {
@@ -335,6 +340,8 @@ mod tests {
             power_domains: vec![],
             power_domain_config: None,
             safety_context: None,
+            is_async: false,
+            barriers: vec![],
         };
 
         let mir = Mir {
@@ -405,6 +412,8 @@ mod tests {
             power_domains: vec![],
             power_domain_config: None,
             safety_context: None,
+            is_async: false,
+            barriers: vec![],
         };
 
         let mir = Mir {
@@ -451,6 +460,8 @@ mod tests {
             power_domains: vec![],
             power_domain_config: None,
             safety_context: None,
+            is_async: false,
+            barriers: vec![],
         };
 
         let mir = Mir {

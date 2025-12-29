@@ -4082,6 +4082,8 @@ impl<'a> MirToSirConverter<'a> {
                 eprintln!("Warning: Enum/Union types not yet supported in SIR, treating as 1-bit");
                 SirType::Bits(1)
             }
+            // NCL dual-rail type - physical width is 2x logical width
+            DataType::Ncl(logical_width) => SirType::Bits(logical_width * 2),
         }
     }
 

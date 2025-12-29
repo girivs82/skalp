@@ -154,6 +154,55 @@ pub enum PrimitiveType {
     },
     /// Always-on buffer for control signal routing
     AlwaysOnBuf,
+
+    // === NCL (Null Convention Logic) Threshold Gates ===
+    /// TH12: 1-of-2 threshold gate (OR with hysteresis)
+    /// Output = 1 when ≥1 of 2 inputs are 1
+    /// Output = 0 when all inputs are 0
+    /// Otherwise holds previous value
+    Th12,
+    /// TH22: 2-of-2 threshold gate (Muller C-element)
+    /// Output = 1 when all 2 inputs are 1
+    /// Output = 0 when all inputs are 0
+    /// Otherwise holds previous value
+    Th22,
+    /// TH13: 1-of-3 threshold gate
+    Th13,
+    /// TH23: 2-of-3 threshold gate
+    Th23,
+    /// TH33: 3-of-3 threshold gate
+    Th33,
+    /// TH14: 1-of-4 threshold gate
+    Th14,
+    /// TH24: 2-of-4 threshold gate
+    Th24,
+    /// TH34: 3-of-4 threshold gate
+    Th34,
+    /// TH44: 4-of-4 threshold gate
+    Th44,
+    /// THmn: General m-of-n threshold gate
+    Thmn {
+        /// Threshold value (output = 1 when ≥m inputs are 1)
+        m: u8,
+        /// Number of inputs
+        n: u8,
+    },
+    /// THmnW: Weighted threshold gate
+    /// Output = 1 when weighted sum of inputs ≥ threshold
+    ThmnW {
+        /// Threshold value
+        m: u8,
+        /// Number of inputs
+        n: u8,
+        /// Weights for each input (length must equal n)
+        weights: Vec<u8>,
+    },
+    /// NCL completion detection tree
+    /// Detects when all dual-rail signals are in DATA or all are in NULL
+    NclCompletion {
+        /// Number of dual-rail signals to monitor
+        width: u32,
+    },
 }
 
 impl PrimitiveType {
@@ -173,6 +222,18 @@ impl PrimitiveType {
                 | PrimitiveType::MemCell
                 | PrimitiveType::RegCell
                 | PrimitiveType::RetentionDff { .. }
+                // NCL threshold gates are state-holding (hysteresis behavior)
+                | PrimitiveType::Th12
+                | PrimitiveType::Th22
+                | PrimitiveType::Th13
+                | PrimitiveType::Th23
+                | PrimitiveType::Th33
+                | PrimitiveType::Th14
+                | PrimitiveType::Th24
+                | PrimitiveType::Th34
+                | PrimitiveType::Th44
+                | PrimitiveType::Thmn { .. }
+                | PrimitiveType::ThmnW { .. }
         )
     }
 
@@ -235,6 +296,15 @@ impl PrimitiveType {
             | PrimitiveType::Fp32Sub
             | PrimitiveType::Fp32Mul
             | PrimitiveType::Fp32Div => 64,
+            // NCL threshold gates
+            PrimitiveType::Th12 | PrimitiveType::Th22 => 2,
+            PrimitiveType::Th13 | PrimitiveType::Th23 | PrimitiveType::Th33 => 3,
+            PrimitiveType::Th14
+            | PrimitiveType::Th24
+            | PrimitiveType::Th34
+            | PrimitiveType::Th44 => 4,
+            PrimitiveType::Thmn { n, .. } | PrimitiveType::ThmnW { n, .. } => *n,
+            PrimitiveType::NclCompletion { width } => *width as u8 * 2, // 2 rails per logical signal
         }
     }
 
@@ -292,6 +362,17 @@ impl PrimitiveType {
             PrimitiveType::Fp32Sub => 100.0,
             PrimitiveType::Fp32Mul => 150.0,
             PrimitiveType::Fp32Div => 200.0,
+            // NCL threshold gates - state-holding with hysteresis
+            // TH22 (C-element) is foundational for NCL, similar FIT to latches
+            PrimitiveType::Th12 | PrimitiveType::Th22 => 0.5,
+            PrimitiveType::Th13 | PrimitiveType::Th23 | PrimitiveType::Th33 => 0.6,
+            PrimitiveType::Th14
+            | PrimitiveType::Th24
+            | PrimitiveType::Th34
+            | PrimitiveType::Th44 => 0.8,
+            PrimitiveType::Thmn { n, .. } => 0.1 * (*n as f64), // Scales with inputs
+            PrimitiveType::ThmnW { n, .. } => 0.15 * (*n as f64), // Weighted gates more complex
+            PrimitiveType::NclCompletion { width } => 0.2 * (*width as f64), // Scales with monitored signals
         }
     }
 
@@ -340,6 +421,19 @@ impl PrimitiveType {
             PrimitiveType::Fp32Sub => "FP32SUB",
             PrimitiveType::Fp32Mul => "FP32MUL",
             PrimitiveType::Fp32Div => "FP32DIV",
+            // NCL threshold gates
+            PrimitiveType::Th12 => "TH12",
+            PrimitiveType::Th22 => "TH22",
+            PrimitiveType::Th13 => "TH13",
+            PrimitiveType::Th23 => "TH23",
+            PrimitiveType::Th33 => "TH33",
+            PrimitiveType::Th14 => "TH14",
+            PrimitiveType::Th24 => "TH24",
+            PrimitiveType::Th34 => "TH34",
+            PrimitiveType::Th44 => "TH44",
+            PrimitiveType::Thmn { .. } => "THmn",
+            PrimitiveType::ThmnW { .. } => "THmnW",
+            PrimitiveType::NclCompletion { .. } => "NCLCOMP",
         }
     }
 }
@@ -388,6 +482,9 @@ impl std::fmt::Display for PrimitiveType {
                     write!(f, "PWRSW_FTR")
                 }
             }
+            PrimitiveType::Thmn { m, n } => write!(f, "TH{}{}", m, n),
+            PrimitiveType::ThmnW { m, n, .. } => write!(f, "TH{}{}W", m, n),
+            PrimitiveType::NclCompletion { width } => write!(f, "NCLCOMP{}", width),
             _ => write!(f, "{}", self.short_name()),
         }
     }
@@ -650,6 +747,49 @@ pub enum LirOp {
     Buffer { width: u32 },
     /// Tristate buffer
     Tristate { width: u32 },
+
+    // === NCL (Null Convention Logic) Operations ===
+    /// Encode single-rail to dual-rail NCL
+    /// Input: N bits, Output: 2N bits (pairs of t,f rails)
+    NclEncode { width: u32 },
+    /// Decode dual-rail NCL to single-rail
+    /// Input: 2N bits, Output: N bits
+    NclDecode { width: u32 },
+    /// NCL AND (dual-rail)
+    /// t = TH22(a_t, b_t), f = TH12(a_f, b_f)
+    NclAnd { width: u32 },
+    /// NCL OR (dual-rail)
+    /// t = TH12(a_t, b_t), f = TH22(a_f, b_f)
+    NclOr { width: u32 },
+    /// NCL XOR (dual-rail)
+    NclXor { width: u32 },
+    /// NCL NOT (dual-rail: swap t and f rails)
+    NclNot { width: u32 },
+    /// NCL ripple-carry adder
+    NclAdd { width: u32 },
+    /// NCL subtractor
+    NclSub { width: u32 },
+    /// NCL array multiplier
+    NclMul { width: u32 },
+    /// NCL less-than comparator
+    NclLt { width: u32 },
+    /// NCL equality comparator
+    NclEq { width: u32 },
+    /// NCL shift left
+    NclShl { width: u32 },
+    /// NCL shift right
+    NclShr { width: u32 },
+    /// NCL 2:1 multiplexer
+    NclMux2 { width: u32 },
+    /// NCL register (NULL/DATA latch)
+    /// Holds value during phase transitions
+    NclReg { width: u32 },
+    /// NCL completion detection
+    /// Outputs 1 when all inputs are in same phase (all DATA or all NULL)
+    NclComplete { width: u32 },
+    /// NCL NULL generator
+    /// Outputs all-zeros dual-rail (NULL spacer)
+    NclNull { width: u32 },
 }
 
 impl LirOp {
@@ -706,6 +846,23 @@ impl LirOp {
             LirOp::Constant { width, .. } | LirOp::Buffer { width } | LirOp::Tristate { width } => {
                 *width
             }
+            // NCL operations - output width is 2x logical width (dual-rail)
+            LirOp::NclEncode { width } => width * 2, // N bits -> 2N dual-rail bits
+            LirOp::NclDecode { width } => *width,    // 2N dual-rail -> N single-rail
+            LirOp::NclAnd { width }
+            | LirOp::NclOr { width }
+            | LirOp::NclXor { width }
+            | LirOp::NclNot { width }
+            | LirOp::NclAdd { width }
+            | LirOp::NclSub { width }
+            | LirOp::NclMul { width }
+            | LirOp::NclShl { width }
+            | LirOp::NclShr { width }
+            | LirOp::NclMux2 { width }
+            | LirOp::NclReg { width }
+            | LirOp::NclNull { width } => width * 2, // Dual-rail width
+            LirOp::NclLt { .. } | LirOp::NclEq { .. } => 2, // 1-bit result, dual-rail = 2 bits
+            LirOp::NclComplete { .. } => 1,          // Single-bit completion signal
         }
     }
 
@@ -760,6 +917,22 @@ impl LirOp {
             LirOp::Constant { .. } => 0,
             LirOp::Buffer { .. } => 1,
             LirOp::Tristate { .. } => 2, // data, enable
+            // NCL operations
+            LirOp::NclEncode { .. } | LirOp::NclDecode { .. } | LirOp::NclNot { .. } => 1,
+            LirOp::NclAnd { .. }
+            | LirOp::NclOr { .. }
+            | LirOp::NclXor { .. }
+            | LirOp::NclAdd { .. }
+            | LirOp::NclSub { .. }
+            | LirOp::NclMul { .. }
+            | LirOp::NclLt { .. }
+            | LirOp::NclEq { .. }
+            | LirOp::NclShl { .. }
+            | LirOp::NclShr { .. } => 2,
+            LirOp::NclMux2 { .. } => 3,     // sel, a, b (all dual-rail)
+            LirOp::NclReg { .. } => 1,      // data (dual-rail)
+            LirOp::NclComplete { .. } => 1, // dual-rail signals to check
+            LirOp::NclNull { .. } => 0,     // no inputs, generates NULL
         }
     }
 
@@ -771,6 +944,7 @@ impl LirOp {
                 | LirOp::Latch { .. }
                 | LirOp::MemRead { .. }
                 | LirOp::MemWrite { .. }
+                | LirOp::NclReg { .. } // NCL register holds state between phases
         )
     }
 }

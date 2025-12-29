@@ -1142,6 +1142,7 @@ mod tests {
         let entity = Entity {
             id: skalp_frontend::hir::EntityId(0),
             name: "test_cpu".to_string(),
+            is_async: false,
             visibility: skalp_frontend::hir::HirVisibility::Private,
             ports: vec![
                 skalp_frontend::hir::HirPort {

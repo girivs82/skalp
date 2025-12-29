@@ -926,6 +926,11 @@ fn generate_process(process: &Process, module: &Module) -> Result<String> {
             sv.push_str(&format_sensitivity(&process.sensitivity, module));
             sv.push_str(") begin\n");
         }
+        ProcessKind::Async => {
+            // NCL async process - use always_comb for now
+            // Phase 7 will generate proper NCL-specific Verilog
+            sv.push_str("    always_comb begin // NCL async\n");
+        }
     }
 
     // Generate body statements
@@ -1754,6 +1759,15 @@ fn get_width_spec(data_type: &skalp_mir::DataType) -> String {
             let total_width = elem_width * 4;
             if total_width > 1 {
                 format!("[{}:0] ", total_width - 1)
+            } else {
+                String::new()
+            }
+        }
+        // NCL dual-rail type - physical width is 2x logical width
+        skalp_mir::DataType::Ncl(logical_width) => {
+            let physical_width = logical_width * 2;
+            if physical_width > 1 {
+                format!("[{}:0] ", physical_width - 1)
             } else {
                 String::new()
             }

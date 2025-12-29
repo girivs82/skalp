@@ -64,6 +64,10 @@ impl<'a> ParseState<'a> {
                 Some(SyntaxKind::PubKw) | Some(SyntaxKind::ModKw) => {
                     self.parse_item_with_visibility()
                 }
+                // Handle both 'entity' and 'async entity' declarations
+                Some(SyntaxKind::AsyncKw) if self.peek_kind(1) == Some(SyntaxKind::EntityKw) => {
+                    self.parse_entity_decl()
+                }
                 Some(SyntaxKind::EntityKw) => self.parse_entity_decl(),
                 Some(SyntaxKind::ImplKw) => self.parse_impl_block(),
                 Some(SyntaxKind::ProtocolKw) => self.parse_protocol_decl(),
@@ -114,8 +118,14 @@ impl<'a> ParseState<'a> {
     }
 
     /// Parse entity declaration
+    /// Handles both 'entity' and 'async entity' (NCL) declarations
     fn parse_entity_decl(&mut self) {
         self.start_node(SyntaxKind::EntityDecl);
+
+        // Optional 'async' keyword for NCL entities
+        if self.at(SyntaxKind::AsyncKw) {
+            self.bump(); // consume 'async'
+        }
 
         // 'entity' keyword
         self.expect(SyntaxKind::EntityKw);
@@ -392,6 +402,7 @@ impl<'a> ParseState<'a> {
                 Some(SyntaxKind::ForKw) => self.parse_for_stmt(),
                 Some(SyntaxKind::GenerateKw) => self.parse_generate_stmt(),
                 Some(SyntaxKind::FlowKw) => self.parse_flow_statement(),
+                Some(SyntaxKind::BarrierKw) => self.parse_barrier_stmt(),
                 Some(SyntaxKind::AssignKw) => self.parse_continuous_assignment(),
                 Some(SyntaxKind::CovergroupKw) => self.parse_covergroup_decl(),
                 Some(SyntaxKind::FormalKw) => self.parse_formal_block(),
@@ -1775,6 +1786,21 @@ impl<'a> ParseState<'a> {
         self.parse_flow_pipeline();
 
         self.expect(SyntaxKind::RBrace);
+
+        self.finish_node();
+    }
+
+    /// Parse barrier statement for NCL pipeline stage boundaries
+    /// Syntax: barrier or barrier;
+    fn parse_barrier_stmt(&mut self) {
+        self.start_node(SyntaxKind::BarrierStmt);
+
+        self.expect(SyntaxKind::BarrierKw);
+
+        // Optional semicolon
+        if self.at(SyntaxKind::Semicolon) {
+            self.bump();
+        }
 
         self.finish_node();
     }

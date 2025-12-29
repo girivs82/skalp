@@ -43,6 +43,8 @@ pub struct EntityDecl {
     pub visibility: Visibility,
     /// Entity name
     pub name: String,
+    /// Whether this is an async (NCL) entity
+    pub is_async: bool,
     /// Generic parameters
     pub generics: Vec<Generic>,
     /// Port declarations
@@ -264,6 +266,15 @@ pub enum Statement {
     Return(Option<Expression>),
     /// Expression statement (for implicit returns)
     Expression(Expression),
+    /// Barrier statement (NCL pipeline stage boundary)
+    Barrier(BarrierStatement),
+}
+
+/// Barrier statement for NCL pipeline stage boundaries
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BarrierStatement {
+    /// Span in source code
+    pub span: std::ops::Range<usize>,
 }
 
 /// If statement

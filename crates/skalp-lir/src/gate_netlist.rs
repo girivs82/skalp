@@ -862,6 +862,62 @@ impl GateNetlist {
         }
 
         output.push_str("endmodule\n");
+
+        // Generate NCL cell library definitions if NCL cells are used
+        let ncl_lib = self.generate_ncl_library();
+        if !ncl_lib.is_empty() {
+            output.push_str("\n// ============================================\n");
+            output.push_str("// NCL (Null Convention Logic) Cell Library\n");
+            output.push_str("// ============================================\n\n");
+            output.push_str(&ncl_lib);
+        }
+
+        output
+    }
+
+    /// Generate NCL cell library Verilog definitions for THmn gates used in this netlist
+    fn generate_ncl_library(&self) -> String {
+        use std::collections::HashSet;
+
+        let mut output = String::new();
+        let mut generated: HashSet<String> = HashSet::new();
+
+        for cell in &self.cells {
+            let cell_type = &cell.cell_type;
+
+            // Check for THmn gates (e.g., TH12, TH22, TH23, TH33, TH44)
+            if cell_type.starts_with("TH")
+                && cell_type.len() >= 4
+                && cell_type[2..].chars().all(|c| c.is_ascii_digit())
+            {
+                if generated.contains(cell_type) {
+                    continue;
+                }
+                generated.insert(cell_type.clone());
+
+                // Parse m and n from THmn
+                let m = cell_type[2..3].parse::<u8>().unwrap_or(1);
+                let n = cell_type[3..4].parse::<u8>().unwrap_or(2);
+
+                output.push_str(&generate_thmn_module(m, n));
+                output.push('\n');
+            }
+
+            // NCL completion detection
+            if cell_type == "NCL_COMPLETION" && !generated.contains(cell_type) {
+                generated.insert(cell_type.clone());
+                output.push_str(&generate_ncl_completion_module(cell.inputs.len()));
+                output.push('\n');
+            }
+
+            // NCL register
+            if cell_type == "NCL_REG" && !generated.contains(cell_type) {
+                generated.insert(cell_type.clone());
+                output.push_str(&generate_ncl_reg_module());
+                output.push('\n');
+            }
+        }
+
         output
     }
 
@@ -1090,6 +1146,24 @@ fn get_input_pin_name_with_net(cell_type: &str, index: usize, net_name: Option<&
             1 => "A2".to_string(),
             _ => "B".to_string(),
         },
+        // NCL threshold gates (TH12, TH22, TH23, etc.)
+        s if s.starts_with("TH") && s.len() >= 4 && s[2..].chars().all(|c| c.is_ascii_digit()) => {
+            // THmn gates use A, B, C, D naming for inputs
+            match index {
+                0 => "A".to_string(),
+                1 => "B".to_string(),
+                2 => "C".to_string(),
+                3 => "D".to_string(),
+                _ => format!("I{}", index),
+            }
+        }
+        // NCL completion detection
+        "NCL_COMPLETION" => format!("I{}", index),
+        // NCL register (DATA/NULL latch)
+        "NCL_REG" => match index {
+            0 => "D".to_string(),  // Data input
+            _ => "Ki".to_string(), // Acknowledge input
+        },
         _ => format!("I{}", index),
     }
 }
@@ -1129,6 +1203,14 @@ fn get_output_pin_name_with_net(cell_type: &str, index: usize, net_name: Option<
                 "QN".to_string()
             }
         }
+        // NCL register (DATA/NULL latch)
+        "NCL_REG" => match index {
+            0 => "Q".to_string(),  // Data output
+            _ => "Ko".to_string(), // Acknowledge output
+        },
+        // NCL completion detection
+        "NCL_COMPLETION" => "Y".to_string(),
+        // NCL threshold gates use Y for output
         _ => {
             if index == 0 {
                 "Y".to_string()
@@ -1221,6 +1303,138 @@ impl GateNetlistStats {
 
         stats
     }
+}
+
+// ============================================================================
+// NCL Cell Library Generation
+// ============================================================================
+
+/// Generate Verilog module for a THmn (m-of-n threshold) gate
+/// These are state-holding gates with hysteresis behavior:
+/// - Output goes HIGH when at least m of n inputs are HIGH
+/// - Output goes LOW when all inputs are LOW
+/// - Output holds previous value otherwise (hysteresis)
+fn generate_thmn_module(m: u8, n: u8) -> String {
+    let inputs: Vec<String> = (0..n)
+        .map(|i| {
+            let c = (b'A' + i) as char;
+            c.to_string()
+        })
+        .collect();
+    let input_list = inputs.join(", ");
+
+    let mut verilog = String::new();
+
+    // Module header
+    verilog.push_str(&format!(
+        "// TH{}{} - {}-of-{} threshold gate (NCL)\n",
+        m, n, m, n
+    ));
+    verilog.push_str(&format!(
+        "// Output HIGH when >= {} inputs HIGH, LOW when all inputs LOW, else hold\n",
+        m
+    ));
+    verilog.push_str(&format!(
+        "module TH{}{} (input {}, output reg Y);\n",
+        m, n, input_list
+    ));
+
+    // Generate threshold logic
+    verilog.push_str(&format!("    wire [{n}:0] sum = "));
+    let sum_terms: Vec<String> = inputs
+        .iter()
+        .map(|s| format!("{{{}'b0, {}}}", n, s))
+        .collect();
+    verilog.push_str(&sum_terms.join(" + "));
+    verilog.push_str(";\n");
+
+    // All-low detection
+    let all_low = inputs
+        .iter()
+        .map(|s| format!("~{}", s))
+        .collect::<Vec<_>>()
+        .join(" & ");
+
+    verilog.push_str(&format!("    always @({}) begin\n", input_list));
+    verilog.push_str(&format!(
+        "        if (sum >= {}'d{}) Y <= 1'b1;\n",
+        n + 1,
+        m
+    ));
+    verilog.push_str(&format!("        else if ({}) Y <= 1'b0;\n", all_low));
+    verilog.push_str("        // else hold previous value (hysteresis)\n");
+    verilog.push_str("    end\n");
+    verilog.push_str("endmodule\n");
+
+    verilog
+}
+
+/// Generate Verilog module for NCL completion detection
+/// Monitors dual-rail signals to detect when all are either DATA or all are NULL
+fn generate_ncl_completion_module(width: usize) -> String {
+    let mut verilog = String::new();
+
+    verilog.push_str("// NCL_COMPLETION - Completion detection for dual-rail signals\n");
+    verilog
+        .push_str("// Output HIGH when all inputs are DATA (01 or 10), LOW when all NULL (00)\n");
+    verilog.push_str(&format!(
+        "module NCL_COMPLETION #(parameter WIDTH = {}) (\n",
+        width
+    ));
+    verilog.push_str("    input [WIDTH-1:0] I,\n");
+    verilog.push_str("    output reg Y\n");
+    verilog.push_str(");\n");
+    verilog.push_str(
+        "    // For dual-rail: bit pairs should be (01) or (10) for DATA, (00) for NULL\n",
+    );
+    verilog.push_str("    // This detects when all pairs are valid DATA\n");
+    verilog.push_str("    wire all_null = (I == {WIDTH{1'b0}});\n");
+    verilog.push_str("    // Check each bit pair is not 11 (invalid) and not 00 (null)\n");
+    verilog.push_str("    integer i;\n");
+    verilog.push_str("    reg all_data;\n");
+    verilog.push_str("    always @(*) begin\n");
+    verilog.push_str("        all_data = 1'b1;\n");
+    verilog.push_str("        for (i = 0; i < WIDTH/2; i = i + 1) begin\n");
+    verilog.push_str("            if (I[2*i +: 2] == 2'b00 || I[2*i +: 2] == 2'b11)\n");
+    verilog.push_str("                all_data = 1'b0;\n");
+    verilog.push_str("        end\n");
+    verilog.push_str("        if (all_data) Y = 1'b1;\n");
+    verilog.push_str("        else if (all_null) Y = 1'b0;\n");
+    verilog.push_str("        // else hold\n");
+    verilog.push_str("    end\n");
+    verilog.push_str("endmodule\n");
+
+    verilog
+}
+
+/// Generate Verilog module for NCL register (DATA/NULL latch)
+/// A transparent latch that passes DATA when acknowledged, and resets to NULL
+fn generate_ncl_reg_module() -> String {
+    let mut verilog = String::new();
+
+    verilog.push_str("// NCL_REG - NCL register (DATA/NULL latch) with handshaking\n");
+    verilog.push_str("// Captures DATA when Ki (acknowledge input) is high\n");
+    verilog.push_str("// Outputs NULL when Ki is low (requesting next DATA)\n");
+    verilog.push_str("module NCL_REG (\n");
+    verilog.push_str("    input D,     // Dual-rail data input\n");
+    verilog.push_str("    input Ki,    // Acknowledge input from downstream\n");
+    verilog.push_str("    output reg Q, // Dual-rail data output\n");
+    verilog.push_str("    output Ko    // Acknowledge output to upstream\n");
+    verilog.push_str(");\n");
+    verilog.push_str("    // NCL latch behavior:\n");
+    verilog.push_str("    // When Ki=1 (downstream ready), pass DATA through\n");
+    verilog.push_str("    // When Ki=0 (downstream not ready), output NULL\n");
+    verilog.push_str("    always @(*) begin\n");
+    verilog.push_str("        if (Ki)\n");
+    verilog.push_str("            Q = D;  // Pass data\n");
+    verilog.push_str("        else\n");
+    verilog.push_str("            Q = 1'b0; // Output NULL\n");
+    verilog.push_str("    end\n");
+    verilog.push_str("    // Acknowledge propagates when we have valid output\n");
+    verilog.push_str("    assign Ko = Q;\n");
+    verilog.push_str("endmodule\n");
+
+    verilog
 }
 
 // ============================================================================

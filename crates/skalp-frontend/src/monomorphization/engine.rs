@@ -298,6 +298,7 @@ impl<'hir> MonomorphizationEngine<'hir> {
         let specialized_entity = HirEntity {
             id: specialized_id,
             name: instantiation.mangled_name(),
+            is_async: entity.is_async, // Preserve async status for NCL entities
             visibility: entity.visibility,
             ports: specialized_ports,
             generics: vec![], // No generics in specialized version

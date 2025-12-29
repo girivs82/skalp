@@ -74,6 +74,7 @@ pub struct HirBuilderContext {
     next_cover_id: u32,
     next_import_id: u32,
     next_for_loop_id: u32,
+    next_barrier_stage_id: u32,
 
     /// Symbol table for name resolution
     symbols: SymbolTable,
@@ -285,6 +286,7 @@ impl HirBuilderContext {
             next_cover_id: 0,
             next_import_id: 0,
             next_for_loop_id: 0,
+            next_barrier_stage_id: 0,
             symbols: SymbolTable::new(),
             type_checker: TypeChecker::new(),
             errors: Vec::new(),
@@ -625,6 +627,11 @@ impl HirBuilderContext {
         let id = self.next_entity_id();
         let name = self.extract_name(node)?;
 
+        // Check if this is an async (NCL) entity
+        let is_async = node
+            .children_with_tokens()
+            .any(|child| child.kind() == SyntaxKind::AsyncKw);
+
         // IMPORTANT: Consume entity-level power_domain_config BEFORE processing ports
         // Otherwise build_port() will steal it via its own .take()
         let entity_power_domain_config = self.pending_power_domain_config.take();
@@ -953,6 +960,7 @@ impl HirBuilderContext {
         Some(HirEntity {
             id,
             name,
+            is_async, // NCL async entity detection
             visibility: crate::hir::HirVisibility::Private,
             ports,
             generics,
@@ -2289,6 +2297,15 @@ impl HirBuilderContext {
             SyntaxKind::GenerateMatchStmt => {
                 // Generate match statement - evaluates at compile time by default
                 self.build_generate_match_statement(node)
+            }
+            SyntaxKind::BarrierStmt => {
+                // NCL barrier statement - marks pipeline stage boundary
+                let stage_id = self.next_barrier_stage_id;
+                self.next_barrier_stage_id += 1;
+                Some(HirStatement::Barrier(crate::hir::HirBarrier {
+                    stage_id,
+                    span: self.make_span(node),
+                }))
             }
             _ => None,
         };
@@ -10348,6 +10365,10 @@ impl HirBuilderContext {
                         .collect();
                     return HirType::Tuple(element_types);
                 }
+                SyntaxKind::NclType => {
+                    // NCL dual-rail type: ncl<N>
+                    return self.build_ncl_type(&child);
+                }
                 _ => {}
             }
         }
@@ -10410,10 +10431,56 @@ impl HirBuilderContext {
                         .collect();
                     return HirType::Tuple(element_types);
                 }
+                SyntaxKind::NclType => {
+                    // NCL dual-rail type: ncl<N>
+                    return self.build_ncl_type(&child);
+                }
                 _ => {}
             }
         }
         HirType::Bit(8) // Default
+    }
+
+    /// Build NCL dual-rail type with width
+    /// NCL (Null Convention Logic) uses dual-rail encoding: 2 bits per logical bit
+    fn build_ncl_type(&mut self, node: &SyntaxNode) -> HirType {
+        // Look for width specification <N>
+        if let Some(width_node) = node.first_child_of_kind(SyntaxKind::WidthSpec) {
+            // Look for expression inside width spec
+            for child in width_node.children() {
+                // Check if it's a simple identifier that might be a generic parameter
+                if child.kind() == SyntaxKind::IdentExpr {
+                    if let Some(ident_token) = child.first_token_of_kind(SyntaxKind::Ident) {
+                        let name = ident_token.text().to_string();
+                        // Check if this is a generic parameter
+                        if let Some(SymbolId::GenericParam(param_name)) = self.symbols.lookup(&name)
+                        {
+                            return HirType::NclParam(param_name.clone());
+                        }
+                    }
+                }
+
+                // Try to evaluate as a constant expression
+                if let Some(expr) = self.build_expression(&child) {
+                    // Try to evaluate to a concrete value
+                    if let HirExpression::Literal(HirLiteral::Integer(width)) = &expr {
+                        return HirType::Ncl(*width as u32);
+                    }
+                    // Non-constant expression
+                    return HirType::NclExpr(Box::new(expr));
+                }
+            }
+        }
+
+        // Check for literal directly in node
+        if let Some(lit_token) = node.first_token_of_kind(SyntaxKind::IntLiteral) {
+            if let Ok(width) = lit_token.text().parse::<u32>() {
+                return HirType::Ncl(width);
+            }
+        }
+
+        // Default to ncl<32>
+        HirType::Ncl(32)
     }
 
     /// Build bit type with width

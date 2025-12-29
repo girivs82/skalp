@@ -290,6 +290,99 @@ pub fn evaluate_primitive(ptype: &PrimitiveType, inputs: &[bool]) -> Vec<bool> {
         PrimitiveType::Fp32Div => {
             evaluate_fp32_operation(inputs, |a, b| if b != 0.0 { a / b } else { f32::NAN })
         }
+
+        // === NCL Threshold Gates ===
+        // Note: These are simplified stateless evaluations.
+        // Full NCL simulation with hysteresis (state-holding) is implemented in ncl_sim.rs (Phase 6).
+        // THmn: Output HIGH when ≥m of n inputs are HIGH, LOW when all inputs are LOW
+        PrimitiveType::Th12 => {
+            // 1-of-2: OR with hysteresis (set when ≥1 input high, reset when all low)
+            // Stateless version: just OR
+            let count = inputs.iter().take(2).filter(|&&x| x).count();
+            vec![count >= 1]
+        }
+
+        PrimitiveType::Th22 => {
+            // 2-of-2: C-element (set when all inputs high, reset when all low)
+            // Stateless version: AND
+            let count = inputs.iter().take(2).filter(|&&x| x).count();
+            vec![count >= 2]
+        }
+
+        PrimitiveType::Th13 => {
+            let count = inputs.iter().take(3).filter(|&&x| x).count();
+            vec![count >= 1]
+        }
+
+        PrimitiveType::Th23 => {
+            let count = inputs.iter().take(3).filter(|&&x| x).count();
+            vec![count >= 2]
+        }
+
+        PrimitiveType::Th33 => {
+            let count = inputs.iter().take(3).filter(|&&x| x).count();
+            vec![count >= 3]
+        }
+
+        PrimitiveType::Th14 => {
+            let count = inputs.iter().take(4).filter(|&&x| x).count();
+            vec![count >= 1]
+        }
+
+        PrimitiveType::Th24 => {
+            let count = inputs.iter().take(4).filter(|&&x| x).count();
+            vec![count >= 2]
+        }
+
+        PrimitiveType::Th34 => {
+            let count = inputs.iter().take(4).filter(|&&x| x).count();
+            vec![count >= 3]
+        }
+
+        PrimitiveType::Th44 => {
+            let count = inputs.iter().take(4).filter(|&&x| x).count();
+            vec![count >= 4]
+        }
+
+        PrimitiveType::Thmn { m, n } => {
+            let count = inputs.iter().take(*n as usize).filter(|&&x| x).count();
+            vec![count >= *m as usize]
+        }
+
+        PrimitiveType::ThmnW { m, n, weights } => {
+            // Weighted threshold: sum(input[i] * weight[i]) >= m
+            let weighted_sum: u32 = inputs
+                .iter()
+                .take(*n as usize)
+                .zip(weights.iter())
+                .map(|(&input, &weight)| if input { weight as u32 } else { 0 })
+                .sum();
+            vec![weighted_sum >= *m as u32]
+        }
+
+        PrimitiveType::NclCompletion { width } => {
+            // Completion detection: all dual-rail signals must be in same phase
+            // Input is width*2 bits (t0,f0, t1,f1, ...)
+            // Complete when: all DATA (one rail high each) or all NULL (both rails low each)
+            let w = *width as usize;
+            let mut all_data = true;
+            let mut all_null = true;
+
+            for i in 0..w {
+                let t = inputs.get(i * 2).copied().unwrap_or(false);
+                let f = inputs.get(i * 2 + 1).copied().unwrap_or(false);
+
+                // DATA: exactly one rail is high (t xor f)
+                // NULL: both rails are low
+                let is_data = t ^ f;
+                let is_null = !t && !f;
+
+                all_data = all_data && is_data;
+                all_null = all_null && is_null;
+            }
+
+            vec![all_data || all_null]
+        }
     }
 }
 

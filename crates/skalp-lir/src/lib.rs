@@ -32,6 +32,7 @@ pub mod gate_optimizer;
 pub mod hierarchical_netlist;
 pub mod lir;
 pub mod mir_to_lir;
+pub mod ncl_expand;
 pub mod netlist;
 pub mod pattern_detector;
 pub mod pipeline_annotations;

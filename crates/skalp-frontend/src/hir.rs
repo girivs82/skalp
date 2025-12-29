@@ -147,6 +147,8 @@ pub struct HirEntity {
     pub id: EntityId,
     /// Entity name
     pub name: String,
+    /// Whether this is an async (NCL) entity
+    pub is_async: bool,
     /// Visibility
     pub visibility: HirVisibility,
     /// Ports
@@ -555,6 +557,8 @@ pub enum HirStatement {
     GenerateFor(HirGenerateFor),
     GenerateIf(HirGenerateIf),
     GenerateMatch(HirGenerateMatch),
+    /// Barrier statement (NCL pipeline stage boundary)
+    Barrier(HirBarrier),
 }
 
 /// If statement in HIR
@@ -1513,6 +1517,17 @@ pub enum HirPipelineStage {
     Block(Vec<HirStatement>),
 }
 
+/// Barrier statement for NCL pipeline stage boundaries
+/// In NCL circuits, barriers define completion detection points
+/// where all signals must transition through NULL before proceeding
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HirBarrier {
+    /// Unique identifier for this barrier (stage number)
+    pub stage_id: u32,
+    /// Source location span
+    pub span: Option<SourceSpan>,
+}
+
 /// Expressions in HIR
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum HirExpression {
@@ -1722,6 +1737,7 @@ pub enum HirType {
     Logic(u32),
     Int(u32),
     Nat(u32),
+    Ncl(u32),                     // NCL dual-rail type (logical width, physical = 2*width)
     Clock(Option<ClockDomainId>), // Clock with optional domain
     Reset {
         polarity: HirResetPolarity,
@@ -1739,11 +1755,13 @@ pub enum HirType {
     LogicParam(String), // logic[WIDTH] where WIDTH is a parameter
     IntParam(String),   // int[WIDTH] where WIDTH is a parameter
     NatParam(String),   // nat[WIDTH] where WIDTH is a parameter
+    NclParam(String),   // ncl<WIDTH> where WIDTH is a parameter
     // Types with const expressions (e.g., bit<SIZE + 1>, nat<clog2(DEPTH)>)
     BitExpr(Box<HirExpression>),
     LogicExpr(Box<HirExpression>),
     IntExpr(Box<HirExpression>),
     NatExpr(Box<HirExpression>),
+    NclExpr(Box<HirExpression>), // ncl<EXPR> where EXPR is a const expression
     ArrayExpr(Box<HirType>, Box<HirExpression>), // array<T, SIZE_EXPR>
     // IEEE 754 floating-point types
     Float16, // IEEE 754 half precision (16-bit)

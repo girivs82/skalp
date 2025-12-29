@@ -651,6 +651,38 @@ pub enum CellFunction {
     /// Power pad with integrated Low Dropout Regulator
     PowerPadLdo,
 
+    // === NCL (Null Convention Logic) Threshold Gates ===
+    /// TH12: 1-of-2 threshold gate (OR with hysteresis)
+    Th12,
+    /// TH22: 2-of-2 threshold gate (C-element/Muller gate)
+    Th22,
+    /// TH13: 1-of-3 threshold gate
+    Th13,
+    /// TH23: 2-of-3 threshold gate
+    Th23,
+    /// TH33: 3-of-3 threshold gate
+    Th33,
+    /// TH14: 1-of-4 threshold gate
+    Th14,
+    /// TH24: 2-of-4 threshold gate
+    Th24,
+    /// TH34: 3-of-4 threshold gate
+    Th34,
+    /// TH44: 4-of-4 threshold gate
+    Th44,
+    /// THmn: General m-of-n threshold gate
+    Thmn {
+        /// Threshold value
+        m: u8,
+        /// Number of inputs
+        n: u8,
+    },
+    /// NCL Completion detection tree
+    NclCompletion {
+        /// Width (number of dual-rail signals)
+        width: u32,
+    },
+
     // Custom/vendor-specific
     Custom(String),
 
@@ -807,6 +839,41 @@ impl CellFunction {
                 }
                 let outputs: Vec<String> = (0..32).map(|i| format!("y{}", i)).collect();
                 (inputs, outputs)
+            }
+            // NCL Threshold Gates
+            CellFunction::Th12 => (vec!["a".into(), "b".into()], vec!["y".into()]),
+            CellFunction::Th22 => (vec!["a".into(), "b".into()], vec!["y".into()]),
+            CellFunction::Th13 => (vec!["a".into(), "b".into(), "c".into()], vec!["y".into()]),
+            CellFunction::Th23 => (vec!["a".into(), "b".into(), "c".into()], vec!["y".into()]),
+            CellFunction::Th33 => (vec!["a".into(), "b".into(), "c".into()], vec!["y".into()]),
+            CellFunction::Th14 => (
+                vec!["a".into(), "b".into(), "c".into(), "d".into()],
+                vec!["y".into()],
+            ),
+            CellFunction::Th24 => (
+                vec!["a".into(), "b".into(), "c".into(), "d".into()],
+                vec!["y".into()],
+            ),
+            CellFunction::Th34 => (
+                vec!["a".into(), "b".into(), "c".into(), "d".into()],
+                vec!["y".into()],
+            ),
+            CellFunction::Th44 => (
+                vec!["a".into(), "b".into(), "c".into(), "d".into()],
+                vec!["y".into()],
+            ),
+            CellFunction::Thmn { m: _, n } => {
+                let inputs: Vec<String> = (0..*n).map(|i| format!("a{}", i)).collect();
+                (inputs, vec!["y".into()])
+            }
+            CellFunction::NclCompletion { width } => {
+                // Completion detector: dual-rail inputs (t0,f0,t1,f1,...) and single output
+                let mut inputs = Vec::with_capacity((*width * 2) as usize);
+                for i in 0..*width {
+                    inputs.push(format!("t{}", i));
+                    inputs.push(format!("f{}", i));
+                }
+                (inputs, vec!["complete".into()])
             }
         }
     }
@@ -2378,6 +2445,18 @@ fn format_cell_function(f: &CellFunction) -> String {
         CellFunction::FpSub32 => "fp_sub32".to_string(),
         CellFunction::FpMul32 => "fp_mul32".to_string(),
         CellFunction::FpDiv32 => "fp_div32".to_string(),
+        // NCL Threshold Gates
+        CellFunction::Th12 => "th12".to_string(),
+        CellFunction::Th22 => "th22".to_string(),
+        CellFunction::Th13 => "th13".to_string(),
+        CellFunction::Th23 => "th23".to_string(),
+        CellFunction::Th33 => "th33".to_string(),
+        CellFunction::Th14 => "th14".to_string(),
+        CellFunction::Th24 => "th24".to_string(),
+        CellFunction::Th34 => "th34".to_string(),
+        CellFunction::Th44 => "th44".to_string(),
+        CellFunction::Thmn { m, n } => format!("th{}{}", m, n),
+        CellFunction::NclCompletion { width } => format!("ncl_completion{}", width),
     }
 }
 

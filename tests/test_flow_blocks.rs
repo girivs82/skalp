@@ -147,6 +147,9 @@ mod flow_block_tests {
                     skalp_frontend::hir::HirStatement::GenerateMatch(_) => {
                         println!("    Statement {}: GenerateMatch", j);
                     }
+                    skalp_frontend::hir::HirStatement::Barrier(barrier) => {
+                        println!("    Statement {}: Barrier (stage {})", j, barrier.stage_id);
+                    }
                 }
             }
         }

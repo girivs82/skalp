@@ -116,11 +116,14 @@ pub enum Token {
     #[token("requirement")]
     Requirement,
 
-    // Testbench Only (5)
+    // Async/NCL and Testbench (7)
+    // Note: 'async' is used both for testbench async functions AND synthesizable NCL entities
     #[token("async")]
     Async,
     #[token("await")]
     Await,
+    #[token("barrier")]
+    Barrier,
     #[token("fn")]
     Fn,
     #[token("return")]
