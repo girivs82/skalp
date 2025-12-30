@@ -381,6 +381,44 @@ impl<'a> TechMapper<'a> {
                 );
             }
 
+            // NCL Threshold Gates - direct mapping to TH12/TH22 cells
+            LirOp::Th12 { width } => {
+                // TH12: 1-of-2 threshold gate (OR with hysteresis)
+                if self.library.find_best_cell(&CellFunction::Th12).is_some() {
+                    self.map_bitwise_gate(
+                        CellFunction::Th12,
+                        *width,
+                        &input_nets,
+                        &output_nets,
+                        &node.path,
+                    );
+                } else {
+                    // Fallback: synthesize from OR (will lose hysteresis, but functional)
+                    self.map_bitwise_gate(
+                        CellFunction::Or2,
+                        *width,
+                        &input_nets,
+                        &output_nets,
+                        &node.path,
+                    );
+                }
+            }
+            LirOp::Th22 { width } => {
+                // TH22: 2-of-2 threshold gate (C-element / AND with hysteresis)
+                if self.library.find_best_cell(&CellFunction::Th22).is_some() {
+                    self.map_bitwise_gate(
+                        CellFunction::Th22,
+                        *width,
+                        &input_nets,
+                        &output_nets,
+                        &node.path,
+                    );
+                } else {
+                    // Synthesize C-element from standard gates
+                    self.map_c_element(*width, &input_nets, &output_nets, &node.path);
+                }
+            }
+
             // Adder - ripple carry chain
             LirOp::Add { width, has_carry } => {
                 self.map_adder(*width, *has_carry, &input_nets, &output_nets, &node.path);
@@ -2744,6 +2782,7 @@ impl<'a> TechMapper<'a> {
     }
 
     /// Map NCL adder using NCL full-adder cells
+    /// Accepts 4 inputs: a_t, a_f, b_t, b_f (separate dual-rail signals)
     fn map_ncl_add(
         &mut self,
         width: u32,
@@ -2751,8 +2790,9 @@ impl<'a> TechMapper<'a> {
         outputs: &[GateNetId],
         path: &str,
     ) {
-        if inputs.len() < 2 {
-            self.warnings.push("NCL Add needs 2 inputs".to_string());
+        if inputs.len() < 4 {
+            self.warnings
+                .push("NCL Add needs 4 inputs (a_t, a_f, b_t, b_f)".to_string());
             return;
         }
 
@@ -2762,6 +2802,7 @@ impl<'a> TechMapper<'a> {
         let th12_info = self.get_ncl_cell_info(&CellFunction::Th12);
         let th22_info = self.get_ncl_cell_info(&CellFunction::Th22);
         let th23_info = self.get_ncl_cell_info(&CellFunction::Th23);
+        let _ = th23_info; // Suppress unused warning
 
         // Initialize carry to 0 (NULL initially, but DATA_FALSE after encoding)
         // For first bit, carry_in is 0 = (t=0, f=1)
@@ -2773,11 +2814,16 @@ impl<'a> TechMapper<'a> {
         let mut carry_f = tie_high;
 
         for i in 0..width as usize {
-            let a_t = inputs[0].get(i * 2).copied().unwrap_or(GateNetId(0));
-            let a_f = inputs[0].get(i * 2 + 1).copied().unwrap_or(GateNetId(0));
-            let b_t = inputs[1].get(i * 2).copied().unwrap_or(GateNetId(0));
-            let b_f = inputs[1].get(i * 2 + 1).copied().unwrap_or(GateNetId(0));
+            // inputs[0] = a_t (all true rails)
+            // inputs[1] = a_f (all false rails)
+            // inputs[2] = b_t (all true rails)
+            // inputs[3] = b_f (all false rails)
+            let a_t = inputs[0].get(i).copied().unwrap_or(GateNetId(0));
+            let a_f = inputs[1].get(i).copied().unwrap_or(GateNetId(0));
+            let b_t = inputs[2].get(i).copied().unwrap_or(GateNetId(0));
+            let b_f = inputs[3].get(i).copied().unwrap_or(GateNetId(0));
 
+            // outputs are interleaved: [sum_t[0], sum_f[0], sum_t[1], sum_f[1], ...]
             let sum_t = outputs.get(i * 2).copied().unwrap_or(GateNetId(0));
             let sum_f = outputs.get(i * 2 + 1).copied().unwrap_or(GateNetId(0));
 
@@ -2988,6 +3034,9 @@ impl<'a> TechMapper<'a> {
     }
 
     /// Map NCL subtractor: a - b = a + (~b) + 1
+    /// Map NCL subtractor using ripple-borrow chain
+    /// Accepts 4 inputs: a_t, a_f, b_t, b_f (b is already inverted by caller)
+    /// Uses carry_in = 1 for two's complement subtraction
     fn map_ncl_sub(
         &mut self,
         width: u32,
@@ -2995,22 +3044,332 @@ impl<'a> TechMapper<'a> {
         outputs: &[GateNetId],
         path: &str,
     ) {
-        if inputs.len() < 2 {
-            self.warnings.push("NCL Sub needs 2 inputs".to_string());
+        if inputs.len() < 4 {
+            self.warnings
+                .push("NCL Sub needs 4 inputs (a_t, a_f, b_inverted_t, b_inverted_f)".to_string());
             return;
         }
 
-        // For subtraction, we invert b (swap its rails) and add 1 (carry_in = 1)
-        // This is simplified - full implementation would negate b and add with carry
+        // NCL subtractor: a - b = a + (~b) + 1
+        // The caller (ncl_expand) swaps b's rails, so inputs are:
+        // inputs[0] = a_t, inputs[1] = a_f, inputs[2] = ~b_t (= b_f), inputs[3] = ~b_f (= b_t)
 
-        self.warnings.push(format!(
-            "NCL Sub at {} - using simplified implementation",
-            path
-        ));
+        let th12_info = self.get_ncl_cell_info(&CellFunction::Th12);
+        let th22_info = self.get_ncl_cell_info(&CellFunction::Th22);
 
-        // For now, delegate to NCL add with inverted b
-        // A complete implementation would create intermediate signals for ~b
-        self.map_ncl_add(width, inputs, outputs, path);
+        // Initialize carry to 1 (for two's complement): t=high, f=low
+        let tie_low = self.get_tie_low();
+        let tie_high = self.get_tie_high();
+
+        let mut carry_t = tie_high; // Start with carry = 1
+        let mut carry_f = tie_low;
+
+        for i in 0..width as usize {
+            let a_t = inputs[0].get(i).copied().unwrap_or(GateNetId(0));
+            let a_f = inputs[1].get(i).copied().unwrap_or(GateNetId(0));
+            let b_t = inputs[2].get(i).copied().unwrap_or(GateNetId(0)); // Already inverted
+            let b_f = inputs[3].get(i).copied().unwrap_or(GateNetId(0)); // Already inverted
+
+            let diff_t = outputs.get(i * 2).copied().unwrap_or(GateNetId(0));
+            let diff_f = outputs.get(i * 2 + 1).copied().unwrap_or(GateNetId(0));
+
+            // Build XOR(a, b) intermediate nets
+            let xor_ab_t = self.alloc_net_id();
+            self.netlist
+                .add_net(GateNet::new(xor_ab_t, format!("{}.sub_xor_ab_t{}", path, i)));
+            let xor_ab_f = self.alloc_net_id();
+            self.netlist
+                .add_net(GateNet::new(xor_ab_f, format!("{}.sub_xor_ab_f{}", path, i)));
+
+            let at_bf = self.alloc_net_id();
+            self.netlist
+                .add_net(GateNet::new(at_bf, format!("{}.sub_at_bf{}", path, i)));
+            let af_bt = self.alloc_net_id();
+            self.netlist
+                .add_net(GateNet::new(af_bt, format!("{}.sub_af_bt{}", path, i)));
+            let at_bt = self.alloc_net_id();
+            self.netlist
+                .add_net(GateNet::new(at_bt, format!("{}.sub_at_bt{}", path, i)));
+            let af_bf = self.alloc_net_id();
+            self.netlist
+                .add_net(GateNet::new(af_bf, format!("{}.sub_af_bf{}", path, i)));
+
+            // Build XOR(a, b) = t: TH12(TH22(a_t,b_f), TH22(a_f,b_t))
+            self.add_cell(Cell::new_comb(
+                CellId(0),
+                th22_info.name.clone(),
+                self.library.name.clone(),
+                th22_info.fit,
+                format!("{}.sub_xor1_{}", path, i),
+                vec![a_t, b_f],
+                vec![at_bf],
+            ));
+            self.add_cell(Cell::new_comb(
+                CellId(0),
+                th22_info.name.clone(),
+                self.library.name.clone(),
+                th22_info.fit,
+                format!("{}.sub_xor2_{}", path, i),
+                vec![a_f, b_t],
+                vec![af_bt],
+            ));
+            self.add_cell(Cell::new_comb(
+                CellId(0),
+                th12_info.name.clone(),
+                self.library.name.clone(),
+                th12_info.fit,
+                format!("{}.sub_xor_t_{}", path, i),
+                vec![at_bf, af_bt],
+                vec![xor_ab_t],
+            ));
+
+            // XOR false rail
+            self.add_cell(Cell::new_comb(
+                CellId(0),
+                th22_info.name.clone(),
+                self.library.name.clone(),
+                th22_info.fit,
+                format!("{}.sub_xor3_{}", path, i),
+                vec![a_t, b_t],
+                vec![at_bt],
+            ));
+            self.add_cell(Cell::new_comb(
+                CellId(0),
+                th22_info.name.clone(),
+                self.library.name.clone(),
+                th22_info.fit,
+                format!("{}.sub_xor4_{}", path, i),
+                vec![a_f, b_f],
+                vec![af_bf],
+            ));
+            self.add_cell(Cell::new_comb(
+                CellId(0),
+                th12_info.name.clone(),
+                self.library.name.clone(),
+                th12_info.fit,
+                format!("{}.sub_xor_f_{}", path, i),
+                vec![at_bt, af_bf],
+                vec![xor_ab_f],
+            ));
+
+            // Build XOR(xor_ab, carry) for diff
+            let xor_ct = self.alloc_net_id();
+            self.netlist
+                .add_net(GateNet::new(xor_ct, format!("{}.sub_xor_ct{}", path, i)));
+            let xor_cf = self.alloc_net_id();
+            self.netlist
+                .add_net(GateNet::new(xor_cf, format!("{}.sub_xor_cf{}", path, i)));
+
+            self.add_cell(Cell::new_comb(
+                CellId(0),
+                th22_info.name.clone(),
+                self.library.name.clone(),
+                th22_info.fit,
+                format!("{}.sub_sum1_{}", path, i),
+                vec![xor_ab_t, carry_f],
+                vec![xor_ct],
+            ));
+            self.add_cell(Cell::new_comb(
+                CellId(0),
+                th22_info.name.clone(),
+                self.library.name.clone(),
+                th22_info.fit,
+                format!("{}.sub_sum2_{}", path, i),
+                vec![xor_ab_f, carry_t],
+                vec![xor_cf],
+            ));
+            self.add_cell(Cell::new_comb(
+                CellId(0),
+                th12_info.name.clone(),
+                self.library.name.clone(),
+                th12_info.fit,
+                format!("{}.sub_diff_t_{}", path, i),
+                vec![xor_ct, xor_cf],
+                vec![diff_t],
+            ));
+
+            // diff_f
+            let xor_dt = self.alloc_net_id();
+            self.netlist
+                .add_net(GateNet::new(xor_dt, format!("{}.sub_xor_dt{}", path, i)));
+            let xor_df = self.alloc_net_id();
+            self.netlist
+                .add_net(GateNet::new(xor_df, format!("{}.sub_xor_df{}", path, i)));
+
+            self.add_cell(Cell::new_comb(
+                CellId(0),
+                th22_info.name.clone(),
+                self.library.name.clone(),
+                th22_info.fit,
+                format!("{}.sub_sum3_{}", path, i),
+                vec![xor_ab_t, carry_t],
+                vec![xor_dt],
+            ));
+            self.add_cell(Cell::new_comb(
+                CellId(0),
+                th22_info.name.clone(),
+                self.library.name.clone(),
+                th22_info.fit,
+                format!("{}.sub_sum4_{}", path, i),
+                vec![xor_ab_f, carry_f],
+                vec![xor_df],
+            ));
+            self.add_cell(Cell::new_comb(
+                CellId(0),
+                th12_info.name.clone(),
+                self.library.name.clone(),
+                th12_info.fit,
+                format!("{}.sub_diff_f_{}", path, i),
+                vec![xor_dt, xor_df],
+                vec![diff_f],
+            ));
+
+            // Carry out = MAJ(a, b, cin) for next bit
+            let and_ab_t = self.alloc_net_id();
+            self.netlist
+                .add_net(GateNet::new(and_ab_t, format!("{}.sub_and_ab_t{}", path, i)));
+            let and_ab_f = self.alloc_net_id();
+            self.netlist
+                .add_net(GateNet::new(and_ab_f, format!("{}.sub_and_ab_f{}", path, i)));
+            let and_bc_t = self.alloc_net_id();
+            self.netlist
+                .add_net(GateNet::new(and_bc_t, format!("{}.sub_and_bc_t{}", path, i)));
+            let and_bc_f = self.alloc_net_id();
+            self.netlist
+                .add_net(GateNet::new(and_bc_f, format!("{}.sub_and_bc_f{}", path, i)));
+            let and_ac_t = self.alloc_net_id();
+            self.netlist
+                .add_net(GateNet::new(and_ac_t, format!("{}.sub_and_ac_t{}", path, i)));
+            let and_ac_f = self.alloc_net_id();
+            self.netlist
+                .add_net(GateNet::new(and_ac_f, format!("{}.sub_and_ac_f{}", path, i)));
+
+            // AND(a, b)
+            self.add_cell(Cell::new_comb(
+                CellId(0),
+                th22_info.name.clone(),
+                self.library.name.clone(),
+                th22_info.fit,
+                format!("{}.sub_and_ab_t_{}", path, i),
+                vec![a_t, b_t],
+                vec![and_ab_t],
+            ));
+            self.add_cell(Cell::new_comb(
+                CellId(0),
+                th12_info.name.clone(),
+                self.library.name.clone(),
+                th12_info.fit,
+                format!("{}.sub_and_ab_f_{}", path, i),
+                vec![a_f, b_f],
+                vec![and_ab_f],
+            ));
+
+            // AND(b, cin)
+            self.add_cell(Cell::new_comb(
+                CellId(0),
+                th22_info.name.clone(),
+                self.library.name.clone(),
+                th22_info.fit,
+                format!("{}.sub_and_bc_t_{}", path, i),
+                vec![b_t, carry_t],
+                vec![and_bc_t],
+            ));
+            self.add_cell(Cell::new_comb(
+                CellId(0),
+                th12_info.name.clone(),
+                self.library.name.clone(),
+                th12_info.fit,
+                format!("{}.sub_and_bc_f_{}", path, i),
+                vec![b_f, carry_f],
+                vec![and_bc_f],
+            ));
+
+            // AND(a, cin)
+            self.add_cell(Cell::new_comb(
+                CellId(0),
+                th22_info.name.clone(),
+                self.library.name.clone(),
+                th22_info.fit,
+                format!("{}.sub_and_ac_t_{}", path, i),
+                vec![a_t, carry_t],
+                vec![and_ac_t],
+            ));
+            self.add_cell(Cell::new_comb(
+                CellId(0),
+                th12_info.name.clone(),
+                self.library.name.clone(),
+                th12_info.fit,
+                format!("{}.sub_and_ac_f_{}", path, i),
+                vec![a_f, carry_f],
+                vec![and_ac_f],
+            ));
+
+            // OR of all three ANDs for carry
+            let or_ab_bc_t = self.alloc_net_id();
+            self.netlist.add_net(GateNet::new(
+                or_ab_bc_t,
+                format!("{}.sub_or_ab_bc_t{}", path, i),
+            ));
+            let or_ab_bc_f = self.alloc_net_id();
+            self.netlist.add_net(GateNet::new(
+                or_ab_bc_f,
+                format!("{}.sub_or_ab_bc_f{}", path, i),
+            ));
+
+            self.add_cell(Cell::new_comb(
+                CellId(0),
+                th12_info.name.clone(),
+                self.library.name.clone(),
+                th12_info.fit,
+                format!("{}.sub_or1_{}", path, i),
+                vec![and_ab_t, and_bc_t],
+                vec![or_ab_bc_t],
+            ));
+            self.add_cell(Cell::new_comb(
+                CellId(0),
+                th22_info.name.clone(),
+                self.library.name.clone(),
+                th22_info.fit,
+                format!("{}.sub_or1f_{}", path, i),
+                vec![and_ab_f, and_bc_f],
+                vec![or_ab_bc_f],
+            ));
+
+            // New carry
+            let new_carry_t = self.alloc_net_id();
+            self.netlist.add_net(GateNet::new(
+                new_carry_t,
+                format!("{}.sub_cout_t{}", path, i),
+            ));
+            let new_carry_f = self.alloc_net_id();
+            self.netlist.add_net(GateNet::new(
+                new_carry_f,
+                format!("{}.sub_cout_f{}", path, i),
+            ));
+
+            self.add_cell(Cell::new_comb(
+                CellId(0),
+                th12_info.name.clone(),
+                self.library.name.clone(),
+                th12_info.fit,
+                format!("{}.sub_cout_t_{}", path, i),
+                vec![or_ab_bc_t, and_ac_t],
+                vec![new_carry_t],
+            ));
+            self.add_cell(Cell::new_comb(
+                CellId(0),
+                th22_info.name.clone(),
+                self.library.name.clone(),
+                th22_info.fit,
+                format!("{}.sub_cout_f_{}", path, i),
+                vec![or_ab_bc_f, and_ac_f],
+                vec![new_carry_f],
+            ));
+
+            carry_t = new_carry_t;
+            carry_f = new_carry_f;
+        }
+
         self.stats.decomposed_mappings += 1;
     }
 

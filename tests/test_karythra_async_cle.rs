@@ -5,44 +5,65 @@
 //! with NCL dual-rail encoding and completion detection.
 
 use skalp_frontend::parse_and_build_compilation_context;
+use skalp_lir::gate_netlist::GateNetlist;
 use skalp_lir::{get_stdlib_library, lower_mir_hierarchical, map_hierarchical_to_gates};
 use skalp_mir::MirCompiler;
 use skalp_sim::{
     CircuitMode, HwAccel, NclSimConfig, NclSimulator, SimLevel, UnifiedSimConfig, UnifiedSimulator,
 };
 use std::path::Path;
+use std::sync::OnceLock;
 
-/// Compile the Karythra async CLE to gate netlist
-fn compile_karythra_async_cle() -> skalp_lir::gate_netlist::GateNetlist {
-    // Set up module search path BEFORE parsing
-    // This must be set before the module resolver is initialized
-    std::env::set_var(
-        "SKALP_STDLIB_PATH",
-        "/Users/girivs/src/hw/karythra/rtl/skalp/cle/lib",
-    );
+/// Cached compiled netlist - compile once, share across all tests
+static COMPILED_CLE: OnceLock<GateNetlist> = OnceLock::new();
 
-    // Use file-based parsing which properly handles module resolution
-    let cle_path = Path::new("/Users/girivs/src/hw/karythra/rtl/skalp/cle/src/main_async.sk");
+/// Get or compile the Karythra async CLE to gate netlist
+/// Uses OnceLock to ensure compilation happens only once across all tests
+fn compile_karythra_async_cle() -> &'static GateNetlist {
+    COMPILED_CLE.get_or_init(|| {
+        println!("🔧 Compiling Karythra async CLE (one-time)...");
+        let start = std::time::Instant::now();
 
-    if !cle_path.exists() {
-        panic!("Karythra async CLE not found at {:?}", cle_path);
-    }
+        // Set up module search path BEFORE parsing
+        // This must be set before the module resolver is initialized
+        std::env::set_var(
+            "SKALP_STDLIB_PATH",
+            "/Users/girivs/src/hw/karythra/rtl/skalp/cle/lib",
+        );
 
-    // BUG #176 FIX: Use parse_and_build_compilation_context and compile_to_mir_with_modules
-    // to properly resolve imported enum discriminant values
-    let context = parse_and_build_compilation_context(cle_path).expect("Failed to parse async CLE");
-    let mir_compiler = MirCompiler::new();
-    let mir = mir_compiler
-        .compile_to_mir_with_modules(&context.main_hir, &context.module_hirs)
-        .expect("Failed to compile to MIR");
+        // Use file-based parsing which properly handles module resolution
+        let cle_path = Path::new("/Users/girivs/src/hw/karythra/rtl/skalp/cle/src/main_async.sk");
 
-    assert!(!mir.modules.is_empty(), "Should have at least one module");
+        if !cle_path.exists() {
+            panic!("Karythra async CLE not found at {:?}", cle_path);
+        }
 
-    // Use hierarchical compilation (depth >= 5 instantiates submodules)
-    let hier_lir = lower_mir_hierarchical(&mir);
-    let library = get_stdlib_library("generic_asic").expect("Failed to load library");
-    let hier_result = map_hierarchical_to_gates(&hier_lir, &library);
-    hier_result.flatten()
+        // BUG #176 FIX: Use parse_and_build_compilation_context and compile_to_mir_with_modules
+        // to properly resolve imported enum discriminant values
+        let context =
+            parse_and_build_compilation_context(cle_path).expect("Failed to parse async CLE");
+        let mir_compiler = MirCompiler::new();
+        let mir = mir_compiler
+            .compile_to_mir_with_modules(&context.main_hir, &context.module_hirs)
+            .expect("Failed to compile to MIR");
+
+        assert!(!mir.modules.is_empty(), "Should have at least one module");
+
+        // Use hierarchical compilation (depth >= 5 instantiates submodules)
+        let hier_lir = lower_mir_hierarchical(&mir);
+        let library = get_stdlib_library("generic_asic").expect("Failed to load library");
+        let hier_result = map_hierarchical_to_gates(&hier_lir, &library);
+        let netlist = hier_result.flatten();
+
+        println!(
+            "✅ Compiled in {:.2}s: {} cells, {} nets",
+            start.elapsed().as_secs_f64(),
+            netlist.cells.len(),
+            netlist.nets.len()
+        );
+
+        netlist
+    })
 }
 
 /// Test NCL simulation with expected outputs using UnifiedSimulator (GPU-accelerated)

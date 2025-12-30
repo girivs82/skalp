@@ -751,7 +751,19 @@ pub enum LirOp {
     /// Tristate buffer
     Tristate { width: u32 },
 
-    // === NCL (Null Convention Logic) Operations ===
+    // === NCL (Null Convention Logic) Threshold Gates ===
+    /// TH12: 1-of-2 threshold gate (OR with hysteresis)
+    /// Output = 1 when ≥1 of 2 inputs are 1
+    /// Output = 0 when all inputs are 0
+    /// Otherwise holds previous value (for simulation)
+    Th12 { width: u32 },
+    /// TH22: 2-of-2 threshold gate (Muller C-element / AND with hysteresis)
+    /// Output = 1 when all 2 inputs are 1
+    /// Output = 0 when all inputs are 0
+    /// Otherwise holds previous value (for simulation)
+    Th22 { width: u32 },
+
+    // === NCL (Null Convention Logic) Dual-Rail Operations ===
     /// Encode single-rail to dual-rail NCL
     /// Input: N bits, Output: 2N bits (pairs of t,f rails)
     NclEncode { width: u32 },
@@ -850,7 +862,9 @@ impl LirOp {
             LirOp::Constant { width, .. } | LirOp::Buffer { width } | LirOp::Tristate { width } => {
                 *width
             }
-            // NCL operations - output width is 2x logical width (dual-rail)
+            // NCL threshold gates - single-rail output
+            LirOp::Th12 { width } | LirOp::Th22 { width } => *width,
+            // NCL dual-rail operations - output width is 2x logical width
             LirOp::NclEncode { width } => width * 2, // N bits -> 2N dual-rail bits
             LirOp::NclDecode { width } => *width,    // 2N dual-rail -> N single-rail
             LirOp::NclAnd { width }
@@ -922,18 +936,19 @@ impl LirOp {
             LirOp::Constant { .. } => 0,
             LirOp::Buffer { .. } => 1,
             LirOp::Tristate { .. } => 2, // data, enable
-            // NCL operations
+            // NCL threshold gates - 2 inputs
+            LirOp::Th12 { .. } | LirOp::Th22 { .. } => 2,
+            // NCL dual-rail operations
             LirOp::NclEncode { .. } | LirOp::NclDecode { .. } | LirOp::NclNot { .. } => 1,
             LirOp::NclAnd { .. }
             | LirOp::NclOr { .. }
             | LirOp::NclXor { .. }
-            | LirOp::NclAdd { .. }
-            | LirOp::NclSub { .. }
-            | LirOp::NclMul { .. }
             | LirOp::NclLt { .. }
             | LirOp::NclEq { .. }
             | LirOp::NclShl { .. }
             | LirOp::NclShr { .. } => 2,
+            // NclAdd/Sub/Mul take 4 separate inputs: a_t, a_f, b_t, b_f
+            LirOp::NclAdd { .. } | LirOp::NclSub { .. } | LirOp::NclMul { .. } => 4,
             LirOp::NclMux2 { .. } => 3,     // sel, a, b (all dual-rail)
             LirOp::NclReg { .. } => 1,      // data (dual-rail)
             LirOp::NclComplete { .. } => 1, // dual-rail signals to check
