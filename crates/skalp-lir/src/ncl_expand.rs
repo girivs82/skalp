@@ -634,6 +634,120 @@ pub fn expand_to_ncl(lir: &Lir, config: &NclConfig) -> NclExpandResult {
                     }
                 }
             }
+            // RangeSelect - extract a range of bits from a signal
+            LirOp::RangeSelect { width, high, low } => {
+                if !node.inputs.is_empty() {
+                    let a = expander.dual_rail_map.get(&node.inputs[0]).copied();
+                    if let (Some(a), Some(dest)) = (a, output_pair) {
+                        // For dual-rail, RangeSelect extracts range from both rails
+                        // Since we're using simplified NCL with interleaved bits, we pass through
+                        expander.alloc_node(
+                            LirOp::RangeSelect {
+                                width: *width,
+                                high: *high,
+                                low: *low,
+                            },
+                            vec![a.t],
+                            dest.t,
+                        );
+                        expander.alloc_node(
+                            LirOp::RangeSelect {
+                                width: *width,
+                                high: *high,
+                                low: *low,
+                            },
+                            vec![a.f],
+                            dest.f,
+                        );
+                    }
+                }
+            }
+            // Concat - concatenate multiple signals
+            LirOp::Concat { widths } => {
+                // Get input pairs for all inputs
+                let input_pairs: Vec<Option<DualRailPair>> = node
+                    .inputs
+                    .iter()
+                    .map(|id| expander.dual_rail_map.get(id).copied())
+                    .collect();
+
+                if input_pairs.iter().all(|p| p.is_some()) {
+                    if let Some(dest) = output_pair {
+                        // Collect true rails and false rails
+                        let t_inputs: Vec<LirSignalId> = input_pairs
+                            .iter()
+                            .filter_map(|p| p.map(|pair| pair.t))
+                            .collect();
+                        let f_inputs: Vec<LirSignalId> = input_pairs
+                            .iter()
+                            .filter_map(|p| p.map(|pair| pair.f))
+                            .collect();
+
+                        expander.alloc_node(
+                            LirOp::Concat {
+                                widths: widths.clone(),
+                            },
+                            t_inputs,
+                            dest.t,
+                        );
+                        expander.alloc_node(
+                            LirOp::Concat {
+                                widths: widths.clone(),
+                            },
+                            f_inputs,
+                            dest.f,
+                        );
+                    }
+                }
+            }
+            // Greater than or equal
+            LirOp::Ge { width } => {
+                if node.inputs.len() >= 2 {
+                    let a = expander.dual_rail_map.get(&node.inputs[0]).copied();
+                    let b = expander.dual_rail_map.get(&node.inputs[1]).copied();
+                    if let (Some(a), Some(b), Some(dest)) = (a, b, output_pair) {
+                        // Simplified: compute Ge using true rails, invert for false rail
+                        expander.alloc_node(LirOp::Ge { width: *width }, vec![a.t, b.t], dest.t);
+                        expander.alloc_node(LirOp::Not { width: 1 }, vec![dest.t], dest.f);
+                    }
+                }
+            }
+            // Greater than
+            LirOp::Gt { width } => {
+                if node.inputs.len() >= 2 {
+                    let a = expander.dual_rail_map.get(&node.inputs[0]).copied();
+                    let b = expander.dual_rail_map.get(&node.inputs[1]).copied();
+                    if let (Some(a), Some(b), Some(dest)) = (a, b, output_pair) {
+                        // Simplified: compute Gt using true rails, invert for false rail
+                        expander.alloc_node(LirOp::Gt { width: *width }, vec![a.t, b.t], dest.t);
+                        expander.alloc_node(LirOp::Not { width: 1 }, vec![dest.t], dest.f);
+                    }
+                }
+            }
+            // Less than or equal
+            LirOp::Le { width } => {
+                if node.inputs.len() >= 2 {
+                    let a = expander.dual_rail_map.get(&node.inputs[0]).copied();
+                    let b = expander.dual_rail_map.get(&node.inputs[1]).copied();
+                    if let (Some(a), Some(b), Some(dest)) = (a, b, output_pair) {
+                        // Simplified: compute Le using true rails, invert for false rail
+                        expander.alloc_node(LirOp::Le { width: *width }, vec![a.t, b.t], dest.t);
+                        expander.alloc_node(LirOp::Not { width: 1 }, vec![dest.t], dest.f);
+                    }
+                }
+            }
+            // Not equal
+            LirOp::Ne { width } => {
+                if node.inputs.len() >= 2 {
+                    let a = expander.dual_rail_map.get(&node.inputs[0]).copied();
+                    let b = expander.dual_rail_map.get(&node.inputs[1]).copied();
+                    if let (Some(a), Some(b), Some(dest)) = (a, b, output_pair) {
+                        // Simplified: compute Ne using true rails, invert for false rail
+                        expander.alloc_node(LirOp::Ne { width: *width }, vec![a.t, b.t], dest.t);
+                        expander.alloc_node(LirOp::Not { width: 1 }, vec![dest.t], dest.f);
+                    }
+                }
+            }
             // Handle other operations by passing through or generating placeholders
             _ => {
                 // For unsupported operations, create pass-through

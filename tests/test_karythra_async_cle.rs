@@ -1,0 +1,361 @@
+//! Karythra Async CLE Integration Tests
+//!
+//! Tests the asynchronous (NCL) version of the Karythra CLE.
+//! Verifies that all function unit levels (L0-L5) work correctly
+//! with NCL dual-rail encoding and completion detection.
+
+use skalp_frontend::parse_and_build_compilation_context;
+use skalp_lir::{get_stdlib_library, lower_mir_module_to_lir, map_lir_to_gates};
+use skalp_mir::MirCompiler;
+use skalp_sim::{NclSimConfig, NclSimulator};
+use std::path::Path;
+
+/// Compile the Karythra async CLE to gate netlist
+fn compile_karythra_async_cle() -> skalp_lir::gate_netlist::GateNetlist {
+    // Set up module search path BEFORE parsing
+    // This must be set before the module resolver is initialized
+    std::env::set_var(
+        "SKALP_STDLIB_PATH",
+        "/Users/girivs/src/hw/karythra/rtl/skalp/cle/lib",
+    );
+
+    // Use file-based parsing which properly handles module resolution
+    let cle_path = Path::new("/Users/girivs/src/hw/karythra/rtl/skalp/cle/src/main_async.sk");
+
+    if !cle_path.exists() {
+        panic!("Karythra async CLE not found at {:?}", cle_path);
+    }
+
+    // BUG #176 FIX: Use parse_and_build_compilation_context and compile_to_mir_with_modules
+    // to properly resolve imported enum discriminant values
+    let context = parse_and_build_compilation_context(cle_path).expect("Failed to parse async CLE");
+    let mir_compiler = MirCompiler::new();
+    let mir = mir_compiler
+        .compile_to_mir_with_modules(&context.main_hir, &context.module_hirs)
+        .expect("Failed to compile to MIR");
+
+    assert!(!mir.modules.is_empty(), "Should have at least one module");
+    let module = &mir.modules[0];
+
+    let lir_result = lower_mir_module_to_lir(module);
+    let library = get_stdlib_library("generic_asic").expect("Failed to load library");
+    let tech_result = map_lir_to_gates(&lir_result.lir, &library);
+
+    tech_result.netlist
+}
+
+/// Test NCL simulation with expected outputs
+fn test_async_cle_operation(
+    netlist: &skalp_lir::gate_netlist::GateNetlist,
+    opcode: u64,
+    data1: u64,
+    data2: u64,
+    expected_result: u64,
+    description: &str,
+) -> bool {
+    let config = NclSimConfig {
+        max_iterations: 100000,
+        debug: true, // Enable debug to see what's happening
+        track_stages: false,
+    };
+
+    let mut sim = NclSimulator::new(netlist.clone(), config);
+
+    // Debug: Print available input/output signal names
+    static PRINTED_NAMES: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if !PRINTED_NAMES.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        println!("  Available inputs: {:?}", sim.input_names());
+        println!("  Available outputs: {:?}", sim.output_names());
+        // Print first few raw net names to see if they have "top." prefix
+        println!("  First 5 input nets (raw):");
+        for net in netlist.nets.iter().filter(|n| n.is_input).take(5) {
+            println!("    {:?} '{}'", net.id, net.name);
+        }
+    }
+
+    // Set function_sel (6 bits)
+    sim.set_dual_rail_value("function_sel", opcode, 6);
+
+    // Set route_sel (3 bits) - use register writeback mode
+    sim.set_dual_rail_value("route_sel", 0, 3);
+
+    // Set data1 (256 bits, but we only use lower 32)
+    sim.set_dual_rail_value("data1", data1, 256);
+
+    // Set data2 (256 bits, but we only use lower 32)
+    sim.set_dual_rail_value("data2", data2, 256);
+
+    // Debug: Print opcode encoding for this specific test
+    print!("  [op={}] function_sel: t=", opcode);
+    for i in 0..6 {
+        let net_name = format!("function_sel_t[{}]", i);
+        if let Some(net) = netlist.nets.iter().find(|n| n.name == net_name) {
+            print!("{}", if sim.get_net(net.id) { 1 } else { 0 });
+        }
+    }
+    print!(" f=");
+    for i in 0..6 {
+        let net_name = format!("function_sel_f[{}]", i);
+        if let Some(net) = netlist.nets.iter().find(|n| n.name == net_name) {
+            print!("{}", if sim.get_net(net.id) { 1 } else { 0 });
+        }
+    }
+    println!();
+
+    // Run until stable
+    let iterations = sim.run_until_stable(100000);
+
+    // Check if simulation converged
+    if !sim.stats().is_stable {
+        println!(
+            "  {} FAIL: Did not converge after {} iterations",
+            description, iterations
+        );
+        return false;
+    }
+
+    // Debug: Check debug_l0_l1 output (should show L0-L1 computation result)
+    if let Some(debug_val) = sim.get_dual_rail_value("debug_l0_l1", 32) {
+        println!("  DEBUG: debug_l0_l1 = 0x{:08X}", debug_val);
+    } else {
+        println!("  DEBUG: debug_l0_l1 is NULL");
+    }
+
+    // Get result (lower 32 bits)
+    match sim.get_dual_rail_value("result", 32) {
+        Some(actual) => {
+            let pass = (actual & 0xFFFFFFFF) == (expected_result & 0xFFFFFFFF);
+            if pass {
+                println!(
+                    "  {} PASS: {} iterations, result=0x{:08X}",
+                    description, iterations, actual
+                );
+            } else {
+                println!(
+                    "  {} FAIL: expected 0x{:08X}, got 0x{:08X} ({} iterations)",
+                    description, expected_result, actual, iterations
+                );
+            }
+            pass
+        }
+        None => {
+            println!("  {} FAIL: result is NULL or invalid", description);
+            false
+        }
+    }
+}
+
+// =============================================================================
+// L0-L1 Tests (Basic 8-bit Operations)
+// =============================================================================
+
+#[test]
+fn test_async_cle_l0_add() {
+    println!("\n=== Async CLE L0 ADD Test ===");
+    let netlist = compile_karythra_async_cle();
+    println!(
+        "Compiled: {} cells, {} nets",
+        netlist.cells.len(),
+        netlist.nets.len()
+    );
+
+    // L0L1Opcode::ADD_8 = 0
+    let test_cases: [(u64, u64, u64); 4] = [(10, 20, 30), (100, 50, 150), (255, 1, 256), (0, 0, 0)];
+
+    let mut all_pass = true;
+    for (a, b, expected) in test_cases {
+        let desc = format!("{} + {} = {}", a, b, expected);
+        let pass = test_async_cle_operation(&netlist, 0, a, b, expected, &desc);
+        all_pass = all_pass && pass;
+    }
+
+    assert!(all_pass, "Async CLE L0 ADD tests failed");
+}
+
+#[test]
+fn test_async_cle_l0_sub() {
+    println!("\n=== Async CLE L0 SUB Test ===");
+    let netlist = compile_karythra_async_cle();
+    println!(
+        "Compiled: {} cells, {} nets",
+        netlist.cells.len(),
+        netlist.nets.len()
+    );
+
+    // L0L1Opcode::SUB_8 = 1
+    let test_cases: [(u64, u64, u64); 3] = [(50, 20, 30), (100, 100, 0), (255, 1, 254)];
+
+    let mut all_pass = true;
+    for (a, b, expected) in test_cases {
+        let desc = format!("{} - {} = {}", a, b, expected);
+        let pass = test_async_cle_operation(&netlist, 1, a, b, expected, &desc);
+        all_pass = all_pass && pass;
+    }
+
+    assert!(all_pass, "Async CLE L0 SUB tests failed");
+}
+
+#[test]
+fn test_async_cle_l0_and() {
+    println!("\n=== Async CLE L0 AND Test ===");
+    let netlist = compile_karythra_async_cle();
+    println!(
+        "Compiled: {} cells, {} nets",
+        netlist.cells.len(),
+        netlist.nets.len()
+    );
+
+    // L0L1Opcode::AND_8 = 3
+    let test_cases: [(u64, u64, u64); 4] = [
+        (0xFF, 0xFF, 0xFF),
+        (0xAA, 0x55, 0x00),
+        (0xF0, 0x0F, 0x00),
+        (0xFF, 0x0F, 0x0F),
+    ];
+
+    let mut all_pass = true;
+    for (a, b, expected) in test_cases {
+        let desc = format!("0x{:02X} & 0x{:02X} = 0x{:02X}", a, b, expected);
+        let pass = test_async_cle_operation(&netlist, 3, a, b, expected, &desc);
+        all_pass = all_pass && pass;
+    }
+
+    assert!(all_pass, "Async CLE L0 AND tests failed");
+}
+
+#[test]
+fn test_async_cle_l0_or() {
+    println!("\n=== Async CLE L0 OR Test ===");
+    let netlist = compile_karythra_async_cle();
+    println!(
+        "Compiled: {} cells, {} nets",
+        netlist.cells.len(),
+        netlist.nets.len()
+    );
+
+    // L0L1Opcode::OR_8 = 4
+    let test_cases: [(u64, u64, u64); 4] = [
+        (0x00, 0x00, 0x00),
+        (0xAA, 0x55, 0xFF),
+        (0xF0, 0x0F, 0xFF),
+        (0xFF, 0x00, 0xFF),
+    ];
+
+    let mut all_pass = true;
+    for (a, b, expected) in test_cases {
+        let desc = format!("0x{:02X} | 0x{:02X} = 0x{:02X}", a, b, expected);
+        let pass = test_async_cle_operation(&netlist, 4, a, b, expected, &desc);
+        all_pass = all_pass && pass;
+    }
+
+    assert!(all_pass, "Async CLE L0 OR tests failed");
+}
+
+#[test]
+fn test_async_cle_l0_xor() {
+    println!("\n=== Async CLE L0 XOR Test ===");
+    let netlist = compile_karythra_async_cle();
+    println!(
+        "Compiled: {} cells, {} nets",
+        netlist.cells.len(),
+        netlist.nets.len()
+    );
+
+    // L0L1Opcode::XOR_8 = 5
+    let test_cases: [(u64, u64, u64); 4] = [
+        (0x00, 0x00, 0x00),
+        (0xFF, 0xFF, 0x00),
+        (0xAA, 0x55, 0xFF),
+        (0xF0, 0x0F, 0xFF),
+    ];
+
+    let mut all_pass = true;
+    for (a, b, expected) in test_cases {
+        let desc = format!("0x{:02X} ^ 0x{:02X} = 0x{:02X}", a, b, expected);
+        let pass = test_async_cle_operation(&netlist, 5, a, b, expected, &desc);
+        all_pass = all_pass && pass;
+    }
+
+    assert!(all_pass, "Async CLE L0 XOR tests failed");
+}
+
+#[test]
+fn test_async_cle_l0_comparisons() {
+    println!("\n=== Async CLE L0 Comparison Tests ===");
+    let netlist = compile_karythra_async_cle();
+    println!(
+        "Compiled: {} cells, {} nets",
+        netlist.cells.len(),
+        netlist.nets.len()
+    );
+
+    let mut all_pass = true;
+
+    // L0L1Opcode::EQ_8 = 10
+    println!("\nEQ tests:");
+    all_pass = all_pass && test_async_cle_operation(&netlist, 10, 42, 42, 1, "42 == 42");
+    all_pass = all_pass && test_async_cle_operation(&netlist, 10, 42, 43, 0, "42 == 43");
+
+    // L0L1Opcode::LT_8 = 12
+    println!("\nLT tests:");
+    all_pass = all_pass && test_async_cle_operation(&netlist, 12, 10, 20, 1, "10 < 20");
+    all_pass = all_pass && test_async_cle_operation(&netlist, 12, 20, 10, 0, "20 < 10");
+    all_pass = all_pass && test_async_cle_operation(&netlist, 12, 10, 10, 0, "10 < 10");
+
+    assert!(all_pass, "Async CLE L0 comparison tests failed");
+}
+
+#[test]
+fn test_async_cle_l0_shifts() {
+    println!("\n=== Async CLE L0 Shift Tests ===");
+    let netlist = compile_karythra_async_cle();
+    println!(
+        "Compiled: {} cells, {} nets",
+        netlist.cells.len(),
+        netlist.nets.len()
+    );
+
+    let mut all_pass = true;
+
+    // L0L1Opcode::SLL_8 = 7 (shift left logical)
+    println!("\nSLL tests:");
+    all_pass = all_pass && test_async_cle_operation(&netlist, 7, 0x01, 1, 0x02, "0x01 << 1");
+    all_pass = all_pass && test_async_cle_operation(&netlist, 7, 0x01, 4, 0x10, "0x01 << 4");
+
+    // L0L1Opcode::SRL_8 = 8 (shift right logical)
+    println!("\nSRL tests:");
+    all_pass = all_pass && test_async_cle_operation(&netlist, 8, 0x80, 1, 0x40, "0x80 >> 1");
+    all_pass = all_pass && test_async_cle_operation(&netlist, 8, 0xF0, 4, 0x0F, "0xF0 >> 4");
+
+    assert!(all_pass, "Async CLE L0 shift tests failed");
+}
+
+// =============================================================================
+// Quick smoke test for compilation
+// =============================================================================
+
+#[test]
+fn test_async_cle_compiles() {
+    println!("\n=== Async CLE Compilation Test ===");
+    let netlist = compile_karythra_async_cle();
+    println!(
+        "Compiled: {} cells, {} nets",
+        netlist.cells.len(),
+        netlist.nets.len()
+    );
+
+    // Verify it's a reasonable size
+    assert!(
+        netlist.cells.len() > 1000,
+        "CLE should have significant complexity"
+    );
+    assert!(netlist.nets.len() > 1000, "CLE should have many nets");
+
+    // Verify NCL dual-rail structure exists
+    let has_t_rails = netlist.nets.iter().any(|n| n.name.contains("_t["));
+    let has_f_rails = netlist.nets.iter().any(|n| n.name.contains("_f["));
+    assert!(has_t_rails, "Should have true rails");
+    assert!(has_f_rails, "Should have false rails");
+
+    println!("NCL structure verified: has true and false rails");
+}

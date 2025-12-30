@@ -2196,7 +2196,12 @@ impl<'a> TechMapper<'a> {
     fn map_constant(&mut self, width: u32, value: u64, outputs: &[GateNetId], path: &str) {
         // Constants are implemented with tie-high/tie-low cells
         for bit in 0..width as usize {
-            let bit_val = (value >> bit) & 1 != 0;
+            // For bits >= 64, they're always 0 since value is u64
+            let bit_val = if bit < 64 {
+                (value >> bit) & 1 != 0
+            } else {
+                false
+            };
             let y = outputs.get(bit).copied().unwrap_or(GateNetId(0));
 
             let cell_name = if bit_val { "TIE_HIGH" } else { "TIE_LOW" };

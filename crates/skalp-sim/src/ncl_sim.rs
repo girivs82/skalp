@@ -304,7 +304,12 @@ impl NclSimulator {
     /// Set all bits of a dual-rail signal from an integer value
     pub fn set_dual_rail_value(&mut self, name: &str, value: u64, width: usize) {
         for bit in 0..width {
-            let bit_value = (value >> bit) & 1 != 0;
+            // For bits >= 64, they're always 0 since value is u64
+            let bit_value = if bit < 64 {
+                (value >> bit) & 1 != 0
+            } else {
+                false
+            };
             self.set_dual_rail_bool(name, bit, bit_value);
         }
     }
@@ -331,11 +336,17 @@ impl NclSimulator {
     }
 
     /// Get a multi-bit dual-rail value as integer (returns None if any bit is NULL/Invalid)
+    /// Note: Only the lower 64 bits are returned in the u64 result
     pub fn get_dual_rail_value(&self, name: &str, width: usize) -> Option<u64> {
         let mut result = 0u64;
         for bit in 0..width {
             match self.get_dual_rail(name, bit).to_bool() {
-                Some(true) => result |= 1 << bit,
+                Some(true) => {
+                    // Only set bits 0-63, bits >= 64 don't fit in u64
+                    if bit < 64 {
+                        result |= 1 << bit;
+                    }
+                }
                 Some(false) => {}
                 None => return None, // Not valid data
             }
@@ -367,6 +378,16 @@ impl NclSimulator {
             }
         }
         true
+    }
+
+    /// Get list of input signal names (for debugging)
+    pub fn input_names(&self) -> Vec<&String> {
+        self.input_nets.keys().collect()
+    }
+
+    /// Get list of output signal names (for debugging)
+    pub fn output_names(&self) -> Vec<&String> {
+        self.output_nets.keys().collect()
     }
 
     /// Get the current phase based on output state
