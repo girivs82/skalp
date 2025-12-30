@@ -331,6 +331,512 @@ fn test_async_cle_l0_shifts() {
 }
 
 // =============================================================================
+// L2 Tests (FP32 Operations)
+// =============================================================================
+
+/// Helper to convert f32 to bits for testing
+fn f32_to_bits(f: f32) -> u64 {
+    f.to_bits() as u64
+}
+
+/// Helper to convert bits to f32 for result checking
+fn bits_to_f32(bits: u64) -> f32 {
+    f32::from_bits(bits as u32)
+}
+
+/// Check if two f32 values are approximately equal (within tolerance)
+fn f32_approx_eq(a: f32, b: f32, tolerance: f32) -> bool {
+    (a - b).abs() < tolerance
+}
+
+#[test]
+fn test_async_cle_l2_fp32_add() {
+    println!("\n=== Async CLE L2 FP32 ADD Test ===");
+    let netlist = compile_karythra_async_cle();
+    println!(
+        "Compiled: {} cells, {} nets",
+        netlist.cells.len(),
+        netlist.nets.len()
+    );
+
+    let config = NclSimConfig {
+        max_iterations: 100000,
+        debug: false,
+        track_stages: false,
+    };
+
+    let mut all_pass = true;
+
+    // L2Opcode::FP32_ADD = 23
+    // Test: 2.0 + 3.0 = 5.0
+    {
+        let mut sim = NclSimulator::new(netlist.clone(), config.clone());
+        sim.set_dual_rail_value("function_sel", 23, 6);
+        sim.set_dual_rail_value("route_sel", 0, 3);
+        // data1[31:0] = a, data1[63:32] = b
+        let a = f32_to_bits(2.0);
+        let b = f32_to_bits(3.0);
+        sim.set_dual_rail_value("data1", a | (b << 32), 256);
+        sim.set_dual_rail_value("data2", 0, 256);
+        sim.run_until_stable(100000);
+
+        if let Some(result_bits) = sim.get_dual_rail_value("debug_l2", 32) {
+            let result = bits_to_f32(result_bits);
+            let pass = f32_approx_eq(result, 5.0, 0.001);
+            println!(
+                "FP32 ADD: 2.0 + 3.0 = {} (expected 5.0) [{}]",
+                result,
+                if pass { "PASS" } else { "FAIL" }
+            );
+            all_pass = all_pass && pass;
+        } else {
+            println!("FP32 ADD: result is NULL [FAIL]");
+            all_pass = false;
+        }
+    }
+
+    // Test: -1.5 + 2.5 = 1.0
+    {
+        let mut sim = NclSimulator::new(netlist.clone(), config.clone());
+        sim.set_dual_rail_value("function_sel", 23, 6);
+        sim.set_dual_rail_value("route_sel", 0, 3);
+        let a = f32_to_bits(-1.5);
+        let b = f32_to_bits(2.5);
+        sim.set_dual_rail_value("data1", a | (b << 32), 256);
+        sim.set_dual_rail_value("data2", 0, 256);
+        sim.run_until_stable(100000);
+
+        if let Some(result_bits) = sim.get_dual_rail_value("debug_l2", 32) {
+            let result = bits_to_f32(result_bits);
+            let pass = f32_approx_eq(result, 1.0, 0.001);
+            println!(
+                "FP32 ADD: -1.5 + 2.5 = {} (expected 1.0) [{}]",
+                result,
+                if pass { "PASS" } else { "FAIL" }
+            );
+            all_pass = all_pass && pass;
+        } else {
+            println!("FP32 ADD: result is NULL [FAIL]");
+            all_pass = false;
+        }
+    }
+
+    assert!(all_pass, "Async CLE L2 FP32 ADD tests failed");
+}
+
+#[test]
+fn test_async_cle_l2_fp32_mul() {
+    println!("\n=== Async CLE L2 FP32 MUL Test ===");
+    let netlist = compile_karythra_async_cle();
+    println!(
+        "Compiled: {} cells, {} nets",
+        netlist.cells.len(),
+        netlist.nets.len()
+    );
+
+    let config = NclSimConfig {
+        max_iterations: 100000,
+        debug: false,
+        track_stages: false,
+    };
+
+    let mut all_pass = true;
+
+    // L2Opcode::FP32_MUL = 24
+    // Test: 3.0 * 4.0 = 12.0
+    {
+        let mut sim = NclSimulator::new(netlist.clone(), config.clone());
+        sim.set_dual_rail_value("function_sel", 24, 6);
+        sim.set_dual_rail_value("route_sel", 0, 3);
+        let a = f32_to_bits(3.0);
+        let b = f32_to_bits(4.0);
+        sim.set_dual_rail_value("data1", a | (b << 32), 256);
+        sim.set_dual_rail_value("data2", 0, 256);
+        sim.run_until_stable(100000);
+
+        if let Some(result_bits) = sim.get_dual_rail_value("debug_l2", 32) {
+            let result = bits_to_f32(result_bits);
+            let pass = f32_approx_eq(result, 12.0, 0.001);
+            println!(
+                "FP32 MUL: 3.0 * 4.0 = {} (expected 12.0) [{}]",
+                result,
+                if pass { "PASS" } else { "FAIL" }
+            );
+            all_pass = all_pass && pass;
+        } else {
+            println!("FP32 MUL: result is NULL [FAIL]");
+            all_pass = false;
+        }
+    }
+
+    // Test: 2.5 * -2.0 = -5.0
+    {
+        let mut sim = NclSimulator::new(netlist.clone(), config.clone());
+        sim.set_dual_rail_value("function_sel", 24, 6);
+        sim.set_dual_rail_value("route_sel", 0, 3);
+        let a = f32_to_bits(2.5);
+        let b = f32_to_bits(-2.0);
+        sim.set_dual_rail_value("data1", a | (b << 32), 256);
+        sim.set_dual_rail_value("data2", 0, 256);
+        sim.run_until_stable(100000);
+
+        if let Some(result_bits) = sim.get_dual_rail_value("debug_l2", 32) {
+            let result = bits_to_f32(result_bits);
+            let pass = f32_approx_eq(result, -5.0, 0.001);
+            println!(
+                "FP32 MUL: 2.5 * -2.0 = {} (expected -5.0) [{}]",
+                result,
+                if pass { "PASS" } else { "FAIL" }
+            );
+            all_pass = all_pass && pass;
+        } else {
+            println!("FP32 MUL: result is NULL [FAIL]");
+            all_pass = false;
+        }
+    }
+
+    assert!(all_pass, "Async CLE L2 FP32 MUL tests failed");
+}
+
+// =============================================================================
+// L3 Tests (Vector Operations)
+// =============================================================================
+
+#[test]
+fn test_async_cle_l3_vec3_add() {
+    println!("\n=== Async CLE L3 VEC3 ADD Test ===");
+    let netlist = compile_karythra_async_cle();
+    println!(
+        "Compiled: {} cells, {} nets",
+        netlist.cells.len(),
+        netlist.nets.len()
+    );
+
+    let config = NclSimConfig {
+        max_iterations: 100000,
+        debug: false,
+        track_stages: false,
+    };
+
+    let mut all_pass = true;
+
+    // L3Opcode::VEC3_ADD = 32
+    // Test: (1.0, 2.0, 3.0) + (4.0, 5.0, 6.0) = (5.0, 7.0, 9.0)
+    {
+        let mut sim = NclSimulator::new(netlist.clone(), config.clone());
+        sim.set_dual_rail_value("function_sel", 32, 6);
+        sim.set_dual_rail_value("route_sel", 0, 3);
+
+        // data1 = vec A: ax[31:0], ay[63:32], az[95:64]
+        let ax = f32_to_bits(1.0);
+        let ay = f32_to_bits(2.0);
+        let _az = f32_to_bits(3.0); // z component not packed due to u64 limitation
+                                    // Pack vec3 into lower 64 bits (ax, ay); az would need u128 for proper packing
+        sim.set_dual_rail_value("data1", ax | (ay << 32), 256);
+
+        // data2 = vec B: bx[31:0], by[63:32], bz[95:64]
+        let bx = f32_to_bits(4.0);
+        let by = f32_to_bits(5.0);
+        let _bz = f32_to_bits(6.0);
+        // Pack vec3 into 96-bit portion of 256-bit data
+        sim.set_dual_rail_value("data2", bx | (by << 32), 256);
+
+        sim.run_until_stable(100000);
+
+        // Check debug_l3 (lower 32 bits = rx)
+        if let Some(result_bits) = sim.get_dual_rail_value("debug_l3", 32) {
+            let rx = bits_to_f32(result_bits);
+            let pass = f32_approx_eq(rx, 5.0, 0.01);
+            println!(
+                "VEC3 ADD: rx = {} (expected 5.0) [{}]",
+                rx,
+                if pass { "PASS" } else { "FAIL" }
+            );
+            all_pass = all_pass && pass;
+        } else {
+            println!("VEC3 ADD: result is NULL [FAIL]");
+            all_pass = false;
+        }
+    }
+
+    assert!(all_pass, "Async CLE L3 VEC3 ADD tests failed");
+}
+
+#[test]
+fn test_async_cle_l3_vec3_dot() {
+    println!("\n=== Async CLE L3 VEC3 DOT Test ===");
+    let netlist = compile_karythra_async_cle();
+    println!(
+        "Compiled: {} cells, {} nets",
+        netlist.cells.len(),
+        netlist.nets.len()
+    );
+
+    let config = NclSimConfig {
+        max_iterations: 100000,
+        debug: false,
+        track_stages: false,
+    };
+
+    let mut all_pass = true;
+
+    // L3Opcode::VEC3_DOT = 35
+    // Test: (1.0, 2.0, 3.0) · (4.0, 5.0, 6.0) = 1*4 + 2*5 + 3*6 = 32.0
+    {
+        let mut sim = NclSimulator::new(netlist.clone(), config.clone());
+        sim.set_dual_rail_value("function_sel", 35, 6);
+        sim.set_dual_rail_value("route_sel", 0, 3);
+
+        // data1 = vec A
+        let ax = f32_to_bits(1.0);
+        let ay = f32_to_bits(2.0);
+        let _az = f32_to_bits(3.0); // z component not packed due to u64 limitation
+                                    // Pack vec3 into lower 64 bits (ax, ay); az would need u128 for proper packing
+        sim.set_dual_rail_value("data1", ax | (ay << 32), 256);
+
+        // data2 = vec B
+        let bx = f32_to_bits(4.0);
+        let by = f32_to_bits(5.0);
+        let _bz = f32_to_bits(6.0); // z component not packed due to u64 limitation
+                                    // Pack vec3 into lower 64 bits (bx, by); bz would need u128 for proper packing
+        sim.set_dual_rail_value("data2", bx | (by << 32), 256);
+
+        sim.run_until_stable(100000);
+
+        if let Some(result_bits) = sim.get_dual_rail_value("debug_l3", 32) {
+            let dot = bits_to_f32(result_bits);
+            let pass = f32_approx_eq(dot, 32.0, 0.1);
+            println!(
+                "VEC3 DOT: (1,2,3)·(4,5,6) = {} (expected 32.0) [{}]",
+                dot,
+                if pass { "PASS" } else { "FAIL" }
+            );
+            all_pass = all_pass && pass;
+        } else {
+            println!("VEC3 DOT: result is NULL [FAIL]");
+            all_pass = false;
+        }
+    }
+
+    assert!(all_pass, "Async CLE L3 VEC3 DOT tests failed");
+}
+
+// =============================================================================
+// L5 Tests (Bitops Operations)
+// =============================================================================
+
+#[test]
+fn test_async_cle_l5_clz() {
+    println!("\n=== Async CLE L5 CLZ Test ===");
+    let netlist = compile_karythra_async_cle();
+    println!(
+        "Compiled: {} cells, {} nets",
+        netlist.cells.len(),
+        netlist.nets.len()
+    );
+
+    let config = NclSimConfig {
+        max_iterations: 100000,
+        debug: false,
+        track_stages: false,
+    };
+
+    let mut all_pass = true;
+
+    // L5Opcode::CLZ = 55
+    // Test cases for count leading zeros
+    let test_cases = [
+        (0x80000000u64, 0u64, "0x80000000 -> 0 leading zeros"),
+        (0x00000001u64, 31u64, "0x00000001 -> 31 leading zeros"),
+        (0x0000FFFFu64, 16u64, "0x0000FFFF -> 16 leading zeros"),
+        (0x00010000u64, 15u64, "0x00010000 -> 15 leading zeros"),
+    ];
+
+    for (input, expected, desc) in test_cases {
+        let mut sim = NclSimulator::new(netlist.clone(), config.clone());
+        sim.set_dual_rail_value("function_sel", 55, 6);
+        sim.set_dual_rail_value("route_sel", 0, 3);
+        sim.set_dual_rail_value("data1", input, 256);
+        sim.set_dual_rail_value("data2", 0, 256);
+        sim.run_until_stable(100000);
+
+        if let Some(result) = sim.get_dual_rail_value("debug_l4_l5", 32) {
+            let pass = result == expected;
+            println!(
+                "CLZ {}: got {} [{}]",
+                desc,
+                result,
+                if pass { "PASS" } else { "FAIL" }
+            );
+            all_pass = all_pass && pass;
+        } else {
+            println!("CLZ {}: result is NULL [FAIL]", desc);
+            all_pass = false;
+        }
+    }
+
+    assert!(all_pass, "Async CLE L5 CLZ tests failed");
+}
+
+#[test]
+fn test_async_cle_l5_popcount() {
+    println!("\n=== Async CLE L5 POPCOUNT Test ===");
+    let netlist = compile_karythra_async_cle();
+    println!(
+        "Compiled: {} cells, {} nets",
+        netlist.cells.len(),
+        netlist.nets.len()
+    );
+
+    let config = NclSimConfig {
+        max_iterations: 100000,
+        debug: false,
+        track_stages: false,
+    };
+
+    let mut all_pass = true;
+
+    // L5Opcode::POPCOUNT = 57
+    let test_cases = [
+        (0x00000000u64, 0u64, "0x00000000 -> 0 bits"),
+        (0xFFFFFFFFu64, 32u64, "0xFFFFFFFF -> 32 bits"),
+        (0x0000000Fu64, 4u64, "0x0000000F -> 4 bits"),
+        (0xAAAAAAAAu64, 16u64, "0xAAAAAAAA -> 16 bits"),
+        (0x12345678u64, 13u64, "0x12345678 -> 13 bits"),
+    ];
+
+    for (input, expected, desc) in test_cases {
+        let mut sim = NclSimulator::new(netlist.clone(), config.clone());
+        sim.set_dual_rail_value("function_sel", 57, 6);
+        sim.set_dual_rail_value("route_sel", 0, 3);
+        sim.set_dual_rail_value("data1", input, 256);
+        sim.set_dual_rail_value("data2", 0, 256);
+        sim.run_until_stable(100000);
+
+        if let Some(result) = sim.get_dual_rail_value("debug_l4_l5", 32) {
+            let pass = result == expected;
+            println!(
+                "POPCOUNT {}: got {} [{}]",
+                desc,
+                result,
+                if pass { "PASS" } else { "FAIL" }
+            );
+            all_pass = all_pass && pass;
+        } else {
+            println!("POPCOUNT {}: result is NULL [FAIL]", desc);
+            all_pass = false;
+        }
+    }
+
+    assert!(all_pass, "Async CLE L5 POPCOUNT tests failed");
+}
+
+#[test]
+fn test_async_cle_l5_bitreverse() {
+    println!("\n=== Async CLE L5 BITREVERSE Test ===");
+    let netlist = compile_karythra_async_cle();
+    println!(
+        "Compiled: {} cells, {} nets",
+        netlist.cells.len(),
+        netlist.nets.len()
+    );
+
+    let config = NclSimConfig {
+        max_iterations: 100000,
+        debug: false,
+        track_stages: false,
+    };
+
+    let mut all_pass = true;
+
+    // L5Opcode::BITREVERSE = 58
+    let test_cases = [
+        (0x00000001u64, 0x80000000u64, "0x00000001 reversed"),
+        (0x80000000u64, 0x00000001u64, "0x80000000 reversed"),
+        (0x0F0F0F0Fu64, 0xF0F0F0F0u64, "0x0F0F0F0F reversed"),
+    ];
+
+    for (input, expected, desc) in test_cases {
+        let mut sim = NclSimulator::new(netlist.clone(), config.clone());
+        sim.set_dual_rail_value("function_sel", 58, 6);
+        sim.set_dual_rail_value("route_sel", 0, 3);
+        sim.set_dual_rail_value("data1", input, 256);
+        sim.set_dual_rail_value("data2", 0, 256);
+        sim.run_until_stable(100000);
+
+        if let Some(result) = sim.get_dual_rail_value("debug_l4_l5", 32) {
+            let pass = result == expected;
+            println!(
+                "BITREVERSE {}: got 0x{:08X} (expected 0x{:08X}) [{}]",
+                desc,
+                result,
+                expected,
+                if pass { "PASS" } else { "FAIL" }
+            );
+            all_pass = all_pass && pass;
+        } else {
+            println!("BITREVERSE {}: result is NULL [FAIL]", desc);
+            all_pass = false;
+        }
+    }
+
+    assert!(all_pass, "Async CLE L5 BITREVERSE tests failed");
+}
+
+#[test]
+fn test_async_cle_l5_parity() {
+    println!("\n=== Async CLE L5 PARITY Test ===");
+    let netlist = compile_karythra_async_cle();
+    println!(
+        "Compiled: {} cells, {} nets",
+        netlist.cells.len(),
+        netlist.nets.len()
+    );
+
+    let config = NclSimConfig {
+        max_iterations: 100000,
+        debug: false,
+        track_stages: false,
+    };
+
+    let mut all_pass = true;
+
+    // L5Opcode::PARITY = 62
+    let test_cases = [
+        (0x00000000u64, 0u64, "0x00000000 -> even parity"),
+        (0x00000001u64, 1u64, "0x00000001 -> odd parity"),
+        (0x00000003u64, 0u64, "0x00000003 -> even parity"),
+        (0xFFFFFFFFu64, 0u64, "0xFFFFFFFF -> even parity (32 bits)"),
+        (0x0000000Fu64, 0u64, "0x0000000F -> even parity (4 bits)"),
+    ];
+
+    for (input, expected, desc) in test_cases {
+        let mut sim = NclSimulator::new(netlist.clone(), config.clone());
+        sim.set_dual_rail_value("function_sel", 62, 6);
+        sim.set_dual_rail_value("route_sel", 0, 3);
+        sim.set_dual_rail_value("data1", input, 256);
+        sim.set_dual_rail_value("data2", 0, 256);
+        sim.run_until_stable(100000);
+
+        if let Some(result) = sim.get_dual_rail_value("debug_l4_l5", 32) {
+            let pass = result == expected;
+            println!(
+                "PARITY {}: got {} [{}]",
+                desc,
+                result,
+                if pass { "PASS" } else { "FAIL" }
+            );
+            all_pass = all_pass && pass;
+        } else {
+            println!("PARITY {}: result is NULL [FAIL]", desc);
+            all_pass = false;
+        }
+    }
+
+    assert!(all_pass, "Async CLE L5 PARITY tests failed");
+}
+
+// =============================================================================
 // Quick smoke test for compilation
 // =============================================================================
 

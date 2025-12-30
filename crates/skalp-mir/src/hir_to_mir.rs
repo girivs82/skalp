@@ -15468,6 +15468,179 @@ impl<'hir> HirToMir<'hir> {
                 }))
             }
 
+            // BUG FIX #177: Handle Call expressions specially to convert arguments with mir_cache
+            // This is critical for blocks like: { let product = fp_mul(a, b); fp_add(product, c) }
+            // Without this, `product` (a local let binding) can't be resolved when converting fp_add's args.
+            hir::HirExpression::Call(call) => {
+                println!(
+                    "🔄🔄🔄 BUG #177 FIX: Call '{}' in mir_cache conversion 🔄🔄🔄",
+                    call.function
+                );
+
+                // Convert arguments using mir_cache for local variable lookups
+                let mut arg_exprs: Vec<Expression> = Vec::new();
+                for (i, arg) in call.args.iter().enumerate() {
+                    match self.convert_hir_expr_with_mir_cache(arg, ctx, mir_cache, depth + 1) {
+                        Some(converted) => {
+                            println!(
+                                "🔄🔄🔄 BUG #177 FIX: Call '{}' arg[{}] converted successfully 🔄🔄🔄",
+                                call.function, i
+                            );
+                            arg_exprs.push(converted);
+                        }
+                        None => {
+                            eprintln!(
+                                "    ⚠️  BUG #177: Failed to convert argument {} for call '{}'",
+                                i, call.function
+                            );
+                            return None;
+                        }
+                    }
+                }
+
+                // Build cache key from converted MIR args (stable)
+                let cache_key = format!("{}@{:?}", call.function, arg_exprs);
+                println!(
+                    "🔄🔄🔄 BUG #177 FIX: Call '{}' cache_key = '{}' 🔄🔄🔄",
+                    call.function,
+                    &cache_key[..cache_key.len().min(200)]
+                );
+
+                // Check cache first
+                if let Some(cached) = self.module_call_cache.get(&cache_key) {
+                    println!(
+                        "🔄🔄🔄 BUG #177 FIX: Using CACHED Call result for '{}' 🔄🔄🔄",
+                        call.function
+                    );
+                    return Some(cached.clone());
+                }
+
+                // BUG FIX #177: Process the function call directly with pre-converted args.
+                // We can't fall back to convert_hir_expr_for_module because it will try to
+                // re-convert args and fail on local variables like `product` that are only
+                // in mir_cache, not in ctx.var_id_to_name.
+
+                // BUG FIX #177 (part 2): Use primitive FP handler for primitive FP operations
+                // regardless of whether they're user-defined. Since args are already pre-converted
+                // (including local variables from mir_cache like `product`), the primitive handler
+                // will work correctly. User-defined FP functions are essentially wrappers around
+                // primitive ops, so we can bypass the wrapper and use the primitive directly.
+                if self.is_primitive_fp_operation(&call.function) {
+                    // Convert to binary/unary operation directly using pre-converted args
+                    let result = self
+                        .convert_primitive_fp_call_for_module(&call.function, arg_exprs.clone());
+                    if let Some(ref r) = result {
+                        self.module_call_cache.insert(cache_key, r.clone());
+                    }
+                    return result;
+                }
+
+                // For non-primitive functions, synthesize as module if needed
+                let module_id = if let Some(&existing_id) = self.function_map.get(&call.function) {
+                    println!(
+                        "🔄🔄🔄 BUG #177 FIX: Using existing module for '{}' (module_id={}) 🔄🔄🔄",
+                        call.function, existing_id.0
+                    );
+                    Some(existing_id)
+                } else if let Some(hir) = &self.hir.clone() {
+                    if let Some(func) = hir.functions.iter().find(|f| f.name == call.function) {
+                        let call_count: usize = func
+                            .body
+                            .iter()
+                            .map(|stmt| self.count_calls_in_statement(stmt))
+                            .sum();
+                        println!(
+                            "🔄🔄🔄 BUG #177 FIX: Function '{}' has {} nested calls 🔄🔄🔄",
+                            call.function, call_count
+                        );
+
+                        if call_count > MAX_INLINE_CALL_COUNT {
+                            println!(
+                                "🔄🔄🔄 BUG #177 FIX: Synthesizing '{}' as module 🔄🔄🔄",
+                                call.function
+                            );
+                            Some(self.synthesize_function_as_module(func))
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+
+                if let Some(module_id) = module_id {
+                    // Get return type from HIR
+                    let return_type = if let Some(hir) = &self.hir {
+                        hir.functions
+                            .iter()
+                            .find(|f| f.name == call.function)
+                            .and_then(|f| f.return_type.clone())
+                    } else {
+                        None
+                    };
+
+                    // Pre-allocate signal IDs for result
+                    let tuple_size = Self::get_tuple_size_from_hir_type(&return_type);
+                    let num_result_signals = if tuple_size > 0 { tuple_size } else { 1 };
+
+                    let mut result_signal_ids = Vec::with_capacity(num_result_signals);
+                    for _ in 0..num_result_signals {
+                        result_signal_ids.push(self.next_signal_id());
+                    }
+
+                    println!(
+                        "🔄🔄🔄 BUG #177 FIX: Pre-allocated {} result signal(s) for '{}' 🔄🔄🔄",
+                        num_result_signals, call.function
+                    );
+
+                    let ty =
+                        skalp_frontend::types::Type::Bit(skalp_frontend::types::Width::Fixed(32));
+
+                    self.pending_module_instances.push((
+                        result_signal_ids.clone(),
+                        call.function.clone(),
+                        module_id,
+                        arg_exprs,
+                        return_type,
+                        ty.clone(),
+                    ));
+
+                    // Build result expression
+                    let result = if result_signal_ids.len() > 1 {
+                        let mut concat_elements: Vec<Expression> = result_signal_ids
+                            .iter()
+                            .map(|sig_id| {
+                                Expression::with_unknown_type(ExpressionKind::Ref(LValue::Signal(
+                                    *sig_id,
+                                )))
+                            })
+                            .collect();
+                        concat_elements.reverse();
+                        Expression::with_unknown_type(ExpressionKind::Concat(concat_elements))
+                    } else {
+                        Expression::with_unknown_type(ExpressionKind::Ref(LValue::Signal(
+                            result_signal_ids[0],
+                        )))
+                    };
+
+                    self.module_call_cache.insert(cache_key, result.clone());
+                    return Some(result);
+                }
+
+                // Function is not module-synthesized, fall back to inlining via convert_expression
+                println!(
+                    "🔄🔄🔄 BUG #177 FIX: Function '{}' will be inlined 🔄🔄🔄",
+                    call.function
+                );
+                let result = self.convert_expression(expr, depth);
+                if let Some(ref r) = result {
+                    self.module_call_cache.insert(cache_key, r.clone());
+                }
+                result
+            }
+
             // For other expressions, use normal conversion (which will use module_call_cache)
             _ => self.convert_hir_expr_for_module(expr, ctx, depth),
         }
@@ -16191,7 +16364,10 @@ impl<'hir> HirToMir<'hir> {
                     &var_id_to_mir,
                     depth + 1,
                 );
-                println!("🧱🧱🧱 MODULE_BLOCK: conversion complete 🧱🧱🧱");
+                println!(
+                    "🧱🧱🧱 MODULE_BLOCK: conversion complete, result is {} 🧱🧱🧱",
+                    if result.is_some() { "Some" } else { "NONE" }
+                );
                 result
             }
 
