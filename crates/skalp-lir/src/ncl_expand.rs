@@ -164,15 +164,13 @@ impl NclExpander {
     /// Uses TH12 for false rail (OR: either input high)
     fn expand_and(&mut self, a: DualRailPair, b: DualRailPair, dest: DualRailPair, width: u32) {
         // NCL AND:
-        // - True rail: TH22(a_t, b_t) = a_t AND b_t with hysteresis
-        // - False rail: TH12(a_f, b_f) = a_f OR b_f with hysteresis
+        // - True rail: TH22(a_t, b_t) - C-element, output 1 when both 1, output 0 when both 0
+        // - False rail: TH12(a_f, b_f) - OR with hysteresis, output 1 when any 1, output 0 when both 0
         //
-        // We use LirOp::And and LirOp::Or which the tech mapper converts to AND2/OR2.
-        // For true NCL synthesis, the tech mapper would need to use TH22/TH12 cells.
-        // The simulation handles this correctly because the simulator implements
-        // proper NCL dual-rail semantics.
-        self.alloc_node(LirOp::And { width }, vec![a.t, b.t], dest.t);
-        self.alloc_node(LirOp::Or { width }, vec![a.f, b.f], dest.f);
+        // We use LirOp::Th22 and LirOp::Th12 which are proper NCL threshold gates
+        // with hysteresis behavior - they hold their previous value during transitions.
+        self.alloc_node(LirOp::Th22 { width }, vec![a.t, b.t], dest.t);
+        self.alloc_node(LirOp::Th12 { width }, vec![a.f, b.f], dest.f);
     }
 
     /// Expand a single-rail OR to NCL dual-rail
@@ -182,10 +180,10 @@ impl NclExpander {
     /// Uses TH22 for false rail (C-element: both inputs must be high)
     fn expand_or(&mut self, a: DualRailPair, b: DualRailPair, dest: DualRailPair, width: u32) {
         // NCL OR:
-        // - True rail: TH12(a_t, b_t) = a_t OR b_t with hysteresis
-        // - False rail: TH22(a_f, b_f) = a_f AND b_f with hysteresis
-        self.alloc_node(LirOp::Or { width }, vec![a.t, b.t], dest.t);
-        self.alloc_node(LirOp::And { width }, vec![a.f, b.f], dest.f);
+        // - True rail: TH12(a_t, b_t) - OR with hysteresis, output 1 when any 1
+        // - False rail: TH22(a_f, b_f) - C-element, output 1 when both 1
+        self.alloc_node(LirOp::Th12 { width }, vec![a.t, b.t], dest.t);
+        self.alloc_node(LirOp::Th22 { width }, vec![a.f, b.f], dest.f);
     }
 
     /// Expand a single-rail NOT to NCL dual-rail
@@ -212,9 +210,9 @@ impl NclExpander {
     }
 
     /// Expand XOR to NCL dual-rail
-    /// XOR in dual-rail:
-    /// - True rail: (a_t AND b_f) OR (a_f AND b_t)
-    /// - False rail: (a_t AND b_t) OR (a_f AND b_f)
+    /// XOR in dual-rail (using threshold gates for proper NCL behavior):
+    /// - True rail: TH12(TH22(a_t, b_f), TH22(a_f, b_t))
+    /// - False rail: TH12(TH22(a_t, b_t), TH22(a_f, b_f))
     fn expand_xor(&mut self, a: DualRailPair, b: DualRailPair, dest: DualRailPair, width: u32) {
         // Intermediate signals
         let at_bf = self.alloc_signal(format!("xor_at_bf_{}", self.next_signal_id), width);
@@ -222,19 +220,19 @@ impl NclExpander {
         let at_bt = self.alloc_signal(format!("xor_at_bt_{}", self.next_signal_id), width);
         let af_bf = self.alloc_signal(format!("xor_af_bf_{}", self.next_signal_id), width);
 
-        // a_t AND b_f
-        self.alloc_node(LirOp::And { width }, vec![a.t, b.f], at_bf);
-        // a_f AND b_t
-        self.alloc_node(LirOp::And { width }, vec![a.f, b.t], af_bt);
-        // True rail: (a_t AND b_f) OR (a_f AND b_t)
-        self.alloc_node(LirOp::Or { width }, vec![at_bf, af_bt], dest.t);
+        // TH22(a_t, b_f) - C-element for a_t AND b_f
+        self.alloc_node(LirOp::Th22 { width }, vec![a.t, b.f], at_bf);
+        // TH22(a_f, b_t) - C-element for a_f AND b_t
+        self.alloc_node(LirOp::Th22 { width }, vec![a.f, b.t], af_bt);
+        // True rail: TH12(at_bf, af_bt) - OR with hysteresis
+        self.alloc_node(LirOp::Th12 { width }, vec![at_bf, af_bt], dest.t);
 
-        // a_t AND b_t
-        self.alloc_node(LirOp::And { width }, vec![a.t, b.t], at_bt);
-        // a_f AND b_f
-        self.alloc_node(LirOp::And { width }, vec![a.f, b.f], af_bf);
-        // False rail: (a_t AND b_t) OR (a_f AND b_f)
-        self.alloc_node(LirOp::Or { width }, vec![at_bt, af_bf], dest.f);
+        // TH22(a_t, b_t) - C-element for a_t AND b_t
+        self.alloc_node(LirOp::Th22 { width }, vec![a.t, b.t], at_bt);
+        // TH22(a_f, b_f) - C-element for a_f AND b_f
+        self.alloc_node(LirOp::Th22 { width }, vec![a.f, b.f], af_bf);
+        // False rail: TH12(at_bt, af_bf) - OR with hysteresis
+        self.alloc_node(LirOp::Th12 { width }, vec![at_bt, af_bf], dest.f);
     }
 
     /// Create completion detection for a set of dual-rail signals
@@ -327,17 +325,67 @@ impl NclExpander {
         self.alloc_node(LirOp::Not { width: 1 }, vec![dest.t], dest.f);
     }
 
-    /// Expand an NCL equality comparator
-    /// Simplified approach: compute eq using true rails, derive false rail from NOT(true)
+    /// Expand an NCL equality comparator using proper dual-rail encoding
+    /// For multi-bit equality: all bits must be equal for overall equality
+    /// 1. Per-bit equality using TH22/TH12
+    /// 2. AND-reduce eq_t bits (all must be equal)
+    /// 3. OR-reduce eq_f bits (any difference means not equal)
     fn expand_eq(&mut self, a: DualRailPair, b: DualRailPair, dest: DualRailPair, width: u32) {
-        // Simplified approach: compute equality using true rails
-        self.alloc_node(LirOp::Eq { width }, vec![a.t, b.t], dest.t);
-        // For false rail, invert the true rail (approximation)
-        self.alloc_node(LirOp::Not { width: 1 }, vec![dest.t], dest.f);
+        if width == 1 {
+            // Single-bit equality - simpler case
+            // eq_t = TH12(TH22(a_t, b_t), TH22(a_f, b_f)) - both same
+            // eq_f = TH12(TH22(a_t, b_f), TH22(a_f, b_t)) - different
+            let both_true = self.alloc_signal(format!("eq_both_true_{}", self.next_signal_id), 1);
+            let both_false =
+                self.alloc_signal(format!("eq_both_false_{}", self.next_signal_id), 1);
+            self.alloc_node(LirOp::Th22 { width: 1 }, vec![a.t, b.t], both_true);
+            self.alloc_node(LirOp::Th22 { width: 1 }, vec![a.f, b.f], both_false);
+            self.alloc_node(LirOp::Th12 { width: 1 }, vec![both_true, both_false], dest.t);
+
+            let diff_tf = self.alloc_signal(format!("eq_diff_tf_{}", self.next_signal_id), 1);
+            let diff_ft = self.alloc_signal(format!("eq_diff_ft_{}", self.next_signal_id), 1);
+            self.alloc_node(LirOp::Th22 { width: 1 }, vec![a.t, b.f], diff_tf);
+            self.alloc_node(LirOp::Th22 { width: 1 }, vec![a.f, b.t], diff_ft);
+            self.alloc_node(LirOp::Th12 { width: 1 }, vec![diff_tf, diff_ft], dest.f);
+        } else {
+            // Multi-bit equality - compute per-bit then reduce
+            // Per-bit equality signals (width bits each)
+            let per_bit_eq_t =
+                self.alloc_signal(format!("eq_perbit_t_{}", self.next_signal_id), width);
+            let per_bit_eq_f =
+                self.alloc_signal(format!("eq_perbit_f_{}", self.next_signal_id), width);
+
+            // Intermediate signals for per-bit equality
+            let both_true =
+                self.alloc_signal(format!("eq_both_true_{}", self.next_signal_id), width);
+            let both_false =
+                self.alloc_signal(format!("eq_both_false_{}", self.next_signal_id), width);
+            let diff_tf = self.alloc_signal(format!("eq_diff_tf_{}", self.next_signal_id), width);
+            let diff_ft = self.alloc_signal(format!("eq_diff_ft_{}", self.next_signal_id), width);
+
+            // Per-bit: eq_t[i] = TH12(TH22(a_t[i], b_t[i]), TH22(a_f[i], b_f[i]))
+            self.alloc_node(LirOp::Th22 { width }, vec![a.t, b.t], both_true);
+            self.alloc_node(LirOp::Th22 { width }, vec![a.f, b.f], both_false);
+            self.alloc_node(LirOp::Th12 { width }, vec![both_true, both_false], per_bit_eq_t);
+
+            // Per-bit: eq_f[i] = TH12(TH22(a_t[i], b_f[i]), TH22(a_f[i], b_t[i]))
+            self.alloc_node(LirOp::Th22 { width }, vec![a.t, b.f], diff_tf);
+            self.alloc_node(LirOp::Th22 { width }, vec![a.f, b.t], diff_ft);
+            self.alloc_node(LirOp::Th12 { width }, vec![diff_tf, diff_ft], per_bit_eq_f);
+
+            // Reduce: overall_eq_t = AND(all per_bit_eq_t) using TH22 tree
+            // Reduce: overall_eq_f = OR(any per_bit_eq_f) using TH12 tree
+            // Note: dest is 1-bit dual-rail output
+            self.alloc_node(LirOp::RedAnd { width }, vec![per_bit_eq_t], dest.t);
+            self.alloc_node(LirOp::RedOr { width }, vec![per_bit_eq_f], dest.f);
+        }
     }
 
-    /// Expand an NCL 2:1 multiplexer
-    /// Simplified approach: compute mux using true rails, derive false rail from NOT(true)
+    /// Expand an NCL 2:1 multiplexer using threshold gates
+    /// MUX(sel, a, b) = (sel AND b) OR (NOT(sel) AND a)
+    /// In NCL dual-rail:
+    ///   y_t = TH12(TH22(sel_t, b_t), TH22(sel_f, a_t))
+    ///   y_f = TH12(TH22(sel_t, b_f), TH22(sel_f, a_f))
     fn expand_mux2(
         &mut self,
         sel: DualRailPair,
@@ -346,10 +394,27 @@ impl NclExpander {
         dest: DualRailPair,
         width: u32,
     ) {
-        // Simplified approach: compute mux using true rails
-        self.alloc_node(LirOp::Mux2 { width }, vec![sel.t, a.t, b.t], dest.t);
-        // For false rail, invert the true rail (approximation)
-        self.alloc_node(LirOp::Not { width }, vec![dest.t], dest.f);
+        // Intermediate signals for true rail
+        let sel_b_t = self.alloc_signal(format!("mux_sel_b_t_{}", self.next_signal_id), width);
+        let nsel_a_t = self.alloc_signal(format!("mux_nsel_a_t_{}", self.next_signal_id), width);
+
+        // TH22(sel_t, b_t) - select high AND b true
+        self.alloc_node(LirOp::Th22 { width }, vec![sel.t, b.t], sel_b_t);
+        // TH22(sel_f, a_t) - select low AND a true (sel_f is NOT sel in dual-rail)
+        self.alloc_node(LirOp::Th22 { width }, vec![sel.f, a.t], nsel_a_t);
+        // True rail: TH12(sel_b_t, nsel_a_t) - OR with hysteresis
+        self.alloc_node(LirOp::Th12 { width }, vec![sel_b_t, nsel_a_t], dest.t);
+
+        // Intermediate signals for false rail
+        let sel_b_f = self.alloc_signal(format!("mux_sel_b_f_{}", self.next_signal_id), width);
+        let nsel_a_f = self.alloc_signal(format!("mux_nsel_a_f_{}", self.next_signal_id), width);
+
+        // TH22(sel_t, b_f) - select high AND b false
+        self.alloc_node(LirOp::Th22 { width }, vec![sel.t, b.f], sel_b_f);
+        // TH22(sel_f, a_f) - select low AND a false
+        self.alloc_node(LirOp::Th22 { width }, vec![sel.f, a.f], nsel_a_f);
+        // False rail: TH12(sel_b_f, nsel_a_f) - OR with hysteresis
+        self.alloc_node(LirOp::Th12 { width }, vec![sel_b_f, nsel_a_f], dest.f);
     }
 
     /// Expand a register to NCL register (NULL/DATA latch)
@@ -748,6 +813,52 @@ pub fn expand_to_ncl(lir: &Lir, config: &NclConfig) -> NclExpandResult {
                     }
                 }
             }
+            // Floating-point operations - use true rails for computation, invert for false rail
+            // These are soft macros that operate on bit representations
+            LirOp::FpAdd { width } => {
+                if node.inputs.len() >= 2 {
+                    let a = expander.dual_rail_map.get(&node.inputs[0]).copied();
+                    let b = expander.dual_rail_map.get(&node.inputs[1]).copied();
+                    if let (Some(a), Some(b), Some(dest)) = (a, b, output_pair) {
+                        // Use true rails for FP computation
+                        expander.alloc_node(LirOp::FpAdd { width: *width }, vec![a.t, b.t], dest.t);
+                        expander.alloc_node(LirOp::Not { width: *width }, vec![dest.t], dest.f);
+                    }
+                }
+            }
+            LirOp::FpSub { width } => {
+                if node.inputs.len() >= 2 {
+                    let a = expander.dual_rail_map.get(&node.inputs[0]).copied();
+                    let b = expander.dual_rail_map.get(&node.inputs[1]).copied();
+                    if let (Some(a), Some(b), Some(dest)) = (a, b, output_pair) {
+                        // Use true rails for FP computation
+                        expander.alloc_node(LirOp::FpSub { width: *width }, vec![a.t, b.t], dest.t);
+                        expander.alloc_node(LirOp::Not { width: *width }, vec![dest.t], dest.f);
+                    }
+                }
+            }
+            LirOp::FpMul { width } => {
+                if node.inputs.len() >= 2 {
+                    let a = expander.dual_rail_map.get(&node.inputs[0]).copied();
+                    let b = expander.dual_rail_map.get(&node.inputs[1]).copied();
+                    if let (Some(a), Some(b), Some(dest)) = (a, b, output_pair) {
+                        // Use true rails for FP computation
+                        expander.alloc_node(LirOp::FpMul { width: *width }, vec![a.t, b.t], dest.t);
+                        expander.alloc_node(LirOp::Not { width: *width }, vec![dest.t], dest.f);
+                    }
+                }
+            }
+            LirOp::FpDiv { width } => {
+                if node.inputs.len() >= 2 {
+                    let a = expander.dual_rail_map.get(&node.inputs[0]).copied();
+                    let b = expander.dual_rail_map.get(&node.inputs[1]).copied();
+                    if let (Some(a), Some(b), Some(dest)) = (a, b, output_pair) {
+                        // Use true rails for FP computation
+                        expander.alloc_node(LirOp::FpDiv { width: *width }, vec![a.t, b.t], dest.t);
+                        expander.alloc_node(LirOp::Not { width: *width }, vec![dest.t], dest.f);
+                    }
+                }
+            }
             // Handle other operations by passing through or generating placeholders
             _ => {
                 // For unsupported operations, create pass-through
@@ -847,10 +958,10 @@ mod tests {
 
         expander.expand_and(a, b, dest, 1);
 
-        // Check that two nodes were created (And for t, Or for f)
+        // Check that two nodes were created (Th22 for t, Th12 for f)
         assert_eq!(expander.lir.nodes.len(), 2);
-        assert!(matches!(expander.lir.nodes[0].op, LirOp::And { width: 1 }));
-        assert!(matches!(expander.lir.nodes[1].op, LirOp::Or { width: 1 }));
+        assert!(matches!(expander.lir.nodes[0].op, LirOp::Th22 { width: 1 }));
+        assert!(matches!(expander.lir.nodes[1].op, LirOp::Th12 { width: 1 }));
     }
 
     #[test]
