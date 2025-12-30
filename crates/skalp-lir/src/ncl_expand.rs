@@ -252,38 +252,365 @@ impl NclExpander {
         completion
     }
 
-    /// Expand an NCL adder (ripple-carry)
-    /// For now, use regular Add for true rail, and compute false rail as NOT(true)
+    /// Expand an NCL adder using proper ripple-carry chain
+    /// NCL full adder: sum = a XOR b XOR cin, cout = majority(a,b,cin)
+    /// Uses TH12/TH22 gates with bit-by-bit carry propagation
     fn expand_add(&mut self, a: DualRailPair, b: DualRailPair, dest: DualRailPair, width: u32) {
-        // Simplified approach: compute add using true rails, then derive false rail
-        // This is an approximation - proper NCL adder would use threshold gates
-        self.alloc_node(
-            LirOp::Add {
-                width,
-                has_carry: false,
-            },
-            vec![a.t, b.t],
-            dest.t,
-        );
-        // For false rail, invert the true rail (approximation)
-        self.alloc_node(LirOp::Not { width }, vec![dest.t], dest.f);
+        // Build ripple-carry NCL adder bit-by-bit
+        // For each bit: sum = XOR(XOR(a, b), cin), cout = MAJ(a, b, cin)
+
+        let id = self.next_signal_id;
+        self.next_signal_id += 1;
+
+        // Collect sum bits for final concatenation
+        let mut sum_t_bits: Vec<LirSignalId> = Vec::with_capacity(width as usize);
+        let mut sum_f_bits: Vec<LirSignalId> = Vec::with_capacity(width as usize);
+
+        // Initialize carry to 0 (dual-rail: t=0, f=1)
+        let carry_init_t = self.alloc_signal(format!("add_cin_t_{}", id), 1);
+        let carry_init_f = self.alloc_signal(format!("add_cin_f_{}", id), 1);
+        let const_zero = self.alloc_signal(format!("add_zero_{}", id), 1);
+        let const_one = self.alloc_signal(format!("add_one_{}", id), 1);
+        self.alloc_node(LirOp::Constant { width: 1, value: 0 }, vec![], const_zero);
+        self.alloc_node(LirOp::Constant { width: 1, value: 1 }, vec![], const_one);
+        self.alloc_node(LirOp::Buf { width: 1 }, vec![const_zero], carry_init_t);
+        self.alloc_node(LirOp::Buf { width: 1 }, vec![const_one], carry_init_f);
+
+        let mut carry_t = carry_init_t;
+        let mut carry_f = carry_init_f;
+
+        for i in 0..width {
+            // Extract bit i from a and b
+            let a_t_i = self.alloc_signal(format!("add_a_t_{}_{}", id, i), 1);
+            let a_f_i = self.alloc_signal(format!("add_a_f_{}_{}", id, i), 1);
+            let b_t_i = self.alloc_signal(format!("add_b_t_{}_{}", id, i), 1);
+            let b_f_i = self.alloc_signal(format!("add_b_f_{}_{}", id, i), 1);
+
+            self.alloc_node(
+                LirOp::RangeSelect {
+                    width,
+                    high: i,
+                    low: i,
+                },
+                vec![a.t],
+                a_t_i,
+            );
+            self.alloc_node(
+                LirOp::RangeSelect {
+                    width,
+                    high: i,
+                    low: i,
+                },
+                vec![a.f],
+                a_f_i,
+            );
+            self.alloc_node(
+                LirOp::RangeSelect {
+                    width,
+                    high: i,
+                    low: i,
+                },
+                vec![b.t],
+                b_t_i,
+            );
+            self.alloc_node(
+                LirOp::RangeSelect {
+                    width,
+                    high: i,
+                    low: i,
+                },
+                vec![b.f],
+                b_f_i,
+            );
+
+            // XOR(a, b) for this bit
+            let xor_ab_t = self.alloc_signal(format!("add_xor_ab_t_{}_{}", id, i), 1);
+            let xor_ab_f = self.alloc_signal(format!("add_xor_ab_f_{}_{}", id, i), 1);
+
+            // NCL XOR: t = TH12(TH22(a_t,b_f), TH22(a_f,b_t))
+            //          f = TH12(TH22(a_t,b_t), TH22(a_f,b_f))
+            let at_bf = self.alloc_signal(format!("add_at_bf_{}_{}", id, i), 1);
+            let af_bt = self.alloc_signal(format!("add_af_bt_{}_{}", id, i), 1);
+            self.alloc_node(LirOp::Th22 { width: 1 }, vec![a_t_i, b_f_i], at_bf);
+            self.alloc_node(LirOp::Th22 { width: 1 }, vec![a_f_i, b_t_i], af_bt);
+            self.alloc_node(LirOp::Th12 { width: 1 }, vec![at_bf, af_bt], xor_ab_t);
+
+            let at_bt = self.alloc_signal(format!("add_at_bt_{}_{}", id, i), 1);
+            let af_bf = self.alloc_signal(format!("add_af_bf_{}_{}", id, i), 1);
+            self.alloc_node(LirOp::Th22 { width: 1 }, vec![a_t_i, b_t_i], at_bt);
+            self.alloc_node(LirOp::Th22 { width: 1 }, vec![a_f_i, b_f_i], af_bf);
+            self.alloc_node(LirOp::Th12 { width: 1 }, vec![at_bt, af_bf], xor_ab_f);
+
+            // XOR(xor_ab, cin) for sum
+            let sum_t_i = self.alloc_signal(format!("add_sum_t_{}_{}", id, i), 1);
+            let sum_f_i = self.alloc_signal(format!("add_sum_f_{}_{}", id, i), 1);
+
+            let xor_ct = self.alloc_signal(format!("add_xor_ct_{}_{}", id, i), 1);
+            let xor_cf = self.alloc_signal(format!("add_xor_cf_{}_{}", id, i), 1);
+            self.alloc_node(LirOp::Th22 { width: 1 }, vec![xor_ab_t, carry_f], xor_ct);
+            self.alloc_node(LirOp::Th22 { width: 1 }, vec![xor_ab_f, carry_t], xor_cf);
+            self.alloc_node(LirOp::Th12 { width: 1 }, vec![xor_ct, xor_cf], sum_t_i);
+
+            let xor_dt = self.alloc_signal(format!("add_xor_dt_{}_{}", id, i), 1);
+            let xor_df = self.alloc_signal(format!("add_xor_df_{}_{}", id, i), 1);
+            self.alloc_node(LirOp::Th22 { width: 1 }, vec![xor_ab_t, carry_t], xor_dt);
+            self.alloc_node(LirOp::Th22 { width: 1 }, vec![xor_ab_f, carry_f], xor_df);
+            self.alloc_node(LirOp::Th12 { width: 1 }, vec![xor_dt, xor_df], sum_f_i);
+
+            sum_t_bits.push(sum_t_i);
+            sum_f_bits.push(sum_f_i);
+
+            // Carry out = MAJ(a, b, cin) = OR(AND(a,b), AND(b,cin), AND(a,cin))
+            // NCL AND: t = TH22(a_t, b_t), f = TH12(a_f, b_f)
+            // NCL OR:  t = TH12(a_t, b_t), f = TH22(a_f, b_f)
+
+            // AND(a, b)
+            let and_ab_t = self.alloc_signal(format!("add_and_ab_t_{}_{}", id, i), 1);
+            let and_ab_f = self.alloc_signal(format!("add_and_ab_f_{}_{}", id, i), 1);
+            self.alloc_node(LirOp::Th22 { width: 1 }, vec![a_t_i, b_t_i], and_ab_t);
+            self.alloc_node(LirOp::Th12 { width: 1 }, vec![a_f_i, b_f_i], and_ab_f);
+
+            // AND(b, cin)
+            let and_bc_t = self.alloc_signal(format!("add_and_bc_t_{}_{}", id, i), 1);
+            let and_bc_f = self.alloc_signal(format!("add_and_bc_f_{}_{}", id, i), 1);
+            self.alloc_node(LirOp::Th22 { width: 1 }, vec![b_t_i, carry_t], and_bc_t);
+            self.alloc_node(LirOp::Th12 { width: 1 }, vec![b_f_i, carry_f], and_bc_f);
+
+            // AND(a, cin)
+            let and_ac_t = self.alloc_signal(format!("add_and_ac_t_{}_{}", id, i), 1);
+            let and_ac_f = self.alloc_signal(format!("add_and_ac_f_{}_{}", id, i), 1);
+            self.alloc_node(LirOp::Th22 { width: 1 }, vec![a_t_i, carry_t], and_ac_t);
+            self.alloc_node(LirOp::Th12 { width: 1 }, vec![a_f_i, carry_f], and_ac_f);
+
+            // OR of all three ANDs for carry true rail
+            let or_ab_bc_t = self.alloc_signal(format!("add_or_ab_bc_t_{}_{}", id, i), 1);
+            self.alloc_node(
+                LirOp::Th12 { width: 1 },
+                vec![and_ab_t, and_bc_t],
+                or_ab_bc_t,
+            );
+            let new_carry_t = self.alloc_signal(format!("add_cout_t_{}_{}", id, i), 1);
+            self.alloc_node(
+                LirOp::Th12 { width: 1 },
+                vec![or_ab_bc_t, and_ac_t],
+                new_carry_t,
+            );
+
+            // AND of all three ORs for carry false rail (De Morgan: NOT(OR(...)) = AND(NOT(...)))
+            let or_ab_bc_f = self.alloc_signal(format!("add_or_ab_bc_f_{}_{}", id, i), 1);
+            self.alloc_node(
+                LirOp::Th22 { width: 1 },
+                vec![and_ab_f, and_bc_f],
+                or_ab_bc_f,
+            );
+            let new_carry_f = self.alloc_signal(format!("add_cout_f_{}_{}", id, i), 1);
+            self.alloc_node(
+                LirOp::Th22 { width: 1 },
+                vec![or_ab_bc_f, and_ac_f],
+                new_carry_f,
+            );
+
+            carry_t = new_carry_t;
+            carry_f = new_carry_f;
+        }
+
+        // Concatenate sum bits into final result
+        // Note: Concat uses {a, b, ...} convention where first element is MSB
+        // We need to reverse since sum_t_bits[0] is bit 0 (LSB)
+        if width == 1 {
+            self.alloc_node(LirOp::Buf { width: 1 }, vec![sum_t_bits[0]], dest.t);
+            self.alloc_node(LirOp::Buf { width: 1 }, vec![sum_f_bits[0]], dest.f);
+        } else {
+            let widths: Vec<u32> = vec![1; width as usize];
+            // Reverse to put MSB first in concat
+            let sum_t_reversed: Vec<_> = sum_t_bits.into_iter().rev().collect();
+            let sum_f_reversed: Vec<_> = sum_f_bits.into_iter().rev().collect();
+            self.alloc_node(
+                LirOp::Concat {
+                    widths: widths.clone(),
+                },
+                sum_t_reversed,
+                dest.t,
+            );
+            self.alloc_node(LirOp::Concat { widths }, sum_f_reversed, dest.f);
+        }
     }
 
-    /// Expand an NCL subtractor
-    /// Simplified approach: compute sub using true rails, derive false rail from NOT(true)
+    /// Expand an NCL subtractor using proper two's complement: a - b = a + (~b) + 1
+    /// Uses ripple-carry chain with carry-in = 1
     fn expand_sub(&mut self, a: DualRailPair, b: DualRailPair, dest: DualRailPair, width: u32) {
-        // Simplified approach: compute subtract using true rails, then derive false rail
-        // This is an approximation - proper NCL subtractor would use threshold gates
-        self.alloc_node(
-            LirOp::Sub {
-                width,
-                has_borrow: false,
-            },
-            vec![a.t, b.t],
-            dest.t,
-        );
-        // For false rail, invert the true rail (approximation)
-        self.alloc_node(LirOp::Not { width }, vec![dest.t], dest.f);
+        // Subtraction: a - b = a + (~b) + 1
+        // In NCL, inverting b means swapping t and f rails
+        // We use the same ripple-carry but with carry-in = 1
+
+        let id = self.next_signal_id;
+        self.next_signal_id += 1;
+
+        // Invert b by swapping rails (NCL NOT)
+        let b_inv = DualRailPair { t: b.f, f: b.t };
+
+        // Collect difference bits for final concatenation
+        let mut diff_t_bits: Vec<LirSignalId> = Vec::with_capacity(width as usize);
+        let mut diff_f_bits: Vec<LirSignalId> = Vec::with_capacity(width as usize);
+
+        // Initialize carry to 1 (dual-rail: t=1, f=0) for two's complement
+        let carry_init_t = self.alloc_signal(format!("sub_cin_t_{}", id), 1);
+        let carry_init_f = self.alloc_signal(format!("sub_cin_f_{}", id), 1);
+        let const_zero = self.alloc_signal(format!("sub_zero_{}", id), 1);
+        let const_one = self.alloc_signal(format!("sub_one_{}", id), 1);
+        self.alloc_node(LirOp::Constant { width: 1, value: 0 }, vec![], const_zero);
+        self.alloc_node(LirOp::Constant { width: 1, value: 1 }, vec![], const_one);
+        self.alloc_node(LirOp::Buf { width: 1 }, vec![const_one], carry_init_t);
+        self.alloc_node(LirOp::Buf { width: 1 }, vec![const_zero], carry_init_f);
+
+        let mut carry_t = carry_init_t;
+        let mut carry_f = carry_init_f;
+
+        for i in 0..width {
+            // Extract bit i from a and inverted b
+            let a_t_i = self.alloc_signal(format!("sub_a_t_{}_{}", id, i), 1);
+            let a_f_i = self.alloc_signal(format!("sub_a_f_{}_{}", id, i), 1);
+            let binv_t_i = self.alloc_signal(format!("sub_binv_t_{}_{}", id, i), 1);
+            let binv_f_i = self.alloc_signal(format!("sub_binv_f_{}_{}", id, i), 1);
+
+            self.alloc_node(
+                LirOp::RangeSelect {
+                    width,
+                    high: i,
+                    low: i,
+                },
+                vec![a.t],
+                a_t_i,
+            );
+            self.alloc_node(
+                LirOp::RangeSelect {
+                    width,
+                    high: i,
+                    low: i,
+                },
+                vec![a.f],
+                a_f_i,
+            );
+            self.alloc_node(
+                LirOp::RangeSelect {
+                    width,
+                    high: i,
+                    low: i,
+                },
+                vec![b_inv.t],
+                binv_t_i,
+            );
+            self.alloc_node(
+                LirOp::RangeSelect {
+                    width,
+                    high: i,
+                    low: i,
+                },
+                vec![b_inv.f],
+                binv_f_i,
+            );
+
+            // XOR(a, ~b) for this bit
+            let xor_ab_t = self.alloc_signal(format!("sub_xor_ab_t_{}_{}", id, i), 1);
+            let xor_ab_f = self.alloc_signal(format!("sub_xor_ab_f_{}_{}", id, i), 1);
+
+            let at_bf = self.alloc_signal(format!("sub_at_bf_{}_{}", id, i), 1);
+            let af_bt = self.alloc_signal(format!("sub_af_bt_{}_{}", id, i), 1);
+            self.alloc_node(LirOp::Th22 { width: 1 }, vec![a_t_i, binv_f_i], at_bf);
+            self.alloc_node(LirOp::Th22 { width: 1 }, vec![a_f_i, binv_t_i], af_bt);
+            self.alloc_node(LirOp::Th12 { width: 1 }, vec![at_bf, af_bt], xor_ab_t);
+
+            let at_bt = self.alloc_signal(format!("sub_at_bt_{}_{}", id, i), 1);
+            let af_bf = self.alloc_signal(format!("sub_af_bf_{}_{}", id, i), 1);
+            self.alloc_node(LirOp::Th22 { width: 1 }, vec![a_t_i, binv_t_i], at_bt);
+            self.alloc_node(LirOp::Th22 { width: 1 }, vec![a_f_i, binv_f_i], af_bf);
+            self.alloc_node(LirOp::Th12 { width: 1 }, vec![at_bt, af_bf], xor_ab_f);
+
+            // XOR(xor_ab, cin) for difference
+            let diff_t_i = self.alloc_signal(format!("sub_diff_t_{}_{}", id, i), 1);
+            let diff_f_i = self.alloc_signal(format!("sub_diff_f_{}_{}", id, i), 1);
+
+            let xor_ct = self.alloc_signal(format!("sub_xor_ct_{}_{}", id, i), 1);
+            let xor_cf = self.alloc_signal(format!("sub_xor_cf_{}_{}", id, i), 1);
+            self.alloc_node(LirOp::Th22 { width: 1 }, vec![xor_ab_t, carry_f], xor_ct);
+            self.alloc_node(LirOp::Th22 { width: 1 }, vec![xor_ab_f, carry_t], xor_cf);
+            self.alloc_node(LirOp::Th12 { width: 1 }, vec![xor_ct, xor_cf], diff_t_i);
+
+            let xor_dt = self.alloc_signal(format!("sub_xor_dt_{}_{}", id, i), 1);
+            let xor_df = self.alloc_signal(format!("sub_xor_df_{}_{}", id, i), 1);
+            self.alloc_node(LirOp::Th22 { width: 1 }, vec![xor_ab_t, carry_t], xor_dt);
+            self.alloc_node(LirOp::Th22 { width: 1 }, vec![xor_ab_f, carry_f], xor_df);
+            self.alloc_node(LirOp::Th12 { width: 1 }, vec![xor_dt, xor_df], diff_f_i);
+
+            diff_t_bits.push(diff_t_i);
+            diff_f_bits.push(diff_f_i);
+
+            // Carry out = MAJ(a, ~b, cin)
+            let and_ab_t = self.alloc_signal(format!("sub_and_ab_t_{}_{}", id, i), 1);
+            let and_ab_f = self.alloc_signal(format!("sub_and_ab_f_{}_{}", id, i), 1);
+            self.alloc_node(LirOp::Th22 { width: 1 }, vec![a_t_i, binv_t_i], and_ab_t);
+            self.alloc_node(LirOp::Th12 { width: 1 }, vec![a_f_i, binv_f_i], and_ab_f);
+
+            let and_bc_t = self.alloc_signal(format!("sub_and_bc_t_{}_{}", id, i), 1);
+            let and_bc_f = self.alloc_signal(format!("sub_and_bc_f_{}_{}", id, i), 1);
+            self.alloc_node(LirOp::Th22 { width: 1 }, vec![binv_t_i, carry_t], and_bc_t);
+            self.alloc_node(LirOp::Th12 { width: 1 }, vec![binv_f_i, carry_f], and_bc_f);
+
+            let and_ac_t = self.alloc_signal(format!("sub_and_ac_t_{}_{}", id, i), 1);
+            let and_ac_f = self.alloc_signal(format!("sub_and_ac_f_{}_{}", id, i), 1);
+            self.alloc_node(LirOp::Th22 { width: 1 }, vec![a_t_i, carry_t], and_ac_t);
+            self.alloc_node(LirOp::Th12 { width: 1 }, vec![a_f_i, carry_f], and_ac_f);
+
+            let or_ab_bc_t = self.alloc_signal(format!("sub_or_ab_bc_t_{}_{}", id, i), 1);
+            self.alloc_node(
+                LirOp::Th12 { width: 1 },
+                vec![and_ab_t, and_bc_t],
+                or_ab_bc_t,
+            );
+            let new_carry_t = self.alloc_signal(format!("sub_cout_t_{}_{}", id, i), 1);
+            self.alloc_node(
+                LirOp::Th12 { width: 1 },
+                vec![or_ab_bc_t, and_ac_t],
+                new_carry_t,
+            );
+
+            let or_ab_bc_f = self.alloc_signal(format!("sub_or_ab_bc_f_{}_{}", id, i), 1);
+            self.alloc_node(
+                LirOp::Th22 { width: 1 },
+                vec![and_ab_f, and_bc_f],
+                or_ab_bc_f,
+            );
+            let new_carry_f = self.alloc_signal(format!("sub_cout_f_{}_{}", id, i), 1);
+            self.alloc_node(
+                LirOp::Th22 { width: 1 },
+                vec![or_ab_bc_f, and_ac_f],
+                new_carry_f,
+            );
+
+            carry_t = new_carry_t;
+            carry_f = new_carry_f;
+        }
+
+        // Concatenate difference bits into final result
+        // Note: Concat uses {a, b, ...} convention where first element is MSB
+        // We need to reverse since diff_t_bits[0] is bit 0 (LSB)
+        if width == 1 {
+            self.alloc_node(LirOp::Buf { width: 1 }, vec![diff_t_bits[0]], dest.t);
+            self.alloc_node(LirOp::Buf { width: 1 }, vec![diff_f_bits[0]], dest.f);
+        } else {
+            let widths: Vec<u32> = vec![1; width as usize];
+            // Reverse to put MSB first in concat
+            let diff_t_reversed: Vec<_> = diff_t_bits.into_iter().rev().collect();
+            let diff_f_reversed: Vec<_> = diff_f_bits.into_iter().rev().collect();
+            self.alloc_node(
+                LirOp::Concat {
+                    widths: widths.clone(),
+                },
+                diff_t_reversed,
+                dest.t,
+            );
+            self.alloc_node(LirOp::Concat { widths }, diff_f_reversed, dest.f);
+        }
     }
 
     /// Expand an NCL multiplier
@@ -336,11 +663,14 @@ impl NclExpander {
             // eq_t = TH12(TH22(a_t, b_t), TH22(a_f, b_f)) - both same
             // eq_f = TH12(TH22(a_t, b_f), TH22(a_f, b_t)) - different
             let both_true = self.alloc_signal(format!("eq_both_true_{}", self.next_signal_id), 1);
-            let both_false =
-                self.alloc_signal(format!("eq_both_false_{}", self.next_signal_id), 1);
+            let both_false = self.alloc_signal(format!("eq_both_false_{}", self.next_signal_id), 1);
             self.alloc_node(LirOp::Th22 { width: 1 }, vec![a.t, b.t], both_true);
             self.alloc_node(LirOp::Th22 { width: 1 }, vec![a.f, b.f], both_false);
-            self.alloc_node(LirOp::Th12 { width: 1 }, vec![both_true, both_false], dest.t);
+            self.alloc_node(
+                LirOp::Th12 { width: 1 },
+                vec![both_true, both_false],
+                dest.t,
+            );
 
             let diff_tf = self.alloc_signal(format!("eq_diff_tf_{}", self.next_signal_id), 1);
             let diff_ft = self.alloc_signal(format!("eq_diff_ft_{}", self.next_signal_id), 1);
@@ -366,7 +696,11 @@ impl NclExpander {
             // Per-bit: eq_t[i] = TH12(TH22(a_t[i], b_t[i]), TH22(a_f[i], b_f[i]))
             self.alloc_node(LirOp::Th22 { width }, vec![a.t, b.t], both_true);
             self.alloc_node(LirOp::Th22 { width }, vec![a.f, b.f], both_false);
-            self.alloc_node(LirOp::Th12 { width }, vec![both_true, both_false], per_bit_eq_t);
+            self.alloc_node(
+                LirOp::Th12 { width },
+                vec![both_true, both_false],
+                per_bit_eq_t,
+            );
 
             // Per-bit: eq_f[i] = TH12(TH22(a_t[i], b_f[i]), TH22(a_f[i], b_t[i]))
             self.alloc_node(LirOp::Th22 { width }, vec![a.t, b.f], diff_tf);
