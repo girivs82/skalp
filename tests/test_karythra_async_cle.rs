@@ -5,9 +5,11 @@
 //! with NCL dual-rail encoding and completion detection.
 
 use skalp_frontend::parse_and_build_compilation_context;
-use skalp_lir::{get_stdlib_library, lower_mir_module_to_lir, map_lir_to_gates};
+use skalp_lir::{get_stdlib_library, lower_mir_hierarchical, map_hierarchical_to_gates};
 use skalp_mir::MirCompiler;
-use skalp_sim::{NclSimConfig, NclSimulator};
+use skalp_sim::{
+    CircuitMode, HwAccel, NclSimConfig, NclSimulator, SimLevel, UnifiedSimConfig, UnifiedSimulator,
+};
 use std::path::Path;
 
 /// Compile the Karythra async CLE to gate netlist
@@ -35,16 +37,15 @@ fn compile_karythra_async_cle() -> skalp_lir::gate_netlist::GateNetlist {
         .expect("Failed to compile to MIR");
 
     assert!(!mir.modules.is_empty(), "Should have at least one module");
-    let module = &mir.modules[0];
 
-    let lir_result = lower_mir_module_to_lir(module);
+    // Use hierarchical compilation (depth >= 5 instantiates submodules)
+    let hier_lir = lower_mir_hierarchical(&mir);
     let library = get_stdlib_library("generic_asic").expect("Failed to load library");
-    let tech_result = map_lir_to_gates(&lir_result.lir, &library);
-
-    tech_result.netlist
+    let hier_result = map_hierarchical_to_gates(&hier_lir, &library);
+    hier_result.flatten()
 }
 
-/// Test NCL simulation with expected outputs
+/// Test NCL simulation with expected outputs using UnifiedSimulator (GPU-accelerated)
 fn test_async_cle_operation(
     netlist: &skalp_lir::gate_netlist::GateNetlist,
     opcode: u64,
@@ -53,87 +54,66 @@ fn test_async_cle_operation(
     expected_result: u64,
     description: &str,
 ) -> bool {
-    let config = NclSimConfig {
+    let config = UnifiedSimConfig {
+        level: SimLevel::GateLevel,
+        circuit_mode: CircuitMode::Ncl,
+        hw_accel: HwAccel::Auto, // Use GPU if available
         max_iterations: 100000,
-        debug: true, // Enable debug to see what's happening
-        track_stages: false,
+        ncl_debug: false,
+        ..Default::default()
     };
 
-    let mut sim = NclSimulator::new(netlist.clone(), config);
+    let mut sim = UnifiedSimulator::new(config).expect("Failed to create simulator");
+    sim.load_ncl_gate_level(netlist.clone())
+        .expect("Failed to load NCL netlist");
 
-    // Debug: Print available input/output signal names
-    static PRINTED_NAMES: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-    if !PRINTED_NAMES.swap(true, std::sync::atomic::Ordering::Relaxed) {
-        println!("  Available inputs: {:?}", sim.input_names());
-        println!("  Available outputs: {:?}", sim.output_names());
-        // Print first few raw net names to see if they have "top." prefix
-        println!("  First 5 input nets (raw):");
-        for net in netlist.nets.iter().filter(|n| n.is_input).take(5) {
-            println!("    {:?} '{}'", net.id, net.name);
-        }
-    }
+    println!(
+        "  Using: {} ({} cells, {} nets)",
+        sim.device_info(),
+        netlist.cells.len(),
+        netlist.nets.len()
+    );
 
     // Set function_sel (6 bits)
-    sim.set_dual_rail_value("function_sel", opcode, 6);
+    sim.set_ncl_input("function_sel", opcode, 6);
 
     // Set route_sel (3 bits) - use register writeback mode
-    sim.set_dual_rail_value("route_sel", 0, 3);
+    sim.set_ncl_input("route_sel", 0, 3);
 
     // Set data1 (256 bits, but we only use lower 32)
-    sim.set_dual_rail_value("data1", data1, 256);
+    sim.set_ncl_input("data1", data1, 256);
 
     // Set data2 (256 bits, but we only use lower 32)
-    sim.set_dual_rail_value("data2", data2, 256);
+    sim.set_ncl_input("data2", data2, 256);
 
-    // Debug: Print opcode encoding for this specific test
-    print!("  [op={}] function_sel: t=", opcode);
-    for i in 0..6 {
-        let net_name = format!("function_sel_t[{}]", i);
-        if let Some(net) = netlist.nets.iter().find(|n| n.name == net_name) {
-            print!("{}", if sim.get_net(net.id) { 1 } else { 0 });
-        }
-    }
-    print!(" f=");
-    for i in 0..6 {
-        let net_name = format!("function_sel_f[{}]", i);
-        if let Some(net) = netlist.nets.iter().find(|n| n.name == net_name) {
-            print!("{}", if sim.get_net(net.id) { 1 } else { 0 });
-        }
-    }
-    println!();
+    println!("  [op={}] Running NCL simulation...", opcode);
 
     // Run until stable
-    let iterations = sim.run_until_stable(100000);
+    let result = sim.run_until_stable();
 
-    // Check if simulation converged
-    if !sim.stats().is_stable {
+    if !result.is_stable {
         println!(
             "  {} FAIL: Did not converge after {} iterations",
-            description, iterations
+            description, result.iterations
         );
         return false;
     }
 
-    // Debug: Check debug_l0_l1 output (should show L0-L1 computation result)
-    if let Some(debug_val) = sim.get_dual_rail_value("debug_l0_l1", 32) {
-        println!("  DEBUG: debug_l0_l1 = 0x{:08X}", debug_val);
-    } else {
-        println!("  DEBUG: debug_l0_l1 is NULL");
-    }
+    println!(
+        "  Converged in {} iterations (GPU: {})",
+        result.iterations, result.used_gpu
+    );
 
     // Get result (lower 32 bits)
-    match sim.get_dual_rail_value("result", 32) {
+    match sim.get_ncl_output("result", 32) {
         Some(actual) => {
             let pass = (actual & 0xFFFFFFFF) == (expected_result & 0xFFFFFFFF);
             if pass {
-                println!(
-                    "  {} PASS: {} iterations, result=0x{:08X}",
-                    description, iterations, actual
-                );
+                println!("  {} PASS: result=0x{:08X}", description, actual);
             } else {
                 println!(
-                    "  {} FAIL: expected 0x{:08X}, got 0x{:08X} ({} iterations)",
-                    description, expected_result, actual, iterations
+                    "  {} FAIL: expected 0x{:08X}, got 0x{:08X}",
+                    description, expected_result, actual
                 );
             }
             pass

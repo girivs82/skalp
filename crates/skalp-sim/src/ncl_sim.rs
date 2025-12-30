@@ -670,29 +670,28 @@ impl NclSimulator {
             &upper
         };
 
-        // Check for THmn patterns
-        if upper.starts_with("TH") {
-            if let Some(digits) = upper.strip_prefix("TH") {
-                if digits.len() == 2 {
-                    let m = digits.chars().next().and_then(|c| c.to_digit(10));
-                    let n = digits.chars().nth(1).and_then(|c| c.to_digit(10));
-                    if let (Some(m), Some(n)) = (m, n) {
-                        return match (m, n) {
-                            (1, 2) => PrimitiveType::Th12,
-                            (2, 2) => PrimitiveType::Th22,
-                            (1, 3) => PrimitiveType::Th13,
-                            (2, 3) => PrimitiveType::Th23,
-                            (3, 3) => PrimitiveType::Th33,
-                            (1, 4) => PrimitiveType::Th14,
-                            (2, 4) => PrimitiveType::Th24,
-                            (3, 4) => PrimitiveType::Th34,
-                            (4, 4) => PrimitiveType::Th44,
-                            _ => PrimitiveType::Thmn {
-                                m: m as u8,
-                                n: n as u8,
-                            },
-                        };
-                    }
+        // Check for THmn patterns (use base_type which has library suffix stripped)
+        if base_type.starts_with("TH") {
+            if let Some(digits) = base_type.strip_prefix("TH") {
+                // Parse the first two chars as m and n digits
+                let m = digits.chars().next().and_then(|c| c.to_digit(10));
+                let n = digits.chars().nth(1).and_then(|c| c.to_digit(10));
+                if let (Some(m), Some(n)) = (m, n) {
+                    return match (m, n) {
+                        (1, 2) => PrimitiveType::Th12,
+                        (2, 2) => PrimitiveType::Th22,
+                        (1, 3) => PrimitiveType::Th13,
+                        (2, 3) => PrimitiveType::Th23,
+                        (3, 3) => PrimitiveType::Th33,
+                        (1, 4) => PrimitiveType::Th14,
+                        (2, 4) => PrimitiveType::Th24,
+                        (3, 4) => PrimitiveType::Th34,
+                        (4, 4) => PrimitiveType::Th44,
+                        _ => PrimitiveType::Thmn {
+                            m: m as u8,
+                            n: n as u8,
+                        },
+                    };
                 }
             }
         }
@@ -704,6 +703,20 @@ impl NclSimulator {
                     return PrimitiveType::NclCompletion { width };
                 }
             }
+        }
+
+        // FP32 soft macros - need explicit handling for NCL simulation
+        if base_type == "FP32_ADD" || upper.contains("FP32_ADD") {
+            return PrimitiveType::Fp32Add;
+        }
+        if base_type == "FP32_SUB" || upper.contains("FP32_SUB") {
+            return PrimitiveType::Fp32Sub;
+        }
+        if base_type == "FP32_MUL" || upper.contains("FP32_MUL") {
+            return PrimitiveType::Fp32Mul;
+        }
+        if base_type == "FP32_DIV" || upper.contains("FP32_DIV") {
+            return PrimitiveType::Fp32Div;
         }
 
         // Common gates - use base_type which has library suffixes stripped
