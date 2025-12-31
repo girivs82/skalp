@@ -636,8 +636,7 @@ impl NclExpander {
         self.next_signal_id += 1;
 
         // Create interleaved output signal (2 * width bits)
-        let interleaved =
-            self.alloc_signal(format!("ncl_add_interleaved_{}", id), width * 2);
+        let interleaved = self.alloc_signal(format!("ncl_add_interleaved_{}", id), width * 2);
 
         // Emit NclAdd: inputs are a_t, a_f, b_t, b_f (each width bits)
         // Output is interleaved: [t0, f0, t1, f1, ...]
@@ -667,8 +666,7 @@ impl NclExpander {
         self.next_signal_id += 1;
 
         // Create interleaved output signal (2 * width bits)
-        let interleaved =
-            self.alloc_signal(format!("ncl_sub_interleaved_{}", id), width * 2);
+        let interleaved = self.alloc_signal(format!("ncl_sub_interleaved_{}", id), width * 2);
 
         // Emit NclSub: inputs are a_t, a_f, ~b_t (=b_f), ~b_f (=b_t)
         // The inversion of b (swap rails) implements two's complement: a + (~b) + 1
@@ -684,12 +682,7 @@ impl NclExpander {
     }
 
     /// Helper to deinterleave an interleaved signal [t0, f0, t1, f1, ...] into a DualRailPair.
-    fn deinterleave_to_pair(
-        &mut self,
-        interleaved: LirSignalId,
-        dest: DualRailPair,
-        width: u32,
-    ) {
+    fn deinterleave_to_pair(&mut self, interleaved: LirSignalId, dest: DualRailPair, width: u32) {
         let id = self.next_signal_id;
         self.next_signal_id += 1;
 

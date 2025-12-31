@@ -3075,11 +3075,15 @@ impl<'a> TechMapper<'a> {
 
             // Build XOR(a, b) intermediate nets
             let xor_ab_t = self.alloc_net_id();
-            self.netlist
-                .add_net(GateNet::new(xor_ab_t, format!("{}.sub_xor_ab_t{}", path, i)));
+            self.netlist.add_net(GateNet::new(
+                xor_ab_t,
+                format!("{}.sub_xor_ab_t{}", path, i),
+            ));
             let xor_ab_f = self.alloc_net_id();
-            self.netlist
-                .add_net(GateNet::new(xor_ab_f, format!("{}.sub_xor_ab_f{}", path, i)));
+            self.netlist.add_net(GateNet::new(
+                xor_ab_f,
+                format!("{}.sub_xor_ab_f{}", path, i),
+            ));
 
             let at_bf = self.alloc_net_id();
             self.netlist
@@ -3226,23 +3230,35 @@ impl<'a> TechMapper<'a> {
 
             // Carry out = MAJ(a, b, cin) for next bit
             let and_ab_t = self.alloc_net_id();
-            self.netlist
-                .add_net(GateNet::new(and_ab_t, format!("{}.sub_and_ab_t{}", path, i)));
+            self.netlist.add_net(GateNet::new(
+                and_ab_t,
+                format!("{}.sub_and_ab_t{}", path, i),
+            ));
             let and_ab_f = self.alloc_net_id();
-            self.netlist
-                .add_net(GateNet::new(and_ab_f, format!("{}.sub_and_ab_f{}", path, i)));
+            self.netlist.add_net(GateNet::new(
+                and_ab_f,
+                format!("{}.sub_and_ab_f{}", path, i),
+            ));
             let and_bc_t = self.alloc_net_id();
-            self.netlist
-                .add_net(GateNet::new(and_bc_t, format!("{}.sub_and_bc_t{}", path, i)));
+            self.netlist.add_net(GateNet::new(
+                and_bc_t,
+                format!("{}.sub_and_bc_t{}", path, i),
+            ));
             let and_bc_f = self.alloc_net_id();
-            self.netlist
-                .add_net(GateNet::new(and_bc_f, format!("{}.sub_and_bc_f{}", path, i)));
+            self.netlist.add_net(GateNet::new(
+                and_bc_f,
+                format!("{}.sub_and_bc_f{}", path, i),
+            ));
             let and_ac_t = self.alloc_net_id();
-            self.netlist
-                .add_net(GateNet::new(and_ac_t, format!("{}.sub_and_ac_t{}", path, i)));
+            self.netlist.add_net(GateNet::new(
+                and_ac_t,
+                format!("{}.sub_and_ac_t{}", path, i),
+            ));
             let and_ac_f = self.alloc_net_id();
-            self.netlist
-                .add_net(GateNet::new(and_ac_f, format!("{}.sub_and_ac_f{}", path, i)));
+            self.netlist.add_net(GateNet::new(
+                and_ac_f,
+                format!("{}.sub_and_ac_f{}", path, i),
+            ));
 
             // AND(a, b)
             self.add_cell(Cell::new_comb(
