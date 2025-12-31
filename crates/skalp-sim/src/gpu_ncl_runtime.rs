@@ -81,6 +81,8 @@ pub struct GpuNclRuntime {
     cpu_net_values: Vec<bool>,
     /// CPU fallback: gate states
     cpu_gate_states: Vec<bool>,
+    /// Whether last run_until_stable converged (changes == 0)
+    is_stable: bool,
 }
 
 /// Information about an NCL cell for GPU simulation
@@ -185,6 +187,7 @@ impl GpuNclRuntime {
             use_gpu: true,
             cpu_net_values: vec![false; num_nets],
             cpu_gate_states: Vec::new(),
+            is_stable: false,
         };
 
         runtime.initialize()?;
@@ -741,7 +744,12 @@ kernel void eval_ncl(
             let width = width.min(actual_width);
 
             for bit in 0..width {
-                let bit_value = (value >> bit) & 1 != 0;
+                // For bits beyond u64 range, value is 0
+                let bit_value = if bit < 64 {
+                    (value >> bit) & 1 != 0
+                } else {
+                    false
+                };
                 // Layout: [t0, t1, ..., tN-1, f0, f1, ..., fN-1]
                 let t_idx = bit;
                 let f_idx = actual_width + bit;
@@ -801,7 +809,10 @@ kernel void eval_ncl(
 
             // Check for valid DATA (exactly one rail high)
             if t && !f {
-                result |= 1 << bit;
+                // Only set bits within u64 range
+                if bit < 64 {
+                    result |= 1u64 << bit;
+                }
             } else if !t && f {
                 // DATA_FALSE, bit stays 0
             } else {
@@ -1102,10 +1113,12 @@ kernel void eval_ncl(
     /// Run until stable (no signal changes)
     pub fn run_until_stable(&mut self, max_iterations: u32) -> u32 {
         let mut iterations = 0u32;
+        let mut last_changes = 0;
 
         loop {
             let changes = self.iterate();
             iterations += 1;
+            last_changes = changes;
 
             if changes == 0 {
                 break;
@@ -1120,7 +1133,151 @@ kernel void eval_ncl(
             }
         }
 
+        self.is_stable = last_changes == 0;
         iterations
+    }
+
+    /// Check if the last simulation run converged
+    pub fn is_stable(&self) -> bool {
+        self.is_stable
+    }
+
+    /// Identify cells that changed frequently (oscillating) during simulation
+    /// Returns (cell_path, cell_type, change_count)
+    pub fn identify_oscillating_cells(&mut self, iterations: u32) -> Vec<(String, String, u32)> {
+        let mut change_counts = vec![0u32; self.cells.len()];
+        let mut current_nets = self.cpu_net_values.clone();
+        let mut current_states = self.cpu_gate_states.clone();
+
+        for _ in 0..iterations {
+            let mut next_nets = current_nets.clone();
+            let mut next_states = current_states.clone();
+
+            for (cell_idx, cell) in self.cells.iter().enumerate() {
+                let inputs: Vec<bool> = cell
+                    .inputs
+                    .iter()
+                    .map(|&idx| current_nets.get(idx).copied().unwrap_or(false))
+                    .collect();
+
+                let (result, new_state) =
+                    self.evaluate_cell_with_state(cell, &inputs, &current_states);
+
+                if let Some(&out_idx) = cell.outputs.first() {
+                    let old_value = current_nets.get(out_idx).copied().unwrap_or(false);
+                    if old_value != result {
+                        change_counts[cell_idx] += 1;
+                    }
+                    if out_idx < next_nets.len() {
+                        next_nets[out_idx] = result;
+                    }
+                }
+
+                if cell.state_index >= 0 {
+                    let state_idx = cell.state_index as usize;
+                    if state_idx < next_states.len() {
+                        next_states[state_idx] = new_state;
+                    }
+                }
+            }
+
+            current_nets = next_nets;
+            current_states = next_states;
+        }
+
+        // Collect cells that changed more than expected
+        let mut oscillating: Vec<(String, String, u32)> = change_counts
+            .iter()
+            .enumerate()
+            .filter(|(_, &count)| count > 2)
+            .map(|(idx, &count)| {
+                let cell = &self.cells[idx];
+                let path = self
+                    .netlist
+                    .cells
+                    .get(idx)
+                    .map(|c| c.path.clone())
+                    .unwrap_or_default();
+                let cell_type = self
+                    .netlist
+                    .cells
+                    .get(idx)
+                    .map(|c| c.cell_type.clone())
+                    .unwrap_or_default();
+                (path, cell_type, count)
+            })
+            .collect();
+
+        oscillating.sort_by(|a, b| b.2.cmp(&a.2));
+        oscillating
+    }
+
+    /// Helper to evaluate a single cell with state tracking
+    fn evaluate_cell_with_state(
+        &self,
+        cell: &NclCellInfo,
+        inputs: &[bool],
+        gate_states: &[bool],
+    ) -> (bool, bool) {
+        match cell.ptype {
+            NclPrimitiveType::And2 => {
+                let result = inputs.first().copied().unwrap_or(false)
+                    && inputs.get(1).copied().unwrap_or(false);
+                (result, false)
+            }
+            NclPrimitiveType::And3 => (inputs.iter().take(3).all(|&x| x), false),
+            NclPrimitiveType::And4 => (inputs.iter().take(4).all(|&x| x), false),
+            NclPrimitiveType::Or2 => {
+                let result = inputs.first().copied().unwrap_or(false)
+                    || inputs.get(1).copied().unwrap_or(false);
+                (result, false)
+            }
+            NclPrimitiveType::Or3 => (inputs.iter().take(3).any(|&x| x), false),
+            NclPrimitiveType::Or4 => (inputs.iter().take(4).any(|&x| x), false),
+            NclPrimitiveType::Xor => {
+                let result = inputs.iter().fold(false, |acc, &x| acc ^ x);
+                (result, false)
+            }
+            NclPrimitiveType::Inv => (!inputs.first().copied().unwrap_or(false), false),
+            NclPrimitiveType::Buf => (inputs.first().copied().unwrap_or(false), false),
+            NclPrimitiveType::Const0 => (false, false),
+            NclPrimitiveType::Const1 => (true, false),
+            NclPrimitiveType::Th12 => {
+                // TH12 is OR with hysteresis
+                let any_high = inputs.iter().any(|&x| x);
+                let all_low = inputs.iter().all(|&x| !x);
+                let prev = gate_states
+                    .get(cell.state_index as usize)
+                    .copied()
+                    .unwrap_or(false);
+                let result = if any_high {
+                    true
+                } else if all_low {
+                    false
+                } else {
+                    prev
+                };
+                (result, result)
+            }
+            NclPrimitiveType::Th22 | NclPrimitiveType::Th33 | NclPrimitiveType::Th44 => {
+                // C-element: all high -> 1, all low -> 0, else hold
+                let all_high = inputs.iter().all(|&x| x);
+                let all_low = inputs.iter().all(|&x| !x);
+                let prev = gate_states
+                    .get(cell.state_index as usize)
+                    .copied()
+                    .unwrap_or(false);
+                let result = if all_high {
+                    true
+                } else if all_low {
+                    false
+                } else {
+                    prev
+                };
+                (result, result)
+            }
+            _ => (inputs.first().copied().unwrap_or(false), false),
+        }
     }
 
     /// Reset all state
@@ -1216,5 +1373,13 @@ pub struct GpuNclRuntime;
 impl GpuNclRuntime {
     pub fn new(_netlist: GateNetlist) -> Result<Self, String> {
         Err("GPU NCL simulation is only available on macOS".to_string())
+    }
+
+    pub fn is_stable(&self) -> bool {
+        false
+    }
+
+    pub fn identify_oscillating_cells(&mut self, _iterations: u32) -> Vec<(String, String, u32)> {
+        Vec::new()
     }
 }

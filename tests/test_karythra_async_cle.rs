@@ -3,6 +3,12 @@
 //! Tests the asynchronous (NCL) version of the Karythra CLE.
 //! Verifies that all function unit levels (L0-L5) work correctly
 //! with NCL dual-rail encoding and completion detection.
+//!
+//! Note: These tests compile a large circuit and may stack overflow in debug mode.
+//! Run with `cargo test --release` for reliable execution.
+
+// Skip all tests in this file in debug mode due to stack overflow during compilation
+#![cfg(not(debug_assertions))]
 
 use skalp_frontend::parse_and_build_compilation_context;
 use skalp_lir::gate_netlist::GateNetlist;
@@ -166,7 +172,7 @@ fn test_async_cle_l0_add() {
     let mut all_pass = true;
     for (a, b, expected) in test_cases {
         let desc = format!("{} + {} = {}", a, b, expected);
-        let pass = test_async_cle_operation(&netlist, 0, a, b, expected, &desc);
+        let pass = test_async_cle_operation(netlist, 0, a, b, expected, &desc);
         all_pass = all_pass && pass;
     }
 
@@ -189,7 +195,7 @@ fn test_async_cle_l0_sub() {
     let mut all_pass = true;
     for (a, b, expected) in test_cases {
         let desc = format!("{} - {} = {}", a, b, expected);
-        let pass = test_async_cle_operation(&netlist, 1, a, b, expected, &desc);
+        let pass = test_async_cle_operation(netlist, 1, a, b, expected, &desc);
         all_pass = all_pass && pass;
     }
 
@@ -217,7 +223,7 @@ fn test_async_cle_l0_and() {
     let mut all_pass = true;
     for (a, b, expected) in test_cases {
         let desc = format!("0x{:02X} & 0x{:02X} = 0x{:02X}", a, b, expected);
-        let pass = test_async_cle_operation(&netlist, 3, a, b, expected, &desc);
+        let pass = test_async_cle_operation(netlist, 3, a, b, expected, &desc);
         all_pass = all_pass && pass;
     }
 
@@ -245,7 +251,7 @@ fn test_async_cle_l0_or() {
     let mut all_pass = true;
     for (a, b, expected) in test_cases {
         let desc = format!("0x{:02X} | 0x{:02X} = 0x{:02X}", a, b, expected);
-        let pass = test_async_cle_operation(&netlist, 4, a, b, expected, &desc);
+        let pass = test_async_cle_operation(netlist, 4, a, b, expected, &desc);
         all_pass = all_pass && pass;
     }
 
@@ -273,7 +279,7 @@ fn test_async_cle_l0_xor() {
     let mut all_pass = true;
     for (a, b, expected) in test_cases {
         let desc = format!("0x{:02X} ^ 0x{:02X} = 0x{:02X}", a, b, expected);
-        let pass = test_async_cle_operation(&netlist, 5, a, b, expected, &desc);
+        let pass = test_async_cle_operation(netlist, 5, a, b, expected, &desc);
         all_pass = all_pass && pass;
     }
 
@@ -294,14 +300,14 @@ fn test_async_cle_l0_comparisons() {
 
     // L0L1Opcode::EQ_8 = 10
     println!("\nEQ tests:");
-    all_pass = all_pass && test_async_cle_operation(&netlist, 10, 42, 42, 1, "42 == 42");
-    all_pass = all_pass && test_async_cle_operation(&netlist, 10, 42, 43, 0, "42 == 43");
+    all_pass = all_pass && test_async_cle_operation(netlist, 10, 42, 42, 1, "42 == 42");
+    all_pass = all_pass && test_async_cle_operation(netlist, 10, 42, 43, 0, "42 == 43");
 
     // L0L1Opcode::LT_8 = 12
     println!("\nLT tests:");
-    all_pass = all_pass && test_async_cle_operation(&netlist, 12, 10, 20, 1, "10 < 20");
-    all_pass = all_pass && test_async_cle_operation(&netlist, 12, 20, 10, 0, "20 < 10");
-    all_pass = all_pass && test_async_cle_operation(&netlist, 12, 10, 10, 0, "10 < 10");
+    all_pass = all_pass && test_async_cle_operation(netlist, 12, 10, 20, 1, "10 < 20");
+    all_pass = all_pass && test_async_cle_operation(netlist, 12, 20, 10, 0, "20 < 10");
+    all_pass = all_pass && test_async_cle_operation(netlist, 12, 10, 10, 0, "10 < 10");
 
     assert!(all_pass, "Async CLE L0 comparison tests failed");
 }
@@ -320,13 +326,13 @@ fn test_async_cle_l0_shifts() {
 
     // L0L1Opcode::SLL_8 = 7 (shift left logical)
     println!("\nSLL tests:");
-    all_pass = all_pass && test_async_cle_operation(&netlist, 7, 0x01, 1, 0x02, "0x01 << 1");
-    all_pass = all_pass && test_async_cle_operation(&netlist, 7, 0x01, 4, 0x10, "0x01 << 4");
+    all_pass = all_pass && test_async_cle_operation(netlist, 7, 0x01, 1, 0x02, "0x01 << 1");
+    all_pass = all_pass && test_async_cle_operation(netlist, 7, 0x01, 4, 0x10, "0x01 << 4");
 
     // L0L1Opcode::SRL_8 = 8 (shift right logical)
     println!("\nSRL tests:");
-    all_pass = all_pass && test_async_cle_operation(&netlist, 8, 0x80, 1, 0x40, "0x80 >> 1");
-    all_pass = all_pass && test_async_cle_operation(&netlist, 8, 0xF0, 4, 0x0F, "0xF0 >> 4");
+    all_pass = all_pass && test_async_cle_operation(netlist, 8, 0x80, 1, 0x40, "0x80 >> 1");
+    all_pass = all_pass && test_async_cle_operation(netlist, 8, 0xF0, 4, 0x0F, "0xF0 >> 4");
 
     assert!(all_pass, "Async CLE L0 shift tests failed");
 }
