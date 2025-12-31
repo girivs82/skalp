@@ -41,6 +41,10 @@ pub struct NclConfig {
     pub completion_tree_depth: Option<u32>,
     /// Insert NULL generator at inputs
     pub generate_null_wavefront: bool,
+    /// Use opaque NCL arithmetic ops (NclAdd, NclSub) instead of bit-level expansion.
+    /// This reduces LIR size by ~12x for arithmetic operations and lets tech_mapper
+    /// handle the gate-level expansion directly.
+    pub use_opaque_arithmetic: bool,
 }
 
 impl Default for NclConfig {
@@ -49,6 +53,7 @@ impl Default for NclConfig {
             use_weak_completion: true,
             completion_tree_depth: None,
             generate_null_wavefront: true,
+            use_opaque_arithmetic: true, // Enable by default for performance
         }
     }
 }
@@ -613,6 +618,152 @@ impl NclExpander {
         }
     }
 
+    /// Expand an NCL adder using opaque NclAdd operation (LIR optimization).
+    ///
+    /// This emits a single LirOp::NclAdd instead of bit-by-bit ripple-carry expansion.
+    /// The tech_mapper handles the gate-level expansion directly.
+    ///
+    /// For a W-bit adder, this reduces LIR from ~25*W nodes to ~2*W+3 nodes (12x reduction).
+    /// The output is interleaved format [t0, f0, t1, f1, ...] which we deinterleave.
+    fn expand_add_opaque(
+        &mut self,
+        a: DualRailPair,
+        b: DualRailPair,
+        dest: DualRailPair,
+        width: u32,
+    ) {
+        let id = self.next_signal_id;
+        self.next_signal_id += 1;
+
+        // Create interleaved output signal (2 * width bits)
+        let interleaved =
+            self.alloc_signal(format!("ncl_add_interleaved_{}", id), width * 2);
+
+        // Emit NclAdd: inputs are a_t, a_f, b_t, b_f (each width bits)
+        // Output is interleaved: [t0, f0, t1, f1, ...]
+        self.alloc_node(
+            LirOp::NclAdd { width },
+            vec![a.t, a.f, b.t, b.f],
+            interleaved,
+        );
+
+        // Deinterleave: extract t and f rails from interleaved output
+        self.deinterleave_to_pair(interleaved, dest, width);
+    }
+
+    /// Expand an NCL subtractor using opaque NclSub operation (LIR optimization).
+    ///
+    /// Similar to expand_add_opaque but for subtraction.
+    /// Note: NclSub expects the inverted b rails (swapped), so we pass b.f as the "true" rail
+    /// and b.t as the "false" rail to implement a - b = a + (~b) + 1.
+    fn expand_sub_opaque(
+        &mut self,
+        a: DualRailPair,
+        b: DualRailPair,
+        dest: DualRailPair,
+        width: u32,
+    ) {
+        let id = self.next_signal_id;
+        self.next_signal_id += 1;
+
+        // Create interleaved output signal (2 * width bits)
+        let interleaved =
+            self.alloc_signal(format!("ncl_sub_interleaved_{}", id), width * 2);
+
+        // Emit NclSub: inputs are a_t, a_f, ~b_t (=b_f), ~b_f (=b_t)
+        // The inversion of b (swap rails) implements two's complement: a + (~b) + 1
+        // Output is interleaved: [t0, f0, t1, f1, ...]
+        self.alloc_node(
+            LirOp::NclSub { width },
+            vec![a.t, a.f, b.f, b.t], // Note: b rails are swapped for inversion
+            interleaved,
+        );
+
+        // Deinterleave: extract t and f rails from interleaved output
+        self.deinterleave_to_pair(interleaved, dest, width);
+    }
+
+    /// Helper to deinterleave an interleaved signal [t0, f0, t1, f1, ...] into a DualRailPair.
+    fn deinterleave_to_pair(
+        &mut self,
+        interleaved: LirSignalId,
+        dest: DualRailPair,
+        width: u32,
+    ) {
+        let id = self.next_signal_id;
+        self.next_signal_id += 1;
+
+        if width == 1 {
+            // Special case: width 1, just use RangeSelect
+            self.alloc_node(
+                LirOp::RangeSelect {
+                    width: 2,
+                    high: 0,
+                    low: 0,
+                },
+                vec![interleaved],
+                dest.t,
+            );
+            self.alloc_node(
+                LirOp::RangeSelect {
+                    width: 2,
+                    high: 1,
+                    low: 1,
+                },
+                vec![interleaved],
+                dest.f,
+            );
+        } else {
+            // Extract individual bits and concatenate
+            let mut t_bits: Vec<LirSignalId> = Vec::with_capacity(width as usize);
+            let mut f_bits: Vec<LirSignalId> = Vec::with_capacity(width as usize);
+
+            for i in 0..width {
+                let t_bit = self.alloc_signal(format!("deint_t{}_{}", i, id), 1);
+                let f_bit = self.alloc_signal(format!("deint_f{}_{}", i, id), 1);
+
+                // t_bit[i] = interleaved[2*i]
+                self.alloc_node(
+                    LirOp::RangeSelect {
+                        width: width * 2,
+                        high: 2 * i,
+                        low: 2 * i,
+                    },
+                    vec![interleaved],
+                    t_bit,
+                );
+                // f_bit[i] = interleaved[2*i + 1]
+                self.alloc_node(
+                    LirOp::RangeSelect {
+                        width: width * 2,
+                        high: 2 * i + 1,
+                        low: 2 * i + 1,
+                    },
+                    vec![interleaved],
+                    f_bit,
+                );
+
+                t_bits.push(t_bit);
+                f_bits.push(f_bit);
+            }
+
+            // Concatenate bits into dest.t and dest.f
+            // Reverse because Concat puts first element as MSB
+            let widths: Vec<u32> = vec![1; width as usize];
+            let t_reversed: Vec<_> = t_bits.into_iter().rev().collect();
+            let f_reversed: Vec<_> = f_bits.into_iter().rev().collect();
+
+            self.alloc_node(
+                LirOp::Concat {
+                    widths: widths.clone(),
+                },
+                t_reversed,
+                dest.t,
+            );
+            self.alloc_node(LirOp::Concat { widths }, f_reversed, dest.f);
+        }
+    }
+
     /// Expand an NCL multiplier
     /// Simplified approach: compute mul using true rails, derive false rail from NOT(true)
     fn expand_mul(
@@ -926,7 +1077,11 @@ pub fn expand_to_ncl(lir: &Lir, config: &NclConfig) -> NclExpandResult {
                     let a = expander.dual_rail_map.get(&node.inputs[0]).copied();
                     let b = expander.dual_rail_map.get(&node.inputs[1]).copied();
                     if let (Some(a), Some(b), Some(dest)) = (a, b, output_pair) {
-                        expander.expand_add(a, b, dest, *width);
+                        if expander.config.use_opaque_arithmetic {
+                            expander.expand_add_opaque(a, b, dest, *width);
+                        } else {
+                            expander.expand_add(a, b, dest, *width);
+                        }
                     }
                 }
             }
@@ -935,7 +1090,11 @@ pub fn expand_to_ncl(lir: &Lir, config: &NclConfig) -> NclExpandResult {
                     let a = expander.dual_rail_map.get(&node.inputs[0]).copied();
                     let b = expander.dual_rail_map.get(&node.inputs[1]).copied();
                     if let (Some(a), Some(b), Some(dest)) = (a, b, output_pair) {
-                        expander.expand_sub(a, b, dest, *width);
+                        if expander.config.use_opaque_arithmetic {
+                            expander.expand_sub_opaque(a, b, dest, *width);
+                        } else {
+                            expander.expand_sub(a, b, dest, *width);
+                        }
                     }
                 }
             }
