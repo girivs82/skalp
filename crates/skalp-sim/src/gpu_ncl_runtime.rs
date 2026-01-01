@@ -134,6 +134,12 @@ enum NclPrimitiveType {
 
     // NCL completion detection
     NclCompletion = 30,
+
+    // Floating-point soft macros (32-bit FP operations)
+    Fp32Add = 40,
+    Fp32Sub = 41,
+    Fp32Mul = 42,
+    Fp32Div = 43,
 }
 
 /// GPU-compatible cell representation
@@ -271,6 +277,25 @@ impl GpuNclRuntime {
         self.num_stateful_gates = state_index as usize;
         self.cpu_gate_states = vec![false; self.num_stateful_gates];
 
+        // Check if there are FP32 cells that need more than 8 inputs
+        // GPU shader only supports 8 inputs per cell, so fallback to CPU for FP32
+        let has_fp32_cells = self.cells.iter().any(|c| {
+            matches!(
+                c.ptype,
+                NclPrimitiveType::Fp32Add
+                    | NclPrimitiveType::Fp32Sub
+                    | NclPrimitiveType::Fp32Mul
+                    | NclPrimitiveType::Fp32Div
+            )
+        });
+
+        if has_fp32_cells {
+            println!(
+                "[GPU_NCL] FP32 cells detected - using CPU fallback (GPU shader only supports 8 inputs/cell)"
+            );
+            self.use_gpu = false;
+        }
+
         // Debug: show stateful gate count
         println!(
             "[GPU_NCL] Detected {} stateful gates (TH12, TH22, etc.) out of {} total cells",
@@ -278,7 +303,7 @@ impl GpuNclRuntime {
             self.cells.len()
         );
 
-        // Allocate GPU buffers
+        // Allocate GPU buffers (even if not using GPU, we need the data structures)
         self.allocate_buffers()?;
 
         Ok(())
@@ -315,6 +340,20 @@ impl GpuNclRuntime {
         // NCL completion
         if upper.starts_with("NCL_COMPLETE") {
             return NclPrimitiveType::NclCompletion;
+        }
+
+        // FP32 soft macros (check before stripping suffix as underscore is part of name)
+        if upper.starts_with("FP32_ADD") || upper.starts_with("FPADD32") {
+            return NclPrimitiveType::Fp32Add;
+        }
+        if upper.starts_with("FP32_SUB") || upper.starts_with("FPSUB32") {
+            return NclPrimitiveType::Fp32Sub;
+        }
+        if upper.starts_with("FP32_MUL") || upper.starts_with("FPMUL32") {
+            return NclPrimitiveType::Fp32Mul;
+        }
+        if upper.starts_with("FP32_DIV") || upper.starts_with("FPDIV32") {
+            return NclPrimitiveType::Fp32Div;
         }
 
         // Strip library suffix (e.g., "AND2_X1" -> "AND2")
@@ -1147,43 +1186,114 @@ kernel void eval_ncl(
 
                     all_data || all_null
                 }
+                // FP32 soft macros - compute and write all 32 output bits
+                NclPrimitiveType::Fp32Add
+                | NclPrimitiveType::Fp32Sub
+                | NclPrimitiveType::Fp32Mul
+                | NclPrimitiveType::Fp32Div => {
+                    // Extract a[0..31] from inputs[0..31]
+                    let mut a_bits: u32 = 0;
+                    for i in 0..32 {
+                        if inputs.get(i).copied().unwrap_or(false) {
+                            a_bits |= 1 << i;
+                        }
+                    }
+
+                    // Extract b[0..31] from inputs[32..63]
+                    let mut b_bits: u32 = 0;
+                    for i in 0..32 {
+                        if inputs.get(32 + i).copied().unwrap_or(false) {
+                            b_bits |= 1 << i;
+                        }
+                    }
+
+                    // Convert to f32 and perform operation
+                    let a = f32::from_bits(a_bits);
+                    let b = f32::from_bits(b_bits);
+                    let result_f32 = match cell.ptype {
+                        NclPrimitiveType::Fp32Add => a + b,
+                        NclPrimitiveType::Fp32Sub => a - b,
+                        NclPrimitiveType::Fp32Mul => a * b,
+                        NclPrimitiveType::Fp32Div => {
+                            if b != 0.0 {
+                                a / b
+                            } else {
+                                f32::NAN
+                            }
+                        }
+                        _ => 0.0,
+                    };
+
+                    // Convert result back to bits
+                    let result_bits = result_f32.to_bits();
+
+                    // Write all 32 output bits
+                    for i in 0..32 {
+                        let bit_value = (result_bits >> i) & 1 == 1;
+                        if let Some(&out_idx) = cell.outputs.get(i) {
+                            let old_value =
+                                self.cpu_net_values.get(out_idx).copied().unwrap_or(false);
+                            if old_value != bit_value {
+                                changes += 1;
+                            }
+                            if let Some(val) = self.cpu_net_values.get_mut(out_idx) {
+                                *val = bit_value;
+                            }
+                        }
+                    }
+
+                    // Return dummy value - we already wrote all outputs above
+                    false
+                }
             };
 
-            // Write outputs
-            if let Some(&out_idx) = cell.outputs.first() {
-                let old_value = self.cpu_net_values.get(out_idx).copied().unwrap_or(false);
-                if old_value != result {
-                    changes += 1;
-                }
-                if let Some(val) = self.cpu_net_values.get_mut(out_idx) {
-                    *val = result;
-                }
-            }
+            // Skip normal output writing for FP32 cells (they already wrote all outputs)
+            let is_fp32_cell = matches!(
+                cell.ptype,
+                NclPrimitiveType::Fp32Add
+                    | NclPrimitiveType::Fp32Sub
+                    | NclPrimitiveType::Fp32Mul
+                    | NclPrimitiveType::Fp32Div
+            );
 
-            // Handle multi-output cells (HalfAdder, FullAdder have carry as second output)
-            if cell.outputs.len() > 1 {
-                let carry = match cell.ptype {
-                    NclPrimitiveType::HalfAdder => {
-                        let a = inputs.first().copied().unwrap_or(false);
-                        let b = inputs.get(1).copied().unwrap_or(false);
-                        a && b // carry
-                    }
-                    NclPrimitiveType::FullAdder => {
-                        let a = inputs.first().copied().unwrap_or(false);
-                        let b = inputs.get(1).copied().unwrap_or(false);
-                        let cin = inputs.get(2).copied().unwrap_or(false);
-                        (a && b) || (cin && (a ^ b)) // carry out
-                    }
-                    _ => false, // Other multi-output cells don't need special handling
-                };
-
-                if let Some(&carry_idx) = cell.outputs.get(1) {
-                    let old_carry = self.cpu_net_values.get(carry_idx).copied().unwrap_or(false);
-                    if old_carry != carry {
+            if !is_fp32_cell {
+                // Write outputs
+                if let Some(&out_idx) = cell.outputs.first() {
+                    let old_value = self.cpu_net_values.get(out_idx).copied().unwrap_or(false);
+                    if old_value != result {
                         changes += 1;
                     }
-                    if let Some(val) = self.cpu_net_values.get_mut(carry_idx) {
-                        *val = carry;
+                    if let Some(val) = self.cpu_net_values.get_mut(out_idx) {
+                        *val = result;
+                    }
+                }
+
+                // Handle multi-output cells (HalfAdder, FullAdder have carry as second output)
+                if cell.outputs.len() > 1 {
+                    let carry = match cell.ptype {
+                        NclPrimitiveType::HalfAdder => {
+                            let a = inputs.first().copied().unwrap_or(false);
+                            let b = inputs.get(1).copied().unwrap_or(false);
+                            a && b // carry
+                        }
+                        NclPrimitiveType::FullAdder => {
+                            let a = inputs.first().copied().unwrap_or(false);
+                            let b = inputs.get(1).copied().unwrap_or(false);
+                            let cin = inputs.get(2).copied().unwrap_or(false);
+                            (a && b) || (cin && (a ^ b)) // carry out
+                        }
+                        _ => false, // Other multi-output cells don't need special handling
+                    };
+
+                    if let Some(&carry_idx) = cell.outputs.get(1) {
+                        let old_carry =
+                            self.cpu_net_values.get(carry_idx).copied().unwrap_or(false);
+                        if old_carry != carry {
+                            changes += 1;
+                        }
+                        if let Some(val) = self.cpu_net_values.get_mut(carry_idx) {
+                            *val = carry;
+                        }
                     }
                 }
             }
