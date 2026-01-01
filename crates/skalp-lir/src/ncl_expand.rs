@@ -767,8 +767,11 @@ impl NclExpander {
         }
     }
 
-    /// Expand an NCL multiplier
-    /// Simplified approach: compute mul using true rails, derive false rail from NOT(true)
+    /// Expand an NCL multiplier using opaque NclMul operation.
+    ///
+    /// Uses the same opaque approach as expand_add_opaque for proper NULL/DATA handling.
+    /// The NclMul operation takes all 4 dual-rail inputs (a_t, a_f, b_t, b_f) and
+    /// produces properly-encoded interleaved output that respects NCL phase transitions.
     fn expand_mul(
         &mut self,
         a: DualRailPair,
@@ -777,24 +780,26 @@ impl NclExpander {
         input_width: u32,
         result_width: u32,
     ) {
-        // Simplified approach: compute multiply using true rails, then derive false rail
-        // This is an approximation - proper NCL multiplier would use threshold gates
+        let id = self.next_signal_id;
+        self.next_signal_id += 1;
+
+        // Create interleaved output signal (2 * result_width bits)
+        let interleaved =
+            self.alloc_signal(format!("ncl_mul_interleaved_{}", id), result_width * 2);
+
+        // Emit NclMul: inputs are a_t, a_f, b_t, b_f (each input_width bits)
+        // Output is interleaved: [t0, f0, t1, f1, ...] for result_width bits
         self.alloc_node(
-            LirOp::Mul {
-                width: input_width,
+            LirOp::NclMul {
+                input_width,
                 result_width,
             },
-            vec![a.t, b.t],
-            dest.t,
+            vec![a.t, a.f, b.t, b.f],
+            interleaved,
         );
-        // For false rail, invert the true rail (approximation)
-        self.alloc_node(
-            LirOp::Not {
-                width: result_width,
-            },
-            vec![dest.t],
-            dest.f,
-        );
+
+        // Deinterleave: extract t and f rails from interleaved output
+        self.deinterleave_to_pair(interleaved, dest, result_width);
     }
 
     /// Expand an NCL less-than comparator using opaque NclLt operation.
@@ -1054,6 +1059,9 @@ impl NclExpander {
     /// In NCL dual-rail:
     ///   y_t = TH12(TH22(sel_t, b_t), TH22(sel_f, a_t))
     ///   y_f = TH12(TH22(sel_t, b_f), TH22(sel_f, a_f))
+    ///
+    /// Note: sel may be 1-bit while data (a, b) may be multi-bit.
+    /// When sel is 1-bit and data is wider, we process bit-by-bit.
     fn expand_mux2(
         &mut self,
         sel: DualRailPair,
@@ -1062,27 +1070,133 @@ impl NclExpander {
         dest: DualRailPair,
         width: u32,
     ) {
-        // Intermediate signals for true rail
-        let sel_b_t = self.alloc_signal(format!("mux_sel_b_t_{}", self.next_signal_id), width);
-        let nsel_a_t = self.alloc_signal(format!("mux_nsel_a_t_{}", self.next_signal_id), width);
+        // Get the width of the select signal
+        let sel_width = self.lir.signals[sel.t.0 as usize].width;
 
-        // TH22(sel_t, b_t) - select high AND b true
-        self.alloc_node(LirOp::Th22 { width }, vec![sel.t, b.t], sel_b_t);
-        // TH22(sel_f, a_t) - select low AND a true (sel_f is NOT sel in dual-rail)
-        self.alloc_node(LirOp::Th22 { width }, vec![sel.f, a.t], nsel_a_t);
-        // True rail: TH12(sel_b_t, nsel_a_t) - OR with hysteresis
-        self.alloc_node(LirOp::Th12 { width }, vec![sel_b_t, nsel_a_t], dest.t);
+        // If select is 1-bit and data is multi-bit, use bit-by-bit MUX with 1-bit select
+        if sel_width == 1 && width > 1 {
+            // Create intermediate signals for gathering per-bit results
+            let mut t_bits = Vec::with_capacity(width as usize);
+            let mut f_bits = Vec::with_capacity(width as usize);
 
-        // Intermediate signals for false rail
-        let sel_b_f = self.alloc_signal(format!("mux_sel_b_f_{}", self.next_signal_id), width);
-        let nsel_a_f = self.alloc_signal(format!("mux_nsel_a_f_{}", self.next_signal_id), width);
+            for i in 0..width {
+                // Extract bit i from a and b
+                let a_t_bit =
+                    self.alloc_signal(format!("mux_a_t_bit_{}_{}", self.next_signal_id, i), 1);
+                let a_f_bit =
+                    self.alloc_signal(format!("mux_a_f_bit_{}_{}", self.next_signal_id, i), 1);
+                let b_t_bit =
+                    self.alloc_signal(format!("mux_b_t_bit_{}_{}", self.next_signal_id, i), 1);
+                let b_f_bit =
+                    self.alloc_signal(format!("mux_b_f_bit_{}_{}", self.next_signal_id, i), 1);
 
-        // TH22(sel_t, b_f) - select high AND b false
-        self.alloc_node(LirOp::Th22 { width }, vec![sel.t, b.f], sel_b_f);
-        // TH22(sel_f, a_f) - select low AND a false
-        self.alloc_node(LirOp::Th22 { width }, vec![sel.f, a.f], nsel_a_f);
-        // False rail: TH12(sel_b_f, nsel_a_f) - OR with hysteresis
-        self.alloc_node(LirOp::Th12 { width }, vec![sel_b_f, nsel_a_f], dest.f);
+                self.alloc_node(
+                    LirOp::RangeSelect {
+                        width,
+                        high: i,
+                        low: i,
+                    },
+                    vec![a.t],
+                    a_t_bit,
+                );
+                self.alloc_node(
+                    LirOp::RangeSelect {
+                        width,
+                        high: i,
+                        low: i,
+                    },
+                    vec![a.f],
+                    a_f_bit,
+                );
+                self.alloc_node(
+                    LirOp::RangeSelect {
+                        width,
+                        high: i,
+                        low: i,
+                    },
+                    vec![b.t],
+                    b_t_bit,
+                );
+                self.alloc_node(
+                    LirOp::RangeSelect {
+                        width,
+                        high: i,
+                        low: i,
+                    },
+                    vec![b.f],
+                    b_f_bit,
+                );
+
+                // Create 1-bit MUX for this bit
+                let bit_t =
+                    self.alloc_signal(format!("mux_bit_t_{}_{}", self.next_signal_id, i), 1);
+                let bit_f =
+                    self.alloc_signal(format!("mux_bit_f_{}_{}", self.next_signal_id, i), 1);
+
+                // Intermediate signals for 1-bit MUX
+                let sel_b_t =
+                    self.alloc_signal(format!("mux1_sel_b_t_{}_{}", self.next_signal_id, i), 1);
+                let nsel_a_t =
+                    self.alloc_signal(format!("mux1_nsel_a_t_{}_{}", self.next_signal_id, i), 1);
+                let sel_b_f =
+                    self.alloc_signal(format!("mux1_sel_b_f_{}_{}", self.next_signal_id, i), 1);
+                let nsel_a_f =
+                    self.alloc_signal(format!("mux1_nsel_a_f_{}_{}", self.next_signal_id, i), 1);
+
+                // TH22(sel_t, b_t[i]) for true rail
+                self.alloc_node(LirOp::Th22 { width: 1 }, vec![sel.t, b_t_bit], sel_b_t);
+                self.alloc_node(LirOp::Th22 { width: 1 }, vec![sel.f, a_t_bit], nsel_a_t);
+                self.alloc_node(LirOp::Th12 { width: 1 }, vec![sel_b_t, nsel_a_t], bit_t);
+
+                // TH22(sel_t, b_f[i]) for false rail
+                self.alloc_node(LirOp::Th22 { width: 1 }, vec![sel.t, b_f_bit], sel_b_f);
+                self.alloc_node(LirOp::Th22 { width: 1 }, vec![sel.f, a_f_bit], nsel_a_f);
+                self.alloc_node(LirOp::Th12 { width: 1 }, vec![sel_b_f, nsel_a_f], bit_f);
+
+                t_bits.push(bit_t);
+                f_bits.push(bit_f);
+            }
+
+            // Concatenate all bits back together
+            // Note: Concat expects inputs in MSB-first order (last input becomes LSB)
+            // So we reverse the bit vectors to get correct bit ordering
+            let widths: Vec<u32> = vec![1; width as usize];
+            let t_bits_rev: Vec<_> = t_bits.into_iter().rev().collect();
+            let f_bits_rev: Vec<_> = f_bits.into_iter().rev().collect();
+            self.alloc_node(
+                LirOp::Concat {
+                    widths: widths.clone(),
+                },
+                t_bits_rev,
+                dest.t,
+            );
+            self.alloc_node(LirOp::Concat { widths }, f_bits_rev, dest.f);
+        } else {
+            // Same-width case: use direct TH22/TH12 on full width
+            // Intermediate signals for true rail
+            let sel_b_t = self.alloc_signal(format!("mux_sel_b_t_{}", self.next_signal_id), width);
+            let nsel_a_t =
+                self.alloc_signal(format!("mux_nsel_a_t_{}", self.next_signal_id), width);
+
+            // TH22(sel_t, b_t) - select high AND b true
+            self.alloc_node(LirOp::Th22 { width }, vec![sel.t, b.t], sel_b_t);
+            // TH22(sel_f, a_t) - select low AND a true (sel_f is NOT sel in dual-rail)
+            self.alloc_node(LirOp::Th22 { width }, vec![sel.f, a.t], nsel_a_t);
+            // True rail: TH12(sel_b_t, nsel_a_t) - OR with hysteresis
+            self.alloc_node(LirOp::Th12 { width }, vec![sel_b_t, nsel_a_t], dest.t);
+
+            // Intermediate signals for false rail
+            let sel_b_f = self.alloc_signal(format!("mux_sel_b_f_{}", self.next_signal_id), width);
+            let nsel_a_f =
+                self.alloc_signal(format!("mux_nsel_a_f_{}", self.next_signal_id), width);
+
+            // TH22(sel_t, b_f) - select high AND b false
+            self.alloc_node(LirOp::Th22 { width }, vec![sel.t, b.f], sel_b_f);
+            // TH22(sel_f, a_f) - select low AND a false
+            self.alloc_node(LirOp::Th22 { width }, vec![sel.f, a.f], nsel_a_f);
+            // False rail: TH12(sel_b_f, nsel_a_f) - OR with hysteresis
+            self.alloc_node(LirOp::Th12 { width }, vec![sel_b_f, nsel_a_f], dest.f);
+        }
     }
 
     /// Expand a register to NCL register (NULL/DATA latch)

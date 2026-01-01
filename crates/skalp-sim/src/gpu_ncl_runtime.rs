@@ -764,6 +764,17 @@ kernel void eval_ncl(
         self.netlist.nets.iter().map(|n| n.name.clone()).collect()
     }
 
+    /// Get a net value by name (for debugging)
+    pub fn get_net_by_name(&self, name: &str) -> Option<bool> {
+        // Find the net with this name
+        for net in &self.netlist.nets {
+            if net.name == name {
+                return Some(self.get_net(net.id));
+            }
+        }
+        None
+    }
+
     /// Get the nets for a specific signal (for debugging)
     pub fn signal_nets(&self, name: &str) -> Option<Vec<GateNetId>> {
         self.signal_name_to_nets.get(name).cloned()

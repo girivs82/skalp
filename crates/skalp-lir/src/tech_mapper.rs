@@ -702,8 +702,17 @@ impl<'a> TechMapper<'a> {
             LirOp::NclSub { width } => {
                 self.map_ncl_sub(*width, &input_nets, &output_nets, &node.path);
             }
-            LirOp::NclMul { width } => {
-                self.map_ncl_mul(*width, &input_nets, &output_nets, &node.path);
+            LirOp::NclMul {
+                input_width,
+                result_width,
+            } => {
+                self.map_ncl_mul(
+                    *input_width,
+                    *result_width,
+                    &input_nets,
+                    &output_nets,
+                    &node.path,
+                );
             }
             LirOp::NclLt { width } => {
                 self.map_ncl_lt(*width, &input_nets, &output_nets, &node.path);
@@ -3397,47 +3406,261 @@ impl<'a> TechMapper<'a> {
         self.stats.decomposed_mappings += 1;
     }
 
-    /// Map NCL multiplier using array of NCL AND gates and adder tree
+    /// Map NCL multiplier with proper NULL/DATA handling
+    ///
+    /// NCL Mul expects 4 inputs: a_t, a_f, b_t, b_f (each width bits)
+    /// Output is 2*width bits interleaved: [t0, f0, t1, f1, ...]
+    ///
+    /// Key NCL property: during NULL phase (all inputs t=f=0), output must also be NULL.
+    /// During DATA phase, output encodes the product value.
+    ///
+    /// Implementation approach:
+    /// 1. Compute product_value = a_t * b_t (correct in DATA phase since true rail = value)
+    /// 2. Compute input completion = all input bits have exactly one of (t,f) set
+    /// 3. Output: out_t[i] = product[i] AND completion, out_f[i] = NOT(product[i]) AND completion
+    ///
+    /// This ensures NULL propagation: when inputs are NULL, completion=0, so output is NULL.
     fn map_ncl_mul(
         &mut self,
-        width: u32,
+        input_width: u32,
+        result_width: u32,
         inputs: &[Vec<GateNetId>],
         outputs: &[GateNetId],
         path: &str,
     ) {
-        if inputs.len() < 2 {
-            self.warnings.push("NCL Mul needs 2 inputs".to_string());
+        if inputs.len() < 4 {
+            self.warnings.push(format!(
+                "NCL Mul at {} needs 4 inputs (a_t, a_f, b_t, b_f), got {}",
+                path,
+                inputs.len()
+            ));
             return;
         }
 
-        // NCL multiplier: array multiplication using NCL AND for partial products
-        // and NCL adder tree for reduction
+        let a_t = &inputs[0];
+        let a_f = &inputs[1];
+        let b_t = &inputs[2];
+        let b_f = &inputs[3];
 
-        // Simplified warning - full implementation is complex
-        self.warnings.push(format!(
-            "NCL Mul at {} - using simplified implementation",
-            path
-        ));
+        let and_info = self.get_cell_info(&CellFunction::And2);
+        let inv_info = self.get_cell_info(&CellFunction::Inv);
+        let xor_info = self.get_cell_info(&CellFunction::Xor2);
 
-        // For now, just wire through (actual implementation would be ~width^2 cells)
+        // Step 1: Compute multiplication on true rails (gives correct value in DATA phase)
+        // Create intermediate nets for product result (result_width bits)
+        let mut product_nets = Vec::with_capacity(result_width as usize);
+        for i in 0..result_width as usize {
+            let net_id = self.alloc_net_id();
+            self.netlist
+                .add_net(GateNet::new(net_id, format!("{}.mul_prod{}", path, i)));
+            product_nets.push(net_id);
+        }
+
+        // Use existing map_multiplier to compute a_t * b_t
+        // Need to collect the true rails as input vectors (input_width bits each)
+        let mul_input_a: Vec<GateNetId> = (0..input_width as usize)
+            .map(|i| a_t.get(i).copied().unwrap_or(GateNetId(0)))
+            .collect();
+        let mul_input_b: Vec<GateNetId> = (0..input_width as usize)
+            .map(|i| b_t.get(i).copied().unwrap_or(GateNetId(0)))
+            .collect();
+
+        // Call existing multiplier implementation
+        // input_width x input_width -> result_width output
+        self.map_multiplier(
+            input_width,
+            result_width,
+            &[mul_input_a, mul_input_b],
+            &product_nets,
+            &format!("{}.mul_core", path),
+        );
+
+        // Step 2: Compute completion detection for all input bits
+        // A bit is complete when exactly one of (t, f) is 1: completion[i] = XOR(t[i], f[i])
+        // Overall completion = AND of all per-bit completions
+        let mut completion_bits_a = Vec::with_capacity(input_width as usize);
+        let mut completion_bits_b = Vec::with_capacity(input_width as usize);
+
+        for i in 0..input_width as usize {
+            // a completion bit
+            let a_comp = self.alloc_net_id();
+            self.netlist
+                .add_net(GateNet::new(a_comp, format!("{}.mul_a_comp{}", path, i)));
+            self.add_cell(Cell::new_comb(
+                CellId(0),
+                xor_info.name.clone(),
+                self.library.name.clone(),
+                xor_info.fit,
+                format!("{}.mul_a_comp_xor{}", path, i),
+                vec![
+                    a_t.get(i).copied().unwrap_or(GateNetId(0)),
+                    a_f.get(i).copied().unwrap_or(GateNetId(0)),
+                ],
+                vec![a_comp],
+            ));
+            completion_bits_a.push(a_comp);
+
+            // b completion bit
+            let b_comp = self.alloc_net_id();
+            self.netlist
+                .add_net(GateNet::new(b_comp, format!("{}.mul_b_comp{}", path, i)));
+            self.add_cell(Cell::new_comb(
+                CellId(0),
+                xor_info.name.clone(),
+                self.library.name.clone(),
+                xor_info.fit,
+                format!("{}.mul_b_comp_xor{}", path, i),
+                vec![
+                    b_t.get(i).copied().unwrap_or(GateNetId(0)),
+                    b_f.get(i).copied().unwrap_or(GateNetId(0)),
+                ],
+                vec![b_comp],
+            ));
+            completion_bits_b.push(b_comp);
+        }
+
+        // AND tree for overall completion
+        // Combine all completion bits into one signal
+        let mut all_comp_bits: Vec<GateNetId> = completion_bits_a;
+        all_comp_bits.extend(completion_bits_b);
+
+        // Build AND tree
+        let input_completion = self.build_and_tree(&all_comp_bits, &and_info, path, "mul_comp");
+
+        // Step 3: Add delay chain to completion signal
+        // The false rail should not go high until the product has stabilized.
+        // Add buffers to delay completion by the multiplier depth (~2*result_width).
+        // This prevents glitches where out_f is high before product is computed.
         let buf_info = self.get_cell_info(&CellFunction::Buf);
-        for i in 0..(width * 2) as usize {
-            let in_bit = inputs[0].get(i).copied().unwrap_or(GateNetId(0));
-            let out_bit = outputs.get(i).copied().unwrap_or(GateNetId(0));
-            if out_bit.0 != 0 {
+        let delay_depth = (result_width * 2).max(8) as usize; // At least 8, typically 2*result_width
+
+        let mut delayed_completion = input_completion;
+        for d in 0..delay_depth {
+            let delay_net = self.alloc_net_id();
+            self.netlist.add_net(GateNet::new(
+                delay_net,
+                format!("{}.mul_comp_delay{}", path, d),
+            ));
+            self.add_cell(Cell::new_comb(
+                CellId(0),
+                buf_info.name.clone(),
+                self.library.name.clone(),
+                buf_info.fit,
+                format!("{}.mul_comp_buf{}", path, d),
+                vec![delayed_completion],
+                vec![delay_net],
+            ));
+            delayed_completion = delay_net;
+        }
+
+        // Use delayed completion for gating outputs
+        let completion = delayed_completion;
+
+        // Step 4: Gate outputs with completion
+        // out_t[i] = product[i] AND completion
+        // out_f[i] = NOT(product[i]) AND completion
+        for i in 0..result_width as usize {
+            let out_t = outputs.get(i * 2).copied().unwrap_or(GateNetId(0));
+            let out_f = outputs.get(i * 2 + 1).copied().unwrap_or(GateNetId(0));
+            let prod_bit = product_nets.get(i).copied().unwrap_or(GateNetId(0));
+
+            if out_t.0 != 0 {
+                // out_t = prod AND completion
                 self.add_cell(Cell::new_comb(
                     CellId(0),
-                    buf_info.name.clone(),
+                    and_info.name.clone(),
                     self.library.name.clone(),
-                    buf_info.fit,
-                    format!("{}.mul_buf{}", path, i),
-                    vec![in_bit],
-                    vec![out_bit],
+                    and_info.fit,
+                    format!("{}.mul_out_t{}", path, i),
+                    vec![prod_bit, completion],
+                    vec![out_t],
+                ));
+            }
+
+            if out_f.0 != 0 {
+                // out_f = NOT(prod) AND completion
+                let not_prod = self.alloc_net_id();
+                self.netlist.add_net(GateNet::new(
+                    not_prod,
+                    format!("{}.mul_not_prod{}", path, i),
+                ));
+                self.add_cell(Cell::new_comb(
+                    CellId(0),
+                    inv_info.name.clone(),
+                    self.library.name.clone(),
+                    inv_info.fit,
+                    format!("{}.mul_not{}", path, i),
+                    vec![prod_bit],
+                    vec![not_prod],
+                ));
+                self.add_cell(Cell::new_comb(
+                    CellId(0),
+                    and_info.name.clone(),
+                    self.library.name.clone(),
+                    and_info.fit,
+                    format!("{}.mul_out_f{}", path, i),
+                    vec![not_prod, completion],
+                    vec![out_f],
                 ));
             }
         }
 
         self.stats.decomposed_mappings += 1;
+    }
+
+    /// Build an AND tree from a list of input nets, returning the final AND result
+    fn build_and_tree(
+        &mut self,
+        inputs: &[GateNetId],
+        and_info: &LibraryCellInfo,
+        path: &str,
+        prefix: &str,
+    ) -> GateNetId {
+        if inputs.is_empty() {
+            return self.get_tie_high();
+        }
+        if inputs.len() == 1 {
+            return inputs[0];
+        }
+
+        let mut current_level = inputs.to_vec();
+        let mut level = 0;
+
+        while current_level.len() > 1 {
+            let mut next_level = Vec::new();
+            let mut i = 0;
+
+            while i < current_level.len() {
+                if i + 1 < current_level.len() {
+                    // Pair two inputs
+                    let and_out = self.alloc_net_id();
+                    self.netlist.add_net(GateNet::new(
+                        and_out,
+                        format!("{}.{}_{}_and{}", path, prefix, level, i / 2),
+                    ));
+                    self.add_cell(Cell::new_comb(
+                        CellId(0),
+                        and_info.name.clone(),
+                        self.library.name.clone(),
+                        and_info.fit,
+                        format!("{}.{}_{}_and{}", path, prefix, level, i / 2),
+                        vec![current_level[i], current_level[i + 1]],
+                        vec![and_out],
+                    ));
+                    next_level.push(and_out);
+                    i += 2;
+                } else {
+                    // Odd one out, pass through
+                    next_level.push(current_level[i]);
+                    i += 1;
+                }
+            }
+
+            current_level = next_level;
+            level += 1;
+        }
+
+        current_level[0]
     }
 
     /// Map NCL less-than comparator

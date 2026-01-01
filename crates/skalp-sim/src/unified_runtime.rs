@@ -605,6 +605,37 @@ impl UnifiedSimulator {
         }
     }
 
+    /// List all available signal names (for debugging NCL simulation)
+    pub fn list_signal_names(&self) -> Vec<String> {
+        match &self.backend {
+            #[cfg(target_os = "macos")]
+            SimulatorBackend::NclGpu(runtime) => runtime
+                .signal_names()
+                .iter()
+                .map(|s| (*s).clone())
+                .collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// List all net names (for debugging NCL simulation)
+    pub fn list_all_net_names(&self) -> Vec<String> {
+        match &self.backend {
+            #[cfg(target_os = "macos")]
+            SimulatorBackend::NclGpu(runtime) => runtime.all_net_names(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// Get raw net value by name (for debugging NCL simulation)
+    pub fn get_net_value(&self, name: &str) -> Option<bool> {
+        match &self.backend {
+            #[cfg(target_os = "macos")]
+            SimulatorBackend::NclGpu(runtime) => runtime.get_net_by_name(name),
+            _ => None,
+        }
+    }
+
     /// Get an output value (as u64), with latency adjustment applied
     ///
     /// If pipeline annotations have been loaded and this output has a

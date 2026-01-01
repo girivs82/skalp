@@ -785,7 +785,8 @@ pub enum LirOp {
     /// NCL subtractor
     NclSub { width: u32 },
     /// NCL array multiplier
-    NclMul { width: u32 },
+    /// input_width: width of each operand, result_width: width of output (typically 2*input_width)
+    NclMul { input_width: u32, result_width: u32 },
     /// NCL less-than comparator
     NclLt { width: u32 },
     /// NCL equality comparator
@@ -873,12 +874,12 @@ impl LirOp {
             | LirOp::NclNot { width }
             | LirOp::NclAdd { width }
             | LirOp::NclSub { width }
-            | LirOp::NclMul { width }
             | LirOp::NclShl { width }
             | LirOp::NclShr { width }
             | LirOp::NclMux2 { width }
             | LirOp::NclReg { width }
             | LirOp::NclNull { width } => width * 2, // Dual-rail width
+            LirOp::NclMul { result_width, .. } => result_width * 2, // Dual-rail output width
             LirOp::NclLt { .. } | LirOp::NclEq { .. } => 2, // 1-bit result, dual-rail = 2 bits
             LirOp::NclComplete { .. } => 1,          // Single-bit completion signal
         }
