@@ -5347,8 +5347,8 @@ impl<'hir> HirToMir<'hir> {
                     // BUG FIX #92: Now storing Vec<SignalId> for tuple support
                     // BUG FIX: Use hir_return_type to get the actual function return type
                     // instead of the inferred expression type (which might be wrong for tuples)
-                    let frontend_return_type =
-                        self.hir_type_to_frontend_type(&hir_return_type).unwrap_or_else(|| ty.clone());
+                    let frontend_return_type = Self::hir_type_to_frontend_type(&hir_return_type)
+                        .unwrap_or_else(|| ty.clone());
                     eprintln!(
                         "[HYBRID] BUG FIX: Using frontend_return_type {:?} (hir_return_type: {:?})",
                         frontend_return_type, hir_return_type
@@ -15605,13 +15605,9 @@ impl<'hir> HirToMir<'hir> {
 
                     // BUG FIX: Use hir_type_to_frontend_type to get the actual tuple type
                     // instead of hardcoding Bit(32) which loses tuple element widths
-                    let frontend_type = self
-                        .hir_type_to_frontend_type(&return_type)
-                        .unwrap_or_else(|| {
-                            skalp_frontend::types::Type::Bit(
-                                skalp_frontend::types::Width::Fixed(32),
-                            )
-                        });
+                    let frontend_type = Self::hir_type_to_frontend_type(&return_type).unwrap_or(
+                        skalp_frontend::types::Type::Bit(skalp_frontend::types::Width::Fixed(32)),
+                    );
 
                     self.pending_module_instances.push((
                         result_signal_ids.clone(),
@@ -15994,13 +15990,9 @@ impl<'hir> HirToMir<'hir> {
 
                     // BUG FIX: Use hir_type_to_frontend_type to get the actual tuple type
                     // instead of hardcoding Bit(32) which loses tuple element widths
-                    let frontend_type = self
-                        .hir_type_to_frontend_type(&return_type)
-                        .unwrap_or_else(|| {
-                            skalp_frontend::types::Type::Bit(
-                                skalp_frontend::types::Width::Fixed(32),
-                            )
-                        });
+                    let frontend_type = Self::hir_type_to_frontend_type(&return_type).unwrap_or(
+                        skalp_frontend::types::Type::Bit(skalp_frontend::types::Width::Fixed(32)),
+                    );
 
                     self.pending_module_instances.push((
                         result_signal_ids.clone(),
@@ -18116,7 +18108,7 @@ impl<'hir> HirToMir<'hir> {
 
     /// Convert HirType to frontend Type
     /// Used for getting the actual function return type (BUG FIX for NCL tuple width mismatch)
-    fn hir_type_to_frontend_type(&self, hir_type: &Option<hir::HirType>) -> Option<Type> {
+    fn hir_type_to_frontend_type(hir_type: &Option<hir::HirType>) -> Option<Type> {
         use skalp_frontend::types::Width;
         let hir_ty = hir_type.as_ref()?;
         Some(match hir_ty {
@@ -18133,13 +18125,13 @@ impl<'hir> HirToMir<'hir> {
                 // Convert each tuple element
                 let element_types: Vec<Type> = elements
                     .iter()
-                    .filter_map(|elem| self.hir_type_to_frontend_type(&Some(elem.clone())))
+                    .filter_map(|elem| Self::hir_type_to_frontend_type(&Some(elem.clone())))
                     .collect();
                 Type::Tuple(element_types)
             }
             hir::HirType::Array(elem, size) => Type::Array {
                 element_type: Box::new(
-                    self.hir_type_to_frontend_type(&Some((**elem).clone()))
+                    Self::hir_type_to_frontend_type(&Some((**elem).clone()))
                         .unwrap_or(Type::Bit(Width::Fixed(32))),
                 ),
                 size: *size,

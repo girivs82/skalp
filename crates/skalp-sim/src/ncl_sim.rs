@@ -229,6 +229,22 @@ impl NclSimulator {
             }
         }
 
+        // Build a lookup map for net names (do this once, not per signal group)
+        let net_names: std::collections::HashMap<u32, &str> = netlist
+            .nets
+            .iter()
+            .map(|n| (n.id.0, n.name.as_str()))
+            .collect();
+
+        // Sort nets in each signal group to ensure proper dual-rail ordering:
+        // [t0, t1, ..., tN-1, f0, f1, ..., fN-1]
+        for (_base_name, nets) in input_nets.iter_mut() {
+            sort_dual_rail_nets(nets, &net_names);
+        }
+        for (_base_name, nets) in output_nets.iter_mut() {
+            sort_dual_rail_nets(nets, &net_names);
+        }
+
         Self {
             netlist,
             config,
@@ -786,6 +802,63 @@ fn strip_bit_suffix(name: &str) -> String {
     }
 
     result
+}
+
+/// Sort nets for proper dual-rail ordering: [t0, t1, ..., tN-1, f0, f1, ..., fN-1]
+///
+/// This ensures that `set_dual_rail_value` and `get_dual_rail_value` can correctly
+/// map bit positions to the right rails.
+fn sort_dual_rail_nets(nets: &mut [GateNetId], net_names: &std::collections::HashMap<u32, &str>) {
+    // Parse each net to extract (is_false_rail, bit_index)
+    // Returns (false, bit_index) for true rail, (true, bit_index) for false rail
+    // This way sorting naturally groups t rails first, then f rails, each sorted by bit index
+    let get_sort_key = |net_id: &GateNetId| -> (bool, usize) {
+        if let Some(&name) = net_names.get(&net_id.0) {
+            // Check for _t or _f suffix patterns
+            if let Some(underscore_pos) = name.rfind('_') {
+                let suffix = &name[underscore_pos + 1..];
+
+                // Handle _t (1-bit true rail) or _f (1-bit false rail)
+                if suffix == "t" {
+                    return (false, 0); // true rail, bit 0
+                }
+                if suffix == "f" {
+                    return (true, 0); // false rail, bit 0
+                }
+
+                // Handle _tN or _fN patterns
+                if let Some(rest) = suffix.strip_prefix('t') {
+                    if let Ok(bit) = rest.parse::<usize>() {
+                        return (false, bit); // true rail
+                    }
+                }
+                if let Some(rest) = suffix.strip_prefix('f') {
+                    if let Ok(bit) = rest.parse::<usize>() {
+                        return (true, bit); // false rail
+                    }
+                }
+            }
+
+            // Check for [N] suffix with _t or _f before it
+            // e.g., "signal_t[5]" or "signal_f[5]"
+            if let Some(bracket_pos) = name.find('[') {
+                let before_bracket = &name[..bracket_pos];
+                let bit_str = &name[bracket_pos + 1..name.len().saturating_sub(1)];
+                let bit = bit_str.parse::<usize>().unwrap_or(0);
+
+                if before_bracket.ends_with("_t") {
+                    return (false, bit); // true rail
+                }
+                if before_bracket.ends_with("_f") {
+                    return (true, bit); // false rail
+                }
+            }
+        }
+        // Default: treat as true rail bit 0 (shouldn't happen for valid NCL nets)
+        (false, 0)
+    };
+
+    nets.sort_by_key(get_sort_key);
 }
 
 /// Evaluate a THmn gate with explicit previous state (for use in gate_eval.rs)

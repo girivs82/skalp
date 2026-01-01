@@ -141,6 +141,16 @@ impl NclExpander {
         inputs: Vec<LirSignalId>,
         output: LirSignalId,
     ) -> LirNodeId {
+        self.alloc_node_with_path(op, inputs, output, String::new())
+    }
+
+    fn alloc_node_with_path(
+        &mut self,
+        op: LirOp,
+        inputs: Vec<LirSignalId>,
+        output: LirSignalId,
+        path: String,
+    ) -> LirNodeId {
         let id = LirNodeId(self.next_node_id);
         self.next_node_id += 1;
         self.lir.nodes.push(LirNode {
@@ -148,7 +158,7 @@ impl NclExpander {
             op,
             inputs,
             output,
-            path: String::new(),
+            path,
             clock: None,
             reset: None,
         });
@@ -787,13 +797,45 @@ impl NclExpander {
         );
     }
 
-    /// Expand an NCL less-than comparator
-    /// Simplified approach: compute lt using true rails, derive false rail from NOT(true)
+    /// Expand an NCL less-than comparator using opaque NclLt operation.
+    /// The opaque approach takes all dual-rail inputs and produces properly-encoded output
+    /// that respects NULL/DATA phase transitions.
     fn expand_lt(&mut self, a: DualRailPair, b: DualRailPair, dest: DualRailPair, width: u32) {
-        // Simplified approach: compute less-than using true rails
-        self.alloc_node(LirOp::Lt { width }, vec![a.t, b.t], dest.t);
-        // For false rail, invert the true rail (approximation)
-        self.alloc_node(LirOp::Not { width: 1 }, vec![dest.t], dest.f);
+        let id = self.next_signal_id;
+        self.next_signal_id += 1;
+
+        // Create interleaved output signal (2 bits: t, f for 1-bit result)
+        let interleaved = self.alloc_signal(format!("ncl_lt_interleaved_{}", id), 2);
+
+        // Emit NclLt: inputs are a_t, a_f, b_t, b_f (each width bits)
+        // Output is interleaved: [t, f] for 1-bit result
+        // Use unique path to avoid net name collision during flattening
+        self.alloc_node_with_path(
+            LirOp::NclLt { width },
+            vec![a.t, a.f, b.t, b.f],
+            interleaved,
+            format!("ncl_lt_{}", id),
+        );
+
+        // Deinterleave: extract t and f rails from interleaved output
+        self.alloc_node(
+            LirOp::RangeSelect {
+                width: 2,
+                high: 0,
+                low: 0,
+            },
+            vec![interleaved],
+            dest.t,
+        );
+        self.alloc_node(
+            LirOp::RangeSelect {
+                width: 2,
+                high: 1,
+                low: 1,
+            },
+            vec![interleaved],
+            dest.f,
+        );
     }
 
     /// Expand an NCL equality comparator using proper dual-rail encoding
@@ -851,11 +893,159 @@ impl NclExpander {
             self.alloc_node(LirOp::Th22 { width }, vec![a.f, b.t], diff_ft);
             self.alloc_node(LirOp::Th12 { width }, vec![diff_tf, diff_ft], per_bit_eq_f);
 
-            // Reduce: overall_eq_t = AND(all per_bit_eq_t) using TH22 tree
-            // Reduce: overall_eq_f = OR(any per_bit_eq_f) using TH12 tree
+            // Reduce using NCL threshold gates for proper hysteresis:
+            // - AND reduction uses TH22 chain (C-element chain)
+            // - OR reduction uses TH12 chain
             // Note: dest is 1-bit dual-rail output
-            self.alloc_node(LirOp::RedAnd { width }, vec![per_bit_eq_t], dest.t);
-            self.alloc_node(LirOp::RedOr { width }, vec![per_bit_eq_f], dest.f);
+            self.reduce_with_th22_chain(per_bit_eq_t, dest.t, width);
+            self.reduce_with_th12_chain(per_bit_eq_f, dest.f, width);
+        }
+    }
+
+    /// Reduce a multi-bit signal to 1-bit using TH22 chain (NCL AND reduction)
+    fn reduce_with_th22_chain(&mut self, signal: LirSignalId, output: LirSignalId, width: u32) {
+        if width == 1 {
+            // Just buffer
+            self.alloc_node(LirOp::Buf { width: 1 }, vec![signal], output);
+        } else if width == 2 {
+            // Extract bits and TH22 them
+            let bit0 = self.alloc_signal(format!("red_and_b0_{}", self.next_signal_id), 1);
+            let bit1 = self.alloc_signal(format!("red_and_b1_{}", self.next_signal_id), 1);
+            self.alloc_node(
+                LirOp::RangeSelect {
+                    width,
+                    high: 0,
+                    low: 0,
+                },
+                vec![signal],
+                bit0,
+            );
+            self.alloc_node(
+                LirOp::RangeSelect {
+                    width,
+                    high: 1,
+                    low: 1,
+                },
+                vec![signal],
+                bit1,
+            );
+            self.alloc_node(LirOp::Th22 { width: 1 }, vec![bit0, bit1], output);
+        } else {
+            // Chain: reduce pairs with TH22, then recursively reduce the result
+            let half = width / 2;
+            let remaining = width - half;
+
+            // Extract and reduce first half
+            let first_half =
+                self.alloc_signal(format!("red_and_half0_{}", self.next_signal_id), half);
+            self.alloc_node(
+                LirOp::RangeSelect {
+                    width,
+                    high: (half - 1),
+                    low: 0,
+                },
+                vec![signal],
+                first_half,
+            );
+            let first_reduced =
+                self.alloc_signal(format!("red_and_h0r_{}", self.next_signal_id), 1);
+            self.reduce_with_th22_chain(first_half, first_reduced, half);
+
+            // Extract and reduce second half
+            let second_half =
+                self.alloc_signal(format!("red_and_half1_{}", self.next_signal_id), remaining);
+            self.alloc_node(
+                LirOp::RangeSelect {
+                    width,
+                    high: (width - 1),
+                    low: half,
+                },
+                vec![signal],
+                second_half,
+            );
+            let second_reduced =
+                self.alloc_signal(format!("red_and_h1r_{}", self.next_signal_id), 1);
+            self.reduce_with_th22_chain(second_half, second_reduced, remaining);
+
+            // TH22 the two halves
+            self.alloc_node(
+                LirOp::Th22 { width: 1 },
+                vec![first_reduced, second_reduced],
+                output,
+            );
+        }
+    }
+
+    /// Reduce a multi-bit signal to 1-bit using TH12 chain (NCL OR reduction)
+    fn reduce_with_th12_chain(&mut self, signal: LirSignalId, output: LirSignalId, width: u32) {
+        if width == 1 {
+            // Just buffer
+            self.alloc_node(LirOp::Buf { width: 1 }, vec![signal], output);
+        } else if width == 2 {
+            // Extract bits and TH12 them
+            let bit0 = self.alloc_signal(format!("red_or_b0_{}", self.next_signal_id), 1);
+            let bit1 = self.alloc_signal(format!("red_or_b1_{}", self.next_signal_id), 1);
+            self.alloc_node(
+                LirOp::RangeSelect {
+                    width,
+                    high: 0,
+                    low: 0,
+                },
+                vec![signal],
+                bit0,
+            );
+            self.alloc_node(
+                LirOp::RangeSelect {
+                    width,
+                    high: 1,
+                    low: 1,
+                },
+                vec![signal],
+                bit1,
+            );
+            self.alloc_node(LirOp::Th12 { width: 1 }, vec![bit0, bit1], output);
+        } else {
+            // Chain: reduce pairs with TH12, then recursively reduce the result
+            let half = width / 2;
+            let remaining = width - half;
+
+            // Extract and reduce first half
+            let first_half =
+                self.alloc_signal(format!("red_or_half0_{}", self.next_signal_id), half);
+            self.alloc_node(
+                LirOp::RangeSelect {
+                    width,
+                    high: (half - 1),
+                    low: 0,
+                },
+                vec![signal],
+                first_half,
+            );
+            let first_reduced = self.alloc_signal(format!("red_or_h0r_{}", self.next_signal_id), 1);
+            self.reduce_with_th12_chain(first_half, first_reduced, half);
+
+            // Extract and reduce second half
+            let second_half =
+                self.alloc_signal(format!("red_or_half1_{}", self.next_signal_id), remaining);
+            self.alloc_node(
+                LirOp::RangeSelect {
+                    width,
+                    high: (width - 1),
+                    low: half,
+                },
+                vec![signal],
+                second_half,
+            );
+            let second_reduced =
+                self.alloc_signal(format!("red_or_h1r_{}", self.next_signal_id), 1);
+            self.reduce_with_th12_chain(second_half, second_reduced, remaining);
+
+            // TH12 the two halves
+            self.alloc_node(
+                LirOp::Th12 { width: 1 },
+                vec![first_reduced, second_reduced],
+                output,
+            );
         }
     }
 
@@ -1251,51 +1441,63 @@ pub fn expand_to_ncl(lir: &Lir, config: &NclConfig) -> NclExpandResult {
                     }
                 }
             }
-            // Greater than or equal
+            // Greater than or equal: ge = NOT(lt) - swap lt outputs
+            // ge_t = lt_f (a >= b when NOT a < b)
+            // ge_f = lt_t (a < b)
             LirOp::Ge { width } => {
                 if node.inputs.len() >= 2 {
                     let a = expander.dual_rail_map.get(&node.inputs[0]).copied();
                     let b = expander.dual_rail_map.get(&node.inputs[1]).copied();
                     if let (Some(a), Some(b), Some(dest)) = (a, b, output_pair) {
-                        // Simplified: compute Ge using true rails, invert for false rail
-                        expander.alloc_node(LirOp::Ge { width: *width }, vec![a.t, b.t], dest.t);
-                        expander.alloc_node(LirOp::Not { width: 1 }, vec![dest.t], dest.f);
+                        // Swap output rails: ge = NOT(lt)
+                        let swapped_dest = DualRailPair {
+                            t: dest.f,
+                            f: dest.t,
+                        };
+                        expander.expand_lt(a, b, swapped_dest, *width);
                     }
                 }
             }
-            // Greater than
+            // Greater than: gt = lt with swapped inputs (a > b is b < a)
             LirOp::Gt { width } => {
                 if node.inputs.len() >= 2 {
                     let a = expander.dual_rail_map.get(&node.inputs[0]).copied();
                     let b = expander.dual_rail_map.get(&node.inputs[1]).copied();
                     if let (Some(a), Some(b), Some(dest)) = (a, b, output_pair) {
-                        // Simplified: compute Gt using true rails, invert for false rail
-                        expander.alloc_node(LirOp::Gt { width: *width }, vec![a.t, b.t], dest.t);
-                        expander.alloc_node(LirOp::Not { width: 1 }, vec![dest.t], dest.f);
+                        // Swap inputs: gt(a, b) = lt(b, a)
+                        expander.expand_lt(b, a, dest, *width);
                     }
                 }
             }
-            // Less than or equal
+            // Less than or equal: le = NOT(gt) = NOT(lt with swapped inputs)
+            // le_t = gt_f = lt(b,a)_f
+            // le_f = gt_t = lt(b,a)_t
             LirOp::Le { width } => {
                 if node.inputs.len() >= 2 {
                     let a = expander.dual_rail_map.get(&node.inputs[0]).copied();
                     let b = expander.dual_rail_map.get(&node.inputs[1]).copied();
                     if let (Some(a), Some(b), Some(dest)) = (a, b, output_pair) {
-                        // Simplified: compute Le using true rails, invert for false rail
-                        expander.alloc_node(LirOp::Le { width: *width }, vec![a.t, b.t], dest.t);
-                        expander.alloc_node(LirOp::Not { width: 1 }, vec![dest.t], dest.f);
+                        // Swap both inputs and outputs: le(a, b) = NOT(lt(b, a))
+                        let swapped_dest = DualRailPair {
+                            t: dest.f,
+                            f: dest.t,
+                        };
+                        expander.expand_lt(b, a, swapped_dest, *width);
                     }
                 }
             }
-            // Not equal
+            // Not equal: ne = NOT(eq) - swap eq outputs
             LirOp::Ne { width } => {
                 if node.inputs.len() >= 2 {
                     let a = expander.dual_rail_map.get(&node.inputs[0]).copied();
                     let b = expander.dual_rail_map.get(&node.inputs[1]).copied();
                     if let (Some(a), Some(b), Some(dest)) = (a, b, output_pair) {
-                        // Simplified: compute Ne using true rails, invert for false rail
-                        expander.alloc_node(LirOp::Ne { width: *width }, vec![a.t, b.t], dest.t);
-                        expander.alloc_node(LirOp::Not { width: 1 }, vec![dest.t], dest.f);
+                        // Swap output rails: ne = NOT(eq)
+                        let swapped_dest = DualRailPair {
+                            t: dest.f,
+                            f: dest.t,
+                        };
+                        expander.expand_eq(a, b, swapped_dest, *width);
                     }
                 }
             }
