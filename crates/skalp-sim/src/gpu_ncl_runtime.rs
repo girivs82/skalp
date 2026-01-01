@@ -565,7 +565,8 @@ uint eval_comb_gate(uint ptype, uint in0, uint in1, uint in2, uint in3) {
         case PTYPE_XOR: return in0 ^ in1;
         case PTYPE_INV: return (~in0) & 1;
         case PTYPE_BUF: return in0;
-        case PTYPE_MUX2: return (in2 == 0) ? in0 : in1;
+        // MUX2: inputs are [sel, d0, d1], output = sel ? d1 : d0
+        case PTYPE_MUX2: return (in0 == 0) ? in1 : in2;
         case PTYPE_CONST0: return 0;
         case PTYPE_CONST1: return 1;
         // Arithmetic: HalfAdder sum = a XOR b
@@ -756,6 +757,37 @@ kernel void eval_ncl(
     /// Get list of all signal names (for debugging)
     pub fn signal_names(&self) -> Vec<&String> {
         self.signal_name_to_nets.keys().collect()
+    }
+
+    /// Get list of all net names (for debugging)
+    pub fn all_net_names(&self) -> Vec<String> {
+        self.netlist.nets.iter().map(|n| n.name.clone()).collect()
+    }
+
+    /// Get the nets for a specific signal (for debugging)
+    pub fn signal_nets(&self, name: &str) -> Option<Vec<GateNetId>> {
+        self.signal_name_to_nets.get(name).cloned()
+    }
+
+    /// Get all net values (for debugging)
+    pub fn get_all_net_values(&self) -> Vec<bool> {
+        if self.use_gpu {
+            let buffer = if self.current_buffer_is_a {
+                &self.signal_buffer_a
+            } else {
+                &self.signal_buffer_b
+            };
+            if let Some(buf) = buffer {
+                unsafe {
+                    let ptr = buf.contents() as *const u32;
+                    (0..self.num_nets).map(|i| *ptr.add(i) != 0).collect()
+                }
+            } else {
+                self.cpu_net_values.clone()
+            }
+        } else {
+            self.cpu_net_values.clone()
+        }
     }
 
     /// Set a dual-rail input value
@@ -991,11 +1023,14 @@ kernel void eval_ncl(
                 NclPrimitiveType::Inv => !inputs.first().copied().unwrap_or(false),
                 NclPrimitiveType::Buf => inputs.first().copied().unwrap_or(false),
                 NclPrimitiveType::Mux2 => {
-                    let sel = inputs.get(2).copied().unwrap_or(false);
+                    // MUX2: inputs are [sel, d0, d1], output = sel ? d1 : d0
+                    let sel = inputs.first().copied().unwrap_or(false);
+                    let d0 = inputs.get(1).copied().unwrap_or(false);
+                    let d1 = inputs.get(2).copied().unwrap_or(false);
                     if sel {
-                        inputs.get(1).copied().unwrap_or(false)
+                        d1
                     } else {
-                        inputs.first().copied().unwrap_or(false)
+                        d0
                     }
                 }
                 NclPrimitiveType::Const0 => false,

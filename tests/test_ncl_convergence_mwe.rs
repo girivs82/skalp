@@ -1023,6 +1023,15 @@ fn test_simple_ncl_shl() {
         netlist.nets.len()
     );
 
+    // Debug: Print some cell info
+    println!("\n=== Debug: First 10 cells ===");
+    for (i, cell) in netlist.cells.iter().take(10).enumerate() {
+        println!(
+            "Cell {}: {} inputs={:?} outputs={:?}",
+            i, cell.path, cell.inputs, cell.outputs
+        );
+    }
+
     let config = UnifiedSimConfig {
         level: SimLevel::GateLevel,
         circuit_mode: CircuitMode::Ncl,
@@ -1037,6 +1046,9 @@ fn test_simple_ncl_shl() {
         .expect("Failed to load NCL netlist");
 
     // Test: 0x01 << 2 = 0x04
+    println!("\n=== Setting inputs ===");
+    println!("Setting a = 0x01 (binary: {:08b})", 0x01u8);
+    println!("Setting b = 2 (binary: {:03b})", 2u8);
     sim.set_ncl_input("top.a", 0x01, 8);
     sim.set_ncl_input("top.b", 2, 3);
 
@@ -1049,18 +1061,12 @@ fn test_simple_ncl_shl() {
     match sim.get_ncl_output("top.result", 8) {
         Some(value) => {
             println!("0x01 << 2 = 0x{:02X} (expected 0x04)", value);
-            // NOTE: Known issue - shifts have computational bugs
-            // The circuit converges but produces wrong results
-            if value != 0x04 {
-                println!(
-                    "WARNING: Shift result incorrect - known issue in NCL shift implementation"
-                );
-            }
+            assert_eq!(value, 0x04, "Shift left produced wrong result");
         }
         None => panic!("Result is NULL - NCL simulation failed to produce valid output"),
     }
 
-    println!("Simple NCL shift left test complete (convergence verified)\n");
+    println!("Simple NCL shift left test PASSED!\n");
 }
 
 /// Test shift right operation

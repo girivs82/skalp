@@ -484,6 +484,53 @@ impl UnifiedSimulator {
         }
     }
 
+    /// Check if an NCL signal exists (for debugging)
+    pub fn has_ncl_signal(&self, name: &str) -> bool {
+        match &self.backend {
+            #[cfg(target_os = "macos")]
+            SimulatorBackend::NclGpu(runtime) => runtime.has_signal(name),
+            _ => false,
+        }
+    }
+
+    /// Get list of NCL signal names (for debugging)
+    pub fn ncl_signal_names(&self) -> Vec<String> {
+        match &self.backend {
+            #[cfg(target_os = "macos")]
+            SimulatorBackend::NclGpu(runtime) => {
+                runtime.signal_names().into_iter().cloned().collect()
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    /// Get list of all NCL net names (for debugging)
+    pub fn ncl_all_net_names(&self) -> Vec<String> {
+        match &self.backend {
+            #[cfg(target_os = "macos")]
+            SimulatorBackend::NclGpu(runtime) => runtime.all_net_names(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// Get the nets for a specific NCL signal (for debugging)
+    pub fn ncl_signal_nets(&self, name: &str) -> Option<Vec<skalp_lir::gate_netlist::GateNetId>> {
+        match &self.backend {
+            #[cfg(target_os = "macos")]
+            SimulatorBackend::NclGpu(runtime) => runtime.signal_nets(name),
+            _ => None,
+        }
+    }
+
+    /// Get all net values (for debugging)
+    pub fn ncl_get_all_net_values(&self) -> Vec<bool> {
+        match &self.backend {
+            #[cfg(target_os = "macos")]
+            SimulatorBackend::NclGpu(runtime) => runtime.get_all_net_values(),
+            _ => Vec::new(),
+        }
+    }
+
     /// Set an NCL dual-rail input with explicit width
     ///
     /// This is the preferred way to set inputs in NCL mode as it gives
