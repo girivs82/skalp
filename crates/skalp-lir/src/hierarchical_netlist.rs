@@ -193,11 +193,16 @@ impl HierarchicalNetlist {
         }
 
         // Phase 4: Cross-boundary cleanup
-        result.propagate_constants();
-        let removed = result.remove_dead_cells();
-        if removed > 0 {
-            eprintln!("[FLATTEN] Removed {} dead cells after stitching", removed);
-        }
+        // DISABLED for NCL: propagate_constants and remove_dead_cells can break
+        // NCL circuits by removing cells that appear "dead" but are essential
+        // for dual-rail signaling. NCL uses both true and false rails - removing
+        // one breaks the circuit.
+        // TODO: Add NCL-aware cleanup that understands dual-rail semantics
+        // result.propagate_constants();
+        // let removed = result.remove_dead_cells();
+        // if removed > 0 {
+        //     eprintln!("[FLATTEN] Removed {} dead cells after stitching", removed);
+        // }
 
         result.update_stats();
         result
@@ -271,19 +276,106 @@ impl HierarchicalNetlist {
                                 );
                             } else if !child_bits.is_empty() || !parent_bits.is_empty() {
                                 // Mismatch: one is bit-indexed, the other isn't
-                                eprintln!(
-                                    "[STITCH]   ~ {} -> {} (child_bits={}, parent_bits={})",
-                                    child_net_name,
-                                    parent_net_name,
-                                    child_bits.len(),
-                                    parent_bits.len()
-                                );
+                                // Try NCL dual-rail stitching
+                                let (child_t, child_f) =
+                                    result.find_ncl_bit_indexed_nets(&child_net_name);
+                                let (parent_t, parent_f) =
+                                    result.find_ncl_bit_indexed_nets(&parent_net_name);
+
+                                if !child_t.is_empty() && !parent_t.is_empty() {
+                                    // NCL dual-rail stitching
+                                    let mut stitched = 0;
+
+                                    // Stitch true rails
+                                    for (idx, child_bit_net) in &child_t {
+                                        if let Some((_, parent_bit_net)) =
+                                            parent_t.iter().find(|(pidx, _)| pidx == idx)
+                                        {
+                                            result
+                                                .merge_nets_by_name(parent_bit_net, child_bit_net);
+                                            stitched += 1;
+                                        }
+                                    }
+
+                                    // Stitch false rails
+                                    for (idx, child_bit_net) in &child_f {
+                                        if let Some((_, parent_bit_net)) =
+                                            parent_f.iter().find(|(pidx, _)| pidx == idx)
+                                        {
+                                            result
+                                                .merge_nets_by_name(parent_bit_net, child_bit_net);
+                                            stitched += 1;
+                                        }
+                                    }
+
+                                    eprintln!(
+                                        "[STITCH]   ✓ {} <-> {} (NCL dual-rail: {} nets)",
+                                        child_net_name, parent_net_name, stitched
+                                    );
+                                } else {
+                                    eprintln!(
+                                        "[STITCH]   ~ {} -> {} (child_bits={}, parent_bits={}, ncl_t={}/{})",
+                                        child_net_name,
+                                        parent_net_name,
+                                        child_bits.len(),
+                                        parent_bits.len(),
+                                        child_t.len(),
+                                        parent_t.len()
+                                    );
+                                }
                             } else {
-                                // Neither exists at all - might be unused connection
-                                eprintln!(
-                                    "[STITCH]   ✗ {} -> {} (neither exists)",
-                                    child_net_name, parent_net_name
-                                );
+                                // Try NCL dual-rail stitching even when no standard bit-indexed nets
+                                let (child_t, child_f) =
+                                    result.find_ncl_bit_indexed_nets(&child_net_name);
+                                let (parent_t, parent_f) =
+                                    result.find_ncl_bit_indexed_nets(&parent_net_name);
+
+                                if !child_t.is_empty() && !parent_t.is_empty() {
+                                    // NCL dual-rail stitching
+                                    let mut stitched = 0;
+
+                                    // Stitch true rails
+                                    for (idx, child_bit_net) in &child_t {
+                                        if let Some((_, parent_bit_net)) =
+                                            parent_t.iter().find(|(pidx, _)| pidx == idx)
+                                        {
+                                            result
+                                                .merge_nets_by_name(parent_bit_net, child_bit_net);
+                                            stitched += 1;
+                                        }
+                                    }
+
+                                    // Stitch false rails
+                                    for (idx, child_bit_net) in &child_f {
+                                        if let Some((_, parent_bit_net)) =
+                                            parent_f.iter().find(|(pidx, _)| pidx == idx)
+                                        {
+                                            result
+                                                .merge_nets_by_name(parent_bit_net, child_bit_net);
+                                            stitched += 1;
+                                        }
+                                    }
+
+                                    eprintln!(
+                                        "[STITCH]   ✓ {} <-> {} (NCL dual-rail: {} nets)",
+                                        child_net_name, parent_net_name, stitched
+                                    );
+                                } else if !child_t.is_empty() || !parent_t.is_empty() {
+                                    // One side has NCL nets, the other doesn't
+                                    eprintln!(
+                                        "[STITCH]   ~ {} -> {} (NCL mismatch: child_t={}, parent_t={})",
+                                        child_net_name,
+                                        parent_net_name,
+                                        child_t.len(),
+                                        parent_t.len()
+                                    );
+                                } else {
+                                    // Neither exists at all - might be unused connection
+                                    eprintln!(
+                                        "[STITCH]   ✗ {} -> {} (neither exists)",
+                                        child_net_name, parent_net_name
+                                    );
+                                }
                             }
                         }
                     }

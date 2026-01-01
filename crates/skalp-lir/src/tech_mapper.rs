@@ -97,6 +97,8 @@ pub struct TechMapper<'a> {
     /// Module-level safety info (from Lir)
     /// Applied to all cells during mapping
     module_safety_info: Option<LirSafetyInfo>,
+    /// Counter for unique C-element naming (to avoid duplicate internal net names)
+    c_elem_counter: u32,
 }
 
 impl<'a> TechMapper<'a> {
@@ -110,6 +112,7 @@ impl<'a> TechMapper<'a> {
             warnings: Vec::new(),
             next_cell_id: 0,
             module_safety_info: None,
+            c_elem_counter: 0,
         }
     }
 
@@ -1699,28 +1702,33 @@ impl<'a> TechMapper<'a> {
         let and_info = self.get_cell_info(&CellFunction::And2);
         let or_info = self.get_cell_info(&CellFunction::Or2);
 
+        // Use a unique counter to ensure C-element internal nets have unique names
+        // This is needed because multiple NCL operations can have the same path
+        let c_elem_id = self.c_elem_counter;
+        self.c_elem_counter += 1;
+
         for bit in 0..width as usize {
             let a = inputs[0].get(bit).copied().unwrap_or(inputs[0][0]);
             let b = inputs[1].get(bit).copied().unwrap_or(inputs[1][0]);
             let q = outputs.get(bit).copied().unwrap_or(GateNetId(0));
 
-            // Create intermediate nets
+            // Create intermediate nets with unique naming: path.c_elem_{id}_{bit}
             let ab_and_net = self.alloc_net_id();
             self.netlist.add_net(GateNet::new(
                 ab_and_net,
-                format!("{}.c_elem{}.ab_and", path, bit),
+                format!("{}.c_elem{}_{}.ab_and", path, c_elem_id, bit),
             ));
 
             let ab_or_net = self.alloc_net_id();
             self.netlist.add_net(GateNet::new(
                 ab_or_net,
-                format!("{}.c_elem{}.ab_or", path, bit),
+                format!("{}.c_elem{}_{}.ab_or", path, c_elem_id, bit),
             ));
 
             let q_and_or_net = self.alloc_net_id();
             self.netlist.add_net(GateNet::new(
                 q_and_or_net,
-                format!("{}.c_elem{}.q_and_or", path, bit),
+                format!("{}.c_elem{}_{}.q_and_or", path, c_elem_id, bit),
             ));
 
             // Gate 1: ab_and = a AND b
@@ -1729,7 +1737,7 @@ impl<'a> TechMapper<'a> {
                 and_info.name.clone(),
                 self.library.name.clone(),
                 and_info.fit,
-                format!("{}.c_elem{}.and1", path, bit),
+                format!("{}.c_elem{}_{}.and1", path, c_elem_id, bit),
                 vec![a, b],
                 vec![ab_and_net],
             );
@@ -1742,7 +1750,7 @@ impl<'a> TechMapper<'a> {
                 or_info.name.clone(),
                 self.library.name.clone(),
                 or_info.fit,
-                format!("{}.c_elem{}.or1", path, bit),
+                format!("{}.c_elem{}_{}.or1", path, c_elem_id, bit),
                 vec![a, b],
                 vec![ab_or_net],
             );
@@ -1756,7 +1764,7 @@ impl<'a> TechMapper<'a> {
                 and_info.name.clone(),
                 self.library.name.clone(),
                 and_info.fit,
-                format!("{}.c_elem{}.and2", path, bit),
+                format!("{}.c_elem{}_{}.and2", path, c_elem_id, bit),
                 vec![q, ab_or_net],
                 vec![q_and_or_net],
             );
@@ -1769,7 +1777,7 @@ impl<'a> TechMapper<'a> {
                 or_info.name.clone(),
                 self.library.name.clone(),
                 or_info.fit,
-                format!("{}.c_elem{}.or2", path, bit),
+                format!("{}.c_elem{}_{}.or2", path, c_elem_id, bit),
                 vec![ab_and_net, q_and_or_net],
                 vec![q],
             );
@@ -4332,8 +4340,11 @@ pub fn map_hierarchical_to_gates(
             );
             create_blackbox_netlist(blackbox_info, &inst_lir.module_name)
         } else {
-            // Normal synthesis path
-            map_lir_to_gates_optimized(&inst_lir.lir_result.lir, library)
+            // Normal synthesis path - use non-optimized mapping for now
+            // The gate optimizer can break NCL circuits by removing cells that
+            // appear "dead" but are actually essential for dual-rail signaling
+            // TODO: Add NCL-aware optimization that understands dual-rail semantics
+            map_lir_to_gates(&inst_lir.lir_result.lir, library)
         };
         let mut inst_netlist =
             InstanceNetlist::new(inst_lir.module_name.clone(), tech_result.netlist);

@@ -101,17 +101,17 @@ fn test_async_cle_operation(
         netlist.nets.len()
     );
 
-    // Set function_sel (6 bits)
-    sim.set_ncl_input("function_sel", opcode, 6);
+    // Set function_sel (6 bits) - use full hierarchical path
+    sim.set_ncl_input("top.function_sel", opcode, 6);
 
     // Set route_sel (3 bits) - use register writeback mode
-    sim.set_ncl_input("route_sel", 0, 3);
+    sim.set_ncl_input("top.route_sel", 0, 3);
 
     // Set data1 (256 bits, but we only use lower 32)
-    sim.set_ncl_input("data1", data1, 256);
+    sim.set_ncl_input("top.data1", data1, 256);
 
     // Set data2 (256 bits, but we only use lower 32)
-    sim.set_ncl_input("data2", data2, 256);
+    sim.set_ncl_input("top.data2", data2, 256);
 
     println!("  [op={}] Running NCL simulation...", opcode);
 
@@ -131,8 +131,8 @@ fn test_async_cle_operation(
         result.iterations, result.used_gpu
     );
 
-    // Get result (lower 32 bits)
-    match sim.get_ncl_output("result", 32) {
+    // Get result (lower 32 bits) - use full hierarchical path
+    match sim.get_ncl_output("top.result", 32) {
         Some(actual) => {
             let pass = (actual & 0xFFFFFFFF) == (expected_result & 0xFFFFFFFF);
             if pass {

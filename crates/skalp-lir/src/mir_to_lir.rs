@@ -206,6 +206,90 @@ impl MirToLirTransform {
         }
     }
 
+    /// Transform with async context propagation
+    ///
+    /// This is used when a child module is instantiated within an async parent.
+    /// The `is_async_context` flag forces NCL expansion even if the module
+    /// itself wasn't declared with `async entity`.
+    pub fn transform_with_async_context(
+        &mut self,
+        module: &Module,
+        is_async_context: bool,
+    ) -> MirToLirResult {
+        self.hierarchy_path = module.name.clone();
+
+        // Propagate module-level safety context to LIR
+        if let Some(ref ctx) = module.safety_context {
+            if ctx.has_safety_annotation() {
+                self.lir.module_safety_info = Some(safety_context_to_lir_info(ctx));
+            }
+        }
+
+        // Phase 1: Create signals for all ports (preserving width)
+        for port in &module.ports {
+            self.create_port_signal(port);
+        }
+
+        // Phase 2: Create signals for all internal signals
+        for signal in &module.signals {
+            self.create_internal_signal(signal);
+        }
+
+        // Phase 2b: Create signals for all variables (BUG #150 FIX)
+        for variable in &module.variables {
+            self.create_variable_signal(variable);
+        }
+
+        // Phase 3: Transform continuous assignments
+        for assign in &module.assignments {
+            self.transform_continuous_assign(assign);
+        }
+
+        // Phase 4: Transform processes
+        for process in &module.processes {
+            self.transform_process(process);
+        }
+
+        // Phase 5: Populate clock and reset nets
+        self.lir.clocks = std::mem::take(&mut self.clock_signals);
+        self.lir.resets = std::mem::take(&mut self.reset_signals);
+
+        // Phase 6: NCL expansion for async modules or async context
+        // Convert synchronous LIR to dual-rail NCL logic
+        // Use OR to combine module's async flag with inherited async context
+        let is_async = module.is_async || is_async_context;
+        let final_lir = if is_async {
+            eprintln!(
+                "⚡ NCL: Expanding module '{}' to dual-rail NCL logic{}",
+                module.name,
+                if is_async_context && !module.is_async {
+                    " (inherited from parent)"
+                } else {
+                    ""
+                }
+            );
+            let ncl_result = expand_to_ncl(&self.lir, &NclConfig::default());
+            eprintln!(
+                "⚡ NCL: Expanded {} signals -> {} dual-rail signals",
+                self.lir.signals.len(),
+                ncl_result.lir.signals.len()
+            );
+            ncl_result.lir
+        } else {
+            self.lir.clone()
+        };
+
+        let stats = LirStats::from_lir(&final_lir);
+
+        MirToLirResult {
+            lir: final_lir,
+            stats,
+            warnings: std::mem::take(&mut self.warnings),
+            compiled_ip_path: None,
+            blackbox_info: None,
+        }
+    }
+
     /// Create a signal for a port
     fn create_port_signal(&mut self, port: &skalp_mir::mir::Port) {
         let width = Self::get_type_width(&port.port_type);
@@ -1569,8 +1653,20 @@ impl MirToLirTransform {
 
 /// Transform a MIR module to LIR
 pub fn lower_mir_module_to_lir(module: &Module) -> MirToLirResult {
+    lower_mir_module_to_lir_with_context(module, false)
+}
+
+/// Lower MIR module to LIR with async context propagation
+///
+/// When `is_async_context` is true, the module is treated as async (NCL)
+/// even if it wasn't declared with `async entity`. This is used when a
+/// sync module is instantiated within an async parent module.
+pub fn lower_mir_module_to_lir_with_context(
+    module: &Module,
+    is_async_context: bool,
+) -> MirToLirResult {
     let mut transformer = MirToLirTransform::new(&module.name);
-    transformer.transform(module)
+    transformer.transform_with_async_context(module, is_async_context)
 }
 
 /// Backward-compatible alias
@@ -1873,12 +1969,14 @@ pub fn lower_mir_hierarchical(mir: &Mir) -> HierarchicalMirToLirResult {
     };
 
     // Recursively elaborate instances
+    // Top module uses its own is_async flag, no inherited context
     elaborate_instance(
         &module_map,
         &module_by_name,
         top_module,
         "top",
         &HashMap::new(), // No constant inputs at top level
+        false,           // No inherited async context for top module
         &mut result,
     );
 
@@ -1886,14 +1984,22 @@ pub fn lower_mir_hierarchical(mir: &Mir) -> HierarchicalMirToLirResult {
 }
 
 /// Recursively elaborate a module instance
+///
+/// The `is_async_context` parameter indicates whether this module is being
+/// instantiated within an async parent. If true, the module will be NCL-expanded
+/// even if it wasn't declared with `async entity`.
 fn elaborate_instance(
     module_map: &HashMap<ModuleId, &Module>,
     _module_by_name: &HashMap<&str, &Module>,
     module: &Module,
     instance_path: &str,
     parent_connections: &HashMap<String, PortConnectionInfo>,
+    is_async_context: bool,
     result: &mut HierarchicalMirToLirResult,
 ) {
+    // Compute effective async status: module's own flag OR inherited from parent
+    let effective_is_async = module.is_async || is_async_context;
+
     // Check if this module is a vendor IP (blackbox - don't synthesize internals)
     let lir_result = if let Some(ref vendor_config) = module.vendor_ip_config {
         // This is a vendor IP / blackbox - create a placeholder LIR result
@@ -1913,12 +2019,12 @@ fn elaborate_instance(
                     config.skb_path, module.name, e
                 );
                 eprintln!("⚠️ COMPILED_IP: Falling back to normal elaboration");
-                lower_mir_module_to_lir(module)
+                lower_mir_module_to_lir_with_context(module, is_async_context)
             }
         }
     } else {
-        // Normal MIR to LIR transformation
-        lower_mir_module_to_lir(module)
+        // Normal MIR to LIR transformation with async context propagation
+        lower_mir_module_to_lir_with_context(module, is_async_context)
     };
 
     // Collect child instance paths
@@ -1953,13 +2059,15 @@ fn elaborate_instance(
             }
             let child_connections = extract_connection_info(&inst.connections, module);
 
-            // Recursively elaborate child
+            // Recursively elaborate child, propagating async context
+            // If parent is async (by declaration or inheritance), children inherit it
             elaborate_instance(
                 module_map,
                 _module_by_name,
                 child_mod,
                 &child_path,
                 &child_connections,
+                effective_is_async, // Propagate async context to child
                 result,
             );
         }

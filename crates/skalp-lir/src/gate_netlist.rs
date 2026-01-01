@@ -1059,6 +1059,55 @@ impl GateNetlist {
         result
     }
 
+    /// Find all NCL dual-rail bit-indexed nets matching a prefix
+    ///
+    /// For NCL signals, the naming convention is:
+    /// - `signal_t[N]` for true rail of bit N
+    /// - `signal_f[N]` for false rail of bit N
+    ///
+    /// Returns two sorted lists: (true_rail_nets, false_rail_nets)
+    /// Each list contains (bit_index, net_name) pairs.
+    #[allow(clippy::type_complexity)]
+    pub fn find_ncl_bit_indexed_nets(
+        &self,
+        prefix: &str,
+    ) -> (Vec<(usize, String)>, Vec<(usize, String)>) {
+        let mut true_rail = Vec::new();
+        let mut false_rail = Vec::new();
+
+        let prefix_t = format!("{}_t", prefix);
+        let prefix_f = format!("{}_f", prefix);
+
+        for name in self.net_map.keys() {
+            // Check for true rail: prefix_t[N]
+            if let Some(rest) = name.strip_prefix(&prefix_t) {
+                if let Some(inner) = rest.strip_prefix('[') {
+                    if let Some(idx_str) = inner.strip_suffix(']') {
+                        if let Ok(idx) = idx_str.parse::<usize>() {
+                            true_rail.push((idx, name.clone()));
+                        }
+                    }
+                }
+            }
+            // Check for false rail: prefix_f[N]
+            else if let Some(rest) = name.strip_prefix(&prefix_f) {
+                if let Some(inner) = rest.strip_prefix('[') {
+                    if let Some(idx_str) = inner.strip_suffix(']') {
+                        if let Ok(idx) = idx_str.parse::<usize>() {
+                            false_rail.push((idx, name.clone()));
+                        }
+                    }
+                }
+            }
+        }
+
+        // Sort by bit index
+        true_rail.sort_by_key(|(idx, _)| *idx);
+        false_rail.sort_by_key(|(idx, _)| *idx);
+
+        (true_rail, false_rail)
+    }
+
     /// Propagate constants through the netlist (lightweight optimization)
     pub fn propagate_constants(&mut self) {
         // Find tie cells and their driven nets
