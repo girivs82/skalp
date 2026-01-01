@@ -650,10 +650,12 @@ impl NclExpander {
 
         // Emit NclAdd: inputs are a_t, a_f, b_t, b_f (each width bits)
         // Output is interleaved: [t0, f0, t1, f1, ...]
-        self.alloc_node(
+        // Use unique path to avoid cell name collisions when multiple ADD ops exist
+        self.alloc_node_with_path(
             LirOp::NclAdd { width },
             vec![a.t, a.f, b.t, b.f],
             interleaved,
+            format!("ncl_add_{}", id),
         );
 
         // Deinterleave: extract t and f rails from interleaved output
@@ -681,10 +683,12 @@ impl NclExpander {
         // Emit NclSub: inputs are a_t, a_f, ~b_t (=b_f), ~b_f (=b_t)
         // The inversion of b (swap rails) implements two's complement: a + (~b) + 1
         // Output is interleaved: [t0, f0, t1, f1, ...]
-        self.alloc_node(
+        // Use unique path to avoid cell name collisions when multiple SUB ops exist
+        self.alloc_node_with_path(
             LirOp::NclSub { width },
             vec![a.t, a.f, b.f, b.t], // Note: b rails are swapped for inversion
             interleaved,
+            format!("ncl_sub_{}", id),
         );
 
         // Deinterleave: extract t and f rails from interleaved output
@@ -789,13 +793,15 @@ impl NclExpander {
 
         // Emit NclMul: inputs are a_t, a_f, b_t, b_f (each input_width bits)
         // Output is interleaved: [t0, f0, t1, f1, ...] for result_width bits
-        self.alloc_node(
+        // Use unique path to avoid cell name collisions when multiple MUL ops exist
+        self.alloc_node_with_path(
             LirOp::NclMul {
                 input_width,
                 result_width,
             },
             vec![a.t, a.f, b.t, b.f],
             interleaved,
+            format!("ncl_mul_{}", id),
         );
 
         // Deinterleave: extract t and f rails from interleaved output
