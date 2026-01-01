@@ -3856,3 +3856,625 @@ fn test_c_element_iteration_trace() {
         sim_gpu.get_net_value("top.mul_result_f[1]")
     );
 }
+
+// =============================================================================
+// MWE: MUL inside match/mux structure oscillation
+// =============================================================================
+// The CLE uses a match statement to select between operations.
+// MUL inside this match causes oscillation (2000+ iterations).
+// This test isolates the issue.
+
+/// Minimal test: just MUL in a 2-way match (simplest case that oscillates)
+const MUL_IN_MATCH_SIMPLE: &str = r#"
+async entity MulInMatchSimple {
+    in a: bit[8]
+    in b: bit[8]
+    in sel: bit[1]
+    out result: bit[8]
+}
+
+impl MulInMatchSimple {
+    result = match sel {
+        0 => a * b,    // MUL when sel=0
+        _ => a + b     // ADD when sel=1
+    }
+}
+"#;
+
+#[test]
+fn test_mul_in_match_oscillation() {
+    println!("\n=== MUL-in-Match Oscillation MWE ===\n");
+
+    let hir = parse_and_build_hir(MUL_IN_MATCH_SIMPLE).expect("Failed to parse");
+    let mir_compiler = MirCompiler::new();
+    let mir = mir_compiler
+        .compile(&hir)
+        .expect("Failed to compile to MIR");
+
+    let hier_lir = lower_mir_hierarchical(&mir);
+    let library = get_stdlib_library("generic_asic").expect("Failed to load library");
+    let hier_result = map_hierarchical_to_gates(&hier_lir, &library);
+    let netlist = hier_result.flatten();
+
+    println!(
+        "Compiled: {} cells, {} nets",
+        netlist.cells.len(),
+        netlist.nets.len()
+    );
+
+    let config = UnifiedSimConfig {
+        level: SimLevel::GateLevel,
+        circuit_mode: CircuitMode::Ncl,
+        hw_accel: HwAccel::Gpu,
+        max_iterations: 500, // Lower limit to see oscillation
+        ncl_debug: true,
+        ..Default::default()
+    };
+
+    let mut sim = UnifiedSimulator::new(config).expect("Failed to create simulator");
+    sim.load_ncl_gate_level(netlist)
+        .expect("Failed to load NCL netlist");
+
+    // Test MUL case (sel=0): 5 * 6 = 30
+    sim.set_ncl_input("top.a", 5, 8);
+    sim.set_ncl_input("top.b", 6, 8);
+    sim.set_ncl_input("top.sel", 0, 1);
+
+    let result = sim.run_until_stable();
+    println!(
+        "MUL case (sel=0): iterations={}, stable={}",
+        result.iterations, result.is_stable
+    );
+
+    match sim.get_ncl_output("top.result", 8) {
+        Some(value) => {
+            println!("5 * 6 = {} (expected 30)", value);
+            assert!(
+                result.iterations < 100,
+                "MUL in match should converge in <100 iterations, took {}",
+                result.iterations
+            );
+            assert_eq!(value, 30, "MUL result incorrect");
+        }
+        None => {
+            println!("Result is NULL after {} iterations", result.iterations);
+            // Print net states to debug
+            let net_names = sim.list_all_net_names();
+            println!("\n=== MUL output nets ===");
+            for name in &net_names {
+                if name.contains("mul") {
+                    if let Some(val) = sim.get_net_value(name) {
+                        println!("  {} = {}", name, val);
+                    }
+                }
+            }
+            panic!("Result is NULL - MUL-in-match failed");
+        }
+    }
+
+    // Test ADD case (sel=1): 5 + 6 = 11
+    sim.reset();
+    sim.set_ncl_input("top.a", 5, 8);
+    sim.set_ncl_input("top.b", 6, 8);
+    sim.set_ncl_input("top.sel", 1, 1);
+
+    let result = sim.run_until_stable();
+    println!(
+        "ADD case (sel=1): iterations={}, stable={}",
+        result.iterations, result.is_stable
+    );
+
+    match sim.get_ncl_output("top.result", 8) {
+        Some(value) => {
+            println!("5 + 6 = {} (expected 11)", value);
+            assert!(
+                result.iterations < 100,
+                "ADD in match should converge in <100 iterations, took {}",
+                result.iterations
+            );
+            assert_eq!(value, 11, "ADD result incorrect");
+        }
+        None => panic!("Result is NULL for ADD case"),
+    }
+
+    println!("\nMUL-in-Match oscillation test PASSED!");
+}
+
+/// Test: MUL with 4-way match (scaling test)
+const MUL_IN_MATCH_4WAY: &str = r#"
+async entity MulInMatch4Way {
+    in a: bit[8]
+    in b: bit[8]
+    in sel: bit[2]
+    out result: bit[8]
+}
+
+impl MulInMatch4Way {
+    result = match sel {
+        0 => a + b,    // ADD
+        1 => a - b,    // SUB
+        2 => a * b,    // MUL
+        _ => a & b     // AND
+    }
+}
+"#;
+
+#[test]
+fn test_mul_in_match_4way() {
+    println!("\n=== MUL-in-Match 4-way Test ===\n");
+
+    let hir = parse_and_build_hir(MUL_IN_MATCH_4WAY).expect("Failed to parse");
+    let mir_compiler = MirCompiler::new();
+    let mir = mir_compiler
+        .compile(&hir)
+        .expect("Failed to compile to MIR");
+
+    let hier_lir = lower_mir_hierarchical(&mir);
+    let library = get_stdlib_library("generic_asic").expect("Failed to load library");
+    let hier_result = map_hierarchical_to_gates(&hier_lir, &library);
+    let netlist = hier_result.flatten();
+
+    println!(
+        "Compiled: {} cells, {} nets",
+        netlist.cells.len(),
+        netlist.nets.len()
+    );
+
+    let config = UnifiedSimConfig {
+        level: SimLevel::GateLevel,
+        circuit_mode: CircuitMode::Ncl,
+        hw_accel: HwAccel::Gpu,
+        max_iterations: 500,
+        ncl_debug: true,
+        ..Default::default()
+    };
+
+    let mut sim = UnifiedSimulator::new(config).expect("Failed to create simulator");
+    sim.load_ncl_gate_level(netlist)
+        .expect("Failed to load NCL netlist");
+
+    // Test MUL case (sel=2): 5 * 6 = 30
+    sim.set_ncl_input("top.a", 5, 8);
+    sim.set_ncl_input("top.b", 6, 8);
+    sim.set_ncl_input("top.sel", 2, 2);
+
+    let result = sim.run_until_stable();
+    println!(
+        "MUL case (sel=2): iterations={}, stable={}",
+        result.iterations, result.is_stable
+    );
+
+    match sim.get_ncl_output("top.result", 8) {
+        Some(value) => {
+            println!("5 * 6 = {} (expected 30)", value);
+            assert!(
+                result.iterations < 100,
+                "MUL in 4-way match should converge in <100 iterations, took {}",
+                result.iterations
+            );
+            assert_eq!(value, 30, "MUL result incorrect");
+        }
+        None => panic!("Result is NULL for MUL case"),
+    }
+
+    // Test ADD case (sel=0): 5 + 6 = 11
+    sim.reset();
+    sim.set_ncl_input("top.a", 5, 8);
+    sim.set_ncl_input("top.b", 6, 8);
+    sim.set_ncl_input("top.sel", 0, 2);
+
+    let result = sim.run_until_stable();
+    println!(
+        "ADD case (sel=0): iterations={}, stable={}",
+        result.iterations, result.is_stable
+    );
+
+    match sim.get_ncl_output("top.result", 8) {
+        Some(value) => {
+            println!("5 + 6 = {} (expected 11)", value);
+            assert_eq!(value, 11, "ADD result incorrect");
+        }
+        None => panic!("Result is NULL for ADD case"),
+    }
+
+    println!("\nMUL-in-Match 4-way test PASSED!");
+}
+
+/// Test: MUL with 8-way match (scaling test)
+const MUL_IN_MATCH_8WAY: &str = r#"
+async entity MulInMatch8Way {
+    in a: bit[8]
+    in b: bit[8]
+    in sel: bit[3]
+    out result: bit[8]
+}
+
+impl MulInMatch8Way {
+    result = match sel {
+        0 => a + b,    // ADD
+        1 => a - b,    // SUB
+        2 => a * b,    // MUL
+        3 => a & b,    // AND
+        4 => a | b,    // OR
+        5 => a ^ b,    // XOR
+        6 => ~a,       // NOT
+        _ => a << b[2:0]  // SHL
+    }
+}
+"#;
+
+#[test]
+fn test_mul_in_match_8way() {
+    println!("\n=== MUL-in-Match 8-way Test ===\n");
+
+    let hir = parse_and_build_hir(MUL_IN_MATCH_8WAY).expect("Failed to parse");
+    let mir_compiler = MirCompiler::new();
+    let mir = mir_compiler
+        .compile(&hir)
+        .expect("Failed to compile to MIR");
+
+    let hier_lir = lower_mir_hierarchical(&mir);
+    let library = get_stdlib_library("generic_asic").expect("Failed to load library");
+    let hier_result = map_hierarchical_to_gates(&hier_lir, &library);
+    let netlist = hier_result.flatten();
+
+    println!(
+        "Compiled: {} cells, {} nets",
+        netlist.cells.len(),
+        netlist.nets.len()
+    );
+
+    let config = UnifiedSimConfig {
+        level: SimLevel::GateLevel,
+        circuit_mode: CircuitMode::Ncl,
+        hw_accel: HwAccel::Gpu,
+        max_iterations: 500,
+        ncl_debug: true,
+        ..Default::default()
+    };
+
+    let mut sim = UnifiedSimulator::new(config).expect("Failed to create simulator");
+    sim.load_ncl_gate_level(netlist)
+        .expect("Failed to load NCL netlist");
+
+    // Test MUL case (sel=2): 5 * 6 = 30
+    sim.set_ncl_input("top.a", 5, 8);
+    sim.set_ncl_input("top.b", 6, 8);
+    sim.set_ncl_input("top.sel", 2, 3);
+
+    let result = sim.run_until_stable();
+    println!(
+        "MUL case (sel=2): iterations={}, stable={}",
+        result.iterations, result.is_stable
+    );
+
+    match sim.get_ncl_output("top.result", 8) {
+        Some(value) => {
+            println!("5 * 6 = {} (expected 30)", value);
+            if result.iterations >= 500 {
+                println!("WARNING: MUL oscillating! {} iterations", result.iterations);
+            }
+            assert_eq!(value, 30, "MUL result incorrect");
+        }
+        None => panic!("Result is NULL for MUL case"),
+    }
+
+    // Test ADD case (sel=0): 5 + 6 = 11
+    sim.reset();
+    sim.set_ncl_input("top.a", 5, 8);
+    sim.set_ncl_input("top.b", 6, 8);
+    sim.set_ncl_input("top.sel", 0, 3);
+
+    let result = sim.run_until_stable();
+    println!(
+        "ADD case (sel=0): iterations={}, stable={}",
+        result.iterations, result.is_stable
+    );
+
+    match sim.get_ncl_output("top.result", 8) {
+        Some(value) => {
+            println!("5 + 6 = {} (expected 11)", value);
+            assert_eq!(value, 11, "ADD result incorrect");
+        }
+        None => panic!("Result is NULL for ADD case"),
+    }
+
+    println!("\nMUL-in-Match 8-way test completed");
+}
+
+/// Test: MUL with 10-way match and 4-bit selector (like original CLE test)
+const MUL_IN_MATCH_10WAY: &str = r#"
+async entity MulInMatch10Way {
+    in a: bit[8]
+    in b: bit[8]
+    in opcode: bit[4]
+    out result: bit[8]
+}
+
+impl MulInMatch10Way {
+    result = match opcode {
+        0 => a + b,
+        1 => a - b,
+        2 => a * b,
+        3 => a & b,
+        4 => a | b,
+        5 => a ^ b,
+        6 => ~a,
+        7 => a << b[2:0],
+        8 => a >> b[2:0],
+        _ => 0
+    }
+}
+"#;
+
+#[test]
+fn test_mul_in_match_10way() {
+    println!("\n=== MUL-in-Match 10-way (4-bit opcode) Test ===\n");
+
+    let hir = parse_and_build_hir(MUL_IN_MATCH_10WAY).expect("Failed to parse");
+    let mir_compiler = MirCompiler::new();
+    let mir = mir_compiler
+        .compile(&hir)
+        .expect("Failed to compile to MIR");
+
+    let hier_lir = lower_mir_hierarchical(&mir);
+    let library = get_stdlib_library("generic_asic").expect("Failed to load library");
+    let hier_result = map_hierarchical_to_gates(&hier_lir, &library);
+    let netlist = hier_result.flatten();
+
+    println!(
+        "Compiled: {} cells, {} nets",
+        netlist.cells.len(),
+        netlist.nets.len()
+    );
+
+    let config = UnifiedSimConfig {
+        level: SimLevel::GateLevel,
+        circuit_mode: CircuitMode::Ncl,
+        hw_accel: HwAccel::Gpu,
+        max_iterations: 2500, // Higher limit to catch oscillation
+        ncl_debug: true,
+        ..Default::default()
+    };
+
+    let mut sim = UnifiedSimulator::new(config).expect("Failed to create simulator");
+    sim.load_ncl_gate_level(netlist)
+        .expect("Failed to load NCL netlist");
+
+    // Test MUL case (opcode=2): 5 * 6 = 30
+    sim.set_ncl_input("top.a", 5, 8);
+    sim.set_ncl_input("top.b", 6, 8);
+    sim.set_ncl_input("top.opcode", 2, 4);
+
+    let result = sim.run_until_stable();
+    println!(
+        "MUL case (opcode=2): iterations={}, stable={}",
+        result.iterations, result.is_stable
+    );
+
+    match sim.get_ncl_output("top.result", 8) {
+        Some(value) => {
+            println!("5 * 6 = {} (expected 30)", value);
+            if result.iterations >= 100 {
+                println!(
+                    "⚠️  OSCILLATION DETECTED: {} iterations (should be <100)",
+                    result.iterations
+                );
+            }
+            assert_eq!(value, 30, "MUL result incorrect");
+        }
+        None => panic!("Result is NULL for MUL case"),
+    }
+
+    // Test ADD case (opcode=0): 5 + 6 = 11
+    sim.reset();
+    sim.set_ncl_input("top.a", 5, 8);
+    sim.set_ncl_input("top.b", 6, 8);
+    sim.set_ncl_input("top.opcode", 0, 4);
+
+    let result = sim.run_until_stable();
+    println!(
+        "ADD case (opcode=0): iterations={}, stable={}",
+        result.iterations, result.is_stable
+    );
+
+    match sim.get_ncl_output("top.result", 8) {
+        Some(value) => {
+            println!("5 + 6 = {} (expected 11)", value);
+            if result.iterations >= 100 {
+                println!("⚠️  ADD also oscillating: {} iterations", result.iterations);
+            }
+            assert_eq!(value, 11, "ADD result incorrect");
+        }
+        None => panic!("Result is NULL for ADD case"),
+    }
+
+    println!("\nMUL-in-Match 10-way test completed");
+}
+
+/// Test: 8-way match with 4-bit selector (wider than needed)
+const MUL_IN_MATCH_8WAY_4BIT: &str = r#"
+async entity MulInMatch8Way4Bit {
+    in a: bit[8]
+    in b: bit[8]
+    in opcode: bit[4]  // 4-bit opcode for 8 arms (over-specified)
+    out result: bit[8]
+}
+
+impl MulInMatch8Way4Bit {
+    result = match opcode {
+        0 => a + b,
+        1 => a - b,
+        2 => a * b,
+        3 => a & b,
+        4 => a | b,
+        5 => a ^ b,
+        6 => ~a,
+        _ => a << b[2:0]
+    }
+}
+"#;
+
+#[test]
+fn test_mul_in_match_8way_4bit() {
+    println!("\n=== MUL-in-Match 8-way with 4-bit opcode Test ===\n");
+
+    let hir = parse_and_build_hir(MUL_IN_MATCH_8WAY_4BIT).expect("Failed to parse");
+    let mir_compiler = MirCompiler::new();
+    let mir = mir_compiler
+        .compile(&hir)
+        .expect("Failed to compile to MIR");
+
+    let hier_lir = lower_mir_hierarchical(&mir);
+    let library = get_stdlib_library("generic_asic").expect("Failed to load library");
+    let hier_result = map_hierarchical_to_gates(&hier_lir, &library);
+    let netlist = hier_result.flatten();
+
+    println!(
+        "Compiled: {} cells, {} nets",
+        netlist.cells.len(),
+        netlist.nets.len()
+    );
+
+    let config = UnifiedSimConfig {
+        level: SimLevel::GateLevel,
+        circuit_mode: CircuitMode::Ncl,
+        hw_accel: HwAccel::Gpu,
+        max_iterations: 500,
+        ncl_debug: true,
+        ..Default::default()
+    };
+
+    let mut sim = UnifiedSimulator::new(config).expect("Failed to create simulator");
+    sim.load_ncl_gate_level(netlist)
+        .expect("Failed to load NCL netlist");
+
+    // Test MUL case (opcode=2): 5 * 6 = 30
+    sim.set_ncl_input("top.a", 5, 8);
+    sim.set_ncl_input("top.b", 6, 8);
+    sim.set_ncl_input("top.opcode", 2, 4);
+
+    let result = sim.run_until_stable();
+    println!(
+        "MUL case (opcode=2): iterations={}, stable={}",
+        result.iterations, result.is_stable
+    );
+
+    match sim.get_ncl_output("top.result", 8) {
+        Some(value) => {
+            println!("5 * 6 = {} (expected 30)", value);
+            if result.iterations >= 100 {
+                println!(
+                    "⚠️  OSCILLATION: {} iterations (4-bit opcode causes oscillation!)",
+                    result.iterations
+                );
+            } else {
+                println!("✓ Converged quickly");
+            }
+            assert_eq!(value, 30, "MUL result incorrect");
+        }
+        None => panic!("Result is NULL for MUL case"),
+    }
+
+    println!("\nMUL-in-Match 8-way with 4-bit opcode test completed");
+}
+
+/// Test: 9-way match (boundary test - when does oscillation start?)
+const MUL_IN_MATCH_9WAY: &str = r#"
+async entity MulInMatch9Way {
+    in a: bit[8]
+    in b: bit[8]
+    in opcode: bit[4]
+    out result: bit[8]
+}
+
+impl MulInMatch9Way {
+    result = match opcode {
+        0 => a + b,
+        1 => a - b,
+        2 => a * b,
+        3 => a & b,
+        4 => a | b,
+        5 => a ^ b,
+        6 => ~a,
+        7 => a << b[2:0],
+        _ => a >> b[2:0]  // 9th arm
+    }
+}
+"#;
+
+#[test]
+fn test_mul_in_match_9way() {
+    println!("\n=== MUL-in-Match 9-way Test (boundary) ===\n");
+
+    let hir = parse_and_build_hir(MUL_IN_MATCH_9WAY).expect("Failed to parse");
+    let mir_compiler = MirCompiler::new();
+    let mir = mir_compiler
+        .compile(&hir)
+        .expect("Failed to compile to MIR");
+
+    let hier_lir = lower_mir_hierarchical(&mir);
+    let library = get_stdlib_library("generic_asic").expect("Failed to load library");
+    let hier_result = map_hierarchical_to_gates(&hier_lir, &library);
+    let netlist = hier_result.flatten();
+
+    println!(
+        "Compiled: {} cells, {} nets",
+        netlist.cells.len(),
+        netlist.nets.len()
+    );
+
+    // Count cell types to see if TH22/TH12 are being used
+    let mut cell_type_counts = std::collections::HashMap::new();
+    for cell in &netlist.cells {
+        *cell_type_counts.entry(cell.cell_type.clone()).or_insert(0) += 1;
+    }
+    println!("Cell type counts:");
+    let mut sorted_types: Vec<_> = cell_type_counts.iter().collect();
+    sorted_types.sort_by_key(|(_, count)| std::cmp::Reverse(*count));
+    for (cell_type, count) in sorted_types.iter().take(15) {
+        println!("  {}: {}", cell_type, count);
+    }
+
+    let config = UnifiedSimConfig {
+        level: SimLevel::GateLevel,
+        circuit_mode: CircuitMode::Ncl,
+        hw_accel: HwAccel::Gpu,
+        max_iterations: 500,
+        ncl_debug: true,
+        ..Default::default()
+    };
+
+    let mut sim = UnifiedSimulator::new(config).expect("Failed to create simulator");
+    sim.load_ncl_gate_level(netlist)
+        .expect("Failed to load NCL netlist");
+
+    // Test MUL case (opcode=2)
+    sim.set_ncl_input("top.a", 5, 8);
+    sim.set_ncl_input("top.b", 6, 8);
+    sim.set_ncl_input("top.opcode", 2, 4);
+
+    let result = sim.run_until_stable();
+    println!(
+        "MUL case (opcode=2): iterations={}, stable={}",
+        result.iterations, result.is_stable
+    );
+
+    match sim.get_ncl_output("top.result", 8) {
+        Some(value) => {
+            println!("5 * 6 = {} (expected 30)", value);
+            if result.iterations >= 100 {
+                println!(
+                    "⚠️  OSCILLATION at 9 arms: {} iterations",
+                    result.iterations
+                );
+            } else {
+                println!("✓ 9 arms OK: {} iterations", result.iterations);
+            }
+            assert_eq!(value, 30);
+        }
+        None => panic!("Result is NULL"),
+    }
+
+    println!("\nMUL-in-Match 9-way test completed");
+}

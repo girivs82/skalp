@@ -1253,6 +1253,300 @@ impl NclExpander {
         );
     }
 
+    /// Expand a left shift to NCL using THmn-based barrel shifter
+    /// Each stage uses NCL mux chains with proper dual-rail encoding
+    fn expand_shl(&mut self, a: DualRailPair, shamt: DualRailPair, dest: DualRailPair, width: u32) {
+        // Calculate number of shift stages (log2 of width)
+        let shift_bits = if width <= 1 {
+            1
+        } else {
+            (32 - (width - 1).leading_zeros()) as usize
+        };
+
+        // Create constant 0 dual-rail pair for filling in shifted bits
+        // In NCL, 0 = (t=0, f=1), so we use a constant signal
+        let const_0_t = self.alloc_signal(format!("shl_const0_t_{}", self.next_signal_id), 1);
+        let const_0_f = self.alloc_signal(format!("shl_const0_f_{}", self.next_signal_id), 1);
+        self.alloc_node(LirOp::Constant { width: 1, value: 0 }, vec![], const_0_t);
+        self.alloc_node(LirOp::Constant { width: 1, value: 1 }, vec![], const_0_f);
+        let zero_pair = DualRailPair {
+            t: const_0_t,
+            f: const_0_f,
+        };
+
+        // Start with input bits
+        let mut current: Vec<DualRailPair> = (0..width)
+            .map(|i| {
+                let bit_t = self.alloc_signal(format!("shl_in_t_{}_{}", self.next_signal_id, i), 1);
+                let bit_f = self.alloc_signal(format!("shl_in_f_{}_{}", self.next_signal_id, i), 1);
+                // Extract bit i from a.t and a.f
+                self.alloc_node(
+                    LirOp::RangeSelect {
+                        width,
+                        high: i,
+                        low: i,
+                    },
+                    vec![a.t],
+                    bit_t,
+                );
+                self.alloc_node(
+                    LirOp::RangeSelect {
+                        width,
+                        high: i,
+                        low: i,
+                    },
+                    vec![a.f],
+                    bit_f,
+                );
+                DualRailPair { t: bit_t, f: bit_f }
+            })
+            .collect();
+
+        // Build barrel shifter with cascaded NCL mux stages
+        for stage in 0..shift_bits {
+            let shift_amount = 1usize << stage;
+
+            // Extract shift amount bit for this stage
+            let sel_t =
+                self.alloc_signal(format!("shl_sel_t_{}_{}", self.next_signal_id, stage), 1);
+            let sel_f =
+                self.alloc_signal(format!("shl_sel_f_{}_{}", self.next_signal_id, stage), 1);
+
+            // Get the shift amount bit (or use 0 if beyond width)
+            let shamt_width = self.lir.signals[shamt.t.0 as usize].width;
+            if (stage as u32) < shamt_width {
+                self.alloc_node(
+                    LirOp::RangeSelect {
+                        width: shamt_width,
+                        high: stage as u32,
+                        low: stage as u32,
+                    },
+                    vec![shamt.t],
+                    sel_t,
+                );
+                self.alloc_node(
+                    LirOp::RangeSelect {
+                        width: shamt_width,
+                        high: stage as u32,
+                        low: stage as u32,
+                    },
+                    vec![shamt.f],
+                    sel_f,
+                );
+            } else {
+                // Beyond shift amount width, shift bit is 0
+                self.alloc_node(LirOp::Constant { width: 1, value: 0 }, vec![], sel_t);
+                self.alloc_node(LirOp::Constant { width: 1, value: 1 }, vec![], sel_f);
+            }
+            let sel_pair = DualRailPair { t: sel_t, f: sel_f };
+
+            let mut next_stage: Vec<DualRailPair> = Vec::with_capacity(width as usize);
+
+            for bit in 0..width as usize {
+                // Calculate source bit for shifted value
+                // Left shift: when sel=1, bit[i] gets bit[i-shift_amount] (or 0)
+                let unshifted = current[bit];
+                let shifted = if bit >= shift_amount {
+                    current[bit - shift_amount]
+                } else {
+                    zero_pair
+                };
+
+                // Create output for this bit at this stage
+                let out_t = self.alloc_signal(
+                    format!("shl_s{}_b{}_t_{}", stage, bit, self.next_signal_id),
+                    1,
+                );
+                let out_f = self.alloc_signal(
+                    format!("shl_s{}_b{}_f_{}", stage, bit, self.next_signal_id),
+                    1,
+                );
+                let out_pair = DualRailPair { t: out_t, f: out_f };
+
+                // NCL MUX: sel=0 -> unshifted, sel=1 -> shifted
+                self.expand_mux2_1bit(sel_pair, unshifted, shifted, out_pair);
+
+                next_stage.push(out_pair);
+            }
+
+            current = next_stage;
+        }
+
+        // Concatenate final bits back to output
+        let t_bits: Vec<LirSignalId> = current.iter().rev().map(|p| p.t).collect();
+        let f_bits: Vec<LirSignalId> = current.iter().rev().map(|p| p.f).collect();
+        let widths: Vec<u32> = vec![1; width as usize];
+        self.alloc_node(
+            LirOp::Concat {
+                widths: widths.clone(),
+            },
+            t_bits,
+            dest.t,
+        );
+        self.alloc_node(LirOp::Concat { widths }, f_bits, dest.f);
+    }
+
+    /// Expand a right shift to NCL using THmn-based barrel shifter
+    fn expand_shr(&mut self, a: DualRailPair, shamt: DualRailPair, dest: DualRailPair, width: u32) {
+        // Calculate number of shift stages (log2 of width)
+        let shift_bits = if width <= 1 {
+            1
+        } else {
+            (32 - (width - 1).leading_zeros()) as usize
+        };
+
+        // Create constant 0 dual-rail pair for filling in shifted bits
+        let const_0_t = self.alloc_signal(format!("shr_const0_t_{}", self.next_signal_id), 1);
+        let const_0_f = self.alloc_signal(format!("shr_const0_f_{}", self.next_signal_id), 1);
+        self.alloc_node(LirOp::Constant { width: 1, value: 0 }, vec![], const_0_t);
+        self.alloc_node(LirOp::Constant { width: 1, value: 1 }, vec![], const_0_f);
+        let zero_pair = DualRailPair {
+            t: const_0_t,
+            f: const_0_f,
+        };
+
+        // Start with input bits
+        let mut current: Vec<DualRailPair> = (0..width)
+            .map(|i| {
+                let bit_t = self.alloc_signal(format!("shr_in_t_{}_{}", self.next_signal_id, i), 1);
+                let bit_f = self.alloc_signal(format!("shr_in_f_{}_{}", self.next_signal_id, i), 1);
+                self.alloc_node(
+                    LirOp::RangeSelect {
+                        width,
+                        high: i,
+                        low: i,
+                    },
+                    vec![a.t],
+                    bit_t,
+                );
+                self.alloc_node(
+                    LirOp::RangeSelect {
+                        width,
+                        high: i,
+                        low: i,
+                    },
+                    vec![a.f],
+                    bit_f,
+                );
+                DualRailPair { t: bit_t, f: bit_f }
+            })
+            .collect();
+
+        // Build barrel shifter with cascaded NCL mux stages
+        for stage in 0..shift_bits {
+            let shift_amount = 1usize << stage;
+
+            // Extract shift amount bit for this stage
+            let sel_t =
+                self.alloc_signal(format!("shr_sel_t_{}_{}", self.next_signal_id, stage), 1);
+            let sel_f =
+                self.alloc_signal(format!("shr_sel_f_{}_{}", self.next_signal_id, stage), 1);
+
+            let shamt_width = self.lir.signals[shamt.t.0 as usize].width;
+            if (stage as u32) < shamt_width {
+                self.alloc_node(
+                    LirOp::RangeSelect {
+                        width: shamt_width,
+                        high: stage as u32,
+                        low: stage as u32,
+                    },
+                    vec![shamt.t],
+                    sel_t,
+                );
+                self.alloc_node(
+                    LirOp::RangeSelect {
+                        width: shamt_width,
+                        high: stage as u32,
+                        low: stage as u32,
+                    },
+                    vec![shamt.f],
+                    sel_f,
+                );
+            } else {
+                self.alloc_node(LirOp::Constant { width: 1, value: 0 }, vec![], sel_t);
+                self.alloc_node(LirOp::Constant { width: 1, value: 1 }, vec![], sel_f);
+            }
+            let sel_pair = DualRailPair { t: sel_t, f: sel_f };
+
+            let mut next_stage: Vec<DualRailPair> = Vec::with_capacity(width as usize);
+
+            for bit in 0..width as usize {
+                // Right shift: when sel=1, bit[i] gets bit[i+shift_amount] (or 0)
+                let unshifted = current[bit];
+                let shifted = if bit + shift_amount < width as usize {
+                    current[bit + shift_amount]
+                } else {
+                    zero_pair
+                };
+
+                let out_t = self.alloc_signal(
+                    format!("shr_s{}_b{}_t_{}", stage, bit, self.next_signal_id),
+                    1,
+                );
+                let out_f = self.alloc_signal(
+                    format!("shr_s{}_b{}_f_{}", stage, bit, self.next_signal_id),
+                    1,
+                );
+                let out_pair = DualRailPair { t: out_t, f: out_f };
+
+                // NCL MUX: sel=0 -> unshifted, sel=1 -> shifted
+                self.expand_mux2_1bit(sel_pair, unshifted, shifted, out_pair);
+
+                next_stage.push(out_pair);
+            }
+
+            current = next_stage;
+        }
+
+        // Concatenate final bits back to output
+        let t_bits: Vec<LirSignalId> = current.iter().rev().map(|p| p.t).collect();
+        let f_bits: Vec<LirSignalId> = current.iter().rev().map(|p| p.f).collect();
+        let widths: Vec<u32> = vec![1; width as usize];
+        self.alloc_node(
+            LirOp::Concat {
+                widths: widths.clone(),
+            },
+            t_bits,
+            dest.t,
+        );
+        self.alloc_node(LirOp::Concat { widths }, f_bits, dest.f);
+    }
+
+    /// 1-bit NCL MUX using THmn gates
+    /// y = (sel AND b) OR (NOT sel AND a)
+    /// In NCL dual-rail:
+    ///   y_t = TH12(TH22(sel_t, b_t), TH22(sel_f, a_t))
+    ///   y_f = TH12(TH22(sel_t, b_f), TH22(sel_f, a_f))
+    fn expand_mux2_1bit(
+        &mut self,
+        sel: DualRailPair,
+        a: DualRailPair,
+        b: DualRailPair,
+        dest: DualRailPair,
+    ) {
+        // Intermediate signals for true rail
+        let sel_b_t = self.alloc_signal(format!("mux1_sel_b_t_{}", self.next_signal_id), 1);
+        let nsel_a_t = self.alloc_signal(format!("mux1_nsel_a_t_{}", self.next_signal_id), 1);
+
+        // TH22(sel_t, b_t) - select high AND b true
+        self.alloc_node(LirOp::Th22 { width: 1 }, vec![sel.t, b.t], sel_b_t);
+        // TH22(sel_f, a_t) - select low AND a true
+        self.alloc_node(LirOp::Th22 { width: 1 }, vec![sel.f, a.t], nsel_a_t);
+        // True rail: TH12(sel_b_t, nsel_a_t) - OR with hysteresis
+        self.alloc_node(LirOp::Th12 { width: 1 }, vec![sel_b_t, nsel_a_t], dest.t);
+
+        // Intermediate signals for false rail
+        let sel_b_f = self.alloc_signal(format!("mux1_sel_b_f_{}", self.next_signal_id), 1);
+        let nsel_a_f = self.alloc_signal(format!("mux1_nsel_a_f_{}", self.next_signal_id), 1);
+
+        // TH22(sel_t, b_f) - select high AND b false
+        self.alloc_node(LirOp::Th22 { width: 1 }, vec![sel.t, b.f], sel_b_f);
+        // TH22(sel_f, a_f) - select low AND a false
+        self.alloc_node(LirOp::Th22 { width: 1 }, vec![sel.f, a.f], nsel_a_f);
+        // False rail: TH12(sel_b_f, nsel_a_f) - OR with hysteresis
+        self.alloc_node(LirOp::Th12 { width: 1 }, vec![sel_b_f, nsel_a_f], dest.f);
+    }
+
     /// Encode a single-rail input to dual-rail
     fn encode_input(&mut self, signal: LirSignalId, width: u32) -> DualRailPair {
         let t = self.alloc_signal(
@@ -1458,19 +1752,13 @@ pub fn expand_to_ncl(lir: &Lir, config: &NclConfig) -> NclExpandResult {
                     expander.expand_constant(*value, dest, *width);
                 }
             }
-            // Shifts - pass through to regular shift operations on true rail
+            // Shifts - use THmn-based barrel shifter for proper NCL dual-rail semantics
             LirOp::Shl { width } => {
                 if node.inputs.len() >= 2 {
                     let a = expander.dual_rail_map.get(&node.inputs[0]).copied();
                     let shamt = expander.dual_rail_map.get(&node.inputs[1]).copied();
                     if let (Some(a), Some(shamt), Some(dest)) = (a, shamt, output_pair) {
-                        // Simplified: shift the true rail, invert for false rail
-                        expander.alloc_node(
-                            LirOp::Shl { width: *width },
-                            vec![a.t, shamt.t],
-                            dest.t,
-                        );
-                        expander.alloc_node(LirOp::Not { width: *width }, vec![dest.t], dest.f);
+                        expander.expand_shl(a, shamt, dest, *width);
                     }
                 }
             }
@@ -1479,13 +1767,7 @@ pub fn expand_to_ncl(lir: &Lir, config: &NclConfig) -> NclExpandResult {
                     let a = expander.dual_rail_map.get(&node.inputs[0]).copied();
                     let shamt = expander.dual_rail_map.get(&node.inputs[1]).copied();
                     if let (Some(a), Some(shamt), Some(dest)) = (a, shamt, output_pair) {
-                        // Simplified: shift the true rail, invert for false rail
-                        expander.alloc_node(
-                            LirOp::Shr { width: *width },
-                            vec![a.t, shamt.t],
-                            dest.t,
-                        );
-                        expander.alloc_node(LirOp::Not { width: *width }, vec![dest.t], dest.f);
+                        expander.expand_shr(a, shamt, dest, *width);
                     }
                 }
             }

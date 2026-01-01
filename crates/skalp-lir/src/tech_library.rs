@@ -3092,4 +3092,31 @@ mod tests {
             CellFunction::IsolationAnd
         );
     }
+
+    #[test]
+    fn test_generic_asic_has_ncl_cells() {
+        let lib = get_stdlib_library("generic_asic").expect("Failed to load generic_asic library");
+
+        // Verify TH22 (C-element) is present
+        let th22 = lib.find_best_cell(&CellFunction::Th22);
+        assert!(
+            th22.is_some(),
+            "TH22 cell should be present in generic_asic library"
+        );
+        let th22 = th22.unwrap();
+        assert_eq!(th22.name, "TH22_X1");
+
+        // Verify TH12 is present
+        let th12 = lib.find_best_cell(&CellFunction::Th12);
+        assert!(
+            th12.is_some(),
+            "TH12 cell should be present in generic_asic library"
+        );
+        let th12 = th12.unwrap();
+        assert_eq!(th12.name, "TH12_X1");
+
+        // Print for debugging
+        println!("TH22 cell: {:?}", th22.name);
+        println!("TH12 cell: {:?}", th12.name);
+    }
 }

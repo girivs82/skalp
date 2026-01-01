@@ -1237,6 +1237,112 @@ fault_type = "delay"
 mechanism = "process_variation"
 
 # =============================================================================
+# NCL Threshold Gates (for Null Convention Logic / Asynchronous Circuits)
+# =============================================================================
+
+# TH22 (C-element / Muller C-gate)
+# Output goes HIGH when both inputs HIGH, LOW when both inputs LOW, holds otherwise
+[[cells]]
+name = "TH22_X1"
+function = "th22"
+fit = 0.15
+area_um2 = 1.4
+transistor_count = 8
+drive_strength = 1
+nominal_voltage_mv = 1000
+min_voltage_mv = 700
+timing_margin_voltage_mv = 850
+voltage_delay_coefficient = 0.12
+voltage_sensitivity = 6
+
+[[cells.failure_modes]]
+name = "stuck_at_0"
+fit = 0.045
+fault_type = "stuck_at_0"
+mechanism = "oxide_breakdown"
+
+[[cells.failure_modes]]
+name = "stuck_at_1"
+fit = 0.045
+fault_type = "stuck_at_1"
+mechanism = "electromigration"
+
+[[cells.failure_modes]]
+name = "transient"
+fit = 0.0225
+fault_type = "transient"
+mechanism = "radiation_seu"
+
+[[cells.failure_modes]]
+name = "bridge"
+fit = 0.015
+fault_type = "bridge"
+mechanism = "metal_bridge"
+
+[[cells.failure_modes]]
+name = "open"
+fit = 0.012
+fault_type = "open"
+mechanism = "via_failure"
+
+[[cells.failure_modes]]
+name = "delay"
+fit = 0.0105
+fault_type = "delay"
+mechanism = "process_variation"
+
+# TH12 (NCL OR with hysteresis)
+# Output goes HIGH when at least 1 input HIGH, LOW when all inputs LOW
+[[cells]]
+name = "TH12_X1"
+function = "th12"
+fit = 0.12
+area_um2 = 1.0
+transistor_count = 6
+drive_strength = 1
+nominal_voltage_mv = 1000
+min_voltage_mv = 700
+timing_margin_voltage_mv = 850
+voltage_delay_coefficient = 0.12
+voltage_sensitivity = 6
+
+[[cells.failure_modes]]
+name = "stuck_at_0"
+fit = 0.036
+fault_type = "stuck_at_0"
+mechanism = "oxide_breakdown"
+
+[[cells.failure_modes]]
+name = "stuck_at_1"
+fit = 0.036
+fault_type = "stuck_at_1"
+mechanism = "electromigration"
+
+[[cells.failure_modes]]
+name = "transient"
+fit = 0.018
+fault_type = "transient"
+mechanism = "radiation_seu"
+
+[[cells.failure_modes]]
+name = "bridge"
+fit = 0.012
+fault_type = "bridge"
+mechanism = "metal_bridge"
+
+[[cells.failure_modes]]
+name = "open"
+fit = 0.0096
+fault_type = "open"
+mechanism = "via_failure"
+
+[[cells.failure_modes]]
+name = "delay"
+fit = 0.0084
+fault_type = "delay"
+mechanism = "process_variation"
+
+# =============================================================================
 # Multiplexers
 # =============================================================================
 

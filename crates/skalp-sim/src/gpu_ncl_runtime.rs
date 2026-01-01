@@ -271,6 +271,13 @@ impl GpuNclRuntime {
         self.num_stateful_gates = state_index as usize;
         self.cpu_gate_states = vec![false; self.num_stateful_gates];
 
+        // Debug: show stateful gate count
+        println!(
+            "[GPU_NCL] Detected {} stateful gates (TH12, TH22, etc.) out of {} total cells",
+            self.num_stateful_gates,
+            self.cells.len()
+        );
+
         // Allocate GPU buffers
         self.allocate_buffers()?;
 
@@ -281,26 +288,26 @@ impl GpuNclRuntime {
     fn classify_cell(&self, cell_type: &str) -> NclPrimitiveType {
         let upper = cell_type.to_uppercase();
 
-        // Check for THmn patterns first
+        // Check for THmn patterns first (handles TH22, TH22_X1, etc.)
         if upper.starts_with("TH") {
-            if let Some(digits) = upper.strip_prefix("TH") {
-                if digits.len() == 2 {
-                    let m = digits.chars().next().and_then(|c| c.to_digit(10));
-                    let n = digits.chars().nth(1).and_then(|c| c.to_digit(10));
-                    if let (Some(m), Some(n)) = (m, n) {
-                        return match (m, n) {
-                            (1, 2) => NclPrimitiveType::Th12,
-                            (2, 2) => NclPrimitiveType::Th22,
-                            (1, 3) => NclPrimitiveType::Th13,
-                            (2, 3) => NclPrimitiveType::Th23,
-                            (3, 3) => NclPrimitiveType::Th33,
-                            (1, 4) => NclPrimitiveType::Th14,
-                            (2, 4) => NclPrimitiveType::Th24,
-                            (3, 4) => NclPrimitiveType::Th34,
-                            (4, 4) => NclPrimitiveType::Th44,
-                            _ => NclPrimitiveType::Thmn,
-                        };
-                    }
+            if let Some(rest) = upper.strip_prefix("TH") {
+                // Extract digits - handle suffixes like "_X1"
+                let mut chars = rest.chars();
+                let m = chars.next().and_then(|c| c.to_digit(10));
+                let n = chars.next().and_then(|c| c.to_digit(10));
+                if let (Some(m), Some(n)) = (m, n) {
+                    return match (m, n) {
+                        (1, 2) => NclPrimitiveType::Th12,
+                        (2, 2) => NclPrimitiveType::Th22,
+                        (1, 3) => NclPrimitiveType::Th13,
+                        (2, 3) => NclPrimitiveType::Th23,
+                        (3, 3) => NclPrimitiveType::Th33,
+                        (1, 4) => NclPrimitiveType::Th14,
+                        (2, 4) => NclPrimitiveType::Th24,
+                        (3, 4) => NclPrimitiveType::Th34,
+                        (4, 4) => NclPrimitiveType::Th44,
+                        _ => NclPrimitiveType::Thmn,
+                    };
                 }
             }
         }
@@ -427,13 +434,18 @@ impl GpuNclRuntime {
                 .new_buffer(signal_buffer_size, MTLResourceOptions::StorageModeShared),
         );
 
-        // Gate state buffer
+        // Gate state buffer - MUST be initialized to zero for proper THmn behavior
         if self.num_stateful_gates > 0 {
             let state_buffer_size = (self.num_stateful_gates * std::mem::size_of::<u32>()) as u64;
-            self.gate_state_buffer = Some(
-                self.device
-                    .new_buffer(state_buffer_size, MTLResourceOptions::StorageModeShared),
-            );
+            let buffer = self
+                .device
+                .new_buffer(state_buffer_size, MTLResourceOptions::StorageModeShared);
+            // Zero-initialize the gate states (all THmn gates start in NULL/0 state)
+            unsafe {
+                let ptr = buffer.contents() as *mut u32;
+                std::ptr::write_bytes(ptr, 0, self.num_stateful_gates);
+            }
+            self.gate_state_buffer = Some(buffer);
         }
 
         // Change counter buffer
