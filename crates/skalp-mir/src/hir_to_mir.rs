@@ -5345,13 +5345,21 @@ impl<'hir> HirToMir<'hir> {
 
                     // Step 4: Record pending module instance (will be added to module later)
                     // BUG FIX #92: Now storing Vec<SignalId> for tuple support
+                    // BUG FIX: Use hir_return_type to get the actual function return type
+                    // instead of the inferred expression type (which might be wrong for tuples)
+                    let frontend_return_type =
+                        self.hir_type_to_frontend_type(&hir_return_type).unwrap_or_else(|| ty.clone());
+                    eprintln!(
+                        "[HYBRID] BUG FIX: Using frontend_return_type {:?} (hir_return_type: {:?})",
+                        frontend_return_type, hir_return_type
+                    );
                     self.pending_module_instances.push((
                         result_signal_ids.clone(),
                         call.function.clone(),
                         module_id,
                         arg_exprs,
                         hir_return_type,
-                        ty.clone(),
+                        frontend_return_type,
                     ));
                     eprintln!(
                         "[HYBRID] ✓ Recorded pending module instance for '{}'",
@@ -15595,8 +15603,15 @@ impl<'hir> HirToMir<'hir> {
                         num_result_signals, call.function
                     );
 
-                    let ty =
-                        skalp_frontend::types::Type::Bit(skalp_frontend::types::Width::Fixed(32));
+                    // BUG FIX: Use hir_type_to_frontend_type to get the actual tuple type
+                    // instead of hardcoding Bit(32) which loses tuple element widths
+                    let frontend_type = self
+                        .hir_type_to_frontend_type(&return_type)
+                        .unwrap_or_else(|| {
+                            skalp_frontend::types::Type::Bit(
+                                skalp_frontend::types::Width::Fixed(32),
+                            )
+                        });
 
                     self.pending_module_instances.push((
                         result_signal_ids.clone(),
@@ -15604,7 +15619,7 @@ impl<'hir> HirToMir<'hir> {
                         module_id,
                         arg_exprs,
                         return_type,
-                        ty.clone(),
+                        frontend_type,
                     ));
 
                     // Build result expression
@@ -15977,8 +15992,15 @@ impl<'hir> HirToMir<'hir> {
                         call.function
                     );
 
-                    let ty =
-                        skalp_frontend::types::Type::Bit(skalp_frontend::types::Width::Fixed(32)); // Placeholder
+                    // BUG FIX: Use hir_type_to_frontend_type to get the actual tuple type
+                    // instead of hardcoding Bit(32) which loses tuple element widths
+                    let frontend_type = self
+                        .hir_type_to_frontend_type(&return_type)
+                        .unwrap_or_else(|| {
+                            skalp_frontend::types::Type::Bit(
+                                skalp_frontend::types::Width::Fixed(32),
+                            )
+                        });
 
                     self.pending_module_instances.push((
                         result_signal_ids.clone(),
@@ -15986,7 +16008,7 @@ impl<'hir> HirToMir<'hir> {
                         module_id,
                         arg_exprs,
                         return_type,
-                        ty.clone(),
+                        frontend_type.clone(),
                     ));
 
                     // BUG FIX #92: For tuple returns, return a Concat of all result signals
@@ -16018,7 +16040,7 @@ impl<'hir> HirToMir<'hir> {
                     } else {
                         let result = Expression::new(
                             ExpressionKind::Ref(LValue::Signal(result_signal_ids[0])),
-                            ty,
+                            frontend_type.clone(),
                         );
                         // BUG FIX #125: Cache the result for subsequent accesses
                         self.module_call_cache
@@ -17892,10 +17914,31 @@ impl<'hir> HirToMir<'hir> {
                         "{}_inst_{}_result_{}",
                         function_name, first_signal_id.0, elem_idx
                     );
+
+                    // BUG FIX: Extract actual element type from tuple instead of hardcoding 32 bits
+                    // This is critical for NCL: child modules have 1-bit result_0, parent must match
+                    println!(
+                        "🔍🔍🔍 DEBUG: frontend_type = {:?}, elem_idx = {}",
+                        frontend_type, elem_idx
+                    );
+                    let element_data_type = if let Type::Tuple(elements) = &frontend_type {
+                        if elem_idx < elements.len() {
+                            self.frontend_type_to_datatype(&elements[elem_idx])
+                        } else {
+                            DataType::Bit(32) // fallback for out-of-bounds
+                        }
+                    } else {
+                        data_type.clone() // single return type
+                    };
+                    eprintln!(
+                        "[HYBRID]       BUG FIX: Element {} has type {:?}",
+                        elem_idx, element_data_type
+                    );
+
                     let signal = Signal {
                         id: elem_signal_id,
                         name: signal_name.clone(),
-                        signal_type: DataType::Bit(32), // Placeholder - should extract element type
+                        signal_type: element_data_type,
                         initial: None,
                         clock_domain: None,
                         span: None,
@@ -18069,6 +18112,62 @@ impl<'hir> HirToMir<'hir> {
         let id = VariableId(self.next_variable_id);
         self.next_variable_id += 1;
         id
+    }
+
+    /// Convert HirType to frontend Type
+    /// Used for getting the actual function return type (BUG FIX for NCL tuple width mismatch)
+    fn hir_type_to_frontend_type(&self, hir_type: &Option<hir::HirType>) -> Option<Type> {
+        use skalp_frontend::types::Width;
+        let hir_ty = hir_type.as_ref()?;
+        Some(match hir_ty {
+            hir::HirType::Bit(n) => Type::Bit(Width::Fixed(*n)),
+            hir::HirType::Logic(n) => Type::Logic(Width::Fixed(*n)),
+            hir::HirType::Int(n) => Type::Int(Width::Fixed(*n)),
+            hir::HirType::Nat(n) => Type::Nat(Width::Fixed(*n)),
+            hir::HirType::Bool => Type::Bool,
+            hir::HirType::Float16 | hir::HirType::Float32 | hir::HirType::Float64 => {
+                // FP types are represented as bit vectors
+                Type::Bit(Width::Fixed(32))
+            }
+            hir::HirType::Tuple(elements) => {
+                // Convert each tuple element
+                let element_types: Vec<Type> = elements
+                    .iter()
+                    .filter_map(|elem| self.hir_type_to_frontend_type(&Some(elem.clone())))
+                    .collect();
+                Type::Tuple(element_types)
+            }
+            hir::HirType::Array(elem, size) => Type::Array {
+                element_type: Box::new(
+                    self.hir_type_to_frontend_type(&Some((**elem).clone()))
+                        .unwrap_or(Type::Bit(Width::Fixed(32))),
+                ),
+                size: *size,
+            },
+            _ => Type::Bit(Width::Fixed(32)), // Fallback for other types
+        })
+    }
+
+    /// Convert frontend Type to MIR DataType
+    /// Used for extracting element types from tuples (BUG FIX for NCL width mismatch)
+    fn frontend_type_to_datatype(&self, ty: &Type) -> DataType {
+        use skalp_frontend::types::Width;
+        match ty {
+            Type::Bit(Width::Fixed(n)) => DataType::Bit(*n as usize),
+            Type::Logic(Width::Fixed(n)) => DataType::Bit(*n as usize),
+            Type::Int(Width::Fixed(n)) => DataType::Bit(*n as usize),
+            Type::Nat(Width::Fixed(n)) => DataType::Bit(*n as usize),
+            Type::Bool => DataType::Bit(1),
+            // For unknown/inferred widths, fallback to 32 bits
+            Type::Bit(_) | Type::Logic(_) | Type::Int(_) | Type::Nat(_) => DataType::Bit(32),
+            // Fixed-point: total width = integer + fractional
+            Type::Fixed {
+                integer_bits,
+                fractional_bits,
+            } => DataType::Bit((*integer_bits + *fractional_bits) as usize),
+            // Other types default to 32 bits
+            _ => DataType::Bit(32),
+        }
     }
 
     /// Get the current variable resolution context

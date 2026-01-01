@@ -473,10 +473,57 @@ impl HierarchicalNetlist {
                                 child_net_name, parent_base, high, low, stitched
                             );
                         } else {
-                            eprintln!(
-                                "[STITCH]   ✗ {} -> {}[{}:{}] (no child bits found)",
-                                child_net_name, parent_base, high, low
-                            );
+                            // Try NCL dual-rail range stitching
+                            // For NCL, we need to stitch {child}_t[N] <-> {parent}_t[low+N]
+                            // and {child}_f[N] <-> {parent}_f[low+N]
+                            let (child_t, child_f) =
+                                result.find_ncl_bit_indexed_nets(&child_net_name);
+
+                            if !child_t.is_empty() {
+                                let mut stitched = 0;
+
+                                // Stitch true rails with offset
+                                for (child_idx, child_bit_net) in &child_t {
+                                    let parent_bit_idx = low + child_idx;
+                                    if parent_bit_idx <= *high {
+                                        let parent_bit_net =
+                                            format!("{}_t[{}]", parent_base, parent_bit_idx);
+                                        if result.get_net(&parent_bit_net).is_some() {
+                                            result.merge_nets_by_name(
+                                                &parent_bit_net,
+                                                child_bit_net,
+                                            );
+                                            stitched += 1;
+                                        }
+                                    }
+                                }
+
+                                // Stitch false rails with offset
+                                for (child_idx, child_bit_net) in &child_f {
+                                    let parent_bit_idx = low + child_idx;
+                                    if parent_bit_idx <= *high {
+                                        let parent_bit_net =
+                                            format!("{}_f[{}]", parent_base, parent_bit_idx);
+                                        if result.get_net(&parent_bit_net).is_some() {
+                                            result.merge_nets_by_name(
+                                                &parent_bit_net,
+                                                child_bit_net,
+                                            );
+                                            stitched += 1;
+                                        }
+                                    }
+                                }
+
+                                eprintln!(
+                                    "[STITCH]   ✓ {} <-> {}[{}:{}] (NCL range: {} nets)",
+                                    child_net_name, parent_base, high, low, stitched
+                                );
+                            } else {
+                                eprintln!(
+                                    "[STITCH]   ✗ {} -> {}[{}:{}] (no child bits found)",
+                                    child_net_name, parent_base, high, low
+                                );
+                            }
                         }
                     }
                     PortConnection::ParentBit(parent_signal, bit_idx) => {

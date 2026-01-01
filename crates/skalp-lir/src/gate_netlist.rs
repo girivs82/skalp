@@ -1067,6 +1067,7 @@ impl GateNetlist {
     ///
     /// Returns two sorted lists: (true_rail_nets, false_rail_nets)
     /// Each list contains (bit_index, net_name) pairs.
+    /// For 1-bit signals, the net name is just {prefix}_t without [0], so we check for exact match too.
     #[allow(clippy::type_complexity)]
     pub fn find_ncl_bit_indexed_nets(
         &self,
@@ -1079,8 +1080,11 @@ impl GateNetlist {
         let prefix_f = format!("{}_f", prefix);
 
         for name in self.net_map.keys() {
-            // Check for true rail: prefix_t[N]
-            if let Some(rest) = name.strip_prefix(&prefix_t) {
+            // Check for true rail: prefix_t[N] or exact match prefix_t (for 1-bit signals)
+            if name == &prefix_t {
+                // Exact match - 1-bit signal without bit index
+                true_rail.push((0, name.clone()));
+            } else if let Some(rest) = name.strip_prefix(&prefix_t) {
                 if let Some(inner) = rest.strip_prefix('[') {
                     if let Some(idx_str) = inner.strip_suffix(']') {
                         if let Ok(idx) = idx_str.parse::<usize>() {
@@ -1089,8 +1093,11 @@ impl GateNetlist {
                     }
                 }
             }
-            // Check for false rail: prefix_f[N]
-            else if let Some(rest) = name.strip_prefix(&prefix_f) {
+            // Check for false rail: prefix_f[N] or exact match prefix_f (for 1-bit signals)
+            if name == &prefix_f {
+                // Exact match - 1-bit signal without bit index
+                false_rail.push((0, name.clone()));
+            } else if let Some(rest) = name.strip_prefix(&prefix_f) {
                 if let Some(inner) = rest.strip_prefix('[') {
                     if let Some(idx_str) = inner.strip_suffix(']') {
                         if let Ok(idx) = idx_str.parse::<usize>() {
