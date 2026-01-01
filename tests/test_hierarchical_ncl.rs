@@ -3,7 +3,10 @@
 //! Verifies that async context propagates to child modules correctly.
 
 use skalp_frontend::parse_and_build_hir;
-use skalp_lir::{get_stdlib_library, lower_mir_hierarchical, lower_mir_module_to_lir, map_hierarchical_to_gates, map_lir_to_gates};
+use skalp_lir::{
+    get_stdlib_library, lower_mir_hierarchical, lower_mir_module_to_lir, map_hierarchical_to_gates,
+    map_lir_to_gates,
+};
 use skalp_mir::MirCompiler;
 use skalp_sim::{CircuitMode, HwAccel, SimLevel, UnifiedSimConfig, UnifiedSimulator};
 
@@ -48,17 +51,22 @@ impl HierarchicalAsync {
 fn test_hierarchical_ncl_async() {
     let hir = parse_and_build_hir(HIERARCHICAL_ASYNC_SOURCE).expect("Failed to parse");
     let mir_compiler = MirCompiler::new();
-    let mir = mir_compiler.compile(&hir).expect("Failed to compile to MIR");
+    let mir = mir_compiler
+        .compile(&hir)
+        .expect("Failed to compile to MIR");
 
     // Use hierarchical compilation
     let hier_lir = lower_mir_hierarchical(&mir);
     let library = get_stdlib_library("generic_asic").expect("Failed to load library");
     let hier_result = map_hierarchical_to_gates(&hier_lir, &library);
 
-
     let netlist = hier_result.flatten();
 
-    println!("Compiled: {} cells, {} nets", netlist.cells.len(), netlist.nets.len());
+    println!(
+        "Compiled: {} cells, {} nets",
+        netlist.cells.len(),
+        netlist.nets.len()
+    );
 
     // Create NCL simulator
     let config = UnifiedSimConfig {
@@ -72,7 +80,8 @@ fn test_hierarchical_ncl_async() {
     };
 
     let mut sim = UnifiedSimulator::new(config).expect("Failed to create simulator");
-    sim.load_ncl_gate_level(netlist.clone()).expect("Failed to load NCL netlist");
+    sim.load_ncl_gate_level(netlist.clone())
+        .expect("Failed to load NCL netlist");
 
     // Note: Hierarchical flattening prefixes signal names with instance path
     // For the top module, signals become "top.data1", "top.data2", etc.
@@ -104,7 +113,9 @@ fn test_hierarchical_ncl_async() {
 fn test_direct_ncl_async() {
     let hir = parse_and_build_hir(HIERARCHICAL_ASYNC_SOURCE).expect("Failed to parse");
     let mir_compiler = MirCompiler::new();
-    let mir = mir_compiler.compile(&hir).expect("Failed to compile to MIR");
+    let mir = mir_compiler
+        .compile(&hir)
+        .expect("Failed to compile to MIR");
 
     assert!(!mir.modules.is_empty(), "Should have at least one module");
     let module = &mir.modules[0];
@@ -115,7 +126,11 @@ fn test_direct_ncl_async() {
     let tech_result = map_lir_to_gates(&lir_result.lir, &library);
     let netlist = tech_result.netlist;
 
-    println!("Direct compiled: {} cells, {} nets", netlist.cells.len(), netlist.nets.len());
+    println!(
+        "Direct compiled: {} cells, {} nets",
+        netlist.cells.len(),
+        netlist.nets.len()
+    );
 
     // Create NCL simulator
     let config = UnifiedSimConfig {
@@ -129,7 +144,8 @@ fn test_direct_ncl_async() {
     };
 
     let mut sim = UnifiedSimulator::new(config).expect("Failed to create simulator");
-    sim.load_ncl_gate_level(netlist).expect("Failed to load NCL netlist");
+    sim.load_ncl_gate_level(netlist)
+        .expect("Failed to load NCL netlist");
 
     // Test 1: Add mode (sel=0): 10 + 20 = 30
     sim.set_ncl_input("data1", 10, 8);

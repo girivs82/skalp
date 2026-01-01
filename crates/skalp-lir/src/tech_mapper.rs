@@ -3448,24 +3448,243 @@ impl<'a> TechMapper<'a> {
         outputs: &[GateNetId],
         path: &str,
     ) {
-        if inputs.len() < 2 {
-            self.warnings.push("NCL Lt needs 2 inputs".to_string());
+        // NCL Lt expects 4 inputs: a_t, a_f, b_t, b_f (each width bits)
+        // Output is 2 bits: [lt_t, lt_f] interleaved
+        if inputs.len() < 4 {
+            self.warnings.push(format!(
+                "NCL Lt at {} needs 4 inputs (a_t, a_f, b_t, b_f), got {}",
+                path,
+                inputs.len()
+            ));
             return;
         }
 
-        // NCL magnitude comparator chain from MSB to LSB
-        self.warnings.push(format!(
-            "NCL Lt at {} - using simplified implementation",
-            path
-        ));
-
-        // Simplified: just output 0
-        let tie_low = self.get_tie_low();
-        let tie_high = self.get_tie_high();
+        let a_t = &inputs[0]; // True rail of a
+        let a_f = &inputs[1]; // False rail of a
+        let b_t = &inputs[2]; // True rail of b
+        let b_f = &inputs[3]; // False rail of b
 
         let out_t = outputs.first().copied().unwrap_or(GateNetId(0));
         let out_f = outputs.get(1).copied().unwrap_or(GateNetId(0));
 
+        let th22_info = self.get_ncl_cell_info(&CellFunction::Th22);
+        let th12_info = self.get_ncl_cell_info(&CellFunction::Th12);
+
+        // NCL magnitude comparator: iterative from MSB to LSB
+        // For each bit position i:
+        //   lt_i = (a[i] < b[i]) OR ((a[i] == b[i]) AND lt_prev)
+        //   ge_i = (a[i] > b[i]) OR ((a[i] == b[i]) AND ge_prev)
+        //
+        // In NCL dual-rail:
+        //   a[i] < b[i]  means a_f[i] AND b_t[i]
+        //   a[i] > b[i]  means a_t[i] AND b_f[i]
+        //   a[i] == b[i] means (a_t[i] AND b_t[i]) OR (a_f[i] AND b_f[i])
+
+        // Initialize: start from MSB
+        // lt_accum_t = 0 (not less than yet)
+        // lt_accum_f = 0 (not determined yet - both rails 0 is NULL, but we're in DATA)
+        // Actually in NCL, we need completion detection, but for now use simpler approach:
+        // Just compute lt on true rails and ge on false rails
+
+        // For simplicity, use the true rails to compute regular Lt, then
+        // compute completion to gate the output.
+
+        // Step 1: Compute completion detection for inputs (all bits have valid data)
+        // A bit is "complete" when exactly one of (t, f) is 1
+        // For now, assume inputs are already valid DATA.
+
+        // Step 2: Compute less-than using iterative magnitude comparison
+        // Build the chain from MSB (index width-1) to LSB (index 0)
+
+        let tie_low = self.get_tie_low();
+        let tie_high = self.get_tie_high();
+
+        // Magnitude comparator from MSB to LSB using equality chain approach:
+        // - eq_chain: 1 while all bits so far are equal, 0 once difference found
+        // - lt: 1 if (first differing bit had a < b), latches forever once set
+        // - ge: 1 if (first differing bit had a > b), latches forever once set
+        //
+        // Recurrence:
+        //   eq_chain_new = eq_chain_prev AND a_eq_b
+        //   lt_new = lt_prev OR (eq_chain_prev AND a_lt_b)
+        //   ge_new = ge_prev OR (eq_chain_prev AND a_gt_b)
+
+        let mut eq_chain_prev = tie_high; // Start with "all equal so far" = true
+        let mut lt_t_prev = tie_low; // Not less than yet
+        let mut ge_t_prev = tie_low; // Not greater than yet
+
+        for i in (0..width as usize).rev() {
+            // Get dual-rail bits for this position
+            let ai_t = a_t.get(i).copied().unwrap_or(tie_low);
+            let ai_f = a_f.get(i).copied().unwrap_or(tie_low);
+            let bi_t = b_t.get(i).copied().unwrap_or(tie_low);
+            let bi_f = b_f.get(i).copied().unwrap_or(tie_low);
+
+            // a[i] < b[i] in NCL: a_f AND b_t (a is 0, b is 1)
+            let a_lt_b = self.alloc_net_id();
+            self.netlist
+                .add_net(GateNet::new(a_lt_b, format!("{}.lt_bit{}_altb", path, i)));
+            self.add_cell(Cell::new_comb(
+                CellId(0),
+                th22_info.name.clone(),
+                self.library.name.clone(),
+                th22_info.fit,
+                format!("{}.lt_bit{}_th22_altb", path, i),
+                vec![ai_f, bi_t],
+                vec![a_lt_b],
+            ));
+
+            // a[i] > b[i] in NCL: a_t AND b_f (a is 1, b is 0)
+            let a_gt_b = self.alloc_net_id();
+            self.netlist
+                .add_net(GateNet::new(a_gt_b, format!("{}.lt_bit{}_agtb", path, i)));
+            self.add_cell(Cell::new_comb(
+                CellId(0),
+                th22_info.name.clone(),
+                self.library.name.clone(),
+                th22_info.fit,
+                format!("{}.lt_bit{}_th22_agtb", path, i),
+                vec![ai_t, bi_f],
+                vec![a_gt_b],
+            ));
+
+            // a[i] == b[i] in NCL: (a_t AND b_t) OR (a_f AND b_f)
+            let both_true = self.alloc_net_id();
+            self.netlist.add_net(GateNet::new(
+                both_true,
+                format!("{}.lt_bit{}_both_t", path, i),
+            ));
+            let both_false = self.alloc_net_id();
+            self.netlist.add_net(GateNet::new(
+                both_false,
+                format!("{}.lt_bit{}_both_f", path, i),
+            ));
+            self.add_cell(Cell::new_comb(
+                CellId(0),
+                th22_info.name.clone(),
+                self.library.name.clone(),
+                th22_info.fit,
+                format!("{}.lt_bit{}_th22_both_t", path, i),
+                vec![ai_t, bi_t],
+                vec![both_true],
+            ));
+            self.add_cell(Cell::new_comb(
+                CellId(0),
+                th22_info.name.clone(),
+                self.library.name.clone(),
+                th22_info.fit,
+                format!("{}.lt_bit{}_th22_both_f", path, i),
+                vec![ai_f, bi_f],
+                vec![both_false],
+            ));
+            let a_eq_b = self.alloc_net_id();
+            self.netlist
+                .add_net(GateNet::new(a_eq_b, format!("{}.lt_bit{}_aeqb", path, i)));
+            self.add_cell(Cell::new_comb(
+                CellId(0),
+                th12_info.name.clone(),
+                self.library.name.clone(),
+                th12_info.fit,
+                format!("{}.lt_bit{}_th12_aeqb", path, i),
+                vec![both_true, both_false],
+                vec![a_eq_b],
+            ));
+
+            // eq_chain_new = eq_chain_prev AND a_eq_b
+            let eq_chain_new = self.alloc_net_id();
+            self.netlist.add_net(GateNet::new(
+                eq_chain_new,
+                format!("{}.lt_bit{}_eq_chain", path, i),
+            ));
+            self.add_cell(Cell::new_comb(
+                CellId(0),
+                th22_info.name.clone(),
+                self.library.name.clone(),
+                th22_info.fit,
+                format!("{}.lt_bit{}_th22_eq_chain", path, i),
+                vec![eq_chain_prev, a_eq_b],
+                vec![eq_chain_new],
+            ));
+
+            // lt_new = lt_prev OR (eq_chain_prev AND a_lt_b)
+            let eq_and_lt = self.alloc_net_id();
+            self.netlist.add_net(GateNet::new(
+                eq_and_lt,
+                format!("{}.lt_bit{}_eq_and_lt", path, i),
+            ));
+            self.add_cell(Cell::new_comb(
+                CellId(0),
+                th22_info.name.clone(),
+                self.library.name.clone(),
+                th22_info.fit,
+                format!("{}.lt_bit{}_th22_eq_lt", path, i),
+                vec![eq_chain_prev, a_lt_b],
+                vec![eq_and_lt],
+            ));
+            let lt_new = self.alloc_net_id();
+            self.netlist
+                .add_net(GateNet::new(lt_new, format!("{}.lt_bit{}_lt_new", path, i)));
+            self.add_cell(Cell::new_comb(
+                CellId(0),
+                th12_info.name.clone(),
+                self.library.name.clone(),
+                th12_info.fit,
+                format!("{}.lt_bit{}_th12_lt_new", path, i),
+                vec![lt_t_prev, eq_and_lt],
+                vec![lt_new],
+            ));
+
+            // ge_new = ge_prev OR (eq_chain_prev AND a_gt_b)
+            let eq_and_ge = self.alloc_net_id();
+            self.netlist.add_net(GateNet::new(
+                eq_and_ge,
+                format!("{}.lt_bit{}_eq_and_ge", path, i),
+            ));
+            self.add_cell(Cell::new_comb(
+                CellId(0),
+                th22_info.name.clone(),
+                self.library.name.clone(),
+                th22_info.fit,
+                format!("{}.lt_bit{}_th22_eq_ge", path, i),
+                vec![eq_chain_prev, a_gt_b],
+                vec![eq_and_ge],
+            ));
+            let ge_new = self.alloc_net_id();
+            self.netlist
+                .add_net(GateNet::new(ge_new, format!("{}.lt_bit{}_ge_new", path, i)));
+            self.add_cell(Cell::new_comb(
+                CellId(0),
+                th12_info.name.clone(),
+                self.library.name.clone(),
+                th12_info.fit,
+                format!("{}.lt_bit{}_th12_ge_new", path, i),
+                vec![ge_t_prev, eq_and_ge],
+                vec![ge_new],
+            ));
+
+            eq_chain_prev = eq_chain_new;
+            lt_t_prev = lt_new;
+            ge_t_prev = ge_new;
+        }
+
+        // Handle the case where all bits are equal: a == b means NOT (a < b)
+        // So if eq_chain is still 1 (all equal), ge should be 1 (not less than)
+        // Final: ge_final = ge_t_prev OR eq_chain_prev
+        let ge_final = self.alloc_net_id();
+        self.netlist
+            .add_net(GateNet::new(ge_final, format!("{}.lt_ge_final", path)));
+        self.add_cell(Cell::new_comb(
+            CellId(0),
+            th12_info.name.clone(),
+            self.library.name.clone(),
+            th12_info.fit,
+            format!("{}.lt_th12_ge_final", path),
+            vec![ge_t_prev, eq_chain_prev],
+            vec![ge_final],
+        ));
+        let ge_t_prev = ge_final;
+
+        // Final output: lt_t = final lt accumulator, lt_f = final ge accumulator
         let buf_info = self.get_cell_info(&CellFunction::Buf);
         if out_t.0 != 0 {
             self.add_cell(Cell::new_comb(
@@ -3473,8 +3692,8 @@ impl<'a> TechMapper<'a> {
                 buf_info.name.clone(),
                 self.library.name.clone(),
                 buf_info.fit,
-                format!("{}.lt_t", path),
-                vec![tie_low],
+                format!("{}.lt_out_t", path),
+                vec![lt_t_prev],
                 vec![out_t],
             ));
         }
@@ -3484,8 +3703,8 @@ impl<'a> TechMapper<'a> {
                 buf_info.name.clone(),
                 self.library.name.clone(),
                 buf_info.fit,
-                format!("{}.lt_f", path),
-                vec![tie_high],
+                format!("{}.lt_out_f", path),
+                vec![ge_t_prev],
                 vec![out_f],
             ));
         }

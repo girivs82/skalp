@@ -101,6 +101,37 @@ fn test_async_cle_operation(
         netlist.nets.len()
     );
 
+    // Debug: Check what signals are available (first test only)
+    static DEBUG_PRINTED: std::sync::Once = std::sync::Once::new();
+    DEBUG_PRINTED.call_once(|| {
+        let signals = sim.ncl_signal_names();
+        let top_signals: Vec<_> = signals
+            .iter()
+            .filter(|s| s.starts_with("top."))
+            .filter(|s| {
+                s.contains("function_sel")
+                    || s.contains("route_sel")
+                    || s.contains("data1")
+                    || s.contains("data2")
+                    || s.contains("result")
+            })
+            .take(30)
+            .collect();
+        println!("  [DEBUG] Sample top signals: {:?}", top_signals);
+        println!(
+            "  [DEBUG] Has top.function_sel: {}",
+            sim.has_ncl_signal("top.function_sel")
+        );
+        println!(
+            "  [DEBUG] Has top.data1: {}",
+            sim.has_ncl_signal("top.data1")
+        );
+        println!(
+            "  [DEBUG] Has top.result: {}",
+            sim.has_ncl_signal("top.result")
+        );
+    });
+
     // Set function_sel (6 bits) - use full hierarchical path
     sim.set_ncl_input("top.function_sel", opcode, 6);
 
@@ -150,6 +181,63 @@ fn test_async_cle_operation(
             false
         }
     }
+}
+
+// =============================================================================
+// Debug: Signal check test
+// =============================================================================
+
+#[test]
+fn test_signal_check() {
+    println!("\n=== Signal Check Test ===");
+    let netlist = compile_karythra_async_cle();
+
+    let config = UnifiedSimConfig {
+        level: SimLevel::GateLevel,
+        circuit_mode: CircuitMode::Ncl,
+        hw_accel: HwAccel::Auto,
+        max_iterations: 10, // Very short - just checking signals exist
+        ncl_debug: false,
+        ..Default::default()
+    };
+
+    let sim = UnifiedSimulator::new(config).expect("Failed to create simulator");
+    // Note: Don't load netlist yet, we want to load it first
+    let mut sim = sim;
+    sim.load_ncl_gate_level(netlist.clone())
+        .expect("Failed to load NCL netlist");
+
+    println!("Total signals: {}", sim.ncl_signal_names().len());
+
+    // Check key signals
+    let key_signals = [
+        "top.function_sel",
+        "top.route_sel",
+        "top.data1",
+        "top.data2",
+        "top.result",
+    ];
+
+    for signal in key_signals {
+        let exists = sim.has_ncl_signal(signal);
+        println!(
+            "  {}: {}",
+            signal,
+            if exists { "EXISTS" } else { "MISSING" }
+        );
+    }
+
+    // Print some matching signals
+    let signals = sim.ncl_signal_names();
+    println!("\nSample signals starting with 'top.':");
+    for sig in signals.iter().filter(|s| s.starts_with("top.")).take(10) {
+        println!("  {}", sig);
+    }
+
+    // Check if we have the expected top-level signals
+    assert!(sim.has_ncl_signal("top.data1"), "top.data1 should exist");
+    assert!(sim.has_ncl_signal("top.data2"), "top.data2 should exist");
+    println!("\nSignal check passed!");
 }
 
 // =============================================================================

@@ -489,10 +489,8 @@ impl HierarchicalNetlist {
                                         let parent_bit_net =
                                             format!("{}_t[{}]", parent_base, parent_bit_idx);
                                         if result.get_net(&parent_bit_net).is_some() {
-                                            result.merge_nets_by_name(
-                                                &parent_bit_net,
-                                                child_bit_net,
-                                            );
+                                            result
+                                                .merge_nets_by_name(&parent_bit_net, child_bit_net);
                                             stitched += 1;
                                         }
                                     }
@@ -505,10 +503,8 @@ impl HierarchicalNetlist {
                                         let parent_bit_net =
                                             format!("{}_f[{}]", parent_base, parent_bit_idx);
                                         if result.get_net(&parent_bit_net).is_some() {
-                                            result.merge_nets_by_name(
-                                                &parent_bit_net,
-                                                child_bit_net,
-                                            );
+                                            result
+                                                .merge_nets_by_name(&parent_bit_net, child_bit_net);
                                             stitched += 1;
                                         }
                                     }
