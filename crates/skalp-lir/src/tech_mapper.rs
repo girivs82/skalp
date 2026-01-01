@@ -2835,10 +2835,13 @@ impl<'a> TechMapper<'a> {
             // inputs[1] = a_f (all false rails)
             // inputs[2] = b_t (all true rails)
             // inputs[3] = b_f (all false rails)
-            let a_t = inputs[0].get(i).copied().unwrap_or(GateNetId(0));
-            let a_f = inputs[1].get(i).copied().unwrap_or(GateNetId(0));
-            let b_t = inputs[2].get(i).copied().unwrap_or(GateNetId(0));
-            let b_f = inputs[3].get(i).copied().unwrap_or(GateNetId(0));
+            //
+            // For NCL zero-extension: bits beyond input width are logical 0
+            // In dual-rail encoding: 0 = (t=0, f=1) = (TIE_LOW, TIE_HIGH)
+            let a_t = inputs[0].get(i).copied().unwrap_or(tie_low);
+            let a_f = inputs[1].get(i).copied().unwrap_or(tie_high);
+            let b_t = inputs[2].get(i).copied().unwrap_or(tie_low);
+            let b_f = inputs[3].get(i).copied().unwrap_or(tie_high);
 
             // outputs are interleaved: [sum_t[0], sum_f[0], sum_t[1], sum_f[1], ...]
             let sum_t = outputs.get(i * 2).copied().unwrap_or(GateNetId(0));
@@ -3082,10 +3085,15 @@ impl<'a> TechMapper<'a> {
         let mut carry_f = tie_low;
 
         for i in 0..width as usize {
-            let a_t = inputs[0].get(i).copied().unwrap_or(GateNetId(0));
-            let a_f = inputs[1].get(i).copied().unwrap_or(GateNetId(0));
-            let b_t = inputs[2].get(i).copied().unwrap_or(GateNetId(0)); // Already inverted
-            let b_f = inputs[3].get(i).copied().unwrap_or(GateNetId(0)); // Already inverted
+            // For NCL zero-extension: bits beyond input width are logical 0
+            // In dual-rail encoding: 0 = (t=0, f=1) = (TIE_LOW, TIE_HIGH)
+            let a_t = inputs[0].get(i).copied().unwrap_or(tie_low);
+            let a_f = inputs[1].get(i).copied().unwrap_or(tie_high);
+            // For b: inputs[2] = ~b_t = b_f, inputs[3] = ~b_f = b_t (already inverted)
+            // When original b beyond width is 0: b_t=0, b_f=1
+            // So: ~b_t = b_f = 1 (TIE_HIGH), ~b_f = b_t = 0 (TIE_LOW)
+            let b_t = inputs[2].get(i).copied().unwrap_or(tie_high); // ~b_t = 1 for zero
+            let b_f = inputs[3].get(i).copied().unwrap_or(tie_low); // ~b_f = 0 for zero
 
             let diff_t = outputs.get(i * 2).copied().unwrap_or(GateNetId(0));
             let diff_f = outputs.get(i * 2 + 1).copied().unwrap_or(GateNetId(0));

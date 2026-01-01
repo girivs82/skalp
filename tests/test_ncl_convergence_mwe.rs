@@ -4478,3 +4478,218 @@ fn test_mul_in_match_9way() {
 
     println!("\nMUL-in-Match 9-way test completed");
 }
+
+/// Test for nested if/else in match arms (like SRA in CLE)
+/// This pattern: match { ... => { let x = ...; if cond { ... } else { ... } } }
+const NESTED_IF_IN_MATCH: &str = r#"
+async entity NestedIfInMatch {
+    in a: bit[8]
+    in b: bit[8]
+    in opcode: bit[4]
+    out result: bit[8]
+}
+impl NestedIfInMatch {
+    result = match opcode {
+        0 => a + b,
+        1 => a - b,
+        2 => a * b,
+        3 => {
+            // SRA-like pattern: sign-extend arithmetic right shift
+            let sign = a[7];
+            let shifted = a >> b[2:0];
+            let shift_amt = b[2:0];
+            if sign && shift_amt > 0 {
+                let mask = 0xFF << (8 - shift_amt);
+                shifted | mask
+            } else {
+                shifted
+            }
+        },
+        4 => a & b,
+        5 => a | b,
+        6 => a ^ b,
+        7 => ~a,
+        _ => 0
+    }
+}
+"#;
+
+#[test]
+fn test_nested_if_in_match() {
+    println!("\n=== Nested If-in-Match Test (SRA-like pattern) ===\n");
+
+    let hir = parse_and_build_hir(NESTED_IF_IN_MATCH).expect("Failed to parse");
+    let mir_compiler = MirCompiler::new();
+    let mir = mir_compiler
+        .compile(&hir)
+        .expect("Failed to compile to MIR");
+
+    let hier_lir = lower_mir_hierarchical(&mir);
+    let library = get_stdlib_library("generic_asic").expect("Failed to load library");
+    let hier_result = map_hierarchical_to_gates(&hier_lir, &library);
+    let netlist = hier_result.flatten();
+
+    println!(
+        "Compiled: {} cells, {} nets",
+        netlist.cells.len(),
+        netlist.nets.len()
+    );
+
+    // Count cell types
+    let mut cell_type_counts = std::collections::HashMap::new();
+    for cell in &netlist.cells {
+        *cell_type_counts.entry(cell.cell_type.clone()).or_insert(0) += 1;
+    }
+    println!("Cell type counts:");
+    let mut sorted_types: Vec<_> = cell_type_counts.iter().collect();
+    sorted_types.sort_by_key(|(_, count)| std::cmp::Reverse(*count));
+    for (cell_type, count) in sorted_types.iter().take(15) {
+        println!("  {}: {}", cell_type, count);
+    }
+
+    // Check for MUX2_X1 (should be 0)
+    let mux2_count = cell_type_counts.get("MUX2_X1").copied().unwrap_or(0);
+    if mux2_count > 0 {
+        println!(
+            "⚠️  WARNING: {} MUX2_X1 cells found (may cause oscillation)",
+            mux2_count
+        );
+    }
+
+    let config = UnifiedSimConfig {
+        level: SimLevel::GateLevel,
+        circuit_mode: CircuitMode::Ncl,
+        hw_accel: HwAccel::Gpu,
+        max_iterations: 500,
+        ncl_debug: true,
+        ..Default::default()
+    };
+
+    let mut sim = UnifiedSimulator::new(config).expect("Failed to create simulator");
+    sim.load_ncl_gate_level(netlist)
+        .expect("Failed to load NCL netlist");
+
+    // Test ADD case (opcode=0) - simple operation
+    sim.set_ncl_input("top.a", 10, 8);
+    sim.set_ncl_input("top.b", 5, 8);
+    sim.set_ncl_input("top.opcode", 0, 4);
+
+    let result = sim.run_until_stable();
+    println!(
+        "ADD case (opcode=0): iterations={}, stable={}",
+        result.iterations, result.is_stable
+    );
+
+    match sim.get_ncl_output("top.result", 8) {
+        Some(value) => {
+            println!("10 + 5 = {} (expected 15)", value);
+            assert_eq!(value, 15);
+        }
+        None => panic!("Result is NULL for ADD"),
+    }
+
+    // Test SRA case (opcode=3) - nested if/else
+    sim.reset();
+    sim.set_ncl_input("top.a", 0x80, 8); // -128 in signed, MSB=1
+    sim.set_ncl_input("top.b", 2, 8); // shift by 2
+    sim.set_ncl_input("top.opcode", 3, 4);
+
+    let result = sim.run_until_stable();
+    println!(
+        "SRA case (opcode=3): iterations={}, stable={}",
+        result.iterations, result.is_stable
+    );
+
+    match sim.get_ncl_output("top.result", 8) {
+        Some(value) => {
+            // 0x80 >> 2 with sign extension = 0xE0
+            println!("SRA(0x80, 2) = 0x{:02X} (expected 0xE0)", value);
+            if result.iterations >= 100 {
+                println!(
+                    "⚠️  OSCILLATION: {} iterations for nested if/else pattern",
+                    result.iterations
+                );
+            } else {
+                println!("✓ Nested if/else OK: {} iterations", result.iterations);
+            }
+            assert_eq!(value, 0xE0);
+        }
+        None => panic!("Result is NULL for SRA"),
+    }
+
+    println!("\nNested if-in-match test completed");
+}
+
+/// Test SUB with width mismatch to isolate the oscillation issue
+const SUB_WIDTH_MISMATCH: &str = r#"
+async entity SubWidthMismatch {
+    in a: bit[8]
+    in b: bit[3]  // 3-bit input
+    out result: bit[8]
+}
+impl SubWidthMismatch {
+    // 8 - b where b is 3 bits, result is 8 bits
+    result = a - b
+}
+"#;
+
+#[test]
+fn test_sub_width_mismatch() {
+    println!("\n=== SUB Width Mismatch Test ===\n");
+
+    let hir = parse_and_build_hir(SUB_WIDTH_MISMATCH).expect("Failed to parse");
+    let mir_compiler = MirCompiler::new();
+    let mir = mir_compiler
+        .compile(&hir)
+        .expect("Failed to compile to MIR");
+
+    let hier_lir = lower_mir_hierarchical(&mir);
+    let library = get_stdlib_library("generic_asic").expect("Failed to load library");
+    let hier_result = map_hierarchical_to_gates(&hier_lir, &library);
+    let netlist = hier_result.flatten();
+
+    println!(
+        "Compiled: {} cells, {} nets",
+        netlist.cells.len(),
+        netlist.nets.len()
+    );
+
+    let config = UnifiedSimConfig {
+        level: SimLevel::GateLevel,
+        circuit_mode: CircuitMode::Ncl,
+        hw_accel: HwAccel::Gpu,
+        max_iterations: 200,
+        ncl_debug: true,
+        ..Default::default()
+    };
+
+    let mut sim = UnifiedSimulator::new(config).expect("Failed to create simulator");
+    sim.load_ncl_gate_level(netlist)
+        .expect("Failed to load NCL netlist");
+
+    // Test: 8 - 2 = 6
+    sim.set_ncl_input("top.a", 8, 8);
+    sim.set_ncl_input("top.b", 2, 3);
+
+    let result = sim.run_until_stable();
+    println!(
+        "8 - 2: iterations={}, stable={}",
+        result.iterations, result.is_stable
+    );
+
+    match sim.get_ncl_output("top.result", 8) {
+        Some(value) => {
+            println!("8 - 2 = {} (expected 6)", value);
+            if result.iterations >= 50 {
+                println!(
+                    "⚠️  OSCILLATION: {} iterations for SUB width mismatch",
+                    result.iterations
+                );
+            } else {
+                println!("✓ SUB width mismatch OK: {} iterations", result.iterations);
+            }
+            assert_eq!(value, 6);
+        }
+        None => panic!("Result is NULL"),
+    }
+}
