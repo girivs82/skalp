@@ -1259,6 +1259,216 @@ impl NclExpander {
         );
     }
 
+    /// BUG #184 FIX: Expand ZeroExtend to NCL dual-rail encoding
+    /// Lower bits are copied from input, upper bits are padded with NCL DATA_FALSE (t=0, f=1)
+    fn expand_zero_extend(&mut self, input: DualRailPair, dest: DualRailPair, from: u32, to: u32) {
+        // Lower `from` bits: use RangeSelect to extract and buffer
+        if from > 0 {
+            // Extract lower bits from true rail
+            let low_t = self.alloc_signal(format!("zext_low_t_{}", self.next_signal_id), from);
+            self.alloc_node(
+                LirOp::RangeSelect {
+                    width: from,
+                    high: from - 1,
+                    low: 0,
+                },
+                vec![input.t],
+                low_t,
+            );
+
+            // Extract lower bits from false rail
+            let low_f = self.alloc_signal(format!("zext_low_f_{}", self.next_signal_id), from);
+            self.alloc_node(
+                LirOp::RangeSelect {
+                    width: from,
+                    high: from - 1,
+                    low: 0,
+                },
+                vec![input.f],
+                low_f,
+            );
+
+            // Upper bits: NCL DATA_FALSE (t=0, f=1)
+            let upper_width = to - from;
+            let upper_t =
+                self.alloc_signal(format!("zext_upper_t_{}", self.next_signal_id), upper_width);
+            let upper_f =
+                self.alloc_signal(format!("zext_upper_f_{}", self.next_signal_id), upper_width);
+            self.alloc_node(
+                LirOp::Constant {
+                    width: upper_width,
+                    value: 0,
+                },
+                vec![],
+                upper_t,
+            );
+            // For NCL DATA_FALSE, f rail should be all 1s
+            let upper_f_mask = if upper_width >= 64 {
+                u64::MAX
+            } else {
+                (1u64 << upper_width) - 1
+            };
+            self.alloc_node(
+                LirOp::Constant {
+                    width: upper_width,
+                    value: upper_f_mask,
+                },
+                vec![],
+                upper_f,
+            );
+
+            // Concatenate: [upper, lower] for both rails
+            let widths = vec![upper_width, from];
+            self.alloc_node(
+                LirOp::Concat {
+                    widths: widths.clone(),
+                },
+                vec![upper_t, low_t],
+                dest.t,
+            );
+            self.alloc_node(LirOp::Concat { widths }, vec![upper_f, low_f], dest.f);
+        } else {
+            // from == 0: All bits are zero-padded (just a constant 0)
+            self.alloc_node(
+                LirOp::Constant {
+                    width: to,
+                    value: 0,
+                },
+                vec![],
+                dest.t,
+            );
+            let f_mask = if to >= 64 { u64::MAX } else { (1u64 << to) - 1 };
+            self.alloc_node(
+                LirOp::Constant {
+                    width: to,
+                    value: f_mask,
+                },
+                vec![],
+                dest.f,
+            );
+        }
+    }
+
+    /// BUG #184 FIX: Expand SignExtend to NCL dual-rail encoding
+    /// Lower bits are copied from input, upper bits replicate the sign bit
+    fn expand_sign_extend(&mut self, input: DualRailPair, dest: DualRailPair, from: u32, to: u32) {
+        if from > 0 {
+            // Extract lower bits from both rails
+            let low_t = self.alloc_signal(format!("sext_low_t_{}", self.next_signal_id), from);
+            self.alloc_node(
+                LirOp::RangeSelect {
+                    width: from,
+                    high: from - 1,
+                    low: 0,
+                },
+                vec![input.t],
+                low_t,
+            );
+
+            let low_f = self.alloc_signal(format!("sext_low_f_{}", self.next_signal_id), from);
+            self.alloc_node(
+                LirOp::RangeSelect {
+                    width: from,
+                    high: from - 1,
+                    low: 0,
+                },
+                vec![input.f],
+                low_f,
+            );
+
+            // Extract sign bit (highest bit of input)
+            let sign_bit_t = self.alloc_signal(format!("sext_sign_t_{}", self.next_signal_id), 1);
+            self.alloc_node(
+                LirOp::RangeSelect {
+                    width: from,
+                    high: from - 1,
+                    low: from - 1,
+                },
+                vec![input.t],
+                sign_bit_t,
+            );
+
+            let sign_bit_f = self.alloc_signal(format!("sext_sign_f_{}", self.next_signal_id), 1);
+            self.alloc_node(
+                LirOp::RangeSelect {
+                    width: from,
+                    high: from - 1,
+                    low: from - 1,
+                },
+                vec![input.f],
+                sign_bit_f,
+            );
+
+            // Replicate sign bit for upper bits
+            let upper_width = to - from;
+            let mut upper_t_bits = Vec::new();
+            let mut upper_f_bits = Vec::new();
+
+            for _ in 0..upper_width {
+                upper_t_bits.push(sign_bit_t);
+                upper_f_bits.push(sign_bit_f);
+            }
+
+            // If upper_width > 1, we need to concat the replicated sign bits
+            if upper_width > 0 {
+                let upper_t =
+                    self.alloc_signal(format!("sext_upper_t_{}", self.next_signal_id), upper_width);
+                let upper_f =
+                    self.alloc_signal(format!("sext_upper_f_{}", self.next_signal_id), upper_width);
+
+                let widths: Vec<u32> = vec![1; upper_width as usize];
+                self.alloc_node(
+                    LirOp::Concat {
+                        widths: widths.clone(),
+                    },
+                    upper_t_bits,
+                    upper_t,
+                );
+                self.alloc_node(LirOp::Concat { widths }, upper_f_bits, upper_f);
+
+                // Concatenate: [upper, lower] for both rails
+                let final_widths = vec![upper_width, from];
+                self.alloc_node(
+                    LirOp::Concat {
+                        widths: final_widths.clone(),
+                    },
+                    vec![upper_t, low_t],
+                    dest.t,
+                );
+                self.alloc_node(
+                    LirOp::Concat {
+                        widths: final_widths,
+                    },
+                    vec![upper_f, low_f],
+                    dest.f,
+                );
+            } else {
+                // No extension needed, just copy
+                self.alloc_node(LirOp::Buf { width: from }, vec![low_t], dest.t);
+                self.alloc_node(LirOp::Buf { width: from }, vec![low_f], dest.f);
+            }
+        } else {
+            // from == 0: All bits are zero (undefined behavior, just output zeros)
+            self.alloc_node(
+                LirOp::Constant {
+                    width: to,
+                    value: 0,
+                },
+                vec![],
+                dest.t,
+            );
+            let f_mask = if to >= 64 { u64::MAX } else { (1u64 << to) - 1 };
+            self.alloc_node(
+                LirOp::Constant {
+                    width: to,
+                    value: f_mask,
+                },
+                vec![],
+                dest.f,
+            );
+        }
+    }
+
     /// Expand a left shift to NCL using THmn-based barrel shifter
     /// Each stage uses NCL mux chains with proper dual-rail encoding
     fn expand_shl(&mut self, a: DualRailPair, shamt: DualRailPair, dest: DualRailPair, width: u32) {
@@ -1946,6 +2156,24 @@ pub fn expand_to_ncl(lir: &Lir, config: &NclConfig) -> NclExpandResult {
                         // Use true rails for FP computation
                         expander.alloc_node(LirOp::FpDiv { width: *width }, vec![a.t, b.t], dest.t);
                         expander.alloc_node(LirOp::Not { width: *width }, vec![dest.t], dest.f);
+                    }
+                }
+            }
+            // BUG #184 FIX: ZeroExtend - copy lower bits, pad upper bits with NCL DATA_FALSE (t=0, f=1)
+            LirOp::ZeroExtend { from, to } => {
+                if !node.inputs.is_empty() {
+                    let input = expander.dual_rail_map.get(&node.inputs[0]).copied();
+                    if let (Some(input), Some(dest)) = (input, output_pair) {
+                        expander.expand_zero_extend(input, dest, *from, *to);
+                    }
+                }
+            }
+            // BUG #184 FIX: SignExtend - copy lower bits, replicate sign bit to upper bits
+            LirOp::SignExtend { from, to } => {
+                if !node.inputs.is_empty() {
+                    let input = expander.dual_rail_map.get(&node.inputs[0]).copied();
+                    if let (Some(input), Some(dest)) = (input, output_pair) {
+                        expander.expand_sign_extend(input, dest, *from, *to);
                     }
                 }
             }

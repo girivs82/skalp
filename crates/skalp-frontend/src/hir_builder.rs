@@ -10435,6 +10435,11 @@ impl HirBuilderContext {
                     // NCL dual-rail type: ncl<N>
                     return self.build_ncl_type(&child);
                 }
+                // BUG #183 FIX: Add handlers for NatType and IntType which were missing
+                // This caused nat[6] to fall through to default Bit(8)
+                SyntaxKind::NatType => return self.build_nat_type(&child),
+                SyntaxKind::IntType => return self.build_int_type(&child),
+                SyntaxKind::LogicType => return self.build_logic_type(&child),
                 _ => {}
             }
         }
