@@ -550,6 +550,24 @@ impl UnifiedSimulator {
         }
     }
 
+    /// Set NCL dual-rail input from u128 (for signals up to 128 bits)
+    ///
+    /// Use this for wide inputs like 96-bit vector data.
+    pub fn set_ncl_input_u128(&mut self, name: &str, value: u128, width: usize) {
+        match &mut self.backend {
+            SimulatorBackend::NclCpu(ncl_sim) => {
+                ncl_sim.set_dual_rail_value_u128(name, value, width);
+            }
+            #[cfg(target_os = "macos")]
+            SimulatorBackend::NclGpu(runtime) => {
+                runtime.set_dual_rail_value_u128(name, value, width);
+            }
+            _ => {
+                eprintln!("Warning: set_ncl_input_u128 called but not in NCL mode");
+            }
+        }
+    }
+
     /// Set all NCL inputs to NULL (spacer phase)
     pub fn set_ncl_null(&mut self, name: &str, width: usize) {
         match &mut self.backend {
@@ -917,6 +935,8 @@ impl UnifiedSimulator {
     fn build_result(&self) -> UnifiedSimResult {
         let is_stable = match &self.backend {
             SimulatorBackend::NclCpu(ncl_sim) => ncl_sim.stats().is_stable,
+            #[cfg(target_os = "macos")]
+            SimulatorBackend::NclGpu(runtime) => runtime.is_stable(),
             _ => true,
         };
 
