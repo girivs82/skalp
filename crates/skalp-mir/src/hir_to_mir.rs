@@ -207,6 +207,11 @@ pub struct HirToMir<'hir> {
     /// When preserve_generate is used, generate statements are converted to MIR GenerateBlocks
     /// instead of being elaborated at compile time
     next_generate_block_id: u32,
+    /// BUG #178 FIX: Pending MIR parameter substitutions for inline_function_call_with_mir_args
+    /// Maps parameter name to pre-converted MIR expression
+    /// This is set during inline_function_call_with_mir_args and checked during convert_expression
+    /// for GenericParam handling
+    pending_mir_param_subs: HashMap<String, Expression>,
 }
 
 /// Context for converting HIR expressions within a synthesized module
@@ -306,6 +311,7 @@ impl<'hir> HirToMir<'hir> {
             next_pipeline_reg_id: 0,
             unroll_substitution: None,
             next_generate_block_id: 0,
+            pending_mir_param_subs: HashMap::new(),
         }
     }
 
@@ -4523,6 +4529,13 @@ impl<'hir> HirToMir<'hir> {
                 ))
             }
             hir::HirExpression::GenericParam(param_name) => {
+                // BUG #178 FIX: Check pending MIR parameter substitutions first
+                // This handles the case where we're inlining a function and have pre-converted
+                // MIR expressions for the arguments that need to be substituted.
+                if let Some(mir_expr) = self.pending_mir_param_subs.get(param_name) {
+                    return Some(mir_expr.clone());
+                }
+
                 // BUG FIX #7: WORKAROUND for Bug #42/43 - Cast expressions create malformed AST
                 // causing variable references to appear as GenericParam instead of Variable.
                 // First check if this is actually a variable from a let-binding (e.g., from inlined function)
@@ -7938,10 +7951,6 @@ impl<'hir> HirToMir<'hir> {
         // Initialize with mutable bindings' initial values
         for let_stmt in let_bindings {
             if let_stmt.mutable {
-                eprintln!(
-                    "[BUG #86] Tracking mutable variable '{}' (id={:?})",
-                    let_stmt.name, let_stmt.id
-                );
                 var_exprs.insert(let_stmt.id, let_stmt.value.clone());
             }
         }
@@ -7992,62 +8001,86 @@ impl<'hir> HirToMir<'hir> {
 
         // If no mutable variables, this isn't our pattern
         if var_exprs.is_empty() {
-            debug_println!("[BUG #86] No mutable variables found");
             return None;
         }
 
         // Check that returned variable is mutable
         if !var_exprs.contains_key(&returned_var_id) {
-            debug_println!("[BUG #86] Returned variable is not mutable");
             return None;
         }
 
         let mut modified = false;
 
-        // Process each if statement (use actual_stmts_before_return which excludes init assignments)
-        for stmt in actual_stmts_before_return {
-            if let hir::HirStatement::If(if_stmt) = stmt {
-                // Get all assignments in the then-block
-                let assignments = self.collect_assignments_in_block(&if_stmt.then_statements);
+        // Process each statement (use actual_stmts_before_return which excludes init assignments)
+        for stmt in actual_stmts_before_return.iter() {
+            match stmt {
+                // Handle straight-line Assignment statements (not just If)
+                // This is critical for functions like bitreverse32 and popcount32 that have:
+                //   let mut x = value;
+                //   x = expr1;  // Straight-line assignment - must be processed!
+                //   x = expr2;
+                //   return x
+                hir::HirStatement::Assignment(assign) => {
+                    if let hir::HirLValue::Variable(var_id) = &assign.lhs {
+                        // Only process if this is a reassignment to a tracked mutable variable
+                        if var_exprs.contains_key(var_id) {
+                            // Substitute variable references in the RHS with current expressions
+                            let substituted_rhs =
+                                self.substitute_variables(&assign.rhs, &var_exprs, let_bindings);
 
-                if assignments.is_empty() {
-                    continue;
+                            // Update the variable's current expression (SSA-style)
+                            var_exprs.insert(*var_id, substituted_rhs);
+                            modified = true;
+                        }
+                    }
                 }
 
-                modified = true;
+                hir::HirStatement::If(if_stmt) => {
+                    // Get all assignments in the then-block
+                    let assignments = self.collect_assignments_in_block(&if_stmt.then_statements);
 
-                // Substitute variable references in the condition
-                let condition =
-                    self.substitute_variables(&if_stmt.condition, &var_exprs, let_bindings);
+                    if assignments.is_empty() {
+                        continue;
+                    }
 
-                // For each assignment, create a conditional expression
-                for (var_id, rhs) in &assignments {
-                    // Substitute variable references in the RHS
-                    let substituted_rhs = self.substitute_variables(rhs, &var_exprs, let_bindings);
+                    modified = true;
 
-                    // Get current value for else branch
-                    let current_value = var_exprs
-                        .get(var_id)
-                        .cloned()
-                        .unwrap_or(hir::HirExpression::Variable(*var_id));
+                    // Substitute variable references in the condition
+                    let condition =
+                        self.substitute_variables(&if_stmt.condition, &var_exprs, let_bindings);
 
-                    // Create: if condition { substituted_rhs } else { current_value }
-                    let new_expr = hir::HirExpression::If(hir::HirIfExpr {
-                        condition: Box::new(condition.clone()),
-                        then_expr: Box::new(substituted_rhs),
-                        else_expr: Box::new(current_value),
-                    });
+                    // For each assignment, create a conditional expression
+                    for (var_id, rhs) in &assignments {
+                        // Substitute variable references in the RHS
+                        let substituted_rhs =
+                            self.substitute_variables(rhs, &var_exprs, let_bindings);
 
-                    debug_println!("[BUG #86] Created conditional for var {:?}", var_id);
-                    var_exprs.insert(*var_id, new_expr);
+                        // Get current value for else branch
+                        let current_value = var_exprs
+                            .get(var_id)
+                            .cloned()
+                            .unwrap_or(hir::HirExpression::Variable(*var_id));
+
+                        // Create: if condition { substituted_rhs } else { current_value }
+                        let new_expr = hir::HirExpression::If(hir::HirIfExpr {
+                            condition: Box::new(condition.clone()),
+                            then_expr: Box::new(substituted_rhs),
+                            else_expr: Box::new(current_value),
+                        });
+
+                        debug_println!("[BUG #86] Created conditional for var {:?}", var_id);
+                        var_exprs.insert(*var_id, new_expr);
+                    }
                 }
+
+                // Other statement types - skip
+                _ => {}
             }
         }
 
         if modified {
             // Return the final expression for the returned variable
             let inner_result = var_exprs.get(&returned_var_id).cloned();
-            debug_println!("[BUG #86] Successfully converted mutable variable pattern");
 
             // BUG #134 FIX: If original return was Cast(Variable), wrap result in Cast
             match (inner_result, outer_cast) {
@@ -12682,6 +12715,75 @@ impl<'hir> HirToMir<'hir> {
         result
     }
 
+    /// BUG #178 FIX: Inline a function call using pre-converted MIR arguments
+    ///
+    /// This is used when inlining within module context (e.g., in #[parallel] match arms)
+    /// where the arguments have already been converted to MIR expressions with proper
+    /// context-aware substitutions (e.g., local let bindings from mir_cache).
+    ///
+    /// The key difference from `inline_function_call` is that we substitute the function
+    /// body's parameter references with MIR expressions directly, instead of re-converting
+    /// HIR arguments which would lose the mir_cache context.
+    fn inline_function_call_with_mir_args(
+        &mut self,
+        call: &hir::HirCallExpr,
+        mir_args: &[Expression],
+    ) -> Option<Expression> {
+        // Step 1: Find the function
+        let func = self.find_function(&call.function)?;
+        let params = func.params.clone();
+        let body = func.body.clone();
+        let return_type = func.return_type.clone();
+
+        // Check arity
+        if params.len() != mir_args.len() {
+            eprintln!(
+                "BUG #178: Function '{}' expected {} args, got {}",
+                call.function,
+                params.len(),
+                mir_args.len()
+            );
+            return None;
+        }
+
+        // Build param_name -> MIR expression map
+        let mut param_to_mir: HashMap<String, Expression> = HashMap::new();
+        for (param, mir_expr) in params.iter().zip(mir_args.iter()) {
+            param_to_mir.insert(param.name.clone(), mir_expr.clone());
+        }
+
+        // Transform early returns
+        let body = self.transform_early_returns(body);
+
+        // Build var_id -> name mapping
+        let mut var_id_to_name = HashMap::new();
+        self.collect_let_bindings(&body, &mut var_id_to_name);
+
+        // Convert body to HIR expression
+        let body_expr = self.convert_body_to_expression(&body)?;
+
+        // Set pending_mir_param_subs BEFORE converting body to MIR
+        // This allows the GenericParam handler in convert_expression to find
+        // the pre-converted MIR expressions.
+        let old_subs = std::mem::replace(&mut self.pending_mir_param_subs, param_to_mir.clone());
+
+        // Push return type for width inference
+        self.inlining_return_type_stack.push(return_type.clone());
+        let mut mir_body = self.convert_expression(&body_expr, 0)?;
+        self.inlining_return_type_stack.pop();
+
+        // Restore old subs
+        self.pending_mir_param_subs = old_subs;
+
+        // Annotate with return type if available
+        if let Some(ref ret_ty) = return_type {
+            let return_type_ty = self.hir_type_to_type(ret_ty);
+            mir_body = self.annotate_expression_with_type(mir_body, return_type_ty, 0);
+        }
+
+        Some(mir_body)
+    }
+
     /// Helper to convert expression to lvalue (for index/range operations)
     fn expr_to_lvalue(&mut self, expr: &hir::HirExpression) -> Option<LValue> {
         match expr {
@@ -15640,12 +15742,12 @@ impl<'hir> HirToMir<'hir> {
                     return Some(result);
                 }
 
-                // Function is not module-synthesized, fall back to inlining via convert_expression
-                println!(
-                    "🔄🔄🔄 BUG #177 FIX: Function '{}' will be inlined 🔄🔄🔄",
-                    call.function
-                );
-                let result = self.convert_expression(expr, depth);
+                // Function is not module-synthesized, inline with pre-converted MIR args
+                // Use pre-converted arg_exprs instead of falling back to convert_expression
+                // which would re-convert HIR args and lose mir_cache context.
+                // This is critical for nested function calls within Block expressions where
+                // local let bindings are only available in mir_cache.
+                let result = self.inline_function_call_with_mir_args(call, &arg_exprs);
                 if let Some(ref r) = result {
                     self.module_call_cache.insert(cache_key, r.clone());
                 }
