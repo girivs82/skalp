@@ -47,35 +47,67 @@ impl SsaConverter {
 
     /// Convert a MIR module to SSA form
     pub fn convert_module(&mut self, module: &mut Module) {
+        println!(
+            "SSA: Module '{}' has {} variables, {} assignments, {} processes",
+            module.name,
+            module.variables.len(),
+            module.assignments.len(),
+            module.processes.len()
+        );
+
         // First pass: count reassignments to identify variables needing SSA
+        // Count in process blocks
         for process in &module.processes {
             self.count_reassignments_in_block(&process.body);
         }
 
+        // Also count in continuous assignments (for async entities)
+        for assign in &module.assignments {
+            if let LValue::Variable(var_id) = &assign.lhs {
+                println!("SSA: Found continuous assign to var_{}", var_id.0);
+                *self.reassignment_count.entry(*var_id).or_insert(0) += 1;
+            }
+        }
+
         // Initialize current_version for variables that need SSA
+        // Note: count > 1 means multiple assignments (initial + reassignments)
+        println!(
+            "SSA: Checking {} variables for SSA needs",
+            module.variables.len()
+        );
         for variable in &module.variables {
-            if self
+            let count = self
                 .reassignment_count
                 .get(&variable.id)
                 .copied()
-                .unwrap_or(0)
-                > 0
-            {
+                .unwrap_or(0);
+            println!(
+                "SSA:   Variable '{}' (id={}) has {} assignments",
+                variable.name, variable.id.0, count
+            );
+            // Variables assigned more than once need SSA
+            if count > 1 {
                 // Variable is reassigned - initialize version mapping
                 self.current_version.insert(variable.id, variable.id);
-                eprintln!(
-                    "SSA: Variable '{}' (id={}) reassigned {} times - will create versions",
-                    variable.name,
-                    variable.id.0,
-                    self.reassignment_count.get(&variable.id).unwrap_or(&0)
+                println!(
+                    "SSA: Variable '{}' (id={}) assigned {} times - will create versions",
+                    variable.name, variable.id.0, count
                 );
             }
         }
 
         // Second pass: transform assignments and references
+        // Transform process blocks
         for process in &mut module.processes {
             self.convert_block(&mut process.body, &module.variables);
         }
+
+        // Transform continuous assignments (for async entities)
+        println!(
+            "SSA: Converting {} continuous assignments",
+            module.assignments.len()
+        );
+        self.convert_continuous_assignments(&mut module.assignments, &module.variables);
 
         // Add new SSA variables to module
         module.variables.append(&mut self.new_variables);
@@ -84,6 +116,88 @@ impl SsaConverter {
             "SSA: Conversion complete - created {} new variable versions",
             module.variables.len()
         );
+    }
+
+    /// Convert continuous assignments to SSA form
+    fn convert_continuous_assignments(
+        &mut self,
+        assignments: &mut [ContinuousAssign],
+        variables: &[Variable],
+    ) {
+        // Track first assignment to each variable (first assignment keeps original name)
+        let mut first_assignment: HashMap<VariableId, bool> = HashMap::new();
+
+        for assign in assignments.iter_mut() {
+            // First update RHS references to use current versions
+            self.update_expr_refs(&mut assign.rhs);
+
+            // Extract var_id if LHS is a variable, and check if it needs SSA
+            let var_id_opt = if let LValue::Variable(var_id) = &assign.lhs {
+                if self.current_version.contains_key(var_id) {
+                    Some(*var_id)
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
+            if let Some(var_id) = var_id_opt {
+                let is_first = !first_assignment.contains_key(&var_id);
+                println!(
+                    "SSA:   Processing assign to var_{}, is_first={}",
+                    var_id.0, is_first
+                );
+
+                if is_first {
+                    // First assignment - keep original variable
+                    println!(
+                        "SSA:   First assignment to var_{}, keeping original",
+                        var_id.0
+                    );
+                    first_assignment.insert(var_id, true);
+                    // Update current version to be the original variable
+                    self.current_version.insert(var_id, var_id);
+                } else {
+                    // Create a new SSA version
+                    let new_id = VariableId(self.next_var_id);
+                    self.next_var_id += 1;
+
+                    // Find the original variable name
+                    let original_name = variables
+                        .iter()
+                        .find(|v| v.id == var_id)
+                        .map(|v| v.name.clone())
+                        .unwrap_or_else(|| format!("var_{}", var_id.0));
+
+                    // Create a new variable with SSA-versioned name
+                    let version_num = self.next_var_id - 1;
+                    let original_var = variables.iter().find(|v| v.id == var_id);
+                    let new_var = Variable {
+                        id: new_id,
+                        name: format!("{}_ssa_{}", original_name, version_num),
+                        var_type: original_var
+                            .map(|v| v.var_type.clone())
+                            .unwrap_or_else(|| DataType::Bit(1)),
+                        initial: None, // SSA versions don't have initial values
+                        span: original_var.and_then(|v| v.span.clone()),
+                    };
+
+                    println!(
+                        "SSA:   Creating new version {} for {} (id={})",
+                        new_var.name, original_name, var_id.0
+                    );
+
+                    self.new_variables.push(new_var);
+
+                    // Update LHS to new variable
+                    assign.lhs = LValue::Variable(new_id);
+
+                    // Update current version for subsequent references
+                    self.current_version.insert(var_id, new_id);
+                }
+            }
+        }
     }
 
     /// Count variable reassignments in a block
@@ -360,12 +474,13 @@ pub fn apply_ssa_conversion(mir: &mut Mir) {
         .max()
         .unwrap_or(0);
 
+    println!("SSA: Found {} modules to process", mir.modules.len());
     for module in &mut mir.modules {
         let mut converter = SsaConverter::new(max_var_id + 1000); // Start IDs high to avoid collision
         converter.convert_module(module);
     }
 
-    eprintln!("SSA: Conversion complete");
+    println!("SSA: Conversion complete");
 }
 
 #[cfg(test)]
