@@ -212,6 +212,11 @@ pub struct HirToMir<'hir> {
     /// This is set during inline_function_call_with_mir_args and checked during convert_expression
     /// for GenericParam handling
     pending_mir_param_subs: HashMap<String, Expression>,
+
+    /// BUG #181 FIX: Maps parameter VariableId to parameter name
+    /// This is set during inline_function_call_with_mir_args so that Variable references
+    /// to parameters can be resolved via pending_mir_param_subs
+    pending_param_var_to_name: HashMap<hir::VariableId, String>,
 }
 
 /// Context for converting HIR expressions within a synthesized module
@@ -312,6 +317,7 @@ impl<'hir> HirToMir<'hir> {
             unroll_substitution: None,
             next_generate_block_id: 0,
             pending_mir_param_subs: HashMap::new(),
+            pending_param_var_to_name: HashMap::new(),
         }
     }
 
@@ -4472,6 +4478,20 @@ impl<'hir> HirToMir<'hir> {
                         ty,
                     ))
                 } else {
+                    // BUG #181 FIX: Check if this is a parameter Variable that should be
+                    // resolved via pending_param_var_to_name + pending_mir_param_subs.
+                    // This happens when inlining functions where parameters are referenced
+                    // as Variable(param_id) instead of GenericParam("param_name").
+                    if let Some(param_name) = self.pending_param_var_to_name.get(id) {
+                        if let Some(mir_expr) = self.pending_mir_param_subs.get(param_name) {
+                            eprintln!(
+                                "[BUG #181 FIX] Variable({:?}) resolved via pending_param_var_to_name['{}'] -> pending_mir_param_subs",
+                                id, param_name
+                            );
+                            return Some(mir_expr.clone());
+                        }
+                    }
+
                     eprintln!(
                         "[DEBUG] Variable not found in any lookup map: HIR ID {:?}",
                         id
@@ -8021,12 +8041,15 @@ impl<'hir> HirToMir<'hir> {
                 //   x = expr2;
                 //   return x
                 hir::HirStatement::Assignment(assign) => {
+                    println!("[BUG #180 DEBUG] Found Assignment in try_convert_mutable_var_pattern");
                     if let hir::HirLValue::Variable(var_id) = &assign.lhs {
+                        println!("[BUG #180 DEBUG]   -> To var {:?}, tracked={}", var_id, var_exprs.contains_key(var_id));
                         // Only process if this is a reassignment to a tracked mutable variable
                         if var_exprs.contains_key(var_id) {
                             // Substitute variable references in the RHS with current expressions
                             let substituted_rhs =
                                 self.substitute_variables(&assign.rhs, &var_exprs, let_bindings);
+                            println!("[BUG #180 DEBUG]   -> Updated var {:?} expression", var_id);
 
                             // Update the variable's current expression (SSA-style)
                             var_exprs.insert(*var_id, substituted_rhs);
@@ -8081,6 +8104,7 @@ impl<'hir> HirToMir<'hir> {
         if modified {
             // Return the final expression for the returned variable
             let inner_result = var_exprs.get(&returned_var_id).cloned();
+            println!("[BUG #180 DEBUG] try_convert_mutable_var_pattern: modified=true, returning result for var {:?}", returned_var_id);
 
             // BUG #134 FIX: If original return was Cast(Variable), wrap result in Cast
             match (inner_result, outer_cast) {
@@ -8095,6 +8119,7 @@ impl<'hir> HirToMir<'hir> {
                 (None, _) => None,
             }
         } else {
+            println!("[BUG #180 DEBUG] try_convert_mutable_var_pattern: modified=false, returning None");
             debug_println!("[BUG #86] No if statements modified any variables");
             None
         }
@@ -12765,62 +12790,125 @@ impl<'hir> HirToMir<'hir> {
             var_id_to_name.insert(hir::VariableId(i as u32), param.name.clone());
         }
 
-        // BUG #179 FIX: Build let_bindings map for HIR substitution
+        // BUG #181 FIX: DON'T substitute parameters with caller's HIR expressions.
+        // Previously, we mapped param names -> caller's Variable(id), but those Variables
+        // are from the CALLER's context and can't be resolved in convert_expression.
+        //
+        // Instead, parameters are resolved via:
+        // 1. GenericParam("name") -> pending_mir_param_subs["name"] (in convert_expression)
+        // 2. Variable(param_id) -> pending_param_var_to_name[param_id] -> pending_mir_param_subs[name]
+        //
         // This is critical for functions with local let bindings like:
         //   let prod_x = fp_mul(ax, bx);
         //   let result = fp_add(prod_x, prod_y);
         //   return result;  // result must be substituted with fp_add expression
-        let mut hir_param_subs: HashMap<String, hir::HirExpression> = HashMap::new();
-        for (param, hir_arg) in params.iter().zip(call.args.iter()) {
-            hir_param_subs.insert(param.name.clone(), hir_arg.clone());
-        }
+        let hir_param_subs: HashMap<String, hir::HirExpression> = HashMap::new();
+        // NOTE: We no longer populate hir_param_subs with caller's HIR args.
+        // Parameters are handled via pending_mir_param_subs during MIR conversion.
 
         let mut let_bindings: HashMap<String, hir::HirExpression> = HashMap::new();
 
-        // Helper to recursively collect let statements
-        fn collect_let_stmts_recursive(
+        // BUG #180 FIX: Track mutable variables separately - they need to be processed
+        // through their full assignment chain for functions like bitreverse32:
+        //   let mut x = value;
+        //   x = f1(x);  // Assignment, not let
+        //   x = f2(x);
+        //   return x;
+        let mut mutable_vars: HashMap<String, hir::VariableId> = HashMap::new();
+
+        // Enum to represent let or assignment statements in order
+        #[derive(Debug)]
+        enum BindingOp {
+            Let {
+                name: String,
+                value: hir::HirExpression,
+                is_mutable: bool,
+                id: hir::VariableId,
+            },
+            Assign {
+                var_id: hir::VariableId,
+                value: hir::HirExpression,
+            },
+        }
+
+        // Helper to recursively collect let AND assignment statements in order
+        fn collect_bindings_recursive(
             stmts: &[hir::HirStatement],
-            collected: &mut Vec<(String, hir::HirExpression, bool, hir::VariableId)>,
+            collected: &mut Vec<BindingOp>,
         ) {
             for stmt in stmts {
                 match stmt {
                     hir::HirStatement::Let(let_stmt) => {
-                        collected.push((
-                            let_stmt.name.clone(),
-                            let_stmt.value.clone(),
-                            let_stmt.mutable,
-                            let_stmt.id,
-                        ));
+                        collected.push(BindingOp::Let {
+                            name: let_stmt.name.clone(),
+                            value: let_stmt.value.clone(),
+                            is_mutable: let_stmt.mutable,
+                            id: let_stmt.id,
+                        });
+                    }
+                    hir::HirStatement::Assignment(assign) => {
+                        // Only collect variable assignments (not signal/port)
+                        if let hir::HirLValue::Variable(var_id) = &assign.lhs {
+                            collected.push(BindingOp::Assign {
+                                var_id: *var_id,
+                                value: assign.rhs.clone(),
+                            });
+                        }
                     }
                     hir::HirStatement::If(if_stmt) => {
-                        collect_let_stmts_recursive(&if_stmt.then_statements, collected);
+                        collect_bindings_recursive(&if_stmt.then_statements, collected);
                         if let Some(else_stmts) = &if_stmt.else_statements {
-                            collect_let_stmts_recursive(else_stmts, collected);
+                            collect_bindings_recursive(else_stmts, collected);
                         }
                     }
                     hir::HirStatement::Block(stmts) => {
-                        collect_let_stmts_recursive(stmts, collected);
+                        collect_bindings_recursive(stmts, collected);
                     }
                     _ => {}
                 }
             }
         }
 
-        let mut collected_lets = Vec::new();
-        collect_let_stmts_recursive(&body, &mut collected_lets);
+        let mut collected_bindings = Vec::new();
+        collect_bindings_recursive(&body, &mut collected_bindings);
 
-        // Process let bindings, substituting as we go
-        for (name, value, is_mutable, _id) in collected_lets {
-            let rhs_substituted = self.substitute_hir_expr_recursively(
-                &value,
-                &hir_param_subs,
-                &let_bindings,
-                &var_id_to_name,
-            );
-            if let Some(rhs) = rhs_substituted {
-                // Only add immutable let bindings (mutable ones need SSA handling)
-                if !is_mutable {
-                    let_bindings.insert(name, rhs);
+        // Process bindings in order, building substitution chain
+        for binding in collected_bindings {
+            match binding {
+                BindingOp::Let {
+                    name,
+                    value,
+                    is_mutable,
+                    id,
+                } => {
+                    let rhs_substituted = self.substitute_hir_expr_recursively(
+                        &value,
+                        &hir_param_subs,
+                        &let_bindings,
+                        &var_id_to_name,
+                    );
+                    if let Some(rhs) = rhs_substituted {
+                        // BUG #180 FIX: Add ALL let bindings (mutable too) to build substitution chain
+                        let_bindings.insert(name.clone(), rhs);
+                        if is_mutable {
+                            mutable_vars.insert(name, id);
+                        }
+                    }
+                }
+                BindingOp::Assign { var_id, value } => {
+                    // BUG #180 FIX: For mutable variable assignments, update the binding
+                    // This handles: x = f(x) -> substitute current value of x in f(x)
+                    if let Some(name) = var_id_to_name.get(&var_id) {
+                        let rhs_substituted = self.substitute_hir_expr_recursively(
+                            &value,
+                            &hir_param_subs,
+                            &let_bindings,
+                            &var_id_to_name,
+                        );
+                        if let Some(rhs) = rhs_substituted {
+                            let_bindings.insert(name.clone(), rhs);
+                        }
+                    }
                 }
             }
         }
@@ -12853,6 +12941,15 @@ impl<'hir> HirToMir<'hir> {
         // the pre-converted MIR expressions.
         let old_subs = std::mem::replace(&mut self.pending_mir_param_subs, param_to_mir.clone());
 
+        // BUG #181 FIX: Set pending_param_var_to_name so that Variable(param_id) can be
+        // resolved to the parameter name, which is then looked up in pending_mir_param_subs.
+        // Parameters are VariableId(0), (1), (2), ... matching their position in params list.
+        let mut param_var_to_name: HashMap<hir::VariableId, String> = HashMap::new();
+        for (i, param) in params.iter().enumerate() {
+            param_var_to_name.insert(hir::VariableId(i as u32), param.name.clone());
+        }
+        let old_param_var = std::mem::replace(&mut self.pending_param_var_to_name, param_var_to_name);
+
         // Push return type for width inference
         self.inlining_return_type_stack.push(return_type.clone());
         let mut mir_body = self.convert_expression(&substituted_body, 0)?;
@@ -12860,6 +12957,7 @@ impl<'hir> HirToMir<'hir> {
 
         // Restore old subs
         self.pending_mir_param_subs = old_subs;
+        self.pending_param_var_to_name = old_param_var;
 
         // Annotate with return type if available
         if let Some(ref ret_ty) = return_type {
