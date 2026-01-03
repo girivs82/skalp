@@ -940,7 +940,6 @@ fn test_async_cle_l4_bezier() {
 }
 
 #[test]
-#[ignore] // BUG #191: FP comparison result routing in NCL - fp_min/fp_max select wrong operand
 fn test_async_cle_l4_ray_aabb() {
     println!("\n=== Async CLE L4 RAY_AABB Test ===");
     let netlist = compile_karythra_async_cle();
