@@ -26,6 +26,7 @@
 //! println!("Cells: {}", gate_netlist.netlist.cells.len());
 //! ```
 
+pub mod async_sta;
 pub mod compiled_ip;
 pub mod gate_netlist;
 pub mod gate_optimizer;
@@ -112,4 +113,10 @@ pub use netlist::Netlist;
 pub use compiled_ip::{
     generate_header, CompiledIp, CompiledIpHeader, CompiledPortDirection, CompiledPortInfo,
     GenericValue, SKB_MAGIC, SKB_VERSION,
+};
+
+// Async STA for NCL circuits
+pub use async_sta::{
+    analyze_async_timing, AsyncSta, AsyncStaConfig, AsyncStaResult, AsyncStaStats,
+    CompletionViolation, ForkViolation, ViolationSeverity,
 };
