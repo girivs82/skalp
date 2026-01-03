@@ -910,6 +910,34 @@ kernel void eval_ncl(
         }
     }
 
+    /// Set a dual-rail input value from two u128s (for signals up to 256 bits)
+    /// low = bits [127:0], high = bits [255:128]
+    pub fn set_dual_rail_value_u256(&mut self, name: &str, low: u128, high: u128, width: usize) {
+        if let Some(nets) = self.signal_name_to_nets.get(name).cloned() {
+            let actual_width = nets.len() / 2;
+            let width = width.min(actual_width);
+
+            for bit in 0..width {
+                let bit_value = if bit < 128 {
+                    (low >> bit) & 1 != 0
+                } else if bit < 256 {
+                    (high >> (bit - 128)) & 1 != 0
+                } else {
+                    false
+                };
+                let t_idx = bit;
+                let f_idx = actual_width + bit;
+
+                if let Some(&t_net) = nets.get(t_idx) {
+                    self.set_net(t_net, bit_value);
+                }
+                if let Some(&f_net) = nets.get(f_idx) {
+                    self.set_net(f_net, !bit_value);
+                }
+            }
+        }
+    }
+
     /// Set all inputs to NULL (both rails low)
     ///
     /// The layout is: t rails first [0..width), then f rails [width..2*width)

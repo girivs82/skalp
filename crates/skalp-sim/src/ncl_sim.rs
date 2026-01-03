@@ -330,6 +330,34 @@ impl NclSimulator {
         }
     }
 
+    /// Set all bits of a dual-rail signal from a u128 value (for signals up to 128 bits)
+    pub fn set_dual_rail_value_u128(&mut self, name: &str, value: u128, width: usize) {
+        for bit in 0..width {
+            // For bits >= 128, they're always 0 since value is u128
+            let bit_value = if bit < 128 {
+                (value >> bit) & 1 != 0
+            } else {
+                false
+            };
+            self.set_dual_rail_bool(name, bit, bit_value);
+        }
+    }
+
+    /// Set all bits of a dual-rail signal from two u128 values (for signals up to 256 bits)
+    /// low = bits [127:0], high = bits [255:128]
+    pub fn set_dual_rail_value_u256(&mut self, name: &str, low: u128, high: u128, width: usize) {
+        for bit in 0..width {
+            let bit_value = if bit < 128 {
+                (low >> bit) & 1 != 0
+            } else if bit < 256 {
+                (high >> (bit - 128)) & 1 != 0
+            } else {
+                false
+            };
+            self.set_dual_rail_bool(name, bit, bit_value);
+        }
+    }
+
     /// Get a dual-rail NCL signal value
     ///
     /// Storage layout: all t rails first, then all f rails

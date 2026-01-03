@@ -568,6 +568,25 @@ impl UnifiedSimulator {
         }
     }
 
+    /// Set NCL dual-rail input from two u128 values (for signals up to 256 bits)
+    ///
+    /// Use this for full 256-bit data words.
+    /// low = bits [127:0], high = bits [255:128]
+    pub fn set_ncl_input_u256(&mut self, name: &str, low: u128, high: u128, width: usize) {
+        match &mut self.backend {
+            SimulatorBackend::NclCpu(ncl_sim) => {
+                ncl_sim.set_dual_rail_value_u256(name, low, high, width);
+            }
+            #[cfg(target_os = "macos")]
+            SimulatorBackend::NclGpu(runtime) => {
+                runtime.set_dual_rail_value_u256(name, low, high, width);
+            }
+            _ => {
+                eprintln!("Warning: set_ncl_input_u256 called but not in NCL mode");
+            }
+        }
+    }
+
     /// Set all NCL inputs to NULL (spacer phase)
     pub fn set_ncl_null(&mut self, name: &str, width: usize) {
         match &mut self.backend {
