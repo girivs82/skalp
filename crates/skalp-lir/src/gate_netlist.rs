@@ -470,6 +470,10 @@ pub struct GateNetlist {
     pub clocks: Vec<GateNetId>,
     /// Reset net IDs
     pub resets: Vec<GateNetId>,
+    /// True if this is an NCL (Null Convention Logic) asynchronous circuit.
+    /// Set by tech_mapper when dual-rail signals are detected.
+    #[serde(default)]
+    pub is_ncl: bool,
     /// Net name to ID mapping (skipped during serialization - rebuilt from nets)
     #[serde(skip, default)]
     net_map: HashMap<String, GateNetId>,
@@ -490,6 +494,7 @@ impl GateNetlist {
             outputs: Vec::new(),
             clocks: Vec::new(),
             resets: Vec::new(),
+            is_ncl: false,
             net_map: HashMap::new(),
             stats: GateNetlistStats::default(),
         }

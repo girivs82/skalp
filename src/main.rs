@@ -962,11 +962,8 @@ fn build_design(
                 }
             };
 
-            // Run async STA for NCL circuits
-            if library
-                .find_best_cell(&skalp_lir::CellFunction::Th22)
-                .is_some()
-            {
+            // Run async STA for NCL circuits (detected by tech_mapper via is_ncl flag)
+            if optimized_netlist.is_ncl {
                 info!("Running async timing analysis for NCL circuit...");
                 let sta_config = skalp_lir::AsyncStaConfig::default();
                 let sta_result = skalp_lir::analyze_async_timing(

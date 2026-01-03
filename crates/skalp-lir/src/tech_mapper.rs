@@ -210,6 +210,14 @@ impl<'a> TechMapper<'a> {
             self.stats.nodes_processed += 1;
         }
 
+        // Detect NCL by checking for dual-rail signal naming
+        // This is set as metadata so downstream tools (async STA) can use it
+        let is_ncl = word_lir
+            .signals
+            .iter()
+            .any(|sig| Self::is_ncl_true_rail(&sig.name) || Self::is_ncl_false_rail(&sig.name));
+        self.netlist.is_ncl = is_ncl;
+
         // Update statistics
         self.netlist.update_stats();
 
