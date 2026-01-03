@@ -611,12 +611,6 @@ impl GateOptimizer {
         // because output port net IDs are fixed (part of module interface)
         let output_port_nets: HashSet<GateNetId> = netlist.outputs.iter().copied().collect();
 
-        // For NCL circuits, we need to be more conservative about buffer removal.
-        // Simulations look up signals by name, so we can only safely remove buffers
-        // if both the input and output nets have internal names (start with "__"),
-        // or if the input net has the same base name as the output net.
-        let is_ncl = netlist.is_ncl;
-
         for cell in &netlist.cells {
             if self.cells_to_remove.contains(&cell.id) {
                 continue;
@@ -624,7 +618,10 @@ impl GateOptimizer {
 
             let cell_type = cell.cell_type.to_uppercase();
 
-            if matches!(cell_type.as_str(), "BUF" | "BUF_X1" | "BUFF" | "CLKBUF") {
+            if matches!(
+                cell_type.as_str(),
+                "BUF" | "BUF_X1" | "BUFF" | "CLKBUF" | "BUFFER"
+            ) {
                 if let (Some(&input), Some(&output)) = (cell.inputs.first(), cell.outputs.first()) {
                     // IMPORTANT: Do NOT remove buffers that drive output ports!
                     // Output port net IDs are fixed (part of module interface).
@@ -633,60 +630,9 @@ impl GateOptimizer {
                         continue;
                     }
 
-                    // For NCL circuits, only remove buffers where:
-                    // 1. The output net has an internal name (starts with "__"), OR
-                    // 2. Both input and output have the same base name
-                    // This ensures simulations can still find values by name.
-                    if is_ncl {
-                        let output_name = netlist
-                            .nets
-                            .get(output.0 as usize)
-                            .map(|n| n.name.as_str())
-                            .unwrap_or("");
-                        let input_name = netlist
-                            .nets
-                            .get(input.0 as usize)
-                            .map(|n| n.name.as_str())
-                            .unwrap_or("");
-
-                        // Check if output has a meaningful name
-                        let output_is_internal =
-                            output_name.starts_with("__") || output_name.is_empty();
-
-                        // Check if they have the same base name (for signal grouping)
-                        let same_base_name = if !output_is_internal && !input_name.is_empty() {
-                            // Strip bit suffix and compare
-                            let strip_suffix = |s: &str| -> String {
-                                let mut result = s.to_string();
-                                if let Some(pos) = result.find('[') {
-                                    result = result[..pos].to_string();
-                                }
-                                if let Some(pos) = result.rfind('_') {
-                                    let suffix = &result[pos + 1..];
-                                    if suffix == "t"
-                                        || suffix == "f"
-                                        || (suffix.starts_with('t')
-                                            && suffix[1..].chars().all(|c| c.is_ascii_digit()))
-                                        || (suffix.starts_with('f')
-                                            && suffix[1..].chars().all(|c| c.is_ascii_digit()))
-                                    {
-                                        result = result[..pos].to_string();
-                                    }
-                                }
-                                result
-                            };
-                            strip_suffix(output_name) == strip_suffix(input_name)
-                        } else {
-                            false
-                        };
-
-                        // Only remove if safe for NCL simulation
-                        if !output_is_internal && !same_base_name {
-                            continue;
-                        }
-                    }
-
                     // Replace buffer output with its input
+                    // For NCL circuits, we'll also set alias_of in apply_optimizations
+                    // so that simulations can resolve the old net name to the new value
                     self.net_replacements.insert(output, input);
                     self.cells_to_remove.insert(cell.id);
                     removed += 1;
@@ -804,42 +750,58 @@ impl GateOptimizer {
             }
         }
 
-        // Transfer meaningful net names from replaced nets to their replacements.
-        // This is critical for NCL simulation where outputs are looked up by name.
-        // When a buffer is removed, its output net (with a meaningful name like "result_t[0]")
-        // is replaced with its input net (which may have an internal name like "__anon_123").
-        // We need to:
-        // 1. Transfer the meaningful name to the replacement net
-        // 2. Rename the old net to prevent name collisions
+        // Set up net aliases for replaced nets.
+        // This is critical for NCL simulation where signals are looked up by name.
+        // When a buffer is removed, its output net becomes an alias for its input net.
+        // The simulation can then resolve the alias to find the actual value.
         //
-        // A name is considered "meaningful" if it doesn't start with double underscore.
-        // For NCL, we're now conservative about which buffers to remove (see buffer_removal).
-        // Buffers with meaningful output names are kept, so no name transfer is needed.
-        // For non-NCL circuits or internal-name buffers, transfer names if beneficial.
+        // For each replaced net, we:
+        // 1. Set alias_of to point to the final replacement (following the chain)
+        // 2. Optionally transfer meaningful names to internal nets
+        let mut aliases_set = 0;
         let mut names_transferred = 0;
+
         for (&old_net, &new_net) in &self.net_replacements {
             if old_net == new_net {
                 continue;
             }
 
+            // Follow the replacement chain to find the final net
+            let mut final_net = new_net;
+            while let Some(&next) = self.net_replacements.get(&final_net) {
+                if next == final_net {
+                    break;
+                }
+                final_net = next;
+            }
+
+            // Set alias_of on the old net to point to the final net
+            if let Some(net) = netlist.nets.get_mut(old_net.0 as usize) {
+                net.alias_of = Some(final_net);
+                aliases_set += 1;
+            }
+
+            // For non-NCL or when the new net has an internal name, transfer the name
             let old_name = netlist.nets.get(old_net.0 as usize).map(|n| n.name.clone());
-            let new_name = netlist.nets.get(new_net.0 as usize).map(|n| n.name.clone());
+            let new_name = netlist
+                .nets
+                .get(final_net.0 as usize)
+                .map(|n| n.name.clone());
 
             if let (Some(old), Some(new)) = (old_name, new_name) {
-                // If old has a meaningful name and new has internal name, transfer
                 if !old.starts_with("__") && !old.is_empty() && new.starts_with("__") {
-                    if let Some(net) = netlist.nets.get_mut(new_net.0 as usize) {
+                    if let Some(net) = netlist.nets.get_mut(final_net.0 as usize) {
                         net.name = old.clone();
                         names_transferred += 1;
-                    }
-                    if let Some(net) = netlist.nets.get_mut(old_net.0 as usize) {
-                        net.name = format!("__replaced_{}", old);
                     }
                 }
             }
         }
-        if names_transferred > 0 {
-            eprintln!("[BUF_REMOVAL] Transferred {} net names", names_transferred);
+        if aliases_set > 0 {
+            eprintln!(
+                "[BUF_REMOVAL] Set {} net aliases, transferred {} names",
+                aliases_set, names_transferred
+            );
         }
 
         // Handle output ports specially - NEVER replace output port net IDs

@@ -4977,6 +4977,7 @@ fn create_blackbox_netlist(
                 is_reset: input_name.contains("rst") || input_name.contains("reset"),
                 is_detection: false,
                 detection_config: None,
+                alias_of: None,
             };
             input_nets.push(net.id);
             netlist.inputs.push(net.id);
@@ -5009,6 +5010,7 @@ fn create_blackbox_netlist(
                 is_reset: false,
                 is_detection: false,
                 detection_config: None,
+                alias_of: None,
             };
             output_nets.push(net.id);
             netlist.outputs.push(net.id);
@@ -5041,6 +5043,7 @@ fn create_blackbox_netlist(
                 is_reset: false,
                 is_detection: false,
                 detection_config: None,
+                alias_of: None,
             };
             input_nets.push(net.id);
             output_nets.push(net.id);

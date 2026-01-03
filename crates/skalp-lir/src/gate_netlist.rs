@@ -354,6 +354,11 @@ pub struct GateNet {
     /// Includes mode (continuous/boot/periodic) and optional interval
     /// Note: Not using skip_serializing_if because bincode uses positional encoding
     pub detection_config: Option<DetectionConfig>,
+    /// If this net is an alias for another net (e.g., after buffer removal),
+    /// this points to the canonical net that holds the actual value.
+    /// Used by NCL simulation to resolve net lookups.
+    #[serde(default)]
+    pub alias_of: Option<GateNetId>,
 }
 
 impl GateNet {
@@ -371,6 +376,7 @@ impl GateNet {
             is_reset: false,
             is_detection: false,
             detection_config: None,
+            alias_of: None,
         }
     }
 
@@ -388,6 +394,7 @@ impl GateNet {
             is_reset: false,
             is_detection: false,
             detection_config: None,
+            alias_of: None,
         }
     }
 
@@ -405,6 +412,7 @@ impl GateNet {
             is_reset: false,
             is_detection: false,
             detection_config: None,
+            alias_of: None,
         }
     }
 
@@ -422,6 +430,7 @@ impl GateNet {
             is_reset: false,
             is_detection: true,
             detection_config: Some(DetectionConfig::default()), // Default to continuous mode
+            alias_of: None,
         }
     }
 
@@ -443,6 +452,7 @@ impl GateNet {
             is_reset: false,
             is_detection: true,
             detection_config: Some(config),
+            alias_of: None,
         }
     }
 }
@@ -950,10 +960,32 @@ impl GateNetlist {
             is_reset: false,
             is_detection: false,
             detection_config: None,
+            alias_of: None,
         };
         self.net_map.insert(name, id);
         self.nets.push(net);
         id
+    }
+
+    /// Resolve a net ID to its canonical net ID, following alias chains.
+    /// Returns the original ID if no alias is set.
+    pub fn resolve_alias(&self, net_id: GateNetId) -> GateNetId {
+        let mut current = net_id;
+        let mut depth = 0;
+        const MAX_DEPTH: usize = 100; // Prevent infinite loops
+
+        while let Some(net) = self.nets.get(current.0 as usize) {
+            if let Some(alias) = net.alias_of {
+                if alias == current || depth >= MAX_DEPTH {
+                    break;
+                }
+                current = alias;
+                depth += 1;
+            } else {
+                break;
+            }
+        }
+        current
     }
 
     /// Merge two nets by name (for stitching hierarchical boundaries)

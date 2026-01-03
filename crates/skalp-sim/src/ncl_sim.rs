@@ -258,16 +258,26 @@ impl NclSimulator {
     }
 
     /// Set a single-bit net value
+    ///
+    /// If the net is an alias (e.g., after buffer removal), resolves to the canonical net.
     pub fn set_net(&mut self, net_id: GateNetId, value: bool) {
-        if (net_id.0 as usize) < self.net_values.len() {
-            self.net_values[net_id.0 as usize] = value;
+        // Resolve alias chain first (handles nets orphaned by buffer removal)
+        let resolved_id = self.netlist.resolve_alias(net_id);
+
+        if (resolved_id.0 as usize) < self.net_values.len() {
+            self.net_values[resolved_id.0 as usize] = value;
         }
     }
 
     /// Get a single-bit net value
+    ///
+    /// If the net is an alias (e.g., after buffer removal), resolves to the canonical net.
     pub fn get_net(&self, net_id: GateNetId) -> bool {
+        // Resolve alias chain first (handles nets orphaned by buffer removal)
+        let resolved_id = self.netlist.resolve_alias(net_id);
+
         self.net_values
-            .get(net_id.0 as usize)
+            .get(resolved_id.0 as usize)
             .copied()
             .unwrap_or(false)
     }

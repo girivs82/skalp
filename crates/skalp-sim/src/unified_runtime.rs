@@ -616,10 +616,7 @@ impl UnifiedSimulator {
             SimulatorBackend::NclCpu(ncl_sim) => ncl_sim.get_dual_rail_value(name, width),
             #[cfg(target_os = "macos")]
             SimulatorBackend::NclGpu(runtime) => runtime.get_dual_rail_value(name, width),
-            _ => {
-                eprintln!("Warning: get_ncl_output called but not in NCL mode");
-                None
-            }
+            _ => None,
         }
     }
 

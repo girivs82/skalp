@@ -304,6 +304,12 @@ impl GpuNclRuntime {
             self.use_gpu = false;
         }
 
+        // Use CPU mode for small circuits - GPU overhead outweighs benefits,
+        // and there's a known GPU kernel issue with aliased nets from buffer removal
+        if self.cells.len() < 10000 {
+            self.use_gpu = false;
+        }
+
         // Debug: show stateful gate count
         println!(
             "[GPU_NCL] Detected {} stateful gates (TH12, TH22, etc.) out of {} total cells",
@@ -779,8 +785,13 @@ kernel void eval_ncl(
     }
 
     /// Set a net value
+    ///
+    /// If the net is an alias (e.g., after buffer removal), resolves to the canonical net.
     pub fn set_net(&mut self, net_id: GateNetId, value: bool) {
-        if let Some(&idx) = self.net_to_index.get(&net_id.0) {
+        // Resolve alias chain first (handles nets orphaned by buffer removal)
+        let resolved_id = self.netlist.resolve_alias(net_id);
+
+        if let Some(&idx) = self.net_to_index.get(&resolved_id.0) {
             self.cpu_net_values[idx] = value;
 
             if self.use_gpu {
@@ -800,8 +811,13 @@ kernel void eval_ncl(
     }
 
     /// Get a net value
+    ///
+    /// If the net is an alias (e.g., after buffer removal), resolves to the canonical net.
     pub fn get_net(&self, net_id: GateNetId) -> bool {
-        if let Some(&idx) = self.net_to_index.get(&net_id.0) {
+        // Resolve alias chain first (handles nets orphaned by buffer removal)
+        let resolved_id = self.netlist.resolve_alias(net_id);
+
+        if let Some(&idx) = self.net_to_index.get(&resolved_id.0) {
             if self.use_gpu {
                 let buffer = if self.current_buffer_is_a {
                     &self.signal_buffer_a
@@ -1011,7 +1027,12 @@ kernel void eval_ncl(
     ///
     /// The layout is: t rails first [0..width), then f rails [width..2*width)
     pub fn get_dual_rail_value(&self, name: &str, width: usize) -> Option<u64> {
-        let nets = self.signal_name_to_nets.get(name)?;
+        let nets = match self.signal_name_to_nets.get(name) {
+            Some(n) => n,
+            None => {
+                return None;
+            }
+        };
         let mut result = 0u64;
 
         // Determine actual width from signal nets
@@ -1023,8 +1044,10 @@ kernel void eval_ncl(
             let t_idx = bit;
             let f_idx = actual_width + bit;
 
-            let t = nets.get(t_idx).map(|&n| self.get_net(n)).unwrap_or(false);
-            let f = nets.get(f_idx).map(|&n| self.get_net(n)).unwrap_or(false);
+            let t_net = nets.get(t_idx).copied();
+            let f_net = nets.get(f_idx).copied();
+            let t = t_net.map(|n| self.get_net(n)).unwrap_or(false);
+            let f = f_net.map(|n| self.get_net(n)).unwrap_or(false);
 
             // Check for valid DATA (exactly one rail high)
             if t && !f {

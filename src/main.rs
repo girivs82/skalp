@@ -913,9 +913,11 @@ fn build_design(
                     }
 
                     // Flatten to single netlist with stitching
+                    // Note: flatten() now automatically runs buffer removal for NCL circuits
                     hier_result.netlist.flatten()
                 } else {
                     // No optimization, just flatten
+                    // Note: flatten() now automatically runs buffer removal for NCL circuits
                     hier_netlist.flatten()
                 }
             } else {
@@ -1677,6 +1679,7 @@ fn simulate_gate_level(
         );
 
         // Flatten to single netlist with proper stitching
+        // Note: flatten() now automatically runs buffer removal for NCL circuits
         hier_netlist.flatten()
     } else {
         println!("   Using flat synthesis (single module)");
