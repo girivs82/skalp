@@ -1366,6 +1366,14 @@ fn format_expression_with_context(expr: &skalp_mir::Expression, module: &Module)
                     "$shortrealtobits($sqrt($bitstoshortreal({})))",
                     format_expression_with_context(operand, module)
                 )
+            } else if matches!(op, skalp_mir::UnaryOp::FNegate) {
+                // BUG FIX #190: FP negation must use proper float conversion
+                // Just like FSqrt, we need to convert bits -> shortreal -> negate -> bits
+                // Otherwise "-x" does two's complement on the bit pattern, not FP sign flip
+                format!(
+                    "$shortrealtobits(-$bitstoshortreal({}))",
+                    format_expression_with_context(operand, module)
+                )
             } else {
                 format!(
                     "{}{}",
@@ -1523,6 +1531,12 @@ fn format_expression(expr: &skalp_mir::Expression) -> String {
             if matches!(op, skalp_mir::UnaryOp::FSqrt) {
                 format!(
                     "$shortrealtobits($sqrt($bitstoshortreal({})))",
+                    format_expression(operand)
+                )
+            } else if matches!(op, skalp_mir::UnaryOp::FNegate) {
+                // BUG FIX #190: FP negation must use proper float conversion
+                format!(
+                    "$shortrealtobits(-$bitstoshortreal({}))",
                     format_expression(operand)
                 )
             } else {

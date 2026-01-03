@@ -913,6 +913,58 @@ impl MirToLirTransform {
                     }
                 }
             }
+            // BUG #186 FIX: Handle tuple field access for async entities
+            // TupleFieldAccess extracts an element from a tuple (Concat of signals)
+            // e.g., let (x, y, z) = func() where func returns (a, b, c)
+            ExpressionKind::TupleFieldAccess { base, index } => {
+                eprintln!(
+                    "🔍 TUPLE_FIELD_ACCESS: index={}, expected_width={}, base.kind={:?}",
+                    index,
+                    expected_width,
+                    std::mem::discriminant(&base.kind)
+                );
+
+                // Get the base signal (should be a Concat representing the tuple)
+                let base_width = self.infer_expression_width(base);
+                let base_signal = self.transform_expression(base, base_width);
+
+                eprintln!(
+                    "🔍 TUPLE_FIELD_ACCESS: base_width={}, base_signal={:?}",
+                    base_width, base_signal
+                );
+
+                // For a 3-element tuple of 32-bit values (total 96 bits):
+                // - element 0 is at bits [31:0] (LSB)
+                // - element 1 is at bits [63:32]
+                // - element 2 is at bits [95:64] (MSB)
+                // Each element is `expected_width` bits wide
+                let low = (*index as u32) * expected_width;
+                let high = low + expected_width - 1;
+
+                eprintln!("🔍 TUPLE_FIELD_ACCESS: extracting bits [{}:{}]", high, low);
+
+                let out = self.alloc_temp_signal(expected_width);
+                self.lir.add_node(
+                    LirOp::RangeSelect {
+                        width: base_width,
+                        high,
+                        low,
+                    },
+                    vec![base_signal],
+                    out,
+                    format!("{}.tuple_{}", self.hierarchy_path, index),
+                );
+                out
+            }
+            // Handle function calls that weren't inlined
+            ExpressionKind::FunctionCall { name, args } => {
+                self.warnings.push(format!(
+                    "Function call '{}' with {} args not inlined - treating as zero",
+                    name,
+                    args.len()
+                ));
+                self.create_constant(&Value::Integer(0), expected_width)
+            }
             _ => {
                 self.warnings
                     .push(format!("Unsupported expression kind: {:?}", expr.kind));
@@ -1268,6 +1320,30 @@ impl MirToLirTransform {
                     },
                     operand_width,
                 )
+            }
+            UnaryOp::FNegate => {
+                // BUG FIX #190: FP negation flips the sign bit (bit 31 for fp32, bit 15 for fp16)
+                // This is done by XORing with 0x80000000 (for 32-bit) or 0x8000 (for 16-bit)
+                let sign_bit_mask = if operand_width == 32 {
+                    0x80000000u64
+                } else if operand_width == 16 {
+                    0x8000u64
+                } else {
+                    // For other widths, flip the MSB
+                    1u64 << (operand_width - 1)
+                };
+                let mask_signal =
+                    self.create_constant(&Value::Integer(sign_bit_mask as i64), operand_width);
+                let out = self.alloc_temp_signal(operand_width);
+                self.lir.add_node(
+                    LirOp::Xor {
+                        width: operand_width,
+                    },
+                    vec![operand_signal, mask_signal],
+                    out,
+                    format!("{}.fp_neg", self.hierarchy_path),
+                );
+                return out;
             }
             _ => {
                 self.warnings
@@ -1639,6 +1715,15 @@ impl MirToLirTransform {
             DataType::Vec2(inner) => Self::get_type_width(inner) * 2,
             DataType::Vec3(inner) => Self::get_type_width(inner) * 3,
             DataType::Vec4(inner) => Self::get_type_width(inner) * 4,
+            // BUG #188 FIX: Handle Struct types (used for tuples)
+            // Sum of all field widths
+            DataType::Struct(struct_type) => struct_type
+                .fields
+                .iter()
+                .map(|f| Self::get_type_width(&f.field_type))
+                .sum(),
+            // NCL dual-rail types
+            DataType::Ncl(w) => (*w as u32) * 2,
             _ => 1,
         }
     }
