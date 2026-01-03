@@ -4374,6 +4374,11 @@ impl<'hir> HirToMir<'hir> {
         expr: &hir::HirExpression,
         depth: usize,
     ) -> Option<Expression> {
+        // BUG #187 DEBUG: Trace what convert_expression receives
+        if depth == 0 && matches!(expr, hir::HirExpression::TupleLiteral(_)) {
+            println!("🟡🟡🟡 [BUG #187] convert_expression at depth 0 with TupleLiteral! stack_len={} 🟡🟡🟡",
+                     self.inlining_return_type_stack.len());
+        }
         // Guard against stack overflow on deeply nested expressions
         if depth > MAX_EXPRESSION_RECURSION_DEPTH {
             panic!(
@@ -6427,6 +6432,10 @@ impl<'hir> HirToMir<'hir> {
                 self.convert_struct_literal(&struct_lit.type_name, &struct_lit.fields)
             }
             hir::HirExpression::TupleLiteral(elements) => {
+                println!(
+                    "🟣🟣🟣 [BUG #187] convert_expression: TupleLiteral case MATCHED with {} elements 🟣🟣🟣",
+                    elements.len()
+                );
                 // Convert tuple literal to an anonymous struct
                 // Tuple (a, b, c) becomes struct { _0: typeof(a), _1: typeof(b), _2: typeof(c) }
                 // This is then packed into a bit vector like any other struct
@@ -6630,11 +6639,69 @@ impl<'hir> HirToMir<'hir> {
     /// Tuples are lowered to anonymous structs with fields named _0, _1, _2, etc.
     /// The tuple elements are concatenated together into a single packed bit vector.
     fn convert_tuple_literal(&mut self, elements: &[hir::HirExpression]) -> Option<Expression> {
+        println!(
+            "🔵🔵🔵 [BUG #187] convert_tuple_literal called with {} elements 🔵🔵🔵",
+            elements.len()
+        );
+        println!(
+            "🔵🔵🔵 [BUG #187] inlining_return_type_stack.len() = {} 🔵🔵🔵",
+            self.inlining_return_type_stack.len()
+        );
+        if let Some(last) = self.inlining_return_type_stack.last() {
+            println!("🔵🔵🔵 [BUG #187] Stack top: {:?} 🔵🔵🔵", last);
+        }
+        // BUG #187 FIX: Check if we're inside function inlining with a Tuple return type
+        // If so, use the element types to annotate each converted element with the correct width
+        println!("🔵🔵🔵 [BUG #187] About to check return type stack for Tuple 🔵🔵🔵");
+        let element_types: Option<Vec<hir::HirType>> = if let Some(Some(hir::HirType::Tuple(
+            types,
+        ))) =
+            self.inlining_return_type_stack.last()
+        {
+            println!(
+                "🔵🔵🔵 [BUG #187] MATCHED Tuple with {} types! 🔵🔵🔵",
+                types.len()
+            );
+            if types.len() == elements.len() {
+                eprintln!(
+                    "[BUG #187 FIX] TupleLiteral: Using {} element types from return type stack",
+                    types.len()
+                );
+                Some(types.clone())
+            } else {
+                eprintln!(
+                    "[BUG #187] TupleLiteral: Return type has {} elements but literal has {}",
+                    types.len(),
+                    elements.len()
+                );
+                None
+            }
+        } else {
+            None
+        };
+
         // Convert each tuple element expression
         let mut element_exprs = Vec::new();
-        for element in elements {
+        for (i, element) in elements.iter().enumerate() {
             let element_expr = self.convert_expression(element, 0)?;
-            element_exprs.push(element_expr);
+
+            // BUG #187 FIX: If we know the expected element type, annotate the expression
+            let annotated_expr = if let Some(ref types) = element_types {
+                if let Some(hir_type) = types.get(i) {
+                    let mir_type = self.hir_type_to_type(hir_type);
+                    eprintln!(
+                        "[BUG #187 FIX] TupleLiteral element {}: annotating with type {:?}",
+                        i, mir_type
+                    );
+                    self.annotate_expression_with_type(element_expr, mir_type, 0)
+                } else {
+                    element_expr
+                }
+            } else {
+                element_expr
+            };
+
+            element_exprs.push(annotated_expr);
         }
 
         // Handle empty tuple
@@ -8041,9 +8108,15 @@ impl<'hir> HirToMir<'hir> {
                 //   x = expr2;
                 //   return x
                 hir::HirStatement::Assignment(assign) => {
-                    println!("[BUG #180 DEBUG] Found Assignment in try_convert_mutable_var_pattern");
+                    println!(
+                        "[BUG #180 DEBUG] Found Assignment in try_convert_mutable_var_pattern"
+                    );
                     if let hir::HirLValue::Variable(var_id) = &assign.lhs {
-                        println!("[BUG #180 DEBUG]   -> To var {:?}, tracked={}", var_id, var_exprs.contains_key(var_id));
+                        println!(
+                            "[BUG #180 DEBUG]   -> To var {:?}, tracked={}",
+                            var_id,
+                            var_exprs.contains_key(var_id)
+                        );
                         // Only process if this is a reassignment to a tracked mutable variable
                         if var_exprs.contains_key(var_id) {
                             // Substitute variable references in the RHS with current expressions
@@ -8119,7 +8192,9 @@ impl<'hir> HirToMir<'hir> {
                 (None, _) => None,
             }
         } else {
-            println!("[BUG #180 DEBUG] try_convert_mutable_var_pattern: modified=false, returning None");
+            println!(
+                "[BUG #180 DEBUG] try_convert_mutable_var_pattern: modified=false, returning None"
+            );
             debug_println!("[BUG #86] No if statements modified any variables");
             None
         }
@@ -10113,6 +10188,48 @@ impl<'hir> HirToMir<'hir> {
                     result.ty
                 );
                 return result;
+            }
+
+            // BUG #187 FIX: Handle Literal expressions to update the width
+            ExpressionKind::Literal(ref value) => {
+                let target_width = match &ty {
+                    Type::Bit(skalp_frontend::types::Width::Fixed(w)) => Some(*w),
+                    Type::Int(skalp_frontend::types::Width::Fixed(w)) => Some(*w),
+                    Type::Nat(skalp_frontend::types::Width::Fixed(w)) => Some(*w),
+                    _ => None,
+                };
+
+                if let Some(target_width) = target_width {
+                    let new_value = match value {
+                        Value::BitVector { width, value } => {
+                            println!(
+                                "[BUG #187 FIX] Extending BitVector from {} bits to {} bits",
+                                width, target_width
+                            );
+                            Value::BitVector {
+                                width: target_width as usize,
+                                value: *value,
+                            }
+                        }
+                        Value::Integer(v) => {
+                            println!(
+                                "[BUG #187 FIX] Converting Integer {} to BitVector with {} bits",
+                                v, target_width
+                            );
+                            Value::BitVector {
+                                width: target_width as usize,
+                                value: *v as u64,
+                            }
+                        }
+                        other => other.clone(),
+                    };
+
+                    return Expression {
+                        kind: ExpressionKind::Literal(new_value),
+                        ty: ty.clone(),
+                        span: None,
+                    };
+                }
             }
 
             _ => {}
@@ -12578,6 +12695,7 @@ impl<'hir> HirToMir<'hir> {
             "🌟🌟🌟 [INLINE] Step 6 DONE: substituted_expr type: {:?} 🌟🌟🌟",
             std::mem::discriminant(&substituted_expr)
         );
+        println!("🟢🟢🟢 [BUG #187 DEBUG] AFTER Step 6 DONE, before expr_type_name 🟢🟢🟢");
 
         // Step 7: Convert the substituted HIR expression to MIR
         let expr_type_name = match &substituted_expr {
@@ -12657,8 +12775,17 @@ impl<'hir> HirToMir<'hir> {
         check_for_generic_param(&substituted_expr, "root");
 
         // BUG #160 FIX: Push return type before converting so concat can infer widths
+        println!(
+            "🟢🟢🟢 [BUG #187 DEBUG] About to push return_type={:?} 🟢🟢🟢",
+            return_type
+        );
         self.inlining_return_type_stack.push(return_type.clone());
+        println!("🟢🟢🟢 [BUG #187 DEBUG] About to call convert_expression 🟢🟢🟢");
         let result = self.convert_expression(&substituted_expr, 0);
+        println!(
+            "🟢🟢🟢 [BUG #187 DEBUG] convert_expression returned is_some={} 🟢🟢🟢",
+            result.is_some()
+        );
         self.inlining_return_type_stack.pop();
 
         // BUG #76 FIX: Annotate the result expression with the function's return type
@@ -12832,10 +12959,7 @@ impl<'hir> HirToMir<'hir> {
         }
 
         // Helper to recursively collect let AND assignment statements in order
-        fn collect_bindings_recursive(
-            stmts: &[hir::HirStatement],
-            collected: &mut Vec<BindingOp>,
-        ) {
+        fn collect_bindings_recursive(stmts: &[hir::HirStatement], collected: &mut Vec<BindingOp>) {
             for stmt in stmts {
                 match stmt {
                     hir::HirStatement::Let(let_stmt) => {
@@ -12948,7 +13072,8 @@ impl<'hir> HirToMir<'hir> {
         for (i, param) in params.iter().enumerate() {
             param_var_to_name.insert(hir::VariableId(i as u32), param.name.clone());
         }
-        let old_param_var = std::mem::replace(&mut self.pending_param_var_to_name, param_var_to_name);
+        let old_param_var =
+            std::mem::replace(&mut self.pending_param_var_to_name, param_var_to_name);
 
         // Push return type for width inference
         self.inlining_return_type_stack.push(return_type.clone());
@@ -12958,6 +13083,28 @@ impl<'hir> HirToMir<'hir> {
         // Restore old subs
         self.pending_mir_param_subs = old_subs;
         self.pending_param_var_to_name = old_param_var;
+
+        // BUG #189 FIX: When the result is a Concat (from TupleLiteral), reverse the elements
+        // to match the convention used by convert_hir_expr_for_module's TupleLiteral handler.
+        // The FieldAccess handler in convert_hir_expr_with_mir_cache uses adjusted_index
+        // assuming elements are reversed (elem[0] at end of Concat, which is LSB in Verilog).
+        //
+        // Without this reversal:
+        //   TupleLiteral (rx, ry, rz) -> Concat [rx, ry, rz] (NO reversal via convert_expression)
+        //   FieldAccess "0" (rx): adjusted_index=2, gets elements[2]=rz (WRONG!)
+        //
+        // With reversal:
+        //   TupleLiteral (rx, ry, rz) -> Concat [rz, ry, rx] (after reversal)
+        //   FieldAccess "0" (rx): adjusted_index=2, gets elements[2]=rx (CORRECT!)
+        if let ExpressionKind::Concat(ref mut elements) = mir_body.kind {
+            if elements.len() > 1 {
+                debug_println!(
+                    "🔄🔄🔄 BUG #189 FIX: Reversing Concat with {} elements in inline_function_call_with_mir_args 🔄🔄🔄",
+                    elements.len()
+                );
+                elements.reverse();
+            }
+        }
 
         // Annotate with return type if available
         if let Some(ref ret_ty) = return_type {
@@ -15736,7 +15883,7 @@ impl<'hir> HirToMir<'hir> {
                     // NOTE: Concat elements are reversed (elem[0] at LSB), so use reversed index
                     if let ExpressionKind::Concat(ref elements) = base_converted.kind {
                         let adjusted_index = elements.len().saturating_sub(1).saturating_sub(index);
-                        println!(
+                        debug_println!(
                             "🔄🔄🔄 BUG #128 FIX: Concat has {} elements, adjusted_index={} 🔄🔄🔄",
                             elements.len(),
                             adjusted_index
