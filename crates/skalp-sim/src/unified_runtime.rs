@@ -536,8 +536,13 @@ impl UnifiedSimulator {
     /// This is the preferred way to set inputs in NCL mode as it gives
     /// explicit control over the bit width.
     pub fn set_ncl_input(&mut self, name: &str, value: u64, width: usize) {
+        eprintln!(
+            "[UNIFIED] set_ncl_input: name='{}' value=0x{:X} width={}",
+            name, value, width
+        );
         match &mut self.backend {
             SimulatorBackend::NclCpu(ncl_sim) => {
+                eprintln!("[UNIFIED] Calling ncl_sim.set_dual_rail_value");
                 ncl_sim.set_dual_rail_value(name, value, width);
             }
             #[cfg(target_os = "macos")]
@@ -1035,15 +1040,11 @@ impl UnifiedSimulator {
             SimulatorBackend::GateLevelCpu(sim) => sim.get_input_names(),
             #[cfg(target_os = "macos")]
             SimulatorBackend::GateLevelGpu(runtime) => runtime.get_input_names(),
-            SimulatorBackend::NclCpu(_) => {
-                // NCL inputs are dual-rail; return empty for now
-                vec![]
+            SimulatorBackend::NclCpu(ncl_sim) => {
+                ncl_sim.input_names().into_iter().cloned().collect()
             }
             #[cfg(target_os = "macos")]
-            SimulatorBackend::NclGpu(_) => {
-                // NCL inputs are dual-rail; return empty for now
-                vec![]
-            }
+            SimulatorBackend::NclGpu(runtime) => runtime.get_input_names(),
         }
     }
 
@@ -1052,17 +1053,13 @@ impl UnifiedSimulator {
         match &self.backend {
             SimulatorBackend::Uninitialized => vec![],
             SimulatorBackend::GateLevelCpu(sim) => sim.get_output_names(),
-            SimulatorBackend::NclCpu(_) => {
-                // NCL outputs are dual-rail; return empty for now
-                vec![]
+            SimulatorBackend::NclCpu(ncl_sim) => {
+                ncl_sim.output_names().into_iter().cloned().collect()
             }
             #[cfg(target_os = "macos")]
             SimulatorBackend::GateLevelGpu(runtime) => runtime.get_output_names(),
             #[cfg(target_os = "macos")]
-            SimulatorBackend::NclGpu(_) => {
-                // NCL outputs are dual-rail; return empty for now
-                vec![]
-            }
+            SimulatorBackend::NclGpu(runtime) => runtime.get_output_names(),
         }
     }
 }

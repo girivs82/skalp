@@ -278,22 +278,42 @@ impl NclSimulator {
     /// Storage layout: all t rails first, then all f rails
     /// For width N: indices 0..N are t rails, indices N..2N are f rails
     pub fn set_dual_rail(&mut self, name: &str, bit: usize, value: NclValue) {
+        // Debug: always print for bit 0
+        if bit == 0 {
+            eprintln!(
+                "[NCL_SIM DEBUG] set_dual_rail called: name='{}' bit={}",
+                name, bit
+            );
+        }
         // Extract net IDs first to avoid borrow conflict
-        let (t_net, f_net) = {
+        let (t_net, f_net, width) = {
             if let Some(nets) = self.input_nets.get(name) {
                 // Layout: [t0, t1, ..., tN-1, f0, f1, ..., fN-1]
                 // Width is half the total nets
                 let width = nets.len() / 2;
                 let t_idx = bit;
                 let f_idx = width + bit;
-                (nets.get(t_idx).copied(), nets.get(f_idx).copied())
+                (nets.get(t_idx).copied(), nets.get(f_idx).copied(), width)
             } else {
-                (None, None)
+                if bit == 0 {
+                    eprintln!(
+                        "[NCL_SIM] set_dual_rail: input '{}' not found. Available: {:?}",
+                        name,
+                        self.input_nets.keys().collect::<Vec<_>>()
+                    );
+                }
+                (None, None, 0)
             }
         };
 
         if let Some(t_net) = t_net {
             self.set_net(t_net, value.true_rail());
+            if bit == 0 {
+                eprintln!(
+                    "[NCL_SIM] set_dual_rail: '{}' bit {} t_net={:?} f_net={:?} width={} value={:?}",
+                    name, bit, t_net, f_net, width, value
+                );
+            }
         }
         if let Some(f_net) = f_net {
             self.set_net(f_net, value.false_rail());
@@ -761,6 +781,20 @@ impl NclSimulator {
         }
         if base_type == "FP32_DIV" || upper.contains("FP32_DIV") {
             return PrimitiveType::Fp32Div;
+        }
+
+        // FP32 comparisons (BUG #191 FIX)
+        if base_type == "FP32_LT" || upper.contains("FP32_LT") {
+            return PrimitiveType::Fp32Lt;
+        }
+        if base_type == "FP32_GT" || upper.contains("FP32_GT") {
+            return PrimitiveType::Fp32Gt;
+        }
+        if base_type == "FP32_LE" || upper.contains("FP32_LE") {
+            return PrimitiveType::Fp32Le;
+        }
+        if base_type == "FP32_GE" || upper.contains("FP32_GE") {
+            return PrimitiveType::Fp32Ge;
         }
 
         // Common gates - use base_type which has library suffixes stripped

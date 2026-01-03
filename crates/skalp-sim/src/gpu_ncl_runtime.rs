@@ -140,6 +140,10 @@ enum NclPrimitiveType {
     Fp32Sub = 41,
     Fp32Mul = 42,
     Fp32Div = 43,
+    Fp32Lt = 44,
+    Fp32Gt = 45,
+    Fp32Le = 46,
+    Fp32Ge = 47,
 }
 
 /// GPU-compatible cell representation
@@ -286,6 +290,10 @@ impl GpuNclRuntime {
                     | NclPrimitiveType::Fp32Sub
                     | NclPrimitiveType::Fp32Mul
                     | NclPrimitiveType::Fp32Div
+                    | NclPrimitiveType::Fp32Lt
+                    | NclPrimitiveType::Fp32Gt
+                    | NclPrimitiveType::Fp32Le
+                    | NclPrimitiveType::Fp32Ge
             )
         });
 
@@ -354,6 +362,19 @@ impl GpuNclRuntime {
         }
         if upper.starts_with("FP32_DIV") || upper.starts_with("FPDIV32") {
             return NclPrimitiveType::Fp32Div;
+        }
+        // FP32 comparison operations (BUG #191 FIX)
+        if upper.starts_with("FP32_LT") || upper.starts_with("FPLT32") {
+            return NclPrimitiveType::Fp32Lt;
+        }
+        if upper.starts_with("FP32_GT") || upper.starts_with("FPGT32") {
+            return NclPrimitiveType::Fp32Gt;
+        }
+        if upper.starts_with("FP32_LE") || upper.starts_with("FPLE32") {
+            return NclPrimitiveType::Fp32Le;
+        }
+        if upper.starts_with("FP32_GE") || upper.starts_with("FPGE32") {
+            return NclPrimitiveType::Fp32Ge;
         }
 
         // Strip library suffix (e.g., "AND2_X1" -> "AND2")
@@ -810,6 +831,30 @@ kernel void eval_ncl(
         self.signal_name_to_nets.keys().collect()
     }
 
+    /// Get list of input signal names
+    pub fn get_input_names(&self) -> Vec<String> {
+        let mut input_bases: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for net in &self.netlist.nets {
+            if net.is_input {
+                let base = strip_bit_suffix(&net.name);
+                input_bases.insert(base);
+            }
+        }
+        input_bases.into_iter().collect()
+    }
+
+    /// Get list of output signal names
+    pub fn get_output_names(&self) -> Vec<String> {
+        let mut output_bases: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for net in &self.netlist.nets {
+            if net.is_output {
+                let base = strip_bit_suffix(&net.name);
+                output_bases.insert(base);
+            }
+        }
+        output_bases.into_iter().collect()
+    }
+
     /// Get list of all net names (for debugging)
     pub fn all_net_names(&self) -> Vec<String> {
         self.netlist.nets.iter().map(|n| n.name.clone()).collect()
@@ -1242,7 +1287,39 @@ kernel void eval_ncl(
 
                     all_data || all_null
                 }
-                // FP32 soft macros - compute and write all 32 output bits
+                // FP32 comparison operations - return single bit result (BUG #191 FIX)
+                NclPrimitiveType::Fp32Lt
+                | NclPrimitiveType::Fp32Gt
+                | NclPrimitiveType::Fp32Le
+                | NclPrimitiveType::Fp32Ge => {
+                    // Extract a[0..31] from inputs[0..31]
+                    let mut a_bits: u32 = 0;
+                    for i in 0..32 {
+                        if inputs.get(i).copied().unwrap_or(false) {
+                            a_bits |= 1 << i;
+                        }
+                    }
+
+                    // Extract b[0..31] from inputs[32..63]
+                    let mut b_bits: u32 = 0;
+                    for i in 0..32 {
+                        if inputs.get(32 + i).copied().unwrap_or(false) {
+                            b_bits |= 1 << i;
+                        }
+                    }
+
+                    // Convert to f32 and perform comparison
+                    let a = f32::from_bits(a_bits);
+                    let b = f32::from_bits(b_bits);
+                    match cell.ptype {
+                        NclPrimitiveType::Fp32Lt => a < b,
+                        NclPrimitiveType::Fp32Gt => a > b,
+                        NclPrimitiveType::Fp32Le => a <= b,
+                        NclPrimitiveType::Fp32Ge => a >= b,
+                        _ => false,
+                    }
+                }
+                // FP32 arithmetic soft macros - compute and write all 32 output bits
                 NclPrimitiveType::Fp32Add
                 | NclPrimitiveType::Fp32Sub
                 | NclPrimitiveType::Fp32Mul

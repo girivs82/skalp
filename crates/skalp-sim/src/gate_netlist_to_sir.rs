@@ -302,6 +302,20 @@ impl GateNetlistToSirConverter {
             return PrimitiveType::Fp32Div;
         }
 
+        // FP32 comparison cells (BUG #191 FIX)
+        if upper.starts_with("FP32_LT") || upper.starts_with("FPLT32") {
+            return PrimitiveType::Fp32Lt;
+        }
+        if upper.starts_with("FP32_GT") || upper.starts_with("FPGT32") {
+            return PrimitiveType::Fp32Gt;
+        }
+        if upper.starts_with("FP32_LE") || upper.starts_with("FPLE32") {
+            return PrimitiveType::Fp32Le;
+        }
+        if upper.starts_with("FP32_GE") || upper.starts_with("FPGE32") {
+            return PrimitiveType::Fp32Ge;
+        }
+
         // Normalize cell type (remove drive strength suffix like "_X1", "_X2")
         let base_type = cell_type
             .split('_')
@@ -349,6 +363,11 @@ impl GateNetlistToSirConverter {
             "FP32SUB" | "FP32_SUB" | "FPSUB32" => PrimitiveType::Fp32Sub,
             "FP32MUL" | "FP32_MUL" | "FPMUL32" => PrimitiveType::Fp32Mul,
             "FP32DIV" | "FP32_DIV" | "FPDIV32" => PrimitiveType::Fp32Div,
+            // FP32 comparisons (BUG #191 FIX)
+            "FP32LT" | "FP32_LT" | "FPLT32" => PrimitiveType::Fp32Lt,
+            "FP32GT" | "FP32_GT" | "FPGT32" => PrimitiveType::Fp32Gt,
+            "FP32LE" | "FP32_LE" | "FPLE32" => PrimitiveType::Fp32Le,
+            "FP32GE" | "FP32_GE" | "FPGE32" => PrimitiveType::Fp32Ge,
 
             // Sequential - D Flip-Flops
             "DFF" | "DFFRQ" => PrimitiveType::DffP, // Rising edge, async reset
