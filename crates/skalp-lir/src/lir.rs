@@ -1085,6 +1085,10 @@ pub struct Lir {
     /// These are output signals marked with #[detection_signal]
     #[serde(default)]
     pub detection_signals: Vec<LirSignalId>,
+    /// True if this LIR uses NCL (Null Convention Logic) dual-rail encoding.
+    /// Set by `expand_to_ncl()` and propagated to GateNetlist.
+    #[serde(default)]
+    pub is_ncl: bool,
     /// Signal name to ID mapping
     signal_map: HashMap<String, LirSignalId>,
     /// Module-level safety information (from MIR SafetyContext)
@@ -1105,6 +1109,7 @@ impl Lir {
             clocks: Vec::new(),
             resets: Vec::new(),
             detection_signals: Vec::new(),
+            is_ncl: false,
             signal_map: HashMap::new(),
             module_safety_info: None,
         }

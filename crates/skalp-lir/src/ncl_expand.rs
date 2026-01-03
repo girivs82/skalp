@@ -2252,6 +2252,9 @@ pub fn expand_to_ncl(lir: &Lir, config: &NclConfig) -> NclExpandResult {
         }
     }
 
+    // Mark the LIR as NCL - this is the source of truth for NCL detection
+    expander.lir.is_ncl = true;
+
     NclExpandResult {
         lir: expander.lir,
         dual_rail_map: expander.dual_rail_map,
