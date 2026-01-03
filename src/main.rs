@@ -962,6 +962,52 @@ fn build_design(
                 }
             };
 
+            // Run async STA for NCL circuits
+            if library
+                .find_best_cell(&skalp_lir::CellFunction::Th22)
+                .is_some()
+            {
+                info!("Running async timing analysis for NCL circuit...");
+                let sta_config = skalp_lir::AsyncStaConfig::default();
+                let sta_result = skalp_lir::analyze_async_timing(
+                    &optimized_netlist,
+                    Some(&library),
+                    &sta_config,
+                );
+
+                // Print summary
+                println!("📊 Async STA:");
+                println!(
+                    "   Analyzed {} forks, {} with timing concerns",
+                    sta_result.stats.total_forks, sta_result.stats.fork_violations
+                );
+                if sta_result.stats.max_skew_ps > 0.0 {
+                    println!("   Max skew: {:.1}ps", sta_result.stats.max_skew_ps);
+                }
+
+                // Report violations
+                if sta_result.has_violations() {
+                    let errors = sta_result.error_count();
+                    if errors > 0 {
+                        eprintln!(
+                            "⚠️  {} timing violation(s) detected (threshold: {:.0}ps)",
+                            errors, sta_config.max_fork_skew_ps
+                        );
+                        // Print detailed report for errors
+                        for violation in &sta_result.fork_violations {
+                            if violation.severity != skalp_lir::ViolationSeverity::Warning {
+                                eprintln!("{}", violation.format());
+                            }
+                        }
+                    }
+
+                    // Save full report
+                    let report_path = output_dir.join("async_sta_report.txt");
+                    fs::write(&report_path, sta_result.summary())?;
+                    info!("Async STA report saved to {:?}", report_path);
+                }
+            }
+
             // Generate Verilog from gate netlist
             let verilog = optimized_netlist.to_verilog();
             let verilog_path = output_dir.join("design_gates.v");
