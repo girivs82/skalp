@@ -355,8 +355,117 @@ impl GateOptimizer {
             // Buffer
             "BUF" | "BUF_X1" | "BUFF" => inputs.first().copied(),
 
-            _ => None, // Unknown cell type
+            // NCL Threshold Gates (THmn = m-of-n threshold)
+            // With constant inputs, NCL gates behave deterministically:
+            // - Output 1 if count(true inputs) >= threshold
+            // - Output 0 if count(true inputs) < threshold (when all inputs known)
+            // Hysteresis only matters during NULL/DATA transitions, not for constants.
+
+            // TH12: 1-of-2 (OR semantics)
+            "TH12" | "TH12_X1" => {
+                let count = inputs.iter().filter(|&&x| x).count();
+                Some(count >= 1)
+            }
+
+            // TH22: 2-of-2 (AND semantics, C-element)
+            "TH22" | "TH22_X1" => {
+                let count = inputs.iter().filter(|&&x| x).count();
+                Some(count >= 2)
+            }
+
+            // TH13: 1-of-3
+            "TH13" | "TH13_X1" => {
+                let count = inputs.iter().filter(|&&x| x).count();
+                Some(count >= 1)
+            }
+
+            // TH23: 2-of-3
+            "TH23" | "TH23_X1" => {
+                let count = inputs.iter().filter(|&&x| x).count();
+                Some(count >= 2)
+            }
+
+            // TH33: 3-of-3 (3-input AND)
+            "TH33" | "TH33_X1" => {
+                let count = inputs.iter().filter(|&&x| x).count();
+                Some(count >= 3)
+            }
+
+            // TH14: 1-of-4
+            "TH14" | "TH14_X1" => {
+                let count = inputs.iter().filter(|&&x| x).count();
+                Some(count >= 1)
+            }
+
+            // TH24: 2-of-4
+            "TH24" | "TH24_X1" => {
+                let count = inputs.iter().filter(|&&x| x).count();
+                Some(count >= 2)
+            }
+
+            // TH34: 3-of-4
+            "TH34" | "TH34_X1" => {
+                let count = inputs.iter().filter(|&&x| x).count();
+                Some(count >= 3)
+            }
+
+            // TH44: 4-of-4 (4-input AND)
+            "TH44" | "TH44_X1" => {
+                let count = inputs.iter().filter(|&&x| x).count();
+                Some(count >= 4)
+            }
+
+            // THxor0: XOR with reset-dominant (for NCL completion detection)
+            // These are essentially XOR gates for constant evaluation
+            "THXOR0" | "THXOR0_X1" => Some(inputs.first()? ^ inputs.get(1)?),
+
+            // THand0: AND with reset-dominant
+            "THAND0" | "THAND0_X1" => Some(inputs.first()? & inputs.get(1)?),
+
+            // Handle generic THmn pattern (e.g., "TH23W2", "TH22N")
+            _ => {
+                let cell_upper = cell_type.as_str();
+                if cell_upper.starts_with("TH") {
+                    // Try to parse THmn pattern
+                    if let Some(result) = Self::evaluate_generic_th_gate(cell_upper, &inputs) {
+                        return Some(result);
+                    }
+                }
+                None // Unknown cell type
+            }
         }
+    }
+
+    /// Evaluate generic THmn gate patterns like TH23W2, TH22N, etc.
+    fn evaluate_generic_th_gate(cell_type: &str, inputs: &[bool]) -> Option<bool> {
+        // Pattern: TH<m><n>[suffix] where m is threshold, n is input count
+        // Examples: TH22, TH23, TH23W2, TH22N, TH33W2
+
+        // Skip "TH" prefix
+        let rest = cell_type.strip_prefix("TH")?;
+        if rest.is_empty() {
+            return None;
+        }
+
+        // Parse first digit (threshold m)
+        let mut chars = rest.chars();
+        let m_char = chars.next()?;
+        if !m_char.is_ascii_digit() {
+            return None;
+        }
+        let m = m_char.to_digit(10)? as usize;
+
+        // Parse second digit (input count n)
+        let n_char = chars.next()?;
+        if !n_char.is_ascii_digit() {
+            return None;
+        }
+        let _n = n_char.to_digit(10)? as usize;
+
+        // Ignore any suffix (W2, N, _X1, etc.)
+        // Count true inputs and compare to threshold
+        let count = inputs.iter().filter(|&&x| x).count();
+        Some(count >= m)
     }
 
     /// Get constant value for a net, following replacements
@@ -537,6 +646,144 @@ impl GateOptimizer {
                             self.cells_to_remove.insert(cell.id);
                             removed += 1;
                         }
+                    }
+                }
+            }
+
+            // NCL TH12: 1-of-2 (OR semantics)
+            // TH12(1, x) -> 1, TH12(0, x) -> x, TH12(x, x) -> x
+            if matches!(cell_type.as_str(), "TH12" | "TH12_X1") {
+                if let (Some(&a), Some(&b)) = (cell.inputs.first(), cell.inputs.get(1)) {
+                    if let Some(const_a) = self.get_constant(a) {
+                        if const_a {
+                            // TH12(1, x) -> 1
+                            if let Some(&out) = cell.outputs.first() {
+                                self.constants.insert(out, true);
+                                self.cells_to_remove.insert(cell.id);
+                                removed += 1;
+                            }
+                        } else {
+                            // TH12(0, x) -> x
+                            if let Some(&out) = cell.outputs.first() {
+                                self.net_replacements.insert(out, b);
+                                self.cells_to_remove.insert(cell.id);
+                                removed += 1;
+                            }
+                        }
+                    } else if let Some(const_b) = self.get_constant(b) {
+                        if const_b {
+                            // TH12(x, 1) -> 1
+                            if let Some(&out) = cell.outputs.first() {
+                                self.constants.insert(out, true);
+                                self.cells_to_remove.insert(cell.id);
+                                removed += 1;
+                            }
+                        } else {
+                            // TH12(x, 0) -> x
+                            if let Some(&out) = cell.outputs.first() {
+                                self.net_replacements.insert(out, a);
+                                self.cells_to_remove.insert(cell.id);
+                                removed += 1;
+                            }
+                        }
+                    } else if a == b {
+                        // TH12(x, x) -> x (idempotency)
+                        if let Some(&out) = cell.outputs.first() {
+                            self.net_replacements.insert(out, a);
+                            self.cells_to_remove.insert(cell.id);
+                            removed += 1;
+                        }
+                    }
+                }
+            }
+
+            // NCL TH22: 2-of-2 (AND semantics / C-element)
+            // TH22(0, x) -> 0, TH22(1, x) -> x, TH22(x, x) -> x
+            if matches!(cell_type.as_str(), "TH22" | "TH22_X1") {
+                if let (Some(&a), Some(&b)) = (cell.inputs.first(), cell.inputs.get(1)) {
+                    if let Some(const_a) = self.get_constant(a) {
+                        if !const_a {
+                            // TH22(0, x) -> 0
+                            if let Some(&out) = cell.outputs.first() {
+                                self.constants.insert(out, false);
+                                self.cells_to_remove.insert(cell.id);
+                                removed += 1;
+                            }
+                        } else {
+                            // TH22(1, x) -> x
+                            if let Some(&out) = cell.outputs.first() {
+                                self.net_replacements.insert(out, b);
+                                self.cells_to_remove.insert(cell.id);
+                                removed += 1;
+                            }
+                        }
+                    } else if let Some(const_b) = self.get_constant(b) {
+                        if !const_b {
+                            // TH22(x, 0) -> 0
+                            if let Some(&out) = cell.outputs.first() {
+                                self.constants.insert(out, false);
+                                self.cells_to_remove.insert(cell.id);
+                                removed += 1;
+                            }
+                        } else {
+                            // TH22(x, 1) -> x
+                            if let Some(&out) = cell.outputs.first() {
+                                self.net_replacements.insert(out, a);
+                                self.cells_to_remove.insert(cell.id);
+                                removed += 1;
+                            }
+                        }
+                    } else if a == b {
+                        // TH22(x, x) -> x (idempotency)
+                        if let Some(&out) = cell.outputs.first() {
+                            self.net_replacements.insert(out, a);
+                            self.cells_to_remove.insert(cell.id);
+                            removed += 1;
+                        }
+                    }
+                }
+            }
+
+            // NCL TH23: 2-of-3
+            // If any input is 0, reduce to TH22 on remaining inputs (handled by constant folding)
+            // If any input is 1, reduce to TH12 on remaining inputs
+            // TH23(x, x, y) -> TH12(x, y) (but can't reduce without creating new cell)
+            // For now, handle the easy cases:
+            // TH23(1, 1, x) -> x, TH23(0, 0, x) -> 0
+            if matches!(cell_type.as_str(), "TH23" | "TH23_X1") && cell.inputs.len() >= 3 {
+                let inputs = &cell.inputs;
+                let consts: Vec<Option<bool>> =
+                    inputs.iter().map(|&id| self.get_constant(id)).collect();
+                let true_count = consts.iter().filter(|c| **c == Some(true)).count();
+                let false_count = consts.iter().filter(|c| **c == Some(false)).count();
+
+                if let Some(&out) = cell.outputs.first() {
+                    if true_count >= 2 {
+                        // At least 2 inputs are 1, output is 1
+                        self.constants.insert(out, true);
+                        self.cells_to_remove.insert(cell.id);
+                        removed += 1;
+                    } else if false_count >= 2 {
+                        // At least 2 inputs are 0, output is 0
+                        self.constants.insert(out, false);
+                        self.cells_to_remove.insert(cell.id);
+                        removed += 1;
+                    }
+                }
+            }
+
+            // NCL TH33: 3-of-3 (3-input AND)
+            // Any 0 -> 0, all 1 -> 1
+            if matches!(cell_type.as_str(), "TH33" | "TH33_X1") && cell.inputs.len() >= 3 {
+                let has_zero = cell
+                    .inputs
+                    .iter()
+                    .any(|&id| self.get_constant(id) == Some(false));
+                if has_zero {
+                    if let Some(&out) = cell.outputs.first() {
+                        self.constants.insert(out, false);
+                        self.cells_to_remove.insert(cell.id);
+                        removed += 1;
                     }
                 }
             }
