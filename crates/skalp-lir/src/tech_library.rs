@@ -588,6 +588,14 @@ pub enum CellFunction {
     FpMul32,
     /// FP32 Divider: result = a / b
     FpDiv32,
+    /// FP32 Less-than: result = a < b (1-bit output)
+    FpLt32,
+    /// FP32 Greater-than: result = a > b (1-bit output)
+    FpGt32,
+    /// FP32 Less-than-or-equal: result = a <= b (1-bit output)
+    FpLe32,
+    /// FP32 Greater-than-or-equal: result = a >= b (1-bit output)
+    FpGe32,
 
     // Sequential
     Dff,
@@ -839,6 +847,20 @@ impl CellFunction {
                 }
                 let outputs: Vec<String> = (0..32).map(|i| format!("y{}", i)).collect();
                 (inputs, outputs)
+            }
+            // FP32 Comparisons: 64 inputs (a0-a31, b0-b31), 1 output
+            CellFunction::FpLt32
+            | CellFunction::FpGt32
+            | CellFunction::FpLe32
+            | CellFunction::FpGe32 => {
+                let mut inputs = Vec::with_capacity(64);
+                for i in 0..32 {
+                    inputs.push(format!("a{}", i));
+                }
+                for i in 0..32 {
+                    inputs.push(format!("b{}", i));
+                }
+                (inputs, vec!["y".into()])
             }
             // NCL Threshold Gates
             CellFunction::Th12 => (vec!["a".into(), "b".into()], vec!["y".into()]),
@@ -2455,6 +2477,10 @@ fn format_cell_function(f: &CellFunction) -> String {
         CellFunction::FpSub32 => "fp_sub32".to_string(),
         CellFunction::FpMul32 => "fp_mul32".to_string(),
         CellFunction::FpDiv32 => "fp_div32".to_string(),
+        CellFunction::FpLt32 => "fp_lt32".to_string(),
+        CellFunction::FpGt32 => "fp_gt32".to_string(),
+        CellFunction::FpLe32 => "fp_le32".to_string(),
+        CellFunction::FpGe32 => "fp_ge32".to_string(),
         // NCL Threshold Gates
         CellFunction::Th12 => "th12".to_string(),
         CellFunction::Th22 => "th22".to_string(),

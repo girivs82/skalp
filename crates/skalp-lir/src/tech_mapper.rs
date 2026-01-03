@@ -675,6 +675,44 @@ impl<'a> TechMapper<'a> {
                 );
             }
 
+            // FP32 Comparisons (1-bit output)
+            LirOp::FpLt { width } => {
+                self.map_fp_comparison(
+                    CellFunction::FpLt32,
+                    *width,
+                    &input_nets,
+                    &output_nets,
+                    &node.path,
+                );
+            }
+            LirOp::FpGt { width } => {
+                self.map_fp_comparison(
+                    CellFunction::FpGt32,
+                    *width,
+                    &input_nets,
+                    &output_nets,
+                    &node.path,
+                );
+            }
+            LirOp::FpLe { width } => {
+                self.map_fp_comparison(
+                    CellFunction::FpLe32,
+                    *width,
+                    &input_nets,
+                    &output_nets,
+                    &node.path,
+                );
+            }
+            LirOp::FpGe { width } => {
+                self.map_fp_comparison(
+                    CellFunction::FpGe32,
+                    *width,
+                    &input_nets,
+                    &output_nets,
+                    &node.path,
+                );
+            }
+
             // === NCL (Null Convention Logic) Operations ===
             // Dual-rail encoding where each bit is represented by two wires (t,f)
             // 00=NULL, 01=DATA_FALSE, 10=DATA_TRUE
@@ -1857,6 +1895,68 @@ impl<'a> TechMapper<'a> {
             self.library.name.clone(),
             100.0, // Higher FIT for complex FP unit
             format!("{}.fp_op", path),
+            all_inputs,
+            all_outputs,
+        );
+        cell.source_op = Some(format!("{:?}", function));
+        self.add_cell(cell);
+
+        self.stats.direct_mappings += 1;
+    }
+
+    /// Map a floating-point comparison operation as a soft-macro cell
+    ///
+    /// FP comparisons take 64 input bits (a0-a31, b0-b31) and produce
+    /// a single 1-bit output (true/false result).
+    fn map_fp_comparison(
+        &mut self,
+        function: CellFunction,
+        width: u32,
+        inputs: &[Vec<GateNetId>],
+        outputs: &[GateNetId],
+        path: &str,
+    ) {
+        if inputs.len() < 2 {
+            self.warnings.push(format!(
+                "FP comparison needs 2 inputs, got {}",
+                inputs.len()
+            ));
+            return;
+        }
+
+        // Collect all input nets (A and B operands)
+        let mut all_inputs: Vec<GateNetId> = Vec::new();
+
+        // Add all bits of operand A
+        for bit in 0..width as usize {
+            let net = inputs[0].get(bit).copied().unwrap_or(inputs[0][0]);
+            all_inputs.push(net);
+        }
+
+        // Add all bits of operand B
+        for bit in 0..width as usize {
+            let net = inputs[1].get(bit).copied().unwrap_or(inputs[1][0]);
+            all_inputs.push(net);
+        }
+
+        // Only 1 output bit for comparisons
+        let all_outputs = vec![outputs.first().copied().unwrap_or(outputs[0])];
+
+        // Create the soft-macro cell
+        let cell_name = match function {
+            CellFunction::FpLt32 => "FP32_LT",
+            CellFunction::FpGt32 => "FP32_GT",
+            CellFunction::FpLe32 => "FP32_LE",
+            CellFunction::FpGe32 => "FP32_GE",
+            _ => "FP32_CMP_UNKNOWN",
+        };
+
+        let mut cell = Cell::new_comb(
+            CellId(0),
+            cell_name.to_string(),
+            self.library.name.clone(),
+            50.0, // Lower FIT than arithmetic ops
+            format!("{}.fp_cmp", path),
             all_inputs,
             all_outputs,
         );

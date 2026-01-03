@@ -291,6 +291,15 @@ pub fn evaluate_primitive(ptype: &PrimitiveType, inputs: &[bool]) -> Vec<bool> {
             evaluate_fp32_operation(inputs, |a, b| if b != 0.0 { a / b } else { f32::NAN })
         }
 
+        // FP32 comparisons return 1 bit (true/false)
+        PrimitiveType::Fp32Lt => evaluate_fp32_comparison(inputs, |a, b| a < b),
+
+        PrimitiveType::Fp32Gt => evaluate_fp32_comparison(inputs, |a, b| a > b),
+
+        PrimitiveType::Fp32Le => evaluate_fp32_comparison(inputs, |a, b| a <= b),
+
+        PrimitiveType::Fp32Ge => evaluate_fp32_comparison(inputs, |a, b| a >= b),
+
         // === NCL Threshold Gates ===
         // Note: These are simplified stateless evaluations.
         // Full NCL simulation with hysteresis (state-holding) is implemented in ncl_sim.rs (Phase 6).
@@ -419,6 +428,38 @@ where
 
     // Return as 32 booleans
     (0..32).map(|i| (result_bits >> i) & 1 == 1).collect()
+}
+
+/// Helper function to evaluate FP32 comparison operations
+/// Converts 64 boolean inputs (a[0..31], b[0..31]) to two f32 values,
+/// applies the comparison, and returns a single boolean output
+fn evaluate_fp32_comparison<F>(inputs: &[bool], op: F) -> Vec<bool>
+where
+    F: Fn(f32, f32) -> bool,
+{
+    // Extract a[0..31] from inputs[0..31]
+    let mut a_bits: u32 = 0;
+    for i in 0..32 {
+        if inputs.get(i).copied().unwrap_or(false) {
+            a_bits |= 1 << i;
+        }
+    }
+
+    // Extract b[0..31] from inputs[32..63]
+    let mut b_bits: u32 = 0;
+    for i in 0..32 {
+        if inputs.get(32 + i).copied().unwrap_or(false) {
+            b_bits |= 1 << i;
+        }
+    }
+
+    // Convert to f32 and perform comparison
+    let a = f32::from_bits(a_bits);
+    let b = f32::from_bits(b_bits);
+    let result = op(a, b);
+
+    // Return as single boolean
+    vec![result]
 }
 
 /// Evaluate a gate primitive with optional fault injection

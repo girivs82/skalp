@@ -815,7 +815,8 @@ fn test_async_cle_l4_quadratic() {
 
         // Result format from quadratic_solve: (valid, x1, x2) where x1=2.0, x2=3.0
         // debug_l4_l5 captures lower 32 bits which should be x1
-        if let Some(result_bits) = test_l4_algorithm_operation(&netlist, 45, (data1_low, 0), (0, 0)) {
+        if let Some(result_bits) = test_l4_algorithm_operation(&netlist, 45, (data1_low, 0), (0, 0))
+        {
             let x1 = bits_to_f32(result_bits);
             // x1 should be 2.0 (the smaller root: (-b - sqrt(disc))/2a)
             let pass = f32_approx_eq(x1, 2.0, 0.1);
@@ -861,7 +862,9 @@ fn test_async_cle_l4_bezier() {
         let data1_low = p0 | (p1 << 32) | (p2 << 64) | (p3 << 96);
         let data1_high = t; // t goes in bits [159:128], which is bits [31:0] of the high word
 
-        if let Some(result_bits) = test_l4_algorithm_operation(&netlist, 46, (data1_low, data1_high), (0, 0)) {
+        if let Some(result_bits) =
+            test_l4_algorithm_operation(&netlist, 46, (data1_low, data1_high), (0, 0))
+        {
             let result = bits_to_f32(result_bits);
             // At t=0.5: (1-0.5)³×0 + 3×(1-0.5)²×0.5×1 + 3×(1-0.5)×0.5²×2 + 0.5³×3
             // = 0 + 3×0.25×0.5×1 + 3×0.5×0.25×2 + 0.125×3
@@ -889,7 +892,9 @@ fn test_async_cle_l4_bezier() {
         let data1_low = p0 | (p1 << 32) | (p2 << 64) | (p3 << 96);
         let data1_high = t;
 
-        if let Some(result_bits) = test_l4_algorithm_operation(&netlist, 46, (data1_low, data1_high), (0, 0)) {
+        if let Some(result_bits) =
+            test_l4_algorithm_operation(&netlist, 46, (data1_low, data1_high), (0, 0))
+        {
             let result = bits_to_f32(result_bits);
             let pass = f32_approx_eq(result, 5.0, 0.01);
             println!(
@@ -914,7 +919,9 @@ fn test_async_cle_l4_bezier() {
         let data1_low = p0 | (p1 << 32) | (p2 << 64) | (p3 << 96);
         let data1_high = t;
 
-        if let Some(result_bits) = test_l4_algorithm_operation(&netlist, 46, (data1_low, data1_high), (0, 0)) {
+        if let Some(result_bits) =
+            test_l4_algorithm_operation(&netlist, 46, (data1_low, data1_high), (0, 0))
+        {
             let result = bits_to_f32(result_bits);
             let pass = f32_approx_eq(result, 20.0, 0.01);
             println!(
@@ -933,7 +940,7 @@ fn test_async_cle_l4_bezier() {
 }
 
 #[test]
-#[ignore] // TODO: Investigate fp_div/fp_min/fp_max gate-level issues causing NaN results
+#[ignore] // BUG #191: FP comparison result routing in NCL - fp_min/fp_max select wrong operand
 fn test_async_cle_l4_ray_aabb() {
     println!("\n=== Async CLE L4 RAY_AABB Test ===");
     let netlist = compile_karythra_async_cle();
@@ -983,7 +990,12 @@ fn test_async_cle_l4_ray_aabb() {
         // Y slab: tmin_y = (-1 - 0)/0.1 = -10, tmax_y = (1 - 0)/0.1 = 10
         // Z slab: tmin_z = (-1 - 0)/0.1 = -10, tmax_z = (1 - 0)/0.1 = 10
         // t_near = max(1, -10, -10) = 1
-        if let Some(result_bits) = test_l4_algorithm_operation(&netlist, 47, (data1_low, data1_high), (data2_low, data2_high)) {
+        if let Some(result_bits) = test_l4_algorithm_operation(
+            &netlist,
+            47,
+            (data1_low, data1_high),
+            (data2_low, data2_high),
+        ) {
             let t_near = bits_to_f32(result_bits);
             // t_near should be 1.0
             let pass = f32_approx_eq(t_near, 1.0, 0.1);

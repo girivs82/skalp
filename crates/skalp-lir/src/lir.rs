@@ -111,6 +111,14 @@ pub enum PrimitiveType {
     Fp32Mul,
     /// FP32 division (inputs: [a[0..31], b[0..31]], outputs: [result[0..31]])
     Fp32Div,
+    /// FP32 less-than comparison (inputs: [a[0..31], b[0..31]], outputs: [result[0]])
+    Fp32Lt,
+    /// FP32 greater-than comparison (inputs: [a[0..31], b[0..31]], outputs: [result[0]])
+    Fp32Gt,
+    /// FP32 less-than-or-equal comparison (inputs: [a[0..31], b[0..31]], outputs: [result[0]])
+    Fp32Le,
+    /// FP32 greater-than-or-equal comparison (inputs: [a[0..31], b[0..31]], outputs: [result[0]])
+    Fp32Ge,
 
     // === Memory Elements (for SRAM/register file modeling) ===
     /// Single-bit memory cell (higher SEU susceptibility)
@@ -295,7 +303,11 @@ impl PrimitiveType {
             PrimitiveType::Fp32Add
             | PrimitiveType::Fp32Sub
             | PrimitiveType::Fp32Mul
-            | PrimitiveType::Fp32Div => 64,
+            | PrimitiveType::Fp32Div
+            | PrimitiveType::Fp32Lt
+            | PrimitiveType::Fp32Gt
+            | PrimitiveType::Fp32Le
+            | PrimitiveType::Fp32Ge => 64,
             // NCL threshold gates
             PrimitiveType::Th12 | PrimitiveType::Th22 => 2,
             PrimitiveType::Th13 | PrimitiveType::Th23 | PrimitiveType::Th33 => 3,
@@ -315,11 +327,16 @@ impl PrimitiveType {
             PrimitiveType::FullAdder => 2,
             PrimitiveType::CompBit => 2,
             PrimitiveType::PowerSwitch { .. } => 0,
-            // FP32 operations have 32 output bits
+            // FP32 arithmetic operations have 32 output bits
             PrimitiveType::Fp32Add
             | PrimitiveType::Fp32Sub
             | PrimitiveType::Fp32Mul
             | PrimitiveType::Fp32Div => 32,
+            // FP32 comparisons have 1 output bit
+            PrimitiveType::Fp32Lt
+            | PrimitiveType::Fp32Gt
+            | PrimitiveType::Fp32Le
+            | PrimitiveType::Fp32Ge => 1,
             _ => 1,
         }
     }
@@ -362,6 +379,11 @@ impl PrimitiveType {
             PrimitiveType::Fp32Sub => 100.0,
             PrimitiveType::Fp32Mul => 150.0,
             PrimitiveType::Fp32Div => 200.0,
+            // FP32 comparisons are simpler than arithmetic
+            PrimitiveType::Fp32Lt
+            | PrimitiveType::Fp32Gt
+            | PrimitiveType::Fp32Le
+            | PrimitiveType::Fp32Ge => 50.0,
             // NCL threshold gates - state-holding with hysteresis
             // TH22 (C-element) is foundational for NCL, similar FIT to latches
             PrimitiveType::Th12 | PrimitiveType::Th22 => 0.5,
@@ -421,6 +443,10 @@ impl PrimitiveType {
             PrimitiveType::Fp32Sub => "FP32SUB",
             PrimitiveType::Fp32Mul => "FP32MUL",
             PrimitiveType::Fp32Div => "FP32DIV",
+            PrimitiveType::Fp32Lt => "FP32LT",
+            PrimitiveType::Fp32Gt => "FP32GT",
+            PrimitiveType::Fp32Le => "FP32LE",
+            PrimitiveType::Fp32Ge => "FP32GE",
             // NCL threshold gates
             PrimitiveType::Th12 => "TH12",
             PrimitiveType::Th22 => "TH22",
@@ -654,6 +680,14 @@ pub enum LirOp {
     FpMul { width: u32 },
     /// FP32 Division: result = a / b (IEEE 754)
     FpDiv { width: u32 },
+    /// FP32 Less than: result = (a < b) (IEEE 754)
+    FpLt { width: u32 },
+    /// FP32 Greater than: result = (a > b) (IEEE 754)
+    FpGt { width: u32 },
+    /// FP32 Less than or equal: result = (a <= b) (IEEE 754)
+    FpLe { width: u32 },
+    /// FP32 Greater than or equal: result = (a >= b) (IEEE 754)
+    FpGe { width: u32 },
 
     // === Bitwise Logic ===
     /// Bitwise AND
@@ -844,7 +878,11 @@ impl LirOp {
             | LirOp::Le { .. }
             | LirOp::Gt { .. }
             | LirOp::Ge { .. }
-            | LirOp::Slt { .. } => 1, // Comparison results are 1-bit
+            | LirOp::Slt { .. }
+            | LirOp::FpLt { .. }
+            | LirOp::FpGt { .. }
+            | LirOp::FpLe { .. }
+            | LirOp::FpGe { .. } => 1, // Comparison results are 1-bit
             LirOp::Mux2 { width } => *width,
             LirOp::MuxN { width, .. } => *width,
             LirOp::Shl { width }
@@ -912,6 +950,10 @@ impl LirOp {
             | LirOp::Gt { .. }
             | LirOp::Ge { .. }
             | LirOp::Slt { .. }
+            | LirOp::FpLt { .. }
+            | LirOp::FpGt { .. }
+            | LirOp::FpLe { .. }
+            | LirOp::FpGe { .. }
             | LirOp::Shl { .. }
             | LirOp::Shr { .. }
             | LirOp::Sar { .. }

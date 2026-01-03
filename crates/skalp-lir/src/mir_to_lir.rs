@@ -1220,6 +1220,83 @@ impl MirToLirTransform {
                 )
             }
 
+            // Floating-Point Comparisons (IEEE 754)
+            BinaryOp::FLess => {
+                let left_sig = self.transform_expression(left, operand_width);
+                let right_sig = self.transform_expression(right, operand_width);
+                (
+                    left_sig,
+                    right_sig,
+                    LirOp::FpLt {
+                        width: operand_width,
+                    },
+                    1, // Comparison results are 1-bit
+                )
+            }
+            BinaryOp::FLessEqual => {
+                let left_sig = self.transform_expression(left, operand_width);
+                let right_sig = self.transform_expression(right, operand_width);
+                (
+                    left_sig,
+                    right_sig,
+                    LirOp::FpLe {
+                        width: operand_width,
+                    },
+                    1,
+                )
+            }
+            BinaryOp::FGreater => {
+                let left_sig = self.transform_expression(left, operand_width);
+                let right_sig = self.transform_expression(right, operand_width);
+                (
+                    left_sig,
+                    right_sig,
+                    LirOp::FpGt {
+                        width: operand_width,
+                    },
+                    1,
+                )
+            }
+            BinaryOp::FGreaterEqual => {
+                let left_sig = self.transform_expression(left, operand_width);
+                let right_sig = self.transform_expression(right, operand_width);
+                (
+                    left_sig,
+                    right_sig,
+                    LirOp::FpGe {
+                        width: operand_width,
+                    },
+                    1,
+                )
+            }
+            BinaryOp::FEqual => {
+                // FP equality comparison - for now use bit equality
+                // (IEEE 754 equality is complex with NaN handling)
+                let left_sig = self.transform_expression(left, operand_width);
+                let right_sig = self.transform_expression(right, operand_width);
+                (
+                    left_sig,
+                    right_sig,
+                    LirOp::Eq {
+                        width: operand_width,
+                    },
+                    1,
+                )
+            }
+            BinaryOp::FNotEqual => {
+                // FP inequality comparison - for now use bit inequality
+                let left_sig = self.transform_expression(left, operand_width);
+                let right_sig = self.transform_expression(right, operand_width);
+                (
+                    left_sig,
+                    right_sig,
+                    LirOp::Ne {
+                        width: operand_width,
+                    },
+                    1,
+                )
+            }
+
             _ => {
                 self.warnings
                     .push(format!("Unsupported binary op: {:?}", op));

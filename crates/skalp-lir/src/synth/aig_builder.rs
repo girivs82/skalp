@@ -735,7 +735,11 @@ impl<'a> AigBuilder<'a> {
             CellFunction::FpAdd32
             | CellFunction::FpSub32
             | CellFunction::FpMul32
-            | CellFunction::FpDiv32 => {
+            | CellFunction::FpDiv32
+            | CellFunction::FpLt32
+            | CellFunction::FpGt32
+            | CellFunction::FpLe32
+            | CellFunction::FpGe32 => {
                 // FP operations are handled as soft macros and not decomposed to AIGs
                 // The SIR evaluator handles them as behavioral primitives
                 inputs.first().copied().unwrap_or(AigLit::false_lit())
