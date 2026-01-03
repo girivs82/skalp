@@ -98,6 +98,21 @@ impl HierarchicalNetlist {
     pub fn flatten(&self) -> GateNetlist {
         let mut result = GateNetlist::new(self.top_module.clone(), self.library.clone());
 
+        // Propagate NCL flag: if any instance is NCL, the flattened netlist is NCL
+        let ncl_instances: Vec<_> = self
+            .instances
+            .iter()
+            .filter(|(_, inst)| inst.netlist.is_ncl)
+            .map(|(path, _)| path.clone())
+            .collect();
+        result.is_ncl = !ncl_instances.is_empty();
+        if result.is_ncl {
+            eprintln!(
+                "[FLATTEN] NCL detected in {} instances, setting is_ncl=true",
+                ncl_instances.len()
+            );
+        }
+
         // Track net ID remapping for each instance
         let mut net_id_maps: HashMap<&InstancePath, HashMap<GateNetId, GateNetId>> = HashMap::new();
 
