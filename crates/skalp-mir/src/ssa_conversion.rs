@@ -402,17 +402,47 @@ impl SsaConverter {
         new_id
     }
 
+    /// Update variable references in an LValue to use current SSA versions
+    /// BUG #182 FIX: Handle nested LValues like RangeSelect and BitSelect
+    fn update_lvalue_refs(&mut self, lvalue: &mut LValue) {
+        match lvalue {
+            LValue::Variable(var_id) => {
+                if let Some(&current_ver) = self.current_version.get(var_id) {
+                    if current_ver != *var_id {
+                        eprintln!(
+                            "SSA: BUG #182 FIX - Updating Variable({}) -> Variable({}) in LValue",
+                            var_id.0, current_ver.0
+                        );
+                        *var_id = current_ver;
+                    }
+                }
+            }
+            LValue::RangeSelect { base, .. } => {
+                // Recursively update the base LValue
+                self.update_lvalue_refs(base);
+            }
+            LValue::BitSelect { base, index } => {
+                // Recursively update the base LValue
+                self.update_lvalue_refs(base);
+                // Also update any variable refs in the index expression
+                self.update_expr_refs(index);
+            }
+            LValue::Concat(parts) => {
+                for part in parts {
+                    self.update_lvalue_refs(part);
+                }
+            }
+            // Port and Signal references don't have nested variables
+            LValue::Port(_) | LValue::Signal(_) => {}
+        }
+    }
+
     /// Update variable references in an expression to use current SSA versions
     fn update_expr_refs(&mut self, expr: &mut Expression) {
         match &mut expr.kind {
             ExpressionKind::Ref(lvalue) => {
-                if let LValue::Variable(var_id) = lvalue {
-                    if let Some(&current_ver) = self.current_version.get(var_id) {
-                        if current_ver != *var_id {
-                            *var_id = current_ver;
-                        }
-                    }
-                }
+                // BUG #182 FIX: Use helper to handle nested LValues
+                self.update_lvalue_refs(lvalue);
             }
             ExpressionKind::Binary { left, right, .. } => {
                 self.update_expr_refs(left);
