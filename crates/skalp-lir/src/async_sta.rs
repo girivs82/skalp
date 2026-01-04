@@ -27,7 +27,7 @@
 //! ```
 
 use crate::gate_netlist::{Cell, CellId, GateNetId, GateNetlist};
-use crate::tech_library::TechLibrary;
+use crate::tech_library::{TechLibrary, TimingCorner};
 use std::collections::{HashMap, HashSet};
 
 /// Configuration for async timing analysis
@@ -43,6 +43,13 @@ pub struct AsyncStaConfig {
     pub wire_delay_per_fanout_ps: f64,
     /// Maximum path depth to trace (prevents infinite loops)
     pub max_trace_depth: usize,
+    /// Timing corner to analyze (None = use default/typical)
+    pub corner: Option<TimingCorner>,
+    /// Enable multi-corner analysis (analyze all corners, report worst-case)
+    pub multi_corner: bool,
+    /// Corners to analyze when multi_corner is enabled
+    /// Default: [SS, TT, FF] for slow, typical, fast
+    pub corners: Vec<TimingCorner>,
 }
 
 impl Default for AsyncStaConfig {
@@ -53,6 +60,9 @@ impl Default for AsyncStaConfig {
             default_gate_delay_ps: 25.0,    // Fallback if not in library
             wire_delay_per_fanout_ps: 10.0, // Estimate wire delay
             max_trace_depth: 100,           // Prevent infinite recursion
+            corner: None,                   // Use default/typical corner
+            multi_corner: false,            // Single corner by default
+            corners: vec![TimingCorner::SS, TimingCorner::TT, TimingCorner::FF],
         }
     }
 }
@@ -103,6 +113,8 @@ pub struct ForkViolation {
     pub threshold_ps: f64,
     /// Severity level
     pub severity: ViolationSeverity,
+    /// Timing corner where this violation was detected (for multi-corner analysis)
+    pub corner: Option<TimingCorner>,
 }
 
 impl ForkViolation {
@@ -384,22 +396,30 @@ impl<'a> AsyncSta<'a> {
     }
 
     /// Get cell delay from library or use default
+    ///
+    /// Uses the timing corner from config if specified. For multi-corner analysis,
+    /// this is called multiple times with different corners.
     fn get_cell_delay_from_type(&self, cell_type: &str, cell: &Cell) -> f64 {
         // Try library lookup first
         if let Some(lib) = self.library {
             if let Some(lib_cell) = lib.get_cell(cell_type) {
                 if let Some(timing) = &lib_cell.timing {
-                    if let Some((_, arc)) = timing.arcs.iter().next() {
-                        // Estimate load from fanout
-                        let fanout = self.estimate_fanout(cell);
-                        let load = fanout as f64 * 5.0; // 5fF per fanout estimate
-                        return arc.avg_delay_ps(load);
+                    // Get timing arc for the configured corner
+                    // get_arc returns corner-specific if available, else falls back to default
+                    let arc_name = timing.arcs.keys().next().cloned();
+                    if let Some(arc_name) = arc_name {
+                        if let Some(arc) = timing.get_arc(&arc_name, self.config.corner) {
+                            // Estimate load from fanout
+                            let fanout = self.estimate_fanout(cell);
+                            let load = fanout as f64 * 5.0; // 5fF per fanout estimate
+                            return arc.avg_delay_ps(load);
+                        }
                     }
                 }
             }
         }
 
-        // Use default delays based on cell type
+        // Use default delays based on cell type, scaled for corner
         self.default_delay_for_type(cell_type)
     }
 
@@ -410,7 +430,7 @@ impl<'a> AsyncSta<'a> {
         // Strip suffix like _X1, _X2
         let base = upper.split('_').next().unwrap_or(&upper);
 
-        match base {
+        let base_delay = match base {
             "INV" | "NOT" => 15.0,
             "BUF" | "BUFF" | "BUFFER" => 20.0,
             "AND2" | "NAND2" => 25.0,
@@ -428,6 +448,28 @@ impl<'a> AsyncSta<'a> {
             _ if upper.starts_with("FP32") => 100.0,
             _ if upper.contains("COMPLETION") || upper.contains("NCL") => 50.0,
             _ => self.config.default_gate_delay_ps,
+        };
+
+        // Scale delay based on corner if specified
+        base_delay * self.corner_delay_factor()
+    }
+
+    /// Get delay scaling factor for the configured corner
+    ///
+    /// - SS (slow-slow): 1.5x slower (high temp, slow process)
+    /// - TT (typical): 1.0x (nominal)
+    /// - FF (fast-fast): 0.6x faster (low temp, fast process)
+    /// - SF/FS (skewed): ~1.0x (mixed effects)
+    fn corner_delay_factor(&self) -> f64 {
+        match self.config.corner {
+            None => 1.0,
+            Some(TimingCorner::TT) => 1.0,
+            Some(TimingCorner::SS) => 1.5,
+            Some(TimingCorner::SSLV) => 1.8, // Worst case: slow + low voltage
+            Some(TimingCorner::FF) => 0.6,
+            Some(TimingCorner::FFHV) => 0.5, // Best case: fast + high voltage
+            Some(TimingCorner::SF) => 1.1,   // Slow N, fast P
+            Some(TimingCorner::FS) => 0.9,   // Fast N, slow P
         }
     }
 
@@ -517,6 +559,7 @@ impl<'a> AsyncSta<'a> {
                 skew_ps: skew,
                 threshold_ps: threshold,
                 severity,
+                corner: self.config.corner,
             })
         } else {
             None
@@ -832,6 +875,133 @@ pub fn analyze_async_timing_with_oscillations(
         .with_oscillation_counts(cell_oscillation_counts)
         .with_net_oscillation_counts(net_oscillation_counts);
     sta.analyze()
+}
+
+/// Multi-corner async timing analysis
+///
+/// Analyzes timing at multiple PVT corners and returns the worst-case result.
+/// This is critical for real silicon where:
+/// - At SS (slow-slow): delays are ~1.5x nominal
+/// - At FF (fast-fast): delays are ~0.6x nominal
+/// - Skew ratios can change between corners (path A fast at SS, path B fast at FF)
+///
+/// # Returns
+/// A `MultiCornerStaResult` containing:
+/// - `worst_case`: The result with maximum skew (used for fix sizing)
+/// - `per_corner`: Individual results for each analyzed corner
+/// - `worst_corner`: Which corner had the maximum skew
+///
+/// # Example
+/// ```ignore
+/// let config = AsyncStaConfig {
+///     multi_corner: true,
+///     corners: vec![TimingCorner::SS, TimingCorner::TT, TimingCorner::FF],
+///     ..Default::default()
+/// };
+/// let result = analyze_async_timing_multi_corner(&netlist, Some(&library), &config);
+/// println!("Worst case at {:?}: {:.1}ps skew", result.worst_corner, result.worst_case.stats.max_skew_ps);
+/// ```
+pub fn analyze_async_timing_multi_corner(
+    netlist: &GateNetlist,
+    library: Option<&TechLibrary>,
+    config: &AsyncStaConfig,
+) -> MultiCornerStaResult {
+    let corners = if config.corners.is_empty() {
+        vec![TimingCorner::SS, TimingCorner::TT, TimingCorner::FF]
+    } else {
+        config.corners.clone()
+    };
+
+    let mut per_corner = Vec::new();
+    let mut worst_skew = 0.0f64;
+    let mut worst_corner = TimingCorner::TT;
+    let mut worst_result: Option<AsyncStaResult> = None;
+
+    for corner in &corners {
+        // Create config for this corner
+        let mut corner_config = config.clone();
+        corner_config.corner = Some(*corner);
+        corner_config.multi_corner = false; // Prevent recursion
+
+        // Run single-corner analysis
+        let result = analyze_async_timing(netlist, library, &corner_config);
+
+        // Track worst case
+        if result.stats.max_skew_ps > worst_skew {
+            worst_skew = result.stats.max_skew_ps;
+            worst_corner = *corner;
+            worst_result = Some(result.clone());
+        }
+
+        per_corner.push((*corner, result));
+    }
+
+    MultiCornerStaResult {
+        worst_case: worst_result.unwrap_or_else(|| {
+            // Fallback if no corners analyzed
+            analyze_async_timing(netlist, library, config)
+        }),
+        per_corner,
+        worst_corner,
+        corners_analyzed: corners,
+    }
+}
+
+/// Result of multi-corner async timing analysis
+#[derive(Debug, Clone)]
+pub struct MultiCornerStaResult {
+    /// Worst-case result (maximum skew across all corners)
+    pub worst_case: AsyncStaResult,
+    /// Results for each individual corner
+    pub per_corner: Vec<(TimingCorner, AsyncStaResult)>,
+    /// Corner with the worst (maximum) skew
+    pub worst_corner: TimingCorner,
+    /// List of corners that were analyzed
+    pub corners_analyzed: Vec<TimingCorner>,
+}
+
+impl MultiCornerStaResult {
+    /// Get the maximum skew across all corners
+    pub fn max_skew(&self) -> f64 {
+        self.worst_case.stats.max_skew_ps
+    }
+
+    /// Get the worst-case buffer delay for sizing
+    ///
+    /// For buffer insertion, use the SLOWEST buffer delay (SS corner)
+    /// to ensure sufficient delay is added at all corners.
+    pub fn worst_case_buffer_delay(&self, nominal_buffer_delay_ps: f64) -> f64 {
+        // Use SSLV corner factor (1.8x) if analyzed, otherwise SS (1.5x)
+        let factor = if self.corners_analyzed.contains(&TimingCorner::SSLV) {
+            1.8 // SSLV is slowest
+        } else {
+            1.5 // SS or default slow assumption
+        };
+        nominal_buffer_delay_ps * factor
+    }
+
+    /// Generate a summary report
+    pub fn summary(&self) -> String {
+        let mut s = String::new();
+        s.push_str("=== Multi-Corner Async STA Report ===\n\n");
+
+        for (corner, result) in &self.per_corner {
+            s.push_str(&format!(
+                "{:?}: {} forks, {} violations, max skew {:.1}ps\n",
+                corner,
+                result.stats.total_forks,
+                result.fork_violations.len(),
+                result.stats.max_skew_ps
+            ));
+        }
+
+        s.push_str(&format!(
+            "\nWorst-case corner: {:?} ({:.1}ps max skew)\n",
+            self.worst_corner, self.worst_case.stats.max_skew_ps
+        ));
+
+        s
+    }
 }
 
 #[cfg(test)]
@@ -1203,5 +1373,170 @@ mod tests {
                 skew
             );
         }
+    }
+
+    #[test]
+    fn test_corner_delay_factors() {
+        let netlist = make_test_netlist();
+
+        // Test SS corner (slow-slow) - delays should be 1.5x
+        let config_ss = AsyncStaConfig {
+            corner: Some(TimingCorner::SS),
+            ..Default::default()
+        };
+        let sta_ss = AsyncSta::new(&netlist, config_ss);
+        assert_eq!(sta_ss.default_delay_for_type("INV_X1"), 15.0 * 1.5);
+        assert_eq!(sta_ss.default_delay_for_type("AND2_X1"), 25.0 * 1.5);
+
+        // Test FF corner (fast-fast) - delays should be 0.6x
+        let config_ff = AsyncStaConfig {
+            corner: Some(TimingCorner::FF),
+            ..Default::default()
+        };
+        let sta_ff = AsyncSta::new(&netlist, config_ff);
+        assert_eq!(sta_ff.default_delay_for_type("INV_X1"), 15.0 * 0.6);
+        assert_eq!(sta_ff.default_delay_for_type("AND2_X1"), 25.0 * 0.6);
+
+        // Test TT corner (typical) - delays should be 1.0x
+        let config_tt = AsyncStaConfig {
+            corner: Some(TimingCorner::TT),
+            ..Default::default()
+        };
+        let sta_tt = AsyncSta::new(&netlist, config_tt);
+        assert_eq!(sta_tt.default_delay_for_type("INV_X1"), 15.0 * 1.0);
+    }
+
+    #[test]
+    fn test_multi_corner_analysis() {
+        let netlist = make_test_netlist();
+        let config = AsyncStaConfig {
+            max_fork_skew_ps: 5.0, // Very tight threshold to trigger violations
+            multi_corner: true,
+            corners: vec![TimingCorner::SS, TimingCorner::TT, TimingCorner::FF],
+            ..Default::default()
+        };
+
+        let result = analyze_async_timing_multi_corner(&netlist, None, &config);
+
+        // Should have analyzed 3 corners
+        assert_eq!(result.corners_analyzed.len(), 3);
+        assert_eq!(result.per_corner.len(), 3);
+
+        // Each corner should have results
+        for (corner, corner_result) in &result.per_corner {
+            assert!(corner_result.stats.total_forks >= 1);
+            println!(
+                "{:?}: {} forks, max_skew={:.1}ps",
+                corner, corner_result.stats.total_forks, corner_result.stats.max_skew_ps
+            );
+        }
+
+        // Worst case should be identified
+        let worst_skew = result.max_skew();
+        assert!(worst_skew > 0.0, "Should have some skew");
+
+        // Summary should be meaningful
+        let summary = result.summary();
+        assert!(summary.contains("Multi-Corner"));
+        assert!(summary.contains("Worst-case corner"));
+    }
+
+    #[test]
+    fn test_multi_corner_worst_case_buffer_delay() {
+        let netlist = make_test_netlist();
+        let config = AsyncStaConfig {
+            multi_corner: true,
+            corners: vec![TimingCorner::SS, TimingCorner::TT, TimingCorner::FF],
+            ..Default::default()
+        };
+
+        let result = analyze_async_timing_multi_corner(&netlist, None, &config);
+
+        // Worst-case buffer delay should account for slow corner
+        let nominal_buffer_delay = 20.0;
+        let worst_buffer_delay = result.worst_case_buffer_delay(nominal_buffer_delay);
+
+        // Should be scaled up for slow corner (SS = 1.5x)
+        assert!(
+            worst_buffer_delay >= nominal_buffer_delay * 1.4,
+            "Worst-case buffer delay should be scaled up for slow corner"
+        );
+    }
+
+    #[test]
+    fn test_violation_includes_corner_info() {
+        // Create a netlist with known unbalanced paths
+        let mut netlist = GateNetlist::new("test".to_string(), "test".to_string());
+
+        // Input net that forks
+        let mut input_net = GateNet::new_input(GateNetId(0), "fork_point".to_string());
+
+        // Short path: inverter (15ps)
+        let inv_cell = Cell {
+            id: CellId(0),
+            cell_type: "INV_X1".to_string(),
+            library: "test".to_string(),
+            fit: 0.0,
+            failure_modes: vec![],
+            inputs: vec![GateNetId(0)],
+            outputs: vec![GateNetId(1)],
+            path: String::new(),
+            clock: None,
+            reset: None,
+            source_op: None,
+            safety_classification: Default::default(),
+        };
+
+        // Long path: AND gate (25ps)
+        let and1 = Cell {
+            id: CellId(1),
+            cell_type: "AND2_X1".to_string(),
+            library: "test".to_string(),
+            fit: 0.0,
+            failure_modes: vec![],
+            inputs: vec![GateNetId(0)],
+            outputs: vec![GateNetId(2)],
+            path: String::new(),
+            clock: None,
+            reset: None,
+            source_op: None,
+            safety_classification: Default::default(),
+        };
+
+        input_net.fanout = vec![(CellId(0), 0), (CellId(1), 0)];
+        netlist.nets.push(input_net);
+
+        // Output nets
+        let mut out1 = GateNet::new_output(GateNetId(1), "out_short".to_string());
+        out1.driver = Some(CellId(0));
+        let mut out2 = GateNet::new_output(GateNetId(2), "out_long".to_string());
+        out2.driver = Some(CellId(1));
+
+        netlist.nets.push(out1);
+        netlist.nets.push(out2);
+        netlist.cells.push(inv_cell);
+        netlist.cells.push(and1);
+
+        // Analyze with SS corner - violations should have corner info
+        let config = AsyncStaConfig {
+            max_fork_skew_ps: 5.0,
+            corner: Some(TimingCorner::SS),
+            ..Default::default()
+        };
+
+        let result = analyze_async_timing(&netlist, None, &config);
+
+        // Should have violations with corner info
+        assert!(
+            !result.fork_violations.is_empty(),
+            "Should detect fork violation"
+        );
+
+        let violation = &result.fork_violations[0];
+        assert_eq!(
+            violation.corner,
+            Some(TimingCorner::SS),
+            "Violation should record corner"
+        );
     }
 }

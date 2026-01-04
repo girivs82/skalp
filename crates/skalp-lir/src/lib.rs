@@ -82,7 +82,7 @@ pub use tech_library::{
     process_corner_factor, voltage_acceleration_factor, CellFunction, DecompConnectivity,
     DecompSource, DecompositionRule, DeratingFactors, DeratingPreset, LibraryCell,
     LibraryDeratingSummary, LibraryFailureMode, LibraryLoadError, OperatingConditions,
-    ProcessCorner, TechLibrary,
+    ProcessCorner, TechLibrary, TimingCorner,
 };
 
 // Technology mapper
@@ -129,12 +129,14 @@ pub use compiled_ip::{
 
 // Async STA for NCL circuits
 pub use async_sta::{
-    analyze_async_timing, analyze_async_timing_with_oscillations, AsyncSta, AsyncStaConfig,
-    AsyncStaResult, AsyncStaStats, CompletionViolation, ForkViolation, ViolationSeverity,
+    analyze_async_timing, analyze_async_timing_multi_corner,
+    analyze_async_timing_with_oscillations, AsyncSta, AsyncStaConfig, AsyncStaResult,
+    AsyncStaStats, CompletionViolation, ForkViolation, MultiCornerStaResult, ViolationSeverity,
 };
 
 // Async STA fix (buffer insertion)
 pub use async_sta_fix::{
-    fix_fork_violations, run_iterative_sta_fix, AsyncStaFixConfig, AsyncStaFixResult, FixStrategy,
-    ForkFix, IterationResult, IterativeStaResult,
+    fix_fork_violations, fix_fork_violations_multi_corner, run_iterative_sta_fix,
+    AsyncStaFixConfig, AsyncStaFixResult, FixStrategy, ForkFix, IterationResult,
+    IterativeStaResult,
 };

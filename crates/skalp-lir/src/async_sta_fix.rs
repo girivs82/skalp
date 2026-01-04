@@ -22,11 +22,14 @@
 //! }
 //! ```
 
-use crate::async_sta::{AsyncStaConfig, AsyncStaResult, ForkViolation, ViolationSeverity};
+use crate::async_sta::{
+    analyze_async_timing_multi_corner, AsyncStaConfig, AsyncStaResult, ForkViolation,
+    MultiCornerStaResult, ViolationSeverity,
+};
 use crate::gate_netlist::{
     Cell, CellId, CellSafetyClassification, GateNet, GateNetId, GateNetlist,
 };
-use std::collections::HashMap;
+use crate::tech_library::TimingCorner;
 
 /// Fix strategy for fork timing violations
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -47,7 +50,7 @@ pub struct AsyncStaFixConfig {
     pub strategy: FixStrategy,
     /// Buffer cell type to use (e.g., "BUF_X1")
     pub buffer_cell_type: String,
-    /// Buffer delay in ps (from tech library)
+    /// Buffer delay in ps (from tech library, nominal TT corner)
     pub buffer_delay_ps: f64,
     /// Library name for inserted buffers
     pub library_name: String,
@@ -59,6 +62,11 @@ pub struct AsyncStaFixConfig {
     pub max_total_buffers: usize,
     /// Extra margin to add when delaying ready signal (ps)
     pub ready_delay_margin_ps: f64,
+    /// Enable multi-corner analysis for fix sizing
+    /// When enabled, uses worst-case skew from all corners and sizes buffers for slow corner
+    pub multi_corner: bool,
+    /// Corners to analyze when multi_corner is enabled
+    pub corners: Vec<TimingCorner>,
 }
 
 impl Default for AsyncStaFixConfig {
@@ -72,6 +80,8 @@ impl Default for AsyncStaFixConfig {
             max_buffers_per_violation: 10,
             max_total_buffers: 1000,
             ready_delay_margin_ps: 10.0, // 10ps extra margin
+            multi_corner: false,         // Single corner by default
+            corners: vec![TimingCorner::SS, TimingCorner::TT, TimingCorner::FF],
         }
     }
 }
@@ -111,6 +121,9 @@ pub struct ForkFix {
 /// This modifies the netlist in place. The strategy used depends on config:
 /// - `PerForkBuffering`: Insert buffers on fast branches of each fork
 /// - `DelayReadySignal`: Insert buffers on completion detection outputs (recommended)
+///
+/// If `config.multi_corner` is enabled, performs multi-corner analysis to find
+/// worst-case skew and sizes buffers for slow corner.
 pub fn fix_fork_violations(
     netlist: &mut GateNetlist,
     sta_result: &AsyncStaResult,
@@ -120,6 +133,35 @@ pub fn fix_fork_violations(
         FixStrategy::DelayReadySignal => fix_by_delaying_ready(netlist, sta_result, config),
         FixStrategy::PerForkBuffering => fix_by_per_fork_buffering(netlist, sta_result, config),
     }
+}
+
+/// Fix fork violations with multi-corner analysis
+///
+/// This variant performs multi-corner analysis to find worst-case skew,
+/// then sizes buffers using the slow-corner buffer delay.
+///
+/// This is the recommended approach for production designs where PVT
+/// variations matter.
+pub fn fix_fork_violations_multi_corner(
+    netlist: &mut GateNetlist,
+    sta_config: &AsyncStaConfig,
+    fix_config: &AsyncStaFixConfig,
+) -> (AsyncStaFixResult, crate::async_sta::MultiCornerStaResult) {
+    // Perform multi-corner analysis
+    let multi_result = analyze_async_timing_multi_corner(netlist, None, sta_config);
+
+    // Use worst-case result for fix sizing
+    let fix_result = match fix_config.strategy {
+        FixStrategy::DelayReadySignal => {
+            fix_by_delaying_ready_multi_corner(netlist, &multi_result, fix_config)
+        }
+        FixStrategy::PerForkBuffering => {
+            // For per-fork, use worst-case result
+            fix_by_per_fork_buffering(netlist, &multi_result.worst_case, fix_config)
+        }
+    };
+
+    (fix_result, multi_result)
 }
 
 /// Fix by delaying the ready/completion signal
@@ -204,6 +246,101 @@ fn fix_by_delaying_ready(
 
     // All violations are fixed by the ready delay
     result.violations_fixed = sta_result
+        .fork_violations
+        .iter()
+        .filter(|v| should_fix_violation(v, config))
+        .count();
+
+    result
+}
+
+/// Fix by delaying the ready/completion signal using multi-corner analysis
+///
+/// This version uses worst-case skew from multi-corner analysis and sizes
+/// buffers using slow-corner buffer delay to ensure correctness across all PVT corners.
+fn fix_by_delaying_ready_multi_corner(
+    netlist: &mut GateNetlist,
+    multi_result: &MultiCornerStaResult,
+    config: &AsyncStaFixConfig,
+) -> AsyncStaFixResult {
+    let mut result = AsyncStaFixResult {
+        violations_fixed: 0,
+        violations_skipped: 0,
+        buffers_inserted: 0,
+        fixes: Vec::new(),
+    };
+
+    // Use worst-case skew across all corners
+    let max_skew = multi_result.max_skew();
+
+    if max_skew == 0.0 {
+        return result;
+    }
+
+    // Add margin
+    let total_delay_needed = max_skew + config.ready_delay_margin_ps;
+
+    // Use slow-corner buffer delay for sizing (ensures enough delay at all corners)
+    // At slow corner (SS), buffer is ~1.5x slower, so we need fewer buffers
+    // At fast corner (FF), buffer is ~0.6x faster, so we need more buffers
+    // To guarantee correctness at all corners, size for fast corner
+    let fast_corner_buffer_delay = config.buffer_delay_ps * 0.6; // FF corner factor
+    let buffers_needed = (total_delay_needed / fast_corner_buffer_delay).ceil() as usize;
+    let buffers_to_insert = buffers_needed.min(config.max_total_buffers);
+
+    if buffers_to_insert == 0 {
+        return result;
+    }
+
+    // Find completion detection nets
+    let detection_nets: Vec<_> = netlist
+        .nets
+        .iter()
+        .filter(|n| n.is_detection)
+        .map(|n| (n.id, n.name.clone()))
+        .collect();
+
+    if detection_nets.is_empty() {
+        // No detection nets found - fall back to per-fork buffering
+        eprintln!(
+            "Warning: No completion detection nets found, falling back to per-fork buffering"
+        );
+        return fix_by_per_fork_buffering(netlist, &multi_result.worst_case, config);
+    }
+
+    // Track next available IDs
+    let mut next_cell_id = netlist.cells.iter().map(|c| c.id.0).max().unwrap_or(0) + 1;
+    let mut next_net_id = netlist.nets.iter().map(|n| n.id.0).max().unwrap_or(0) + 1;
+
+    // Insert buffer chain on each detection net's output
+    for (det_net_id, det_net_name) in detection_nets {
+        if let Some(buffers) = insert_delay_on_net(
+            netlist,
+            det_net_id,
+            &det_net_name,
+            buffers_to_insert,
+            config,
+            &mut next_cell_id,
+            &mut next_net_id,
+        ) {
+            result.buffers_inserted += buffers;
+            result.fixes.push(ForkFix {
+                fork_net_id: det_net_id,
+                fork_net_name: format!(
+                    "{} (ready delay, worst@{:?})",
+                    det_net_name, multi_result.worst_corner
+                ),
+                fast_branch_cell: CellId(0), // N/A for ready delay
+                buffers_inserted: buffers,
+                original_skew_ps: max_skew,
+                estimated_skew_ps: 0.0, // All violations covered
+            });
+        }
+    }
+
+    // Count violations fixed (all from worst-case corner)
+    result.violations_fixed = multi_result
+        .worst_case
         .fork_violations
         .iter()
         .filter(|v| should_fix_violation(v, config))
@@ -752,6 +889,7 @@ mod tests {
             skew_ps: 60.0,
             threshold_ps: 50.0,
             severity: ViolationSeverity::Error,
+            corner: None,
         };
 
         let config = AsyncStaFixConfig {
@@ -809,6 +947,7 @@ mod tests {
             skew_ps: 40.0,
             threshold_ps: 50.0,
             severity: ViolationSeverity::Warning,
+            corner: None,
         };
 
         let config = AsyncStaFixConfig {
