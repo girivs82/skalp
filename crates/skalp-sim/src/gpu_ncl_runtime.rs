@@ -83,6 +83,10 @@ pub struct GpuNclRuntime {
     cpu_gate_states: Vec<bool>,
     /// Whether last run_until_stable converged (changes == 0)
     is_stable: bool,
+    /// Per-cell change counts from last run_until_stable (for oscillation analysis)
+    cell_change_counts: Vec<u32>,
+    /// Per-net change counts from last run_until_stable (for fork oscillation analysis)
+    net_change_counts: Vec<u32>,
 }
 
 /// Information about an NCL cell for GPU simulation
@@ -183,6 +187,7 @@ impl GpuNclRuntime {
 
         let num_nets = netlist.nets.len();
 
+        let num_cells = netlist.cells.len();
         let mut runtime = Self {
             device,
             command_queue,
@@ -204,6 +209,8 @@ impl GpuNclRuntime {
             cpu_net_values: vec![false; num_nets],
             cpu_gate_states: Vec::new(),
             is_stable: false,
+            cell_change_counts: vec![0; num_cells],
+            net_change_counts: vec![0; num_nets],
         };
 
         runtime.initialize()?;
@@ -1194,7 +1201,7 @@ kernel void eval_ncl(
     fn iterate_cpu(&mut self) -> u32 {
         let mut changes = 0u32;
 
-        for cell in &self.cells {
+        for (cell_idx, cell) in self.cells.iter().enumerate() {
             let inputs: Vec<bool> = cell
                 .inputs
                 .iter()
@@ -1468,6 +1475,14 @@ kernel void eval_ncl(
                     let old_value = self.cpu_net_values.get(out_idx).copied().unwrap_or(false);
                     if old_value != result {
                         changes += 1;
+                        // Track per-cell change count for oscillation analysis
+                        if let Some(count) = self.cell_change_counts.get_mut(cell_idx) {
+                            *count += 1;
+                        }
+                        // Track per-net change count for fork oscillation analysis
+                        if let Some(count) = self.net_change_counts.get_mut(out_idx) {
+                            *count += 1;
+                        }
                     }
                     if let Some(val) = self.cpu_net_values.get_mut(out_idx) {
                         *val = result;
@@ -1496,6 +1511,10 @@ kernel void eval_ncl(
                             self.cpu_net_values.get(carry_idx).copied().unwrap_or(false);
                         if old_carry != carry {
                             changes += 1;
+                            // Track per-net change count for carry output
+                            if let Some(count) = self.net_change_counts.get_mut(carry_idx) {
+                                *count += 1;
+                            }
                         }
                         if let Some(val) = self.cpu_net_values.get_mut(carry_idx) {
                             *val = carry;
@@ -1516,6 +1535,10 @@ kernel void eval_ncl(
     pub fn run_until_stable(&mut self, max_iterations: u32) -> u32 {
         let mut iterations = 0u32;
         let mut last_changes = 0;
+
+        // Reset per-cell and per-net change counts for this run
+        self.cell_change_counts.fill(0);
+        self.net_change_counts.fill(0);
 
         // Track oscillation: count how many iterations have the same change count
         let mut oscillation_count = 0u32;
@@ -1588,6 +1611,72 @@ kernel void eval_ncl(
     /// Check if the last simulation run converged
     pub fn is_stable(&self) -> bool {
         self.is_stable
+    }
+
+    /// Get oscillation counts from the last run_until_stable() call.
+    ///
+    /// Returns a map from CellId to the number of times that cell's output changed
+    /// during simulation. This is useful for async STA to calculate effective delays:
+    /// effective_delay = base_delay * oscillation_count
+    ///
+    /// Cells that never changed have count = 0 (or 1 for initial evaluation).
+    /// Cells in feedback loops will have higher counts.
+    pub fn get_oscillation_counts(&self) -> std::collections::HashMap<CellId, u32> {
+        self.cells
+            .iter()
+            .enumerate()
+            .map(|(idx, cell)| {
+                let count = self.cell_change_counts.get(idx).copied().unwrap_or(0);
+                // Add 1 for initial evaluation (every cell evaluates at least once)
+                (cell.id, count.max(1))
+            })
+            .collect()
+    }
+
+    /// Get the raw oscillation count for a specific cell
+    pub fn get_cell_oscillation_count(&self, cell_id: CellId) -> u32 {
+        self.cells
+            .iter()
+            .enumerate()
+            .find(|(_, cell)| cell.id == cell_id)
+            .map(|(idx, _)| {
+                self.cell_change_counts
+                    .get(idx)
+                    .copied()
+                    .unwrap_or(0)
+                    .max(1)
+            })
+            .unwrap_or(1)
+    }
+
+    /// Get net oscillation counts from the last run_until_stable() call.
+    ///
+    /// Returns a map from GateNetId to the number of times that net's value changed
+    /// during simulation. This is useful for async STA fork analysis:
+    /// - Fork net oscillation represents common-mode oscillation affecting all branches
+    /// - Differential oscillation = cell_osc - fork_net_osc
+    ///
+    /// Nets that never changed have count = 0 (returned as 1 for calculation purposes).
+    pub fn get_net_oscillation_counts(&self) -> std::collections::HashMap<GateNetId, u32> {
+        self.netlist
+            .nets
+            .iter()
+            .filter_map(|net| {
+                self.net_to_index.get(&net.id.0).map(|&idx| {
+                    let count = self.net_change_counts.get(idx).copied().unwrap_or(0);
+                    (net.id, count.max(1))
+                })
+            })
+            .collect()
+    }
+
+    /// Get the raw oscillation count for a specific net
+    pub fn get_net_oscillation_count(&self, net_id: GateNetId) -> u32 {
+        self.net_to_index
+            .get(&net_id.0)
+            .and_then(|&idx| self.net_change_counts.get(idx).copied())
+            .unwrap_or(0)
+            .max(1)
     }
 
     /// Identify cells that changed frequently (oscillating) during simulation

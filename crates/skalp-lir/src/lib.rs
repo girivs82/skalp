@@ -128,6 +128,6 @@ pub use compiled_ip::{
 
 // Async STA for NCL circuits
 pub use async_sta::{
-    analyze_async_timing, AsyncSta, AsyncStaConfig, AsyncStaResult, AsyncStaStats,
-    CompletionViolation, ForkViolation, ViolationSeverity,
+    analyze_async_timing, analyze_async_timing_with_oscillations, AsyncSta, AsyncStaConfig,
+    AsyncStaResult, AsyncStaStats, CompletionViolation, ForkViolation, ViolationSeverity,
 };

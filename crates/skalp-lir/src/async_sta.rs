@@ -259,8 +259,15 @@ pub struct AsyncSta<'a> {
     config: AsyncStaConfig,
     netlist: &'a GateNetlist,
     library: Option<&'a TechLibrary>,
-    /// Cached cell delays
+    /// Cached cell delays (base delay, not including oscillation)
     cell_delays: HashMap<CellId, f64>,
+    /// Oscillation counts from simulation (how many times each cell's output changed)
+    /// Used to calculate effective delay: base_delay * oscillation_count
+    oscillation_counts: HashMap<CellId, u32>,
+    /// Net oscillation counts from simulation (how many times each net's value changed)
+    /// Used for fork analysis to calculate differential oscillation:
+    /// differential_osc = cell_osc - fork_net_osc (common-mode cancellation)
+    net_oscillation_counts: HashMap<GateNetId, u32>,
 }
 
 impl<'a> AsyncSta<'a> {
@@ -271,12 +278,43 @@ impl<'a> AsyncSta<'a> {
             netlist,
             library: None,
             cell_delays: HashMap::new(),
+            oscillation_counts: HashMap::new(),
+            net_oscillation_counts: HashMap::new(),
         }
     }
 
     /// Set the technology library for delay lookup
     pub fn with_library(mut self, library: &'a TechLibrary) -> Self {
         self.library = Some(library);
+        self
+    }
+
+    /// Set oscillation counts from simulation.
+    ///
+    /// The oscillation counts represent how many times each cell's output changed
+    /// during simulation until stable. This is used to calculate effective delays:
+    /// `effective_delay = base_delay * oscillation_count`
+    ///
+    /// This accounts for async circuits with feedback that may oscillate multiple
+    /// times before converging.
+    pub fn with_oscillation_counts(mut self, counts: HashMap<CellId, u32>) -> Self {
+        self.oscillation_counts = counts;
+        self
+    }
+
+    /// Set net oscillation counts from simulation.
+    ///
+    /// The net oscillation counts represent how many times each net's value changed
+    /// during simulation. This is used for fork analysis to calculate differential
+    /// oscillation:
+    ///
+    /// `differential_osc = cell_osc - fork_net_osc + 1`
+    ///
+    /// The fork net's oscillation count represents "common mode" oscillation that
+    /// affects all downstream branches equally, so it should be subtracted to get
+    /// the true skew-affecting oscillation.
+    pub fn with_net_oscillation_counts(mut self, counts: HashMap<GateNetId, u32>) -> Self {
+        self.net_oscillation_counts = counts;
         self
     }
 
@@ -330,6 +368,19 @@ impl<'a> AsyncSta<'a> {
             let delay = self.get_cell_delay_from_type(&cell.cell_type, cell);
             self.cell_delays.insert(cell.id, delay);
         }
+    }
+
+    /// Get effective delay for a cell, accounting for oscillation.
+    ///
+    /// If oscillation counts are provided (from simulation), the effective delay
+    /// is: `base_delay * oscillation_count`
+    ///
+    /// This accounts for cells in feedback loops that may evaluate multiple times
+    /// before the circuit converges.
+    fn get_effective_delay(&self, cell_id: CellId) -> f64 {
+        let base_delay = self.cell_delays.get(&cell_id).copied().unwrap_or(0.0);
+        let oscillation_factor = self.oscillation_counts.get(&cell_id).copied().unwrap_or(1) as f64;
+        base_delay * oscillation_factor
     }
 
     /// Get cell delay from library or use default
@@ -409,12 +460,21 @@ impl<'a> AsyncSta<'a> {
             return None;
         }
 
+        // Get the fork net's oscillation count (common-mode that affects all branches)
+        let fork_net_osc = self
+            .net_oscillation_counts
+            .get(&net_id)
+            .copied()
+            .unwrap_or(1);
+
         // Calculate delay to each fanout destination
         let mut branch_delays: Vec<(CellId, String, f64)> = Vec::new();
 
         for (dest_cell_id, _pin) in &net.fanout {
             let mut visited = HashSet::new();
-            let delay = self.trace_path_delay(*dest_cell_id, &mut visited, 0);
+            // Pass fork_net_osc for differential oscillation calculation
+            let delay =
+                self.trace_path_delay_differential(*dest_cell_id, &mut visited, 0, fork_net_osc);
 
             // Add wire delay estimate
             let wire_delay = self.config.wire_delay_per_fanout_ps;
@@ -476,8 +536,8 @@ impl<'a> AsyncSta<'a> {
         }
         visited.insert(cell_id);
 
-        // Get this cell's delay
-        let cell_delay = self.cell_delays.get(&cell_id).copied().unwrap_or(0.0);
+        // Get this cell's effective delay (base delay * oscillation factor)
+        let cell_delay = self.get_effective_delay(cell_id);
 
         // Check if this is a synchronization point (stop tracing)
         if self.is_sync_point(cell_id) {
@@ -502,6 +562,77 @@ impl<'a> AsyncSta<'a> {
         }
 
         cell_delay + max_downstream
+    }
+
+    /// Trace path delay with differential oscillation calculation for fork analysis.
+    ///
+    /// This version subtracts the fork net's oscillation (common-mode) from each cell's
+    /// oscillation to get the true differential delay that affects skew.
+    fn trace_path_delay_differential(
+        &self,
+        cell_id: CellId,
+        visited: &mut HashSet<CellId>,
+        depth: usize,
+        fork_net_osc: u32,
+    ) -> f64 {
+        // Prevent infinite loops and excessive depth
+        if visited.contains(&cell_id) || depth > self.config.max_trace_depth {
+            return 0.0;
+        }
+        visited.insert(cell_id);
+
+        // Get this cell's differential effective delay
+        // differential_osc = max(1, cell_osc - fork_net_osc + 1)
+        let cell_delay = self.get_differential_effective_delay(cell_id, fork_net_osc);
+
+        // Check if this is a synchronization point (stop tracing)
+        if self.is_sync_point(cell_id) {
+            return cell_delay;
+        }
+
+        // Get the cell
+        let Some(cell) = self.netlist.cells.iter().find(|c| c.id == cell_id) else {
+            return cell_delay;
+        };
+
+        // Trace through outputs to find max downstream delay
+        let mut max_downstream = 0.0f64;
+
+        for output_net_id in &cell.outputs {
+            if let Some(net) = self.netlist.nets.iter().find(|n| n.id == *output_net_id) {
+                for (next_cell_id, _) in &net.fanout {
+                    let downstream = self.trace_path_delay_differential(
+                        *next_cell_id,
+                        visited,
+                        depth + 1,
+                        fork_net_osc,
+                    );
+                    max_downstream = max_downstream.max(downstream);
+                }
+            }
+        }
+
+        cell_delay + max_downstream
+    }
+
+    /// Get differential effective delay for a cell, accounting for common-mode oscillation.
+    ///
+    /// For fork analysis, the fork net's oscillation represents common-mode oscillation
+    /// that affects all branches equally. We subtract it to get the true differential:
+    /// `effective_delay = base_delay * max(1, cell_osc - fork_net_osc + 1)`
+    fn get_differential_effective_delay(&self, cell_id: CellId, fork_net_osc: u32) -> f64 {
+        let base_delay = self.cell_delays.get(&cell_id).copied().unwrap_or(0.0);
+        let cell_osc = self.oscillation_counts.get(&cell_id).copied().unwrap_or(1);
+
+        // Differential oscillation: remove common-mode, keep at least 1
+        // The +1 accounts for the initial evaluation that every cell does
+        let differential_osc = if cell_osc > fork_net_osc {
+            cell_osc - fork_net_osc + 1
+        } else {
+            1 // At minimum, the cell evaluates once
+        };
+
+        base_delay * differential_osc as f64
     }
 
     /// Check if a cell is a synchronization point (where paths reconverge)
@@ -575,8 +706,8 @@ impl<'a> AsyncSta<'a> {
                 }
             }
 
-            // Completion delay is just this cell's delay
-            let completion_delay = self.cell_delays.get(&cell.id).copied().unwrap_or(0.0);
+            // Completion delay is this cell's effective delay
+            let completion_delay = self.get_effective_delay(cell.id);
 
             // Check margin
             let margin = completion_delay - max_data_delay - self.config.completion_margin_ps;
@@ -607,7 +738,8 @@ impl<'a> AsyncSta<'a> {
         }
         visited.insert(cell_id);
 
-        let cell_delay = self.cell_delays.get(&cell_id).copied().unwrap_or(0.0);
+        // Get effective delay (base delay * oscillation factor)
+        let cell_delay = self.get_effective_delay(cell_id);
 
         let Some(cell) = self.netlist.cells.iter().find(|c| c.id == cell_id) else {
             return cell_delay;
@@ -639,6 +771,14 @@ impl<'a> AsyncSta<'a> {
 }
 
 /// Convenience function to analyze async timing
+///
+/// # Arguments
+/// * `netlist` - The gate netlist to analyze
+/// * `library` - Optional technology library for delay lookup
+/// * `config` - Configuration for the analysis
+///
+/// For oscillation-aware timing (recommended for circuits with feedback),
+/// use `analyze_async_timing_with_oscillations` instead.
 pub fn analyze_async_timing(
     netlist: &GateNetlist,
     library: Option<&TechLibrary>,
@@ -648,6 +788,49 @@ pub fn analyze_async_timing(
     if let Some(lib) = library {
         sta = sta.with_library(lib);
     }
+    sta.analyze()
+}
+
+/// Convenience function to analyze async timing with oscillation data from simulation
+///
+/// This version accounts for cells in feedback loops that may oscillate multiple
+/// times before converging. For fork analysis, it also uses net oscillation counts
+/// to calculate differential oscillation (removing common-mode oscillation).
+///
+/// The effective delay calculation:
+/// - For general path tracing: `base_delay * cell_oscillation_count`
+/// - For fork analysis: `base_delay * max(1, cell_osc - fork_net_osc + 1)`
+///
+/// # Arguments
+/// * `netlist` - The gate netlist to analyze
+/// * `library` - Optional technology library for delay lookup
+/// * `config` - Configuration for the analysis
+/// * `cell_oscillation_counts` - Map of cell IDs to their oscillation counts from simulation
+/// * `net_oscillation_counts` - Map of net IDs to their oscillation counts from simulation
+///
+/// # Example
+/// ```ignore
+/// // After running NCL simulation:
+/// let cell_osc = runtime.get_oscillation_counts();
+/// let net_osc = runtime.get_net_oscillation_counts();
+/// let result = analyze_async_timing_with_oscillations(
+///     &netlist, None, &config, cell_osc, net_osc
+/// );
+/// ```
+pub fn analyze_async_timing_with_oscillations(
+    netlist: &GateNetlist,
+    library: Option<&TechLibrary>,
+    config: &AsyncStaConfig,
+    cell_oscillation_counts: HashMap<CellId, u32>,
+    net_oscillation_counts: HashMap<GateNetId, u32>,
+) -> AsyncStaResult {
+    let mut sta = AsyncSta::new(netlist, config.clone());
+    if let Some(lib) = library {
+        sta = sta.with_library(lib);
+    }
+    sta = sta
+        .with_oscillation_counts(cell_oscillation_counts)
+        .with_net_oscillation_counts(net_oscillation_counts);
     sta.analyze()
 }
 
@@ -843,5 +1026,182 @@ mod tests {
             !result.fork_violations.is_empty(),
             "Should detect fork violation"
         );
+    }
+
+    #[test]
+    fn test_oscillation_aware_timing() {
+        // Test that oscillation counts multiply effective delays
+        let netlist = make_test_netlist();
+        let config = AsyncStaConfig::default();
+
+        // Create oscillation counts: cell 0 (INV) oscillates 3 times, cell 1 (AND2) once
+        let mut osc_counts = HashMap::new();
+        osc_counts.insert(CellId(0), 3); // INV oscillates 3x: 15ps * 3 = 45ps
+        osc_counts.insert(CellId(1), 1); // AND2 stays stable: 25ps * 1 = 25ps
+
+        let mut sta = AsyncSta::new(&netlist, config).with_oscillation_counts(osc_counts);
+
+        // Build delay map to verify effective delays
+        sta.build_delay_map();
+
+        // Base delays should be normal
+        assert_eq!(sta.cell_delays.get(&CellId(0)).copied(), Some(15.0));
+        assert_eq!(sta.cell_delays.get(&CellId(1)).copied(), Some(25.0));
+
+        // Effective delays should be multiplied by oscillation factor
+        assert_eq!(sta.get_effective_delay(CellId(0)), 45.0); // 15 * 3
+        assert_eq!(sta.get_effective_delay(CellId(1)), 25.0); // 25 * 1
+
+        // Without oscillation counts, effective delay = base delay
+        let sta2 = AsyncSta::new(&netlist, AsyncStaConfig::default());
+        // Note: delay map not built yet, so get_effective_delay returns 0
+        // Build delay map first
+        let mut sta2_mut = sta2;
+        sta2_mut.build_delay_map();
+        assert_eq!(sta2_mut.get_effective_delay(CellId(0)), 15.0); // 15 * 1 (default)
+        assert_eq!(sta2_mut.get_effective_delay(CellId(1)), 25.0); // 25 * 1 (default)
+    }
+
+    #[test]
+    fn test_analyze_with_oscillation_convenience_function() {
+        let netlist = make_test_netlist();
+        let config = AsyncStaConfig::default();
+
+        // High oscillation on the INV should increase its effective delay
+        let mut cell_osc_counts = HashMap::new();
+        cell_osc_counts.insert(CellId(0), 10); // INV oscillates heavily
+
+        // Empty net oscillation counts (no common-mode oscillation)
+        let net_osc_counts = HashMap::new();
+
+        let result = analyze_async_timing_with_oscillations(
+            &netlist,
+            None,
+            &config,
+            cell_osc_counts,
+            net_osc_counts,
+        );
+
+        // Should complete without errors
+        assert!(result.stats.total_nets > 0);
+        assert!(result.stats.total_forks >= 1);
+    }
+
+    #[test]
+    fn test_differential_oscillation_calculation() {
+        // Test that common-mode oscillation is properly subtracted
+        let netlist = make_test_netlist();
+        let config = AsyncStaConfig::default();
+
+        // Cell oscillates 5 times, fork net oscillates 3 times
+        // Differential = 5 - 3 + 1 = 3
+        let mut cell_osc = HashMap::new();
+        cell_osc.insert(CellId(0), 5);
+        cell_osc.insert(CellId(1), 5);
+
+        let mut net_osc = HashMap::new();
+        net_osc.insert(GateNetId(0), 3); // Fork net oscillates 3 times (common mode)
+
+        let mut sta = AsyncSta::new(&netlist, config)
+            .with_oscillation_counts(cell_osc)
+            .with_net_oscillation_counts(net_osc);
+        sta.build_delay_map();
+
+        // Differential effective delay: 15ps * (5 - 3 + 1) = 15ps * 3 = 45ps
+        let diff_delay = sta.get_differential_effective_delay(CellId(0), 3);
+        assert_eq!(diff_delay, 45.0);
+
+        // When cell_osc <= fork_net_osc, differential should be 1 (minimum)
+        let diff_delay_min = sta.get_differential_effective_delay(CellId(0), 10);
+        assert_eq!(diff_delay_min, 15.0); // 15ps * 1
+    }
+
+    #[test]
+    fn test_fork_analysis_with_common_mode_oscillation() {
+        // Test that fork skew calculation removes common-mode oscillation
+        let mut netlist = GateNetlist::new("test".to_string(), "test".to_string());
+
+        // Create a fork: input_net -> cell0 (INV) and cell1 (AND2)
+        let mut input_net = GateNet::new_input(GateNetId(0), "fork_net".to_string());
+        input_net.fanout = vec![(CellId(0), 0), (CellId(1), 0)];
+        netlist.nets.push(input_net);
+
+        // INV cell
+        let inv_cell = Cell {
+            id: CellId(0),
+            cell_type: "INV_X1".to_string(),
+            library: "test".to_string(),
+            fit: 0.0,
+            failure_modes: vec![],
+            inputs: vec![GateNetId(0)],
+            outputs: vec![GateNetId(1)],
+            path: String::new(),
+            clock: None,
+            reset: None,
+            source_op: None,
+            safety_classification: Default::default(),
+        };
+
+        // AND2 cell
+        let and_cell = Cell {
+            id: CellId(1),
+            cell_type: "AND2_X1".to_string(),
+            library: "test".to_string(),
+            fit: 0.0,
+            failure_modes: vec![],
+            inputs: vec![GateNetId(0)],
+            outputs: vec![GateNetId(2)],
+            path: String::new(),
+            clock: None,
+            reset: None,
+            source_op: None,
+            safety_classification: Default::default(),
+        };
+
+        netlist.cells.push(inv_cell);
+        netlist.cells.push(and_cell);
+
+        // Output nets
+        let mut out1 = GateNet::new_output(GateNetId(1), "out1".to_string());
+        out1.driver = Some(CellId(0));
+        let mut out2 = GateNet::new_output(GateNetId(2), "out2".to_string());
+        out2.driver = Some(CellId(1));
+        netlist.nets.push(out1);
+        netlist.nets.push(out2);
+
+        // Both cells oscillate 10 times (due to fork oscillating 10 times)
+        // This is common-mode - shouldn't affect skew!
+        let mut cell_osc = HashMap::new();
+        cell_osc.insert(CellId(0), 10);
+        cell_osc.insert(CellId(1), 10);
+
+        let mut net_osc = HashMap::new();
+        net_osc.insert(GateNetId(0), 10); // Fork net oscillates 10 times
+
+        let config = AsyncStaConfig {
+            max_fork_skew_ps: 50.0, // Generous threshold
+            ..Default::default()
+        };
+
+        let result =
+            analyze_async_timing_with_oscillations(&netlist, None, &config, cell_osc, net_osc);
+
+        // With differential calculation:
+        // INV differential = 10 - 10 + 1 = 1, delay = 15ps
+        // AND2 differential = 10 - 10 + 1 = 1, delay = 25ps
+        // Skew = |25 - 15| = 10ps
+        // This is much better than naive: 10*25 - 10*15 = 100ps skew!
+
+        // The skew should be small (base delay difference only)
+        // Not inflated by common-mode oscillation
+        if !result.fork_violations.is_empty() {
+            let skew = result.fork_violations[0].skew_ps;
+            // Skew should be around 10ps (25-15), not 100ps (250-150)
+            assert!(
+                skew < 20.0,
+                "Skew should be small after removing common-mode, got {}ps",
+                skew
+            );
+        }
     }
 }
