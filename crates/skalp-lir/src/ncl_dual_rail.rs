@@ -511,6 +511,16 @@ impl DualRailConverter {
                 self.convert_or4(cell, out_dual, output);
             }
 
+            // Full Adder: has 2 outputs (sum, cout)
+            "FA" | "FA_X1" => {
+                self.convert_fa(cell, output);
+            }
+
+            // Half Adder: has 2 outputs (sum, cout)
+            "HA" | "HA_X1" => {
+                self.convert_ha(cell, output);
+            }
+
             _ => {
                 // Unknown gate type - log warning and create passthrough
                 eprintln!(
@@ -801,6 +811,243 @@ impl DualRailConverter {
                 self.connect_nets(output, f_out, out.f);
             }
         }
+    }
+
+    /// Convert Full Adder (FA_X1)
+    /// Inputs: a[0], b[1], cin[2]
+    /// Outputs: sum[0], cout[1]
+    ///
+    /// NCL Implementation:
+    /// - sum = a XOR b XOR cin (3-way XOR)
+    /// - cout = majority(a, b, cin) = (a AND b) OR (b AND cin) OR (a AND cin)
+    fn convert_fa(&mut self, cell: &Cell, output: &mut GateNetlist) {
+        if cell.inputs.len() < 3 || cell.outputs.len() < 2 {
+            eprintln!(
+                "[DUAL_RAIL] FA_X1 requires 3 inputs and 2 outputs, got {} inputs and {} outputs",
+                cell.inputs.len(),
+                cell.outputs.len()
+            );
+            return;
+        }
+
+        let a = cell.inputs[0];
+        let b = cell.inputs[1];
+        let cin = cell.inputs[2];
+        let sum_out = cell.outputs[0];
+        let cout_out = cell.outputs[1];
+
+        let (a_dual, b_dual, cin_dual) = match (
+            self.get_dual_rail(a),
+            self.get_dual_rail(b),
+            self.get_dual_rail(cin),
+        ) {
+            (Some(a), Some(b), Some(c)) => (a, b, c),
+            _ => return,
+        };
+
+        let (sum_dual, cout_dual) =
+            match (self.get_dual_rail(sum_out), self.get_dual_rail(cout_out)) {
+                (Some(s), Some(c)) => (s, c),
+                _ => return,
+            };
+
+        // === SUM = a XOR b XOR cin ===
+        // First compute a XOR b
+        // xor_ab_t = TH12(TH22(a_t, b_f), TH22(a_f, b_t))
+        let xor_ab_t1 = self.create_th22(
+            output,
+            &format!("{}_xor_ab_t1", cell.path),
+            a_dual.t,
+            b_dual.f,
+        );
+        let xor_ab_t2 = self.create_th22(
+            output,
+            &format!("{}_xor_ab_t2", cell.path),
+            a_dual.f,
+            b_dual.t,
+        );
+        let xor_ab_t = self.create_th12(
+            output,
+            &format!("{}_xor_ab_t", cell.path),
+            xor_ab_t1,
+            xor_ab_t2,
+        );
+
+        // xor_ab_f = TH12(TH22(a_t, b_t), TH22(a_f, b_f))
+        let xor_ab_f1 = self.create_th22(
+            output,
+            &format!("{}_xor_ab_f1", cell.path),
+            a_dual.t,
+            b_dual.t,
+        );
+        let xor_ab_f2 = self.create_th22(
+            output,
+            &format!("{}_xor_ab_f2", cell.path),
+            a_dual.f,
+            b_dual.f,
+        );
+        let xor_ab_f = self.create_th12(
+            output,
+            &format!("{}_xor_ab_f", cell.path),
+            xor_ab_f1,
+            xor_ab_f2,
+        );
+
+        // Now compute (a XOR b) XOR cin
+        // sum_t = TH12(TH22(xor_ab_t, cin_f), TH22(xor_ab_f, cin_t))
+        let sum_t1 = self.create_th22(
+            output,
+            &format!("{}_sum_t1", cell.path),
+            xor_ab_t,
+            cin_dual.f,
+        );
+        let sum_t2 = self.create_th22(
+            output,
+            &format!("{}_sum_t2", cell.path),
+            xor_ab_f,
+            cin_dual.t,
+        );
+        let sum_t = self.create_th12(output, &format!("{}_sum_t", cell.path), sum_t1, sum_t2);
+        self.connect_nets(output, sum_t, sum_dual.t);
+
+        // sum_f = TH12(TH22(xor_ab_t, cin_t), TH22(xor_ab_f, cin_f))
+        let sum_f1 = self.create_th22(
+            output,
+            &format!("{}_sum_f1", cell.path),
+            xor_ab_t,
+            cin_dual.t,
+        );
+        let sum_f2 = self.create_th22(
+            output,
+            &format!("{}_sum_f2", cell.path),
+            xor_ab_f,
+            cin_dual.f,
+        );
+        let sum_f = self.create_th12(output, &format!("{}_sum_f", cell.path), sum_f1, sum_f2);
+        self.connect_nets(output, sum_f, sum_dual.f);
+
+        // === COUT = majority(a, b, cin) = (a AND b) OR (b AND cin) OR (a AND cin) ===
+        // cout_t = TH12(TH22(a_t, b_t), TH12(TH22(b_t, cin_t), TH22(a_t, cin_t)))
+        let cout_ab = self.create_th22(
+            output,
+            &format!("{}_cout_ab", cell.path),
+            a_dual.t,
+            b_dual.t,
+        );
+        let cout_bc = self.create_th22(
+            output,
+            &format!("{}_cout_bc", cell.path),
+            b_dual.t,
+            cin_dual.t,
+        );
+        let cout_ac = self.create_th22(
+            output,
+            &format!("{}_cout_ac", cell.path),
+            a_dual.t,
+            cin_dual.t,
+        );
+        let cout_bc_ac = self.create_th12(
+            output,
+            &format!("{}_cout_bc_ac", cell.path),
+            cout_bc,
+            cout_ac,
+        );
+        let cout_t = self.create_th12(
+            output,
+            &format!("{}_cout_t", cell.path),
+            cout_ab,
+            cout_bc_ac,
+        );
+        self.connect_nets(output, cout_t, cout_dual.t);
+
+        // cout_f = TH12(TH22(a_f, b_f), TH12(TH22(b_f, cin_f), TH22(a_f, cin_f)))
+        let cout_ab_f = self.create_th22(
+            output,
+            &format!("{}_cout_ab_f", cell.path),
+            a_dual.f,
+            b_dual.f,
+        );
+        let cout_bc_f = self.create_th22(
+            output,
+            &format!("{}_cout_bc_f", cell.path),
+            b_dual.f,
+            cin_dual.f,
+        );
+        let cout_ac_f = self.create_th22(
+            output,
+            &format!("{}_cout_ac_f", cell.path),
+            a_dual.f,
+            cin_dual.f,
+        );
+        let cout_bc_ac_f = self.create_th12(
+            output,
+            &format!("{}_cout_bc_ac_f", cell.path),
+            cout_bc_f,
+            cout_ac_f,
+        );
+        let cout_f = self.create_th12(
+            output,
+            &format!("{}_cout_f", cell.path),
+            cout_ab_f,
+            cout_bc_ac_f,
+        );
+        self.connect_nets(output, cout_f, cout_dual.f);
+    }
+
+    /// Convert Half Adder (HA_X1)
+    /// Inputs: a[0], b[1]
+    /// Outputs: sum[0], cout[1]
+    ///
+    /// NCL Implementation:
+    /// - sum = a XOR b
+    /// - cout = a AND b
+    fn convert_ha(&mut self, cell: &Cell, output: &mut GateNetlist) {
+        if cell.inputs.len() < 2 || cell.outputs.len() < 2 {
+            eprintln!(
+                "[DUAL_RAIL] HA_X1 requires 2 inputs and 2 outputs, got {} inputs and {} outputs",
+                cell.inputs.len(),
+                cell.outputs.len()
+            );
+            return;
+        }
+
+        let a = cell.inputs[0];
+        let b = cell.inputs[1];
+        let sum_out = cell.outputs[0];
+        let cout_out = cell.outputs[1];
+
+        let (a_dual, b_dual) = match (self.get_dual_rail(a), self.get_dual_rail(b)) {
+            (Some(a), Some(b)) => (a, b),
+            _ => return,
+        };
+
+        let (sum_dual, cout_dual) =
+            match (self.get_dual_rail(sum_out), self.get_dual_rail(cout_out)) {
+                (Some(s), Some(c)) => (s, c),
+                _ => return,
+            };
+
+        // === SUM = a XOR b ===
+        // sum_t = TH12(TH22(a_t, b_f), TH22(a_f, b_t))
+        let sum_t1 = self.create_th22(output, &format!("{}_sum_t1", cell.path), a_dual.t, b_dual.f);
+        let sum_t2 = self.create_th22(output, &format!("{}_sum_t2", cell.path), a_dual.f, b_dual.t);
+        let sum_t = self.create_th12(output, &format!("{}_sum_t", cell.path), sum_t1, sum_t2);
+        self.connect_nets(output, sum_t, sum_dual.t);
+
+        // sum_f = TH12(TH22(a_t, b_t), TH22(a_f, b_f))
+        let sum_f1 = self.create_th22(output, &format!("{}_sum_f1", cell.path), a_dual.t, b_dual.t);
+        let sum_f2 = self.create_th22(output, &format!("{}_sum_f2", cell.path), a_dual.f, b_dual.f);
+        let sum_f = self.create_th12(output, &format!("{}_sum_f", cell.path), sum_f1, sum_f2);
+        self.connect_nets(output, sum_f, sum_dual.f);
+
+        // === COUT = a AND b ===
+        // cout_t = TH22(a_t, b_t)
+        let cout_t = self.create_th22(output, &format!("{}_cout_t", cell.path), a_dual.t, b_dual.t);
+        self.connect_nets(output, cout_t, cout_dual.t);
+
+        // cout_f = TH12(a_f, b_f)
+        let cout_f = self.create_th12(output, &format!("{}_cout_f", cell.path), a_dual.f, b_dual.f);
+        self.connect_nets(output, cout_f, cout_dual.f);
     }
 
     /// Create a buffer cell (for rail connections)
