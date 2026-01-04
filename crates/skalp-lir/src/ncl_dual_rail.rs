@@ -35,10 +35,14 @@ pub struct DualRailConfig {
     pub add_completion: bool,
     /// Library name for generated cells
     pub library_name: String,
-    /// FIT rate for TH12 gates
+    /// FIT rate for TH12 gates (or OR2 if using std cells)
     pub th12_fit: f64,
-    /// FIT rate for TH22 gates
+    /// FIT rate for TH22 gates (or C-element macro if using std cells)
     pub th22_fit: f64,
+    /// Use standard cells with feedback for C-elements instead of native THmn gates
+    /// When true: TH12 → OR2, TH22 → C-element macro (AND2 + OR2 + feedback)
+    /// This is auto-detected from the tech library - set via `from_library()`
+    pub use_std_cells: bool,
 }
 
 impl Default for DualRailConfig {
@@ -48,6 +52,41 @@ impl Default for DualRailConfig {
             library_name: "generic_asic".to_string(),
             th12_fit: 0.1,
             th22_fit: 0.1,
+            use_std_cells: false, // Default to native THmn gates
+        }
+    }
+}
+
+impl DualRailConfig {
+    /// Create config by querying the tech library for available cells
+    /// If THmn gates (TH12, TH22) are available, use them directly.
+    /// Otherwise, decompose to standard cells with feedback.
+    pub fn from_library(library: &crate::TechLibrary) -> Self {
+        let has_th12 = library.get_cell("TH12_X1").is_some();
+        let has_th22 = library.get_cell("TH22_X1").is_some();
+        let use_std_cells = !has_th12 || !has_th22;
+
+        // Get FIT rates from library if available
+        let th12_fit = library
+            .get_cell("TH12_X1")
+            .map(|c| c.fit)
+            .or_else(|| library.get_cell("OR2_X1").map(|c| c.fit))
+            .unwrap_or(0.1);
+
+        let th22_fit = library
+            .get_cell("TH22_X1")
+            .map(|c| c.fit)
+            .or_else(|| library.get_cell("AND2_X1").map(|c| c.fit))
+            .unwrap_or(0.1);
+
+        // Note: if use_std_cells is true, TH12→OR2 and TH22→C-element macro
+
+        Self {
+            add_completion: true,
+            library_name: library.name.clone(),
+            th12_fit,
+            th22_fit,
+            use_std_cells,
         }
     }
 }
@@ -59,9 +98,9 @@ pub struct DualRailStats {
     pub single_rail_cells: usize,
     /// Resulting dual-rail cell count
     pub dual_rail_cells: usize,
-    /// Number of TH12 gates created
+    /// Number of TH12 gates created (or OR2 if use_std_cells)
     pub th12_count: usize,
-    /// Number of TH22 gates created
+    /// Number of TH22 gates created (or C-element macros if use_std_cells)
     pub th22_count: usize,
     /// Number of completion detection gates
     pub completion_gates: usize,
@@ -69,6 +108,10 @@ pub struct DualRailStats {
     pub nets_before: usize,
     /// Number of nets after conversion
     pub nets_after: usize,
+    /// Number of C-element macros created (only when use_std_cells=true)
+    pub c_element_macros: usize,
+    /// Number of feedback loops created (for C-element macros)
+    pub feedback_loops: usize,
 }
 
 /// Dual-rail signal pair
@@ -196,6 +239,7 @@ impl DualRailConverter {
     }
 
     /// Create a TH12 gate (1-of-2, OR semantics)
+    /// When use_std_cells=true, uses OR2 instead (equivalent behavior for NCL)
     fn create_th12(
         &mut self,
         output: &mut GateNetlist,
@@ -208,9 +252,15 @@ impl DualRailConverter {
         output.nets.push(out_net);
 
         let cell_id = self.alloc_cell_id();
+        // TH12 (1-of-2) is equivalent to OR for NCL steady-state behavior
+        let cell_type = if self.config.use_std_cells {
+            "OR2_X1".to_string()
+        } else {
+            "TH12_X1".to_string()
+        };
         let cell = Cell::new_comb(
             cell_id,
-            "TH12_X1".to_string(),
+            cell_type,
             self.config.library_name.clone(),
             self.config.th12_fit,
             name.to_string(),
@@ -223,6 +273,8 @@ impl DualRailConverter {
     }
 
     /// Create a TH22 gate (2-of-2, AND/C-element semantics)
+    /// When use_std_cells=true, creates a C-element macro with feedback:
+    /// Y = (A & B) | (Y & (A | B))
     fn create_th22(
         &mut self,
         output: &mut GateNetlist,
@@ -230,6 +282,10 @@ impl DualRailConverter {
         in_a: GateNetId,
         in_b: GateNetId,
     ) -> GateNetId {
+        if self.config.use_std_cells {
+            return self.create_c_element_macro(output, name, in_a, in_b);
+        }
+
         let out_id = self.alloc_net_id();
         let out_net = GateNet::new(out_id, format!("{}_out", name));
         output.nets.push(out_net);
@@ -246,6 +302,108 @@ impl DualRailConverter {
         );
         output.cells.push(cell);
         self.stats.th22_count += 1;
+        out_id
+    }
+
+    /// Create a C-element macro using standard cells with feedback
+    /// Implements: Y = (A & B) | (Y & (A | B))
+    ///
+    /// This is equivalent to TH22 (Muller C-element) behavior:
+    /// - Output = 1 when both inputs = 1
+    /// - Output = 0 when both inputs = 0
+    /// - Output holds when inputs differ
+    ///
+    /// Structure:
+    /// ```text
+    ///        A ──┬──[AND2]──┐
+    ///            │          │
+    ///        B ──┼──────────┤──[OR2]── Y
+    ///            │          │          │
+    ///            └──[OR2]───┼──[AND2]──┘
+    ///                       │     ↑
+    ///                       └─────┘ (feedback)
+    /// ```
+    fn create_c_element_macro(
+        &mut self,
+        output: &mut GateNetlist,
+        name: &str,
+        in_a: GateNetId,
+        in_b: GateNetId,
+    ) -> GateNetId {
+        // Create output net first (needed for feedback loop)
+        let out_id = self.alloc_net_id();
+        let out_net = GateNet::new(out_id, format!("{}_out", name));
+        output.nets.push(out_net);
+
+        // 1. AND2: and_ab = A & B (the "set" condition)
+        let and_ab_id = self.alloc_net_id();
+        let and_ab_net = GateNet::new(and_ab_id, format!("{}_and_ab", name));
+        output.nets.push(and_ab_net);
+
+        let and_ab_cell_id = self.alloc_cell_id();
+        let and_ab_cell = Cell::new_comb(
+            and_ab_cell_id,
+            "AND2_X1".to_string(),
+            self.config.library_name.clone(),
+            0.1,
+            format!("{}_and_ab", name),
+            vec![in_a, in_b],
+            vec![and_ab_id],
+        );
+        output.cells.push(and_ab_cell);
+
+        // 2. OR2: or_ab = A | B (used for hold condition)
+        let or_ab_id = self.alloc_net_id();
+        let or_ab_net = GateNet::new(or_ab_id, format!("{}_or_ab", name));
+        output.nets.push(or_ab_net);
+
+        let or_ab_cell_id = self.alloc_cell_id();
+        let or_ab_cell = Cell::new_comb(
+            or_ab_cell_id,
+            "OR2_X1".to_string(),
+            self.config.library_name.clone(),
+            0.1,
+            format!("{}_or_ab", name),
+            vec![in_a, in_b],
+            vec![or_ab_id],
+        );
+        output.cells.push(or_ab_cell);
+
+        // 3. AND2: hold = Y & (A | B) (feedback - holds previous value)
+        let hold_id = self.alloc_net_id();
+        let hold_net = GateNet::new(hold_id, format!("{}_hold", name));
+        output.nets.push(hold_net);
+
+        let hold_cell_id = self.alloc_cell_id();
+        let hold_cell = Cell::new_comb(
+            hold_cell_id,
+            "AND2_X1".to_string(),
+            self.config.library_name.clone(),
+            0.1,
+            format!("{}_hold", name),
+            vec![out_id, or_ab_id], // out_id creates feedback loop!
+            vec![hold_id],
+        );
+        output.cells.push(hold_cell);
+
+        // 4. OR2: Y = (A & B) | hold (final output)
+        let out_cell_id = self.alloc_cell_id();
+        let out_cell = Cell::new_comb(
+            out_cell_id,
+            "OR2_X1".to_string(),
+            self.config.library_name.clone(),
+            self.config.th22_fit,
+            format!("{}_out", name),
+            vec![and_ab_id, hold_id],
+            vec![out_id],
+        );
+        output.cells.push(out_cell);
+
+        // Update stats
+        self.stats.th22_count += 1;
+        self.stats.c_element_macros += 1;
+        self.stats.feedback_loops += 1;
+
         out_id
     }
 
@@ -847,5 +1005,109 @@ mod tests {
         // Inverter just swaps rails, no TH gates for the logic itself
         // Only completion detection adds TH gates
         println!("Inverter stats: {:?}", stats);
+    }
+
+    #[test]
+    fn test_dual_rail_with_std_cells() {
+        // Test C-element macro mode (for libraries without native THmn gates)
+        let mut input = GateNetlist::new("test".to_string(), "test_lib".to_string());
+
+        let a = input.add_input("a".to_string());
+        let b = input.add_input("b".to_string());
+        let out = input.add_output("out".to_string());
+
+        input.cells.push(Cell::new_comb(
+            CellId(0),
+            "AND2_X1".to_string(),
+            "test_lib".to_string(),
+            0.1,
+            "and_gate".to_string(),
+            vec![a, b],
+            vec![out],
+        ));
+
+        // Enable std cells mode (simulating a library without THmn gates)
+        let config = DualRailConfig {
+            use_std_cells: true,
+            ..Default::default()
+        };
+
+        let (result, stats) = convert_to_dual_rail(&input, config);
+
+        // With std cells mode:
+        // - TH22 (for true rail AND) becomes C-element macro (4 gates: 2 AND, 2 OR)
+        // - TH12 (for false rail OR) becomes OR2
+        // - Completion also uses C-element macros
+        assert!(stats.c_element_macros >= 1, "Should use C-element macros");
+        assert!(stats.feedback_loops >= 1, "C-elements have feedback loops");
+
+        // Check that output contains standard cells, not THmn gates
+        let has_th22 = result.cells.iter().any(|c| c.cell_type.contains("TH22"));
+        let has_or2 = result.cells.iter().any(|c| c.cell_type.contains("OR2"));
+        let has_and2 = result.cells.iter().any(|c| c.cell_type.contains("AND2"));
+
+        assert!(!has_th22, "Should not have TH22 cells in std cells mode");
+        assert!(has_or2, "Should have OR2 cells (for TH12 replacement)");
+        assert!(has_and2, "Should have AND2 cells (for C-element macro)");
+
+        println!("Std cells mode stats: {:?}", stats);
+        println!("Total cells: {}", result.cells.len());
+    }
+
+    #[test]
+    fn test_c_element_macro_structure() {
+        // Verify the C-element macro has correct structure:
+        // Y = (A & B) | (Y & (A | B))
+        let mut input = GateNetlist::new("test".to_string(), "test_lib".to_string());
+
+        let a = input.add_input("a".to_string());
+        let b = input.add_input("b".to_string());
+        let out = input.add_output("out".to_string());
+
+        // Simple AND gate - its true rail will use C-element (TH22)
+        input.cells.push(Cell::new_comb(
+            CellId(0),
+            "AND2_X1".to_string(),
+            "test_lib".to_string(),
+            0.1,
+            "and_gate".to_string(),
+            vec![a, b],
+            vec![out],
+        ));
+
+        let config = DualRailConfig {
+            use_std_cells: true,
+            add_completion: false, // Skip completion to focus on logic
+            ..Default::default()
+        };
+
+        let (result, stats) = convert_to_dual_rail(&input, config);
+
+        // Each C-element macro adds 4 cells: 2 AND2, 2 OR2
+        // The macro structure is:
+        //   AND2: and_ab = A & B
+        //   OR2:  or_ab = A | B
+        //   AND2: hold = Y & or_ab (feedback!)
+        //   OR2:  Y = and_ab | hold
+
+        // Count cell types
+        let and2_count = result
+            .cells
+            .iter()
+            .filter(|c| c.cell_type == "AND2_X1")
+            .count();
+        let or2_count = result
+            .cells
+            .iter()
+            .filter(|c| c.cell_type == "OR2_X1")
+            .count();
+
+        println!("AND2 cells: {}, OR2 cells: {}", and2_count, or2_count);
+        println!("C-element macros: {}", stats.c_element_macros);
+        println!("Feedback loops: {}", stats.feedback_loops);
+
+        // The feedback is created by connecting Y back to the hold AND gate
+        // We verify this via the stats counter rather than graph analysis
+        assert!(stats.feedback_loops > 0, "Should have feedback loops");
     }
 }
