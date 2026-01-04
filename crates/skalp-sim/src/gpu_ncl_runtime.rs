@@ -119,6 +119,12 @@ enum NclPrimitiveType {
     // Arithmetic cells
     HalfAdder = 12,
     FullAdder = 13,
+    // Compound gates (for C-element macros without native THmn)
+    Ao22 = 14,  // AND-OR: (A1 & A2) | (B1 & B2)
+    Aoi22 = 15, // AND-OR-Invert: ~((A1 & A2) | (B1 & B2))
+    Oai22 = 16, // OR-AND-Invert: ~((A1 | A2) & (B1 | B2))
+    Nand2 = 17,
+    Nor2 = 18,
 
     // NCL threshold gates (stateful - need hysteresis)
     Th12 = 20,
@@ -403,6 +409,12 @@ impl GpuNclRuntime {
             // Arithmetic cells
             "HA" | "HALFADDER" | "HALF" => NclPrimitiveType::HalfAdder,
             "FA" | "FULLADDER" | "FULL" => NclPrimitiveType::FullAdder,
+            // Compound gates (for C-element macros)
+            "AO22" => NclPrimitiveType::Ao22,
+            "AOI22" => NclPrimitiveType::Aoi22,
+            "OAI22" => NclPrimitiveType::Oai22,
+            "NAND2" => NclPrimitiveType::Nand2,
+            "NOR2" => NclPrimitiveType::Nor2,
             _ => {
                 // Check for full name match for tie cells
                 if upper.starts_with("TIE_HIGH") || upper == "TIEH" || upper == "VDD" {
@@ -1238,6 +1250,44 @@ kernel void eval_ncl(
                     let cin = inputs.get(2).copied().unwrap_or(false);
                     a ^ b ^ cin // sum
                 }
+                // Compound gates for C-element macros (stateless combinational)
+                NclPrimitiveType::Nand2 => {
+                    let a = inputs.first().copied().unwrap_or(false);
+                    let b = inputs.get(1).copied().unwrap_or(false);
+                    !(a && b)
+                }
+                NclPrimitiveType::Nor2 => {
+                    let a = inputs.first().copied().unwrap_or(false);
+                    let b = inputs.get(1).copied().unwrap_or(false);
+                    !(a || b)
+                }
+                NclPrimitiveType::Ao22 => {
+                    // AO22: (A1 & A2) | (B1 & B2)
+                    // inputs: [A1, A2, B1, B2]
+                    let a1 = inputs.first().copied().unwrap_or(false);
+                    let a2 = inputs.get(1).copied().unwrap_or(false);
+                    let b1 = inputs.get(2).copied().unwrap_or(false);
+                    let b2 = inputs.get(3).copied().unwrap_or(false);
+                    (a1 && a2) || (b1 && b2)
+                }
+                NclPrimitiveType::Aoi22 => {
+                    // AOI22: ~((A1 & A2) | (B1 & B2))
+                    // inputs: [A1, A2, B1, B2]
+                    let a1 = inputs.first().copied().unwrap_or(false);
+                    let a2 = inputs.get(1).copied().unwrap_or(false);
+                    let b1 = inputs.get(2).copied().unwrap_or(false);
+                    let b2 = inputs.get(3).copied().unwrap_or(false);
+                    !((a1 && a2) || (b1 && b2))
+                }
+                NclPrimitiveType::Oai22 => {
+                    // OAI22: ~((A1 | A2) & (B1 | B2))
+                    // inputs: [A1, A2, B1, B2]
+                    let a1 = inputs.first().copied().unwrap_or(false);
+                    let a2 = inputs.get(1).copied().unwrap_or(false);
+                    let b1 = inputs.get(2).copied().unwrap_or(false);
+                    let b2 = inputs.get(3).copied().unwrap_or(false);
+                    !((a1 || a2) && (b1 || b2))
+                }
                 NclPrimitiveType::Th12
                 | NclPrimitiveType::Th22
                 | NclPrimitiveType::Th13
@@ -1673,6 +1723,41 @@ kernel void eval_ncl(
                     prev
                 };
                 (result, result)
+            }
+            // Compound gates for C-element macros (stateless combinational)
+            NclPrimitiveType::Nand2 => {
+                let a = inputs.first().copied().unwrap_or(false);
+                let b = inputs.get(1).copied().unwrap_or(false);
+                (!(a && b), false)
+            }
+            NclPrimitiveType::Nor2 => {
+                let a = inputs.first().copied().unwrap_or(false);
+                let b = inputs.get(1).copied().unwrap_or(false);
+                (!(a || b), false)
+            }
+            NclPrimitiveType::Ao22 => {
+                // AO22: (A1 & A2) | (B1 & B2)
+                let a1 = inputs.first().copied().unwrap_or(false);
+                let a2 = inputs.get(1).copied().unwrap_or(false);
+                let b1 = inputs.get(2).copied().unwrap_or(false);
+                let b2 = inputs.get(3).copied().unwrap_or(false);
+                ((a1 && a2) || (b1 && b2), false)
+            }
+            NclPrimitiveType::Aoi22 => {
+                // AOI22: ~((A1 & A2) | (B1 & B2))
+                let a1 = inputs.first().copied().unwrap_or(false);
+                let a2 = inputs.get(1).copied().unwrap_or(false);
+                let b1 = inputs.get(2).copied().unwrap_or(false);
+                let b2 = inputs.get(3).copied().unwrap_or(false);
+                (!((a1 && a2) || (b1 && b2)), false)
+            }
+            NclPrimitiveType::Oai22 => {
+                // OAI22: ~((A1 | A2) & (B1 | B2))
+                let a1 = inputs.first().copied().unwrap_or(false);
+                let a2 = inputs.get(1).copied().unwrap_or(false);
+                let b1 = inputs.get(2).copied().unwrap_or(false);
+                let b2 = inputs.get(3).copied().unwrap_or(false);
+                (!((a1 || a2) && (b1 || b2)), false)
             }
             _ => (inputs.first().copied().unwrap_or(false), false),
         }
