@@ -1,0 +1,4 @@
+# Standard library crate manifest
+[package]
+name = "skalp"
+version = "0.1.0"

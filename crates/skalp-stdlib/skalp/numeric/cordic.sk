@@ -7,8 +7,7 @@
 //
 // All implementations are fully synthesizable.
 
-use crate::numeric::fp::{fp, FpMul, FpAdd, FpSub, FpDiv};
-use crate::numeric::formats::{FloatFormat, IEEE754_32};
+use crate::numeric::formats::{FloatFormat, IEEE754_32, fp32};
 
 // ============================================================================
 // Constants

@@ -6,7 +6,7 @@
 // - Proper rounding (round-to-nearest-even)
 // - Exception flags (invalid, overflow, underflow, inexact)
 
-use crate::numeric::formats::FloatFormat;
+use crate::numeric::formats::{FloatFormat, fp16, fp32, fp64, bf16};
 use crate::numeric::traits::{Add, Sub, Mul, Div, Neg, PartialOrd, PartialEq};
 use crate::numeric::cordic::{CordicSqrt, cordic_sqrt};
 
@@ -17,13 +17,8 @@ use crate::numeric::cordic::{CordicSqrt, cordic_sqrt};
 /// Generic floating-point type parameterized by format
 pub type fp<const F: FloatFormat> = bit[F.total_bits];
 
-// IEEE 754 floating-point types as distinct types (newtype pattern)
-// These are type-safe wrappers around bit vectors that prevent
-// accidental mixing of float and integer operations.
-pub distinct fp16 = bit[16];
-pub distinct fp32 = bit[32];
-pub distinct fp64 = bit[64];
-pub distinct bf16 = bit[16];
+// Re-export fp types from formats module for convenience
+// (fp16, fp32, fp64, bf16 are imported from formats.sk above)
 
 // ============================================================================
 // Addition
@@ -128,7 +123,7 @@ impl FpAdd<const F: FloatFormat> {
 
     // Detect overflow/underflow
     signal overflow: bit = (result_exp_adj >= MAX_EXP)
-    signal underflow: bit = (result_exp_adj = 0)
+    signal underflow: bit = (result_exp_adj <= 0)
     signal result_exp: bit[E] = underflow ? 0 :
                                 overflow ? MAX_EXP :
                                 result_exp_adj as bit[E]
@@ -264,7 +259,7 @@ impl FpMul<const F: FloatFormat> {
 
     // Overflow/underflow
     signal overflow: bit = (exp_adj >= MAX_EXP)
-    signal underflow: bit = (exp_adj = 0)
+    signal underflow: bit = (exp_adj <= 0)
     signal result_exp: bit[E] = underflow ? 0 :
                                 overflow ? MAX_EXP :
                                 exp_adj as bit[E]
@@ -374,7 +369,7 @@ impl FpDiv<const F: FloatFormat> {
 
     // Overflow/underflow
     signal overflow: bit = (exp_adj >= MAX_EXP)
-    signal underflow: bit = (exp_adj = 0)
+    signal underflow: bit = (exp_adj <= 0)
     signal result_exp: bit[E] = underflow ? 0 :
                                 overflow ? MAX_EXP :
                                 exp_adj as bit[E]

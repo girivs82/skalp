@@ -2,6 +2,22 @@
 //
 // Defines standard IEEE 754 and other floating-point formats
 
+// ============================================================================
+// Distinct Type Definitions
+// ============================================================================
+
+/// IEEE 754 floating-point types as distinct types (newtype pattern)
+/// These are type-safe wrappers around bit vectors that prevent
+/// accidental mixing of float and integer operations.
+pub distinct fp16 = bit[16];
+pub distinct fp32 = bit[32];
+pub distinct fp64 = bit[64];
+pub distinct bf16 = bit[16];
+
+// ============================================================================
+// Format Trait and Implementations
+// ============================================================================
+
 /// Float format specification
 pub trait FloatFormat {
     const total_bits: nat;

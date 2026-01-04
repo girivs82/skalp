@@ -359,8 +359,8 @@ pub enum Token {
     DecimalLiteral(u64),
 
     // Floating-point literals
-    // Matches: 1.0, 3.14, 1.5e10, 1.5e-10, 1.0f, 1.0f32, 1.0f64
-    #[regex(r"[0-9][0-9_]*\.[0-9][0-9_]*([eE][+-]?[0-9]+)?(f|f16|f32|f64)?", |lex| parse_float(lex.slice()))]
+    // Matches: 1.0, 3.14, 1.5e10, 1.5e-10, 1.0f, 1.0f32, 1.0f64, 1.0fp32, 1.0fp64, etc.
+    #[regex(r"[0-9][0-9_]*\.[0-9][0-9_]*([eE][+-]?[0-9]+)?(f|f16|f32|f64|fp16|fp32|fp64)?", |lex| parse_float(lex.slice()))]
     FloatLiteral(f64),
 
     // String literals
@@ -591,11 +591,13 @@ pub fn parse_decimal(input: &str) -> Option<u64> {
 /// Parse floating-point literal
 /// Supports: 1.0, 3.14, 1.5e10, 1.5e-10, 1.0f, 1.0f32, 1.0f64
 pub fn parse_float(input: &str) -> Option<f64> {
-    // Remove underscores and optional type suffix (f, f16, f32, f64)
+    // Remove underscores and optional type suffix (f, f16, f32, f64, fp16, fp32, fp64)
     let mut cleaned = input.replace('_', "");
 
-    // Remove type suffix if present
-    if cleaned.ends_with("f64") || cleaned.ends_with("f32") || cleaned.ends_with("f16") {
+    // Remove type suffix if present (longest suffixes first)
+    if cleaned.ends_with("fp64") || cleaned.ends_with("fp32") || cleaned.ends_with("fp16") {
+        cleaned = cleaned[..cleaned.len() - 4].to_string();
+    } else if cleaned.ends_with("f64") || cleaned.ends_with("f32") || cleaned.ends_with("f16") {
         cleaned = cleaned[..cleaned.len() - 3].to_string();
     } else if cleaned.ends_with('f') {
         cleaned = cleaned[..cleaned.len() - 1].to_string();

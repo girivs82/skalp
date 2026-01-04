@@ -574,6 +574,8 @@ impl<'a> ParseState<'a> {
     }
 
     /// Parse constant declaration
+    /// Syntax: const name: Type = expression [;]
+    /// Semicolon is optional for consistency with other SKALP declarations
     fn parse_constant_decl(&mut self) {
         self.start_node(SyntaxKind::ConstantDecl);
 
@@ -583,7 +585,10 @@ impl<'a> ParseState<'a> {
         self.parse_type();
         self.expect(SyntaxKind::Assign);
         self.parse_expression();
-        self.expect(SyntaxKind::Semicolon);
+        // Semicolon is optional
+        if self.at(SyntaxKind::Semicolon) {
+            self.bump();
+        }
 
         self.finish_node();
     }
@@ -876,6 +881,15 @@ impl<'a> ParseState<'a> {
                         self.bump();
                     }
                 }
+                // Support const declarations in function bodies
+                // This enables patterns like:
+                //   fn process<const F: FloatFormat>() {
+                //       const W: nat = F.total_bits
+                //       ...
+                //   }
+                Some(SyntaxKind::ConstKw) => {
+                    self.parse_constant_decl();
+                }
                 Some(SyntaxKind::LetKw) => self.parse_let_statement(),
                 Some(SyntaxKind::AssertKw) => self.parse_assert_statement(),
                 Some(SyntaxKind::PropertyKw) => self.parse_property_statement(),
@@ -889,6 +903,23 @@ impl<'a> ParseState<'a> {
                 Some(SyntaxKind::LParen) => {
                     // Handle tuple expression as statement (e.g., implicit return: (y, x))
                     // Bug #85 fix: Support tuple expressions in function bodies for implicit returns
+                    self.start_node(SyntaxKind::ExprStmt);
+                    self.parse_expression();
+                    self.consume_semicolon();
+                    self.finish_node();
+                }
+                // Handle expression statements that start with unary operators or literals
+                // This enables implicit returns like: !eq_out && !unordered
+                Some(SyntaxKind::Bang)
+                | Some(SyntaxKind::Tilde)
+                | Some(SyntaxKind::Minus)
+                | Some(SyntaxKind::Pipe)
+                | Some(SyntaxKind::IntLiteral)
+                | Some(SyntaxKind::BinLiteral)
+                | Some(SyntaxKind::HexLiteral)
+                | Some(SyntaxKind::FloatLiteral)
+                | Some(SyntaxKind::TrueKw)
+                | Some(SyntaxKind::FalseKw) => {
                     self.start_node(SyntaxKind::ExprStmt);
                     self.parse_expression();
                     self.consume_semicolon();
@@ -1460,9 +1491,6 @@ impl<'a> ParseState<'a> {
                         self.parse_impl_function()
                     } else {
                         self.parse_constant_decl();
-                        if self.at(SyntaxKind::Semicolon) {
-                            self.bump();
-                        }
                     }
                 }
                 Some(SyntaxKind::FnKw) => self.parse_impl_function(),
@@ -4301,6 +4329,7 @@ impl<'a> ParseState<'a> {
     }
 
     /// Parse ternary conditional expression: condition ? true_expr : false_expr
+    /// Supports nested ternaries in the false branch (right-associative)
     fn parse_ternary_expr(&mut self) {
         let checkpoint = self.builder.checkpoint();
         self.parse_logical_or_expr();
@@ -4313,7 +4342,9 @@ impl<'a> ParseState<'a> {
             self.bump(); // consume ?
             self.parse_logical_or_expr(); // true expression
             self.expect(SyntaxKind::Colon);
-            self.parse_logical_or_expr(); // false expression
+            // Recursively parse ternary for right-associativity
+            // This allows: a ? b : c ? d : e to parse as a ? b : (c ? d : e)
+            self.parse_ternary_expr(); // false expression (may be another ternary)
             self.builder.finish_node();
         }
     }
@@ -4784,12 +4815,81 @@ impl<'a> ParseState<'a> {
                 self.parse_match_expression();
             }
             Some(SyntaxKind::Pipe) => {
-                // Closure expression: |param: Type| { body }
-                self.parse_closure_expression();
+                // Could be:
+                // 1. Closure: |param: Type| { body } or || { body }
+                // 2. Reduction OR: |expr
+                //
+                // To distinguish:
+                // - Closure: | followed by || or | ident [: Type] [,...]|
+                // - Reduction OR: | followed by expression
+                if self.is_closure_start() {
+                    self.parse_closure_expression();
+                } else {
+                    // Reduction OR unary operator
+                    self.start_node(SyntaxKind::UnaryExpr);
+                    self.bump(); // consume |
+                    self.parse_unary_expr();
+                    self.finish_node();
+                }
             }
             _ => {
                 self.error("expected expression");
             }
+        }
+    }
+
+    /// Check if we're at the start of a closure expression
+    /// Returns true for: || { body } or |param| { body } or |param: Type| { body }
+    /// Returns false for reduction OR: |expr
+    fn is_closure_start(&self) -> bool {
+        // We're at a |
+        // Look at what follows:
+        // - || => closure with no params
+        // - |} or |) or |; => likely reduction OR followed by end of expression
+        // - | ident | => closure with single untyped param
+        // - | ident : => closure with typed param
+        // - | ident , => closure with multiple params
+        // - | ( => reduction OR of parenthesized expression
+        // - | { => reduction OR of concat/replicate expression
+        // - | ! or | ~ or | - => reduction OR of unary expression
+
+        if self.peek_kind(1) == Some(SyntaxKind::Pipe) {
+            // || - closure with no params
+            return true;
+        }
+
+        match self.peek_kind(1) {
+            // These clearly indicate reduction OR, not closure
+            Some(SyntaxKind::LParen)
+            | Some(SyntaxKind::LBrace)
+            | Some(SyntaxKind::LBracket)
+            | Some(SyntaxKind::Bang)
+            | Some(SyntaxKind::Tilde)
+            | Some(SyntaxKind::Minus)
+            | Some(SyntaxKind::IntLiteral)
+            | Some(SyntaxKind::BinLiteral)
+            | Some(SyntaxKind::HexLiteral) => false,
+
+            // Identifier - need to look further
+            Some(SyntaxKind::Ident) => {
+                // Check what follows the identifier
+                match self.peek_kind(2) {
+                    // | ident | => closure
+                    // | ident : => closure (typed param)
+                    // | ident , => closure (multiple params)
+                    Some(SyntaxKind::Pipe) | Some(SyntaxKind::Colon) | Some(SyntaxKind::Comma) => {
+                        true
+                    }
+                    // | ident [ => reduction OR (array indexing)
+                    // | ident ( => reduction OR (function call)
+                    // | ident . => reduction OR (field access)
+                    // | ident + etc => reduction OR (binary op)
+                    _ => false,
+                }
+            }
+
+            // Anything else - assume reduction OR
+            _ => false,
         }
     }
 
@@ -5089,13 +5189,50 @@ impl<'a> ParseState<'a> {
     }
 
     /// Parse concatenation expression: {a, b, c}
+    /// Also handles Verilog-style replication: {N{expr}}
     fn parse_concat_expression(&mut self) {
-        self.start_node(SyntaxKind::ConcatExpr);
-        self.expect(SyntaxKind::LBrace);
+        // We need to determine if this is:
+        // 1. Regular concat: {a, b, c}
+        // 2. Replication: {N{expr}}
+        //
+        // To distinguish, we look ahead after the first expression:
+        // - If followed by `{`, it's replication
+        // - If followed by `,` or `}`, it's regular concat
 
-        // Parse comma-separated list of expressions
-        if !self.at(SyntaxKind::RBrace) {
+        // Save checkpoint before consuming `{`
+        let checkpoint = self.builder.checkpoint();
+
+        self.bump(); // consume opening `{`
+
+        if self.at(SyntaxKind::RBrace) {
+            // Empty concat {}
+            self.builder
+                .start_node_at(checkpoint, rowan::SyntaxKind(SyntaxKind::ConcatExpr as u16));
+            self.bump();
+            self.finish_node();
+            return;
+        }
+
+        // Parse first expression
+        self.parse_expression();
+
+        // Check what follows
+        if self.at(SyntaxKind::LBrace) {
+            // This is replication: {count{value}}
+            // Wrap everything in ReplicateExpr
+            self.builder.start_node_at(
+                checkpoint,
+                rowan::SyntaxKind(SyntaxKind::ReplicateExpr as u16),
+            );
+            self.bump(); // consume inner '{'
             self.parse_expression();
+            self.expect(SyntaxKind::RBrace); // inner '}'
+            self.expect(SyntaxKind::RBrace); // outer '}'
+            self.finish_node();
+        } else {
+            // Regular concatenation
+            self.builder
+                .start_node_at(checkpoint, rowan::SyntaxKind(SyntaxKind::ConcatExpr as u16));
 
             while self.at(SyntaxKind::Comma) {
                 self.bump(); // consume ','
@@ -5103,10 +5240,10 @@ impl<'a> ParseState<'a> {
                     self.parse_expression();
                 }
             }
-        }
 
-        self.expect(SyntaxKind::RBrace);
-        self.finish_node();
+            self.expect(SyntaxKind::RBrace);
+            self.finish_node();
+        }
     }
 
     /// Parse struct literal: TypeName { field: value, ... }
