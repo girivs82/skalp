@@ -2257,6 +2257,8 @@ pub fn expand_to_ncl(lir: &Lir, config: &NclConfig) -> NclExpandResult {
 
         if !output_pairs.is_empty() {
             let completion = expander.create_completion(&output_pairs);
+            // Mark completion signal for STA fix (ready signal delay strategy)
+            expander.lir.mark_as_detection(completion);
             stage_completions.push(completion);
         }
     }

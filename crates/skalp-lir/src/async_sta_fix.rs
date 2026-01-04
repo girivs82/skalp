@@ -28,9 +28,23 @@ use crate::gate_netlist::{
 };
 use std::collections::HashMap;
 
+/// Fix strategy for fork timing violations
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FixStrategy {
+    /// Insert buffers on fast branches of each fork (original approach)
+    /// May require multiple iterations for multi-branch forks
+    PerForkBuffering,
+    /// Delay the completion/ready signal to cover max skew (recommended)
+    /// Single point of control, converges in one iteration
+    #[default]
+    DelayReadySignal,
+}
+
 /// Configuration for async STA fix pass
 #[derive(Debug, Clone)]
 pub struct AsyncStaFixConfig {
+    /// Fix strategy to use
+    pub strategy: FixStrategy,
     /// Buffer cell type to use (e.g., "BUF_X1")
     pub buffer_cell_type: String,
     /// Buffer delay in ps (from tech library)
@@ -43,17 +57,21 @@ pub struct AsyncStaFixConfig {
     pub max_buffers_per_violation: usize,
     /// Maximum total buffers to insert
     pub max_total_buffers: usize,
+    /// Extra margin to add when delaying ready signal (ps)
+    pub ready_delay_margin_ps: f64,
 }
 
 impl Default for AsyncStaFixConfig {
     fn default() -> Self {
         Self {
+            strategy: FixStrategy::DelayReadySignal,
             buffer_cell_type: "BUF_X1".to_string(),
             buffer_delay_ps: 20.0,
             library_name: "generic_asic".to_string(),
             min_severity: ViolationSeverity::Warning,
             max_buffers_per_violation: 10,
             max_total_buffers: 1000,
+            ready_delay_margin_ps: 10.0, // 10ps extra margin
         }
     }
 }
@@ -88,11 +106,237 @@ pub struct ForkFix {
     pub estimated_skew_ps: f64,
 }
 
-/// Fix fork violations by inserting buffers on fast paths
+/// Fix fork violations by inserting buffers
 ///
-/// This modifies the netlist in place, inserting buffer cells on the fast
-/// branches of fork violations to balance the delays.
+/// This modifies the netlist in place. The strategy used depends on config:
+/// - `PerForkBuffering`: Insert buffers on fast branches of each fork
+/// - `DelayReadySignal`: Insert buffers on completion detection outputs (recommended)
 pub fn fix_fork_violations(
+    netlist: &mut GateNetlist,
+    sta_result: &AsyncStaResult,
+    config: &AsyncStaFixConfig,
+) -> AsyncStaFixResult {
+    match config.strategy {
+        FixStrategy::DelayReadySignal => fix_by_delaying_ready(netlist, sta_result, config),
+        FixStrategy::PerForkBuffering => fix_by_per_fork_buffering(netlist, sta_result, config),
+    }
+}
+
+/// Fix by delaying the ready/completion signal
+///
+/// This is the recommended approach: instead of balancing each fork individually,
+/// we delay the completion detection output to ensure all paths have settled.
+fn fix_by_delaying_ready(
+    netlist: &mut GateNetlist,
+    sta_result: &AsyncStaResult,
+    config: &AsyncStaFixConfig,
+) -> AsyncStaFixResult {
+    let mut result = AsyncStaFixResult {
+        violations_fixed: 0,
+        violations_skipped: 0,
+        buffers_inserted: 0,
+        fixes: Vec::new(),
+    };
+
+    // Find the maximum skew across all violations
+    let max_skew = sta_result
+        .fork_violations
+        .iter()
+        .filter(|v| should_fix_violation(v, config))
+        .map(|v| v.skew_ps)
+        .fold(0.0_f64, f64::max);
+
+    if max_skew == 0.0 {
+        return result;
+    }
+
+    // Add margin
+    let total_delay_needed = max_skew + config.ready_delay_margin_ps;
+    let buffers_needed = (total_delay_needed / config.buffer_delay_ps).ceil() as usize;
+    let buffers_to_insert = buffers_needed.min(config.max_total_buffers);
+
+    if buffers_to_insert == 0 {
+        return result;
+    }
+
+    // Find completion detection nets
+    let detection_nets: Vec<_> = netlist
+        .nets
+        .iter()
+        .filter(|n| n.is_detection)
+        .map(|n| (n.id, n.name.clone()))
+        .collect();
+
+    if detection_nets.is_empty() {
+        // No detection nets found - fall back to per-fork buffering
+        eprintln!(
+            "Warning: No completion detection nets found, falling back to per-fork buffering"
+        );
+        return fix_by_per_fork_buffering(netlist, sta_result, config);
+    }
+
+    // Track next available IDs
+    let mut next_cell_id = netlist.cells.iter().map(|c| c.id.0).max().unwrap_or(0) + 1;
+    let mut next_net_id = netlist.nets.iter().map(|n| n.id.0).max().unwrap_or(0) + 1;
+
+    // Insert buffer chain on each detection net's output
+    for (det_net_id, det_net_name) in detection_nets {
+        if let Some(buffers) = insert_delay_on_net(
+            netlist,
+            det_net_id,
+            &det_net_name,
+            buffers_to_insert,
+            config,
+            &mut next_cell_id,
+            &mut next_net_id,
+        ) {
+            result.buffers_inserted += buffers;
+            result.fixes.push(ForkFix {
+                fork_net_id: det_net_id,
+                fork_net_name: format!("{} (ready delay)", det_net_name),
+                fast_branch_cell: CellId(0), // N/A for ready delay
+                buffers_inserted: buffers,
+                original_skew_ps: max_skew,
+                estimated_skew_ps: 0.0, // All violations covered
+            });
+        }
+    }
+
+    // All violations are fixed by the ready delay
+    result.violations_fixed = sta_result
+        .fork_violations
+        .iter()
+        .filter(|v| should_fix_violation(v, config))
+        .count();
+
+    result
+}
+
+/// Insert a delay buffer chain on a net
+///
+/// This inserts buffers between the net's driver and its fanout.
+/// For output nets (no internal fanout), replaces the output with the buffer chain output.
+fn insert_delay_on_net(
+    netlist: &mut GateNetlist,
+    net_id: GateNetId,
+    net_name: &str,
+    num_buffers: usize,
+    config: &AsyncStaFixConfig,
+    next_cell_id: &mut u32,
+    next_net_id: &mut u32,
+) -> Option<usize> {
+    // Find the net
+    let net_idx = netlist.nets.iter().position(|n| n.id == net_id)?;
+
+    // Save original fanout and check if this is an output net
+    let original_fanout = netlist.nets[net_idx].fanout.clone();
+    let is_output_net = netlist.nets[net_idx].is_output;
+
+    // For internal nets, we need fanout to redirect
+    // For output nets, we'll replace the output
+    if original_fanout.is_empty() && !is_output_net {
+        return None;
+    }
+
+    // Clear original net's fanout - it will now drive the first buffer
+    netlist.nets[net_idx].fanout.clear();
+
+    // If this is an output net, remove it from outputs list (we'll add the buffer output)
+    if is_output_net {
+        netlist.outputs.retain(|&id| id != net_id);
+        netlist.nets[net_idx].is_output = false;
+    }
+
+    // Build buffer chain
+    let mut current_input_net = net_id;
+
+    for i in 0..num_buffers {
+        let is_last = i == num_buffers - 1;
+
+        // Create output net for this buffer
+        let buffer_output_net_id = GateNetId(*next_net_id);
+        *next_net_id += 1;
+
+        let buffer_cell_id = CellId(*next_cell_id);
+        *next_cell_id += 1;
+
+        // The last buffer's output connects to original fanout
+        let fanout = if is_last {
+            original_fanout.clone()
+        } else {
+            Vec::new() // Will be filled when next buffer is created
+        };
+
+        let buffer_output_net = GateNet {
+            id: buffer_output_net_id,
+            name: format!("{}_rdy_buf{}_out", net_name, i),
+            driver: Some(buffer_cell_id),
+            driver_pin: Some(0),
+            fanout,
+            is_input: false,
+            is_output: is_output_net && is_last, // Inherit output status on last buffer
+            is_clock: false,
+            is_reset: false,
+            is_detection: is_last, // Last buffer output is the new detection net
+            detection_config: if is_last {
+                netlist.nets[net_idx].detection_config.clone()
+            } else {
+                None
+            },
+            alias_of: None,
+        };
+
+        // Create the buffer cell
+        let buffer_cell = Cell {
+            id: buffer_cell_id,
+            cell_type: config.buffer_cell_type.clone(),
+            library: config.library_name.clone(),
+            fit: 0.0,
+            failure_modes: Vec::new(),
+            inputs: vec![current_input_net],
+            outputs: vec![buffer_output_net_id],
+            path: format!("{}.ready_delay_buf{}", net_name, i),
+            clock: None,
+            reset: None,
+            source_op: Some("async_sta_fix_ready_delay".to_string()),
+            safety_classification: CellSafetyClassification::default(),
+        };
+
+        // Add buffer cell's fanout to the input net
+        if let Some(input_net) = netlist.nets.iter_mut().find(|n| n.id == current_input_net) {
+            input_net.fanout.push((buffer_cell_id, 0));
+        }
+
+        netlist.cells.push(buffer_cell);
+        netlist.nets.push(buffer_output_net);
+
+        current_input_net = buffer_output_net_id;
+    }
+
+    // Update all cells that were connected to original net to use last buffer's output
+    let final_output_net = current_input_net;
+    for (cell_id, pin) in &original_fanout {
+        if let Some(cell) = netlist.cells.iter_mut().find(|c| c.id == *cell_id) {
+            if let Some(input) = cell.inputs.get_mut(*pin) {
+                *input = final_output_net;
+            }
+        }
+    }
+
+    // If this was an output net, add the last buffer's output to outputs list
+    if is_output_net {
+        netlist.outputs.push(final_output_net);
+    }
+
+    // Clear detection flag from original net (now on buffer output)
+    netlist.nets[net_idx].is_detection = false;
+    netlist.nets[net_idx].detection_config = None;
+
+    Some(num_buffers)
+}
+
+/// Fix by inserting buffers on fast branches of each fork (original approach)
+fn fix_by_per_fork_buffering(
     netlist: &mut GateNetlist,
     sta_result: &AsyncStaResult,
     config: &AsyncStaFixConfig,

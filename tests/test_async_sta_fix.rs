@@ -5,7 +5,7 @@
 use skalp_lir::gate_netlist::GateNetlist;
 use skalp_lir::{
     analyze_async_timing, analyze_async_timing_with_oscillations, fix_fork_violations,
-    run_iterative_sta_fix, AsyncStaConfig, AsyncStaFixConfig,
+    run_iterative_sta_fix, AsyncStaConfig, AsyncStaFixConfig, FixStrategy,
 };
 use skalp_sim::GpuNclRuntime;
 use std::process::Command;
@@ -251,8 +251,8 @@ fn test_sta_fix_with_simulation_data() {
 }
 
 #[test]
-fn test_sta_fix_on_alu() {
-    println!("\n=== Async STA Fix on 8-bit NCL ALU ===");
+fn test_sta_fix_on_alu_per_fork() {
+    println!("\n=== Async STA Fix on 8-bit NCL ALU (Per-Fork Buffering) ===");
 
     let mut netlist = compile_to_ncl_gates(ALU_8BIT);
     println!(
@@ -266,7 +266,11 @@ fn test_sta_fix_on_alu() {
         ..Default::default()
     };
 
-    let fix_config = AsyncStaFixConfig::default();
+    // Use per-fork buffering strategy (original approach)
+    let fix_config = AsyncStaFixConfig {
+        strategy: FixStrategy::PerForkBuffering,
+        ..Default::default()
+    };
 
     // Run iterative flow
     let result = run_iterative_sta_fix(&mut netlist, &sta_config, &fix_config, 3);
@@ -319,7 +323,9 @@ fn test_fix_details_report() {
         return;
     }
 
+    // Use PerForkBuffering to see per-violation details
     let fix_config = AsyncStaFixConfig {
+        strategy: FixStrategy::PerForkBuffering,
         buffer_delay_ps: 15.0,
         ..Default::default()
     };
@@ -336,4 +342,97 @@ fn test_fix_details_report() {
             fix.original_skew_ps, fix.estimated_skew_ps
         );
     }
+}
+
+#[test]
+fn test_sta_fix_delay_ready_signal() {
+    println!("\n=== Async STA Fix with Ready Signal Delay ===");
+
+    let mut netlist = compile_to_ncl_gates(ALU_8BIT);
+    let original_cells = netlist.cells.len();
+    let original_nets = netlist.nets.len();
+    println!("Compiled: {} cells, {} nets", original_cells, original_nets);
+
+    // Check for detection nets
+    let detection_nets: Vec<_> = netlist
+        .nets
+        .iter()
+        .filter(|n| n.is_detection)
+        .map(|n| n.name.clone())
+        .collect();
+    println!("Detection nets: {:?}", detection_nets);
+
+    let sta_config = AsyncStaConfig {
+        max_fork_skew_ps: 25.0,
+        ..Default::default()
+    };
+
+    // Run initial STA
+    let result = analyze_async_timing(&netlist, None, &sta_config);
+    println!(
+        "\nBefore fix: {} violations, max skew {:.1}ps",
+        result.fork_violations.len(),
+        result.stats.max_skew_ps
+    );
+
+    if result.fork_violations.is_empty() {
+        println!("No violations to fix!");
+        return;
+    }
+
+    // Use DelayReadySignal strategy (default)
+    let fix_config = AsyncStaFixConfig {
+        strategy: FixStrategy::DelayReadySignal,
+        buffer_delay_ps: 20.0,
+        ready_delay_margin_ps: 10.0,
+        ..Default::default()
+    };
+
+    // Single-pass fix
+    let fix_result = fix_fork_violations(&mut netlist, &result, &fix_config);
+
+    println!("\nFix result (DelayReadySignal):");
+    println!("  Strategy: DelayReadySignal");
+    println!("  Violations fixed: {}", fix_result.violations_fixed);
+    println!("  Buffers inserted: {}", fix_result.buffers_inserted);
+    println!("  New cell count: {}", netlist.cells.len());
+    println!("  New net count: {}", netlist.nets.len());
+
+    for fix in &fix_result.fixes {
+        println!(
+            "  Fixed: {} with {} buffers",
+            fix.fork_net_name, fix.buffers_inserted
+        );
+    }
+
+    // Verify single-pass convergence for DelayReadySignal
+    // Run STA again - violations should still exist (forks still there)
+    // but the ready signal delay covers them
+    let result_after = analyze_async_timing(&netlist, None, &sta_config);
+    println!(
+        "\nAfter fix: {} violations (expected - forks unchanged)",
+        result_after.fork_violations.len()
+    );
+
+    // The key benefit: buffers are concentrated on ready signal path
+    // not scattered throughout the datapath
+    let ready_buffers = netlist
+        .cells
+        .iter()
+        .filter(|c| c.source_op.as_deref() == Some("async_sta_fix_ready_delay"))
+        .count();
+    println!("Ready delay buffers: {}", ready_buffers);
+
+    // Verify netlist integrity
+    for cell in &netlist.cells {
+        for input_net_id in &cell.inputs {
+            assert!(
+                netlist.nets.iter().any(|n| n.id == *input_net_id),
+                "Cell {} has invalid input net {:?}",
+                cell.id.0,
+                input_net_id
+            );
+        }
+    }
+    println!("Netlist integrity verified");
 }

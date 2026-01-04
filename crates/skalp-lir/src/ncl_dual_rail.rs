@@ -1503,13 +1503,20 @@ impl DualRailConverter {
         if bit_completions.len() == 1 {
             // Single bit, no tree needed
             let complete_net_id = self.alloc_net_id();
-            let complete_net = GateNet::new(complete_net_id, "all_complete".to_string());
+            let mut complete_net = GateNet::new(complete_net_id, "all_complete".to_string());
+            complete_net.is_detection = true; // Mark for STA fix (ready signal delay)
+            complete_net.is_output = true;
             output.nets.push(complete_net);
             self.connect_nets(output, bit_completions[0], complete_net_id);
             output.outputs.push(complete_net_id);
         } else {
             // Build balanced binary tree
             let all_complete = self.build_completion_tree(output, &bit_completions, "complete");
+            // Mark completion net for STA fix (ready signal delay strategy)
+            if let Some(net) = output.nets.iter_mut().find(|n| n.id == all_complete) {
+                net.is_detection = true;
+                net.is_output = true;
+            }
             output.outputs.push(all_complete);
         }
     }

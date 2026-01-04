@@ -135,6 +135,6 @@ pub use async_sta::{
 
 // Async STA fix (buffer insertion)
 pub use async_sta_fix::{
-    fix_fork_violations, run_iterative_sta_fix, AsyncStaFixConfig, AsyncStaFixResult, ForkFix,
-    IterationResult, IterativeStaResult,
+    fix_fork_violations, run_iterative_sta_fix, AsyncStaFixConfig, AsyncStaFixResult, FixStrategy,
+    ForkFix, IterationResult, IterativeStaResult,
 };
