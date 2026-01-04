@@ -36,9 +36,7 @@ pub enum SyntaxKind {
     ResetKw,
     TypeKw,
     StreamKw,
-    Fp16Kw,
-    Fp32Kw,
-    Fp64Kw,
+    // NOTE: Fp16Kw, Fp32Kw, Fp64Kw removed - fp types are now regular identifiers
     StructKw,
     EnumKw,
     UnionKw,
@@ -454,9 +452,7 @@ pub enum SyntaxKind {
     ResetType,
     EventType,
     StreamType,
-    Fp16Type,
-    Fp32Type,
-    Fp64Type,
+    // NOTE: Fp16Type, Fp32Type, Fp64Type removed - fp types are now IdentType
     NclType, // NCL dual-rail type
     IdentType,
     ArrayType,
@@ -551,8 +547,8 @@ impl SyntaxKind {
             // Core Hardware Description (14)
             EntityKw | ImplKw | SignalKw | VarKw | ConstKw
                 | InKw | InputKw | OutKw | OutputKw | InoutKw | PortKw | OnKw | IfKw | ElseKw | AssignKw
-            // Type System (16)
-            | BitKw | BoolKw | StringKw | NatKw | IntKw | LogicKw | ClockKw | ResetKw | TypeKw | StreamKw | Fp16Kw | Fp32Kw | Fp64Kw | StructKw | EnumKw | UnionKw | DistinctKw
+            // Type System (13) - fp16/fp32/fp64 removed as keywords
+            | BitKw | BoolKw | StringKw | NatKw | IntKw | LogicKw | ClockKw | ResetKw | TypeKw | StreamKw | StructKw | EnumKw | UnionKw | DistinctKw
             // Boolean Literals (2)
             | TrueKw | FalseKw
             // Traits and Generics (5)
@@ -664,9 +660,7 @@ impl SyntaxKind {
             ResetKw => "'reset'",
             TypeKw => "'type'",
             StreamKw => "'stream'",
-            Fp16Kw => "'fp16'",
-            Fp32Kw => "'fp32'",
-            Fp64Kw => "'fp64'",
+            // Fp16Kw, Fp32Kw, Fp64Kw removed - fp types are now identifiers
             StructKw => "'struct'",
             EnumKw => "'enum'",
             UnionKw => "'union'",
@@ -937,9 +931,7 @@ impl From<crate::lexer::Token> for SyntaxKind {
             Token::Reset => ResetKw,
             Token::Type => TypeKw,
             Token::Stream => StreamKw,
-            Token::Fp16 => Fp16Kw,
-            Token::Fp32 => Fp32Kw,
-            Token::Fp64 => Fp64Kw,
+            // NOTE: Token::Fp16/32/64 removed - fp types are now regular identifiers
             Token::Struct => StructKw,
             Token::Enum => EnumKw,
             Token::Union => UnionKw,

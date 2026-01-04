@@ -10369,21 +10369,23 @@ impl HirBuilderContext {
                         return HirType::Stream(Box::new(HirType::Bit(8)));
                     }
                 }
-                SyntaxKind::Fp16Type => {
-                    return HirType::Float16;
-                }
-                SyntaxKind::Fp32Type => {
-                    return HirType::Float32;
-                }
-                SyntaxKind::Fp64Type => {
-                    return HirType::Float64;
-                }
+                // NOTE: Fp16Type, Fp32Type, Fp64Type syntax kinds removed.
+                // fp16, fp32, fp64 are now parsed as IdentType and resolved below.
                 SyntaxKind::ArrayType => {
                     return self.build_array_type(&child);
                 }
                 SyntaxKind::IdentType | SyntaxKind::CustomType => {
                     if let Some(name) = child.first_token_of_kind(SyntaxKind::Ident) {
                         let type_name = name.text().to_string();
+                        // NOTE: fp16, fp32, fp64 are no longer reserved keywords.
+                        // Map them to built-in Float types for backward compatibility.
+                        // Eventually these will be resolved as distinct types from stdlib.
+                        match type_name.as_str() {
+                            "fp16" => return HirType::Float16,
+                            "fp32" => return HirType::Float32,
+                            "fp64" => return HirType::Float64,
+                            _ => {}
+                        }
                         // Check if this is a user-defined type (struct, enum, union)
                         if let Some(user_type) = self.symbols.user_types.get(&type_name) {
                             return user_type.clone();
@@ -10459,10 +10461,8 @@ impl HirBuilderContext {
                 SyntaxKind::BitType => return self.build_bit_type(&child),
                 SyntaxKind::ClockType => return self.build_clock_type(&child),
                 SyntaxKind::ResetType => return self.build_reset_type(&child),
-                // FP types (Bug #39 fix)
-                SyntaxKind::Fp16Type => return HirType::Float16,
-                SyntaxKind::Fp32Type => return HirType::Float32,
-                SyntaxKind::Fp64Type => return HirType::Float64,
+                // NOTE: fp16, fp32, fp64 are no longer reserved keywords.
+                // They are now parsed as IdentType and resolved from stdlib.
                 SyntaxKind::StreamType => {
                     // Stream<T> type
                     if let Some(inner_type_node) = child.children().next() {

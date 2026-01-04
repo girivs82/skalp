@@ -61,12 +61,9 @@ pub enum Token {
     Type,
     #[token("stream")]
     Stream,
-    #[token("fp16")]
-    Fp16,
-    #[token("fp32")]
-    Fp32,
-    #[token("fp64")]
-    Fp64,
+    // NOTE: fp16, fp32, fp64 are no longer reserved keywords.
+    // They are now defined as distinct types in the stdlib (numeric/fp.sk).
+    // This allows user code to define their own fp types if needed.
     #[token("struct")]
     Struct,
     #[token("enum")]

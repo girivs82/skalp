@@ -3955,24 +3955,8 @@ impl<'a> ParseState<'a> {
                 }
                 self.finish_node();
             }
-            Some(SyntaxKind::Fp16Kw) => {
-                self.start_node(SyntaxKind::Fp16Type);
-                self.bump();
-                // FP16 has fixed width (16-bit), no width specifier
-                self.finish_node();
-            }
-            Some(SyntaxKind::Fp32Kw) => {
-                self.start_node(SyntaxKind::Fp32Type);
-                self.bump();
-                // FP32 has fixed width (32-bit), no width specifier
-                self.finish_node();
-            }
-            Some(SyntaxKind::Fp64Kw) => {
-                self.start_node(SyntaxKind::Fp64Type);
-                self.bump();
-                // FP64 has fixed width (64-bit), no width specifier
-                self.finish_node();
-            }
+            // NOTE: fp16, fp32, fp64 are no longer reserved keywords.
+            // They are now parsed as regular identifiers and resolved from stdlib.
             Some(SyntaxKind::LBracket) => {
                 // Array type [element_type; size]
                 self.parse_array_type();
@@ -4557,10 +4541,8 @@ impl<'a> ParseState<'a> {
                 self.bump();
                 self.finish_node();
             }
-            Some(SyntaxKind::Ident)
-            | Some(SyntaxKind::Fp16Kw)
-            | Some(SyntaxKind::Fp32Kw)
-            | Some(SyntaxKind::Fp64Kw) => {
+            Some(SyntaxKind::Ident) => {
+                // NOTE: fp16, fp32, fp64 now parse as regular identifiers
                 // Check if this is a struct literal: Type { field: value, ... } or Type<T> { field: value, ... } or Type::<T> { ... }
                 // Look ahead for: Type { Ident : or Type { } or Type<...> { Ident : or Type<...> { } or Type::<...> { ... }
                 // Type can be Ident or type keyword (vec3, fp32, etc.)
@@ -5132,13 +5114,8 @@ impl<'a> ParseState<'a> {
     fn parse_struct_literal(&mut self) {
         self.start_node(SyntaxKind::StructLiteral);
 
-        // Type name (identifier or type keyword like vec3, fp32)
-        if self.at(SyntaxKind::Ident)
-            || matches!(
-                self.current_kind(),
-                Some(SyntaxKind::Fp16Kw) | Some(SyntaxKind::Fp32Kw) | Some(SyntaxKind::Fp64Kw)
-            )
-        {
+        // Type name (identifier - fp16, fp32, fp64 are now regular identifiers)
+        if self.at(SyntaxKind::Ident) {
             self.bump();
         } else {
             self.error("expected type name for struct literal");
