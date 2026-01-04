@@ -887,10 +887,17 @@ impl DualRailConverter {
                 self.convert_ha(cell, output);
             }
 
+            // FP32 macros: treat as synchronous operations
+            // Use TRUE rails for computation, invert for FALSE rail
+            // This matches the expand-first path behavior in ncl_expand.rs
+            cell_type if cell_type.starts_with("FP32_") => {
+                self.convert_fp32_macro(cell, output);
+            }
+
             _ => {
-                // Unknown gate type - log warning and create passthrough
+                // Unknown gate type - log warning and skip
                 eprintln!(
-                    "[DUAL_RAIL] Warning: Unknown gate type '{}' in cell '{}'",
+                    "[DUAL_RAIL] Warning: Unknown gate type '{}' in cell '{}' - cell dropped!",
                     cell.cell_type, cell.path
                 );
             }
@@ -1414,6 +1421,95 @@ impl DualRailConverter {
         // cout_f = TH12(a_f, b_f)
         let cout_f = self.create_th12(output, &format!("{}_cout_f", cell.path), a_dual.f, b_dual.f);
         self.connect_nets(output, cout_f, cout_dual.f);
+    }
+
+    /// Convert FP32 macro (FP32_ADD, FP32_MUL, etc.)
+    ///
+    /// FP32 macros are synchronous soft-macros. For NCL conversion:
+    /// - Use TRUE rails from inputs as the macro inputs
+    /// - Create TRUE rail outputs from the macro
+    /// - Create FALSE rail outputs by inverting the TRUE rails
+    ///
+    /// This matches the expand-first path behavior in ncl_expand.rs
+    fn convert_fp32_macro(&mut self, cell: &Cell, output: &mut GateNetlist) {
+        // Get TRUE rails for all inputs
+        let mut true_inputs = Vec::new();
+        for &input_net in &cell.inputs {
+            if let Some(dual) = self.get_dual_rail(input_net) {
+                true_inputs.push(dual.t);
+            } else {
+                eprintln!(
+                    "[DUAL_RAIL] FP32 macro '{}' missing dual-rail for input {}",
+                    cell.path, input_net.0
+                );
+                return;
+            }
+        }
+
+        // Create new output nets for the FP32 macro (TRUE rails)
+        let mut macro_outputs = Vec::new();
+        for (i, &orig_out) in cell.outputs.iter().enumerate() {
+            let out_net_id = self.alloc_net_id();
+            let out_net = GateNet::new(
+                out_net_id,
+                format!("{}_out_{}", cell.path, i),
+            );
+            output.nets.push(out_net);
+            macro_outputs.push(out_net_id);
+        }
+
+        // Create the FP32 macro cell with TRUE rail I/O
+        let macro_cell_id = self.alloc_cell_id();
+        let macro_cell = Cell::new_comb(
+            macro_cell_id,
+            cell.cell_type.clone(),
+            self.config.library_name.clone(),
+            cell.fit,
+            format!("{}_ncl", cell.path),
+            true_inputs,
+            macro_outputs.clone(),
+        );
+        output.cells.push(macro_cell);
+
+        // For each output, connect TRUE rail and create FALSE rail (inverted)
+        for (i, &orig_out) in cell.outputs.iter().enumerate() {
+            if let Some(out_dual) = self.get_dual_rail(orig_out) {
+                let macro_out = macro_outputs[i];
+
+                // Connect macro output to TRUE rail
+                self.connect_nets(output, macro_out, out_dual.t);
+
+                // Create FALSE rail by inverting TRUE rail
+                let inv_out = self.create_inverter(output, &format!("{}_f_{}", cell.path, i), macro_out);
+                self.connect_nets(output, inv_out, out_dual.f);
+            }
+        }
+    }
+
+    /// Create an inverter cell and return its output net
+    fn create_inverter(
+        &mut self,
+        output: &mut GateNetlist,
+        name: &str,
+        input: GateNetId,
+    ) -> GateNetId {
+        let out_net_id = self.alloc_net_id();
+        let out_net = GateNet::new(out_net_id, format!("{}_inv_out", name));
+        output.nets.push(out_net);
+
+        let cell_id = self.alloc_cell_id();
+        let cell = Cell::new_comb(
+            cell_id,
+            "INV_X1".to_string(),
+            self.config.library_name.clone(),
+            0.01,
+            format!("{}_inv", name),
+            vec![input],
+            vec![out_net_id],
+        );
+        output.cells.push(cell);
+
+        out_net_id
     }
 
     /// Create a buffer cell (for rail connections)

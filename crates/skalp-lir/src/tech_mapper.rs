@@ -14,6 +14,7 @@
 //! 2. Applies decomposition rules if no direct match
 //! 3. Creates GateNetlist with FIT rates from the library
 
+use crate::fp32_decompose::Fp32Decomposer;
 use crate::gate_netlist::{
     Cell, CellFailureMode, CellId, CellSafetyClassification, GateNet, GateNetId, GateNetlist,
 };
@@ -1840,13 +1841,10 @@ impl<'a> TechMapper<'a> {
         self.stats.decomposed_mappings += 1;
     }
 
-    /// Map a floating-point operation as a soft-macro cell
+    /// Map a floating-point operation by decomposing to gates
     ///
-    /// FP operations are mapped as single cells with all 32 input bits for A,
-    /// all 32 input bits for B, and all 32 output bits. These cells represent
-    /// IEEE 754 floating-point operations that can be:
-    /// - Simulated at gate level using software FP computation
-    /// - Replaced with actual FP IP during physical implementation
+    /// FP operations are decomposed into actual gate-level logic instead of
+    /// soft macros. This enables proper optimization and NCL conversion.
     fn map_fp_operation(
         &mut self,
         function: CellFunction,
@@ -1861,56 +1859,115 @@ impl<'a> TechMapper<'a> {
             return;
         }
 
-        // Collect all input nets (A and B operands)
-        let mut all_inputs: Vec<GateNetId> = Vec::new();
+        // Collect input nets for A and B operands
+        let mut a_inputs: Vec<GateNetId> = Vec::new();
+        let mut b_inputs: Vec<GateNetId> = Vec::new();
 
-        // Add all bits of operand A
         for bit in 0..width as usize {
-            let net = inputs[0].get(bit).copied().unwrap_or(inputs[0][0]);
-            all_inputs.push(net);
+            let a_net = inputs[0].get(bit).copied().unwrap_or(inputs[0][0]);
+            a_inputs.push(a_net);
+            let b_net = inputs[1].get(bit).copied().unwrap_or(inputs[1][0]);
+            b_inputs.push(b_net);
         }
 
-        // Add all bits of operand B
-        for bit in 0..width as usize {
-            let net = inputs[1].get(bit).copied().unwrap_or(inputs[1][0]);
-            all_inputs.push(net);
-        }
-
-        // Collect all output nets
-        let mut all_outputs: Vec<GateNetId> = Vec::new();
+        // Collect output nets
+        let mut output_nets: Vec<GateNetId> = Vec::new();
         for bit in 0..width as usize {
             let net = outputs.get(bit).copied().unwrap_or(outputs[0]);
-            all_outputs.push(net);
+            output_nets.push(net);
         }
 
-        // Create the soft-macro cell
-        let cell_name = match function {
-            CellFunction::FpAdd32 => "FP32_ADD",
-            CellFunction::FpSub32 => "FP32_SUB",
-            CellFunction::FpMul32 => "FP32_MUL",
-            CellFunction::FpDiv32 => "FP32_DIV",
-            _ => "FP32_UNKNOWN",
-        };
-
-        let mut cell = Cell::new_comb(
-            CellId(0),
-            cell_name.to_string(),
+        // Create decomposer with current net/cell IDs
+        let start_net_id = self.netlist.nets.len() as u32;
+        let start_cell_id = self.next_cell_id;
+        let mut decomposer = Fp32Decomposer::new(
+            start_net_id,
+            start_cell_id,
             self.library.name.clone(),
-            100.0, // Higher FIT for complex FP unit
-            format!("{}.fp_op", path),
-            all_inputs,
-            all_outputs,
         );
-        cell.source_op = Some(format!("{:?}", function));
-        self.add_cell(cell);
 
-        self.stats.direct_mappings += 1;
+        // Decompose based on operation type
+        match function {
+            CellFunction::FpAdd32 => {
+                decomposer.decompose_fp32_add(
+                    &mut self.netlist,
+                    path,
+                    &a_inputs,
+                    &b_inputs,
+                    &output_nets,
+                );
+            }
+            CellFunction::FpSub32 => {
+                decomposer.decompose_fp32_sub(
+                    &mut self.netlist,
+                    path,
+                    &a_inputs,
+                    &b_inputs,
+                    &output_nets,
+                );
+            }
+            CellFunction::FpMul32 => {
+                decomposer.decompose_fp32_mul(
+                    &mut self.netlist,
+                    path,
+                    &a_inputs,
+                    &b_inputs,
+                    &output_nets,
+                );
+            }
+            CellFunction::FpDiv32 => {
+                // FP division is complex - for now use soft macro as placeholder
+                // TODO: Implement full FP32 division decomposition
+                self.warnings.push(format!(
+                    "FP32 division at '{}' using soft macro (decomposition not yet implemented)",
+                    path
+                ));
+                self.create_fp_soft_macro("FP32_DIV", &a_inputs, &b_inputs, &output_nets, path);
+                return;
+            }
+            _ => {
+                self.warnings.push(format!("Unknown FP operation: {:?}", function));
+                return;
+            }
+        }
+
+        // Update next_cell_id from decomposer
+        let (_, new_cell_id) = decomposer.next_ids();
+        self.next_cell_id = new_cell_id;
+
+        self.stats.decomposed_mappings += 1;
     }
 
-    /// Map a floating-point comparison operation as a soft-macro cell
+    /// Create a soft-macro cell for FP operations not yet decomposed
+    fn create_fp_soft_macro(
+        &mut self,
+        cell_name: &str,
+        a_inputs: &[GateNetId],
+        b_inputs: &[GateNetId],
+        outputs: &[GateNetId],
+        path: &str,
+    ) {
+        let mut all_inputs = a_inputs.to_vec();
+        all_inputs.extend(b_inputs);
+
+        let mut cell = Cell::new_comb(
+            CellId(self.next_cell_id),
+            cell_name.to_string(),
+            self.library.name.clone(),
+            100.0,
+            format!("{}.fp_op", path),
+            all_inputs,
+            outputs.to_vec(),
+        );
+        cell.source_op = Some(cell_name.to_string());
+        self.add_cell(cell);
+        self.next_cell_id += 1;
+    }
+
+    /// Map a floating-point comparison operation by decomposing to gates
     ///
-    /// FP comparisons take 64 input bits (a0-a31, b0-b31) and produce
-    /// a single 1-bit output (true/false result).
+    /// FP comparisons are decomposed into actual gate-level logic instead of
+    /// soft macros. This enables proper optimization and NCL conversion.
     fn map_fp_comparison(
         &mut self,
         function: CellFunction,
@@ -1927,46 +1984,78 @@ impl<'a> TechMapper<'a> {
             return;
         }
 
-        // Collect all input nets (A and B operands)
-        let mut all_inputs: Vec<GateNetId> = Vec::new();
+        // Collect input nets for A and B operands
+        let mut a_inputs: Vec<GateNetId> = Vec::new();
+        let mut b_inputs: Vec<GateNetId> = Vec::new();
 
-        // Add all bits of operand A
         for bit in 0..width as usize {
-            let net = inputs[0].get(bit).copied().unwrap_or(inputs[0][0]);
-            all_inputs.push(net);
-        }
-
-        // Add all bits of operand B
-        for bit in 0..width as usize {
-            let net = inputs[1].get(bit).copied().unwrap_or(inputs[1][0]);
-            all_inputs.push(net);
+            let a_net = inputs[0].get(bit).copied().unwrap_or(inputs[0][0]);
+            a_inputs.push(a_net);
+            let b_net = inputs[1].get(bit).copied().unwrap_or(inputs[1][0]);
+            b_inputs.push(b_net);
         }
 
         // Only 1 output bit for comparisons
-        let all_outputs = vec![outputs.first().copied().unwrap_or(outputs[0])];
+        let output = outputs.first().copied().unwrap_or(outputs[0]);
 
-        // Create the soft-macro cell
-        let cell_name = match function {
-            CellFunction::FpLt32 => "FP32_LT",
-            CellFunction::FpGt32 => "FP32_GT",
-            CellFunction::FpLe32 => "FP32_LE",
-            CellFunction::FpGe32 => "FP32_GE",
-            _ => "FP32_CMP_UNKNOWN",
-        };
-
-        let mut cell = Cell::new_comb(
-            CellId(0),
-            cell_name.to_string(),
+        // Create decomposer with current net/cell IDs
+        let start_net_id = self.netlist.nets.len() as u32;
+        let start_cell_id = self.next_cell_id;
+        let mut decomposer = Fp32Decomposer::new(
+            start_net_id,
+            start_cell_id,
             self.library.name.clone(),
-            50.0, // Lower FIT than arithmetic ops
-            format!("{}.fp_cmp", path),
-            all_inputs,
-            all_outputs,
         );
-        cell.source_op = Some(format!("{:?}", function));
-        self.add_cell(cell);
 
-        self.stats.direct_mappings += 1;
+        // Decompose based on comparison type
+        match function {
+            CellFunction::FpLt32 => {
+                decomposer.decompose_fp32_lt(
+                    &mut self.netlist,
+                    path,
+                    &a_inputs,
+                    &b_inputs,
+                    output,
+                );
+            }
+            CellFunction::FpGt32 => {
+                decomposer.decompose_fp32_gt(
+                    &mut self.netlist,
+                    path,
+                    &a_inputs,
+                    &b_inputs,
+                    output,
+                );
+            }
+            CellFunction::FpLe32 => {
+                decomposer.decompose_fp32_le(
+                    &mut self.netlist,
+                    path,
+                    &a_inputs,
+                    &b_inputs,
+                    output,
+                );
+            }
+            CellFunction::FpGe32 => {
+                decomposer.decompose_fp32_ge(
+                    &mut self.netlist,
+                    path,
+                    &a_inputs,
+                    &b_inputs,
+                    output,
+                );
+            }
+            _ => {
+                self.warnings.push(format!("Unknown FP comparison: {:?}", function));
+                return;
+            }
+        }
+
+        // Update next_cell_id from decomposer
+        let (_, new_cell_id) = decomposer.next_ids();
+        self.next_cell_id = new_cell_id;
+
+        self.stats.decomposed_mappings += 1;
     }
 
     /// Map bit select (single bit extraction): output = input[index]
