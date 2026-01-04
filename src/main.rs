@@ -954,7 +954,8 @@ fn build_design(
                         cells_before
                     );
 
-                    let dual_rail_config = skalp_lir::DualRailConfig::default();
+                    // Use library-aware config to auto-detect THmn vs std cells
+                    let dual_rail_config = skalp_lir::DualRailConfig::from_library(&library);
                     let (ncl_netlist, stats) =
                         skalp_lir::convert_to_dual_rail(&flattened, dual_rail_config);
 
@@ -964,8 +965,14 @@ fn build_design(
                         ncl_netlist.cells.len(),
                         ((ncl_netlist.cells.len() as f64 / (cells_before * 2) as f64) - 1.0) * 100.0
                     );
+                    if stats.c_element_macros > 0 {
+                        info!(
+                            "   Using C-element macros (no native THmn gates): {} macros, {} feedback loops",
+                            stats.c_element_macros, stats.feedback_loops
+                        );
+                    }
                     info!(
-                        "   TH12: {}, TH22: {}, Completion: {} gates",
+                        "   TH12/OR2: {}, TH22/C-elem: {}, Completion: {} gates",
                         stats.th12_count, stats.th22_count, stats.completion_gates
                     );
 
@@ -1031,7 +1038,8 @@ fn build_design(
                         cells_before
                     );
 
-                    let dual_rail_config = skalp_lir::DualRailConfig::default();
+                    // Use library-aware config to auto-detect THmn vs std cells
+                    let dual_rail_config = skalp_lir::DualRailConfig::from_library(&library);
                     let (ncl_netlist, stats) =
                         skalp_lir::convert_to_dual_rail(&gate_netlist, dual_rail_config);
 
@@ -1041,8 +1049,14 @@ fn build_design(
                         ncl_netlist.cells.len(),
                         ((ncl_netlist.cells.len() as f64 / (cells_before * 2) as f64) - 1.0) * 100.0
                     );
+                    if stats.c_element_macros > 0 {
+                        info!(
+                            "   Using C-element macros (no native THmn gates): {} macros, {} feedback loops",
+                            stats.c_element_macros, stats.feedback_loops
+                        );
+                    }
                     info!(
-                        "   TH12: {}, TH22: {}, Completion: {} gates",
+                        "   TH12/OR2: {}, TH22/C-elem: {}, Completion: {} gates",
                         stats.th12_count, stats.th22_count, stats.completion_gates
                     );
 
