@@ -863,6 +863,19 @@ impl<'a> ParseState<'a> {
                 Some(SyntaxKind::ForKw) => self.parse_for_stmt(),
                 Some(SyntaxKind::GenerateKw) => self.parse_generate_stmt(),
                 Some(SyntaxKind::FlowKw) => self.parse_flow_statement(),
+                // Support signal declarations in function bodies for entity instantiation
+                // This enables patterns like:
+                //   fn add(a: fp32, b: fp32) -> fp32 {
+                //       signal result: fp32;
+                //       let adder = FpAdd { a: a, b: b, result: result };
+                //       result
+                //   }
+                Some(SyntaxKind::SignalKw) => {
+                    self.parse_signal_decl();
+                    if self.at(SyntaxKind::Semicolon) {
+                        self.bump();
+                    }
+                }
                 Some(SyntaxKind::LetKw) => self.parse_let_statement(),
                 Some(SyntaxKind::AssertKw) => self.parse_assert_statement(),
                 Some(SyntaxKind::PropertyKw) => self.parse_property_statement(),

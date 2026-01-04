@@ -7,7 +7,7 @@
 // - Exception flags (invalid, overflow, underflow, inexact)
 
 use crate::numeric::formats::FloatFormat;
-use crate::numeric::traits::Numeric;
+use crate::numeric::traits::{Add, Sub, Mul, Div, Neg, PartialOrd, PartialEq};
 use crate::numeric::cordic::{CordicSqrt, cordic_sqrt};
 
 // ============================================================================
@@ -17,11 +17,13 @@ use crate::numeric::cordic::{CordicSqrt, cordic_sqrt};
 /// Generic floating-point type parameterized by format
 pub type fp<const F: FloatFormat> = bit[F.total_bits];
 
-// Common format aliases for convenience
-pub type fp16 = fp<IEEE754_16>;
-pub type fp32 = fp<IEEE754_32>;
-pub type fp64 = fp<IEEE754_64>;
-pub type bf16 = fp<BFLOAT16>;
+// IEEE 754 floating-point types as distinct types (newtype pattern)
+// These are type-safe wrappers around bit vectors that prevent
+// accidental mixing of float and integer operations.
+pub distinct fp16 = bit[16];
+pub distinct fp32 = bit[32];
+pub distinct fp64 = bit[64];
+pub distinct bf16 = bit[16];
 
 // ============================================================================
 // Addition
@@ -711,4 +713,334 @@ pub fn sqrt(x: fp32) -> fp32 {
         result: res
     }
     res
+}
+
+// ============================================================================
+// Trait Implementations for fp32
+// ============================================================================
+
+/// Addition for fp32: a + b uses IEEE 754 floating-point addition
+impl Add for fp32 {
+    fn add(a: Self, b: Self) -> Self {
+        signal result: fp32;
+        signal flags: bit[5];
+        let adder = FpAdd<IEEE754_32> {
+            a: a as fp<IEEE754_32>,
+            b: b as fp<IEEE754_32>,
+            result: result as fp<IEEE754_32>,
+            flags: flags
+        };
+        result
+    }
+}
+
+/// Subtraction for fp32: a - b uses IEEE 754 floating-point subtraction
+impl Sub for fp32 {
+    fn sub(a: Self, b: Self) -> Self {
+        signal result: fp32;
+        signal flags: bit[5];
+        let subtractor = FpSub<IEEE754_32> {
+            a: a as fp<IEEE754_32>,
+            b: b as fp<IEEE754_32>,
+            result: result as fp<IEEE754_32>,
+            flags: flags
+        };
+        result
+    }
+}
+
+/// Multiplication for fp32: a * b uses IEEE 754 floating-point multiplication
+impl Mul for fp32 {
+    fn mul(a: Self, b: Self) -> Self {
+        signal result: fp32;
+        signal flags: bit[5];
+        let multiplier = FpMul<IEEE754_32> {
+            a: a as fp<IEEE754_32>,
+            b: b as fp<IEEE754_32>,
+            result: result as fp<IEEE754_32>,
+            flags: flags
+        };
+        result
+    }
+}
+
+/// Division for fp32: a / b uses IEEE 754 floating-point division
+impl Div for fp32 {
+    fn div(a: Self, b: Self) -> Self {
+        signal result: fp32;
+        signal flags: bit[5];
+        let divider = FpDiv<IEEE754_32> {
+            a: a as fp<IEEE754_32>,
+            b: b as fp<IEEE754_32>,
+            result: result as fp<IEEE754_32>,
+            flags: flags
+        };
+        result
+    }
+}
+
+/// Negation for fp32: -a flips the sign bit
+impl Neg for fp32 {
+    fn neg(a: Self) -> Self {
+        signal result: fp32;
+        let negator = FpNeg<IEEE754_32> {
+            x: a as fp<IEEE754_32>,
+            result: result as fp<IEEE754_32>
+        };
+        result
+    }
+}
+
+/// Partial ordering for fp32: comparison operations
+impl PartialOrd for fp32 {
+    fn lt(a: Self, b: Self) -> bit {
+        signal lt_out: bit;
+        signal eq_out: bit;
+        signal gt_out: bit;
+        signal unordered: bit;
+        let cmp = FpCompare<IEEE754_32> {
+            a: a as fp<IEEE754_32>,
+            b: b as fp<IEEE754_32>,
+            lt: lt_out,
+            eq: eq_out,
+            gt: gt_out,
+            unordered: unordered
+        };
+        lt_out
+    }
+
+    fn le(a: Self, b: Self) -> bit {
+        signal lt_out: bit;
+        signal eq_out: bit;
+        signal gt_out: bit;
+        signal unordered: bit;
+        let cmp = FpCompare<IEEE754_32> {
+            a: a as fp<IEEE754_32>,
+            b: b as fp<IEEE754_32>,
+            lt: lt_out,
+            eq: eq_out,
+            gt: gt_out,
+            unordered: unordered
+        };
+        lt_out || eq_out
+    }
+
+    fn gt(a: Self, b: Self) -> bit {
+        signal lt_out: bit;
+        signal eq_out: bit;
+        signal gt_out: bit;
+        signal unordered: bit;
+        let cmp = FpCompare<IEEE754_32> {
+            a: a as fp<IEEE754_32>,
+            b: b as fp<IEEE754_32>,
+            lt: lt_out,
+            eq: eq_out,
+            gt: gt_out,
+            unordered: unordered
+        };
+        gt_out
+    }
+
+    fn ge(a: Self, b: Self) -> bit {
+        signal lt_out: bit;
+        signal eq_out: bit;
+        signal gt_out: bit;
+        signal unordered: bit;
+        let cmp = FpCompare<IEEE754_32> {
+            a: a as fp<IEEE754_32>,
+            b: b as fp<IEEE754_32>,
+            lt: lt_out,
+            eq: eq_out,
+            gt: gt_out,
+            unordered: unordered
+        };
+        gt_out || eq_out
+    }
+}
+
+/// Equality for fp32
+impl PartialEq for fp32 {
+    fn eq(a: Self, b: Self) -> bit {
+        signal lt_out: bit;
+        signal eq_out: bit;
+        signal gt_out: bit;
+        signal unordered: bit;
+        let cmp = FpCompare<IEEE754_32> {
+            a: a as fp<IEEE754_32>,
+            b: b as fp<IEEE754_32>,
+            lt: lt_out,
+            eq: eq_out,
+            gt: gt_out,
+            unordered: unordered
+        };
+        eq_out
+    }
+
+    fn ne(a: Self, b: Self) -> bit {
+        signal lt_out: bit;
+        signal eq_out: bit;
+        signal gt_out: bit;
+        signal unordered: bit;
+        let cmp = FpCompare<IEEE754_32> {
+            a: a as fp<IEEE754_32>,
+            b: b as fp<IEEE754_32>,
+            lt: lt_out,
+            eq: eq_out,
+            gt: gt_out,
+            unordered: unordered
+        };
+        !eq_out && !unordered
+    }
+}
+
+// ============================================================================
+// Trait Implementations for fp64
+// ============================================================================
+
+/// Addition for fp64
+impl Add for fp64 {
+    fn add(a: Self, b: Self) -> Self {
+        signal result: fp64;
+        signal flags: bit[5];
+        let adder = FpAdd<IEEE754_64> {
+            a: a as fp<IEEE754_64>,
+            b: b as fp<IEEE754_64>,
+            result: result as fp<IEEE754_64>,
+            flags: flags
+        };
+        result
+    }
+}
+
+/// Subtraction for fp64
+impl Sub for fp64 {
+    fn sub(a: Self, b: Self) -> Self {
+        signal result: fp64;
+        signal flags: bit[5];
+        let subtractor = FpSub<IEEE754_64> {
+            a: a as fp<IEEE754_64>,
+            b: b as fp<IEEE754_64>,
+            result: result as fp<IEEE754_64>,
+            flags: flags
+        };
+        result
+    }
+}
+
+/// Multiplication for fp64
+impl Mul for fp64 {
+    fn mul(a: Self, b: Self) -> Self {
+        signal result: fp64;
+        signal flags: bit[5];
+        let multiplier = FpMul<IEEE754_64> {
+            a: a as fp<IEEE754_64>,
+            b: b as fp<IEEE754_64>,
+            result: result as fp<IEEE754_64>,
+            flags: flags
+        };
+        result
+    }
+}
+
+/// Division for fp64
+impl Div for fp64 {
+    fn div(a: Self, b: Self) -> Self {
+        signal result: fp64;
+        signal flags: bit[5];
+        let divider = FpDiv<IEEE754_64> {
+            a: a as fp<IEEE754_64>,
+            b: b as fp<IEEE754_64>,
+            result: result as fp<IEEE754_64>,
+            flags: flags
+        };
+        result
+    }
+}
+
+/// Negation for fp64
+impl Neg for fp64 {
+    fn neg(a: Self) -> Self {
+        signal result: fp64;
+        let negator = FpNeg<IEEE754_64> {
+            x: a as fp<IEEE754_64>,
+            result: result as fp<IEEE754_64>
+        };
+        result
+    }
+}
+
+// ============================================================================
+// Trait Implementations for fp16
+// ============================================================================
+
+/// Addition for fp16
+impl Add for fp16 {
+    fn add(a: Self, b: Self) -> Self {
+        signal result: fp16;
+        signal flags: bit[5];
+        let adder = FpAdd<IEEE754_16> {
+            a: a as fp<IEEE754_16>,
+            b: b as fp<IEEE754_16>,
+            result: result as fp<IEEE754_16>,
+            flags: flags
+        };
+        result
+    }
+}
+
+/// Subtraction for fp16
+impl Sub for fp16 {
+    fn sub(a: Self, b: Self) -> Self {
+        signal result: fp16;
+        signal flags: bit[5];
+        let subtractor = FpSub<IEEE754_16> {
+            a: a as fp<IEEE754_16>,
+            b: b as fp<IEEE754_16>,
+            result: result as fp<IEEE754_16>,
+            flags: flags
+        };
+        result
+    }
+}
+
+/// Multiplication for fp16
+impl Mul for fp16 {
+    fn mul(a: Self, b: Self) -> Self {
+        signal result: fp16;
+        signal flags: bit[5];
+        let multiplier = FpMul<IEEE754_16> {
+            a: a as fp<IEEE754_16>,
+            b: b as fp<IEEE754_16>,
+            result: result as fp<IEEE754_16>,
+            flags: flags
+        };
+        result
+    }
+}
+
+/// Division for fp16
+impl Div for fp16 {
+    fn div(a: Self, b: Self) -> Self {
+        signal result: fp16;
+        signal flags: bit[5];
+        let divider = FpDiv<IEEE754_16> {
+            a: a as fp<IEEE754_16>,
+            b: b as fp<IEEE754_16>,
+            result: result as fp<IEEE754_16>,
+            flags: flags
+        };
+        result
+    }
+}
+
+/// Negation for fp16
+impl Neg for fp16 {
+    fn neg(a: Self) -> Self {
+        signal result: fp16;
+        let negator = FpNeg<IEEE754_16> {
+            x: a as fp<IEEE754_16>,
+            result: result as fp<IEEE754_16>
+        };
+        result
+    }
 }

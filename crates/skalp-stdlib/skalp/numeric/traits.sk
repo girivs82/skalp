@@ -1,0 +1,90 @@
+// Numeric Traits
+//
+// Operator traits for arithmetic and comparison operations.
+// These enable trait-based operator resolution for user-defined types.
+
+// ============================================================================
+// Arithmetic Traits
+// ============================================================================
+
+/// Addition trait: a + b
+pub trait Add {
+    fn add(a: Self, b: Self) -> Self;
+}
+
+/// Subtraction trait: a - b
+pub trait Sub {
+    fn sub(a: Self, b: Self) -> Self;
+}
+
+/// Multiplication trait: a * b
+pub trait Mul {
+    fn mul(a: Self, b: Self) -> Self;
+}
+
+/// Division trait: a / b
+pub trait Div {
+    fn div(a: Self, b: Self) -> Self;
+}
+
+/// Negation trait: -a
+pub trait Neg {
+    fn neg(a: Self) -> Self;
+}
+
+// ============================================================================
+// Comparison Traits
+// ============================================================================
+
+/// Partial ordering trait for types that support comparison
+/// Returns comparison results as single bits
+pub trait PartialOrd {
+    fn lt(a: Self, b: Self) -> bit;   // a < b
+    fn le(a: Self, b: Self) -> bit;   // a <= b
+    fn gt(a: Self, b: Self) -> bit;   // a > b
+    fn ge(a: Self, b: Self) -> bit;   // a >= b
+}
+
+/// Equality trait for types that support equality comparison
+pub trait PartialEq {
+    fn eq(a: Self, b: Self) -> bit;   // a == b
+    fn ne(a: Self, b: Self) -> bit;   // a != b
+}
+
+// ============================================================================
+// Bitwise Traits
+// ============================================================================
+
+/// Bitwise AND trait: a & b
+pub trait BitAnd {
+    fn bitand(a: Self, b: Self) -> Self;
+}
+
+/// Bitwise OR trait: a | b
+pub trait BitOr {
+    fn bitor(a: Self, b: Self) -> Self;
+}
+
+/// Bitwise XOR trait: a ^ b
+pub trait BitXor {
+    fn bitxor(a: Self, b: Self) -> Self;
+}
+
+/// Bitwise NOT trait: ~a
+pub trait BitNot {
+    fn bitnot(a: Self) -> Self;
+}
+
+// ============================================================================
+// Shift Traits
+// ============================================================================
+
+/// Left shift trait: a << b
+pub trait Shl<RHS> {
+    fn shl(a: Self, b: RHS) -> Self;
+}
+
+/// Right shift trait: a >> b
+pub trait Shr<RHS> {
+    fn shr(a: Self, b: RHS) -> Self;
+}

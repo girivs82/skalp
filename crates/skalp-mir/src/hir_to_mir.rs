@@ -4625,6 +4625,53 @@ impl<'hir> HirToMir<'hir> {
                     debug_println!("[MIR_LOGICAL_DEBUG]   left: {:?}", binary.left);
                     debug_println!("[MIR_LOGICAL_DEBUG]   right: {:?}", binary.right);
                 }
+
+                // TRAIT-BASED OPERATOR RESOLUTION (Operator Overloading)
+                // Try to resolve the operator through trait implementations first.
+                // If a trait impl exists (e.g., `impl Add for myint`), inline the trait method
+                // body instead of using a primitive binary operation.
+                if let Some((type_name, trait_name, method_name)) =
+                    self.try_resolve_trait_operator(&binary.op, &binary.left)
+                {
+                    eprintln!(
+                        "[TRAIT_OP] Attempting to inline {}::{} for type '{}' (op: {:?})",
+                        trait_name, method_name, type_name, binary.op
+                    );
+
+                    // Try to inline the trait method body
+                    if let Some(result) = self.inline_trait_method(
+                        &type_name,
+                        trait_name,
+                        method_name,
+                        &binary.left,
+                        &binary.right,
+                    ) {
+                        eprintln!(
+                            "[TRAIT_OP] Successfully inlined {}::{} for type '{}'",
+                            trait_name, method_name, type_name
+                        );
+                        return Some(result);
+                    }
+
+                    // If inlining fails, fall back to FunctionCall (for debugging)
+                    eprintln!(
+                        "[TRAIT_OP] Failed to inline {}::{}, falling back to FunctionCall",
+                        trait_name, method_name
+                    );
+                    let func_name = format!("{}::{}", trait_name, method_name);
+                    let left = self.convert_expression(&binary.left, depth + 1)?;
+                    let right = self.convert_expression(&binary.right, depth + 1)?;
+
+                    return Some(Expression::new(
+                        ExpressionKind::FunctionCall {
+                            name: func_name,
+                            args: vec![left, right],
+                        },
+                        ty,
+                    ));
+                }
+
+                // Fall back to primitive binary operation
                 let left = self.convert_expression(&binary.left, depth + 1)?;
                 let right = self.convert_expression(&binary.right, depth + 1)?;
                 if matches!(
@@ -13349,11 +13396,319 @@ impl<'hir> HirToMir<'hir> {
     }
 
     /// Check if HIR type is a floating-point type
+    ///
+    /// This recognizes both:
+    /// - Built-in FP types: Float16, Float32, Float64 (deprecated, for backward compat)
+    /// - Distinct FP types: fp16, fp32, fp64 from stdlib (preferred)
     fn is_float_type(&self, hir_type: &hir::HirType) -> bool {
-        matches!(
+        // Check built-in FP types (deprecated, kept for backward compatibility)
+        if matches!(
             hir_type,
             hir::HirType::Float16 | hir::HirType::Float32 | hir::HirType::Float64
-        )
+        ) {
+            return true;
+        }
+
+        // Check for distinct FP types from stdlib (e.g., fp32, fp64, fp16, bf16)
+        if let hir::HirType::Custom(name) = hir_type {
+            if self.is_distinct_float_type(name) {
+                return true;
+            }
+        }
+
+        false
+    }
+
+    /// Check if a type name corresponds to a distinct floating-point type
+    ///
+    /// Only recognizes the well-known FP type names from stdlib:
+    /// - fp16, fp32, fp64, bf16
+    ///
+    /// This is intentionally restrictive. We only want to use the hardcoded
+    /// FP synthesis path for types that are specifically meant to be IEEE 754
+    /// floating-point types. Other distinct types (like `distinct myint = bit[32]`)
+    /// should use trait-based operator resolution instead.
+    fn is_distinct_float_type(&self, name: &str) -> bool {
+        // Only recognize well-known stdlib FP type names
+        // These types use the proven hardcoded FP synthesis path
+        matches!(name, "fp16" | "fp32" | "fp64" | "bf16")
+    }
+
+    /// Find a trait method implementation for a given type, trait name, and method name
+    ///
+    /// This is used for trait-based operator resolution. When `a + b` is encountered
+    /// and `a` has type `fp32`, this function finds the `add` method from `impl Add for fp32`.
+    ///
+    /// Returns the method implementation (body statements) if found, None otherwise.
+    #[allow(dead_code)]
+    fn find_trait_method_impl<'a>(
+        &'a self,
+        type_name: &str,
+        trait_name: &str,
+        method_name: &str,
+    ) -> Option<&'a hir::HirTraitMethodImpl> {
+        let trait_impl = self.find_trait_impl(type_name, trait_name)?;
+        trait_impl
+            .method_implementations
+            .iter()
+            .find(|m| m.name == method_name)
+    }
+
+    /// Find a trait definition by name
+    fn find_trait_definition<'a>(
+        &'a self,
+        trait_name: &str,
+    ) -> Option<&'a hir::HirTraitDefinition> {
+        let hir = self.hir.as_ref()?;
+        hir.trait_definitions.iter().find(|t| t.name == trait_name)
+    }
+
+    /// Find a trait method definition (parameters and return type) by trait and method name
+    fn find_trait_method_definition<'a>(
+        &'a self,
+        trait_name: &str,
+        method_name: &str,
+    ) -> Option<&'a hir::HirTraitMethod> {
+        let trait_def = self.find_trait_definition(trait_name)?;
+        trait_def.methods.iter().find(|m| m.name == method_name)
+    }
+
+    /// Inline a trait method call by substituting parameters and converting the body
+    ///
+    /// This is the core of trait-based operator overloading. When `a + b` is encountered
+    /// for a type with `impl Add`, this function:
+    /// 1. Gets the method definition (parameters) from the trait
+    /// 2. Gets the method implementation (body) from the impl
+    /// 3. Substitutes the HIR parameters with the actual arguments
+    /// 4. Converts the substituted body to MIR
+    ///
+    /// Returns the MIR expression representing the inlined method, or None if inlining fails.
+    fn inline_trait_method(
+        &mut self,
+        type_name: &str,
+        trait_name: &str,
+        method_name: &str,
+        left_expr: &hir::HirExpression,
+        right_expr: &hir::HirExpression,
+    ) -> Option<Expression> {
+        eprintln!(
+            "[TRAIT_INLINE] Inlining {}::{} for type '{}'",
+            trait_name, method_name, type_name
+        );
+
+        // Get the method definition (parameters) from the trait
+        let method_def = self.find_trait_method_definition(trait_name, method_name)?;
+        let params = method_def.parameters.clone();
+
+        // Get the method implementation (body) from the impl
+        let trait_impl = self.find_trait_impl(type_name, trait_name)?;
+        let method_impl = trait_impl
+            .method_implementations
+            .iter()
+            .find(|m| m.name == method_name)?;
+        let body = method_impl.body.clone();
+
+        if body.is_empty() {
+            eprintln!("[TRAIT_INLINE] Method body is empty, cannot inline");
+            return None;
+        }
+
+        eprintln!(
+            "[TRAIT_INLINE] Found {} parameters and {} body statements",
+            params.len(),
+            body.len()
+        );
+
+        // Build parameter substitution map
+        // For binary operators: param[0] = left, param[1] = right
+        let mut param_map: HashMap<String, &hir::HirExpression> = HashMap::new();
+        if !params.is_empty() {
+            param_map.insert(params[0].name.clone(), left_expr);
+        }
+        if params.len() >= 2 {
+            param_map.insert(params[1].name.clone(), right_expr);
+        }
+
+        // Build var_id -> name mapping for let bindings in the body
+        let mut var_id_to_name: HashMap<hir::VariableId, String> = HashMap::new();
+        self.collect_let_bindings(&body, &mut var_id_to_name);
+
+        // Convert body to expression (like inline_function_call does)
+        let body_expr = self.convert_body_to_expression(&body)?;
+
+        eprintln!(
+            "[TRAIT_INLINE] Body expression type: {:?}",
+            std::mem::discriminant(&body_expr)
+        );
+
+        // Substitute parameters in the body expression
+        let substituted =
+            self.substitute_expression_with_var_map(&body_expr, &param_map, &var_id_to_name)?;
+
+        eprintln!(
+            "[TRAIT_INLINE] Substituted expression type: {:?}",
+            std::mem::discriminant(&substituted)
+        );
+
+        // Convert the substituted expression to MIR
+        // The Block expression handler will process let statements and entity instantiations
+        self.convert_expression(&substituted, 0)
+    }
+
+    /// Find a trait implementation for a given type and trait name
+    ///
+    /// This is used for trait-based operator resolution. When `a + b` is encountered
+    /// and `a` has type `fp32`, this function checks if there's an `impl Add for fp32`
+    /// which would allow resolving the `+` operator to `Add::add(a, b)`.
+    ///
+    /// Returns the trait implementation if found, None otherwise.
+    fn find_trait_impl<'a>(
+        &'a self,
+        type_name: &str,
+        trait_name: &str,
+    ) -> Option<&'a hir::HirTraitImplementation> {
+        let hir = self.hir.as_ref()?;
+
+        // Look through all trait implementations for a match
+        hir.trait_implementations.iter().find(|impl_| {
+            // Check if the trait matches
+            if impl_.trait_name != trait_name {
+                return false;
+            }
+
+            // Check if the target type matches
+            match &impl_.target {
+                hir::TraitImplTarget::Type(ty) => {
+                    // Check if the type matches by name
+                    if let hir::HirType::Custom(name) = ty {
+                        name == type_name
+                    } else {
+                        false
+                    }
+                }
+                hir::TraitImplTarget::Entity(_) => false,
+            }
+        })
+    }
+
+    /// Get the trait name for a binary operator
+    ///
+    /// Maps HIR binary operators to their corresponding trait names:
+    /// - Add -> "Add"
+    /// - Sub -> "Sub"
+    /// - Mul -> "Mul"
+    /// - Div -> "Div"
+    /// - Less -> "PartialOrd"
+    /// - etc.
+    #[allow(dead_code)]
+    fn operator_to_trait_name(op: &hir::HirBinaryOp) -> &'static str {
+        match op {
+            hir::HirBinaryOp::Add => "Add",
+            hir::HirBinaryOp::Sub => "Sub",
+            hir::HirBinaryOp::Mul => "Mul",
+            hir::HirBinaryOp::Div => "Div",
+            hir::HirBinaryOp::Mod => "Rem",
+            hir::HirBinaryOp::Less
+            | hir::HirBinaryOp::LessEqual
+            | hir::HirBinaryOp::Greater
+            | hir::HirBinaryOp::GreaterEqual => "PartialOrd",
+            hir::HirBinaryOp::Equal | hir::HirBinaryOp::NotEqual => "PartialEq",
+            hir::HirBinaryOp::And => "BitAnd",
+            hir::HirBinaryOp::Or => "BitOr",
+            hir::HirBinaryOp::Xor => "BitXor",
+            hir::HirBinaryOp::LeftShift => "Shl",
+            hir::HirBinaryOp::RightShift => "Shr",
+            hir::HirBinaryOp::LogicalAnd | hir::HirBinaryOp::LogicalOr => "bool", // Special case
+        }
+    }
+
+    /// Get the method name for a binary operator
+    ///
+    /// Maps HIR binary operators to their corresponding trait method names:
+    /// - Add -> "add"
+    /// - Sub -> "sub"
+    /// - Less -> "lt"
+    /// - etc.
+    #[allow(dead_code)]
+    fn operator_to_method_name(op: &hir::HirBinaryOp) -> &'static str {
+        match op {
+            hir::HirBinaryOp::Add => "add",
+            hir::HirBinaryOp::Sub => "sub",
+            hir::HirBinaryOp::Mul => "mul",
+            hir::HirBinaryOp::Div => "div",
+            hir::HirBinaryOp::Mod => "rem",
+            hir::HirBinaryOp::Less => "lt",
+            hir::HirBinaryOp::LessEqual => "le",
+            hir::HirBinaryOp::Greater => "gt",
+            hir::HirBinaryOp::GreaterEqual => "ge",
+            hir::HirBinaryOp::Equal => "eq",
+            hir::HirBinaryOp::NotEqual => "ne",
+            hir::HirBinaryOp::And => "bitand",
+            hir::HirBinaryOp::Or => "bitor",
+            hir::HirBinaryOp::Xor => "bitxor",
+            hir::HirBinaryOp::LeftShift => "shl",
+            hir::HirBinaryOp::RightShift => "shr",
+            hir::HirBinaryOp::LogicalAnd => "and",
+            hir::HirBinaryOp::LogicalOr => "or",
+        }
+    }
+
+    /// Try to resolve a binary operator through trait implementations
+    ///
+    /// This enables operator overloading through traits. When `a + b` is encountered:
+    /// 1. Infer the type of `a`
+    /// 2. Look for `impl Add for <type>`
+    /// 3. If found, return the trait and method names for generating a function call
+    ///
+    /// Returns Some((type_name, trait_name, method_name)) if trait resolution succeeds,
+    /// None if we should fall back to primitive operator handling.
+    fn try_resolve_trait_operator(
+        &self,
+        op: &hir::HirBinaryOp,
+        left_expr: &hir::HirExpression,
+    ) -> Option<(String, &'static str, &'static str)> {
+        // Get the type of the left operand
+        let left_type = self.infer_hir_type(left_expr)?;
+
+        // Extract the type name for Custom types (distinct types, user-defined types)
+        let type_name = match &left_type {
+            hir::HirType::Custom(name) => name.clone(),
+            // For now, only support trait resolution for Custom types
+            // Built-in types use hardcoded operators
+            _ => return None,
+        };
+
+        // Skip known float types - they use the proven hardcoded FP operator path
+        // which handles IEEE 754 synthesis correctly. Trait resolution for these
+        // types is for documentation/future use; actual synthesis uses BinaryOp::FAdd etc.
+        if self.is_distinct_float_type(&type_name) {
+            eprintln!(
+                "[TRAIT_OP] Skipping trait resolution for float type '{}' - using hardcoded FP path",
+                type_name
+            );
+            return None;
+        }
+
+        // Get the trait and method names for this operator
+        let trait_name = Self::operator_to_trait_name(op);
+        let method_name = Self::operator_to_method_name(op);
+
+        // Skip logical operators - they don't have trait impls
+        if trait_name == "bool" {
+            return None;
+        }
+
+        // Check if there's a trait implementation for this type
+        if self.find_trait_impl(&type_name, trait_name).is_some() {
+            eprintln!(
+                "[TRAIT_OP] Resolved {:?} on {} to {}::{}",
+                op, type_name, trait_name, method_name
+            );
+            Some((type_name, trait_name, method_name))
+        } else {
+            // No trait impl found - fall back to primitive handling
+            None
+        }
     }
 
     /// Check if a function name is a primitive FP operation that should always be inlined.
