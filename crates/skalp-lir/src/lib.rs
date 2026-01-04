@@ -55,14 +55,18 @@ pub use lir::{Lir, LirNode, LirNodeId, LirOp, LirSignal, LirSignalId, LirStats};
 pub use lir::{WordLir, WordLirStats, WordNode, WordNodeId, WordOp, WordSignal, WordSignalId};
 
 // MIR to LIR transformation
-pub use mir_to_lir::{lower_mir_module_to_lir, MirToLirResult};
+pub use mir_to_lir::{
+    lower_mir_module_to_lir, lower_mir_module_to_lir_skip_ncl,
+    lower_mir_module_to_lir_with_context, MirToLirResult,
+};
 
 // Backward-compatible aliases for MIR to LIR
 pub use mir_to_lir::{lower_mir_module_to_word_lir, MirToWordLirResult};
 
 // Hierarchical MIR to LIR transformation
 pub use mir_to_lir::{
-    lower_mir_hierarchical, HierarchicalMirToLirResult, InstanceLirResult, PortConnectionInfo,
+    lower_mir_hierarchical, lower_mir_hierarchical_for_optimize_first, HierarchicalMirToLirResult,
+    InstanceLirResult, PortConnectionInfo,
 };
 
 // Gate-level netlist (output of technology mapping)
@@ -98,6 +102,9 @@ pub use gate_optimizer::{GateOptimizer, OptimizationStats, PassStats};
 
 // NCL optimizer
 pub use ncl_optimizer::{NclOptConfig, NclOptStats, NclOptimizer};
+
+// NCL expansion (direct synthesis flow)
+pub use ncl_expand::{expand_to_ncl, NclConfig, NclExpandResult, NclSynthesisMode};
 
 // NCL dual-rail conversion (optimize-first flow)
 pub use ncl_dual_rail::{convert_to_dual_rail, DualRailConfig, DualRailConverter, DualRailStats};

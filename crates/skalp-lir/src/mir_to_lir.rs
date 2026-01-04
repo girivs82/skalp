@@ -290,6 +290,64 @@ impl MirToLirTransform {
         }
     }
 
+    /// Transform without NCL expansion (for optimize-first flow)
+    ///
+    /// This always produces single-rail LIR, even for async modules.
+    /// The dual-rail NCL conversion is done later after gate-level optimization.
+    pub fn transform_skip_ncl(&mut self, module: &Module) -> MirToLirResult {
+        self.hierarchy_path = module.name.clone();
+
+        // Propagate module-level safety context to LIR
+        if let Some(ref ctx) = module.safety_context {
+            if ctx.has_safety_annotation() {
+                self.lir.module_safety_info = Some(safety_context_to_lir_info(ctx));
+            }
+        }
+
+        // Phase 1: Create signals for all ports
+        for port in &module.ports {
+            self.create_port_signal(port);
+        }
+
+        // Phase 2: Create signals for all internal signals
+        for signal in &module.signals {
+            self.create_internal_signal(signal);
+        }
+
+        // Phase 3: Transform continuous assignments
+        for assign in &module.assignments {
+            self.transform_continuous_assign(assign);
+        }
+
+        // Phase 4: Transform processes
+        for process in &module.processes {
+            self.transform_process(process);
+        }
+
+        // Phase 5: Populate clock and reset nets
+        self.lir.clocks = std::mem::take(&mut self.clock_signals);
+        self.lir.resets = std::mem::take(&mut self.reset_signals);
+
+        // Phase 6: SKIP NCL expansion - keep as single-rail LIR
+        // The dual-rail conversion will be done after gate-level optimization
+        if module.is_async {
+            eprintln!(
+                "⚡ NCL Optimize-First: Skipping NCL expansion for async module '{}' (will convert after optimization)",
+                module.name
+            );
+        }
+
+        let stats = LirStats::from_lir(&self.lir);
+
+        MirToLirResult {
+            lir: self.lir.clone(),
+            stats,
+            warnings: std::mem::take(&mut self.warnings),
+            compiled_ip_path: None,
+            blackbox_info: None,
+        }
+    }
+
     /// Create a signal for a port
     fn create_port_signal(&mut self, port: &skalp_mir::mir::Port) {
         let width = Self::get_type_width(&port.port_type);
@@ -1836,6 +1894,20 @@ pub fn lower_mir_module_to_word_lir(module: &Module) -> MirToLirResult {
     lower_mir_module_to_lir(module)
 }
 
+/// Lower MIR module to LIR without NCL expansion
+///
+/// This is used by the optimize-first NCL synthesis flow where we want to:
+/// 1. Lower to single-rail LIR (no NCL expansion)
+/// 2. Tech map to single-rail gates
+/// 3. Optimize the Boolean logic
+/// 4. Convert to dual-rail NCL using convert_to_dual_rail()
+///
+/// This function ALWAYS skips NCL expansion, even for async modules.
+pub fn lower_mir_module_to_lir_skip_ncl(module: &Module) -> MirToLirResult {
+    let mut transformer = MirToLirTransform::new(&module.name);
+    transformer.transform_skip_ncl(module)
+}
+
 // ============================================================================
 // Hierarchical MIR Traversal
 // ============================================================================
@@ -2143,6 +2215,164 @@ pub fn lower_mir_hierarchical(mir: &Mir) -> HierarchicalMirToLirResult {
     );
 
     result
+}
+
+/// Lower entire MIR hierarchy for optimize-first NCL synthesis
+///
+/// This variant is used when `NclSynthesisMode::OptimizeFirst` is selected.
+/// It skips NCL expansion during MIR→LIR lowering, producing single-rail gates
+/// that can be optimized before converting to dual-rail NCL.
+///
+/// Returns:
+/// - The hierarchical LIR result (without NCL expansion)
+/// - A flag indicating if any module was async (needs dual-rail conversion)
+pub fn lower_mir_hierarchical_for_optimize_first(mir: &Mir) -> (HierarchicalMirToLirResult, bool) {
+    use skalp_mir::ModuleId;
+    use std::collections::HashSet;
+
+    // Check if any module is async
+    let has_async = mir.modules.iter().any(|m| m.is_async);
+    if has_async {
+        eprintln!(
+            "⚡ NCL Optimize-First: Skipping NCL expansion for {} modules",
+            mir.modules.iter().filter(|m| m.is_async).count()
+        );
+    }
+
+    // Build module lookup by ID and by name
+    let module_map: HashMap<ModuleId, &Module> = mir.modules.iter().map(|m| (m.id, m)).collect();
+    let module_by_name: HashMap<&str, &Module> =
+        mir.modules.iter().map(|m| (m.name.as_str(), m)).collect();
+
+    // Find modules that are instantiated (have parents)
+    let mut instantiated_modules: HashSet<ModuleId> = HashSet::new();
+    let mut modules_with_instances: HashSet<ModuleId> = HashSet::new();
+
+    for module in &mir.modules {
+        if !module.instances.is_empty() {
+            modules_with_instances.insert(module.id);
+        }
+        for inst in &module.instances {
+            instantiated_modules.insert(inst.module);
+        }
+    }
+
+    // Find top module
+    let top_module = mir
+        .modules
+        .iter()
+        .find(|m| modules_with_instances.contains(&m.id) && !instantiated_modules.contains(&m.id))
+        .or_else(|| {
+            mir.modules
+                .iter()
+                .find(|m| !instantiated_modules.contains(&m.id))
+        })
+        .unwrap_or_else(|| &mir.modules[0]);
+
+    let mut result = HierarchicalMirToLirResult {
+        instances: HashMap::new(),
+        top_module: top_module.name.clone(),
+        hierarchy: HashMap::new(),
+    };
+
+    // Elaborate instances with is_async_context = FALSE to skip NCL expansion
+    // We pass false even for async modules so they get single-rail gates
+    elaborate_instance_for_optimize_first(
+        &module_map,
+        &module_by_name,
+        top_module,
+        "top",
+        &HashMap::new(),
+        &mut result,
+    );
+
+    (result, has_async)
+}
+
+/// Recursively elaborate a module instance for optimize-first flow
+///
+/// This always passes is_async_context = false to skip NCL expansion,
+/// regardless of whether the module is async. The dual-rail conversion
+/// will be done later after optimization.
+fn elaborate_instance_for_optimize_first(
+    module_map: &HashMap<ModuleId, &Module>,
+    _module_by_name: &HashMap<&str, &Module>,
+    module: &Module,
+    instance_path: &str,
+    parent_connections: &HashMap<String, PortConnectionInfo>,
+    result: &mut HierarchicalMirToLirResult,
+) {
+    // Use skip_ncl to completely skip NCL expansion for optimize-first flow
+    let lir_result = if let Some(ref vendor_config) = module.vendor_ip_config {
+        eprintln!(
+            "🔌 VENDOR_IP: Module '{}' is a blackbox (ip={}), skipping internal elaboration",
+            module.name, vendor_config.ip_name
+        );
+        create_blackbox_lir_placeholder(module, vendor_config)
+    } else if let Some(ref config) = module.compiled_ip_config {
+        match load_compiled_ip_as_lir(config, module) {
+            Ok(lir_result) => lir_result,
+            Err(e) => {
+                eprintln!(
+                    "⚠️ COMPILED_IP: Failed to load '{}' for module '{}': {}",
+                    config.skb_path, module.name, e
+                );
+                // Use skip_ncl to get single-rail LIR
+                lower_mir_module_to_lir_skip_ncl(module)
+            }
+        }
+    } else {
+        // Use skip_ncl to get single-rail LIR for optimize-first flow
+        lower_mir_module_to_lir_skip_ncl(module)
+    };
+
+    // Collect child instance paths
+    let mut children: Vec<String> = Vec::new();
+
+    eprintln!(
+        "[ELABORATE-OPT] Module '{}' at path '{}' has {} instances (async={})",
+        module.name,
+        instance_path,
+        module.instances.len(),
+        module.is_async
+    );
+
+    // Process child instances
+    for inst in &module.instances {
+        let child_path = format!("{}.{}", instance_path, inst.name);
+        children.push(child_path.clone());
+
+        if let Some(child_mod) = module_map.get(&inst.module).copied() {
+            // Use the same connection extraction as the regular elaborate_instance
+            let child_connections = extract_connection_info(&inst.connections, module);
+
+            // Recurse with optimize-first flow
+            elaborate_instance_for_optimize_first(
+                module_map,
+                _module_by_name,
+                child_mod,
+                &child_path,
+                &child_connections,
+                result,
+            );
+        }
+    }
+
+    // Record hierarchy
+    result
+        .hierarchy
+        .insert(instance_path.to_string(), children.clone());
+
+    // Store this instance's result
+    result.instances.insert(
+        instance_path.to_string(),
+        InstanceLirResult {
+            module_name: module.name.clone(),
+            lir_result,
+            port_connections: parent_connections.clone(),
+            children,
+        },
+    );
 }
 
 /// Recursively elaborate a module instance

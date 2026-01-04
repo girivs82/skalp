@@ -32,9 +32,31 @@ use crate::lir::{Lir, LirNode, LirNodeId, LirOp, LirSignal, LirSignalId};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+/// NCL synthesis mode
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum NclSynthesisMode {
+    /// Direct NCL expansion (current behavior)
+    /// Expands to dual-rail at LIR level, then tech maps to NCL gates.
+    /// Simpler but less optimized - completion detection at every module boundary.
+    #[default]
+    Direct,
+
+    /// Optimize-first synthesis flow
+    /// 1. Map to single-rail Boolean gates (AND, OR, NOT, etc.)
+    /// 2. Apply standard gate optimization (constant folding, DCE, etc.)
+    /// 3. Convert optimized netlist to dual-rail NCL
+    /// 4. Add minimal completion detection only at primary outputs
+    ///
+    /// This can dramatically reduce gate count by leveraging Boolean optimization
+    /// before paying the 2x dual-rail encoding cost.
+    OptimizeFirst,
+}
+
 /// Configuration for NCL expansion
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NclConfig {
+    /// NCL synthesis mode (Direct or OptimizeFirst)
+    pub synthesis_mode: NclSynthesisMode,
     /// Use weak completion (only monitor outputs) vs strong (monitor all signals)
     pub use_weak_completion: bool,
     /// Maximum depth for completion detection tree (None = automatic)
@@ -50,6 +72,7 @@ pub struct NclConfig {
 impl Default for NclConfig {
     fn default() -> Self {
         Self {
+            synthesis_mode: NclSynthesisMode::default(),
             use_weak_completion: true,
             completion_tree_depth: None,
             generate_null_wavefront: true,

@@ -22,7 +22,7 @@ pub struct SafetyBuildOptions {
 }
 
 /// Logic synthesis optimization options
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct OptimizationOptions {
     /// Optimization preset (quick, balanced, full, timing, area, resyn2, compress2)
     pub preset: Option<String>,
@@ -36,6 +36,22 @@ pub struct OptimizationOptions {
     pub training_data_dir: Option<PathBuf>,
     /// Gate optimization level (0=none, 1=basic, 2=full)
     pub gate_opt_level: u8,
+    /// NCL synthesis mode (Direct or OptimizeFirst)
+    pub ncl_mode: skalp_lir::NclSynthesisMode,
+}
+
+impl Default for OptimizationOptions {
+    fn default() -> Self {
+        Self {
+            preset: None,
+            passes: None,
+            ml_guided: false,
+            ml_policy_path: None,
+            training_data_dir: None,
+            gate_opt_level: 1,
+            ncl_mode: skalp_lir::NclSynthesisMode::default(),
+        }
+    }
 }
 
 /// SKALP - Intent-driven hardware synthesis
@@ -137,6 +153,14 @@ enum Commands {
             default_value = "1"
         )]
         gate_opt_level: u8,
+
+        // === NCL (Async) Synthesis Options ===
+        /// NCL synthesis mode for async circuits (direct, optimize-first)
+        /// - direct: Dual-rail expansion at LIR level (current behavior)
+        /// - optimize-first: Optimize Boolean logic first, then convert to dual-rail NCL
+        ///   This can reduce gate count by 50-80% for complex combinational logic
+        #[arg(long, value_name = "MODE", default_value = "direct")]
+        ncl_mode: String,
     },
 
     /// Simulate the design
@@ -481,6 +505,7 @@ fn main() -> Result<()> {
             collect_training_data,
             library,
             gate_opt_level,
+            ncl_mode,
         } => {
             let source_file = source.unwrap_or_else(|| PathBuf::from("src/main.sk"));
 
@@ -497,6 +522,21 @@ fn main() -> Result<()> {
                 None
             };
 
+            // Parse NCL synthesis mode
+            let ncl_synthesis_mode = match ncl_mode.to_lowercase().as_str() {
+                "direct" => skalp_lir::NclSynthesisMode::Direct,
+                "optimize-first" | "optimize_first" | "optimizefirst" => {
+                    skalp_lir::NclSynthesisMode::OptimizeFirst
+                }
+                _ => {
+                    eprintln!(
+                        "Warning: Unknown NCL mode '{}', using 'direct'. Valid modes: direct, optimize-first",
+                        ncl_mode
+                    );
+                    skalp_lir::NclSynthesisMode::Direct
+                }
+            };
+
             // Build optimization options
             let optimization_options = OptimizationOptions {
                 preset: optimize,
@@ -505,6 +545,7 @@ fn main() -> Result<()> {
                 ml_policy_path: ml_policy,
                 training_data_dir: collect_training_data,
                 gate_opt_level,
+                ncl_mode: ncl_synthesis_mode,
             };
 
             build_design(
@@ -872,12 +913,28 @@ fn build_design(
                     mir.modules.len()
                 );
 
+                // Check if we're using optimize-first NCL synthesis
+                let is_optimize_first =
+                    optimization_options.ncl_mode == skalp_lir::NclSynthesisMode::OptimizeFirst;
+
                 // Lower entire MIR hierarchy
-                let hier_lir = skalp_lir::lower_mir_hierarchical(&mir);
+                // For optimize-first: skip NCL expansion, we'll convert after optimization
+                let (hier_lir, needs_dual_rail) = if is_optimize_first {
+                    info!("Using optimize-first NCL synthesis mode");
+                    skalp_lir::lower_mir_hierarchical_for_optimize_first(&mir)
+                } else {
+                    (skalp_lir::lower_mir_hierarchical(&mir), false)
+                };
+
                 info!(
-                    "Elaborated {} instances: top={}",
+                    "Elaborated {} instances: top={}{}",
                     hier_lir.instances.len(),
-                    hier_lir.top_module
+                    hier_lir.top_module,
+                    if needs_dual_rail {
+                        " (pending dual-rail conversion)"
+                    } else {
+                        ""
+                    }
                 );
 
                 // Map to hierarchical gate netlist
@@ -889,7 +946,7 @@ fn build_design(
                 );
 
                 // Parallel per-instance synthesis optimization
-                if optimization_options.preset.is_some()
+                let mut flattened = if optimization_options.preset.is_some()
                     || optimization_options.passes.is_some()
                     || optimization_options.ml_guided
                 {
@@ -919,7 +976,35 @@ fn build_design(
                     // No optimization, just flatten
                     // Note: flatten() now automatically runs buffer removal for NCL circuits
                     hier_netlist.flatten()
+                };
+
+                // For optimize-first NCL: Convert single-rail gates to dual-rail NCL
+                if needs_dual_rail {
+                    let cells_before = flattened.cells.len();
+                    info!(
+                        "Converting {} single-rail cells to dual-rail NCL...",
+                        cells_before
+                    );
+
+                    let dual_rail_config = skalp_lir::DualRailConfig::default();
+                    let (ncl_netlist, stats) =
+                        skalp_lir::convert_to_dual_rail(&flattened, dual_rail_config);
+
+                    info!(
+                        "⚡ NCL Optimize-First conversion: {} -> {} cells ({:.1}% overhead vs 2x baseline)",
+                        cells_before,
+                        ncl_netlist.cells.len(),
+                        ((ncl_netlist.cells.len() as f64 / (cells_before * 2) as f64) - 1.0) * 100.0
+                    );
+                    info!(
+                        "   TH12: {}, TH22: {}, Completion: {} gates",
+                        stats.th12_count, stats.th22_count, stats.completion_gates
+                    );
+
+                    flattened = ncl_netlist;
                 }
+
+                flattened
             } else {
                 // Flat synthesis for single-module designs
                 let top_module = mir
@@ -927,8 +1012,19 @@ fn build_design(
                     .first()
                     .ok_or_else(|| anyhow::anyhow!("No modules found in MIR"))?;
 
+                // Check if we're using optimize-first NCL synthesis
+                let is_optimize_first =
+                    optimization_options.ncl_mode == skalp_lir::NclSynthesisMode::OptimizeFirst;
+                let needs_dual_rail = is_optimize_first && top_module.is_async;
+
                 // Lower MIR module to LIR
-                let lir_result = lower_mir_module_to_lir(top_module);
+                // For optimize-first: use skip_ncl to completely skip NCL expansion
+                let lir_result = if is_optimize_first && top_module.is_async {
+                    info!("Using optimize-first NCL synthesis mode for async module");
+                    skalp_lir::lower_mir_module_to_lir_skip_ncl(top_module)
+                } else {
+                    lower_mir_module_to_lir(top_module)
+                };
 
                 // Map to gate netlist with configurable optimization level
                 let tech_result = skalp_lir::map_lir_to_gates_with_opt_level(
@@ -936,7 +1032,7 @@ fn build_design(
                     &library,
                     optimization_options.gate_opt_level,
                 );
-                let gate_netlist = tech_result.netlist;
+                let mut gate_netlist = tech_result.netlist;
 
                 // Apply synthesis optimization if requested
                 if optimization_options.preset.is_some()
@@ -958,10 +1054,36 @@ fn build_design(
                         info!("  {}", annotations.summary());
                     }
 
-                    synth_result.netlist
-                } else {
-                    gate_netlist
+                    gate_netlist = synth_result.netlist;
                 }
+
+                // For optimize-first NCL: Convert single-rail gates to dual-rail NCL
+                if needs_dual_rail {
+                    let cells_before = gate_netlist.cells.len();
+                    info!(
+                        "Converting {} single-rail cells to dual-rail NCL...",
+                        cells_before
+                    );
+
+                    let dual_rail_config = skalp_lir::DualRailConfig::default();
+                    let (ncl_netlist, stats) =
+                        skalp_lir::convert_to_dual_rail(&gate_netlist, dual_rail_config);
+
+                    info!(
+                        "⚡ NCL Optimize-First conversion: {} -> {} cells ({:.1}% overhead vs 2x baseline)",
+                        cells_before,
+                        ncl_netlist.cells.len(),
+                        ((ncl_netlist.cells.len() as f64 / (cells_before * 2) as f64) - 1.0) * 100.0
+                    );
+                    info!(
+                        "   TH12: {}, TH22: {}, Completion: {} gates",
+                        stats.th12_count, stats.th22_count, stats.completion_gates
+                    );
+
+                    gate_netlist = ncl_netlist;
+                }
+
+                gate_netlist
             };
 
             // Run async STA for NCL circuits (detected by tech_mapper via is_ncl flag)
