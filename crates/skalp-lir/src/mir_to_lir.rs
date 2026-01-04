@@ -2219,7 +2219,7 @@ pub fn lower_mir_hierarchical(mir: &Mir) -> HierarchicalMirToLirResult {
 
 /// Lower entire MIR hierarchy for optimize-first NCL synthesis
 ///
-/// This variant is used when `NclSynthesisMode::OptimizeFirst` is selected.
+/// This is the standard approach for async (NCL) circuits.
 /// It skips NCL expansion during MIR→LIR lowering, producing single-rail gates
 /// that can be optimized before converting to dual-rail NCL.
 ///

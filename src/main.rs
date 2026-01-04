@@ -36,8 +36,6 @@ pub struct OptimizationOptions {
     pub training_data_dir: Option<PathBuf>,
     /// Gate optimization level (0=none, 1=basic, 2=full)
     pub gate_opt_level: u8,
-    /// NCL synthesis mode (Direct or OptimizeFirst)
-    pub ncl_mode: skalp_lir::NclSynthesisMode,
 }
 
 impl Default for OptimizationOptions {
@@ -49,7 +47,6 @@ impl Default for OptimizationOptions {
             ml_policy_path: None,
             training_data_dir: None,
             gate_opt_level: 1,
-            ncl_mode: skalp_lir::NclSynthesisMode::default(),
         }
     }
 }
@@ -153,14 +150,6 @@ enum Commands {
             default_value = "1"
         )]
         gate_opt_level: u8,
-
-        // === NCL (Async) Synthesis Options ===
-        /// NCL synthesis mode for async circuits (direct, optimize-first)
-        /// - direct: Dual-rail expansion at LIR level (current behavior)
-        /// - optimize-first: Optimize Boolean logic first, then convert to dual-rail NCL
-        ///   This can reduce gate count by 50-80% for complex combinational logic
-        #[arg(long, value_name = "MODE", default_value = "direct")]
-        ncl_mode: String,
     },
 
     /// Simulate the design
@@ -505,7 +494,6 @@ fn main() -> Result<()> {
             collect_training_data,
             library,
             gate_opt_level,
-            ncl_mode,
         } => {
             let source_file = source.unwrap_or_else(|| PathBuf::from("src/main.sk"));
 
@@ -522,21 +510,6 @@ fn main() -> Result<()> {
                 None
             };
 
-            // Parse NCL synthesis mode
-            let ncl_synthesis_mode = match ncl_mode.to_lowercase().as_str() {
-                "direct" => skalp_lir::NclSynthesisMode::Direct,
-                "optimize-first" | "optimize_first" | "optimizefirst" => {
-                    skalp_lir::NclSynthesisMode::OptimizeFirst
-                }
-                _ => {
-                    eprintln!(
-                        "Warning: Unknown NCL mode '{}', using 'direct'. Valid modes: direct, optimize-first",
-                        ncl_mode
-                    );
-                    skalp_lir::NclSynthesisMode::Direct
-                }
-            };
-
             // Build optimization options
             let optimization_options = OptimizationOptions {
                 preset: optimize,
@@ -545,7 +518,6 @@ fn main() -> Result<()> {
                 ml_policy_path: ml_policy,
                 training_data_dir: collect_training_data,
                 gate_opt_level,
-                ncl_mode: ncl_synthesis_mode,
             };
 
             build_design(
@@ -913,18 +885,14 @@ fn build_design(
                     mir.modules.len()
                 );
 
-                // Check if we're using optimize-first NCL synthesis
-                let is_optimize_first =
-                    optimization_options.ncl_mode == skalp_lir::NclSynthesisMode::OptimizeFirst;
-
                 // Lower entire MIR hierarchy
-                // For optimize-first: skip NCL expansion, we'll convert after optimization
-                let (hier_lir, needs_dual_rail) = if is_optimize_first {
-                    info!("Using optimize-first NCL synthesis mode");
-                    skalp_lir::lower_mir_hierarchical_for_optimize_first(&mir)
-                } else {
-                    (skalp_lir::lower_mir_hierarchical(&mir), false)
-                };
+                // For async modules: skip NCL expansion, we'll convert to dual-rail after optimization
+                let (hier_lir, needs_dual_rail) =
+                    skalp_lir::lower_mir_hierarchical_for_optimize_first(&mir);
+
+                if needs_dual_rail {
+                    info!("Async modules detected - using optimize-first NCL synthesis");
+                }
 
                 info!(
                     "Elaborated {} instances: top={}{}",
@@ -1012,15 +980,13 @@ fn build_design(
                     .first()
                     .ok_or_else(|| anyhow::anyhow!("No modules found in MIR"))?;
 
-                // Check if we're using optimize-first NCL synthesis
-                let is_optimize_first =
-                    optimization_options.ncl_mode == skalp_lir::NclSynthesisMode::OptimizeFirst;
-                let needs_dual_rail = is_optimize_first && top_module.is_async;
+                // For async modules: skip NCL expansion, convert to dual-rail after optimization
+                let needs_dual_rail = top_module.is_async;
 
                 // Lower MIR module to LIR
-                // For optimize-first: use skip_ncl to completely skip NCL expansion
-                let lir_result = if is_optimize_first && top_module.is_async {
-                    info!("Using optimize-first NCL synthesis mode for async module");
+                // For async modules: skip NCL expansion, we'll convert after optimization
+                let lir_result = if top_module.is_async {
+                    info!("Async module - using optimize-first NCL synthesis");
                     skalp_lir::lower_mir_module_to_lir_skip_ncl(top_module)
                 } else {
                     lower_mir_module_to_lir(top_module)
