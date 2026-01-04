@@ -601,6 +601,11 @@ impl HirBuilderContext {
                         hir.type_aliases.push(type_alias);
                     }
                 }
+                SyntaxKind::DistinctTypeDecl => {
+                    if let Some(distinct_type) = self.build_distinct_type(&child) {
+                        hir.distinct_types.push(distinct_type);
+                    }
+                }
                 SyntaxKind::SafetyGoalDecl => {
                     if let Some(safety_goal) = self.build_safety_goal(&child) {
                         hir.safety_definitions.add_safety_goal(safety_goal);
@@ -1908,6 +1913,56 @@ impl HirBuilderContext {
             visibility,
             generics,
             target_type,
+        })
+    }
+
+    /// Build distinct type declaration from syntax node
+    fn build_distinct_type(&mut self, node: &SyntaxNode) -> Option<HirDistinctType> {
+        // Extract name (first Ident after DistinctKw)
+        let name = self.extract_name(node)?;
+
+        // Extract visibility - check for PubKw token in node or parent
+        let visibility = if node.children_with_tokens().any(|child| {
+            child
+                .as_token()
+                .map(|t| t.kind() == SyntaxKind::PubKw)
+                .unwrap_or(false)
+        }) || node
+            .parent()
+            .and_then(|p| p.first_token_of_kind(SyntaxKind::PubKw))
+            .is_some()
+        {
+            HirVisibility::Public
+        } else {
+            HirVisibility::Private
+        };
+
+        // Extract generic parameters if present
+        let generics =
+            if let Some(generic_list) = node.first_child_of_kind(SyntaxKind::GenericParamList) {
+                self.parse_generic_params(&generic_list)
+            } else {
+                Vec::new()
+            };
+
+        // Extract base type (the type after '=')
+        // Find the TypeExpr or TypeAnnotation child node
+        let base_type = node
+            .children()
+            .find(|child| {
+                matches!(
+                    child.kind(),
+                    SyntaxKind::TypeExpr | SyntaxKind::TypeAnnotation
+                )
+            })
+            .map(|type_node| self.extract_hir_type(&type_node))
+            .unwrap_or(HirType::Bit(1)); // Fallback to bit<1> if type not found
+
+        Some(HirDistinctType {
+            name,
+            visibility,
+            generics,
+            base_type,
         })
     }
 

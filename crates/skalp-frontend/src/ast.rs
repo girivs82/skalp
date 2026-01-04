@@ -30,6 +30,8 @@ pub enum Item {
     TraitImpl(TraitImpl),
     /// Type alias
     TypeAlias(TypeAliasDecl),
+    /// Distinct type (newtype pattern - same representation, different type)
+    DistinctType(DistinctTypeDecl),
     /// Use statement (import)
     Use(UseDecl),
     /// Module declaration
@@ -916,6 +918,26 @@ pub struct TypeAliasDecl {
     pub generics: Vec<Generic>,
     /// Target type (what this alias resolves to)
     pub target_type: Type,
+    /// Span in source code
+    pub span: std::ops::Range<usize>,
+}
+
+/// Distinct type declaration (newtype pattern)
+///
+/// Creates a new type with the same representation as the base type,
+/// but is not implicitly convertible. Requires explicit `as` cast.
+///
+/// Example: `distinct fp32 = bit[32]`
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DistinctTypeDecl {
+    /// Visibility
+    pub visibility: Visibility,
+    /// New type name
+    pub name: String,
+    /// Generic parameters
+    pub generics: Vec<Generic>,
+    /// Base type (the representation)
+    pub base_type: Type,
     /// Span in source code
     pub span: std::ops::Range<usize>,
 }

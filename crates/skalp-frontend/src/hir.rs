@@ -124,6 +124,8 @@ pub struct Hir {
     pub trait_implementations: Vec<HirTraitImplementation>,
     /// Type aliases
     pub type_aliases: Vec<HirTypeAlias>,
+    /// Distinct types (newtype pattern - same representation, different type)
+    pub distinct_types: Vec<HirDistinctType>,
     /// User-defined types (struct, enum, union definitions)
     pub user_defined_types: Vec<HirUserDefinedType>,
     /// Global physical constraints
@@ -2186,6 +2188,7 @@ impl HirBuilder {
             trait_definitions: Vec::new(),
             trait_implementations: Vec::new(),
             type_aliases: Vec::new(),
+            distinct_types: Vec::new(),
             user_defined_types: Vec::new(),
             global_constraints: Vec::new(),
             modules: Vec::new(),
@@ -2278,6 +2281,7 @@ impl Hir {
             trait_definitions: Vec::new(),
             trait_implementations: Vec::new(),
             type_aliases: Vec::new(),
+            distinct_types: Vec::new(),
             user_defined_types: Vec::new(),
             global_constraints: Vec::new(),
             modules: Vec::new(),
@@ -2419,6 +2423,28 @@ pub struct HirTypeAlias {
     pub generics: Vec<HirGeneric>,
     /// Target type (what this alias resolves to)
     pub target_type: HirType,
+}
+
+/// Distinct type declaration in HIR (newtype pattern)
+///
+/// Creates a new type with the same representation as the base type,
+/// but is not implicitly convertible. Requires explicit `as` cast.
+///
+/// Example:
+/// ```skalp
+/// pub distinct fp32 = bit[32];
+/// pub distinct celsius = fp32;
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HirDistinctType {
+    /// Distinct type name
+    pub name: String,
+    /// Visibility
+    pub visibility: HirVisibility,
+    /// Generic parameters
+    pub generics: Vec<HirGeneric>,
+    /// Base type (the underlying representation)
+    pub base_type: HirType,
 }
 
 /// User-defined type definition in HIR

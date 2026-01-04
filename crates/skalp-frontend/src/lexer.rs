@@ -73,6 +73,8 @@ pub enum Token {
     Enum,
     #[token("union")]
     Union,
+    #[token("distinct")]
+    Distinct,
 
     // Boolean Literals (2)
     #[token("true")]

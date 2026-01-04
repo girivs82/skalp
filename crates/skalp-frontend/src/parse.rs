@@ -75,6 +75,7 @@ impl<'a> ParseState<'a> {
                 Some(SyntaxKind::RequirementKw) => self.parse_requirement_decl(),
                 Some(SyntaxKind::TraitKw) => self.parse_trait_def(),
                 Some(SyntaxKind::TypeKw) => self.parse_type_alias(),
+                Some(SyntaxKind::DistinctKw) => self.parse_distinct_type(),
                 Some(SyntaxKind::StructKw) => self.parse_struct_decl(),
                 Some(SyntaxKind::EnumKw) => self.parse_enum_decl(),
                 Some(SyntaxKind::UnionKw) => self.parse_union_decl(),
@@ -3181,6 +3182,35 @@ impl<'a> ParseState<'a> {
         self.finish_node();
     }
 
+    /// Parse distinct type declaration: `distinct Name = BaseType;`
+    /// Creates a new type with the same representation as the base type,
+    /// but is not implicitly convertible. Requires explicit `as` cast.
+    fn parse_distinct_type(&mut self) {
+        self.start_node(SyntaxKind::DistinctTypeDecl);
+
+        // 'distinct' keyword
+        self.expect(SyntaxKind::DistinctKw);
+
+        // Distinct type name
+        self.expect(SyntaxKind::Ident);
+
+        // Optional generic parameters
+        if self.at(SyntaxKind::Lt) {
+            self.parse_generic_params();
+        }
+
+        // '=' sign
+        self.expect(SyntaxKind::Assign);
+
+        // Base type (the representation)
+        self.parse_type();
+
+        // Semicolon
+        self.expect(SyntaxKind::Semicolon);
+
+        self.finish_node();
+    }
+
     /// Parse function declaration: `pub fn name<T: Trait>(params) -> RetType { body }`
     fn parse_function_decl(&mut self) {
         self.start_node(SyntaxKind::FunctionDecl);
@@ -5981,6 +6011,7 @@ impl ParseState<'_> {
             Some(SyntaxKind::EntityKw) => self.parse_entity_decl(),
             Some(SyntaxKind::TraitKw) => self.parse_trait_def(),
             Some(SyntaxKind::TypeKw) => self.parse_type_alias(),
+            Some(SyntaxKind::DistinctKw) => self.parse_distinct_type(),
             Some(SyntaxKind::StructKw) => self.parse_struct_decl(),
             Some(SyntaxKind::EnumKw) => self.parse_enum_decl(),
             Some(SyntaxKind::FnKw) => self.parse_function_decl(),

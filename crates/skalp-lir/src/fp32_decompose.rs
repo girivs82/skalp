@@ -8,6 +8,11 @@
 //! - Bits 30-23: Exponent (8 bits, biased by 127)
 //! - Bits 22-0: Mantissa (23 bits, implicit leading 1 for normalized numbers)
 
+// Allow needless_range_loop in this module - the loops are indexing multiple arrays
+// simultaneously and using the index for unique naming, which is idiomatic for
+// hardware logic generation.
+#![allow(clippy::needless_range_loop)]
+
 use crate::gate_netlist::{Cell, CellId, GateNet, GateNetId, GateNetlist};
 
 /// FP32 decomposition context for building gate-level circuits
@@ -61,7 +66,13 @@ impl Fp32Decomposer {
         out
     }
 
-    fn create_and2(&mut self, netlist: &mut GateNetlist, path: &str, a: GateNetId, b: GateNetId) -> GateNetId {
+    fn create_and2(
+        &mut self,
+        netlist: &mut GateNetlist,
+        path: &str,
+        a: GateNetId,
+        b: GateNetId,
+    ) -> GateNetId {
         let out = self.alloc_net(netlist, format!("{}_and2_out", path));
         let cell = Cell::new_comb(
             self.alloc_cell_id(),
@@ -76,7 +87,13 @@ impl Fp32Decomposer {
         out
     }
 
-    fn create_or2(&mut self, netlist: &mut GateNetlist, path: &str, a: GateNetId, b: GateNetId) -> GateNetId {
+    fn create_or2(
+        &mut self,
+        netlist: &mut GateNetlist,
+        path: &str,
+        a: GateNetId,
+        b: GateNetId,
+    ) -> GateNetId {
         let out = self.alloc_net(netlist, format!("{}_or2_out", path));
         let cell = Cell::new_comb(
             self.alloc_cell_id(),
@@ -91,7 +108,13 @@ impl Fp32Decomposer {
         out
     }
 
-    fn create_xor2(&mut self, netlist: &mut GateNetlist, path: &str, a: GateNetId, b: GateNetId) -> GateNetId {
+    fn create_xor2(
+        &mut self,
+        netlist: &mut GateNetlist,
+        path: &str,
+        a: GateNetId,
+        b: GateNetId,
+    ) -> GateNetId {
         let out = self.alloc_net(netlist, format!("{}_xor2_out", path));
         let cell = Cell::new_comb(
             self.alloc_cell_id(),
@@ -106,7 +129,13 @@ impl Fp32Decomposer {
         out
     }
 
-    fn create_xnor2(&mut self, netlist: &mut GateNetlist, path: &str, a: GateNetId, b: GateNetId) -> GateNetId {
+    fn create_xnor2(
+        &mut self,
+        netlist: &mut GateNetlist,
+        path: &str,
+        a: GateNetId,
+        b: GateNetId,
+    ) -> GateNetId {
         let out = self.alloc_net(netlist, format!("{}_xnor2_out", path));
         let cell = Cell::new_comb(
             self.alloc_cell_id(),
@@ -121,7 +150,14 @@ impl Fp32Decomposer {
         out
     }
 
-    fn create_mux2(&mut self, netlist: &mut GateNetlist, path: &str, d0: GateNetId, d1: GateNetId, sel: GateNetId) -> GateNetId {
+    fn create_mux2(
+        &mut self,
+        netlist: &mut GateNetlist,
+        path: &str,
+        d0: GateNetId,
+        d1: GateNetId,
+        sel: GateNetId,
+    ) -> GateNetId {
         let out = self.alloc_net(netlist, format!("{}_mux2_out", path));
         let cell = Cell::new_comb(
             self.alloc_cell_id(),
@@ -152,7 +188,13 @@ impl Fp32Decomposer {
     }
 
     /// Create a half adder: sum = a ^ b, cout = a & b
-    fn create_ha(&mut self, netlist: &mut GateNetlist, path: &str, a: GateNetId, b: GateNetId) -> (GateNetId, GateNetId) {
+    fn create_ha(
+        &mut self,
+        netlist: &mut GateNetlist,
+        path: &str,
+        a: GateNetId,
+        b: GateNetId,
+    ) -> (GateNetId, GateNetId) {
         let sum = self.alloc_net(netlist, format!("{}_ha_sum", path));
         let cout = self.alloc_net(netlist, format!("{}_ha_cout", path));
         let cell = Cell::new_comb(
@@ -169,7 +211,14 @@ impl Fp32Decomposer {
     }
 
     /// Create a full adder: sum = a ^ b ^ cin, cout = maj(a,b,cin)
-    fn create_fa(&mut self, netlist: &mut GateNetlist, path: &str, a: GateNetId, b: GateNetId, cin: GateNetId) -> (GateNetId, GateNetId) {
+    fn create_fa(
+        &mut self,
+        netlist: &mut GateNetlist,
+        path: &str,
+        a: GateNetId,
+        b: GateNetId,
+        cin: GateNetId,
+    ) -> (GateNetId, GateNetId) {
         let sum = self.alloc_net(netlist, format!("{}_fa_sum", path));
         let cout = self.alloc_net(netlist, format!("{}_fa_cout", path));
         let cell = Cell::new_comb(
@@ -321,7 +370,12 @@ impl Fp32Decomposer {
             let mut next = Vec::new();
             for (i, chunk) in current.chunks(2).enumerate() {
                 if chunk.len() == 2 {
-                    let out = self.create_and2(netlist, &format!("{}_l{}_{}", path, level, i), chunk[0], chunk[1]);
+                    let out = self.create_and2(
+                        netlist,
+                        &format!("{}_l{}_{}", path, level, i),
+                        chunk[0],
+                        chunk[1],
+                    );
                     next.push(out);
                 } else {
                     next.push(chunk[0]);
@@ -364,7 +418,12 @@ impl Fp32Decomposer {
             let mut next = Vec::new();
             for (i, chunk) in current.chunks(2).enumerate() {
                 if chunk.len() == 2 {
-                    let out = self.create_or2(netlist, &format!("{}_l{}_{}", path, level, i), chunk[0], chunk[1]);
+                    let out = self.create_or2(
+                        netlist,
+                        &format!("{}_l{}_{}", path, level, i),
+                        chunk[0],
+                        chunk[1],
+                    );
                     next.push(out);
                 } else {
                     next.push(chunk[0]);
@@ -397,12 +456,15 @@ impl Fp32Decomposer {
             if inputs.is_empty() {
                 panic!("[FP32_DECOMPOSE] Cannot extract FP32 parts from empty input");
             }
-            inputs.get(idx).copied().unwrap_or_else(|| inputs[inputs.len() - 1])
+            inputs
+                .get(idx)
+                .copied()
+                .unwrap_or_else(|| inputs[inputs.len() - 1])
         };
 
         let sign = get_bit(31);
-        let exp: Vec<GateNetId> = (23..31).map(|i| get_bit(i)).collect();
-        let mant: Vec<GateNetId> = (0..23).map(|i| get_bit(i)).collect();
+        let exp: Vec<GateNetId> = (23..31).map(&get_bit).collect();
+        let mant: Vec<GateNetId> = (0..23).map(&get_bit).collect();
         (sign, exp, mant)
     }
 
@@ -416,8 +478,8 @@ impl Fp32Decomposer {
         &mut self,
         netlist: &mut GateNetlist,
         path: &str,
-        a_inputs: &[GateNetId],  // 32 bits
-        b_inputs: &[GateNetId],  // 32 bits
+        a_inputs: &[GateNetId], // 32 bits
+        b_inputs: &[GateNetId], // 32 bits
         output: GateNetId,
     ) {
         let (a_sign, a_exp, a_mant) = self.extract_fp32_parts(a_inputs);
@@ -451,17 +513,14 @@ impl Fp32Decomposer {
         let mant_lt = self.create_ult_n(netlist, &format!("{}_mant_lt", path), &a_mant, &b_mant);
 
         // For positive numbers: a < b if (exp_lt) OR (exp_eq AND mant_lt)
-        let exp_eq_mant_lt = self.create_and2(netlist, &format!("{}_eq_mant_lt", path), exp_eq, mant_lt);
+        let exp_eq_mant_lt =
+            self.create_and2(netlist, &format!("{}_eq_mant_lt", path), exp_eq, mant_lt);
         let mag_lt = self.create_or2(netlist, &format!("{}_mag_lt", path), exp_lt, exp_eq_mant_lt);
 
         // For negative numbers: a < b if magnitude(a) > magnitude(b)
         let mant_ge = self.create_inv(netlist, &format!("{}_mant_ge", path), mant_lt);
-        let exp_eq_mant_gt = self.create_and2(
-            netlist,
-            &format!("{}_eq_mant_gt", path),
-            exp_eq,
-            mant_ge,
-        );
+        let exp_eq_mant_gt =
+            self.create_and2(netlist, &format!("{}_eq_mant_gt", path), exp_eq, mant_ge);
         let mag_gt = self.create_or2(netlist, &format!("{}_mag_gt", path), exp_gt, exp_eq_mant_gt);
 
         // both_pos AND mag_lt
@@ -505,7 +564,13 @@ impl Fp32Decomposer {
         // a <= b is equivalent to NOT(a > b) = NOT(b < a)
         // Create temp net for b < a result
         let lt_result = self.alloc_net(netlist, format!("{}_gt_temp", path));
-        self.decompose_fp32_lt(netlist, &format!("{}_gt", path), b_inputs, a_inputs, lt_result);
+        self.decompose_fp32_lt(
+            netlist,
+            &format!("{}_gt", path),
+            b_inputs,
+            a_inputs,
+            lt_result,
+        );
 
         // Invert to get <=
         let le_result = self.create_inv(netlist, &format!("{}_le", path), lt_result);
@@ -523,7 +588,13 @@ impl Fp32Decomposer {
     ) {
         // a >= b is equivalent to NOT(a < b)
         let lt_result = self.alloc_net(netlist, format!("{}_lt_temp", path));
-        self.decompose_fp32_lt(netlist, &format!("{}_lt", path), a_inputs, b_inputs, lt_result);
+        self.decompose_fp32_lt(
+            netlist,
+            &format!("{}_lt", path),
+            a_inputs,
+            b_inputs,
+            lt_result,
+        );
 
         let ge_result = self.create_inv(netlist, &format!("{}_ge", path), lt_result);
         self.connect_to_output(netlist, ge_result, output);
@@ -558,7 +629,7 @@ impl Fp32Decomposer {
         path: &str,
         a_inputs: &[GateNetId],
         b_inputs: &[GateNetId],
-        outputs: &[GateNetId],  // 32 output bits
+        outputs: &[GateNetId], // 32 output bits
     ) {
         if outputs.len() < 32 {
             eprintln!(
@@ -575,11 +646,13 @@ impl Fp32Decomposer {
 
         // 2. Result exponent = a_exp + b_exp - 127
         // First add exponents
-        let (exp_sum, _) = self.create_adder_n(netlist, &format!("{}_exp_add", path), &a_exp, &b_exp, None);
+        let (exp_sum, _) =
+            self.create_adder_n(netlist, &format!("{}_exp_add", path), &a_exp, &b_exp, None);
 
         // Subtract 127 (0x7F = 01111111)
         let bias: Vec<GateNetId> = self.create_constant(netlist, &format!("{}_bias", path), 127, 8);
-        let (result_exp_raw, _) = self.create_subtractor_n(netlist, &format!("{}_exp_sub", path), &exp_sum, &bias);
+        let (result_exp_raw, _) =
+            self.create_subtractor_n(netlist, &format!("{}_exp_sub", path), &exp_sum, &bias);
 
         // 3. Mantissa multiplication
         // Add implicit 1: full_mant = 1.mant = {1, mant[22:0]} = 24 bits
@@ -625,7 +698,7 @@ impl Fp32Decomposer {
         let (exp_inc, _) = self.create_adder_n(
             netlist,
             &format!("{}_exp_inc", path),
-            &result_exp_raw[0..8].to_vec(),
+            &result_exp_raw[0..8],
             &one,
             None,
         );
@@ -726,21 +799,20 @@ impl Fp32Decomposer {
             let mut row = Vec::new();
             // Add i zeros at the start (shift)
             for _ in 0..i {
-                row.push(self.create_tie_low(netlist, &format!("{}_pp_zero_{}_{}", path, i, row.len())));
+                row.push(
+                    self.create_tie_low(netlist, &format!("{}_pp_zero_{}_{}", path, i, row.len())),
+                );
             }
             // Generate partial products
             for j in 0..n {
-                let pp = self.create_and2(
-                    netlist,
-                    &format!("{}_pp_{}_{}", path, i, j),
-                    a[j],
-                    b[i],
-                );
+                let pp = self.create_and2(netlist, &format!("{}_pp_{}_{}", path, i, j), a[j], b[i]);
                 row.push(pp);
             }
             // Pad to result_bits
             while row.len() < result_bits {
-                row.push(self.create_tie_low(netlist, &format!("{}_pp_pad_{}_{}", path, i, row.len())));
+                row.push(
+                    self.create_tie_low(netlist, &format!("{}_pp_pad_{}_{}", path, i, row.len())),
+                );
             }
             partial_products.push(row);
         }
@@ -764,13 +836,8 @@ impl Fp32Decomposer {
 
         let mut sum = products.remove(0);
         for (i, pp) in products.into_iter().enumerate() {
-            let (new_sum, _) = self.create_adder_n(
-                netlist,
-                &format!("{}_sum_{}", path, i),
-                &sum,
-                &pp,
-                None,
-            );
+            let (new_sum, _) =
+                self.create_adder_n(netlist, &format!("{}_sum_{}", path, i), &sum, &pp, None);
             sum = new_sum;
             // Extend to result_bits if needed
             while sum.len() < result_bits {
@@ -801,7 +868,8 @@ impl Fp32Decomposer {
         if outputs.len() < 32 {
             eprintln!(
                 "[FP32_DECOMPOSE] Error at '{}': FP32 add needs 32 output bits, got {}. Skipping.",
-                path, outputs.len()
+                path,
+                outputs.len()
             );
             return;
         }
@@ -821,12 +889,16 @@ impl Fp32Decomposer {
             large_exp.push(self.create_mux2(
                 netlist,
                 &format!("{}_lexp_{}", path, i),
-                b_exp[i], a_exp[i], exp_gt,
+                b_exp[i],
+                a_exp[i],
+                exp_gt,
             ));
             small_exp.push(self.create_mux2(
                 netlist,
                 &format!("{}_sexp_{}", path, i),
-                a_exp[i], b_exp[i], exp_gt,
+                a_exp[i],
+                b_exp[i],
+                exp_gt,
             ));
         }
 
@@ -834,17 +906,23 @@ impl Fp32Decomposer {
             large_mant.push(self.create_mux2(
                 netlist,
                 &format!("{}_lmant_{}", path, i),
-                b_mant[i], a_mant[i], exp_gt,
+                b_mant[i],
+                a_mant[i],
+                exp_gt,
             ));
             small_mant.push(self.create_mux2(
                 netlist,
                 &format!("{}_smant_{}", path, i),
-                a_mant[i], b_mant[i], exp_gt,
+                a_mant[i],
+                b_mant[i],
+                exp_gt,
             ));
         }
 
-        let large_sign = self.create_mux2(netlist, &format!("{}_lsign", path), b_sign, a_sign, exp_gt);
-        let small_sign = self.create_mux2(netlist, &format!("{}_ssign", path), a_sign, b_sign, exp_gt);
+        let large_sign =
+            self.create_mux2(netlist, &format!("{}_lsign", path), b_sign, a_sign, exp_gt);
+        let small_sign =
+            self.create_mux2(netlist, &format!("{}_ssign", path), a_sign, b_sign, exp_gt);
 
         // Calculate exponent difference
         let (exp_diff, _) = self.create_subtractor_n(
@@ -868,18 +946,24 @@ impl Fp32Decomposer {
             netlist,
             &format!("{}_shift", path),
             &small_full,
-            &exp_diff[0..5].to_vec(), // Use 5 bits for shift (up to 31)
-            26, // Extended for guard bits
+            &exp_diff[0..5], // Use 5 bits for shift (up to 31)
+            26,              // Extended for guard bits
         );
 
         // Extend large mantissa to same width
         let mut large_ext = large_full.clone();
         while large_ext.len() < 26 {
-            large_ext.push(self.create_tie_low(netlist, &format!("{}_lext_{}", path, large_ext.len())));
+            large_ext
+                .push(self.create_tie_low(netlist, &format!("{}_lext_{}", path, large_ext.len())));
         }
 
         // Determine if we add or subtract
-        let diff_sign = self.create_xor2(netlist, &format!("{}_op_sign", path), large_sign, small_sign);
+        let diff_sign = self.create_xor2(
+            netlist,
+            &format!("{}_op_sign", path),
+            large_sign,
+            small_sign,
+        );
 
         // Add or subtract mantissas
         let (sum_result, _) = self.create_adder_n(
@@ -893,7 +977,11 @@ impl Fp32Decomposer {
         // For subtraction, need to complement and add
         let mut small_inv = Vec::with_capacity(shifted_small.len());
         for i in 0..shifted_small.len() {
-            small_inv.push(self.create_inv(netlist, &format!("{}_sinv_{}", path, i), shifted_small[i]));
+            small_inv.push(self.create_inv(
+                netlist,
+                &format!("{}_sinv_{}", path, i),
+                shifted_small[i],
+            ));
         }
         let sub_cin = self.create_tie_high(netlist, &format!("{}_sub_cin", path));
         let (diff_result, _) = self.create_adder_n(
@@ -912,7 +1000,9 @@ impl Fp32Decomposer {
             mant_result.push(self.create_mux2(
                 netlist,
                 &format!("{}_res_{}", path, i),
-                sr, dr, diff_sign,
+                sr,
+                dr,
+                diff_sign,
             ));
         }
 

@@ -1069,6 +1069,7 @@ pub fn build_hir(_ast: &ast::SourceFile) -> Result<Hir> {
         trait_definitions: Vec::new(),
         trait_implementations: Vec::new(),
         type_aliases: Vec::new(),
+        distinct_types: Vec::new(),
         user_defined_types: Vec::new(),
         global_constraints: Vec::new(),
         modules: Vec::new(),

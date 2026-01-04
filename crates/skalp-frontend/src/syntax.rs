@@ -25,7 +25,7 @@ pub enum SyntaxKind {
     ElseKw,
     AssignKw,
 
-    // Type System (14) - Updated to include numeric, floating-point, and string types
+    // Type System (15) - Updated to include numeric, floating-point, string, and distinct types
     BitKw,
     BoolKw,
     StringKw,
@@ -42,6 +42,7 @@ pub enum SyntaxKind {
     StructKw,
     EnumKw,
     UnionKw,
+    DistinctKw,
 
     // Boolean Literals (2)
     TrueKw,
@@ -282,6 +283,7 @@ pub enum SyntaxKind {
     EnumDecl,
     UnionDecl,
     TypeAlias,
+    DistinctTypeDecl,
     UseDecl,
     ModuleDecl,
 
@@ -549,8 +551,8 @@ impl SyntaxKind {
             // Core Hardware Description (14)
             EntityKw | ImplKw | SignalKw | VarKw | ConstKw
                 | InKw | InputKw | OutKw | OutputKw | InoutKw | PortKw | OnKw | IfKw | ElseKw | AssignKw
-            // Type System (15)
-            | BitKw | BoolKw | StringKw | NatKw | IntKw | LogicKw | ClockKw | ResetKw | TypeKw | StreamKw | Fp16Kw | Fp32Kw | Fp64Kw | StructKw | EnumKw | UnionKw
+            // Type System (16)
+            | BitKw | BoolKw | StringKw | NatKw | IntKw | LogicKw | ClockKw | ResetKw | TypeKw | StreamKw | Fp16Kw | Fp32Kw | Fp64Kw | StructKw | EnumKw | UnionKw | DistinctKw
             // Boolean Literals (2)
             | TrueKw | FalseKw
             // Traits and Generics (5)
@@ -668,6 +670,7 @@ impl SyntaxKind {
             StructKw => "'struct'",
             EnumKw => "'enum'",
             UnionKw => "'union'",
+            DistinctKw => "'distinct'",
 
             // Boolean Literals (2)
             TrueKw => "'true'",
@@ -888,6 +891,7 @@ impl SyntaxKind {
             AttributeList => "attribute list",
             RequirementDecl => "requirement declaration",
             TypeAlias => "type alias",
+            DistinctTypeDecl => "distinct type declaration",
             UseDecl => "use declaration",
             ModuleDecl => "module declaration",
             UsePath => "use path",
@@ -939,6 +943,7 @@ impl From<crate::lexer::Token> for SyntaxKind {
             Token::Struct => StructKw,
             Token::Enum => EnumKw,
             Token::Union => UnionKw,
+            Token::Distinct => DistinctKw,
 
             // Boolean Literals (2)
             Token::True => TrueKw,
