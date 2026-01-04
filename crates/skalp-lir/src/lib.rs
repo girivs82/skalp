@@ -27,6 +27,7 @@
 //! ```
 
 pub mod async_sta;
+pub mod async_sta_fix;
 pub mod compiled_ip;
 pub mod gate_netlist;
 pub mod gate_optimizer;
@@ -130,4 +131,10 @@ pub use compiled_ip::{
 pub use async_sta::{
     analyze_async_timing, analyze_async_timing_with_oscillations, AsyncSta, AsyncStaConfig,
     AsyncStaResult, AsyncStaStats, CompletionViolation, ForkViolation, ViolationSeverity,
+};
+
+// Async STA fix (buffer insertion)
+pub use async_sta_fix::{
+    fix_fork_violations, run_iterative_sta_fix, AsyncStaFixConfig, AsyncStaFixResult, ForkFix,
+    IterationResult, IterativeStaResult,
 };
