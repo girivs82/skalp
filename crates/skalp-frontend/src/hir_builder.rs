@@ -424,6 +424,14 @@ impl HirBuilderContext {
         );
     }
 
+    /// Pre-register constants from merged HIR (for handling imports)
+    /// BUG #170 FIX: Register imported constants like IEEE754_32 for const generic resolution
+    pub fn preregister_constant(&mut self, constant: &crate::hir::HirConstant) {
+        self.symbols
+            .constants
+            .insert(constant.name.clone(), constant.id);
+    }
+
     /// Build HIR from syntax tree
     pub fn build(&mut self, root: &SyntaxNode) -> Result<Hir, Vec<HirError>> {
         // Type checking is temporarily disabled during HIR building to avoid conflicts

@@ -479,6 +479,59 @@ impl ModuleResolver {
                 }
             }
         }
+
+        // BUG #170 FIX: Also merge constants from the source module's global impl blocks
+        // This is critical for const generic resolution: FpAdd<IEEE754_32> needs IEEE754_32
+        // to be available when fp.sk is parsed, not just when the user's module is parsed.
+        // For glob imports, merge ALL global constants. For specific imports, merge by name.
+        let is_glob = matches!(import.path, HirImportPath::Glob { .. });
+
+        for impl_block in &source.implementations {
+            if impl_block.entity == crate::hir::EntityId(0) {
+                for constant in &impl_block.constants {
+                    // For glob imports, include all constants
+                    // For specific imports, only include if the constant name is in the import list
+                    if is_glob || symbol_names.contains(&constant.name) {
+                        // Ensure target has a global impl block
+                        if target.implementations.is_empty()
+                            || !target
+                                .implementations
+                                .iter()
+                                .any(|i| i.entity == crate::hir::EntityId(0))
+                        {
+                            target.implementations.push(crate::hir::HirImplementation {
+                                entity: crate::hir::EntityId(0),
+                                signals: Vec::new(),
+                                variables: Vec::new(),
+                                constants: Vec::new(),
+                                functions: Vec::new(),
+                                event_blocks: Vec::new(),
+                                assignments: Vec::new(),
+                                instances: Vec::new(),
+                                covergroups: Vec::new(),
+                                formal_blocks: Vec::new(),
+                                statements: Vec::new(),
+                            });
+                        }
+
+                        // Find the global impl block and add the constant if not already present
+                        if let Some(global_impl) = target
+                            .implementations
+                            .iter_mut()
+                            .find(|i| i.entity == crate::hir::EntityId(0))
+                        {
+                            if !global_impl
+                                .constants
+                                .iter()
+                                .any(|c| c.name == constant.name)
+                            {
+                                global_impl.constants.push(constant.clone());
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 

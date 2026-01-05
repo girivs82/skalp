@@ -592,10 +592,44 @@ impl<'hir> MonomorphizationEngine<'hir> {
     /// Create a const evaluator with current constants and enums registered
     fn create_evaluator_with_constants(&self) -> ConstEvaluator {
         let mut eval = ConstEvaluator::new();
-        eval.register_constants(&self.current_constants);
-        // Register enums for enum variant resolution
+        // Register enums for enum variant resolution AND module-level constants
+        // BUG #170 FIX: Module-level constants like IEEE754_32 need to be registered
+        // for const generic argument evaluation to work correctly
         if let Some(hir) = self.hir {
             self.register_enums_to_evaluator(&mut eval, hir);
+            // Register constants from ALL impl blocks
+            // This includes module-level constants (which may have various entity IDs
+            // depending on parse order) and implementation-specific constants
+            for impl_block in &hir.implementations {
+                eval.register_constants(&impl_block.constants);
+            }
+        }
+        // BUG #171 FIX: Register specialized constants LAST so they take precedence
+        // over the original unspecialized constants from HIR impl blocks.
+        // This ensures `const E: nat = F.exponent_bits` evaluates to `8` (specialized)
+        // rather than `F.exponent_bits` (unspecialized).
+        //
+        // BUG #172 FIX: When modules are merged, constants from different modules
+        // may have colliding IDs. Constants that couldn't be converted to numeric
+        // literals (like FloatFormat structs) get value Literal(Integer(0)), which
+        // would incorrectly overwrite valid numeric constants with the same ID.
+        // Solution: Only register constants that have valid numeric values, skip
+        // struct literals that were converted to 0.
+        for c in &self.current_constants {
+            // Skip constants that are struct literals that failed conversion
+            // (they become Literal(Integer(0)) but shouldn't override actual values)
+            let is_failed_struct_conversion = matches!(
+                &c.value,
+                HirExpression::Literal(crate::hir::HirLiteral::Integer(0))
+            ) && matches!(
+                &c.const_type,
+                HirType::Custom(_) // FloatFormat and other custom types
+            );
+
+            if !is_failed_struct_conversion {
+                eval.register_constant(c.id, c.value.clone());
+                eval.register_named_constant(c.name.clone(), c.value.clone());
+            }
         }
         eval
     }

@@ -225,6 +225,16 @@ fn rebuild_instances_with_imports(hir: &Hir, file_path: &Path) -> Result<Hir> {
         builder.preregister_distinct_type(distinct);
     }
 
+    // Pre-register constants from impl blocks (BUG #170 FIX)
+    // This is critical for const generic resolution: `FpAdd<IEEE754_32>`
+    // IEEE754_32 needs to be in the symbol table so it resolves to Constant(id)
+    // instead of GenericParam("IEEE754_32")
+    for implementation in &hir.implementations {
+        for constant in &implementation.constants {
+            builder.preregister_constant(constant);
+        }
+    }
+
     // Rebuild implementations (this will now find imported entities)
     let rebuilt_hir = builder.build(&syntax_tree).map_err(|errors| {
         anyhow::anyhow!(
