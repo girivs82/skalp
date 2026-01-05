@@ -1660,6 +1660,45 @@ pub enum HirBinaryOp {
     RightShift,
 }
 
+impl HirBinaryOp {
+    /// Returns the trait name for this operator (e.g., Add -> "Add", Less -> "PartialOrd")
+    /// Used for trait-based operator resolution
+    pub fn to_trait_name(&self) -> Option<&'static str> {
+        match self {
+            HirBinaryOp::Add => Some("Add"),
+            HirBinaryOp::Sub => Some("Sub"),
+            HirBinaryOp::Mul => Some("Mul"),
+            HirBinaryOp::Div => Some("Div"),
+            HirBinaryOp::Less
+            | HirBinaryOp::LessEqual
+            | HirBinaryOp::Greater
+            | HirBinaryOp::GreaterEqual => Some("PartialOrd"),
+            HirBinaryOp::Equal | HirBinaryOp::NotEqual => Some("PartialEq"),
+            // Bitwise and logical ops don't have trait-based resolution yet
+            _ => None,
+        }
+    }
+
+    /// Returns the method name for this operator (e.g., Add -> "add", Less -> "lt")
+    /// Used for trait-based operator resolution
+    pub fn to_method_name(&self) -> Option<&'static str> {
+        match self {
+            HirBinaryOp::Add => Some("add"),
+            HirBinaryOp::Sub => Some("sub"),
+            HirBinaryOp::Mul => Some("mul"),
+            HirBinaryOp::Div => Some("div"),
+            HirBinaryOp::Less => Some("lt"),
+            HirBinaryOp::LessEqual => Some("le"),
+            HirBinaryOp::Greater => Some("gt"),
+            HirBinaryOp::GreaterEqual => Some("ge"),
+            HirBinaryOp::Equal => Some("eq"),
+            HirBinaryOp::NotEqual => Some("ne"),
+            // Bitwise and logical ops don't have trait-based resolution yet
+            _ => None,
+        }
+    }
+}
+
 /// Unary expression in HIR
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HirUnaryExpr {

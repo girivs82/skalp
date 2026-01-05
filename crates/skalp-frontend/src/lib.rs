@@ -414,21 +414,65 @@ fn merge_trait_implementations_for_existing_types(target: &mut Hir, source: &Hir
         target_types
     );
 
-    // Also include types from type aliases
-    // (Some trait impls might target type aliases)
+    // Track which trait definitions we need to merge
+    let mut traits_to_merge: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     // Merge trait implementations that target types we have
     for trait_impl in &source.trait_implementations {
-        if let hir::TraitImplTarget::Type(hir::HirType::Custom(type_name)) = &trait_impl.target {
-            if target_types.contains(type_name) {
+        // Extract the type name from the target, handling both Custom types
+        // and primitive float types (which may be used due to fallback resolution)
+        let type_name = match &trait_impl.target {
+            hir::TraitImplTarget::Type(hir::HirType::Custom(name)) => Some(name.clone()),
+            // Handle primitive float types - these may be used when fp32/fp64/fp16
+            // are resolved via fallback before distinct types are in scope
+            hir::TraitImplTarget::Type(hir::HirType::Float32) => Some("fp32".to_string()),
+            hir::TraitImplTarget::Type(hir::HirType::Float64) => Some("fp64".to_string()),
+            hir::TraitImplTarget::Type(hir::HirType::Float16) => Some("fp16".to_string()),
+            _ => None,
+        };
+
+        if let Some(type_name) = type_name {
+            if target_types.contains(&type_name) {
                 // Check if we already have this trait implementation
                 let already_exists = target.trait_implementations.iter().any(|ti| {
-                    ti.trait_name == trait_impl.trait_name
-                        && matches!(&ti.target, hir::TraitImplTarget::Type(hir::HirType::Custom(tn)) if tn == type_name)
+                    ti.trait_name == trait_impl.trait_name && {
+                        let ti_type_name = match &ti.target {
+                            hir::TraitImplTarget::Type(hir::HirType::Custom(n)) => Some(n.as_str()),
+                            hir::TraitImplTarget::Type(hir::HirType::Float32) => Some("fp32"),
+                            hir::TraitImplTarget::Type(hir::HirType::Float64) => Some("fp64"),
+                            hir::TraitImplTarget::Type(hir::HirType::Float16) => Some("fp16"),
+                            _ => None,
+                        };
+                        ti_type_name == Some(type_name.as_str())
+                    }
                 });
                 if !already_exists {
+                    // Track that we need this trait definition
+                    traits_to_merge.insert(trait_impl.trait_name.clone());
                     target.trait_implementations.push(trait_impl.clone());
                 }
+            }
+        }
+    }
+
+    // Also merge the trait DEFINITIONS for any traits we imported implementations for
+    // This is critical for trait-based operator resolution - we need the trait definition
+    // to get method signatures (parameters, return type)
+    for trait_name in traits_to_merge {
+        // Check if we already have this trait definition
+        let already_has_trait = target
+            .trait_definitions
+            .iter()
+            .any(|td| td.name == trait_name);
+
+        if !already_has_trait {
+            // Find and merge the trait definition from source
+            if let Some(trait_def) = source
+                .trait_definitions
+                .iter()
+                .find(|td| td.name == trait_name)
+            {
+                target.trait_definitions.push(trait_def.clone());
             }
         }
     }
@@ -632,6 +676,13 @@ fn remap_statement_ports(
 
 /// Merge a specific symbol from a module into the current HIR
 fn merge_symbol(target: &mut Hir, source: &Hir, symbol_name: &str) -> Result<()> {
+    eprintln!(
+        "[MERGE_SYMBOL] Importing symbol '{}' from source with {} entities, {} trait_defs",
+        symbol_name,
+        source.entities.len(),
+        source.trait_definitions.len()
+    );
+
     // FIRST: Merge trait implementations for types we already have
     // This ensures that when we import an entity from a module that has trait impls
     // for types we already have (like fp32), those impls are available
@@ -693,6 +744,11 @@ fn merge_symbol(target: &mut Hir, source: &Hir, symbol_name: &str) -> Result<()>
         .iter()
         .find(|t| t.name == symbol_name)
     {
+        eprintln!(
+            "[IMPORT_TRAIT_DEF] Importing trait definition '{}' from source with {} trait_defs",
+            symbol_name,
+            source.trait_definitions.len()
+        );
         target.trait_definitions.push(trait_def.clone());
         return Ok(());
     }

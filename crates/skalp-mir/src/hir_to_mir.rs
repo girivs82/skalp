@@ -13801,8 +13801,18 @@ impl<'hir> HirToMir<'hir> {
             match &impl_.target {
                 hir::TraitImplTarget::Type(ty) => {
                     // Check if the type matches by name
-                    if let hir::HirType::Custom(name) = ty {
-                        let matches = name == type_name;
+                    // Handle both Custom types and primitive float types
+                    // (float types may be used due to fallback resolution in hir_builder)
+                    let impl_type_name = match ty {
+                        hir::HirType::Custom(name) => Some(name.as_str()),
+                        hir::HirType::Float32 => Some("fp32"),
+                        hir::HirType::Float64 => Some("fp64"),
+                        hir::HirType::Float16 => Some("fp16"),
+                        _ => None,
+                    };
+
+                    if let Some(impl_type) = impl_type_name {
+                        let matches = impl_type == type_name;
                         if matches {
                             println!(
                                 "[FIND_TRAIT_IMPL] FOUND: impl {} for {} matches!",

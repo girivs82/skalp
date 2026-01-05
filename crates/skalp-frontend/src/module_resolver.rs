@@ -358,7 +358,7 @@ impl ModuleResolver {
         // Build HIR
         eprintln!("[MODULE_RESOLVER] Building HIR for {:?}", path);
         let mut builder = HirBuilderContext::new();
-        let hir = builder.build(&syntax_tree).map_err(|errors| {
+        let mut hir = builder.build(&syntax_tree).map_err(|errors| {
             anyhow::anyhow!(
                 "Failed to build HIR: {}",
                 errors
@@ -374,7 +374,8 @@ impl ModuleResolver {
             hir.imports.len()
         );
 
-        // Recursively load dependencies
+        // Recursively load dependencies first
+        let mut dep_paths = Vec::new();
         for (i, import) in hir.imports.iter().enumerate() {
             eprintln!(
                 "[MODULE_RESOLVER] Processing import {}/{} from {:?}",
@@ -390,12 +391,23 @@ impl ModuleResolver {
                 "[MODULE_RESOLVER] Successfully loaded dependency: {:?}",
                 dep_path
             );
+            dep_paths.push((import.clone(), dep_path));
+        }
+
+        // NOW merge imported symbols INTO the module's HIR before caching
+        // This ensures that when we later use this module as a source for merging,
+        // it has all the trait definitions from its imports
+        for (import, dep_path) in &dep_paths {
+            if let Some(dep_hir) = self.loaded_modules.get(dep_path) {
+                // Merge trait definitions from dependency if this import references them
+                Self::merge_import_into_hir(&mut hir, dep_hir, import);
+            }
         }
 
         // Mark as done loading
         self.loading.remove(path);
 
-        // Cache the module
+        // Cache the module (now with merged imports)
         self.loaded_modules.insert(path.to_path_buf(), hir);
 
         Ok(())
@@ -422,6 +434,51 @@ impl ModuleResolver {
     /// Get all loaded modules
     pub fn loaded_modules(&self) -> impl Iterator<Item = (&PathBuf, &Hir)> {
         self.loaded_modules.iter()
+    }
+
+    /// Merge imported symbols from a dependency INTO the target HIR
+    /// This ensures that when a module imports trait definitions, those definitions
+    /// are included in the module's HIR when it's cached.
+    fn merge_import_into_hir(target: &mut Hir, source: &Hir, import: &HirImport) {
+        // Extract the symbol names being imported
+        let symbol_names: Vec<String> = match &import.path {
+            HirImportPath::Simple { segments } => {
+                segments.last().map(|s| vec![s.clone()]).unwrap_or_default()
+            }
+            HirImportPath::Renamed { segments, alias: _ } => {
+                segments.last().map(|s| vec![s.clone()]).unwrap_or_default()
+            }
+            HirImportPath::Glob { .. } => {
+                // For glob imports, get all trait definition names
+                source
+                    .trait_definitions
+                    .iter()
+                    .map(|t| t.name.clone())
+                    .collect()
+            }
+            HirImportPath::Nested { paths, .. } => paths
+                .iter()
+                .filter_map(|p| match p {
+                    HirImportPath::Simple { segments } => segments.last().cloned(),
+                    HirImportPath::Renamed { segments, .. } => segments.last().cloned(),
+                    _ => None,
+                })
+                .collect(),
+        };
+
+        // Merge trait definitions that are being imported
+        for name in &symbol_names {
+            if let Some(trait_def) = source.trait_definitions.iter().find(|t| &t.name == name) {
+                // Only add if not already present
+                if !target
+                    .trait_definitions
+                    .iter()
+                    .any(|t| t.name == trait_def.name)
+                {
+                    target.trait_definitions.push(trait_def.clone());
+                }
+            }
+        }
     }
 }
 
