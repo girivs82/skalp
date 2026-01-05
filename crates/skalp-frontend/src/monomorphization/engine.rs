@@ -184,11 +184,28 @@ impl<'hir> MonomorphizationEngine<'hir> {
                     });
 
                     if let Some(impl_block) = impl_block {
+                        // BUG #175 FIX: The impl_block was parsed with port IDs starting from 0,
+                        // but after module merging, the entity's port IDs may have been reassigned
+                        // to different values (e.g., 3, 4, 5, 6). We need to create a combined
+                        // mapping from impl_block's port IDs to specialized port IDs.
+                        //
+                        // Create mapping: impl port index (0, 1, ...) -> specialized port ID
+                        // by matching port positions
+                        let mut impl_to_specialized_map = HashMap::new();
+                        for (idx, entity_port) in entity.ports.iter().enumerate() {
+                            // The impl_block uses sequential port IDs starting from 0
+                            let impl_port_id = crate::hir::PortId(idx as u32);
+                            // Map to the specialized port ID
+                            if let Some(&specialized_port_id) = port_id_map.get(&entity_port.id) {
+                                impl_to_specialized_map.insert(impl_port_id, specialized_port_id);
+                            }
+                        }
+
                         let specialized_impl = self.specialize_implementation(
                             impl_block,
                             &specialized_entity,
                             instantiation,
-                            &port_id_map,
+                            &impl_to_specialized_map,
                         );
                         all_specialized_implementations.push(specialized_impl);
                     }
@@ -396,17 +413,20 @@ impl<'hir> MonomorphizationEngine<'hir> {
         // Store specialized constants for this implementation
         self.current_constants = specialized_constants;
 
-        // Specialize signals - substitute types
+        // Specialize signals - substitute types AND remap port IDs
         let specialized_signals = impl_block
             .signals
             .iter()
             .map(|signal| {
                 let mut new_signal = signal.clone();
                 new_signal.signal_type = self.substitute_type(&signal.signal_type, instantiation);
-                // Substitute initial value expression if present
+                // Substitute initial value expression AND remap port IDs if present
+                // BUG #175 FIX: Signal initial values like `a[W-2:M]` reference ports
+                // that need to be remapped to the specialized entity's ports
                 if let Some(ref init_expr) = signal.initial_value {
-                    new_signal.initial_value =
-                        Some(self.substitute_expr(init_expr, &instantiation.const_args));
+                    let substituted = self.substitute_expr(init_expr, &instantiation.const_args);
+                    let remapped = self.remap_expr_ports(&substituted, port_id_map);
+                    new_signal.initial_value = Some(remapped);
                 }
                 new_signal
             })
