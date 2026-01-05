@@ -3,7 +3,7 @@
 // Generic fixed-point arithmetic with parameterized word width, fraction bits, and signedness.
 // Format: Qm.n where m = integer bits, n = fraction bits, W = m+n
 
-use crate::numeric::traits::Numeric;
+use skalp::numeric::traits::Numeric;
 
 // ============================================================================
 // Type Definitions

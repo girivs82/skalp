@@ -2,7 +2,7 @@
 //
 // Generic integer arithmetic with parameterized width and signedness.
 
-use crate::numeric::traits::Numeric;
+use skalp::numeric::traits::Numeric;
 
 // ============================================================================
 // Type Definitions

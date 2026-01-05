@@ -6,9 +6,9 @@
 // - Proper rounding (round-to-nearest-even)
 // - Exception flags (invalid, overflow, underflow, inexact)
 
-use crate::numeric::formats::{FloatFormat, fp16, fp32, fp64, bf16};
-use crate::numeric::traits::{Add, Sub, Mul, Div, Neg, PartialOrd, PartialEq};
-use crate::numeric::cordic::{CordicSqrt, cordic_sqrt};
+use skalp::numeric::formats::{FloatFormat, fp16, fp32, fp64, bf16};
+use skalp::numeric::traits::{Add, Sub, Mul, Div, Neg, PartialOrd, PartialEq};
+use skalp::numeric::cordic::{CordicSqrt, cordic_sqrt};
 
 // ============================================================================
 // Type Definitions

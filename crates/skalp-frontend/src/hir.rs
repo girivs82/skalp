@@ -1706,6 +1706,9 @@ pub struct HirCallExpr {
 pub struct HirStructLiteral {
     /// Struct type name
     pub type_name: String,
+    /// Generic arguments (e.g., for `FpAdd<IEEE754_32>`, this contains the IEEE754_32 expression)
+    #[serde(default)]
+    pub generic_args: Vec<HirExpression>,
     /// Field initializations
     pub fields: Vec<HirStructFieldInit>,
 }

@@ -3,9 +3,9 @@
 // Generic vector operations for N-dimensional vectors with any numeric type.
 // All operations work with the Numeric trait for maximum flexibility.
 
-use crate::numeric::traits::Numeric;
-use crate::numeric::fp::{fp, fp32, FpMul, FpAdd, FpDiv, FpSqrt};
-use crate::numeric::trig::{sin as trig_sin, cos as trig_cos, acos as trig_acos};
+use skalp::numeric::traits::Numeric;
+use skalp::numeric::fp::{fp, fp32, FpMul, FpAdd, FpDiv, FpSqrt};
+use skalp::numeric::trig::{sin as trig_sin, cos as trig_cos, acos as trig_acos};
 
 // ============================================================================
 // Type Definitions

@@ -7,7 +7,7 @@
 //
 // All implementations are fully synthesizable.
 
-use crate::numeric::formats::{FloatFormat, IEEE754_32, fp32};
+use skalp::numeric::formats::{FloatFormat, IEEE754_32, fp32};
 
 // ============================================================================
 // Constants

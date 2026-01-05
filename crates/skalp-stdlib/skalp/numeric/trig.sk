@@ -3,8 +3,8 @@
 // Fully synthesizable trigonometric functions using CORDIC algorithm.
 // All implementations work in hardware without requiring floating-point intrinsics.
 
-use crate::numeric::fp::{fp, fp32};
-use crate::numeric::cordic::{
+use skalp::numeric::fp::{fp, fp32};
+use skalp::numeric::cordic::{
     CordicRotate16, CordicVector16,
     PI, PI_HALF, CORDIC_GAIN_16, CORDIC_GAIN_INV_16
 };

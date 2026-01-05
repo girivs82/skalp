@@ -444,20 +444,14 @@ impl ConstEvaluator {
                         .get("mantissa_bits")
                         .and_then(|v| v.as_nat())
                         .unwrap_or(0);
-                    let bias = fields
-                        .get("bias")
-                        .and_then(|v| v.as_int())
-                        .unwrap_or(0);
+                    let bias = fields.get("bias").and_then(|v| v.as_int()).unwrap_or(0);
 
                     Ok(ConstValue::FloatFormat(FloatFormatValue {
                         total_bits,
                         exponent_bits,
                         mantissa_bits,
                         bias,
-                        name: format!(
-                            "fp{}",
-                            total_bits
-                        ),
+                        name: format!("fp{}", total_bits),
                     }))
                 } else {
                     // General struct: return as Struct value
