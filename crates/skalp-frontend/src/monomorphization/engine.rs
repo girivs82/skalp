@@ -192,12 +192,70 @@ impl<'hir> MonomorphizationEngine<'hir> {
                         // Create mapping: impl port index (0, 1, ...) -> specialized port ID
                         // by matching port positions
                         let mut impl_to_specialized_map = HashMap::new();
-                        for (idx, entity_port) in entity.ports.iter().enumerate() {
-                            // The impl_block uses sequential port IDs starting from 0
-                            let impl_port_id = crate::hir::PortId(idx as u32);
-                            // Map to the specialized port ID
-                            if let Some(&specialized_port_id) = port_id_map.get(&entity_port.id) {
-                                impl_to_specialized_map.insert(impl_port_id, specialized_port_id);
+                        // BUG #178 FIX: The impl_block does NOT necessarily use sequential port IDs
+                        // starting from 0. When modules are merged, the impl block retains its
+                        // original port IDs from parsing. We need to find the actual port IDs
+                        // referenced by the impl block and map them correctly.
+                        //
+                        // Strategy: Look at what port IDs are actually used in the impl block's
+                        // assignments and map them by position to the entity's ports.
+                        // Collect unique port IDs used in impl block
+                        let mut impl_port_ids_used: Vec<crate::hir::PortId> = Vec::new();
+                        // From assignments (LHS and RHS)
+                        for assign in &impl_block.assignments {
+                            Self::collect_port_ids_from_lvalue(
+                                &assign.lhs,
+                                &mut impl_port_ids_used,
+                            );
+                            Self::collect_port_ids_from_expr(&assign.rhs, &mut impl_port_ids_used);
+                        }
+                        // From signal initial values
+                        for signal in &impl_block.signals {
+                            if let Some(ref init_expr) = signal.initial_value {
+                                Self::collect_port_ids_from_expr(
+                                    init_expr,
+                                    &mut impl_port_ids_used,
+                                );
+                            }
+                        }
+                        impl_port_ids_used.sort_by_key(|id| id.0);
+                        impl_port_ids_used.dedup();
+
+                        // Build mapping from impl port IDs to specialized port IDs
+                        // BUG #179 FIX: The impl block's port IDs may directly match the entity's
+                        // port IDs (if they were parsed together), or they may be sequential (0, 1, 2...)
+                        // if the impl was parsed separately. We need to handle both cases.
+                        //
+                        // Strategy: First try direct ID matching (impl port ID == entity port ID),
+                        // then fall back to positional matching.
+                        for &impl_port_id in &impl_port_ids_used {
+                            // First, check if this impl port ID matches any entity port ID directly
+                            if let Some(entity_port) =
+                                entity.ports.iter().find(|p| p.id == impl_port_id)
+                            {
+                                if let Some(&specialized_port_id) = port_id_map.get(&entity_port.id)
+                                {
+                                    impl_to_specialized_map
+                                        .insert(impl_port_id, specialized_port_id);
+                                }
+                            }
+                        }
+
+                        // For any impl port IDs that weren't matched by direct ID, try positional matching
+                        // This handles cases where the impl block uses sequential IDs (0, 1, 2, ...)
+                        for &impl_port_id in &impl_port_ids_used {
+                            if let std::collections::hash_map::Entry::Vacant(e) =
+                                impl_to_specialized_map.entry(impl_port_id)
+                            {
+                                // Use the impl port ID as a position index
+                                let idx = impl_port_id.0 as usize;
+                                if let Some(entity_port) = entity.ports.get(idx) {
+                                    if let Some(&specialized_port_id) =
+                                        port_id_map.get(&entity_port.id)
+                                    {
+                                        e.insert(specialized_port_id);
+                                    }
+                                }
                             }
                         }
 
@@ -377,6 +435,13 @@ impl<'hir> MonomorphizationEngine<'hir> {
         // Evaluate and specialize constants
         // BUG #169 FIX: Evaluate constants with bound generic args and register by ID
         // This handles cases like `const E: nat = F.exponent_bits` where F is bound to FloatFormat
+        //
+        // BUG #177 FIX: Update self.current_constants INCREMENTALLY as we evaluate each constant.
+        // This is critical because substitute_expr uses create_evaluator_with_constants() which
+        // reads from self.current_constants. Constants like MAX_EXP = (1 << E) - 1 depend on
+        // earlier constants (E), so E must be in self.current_constants BEFORE we evaluate MAX_EXP.
+        self.current_constants = Vec::new();
+
         let specialized_constants: Vec<HirConstant> = impl_block
             .constants
             .iter()
@@ -395,12 +460,18 @@ impl<'hir> MonomorphizationEngine<'hir> {
                         // - By ID for Constant(ConstantId) resolution
                         evaluator.register_constant(constant.id, specialized_expr.clone());
 
-                        HirConstant {
+                        let new_const = HirConstant {
                             id: constant.id,
                             name: constant.name.clone(),
                             const_type: constant.const_type.clone(),
                             value: specialized_expr,
-                        }
+                        };
+
+                        // BUG #177 FIX: Add to current_constants immediately so subsequent
+                        // constants can reference this one via substitute_expr
+                        self.current_constants.push(new_const.clone());
+
+                        new_const
                     }
                     Err(_) => {
                         // Keep original if evaluation fails
@@ -410,7 +481,7 @@ impl<'hir> MonomorphizationEngine<'hir> {
             })
             .collect();
 
-        // Store specialized constants for this implementation
+        // Store specialized constants for this implementation (now complete)
         self.current_constants = specialized_constants;
 
         // Specialize signals - substitute types AND remap port IDs
@@ -995,14 +1066,56 @@ impl<'hir> MonomorphizationEngine<'hir> {
                 )
             }
 
-            // Constant reference - pass through unchanged during substitution
-            // BUG #173/#174 FIX: Constants like M = ConstantId(2) should NOT be resolved
-            // during expression substitution because:
-            // 1. During constant specialization, self.current_constants is stale
-            // 2. The evaluator (which has proper bindings) will resolve Constant(id)
-            //    when eval() is called on the substituted expression
-            // By passing through unchanged, we let the caller's evaluator handle resolution.
-            HirExpression::Constant(_id) => expr.clone(),
+            // Constant reference - try to resolve using evaluator
+            // BUG #176 FIX: Constants like M = ConstantId(2) need to be resolved to their
+            // literal values when used in signal initial expressions like a[W-2:M].
+            // The evaluator has proper bindings from current_constants and const_args.
+            HirExpression::Constant(id) => {
+                // First, look up in current_constants (which has specialized values)
+                if let Some(c) = self.current_constants.iter().find(|c| c.id == *id) {
+                    // If the value is already a literal, return it directly
+                    if let HirExpression::Literal(_) = &c.value {
+                        return c.value.clone();
+                    }
+                }
+
+                let mut eval = self.create_evaluator_with_constants();
+                eval.bind_all(const_args.clone());
+                match eval.eval(expr) {
+                    Ok(result) => self.const_value_to_expr(&result),
+                    Err(_) => expr.clone(),
+                }
+            }
+
+            // Ternary expression - substitute in all three parts
+            // BUG #180 FIX: Ternary expressions (cond ? true : false) need recursion
+            HirExpression::Ternary {
+                condition,
+                true_expr,
+                false_expr,
+            } => {
+                let cond = self.substitute_expr(condition, const_args);
+                let true_e = self.substitute_expr(true_expr, const_args);
+                let false_e = self.substitute_expr(false_expr, const_args);
+
+                // Try to evaluate condition
+                let mut eval = self.create_evaluator_with_constants();
+                eval.bind_all(const_args.clone());
+
+                if let Ok(cond_val) = eval.eval(&cond) {
+                    if let Some(b) = cond_val.as_bool() {
+                        // Condition is known at compile time - select branch
+                        return if b { true_e } else { false_e };
+                    }
+                }
+
+                // Condition not compile-time constant, keep ternary expression
+                HirExpression::Ternary {
+                    condition: Box::new(cond),
+                    true_expr: Box::new(true_e),
+                    false_expr: Box::new(false_e),
+                }
+            }
 
             // Other expressions pass through
             _ => expr.clone(),
@@ -1318,7 +1431,103 @@ impl<'hir> MonomorphizationEngine<'hir> {
                     .collect();
                 HirExpression::Concat(new_exprs)
             }
+            // BUG #180 FIX: Handle Ternary expressions (separate from If expressions)
+            HirExpression::Ternary {
+                condition,
+                true_expr,
+                false_expr,
+            } => {
+                let new_cond = self.remap_expr_ports(condition, port_id_map);
+                let new_true = self.remap_expr_ports(true_expr, port_id_map);
+                let new_false = self.remap_expr_ports(false_expr, port_id_map);
+                HirExpression::Ternary {
+                    condition: Box::new(new_cond),
+                    true_expr: Box::new(new_true),
+                    false_expr: Box::new(new_false),
+                }
+            }
             _ => expr.clone(),
+        }
+    }
+
+    /// Collect port IDs referenced in an LValue
+    fn collect_port_ids_from_lvalue(
+        lval: &crate::hir::HirLValue,
+        port_ids: &mut Vec<crate::hir::PortId>,
+    ) {
+        use crate::hir::HirLValue;
+        match lval {
+            HirLValue::Port(id) => {
+                if !port_ids.contains(id) {
+                    port_ids.push(*id);
+                }
+            }
+            HirLValue::Signal(_) => {}
+            HirLValue::Variable(_) => {}
+            HirLValue::Index(base, index) => {
+                Self::collect_port_ids_from_lvalue(base, port_ids);
+                Self::collect_port_ids_from_expr(index, port_ids);
+            }
+            HirLValue::Range(base, high, low) => {
+                Self::collect_port_ids_from_lvalue(base, port_ids);
+                Self::collect_port_ids_from_expr(high, port_ids);
+                Self::collect_port_ids_from_expr(low, port_ids);
+            }
+            HirLValue::FieldAccess { base, .. } => {
+                Self::collect_port_ids_from_lvalue(base, port_ids);
+            }
+        }
+    }
+
+    /// Collect port IDs referenced in an expression
+    fn collect_port_ids_from_expr(expr: &HirExpression, port_ids: &mut Vec<crate::hir::PortId>) {
+        match expr {
+            HirExpression::Port(id) => {
+                if !port_ids.contains(id) {
+                    port_ids.push(*id);
+                }
+            }
+            HirExpression::Binary(bin) => {
+                Self::collect_port_ids_from_expr(&bin.left, port_ids);
+                Self::collect_port_ids_from_expr(&bin.right, port_ids);
+            }
+            HirExpression::Unary(unary) => {
+                Self::collect_port_ids_from_expr(&unary.operand, port_ids);
+            }
+            HirExpression::Index(base, index) => {
+                Self::collect_port_ids_from_expr(base, port_ids);
+                Self::collect_port_ids_from_expr(index, port_ids);
+            }
+            HirExpression::Range(base, high, low) => {
+                Self::collect_port_ids_from_expr(base, port_ids);
+                Self::collect_port_ids_from_expr(high, port_ids);
+                Self::collect_port_ids_from_expr(low, port_ids);
+            }
+            HirExpression::If(if_expr) => {
+                Self::collect_port_ids_from_expr(&if_expr.condition, port_ids);
+                Self::collect_port_ids_from_expr(&if_expr.then_expr, port_ids);
+                Self::collect_port_ids_from_expr(&if_expr.else_expr, port_ids);
+            }
+            HirExpression::Ternary {
+                condition,
+                true_expr,
+                false_expr,
+            } => {
+                Self::collect_port_ids_from_expr(condition, port_ids);
+                Self::collect_port_ids_from_expr(true_expr, port_ids);
+                Self::collect_port_ids_from_expr(false_expr, port_ids);
+            }
+            HirExpression::Concat(exprs) => {
+                for e in exprs {
+                    Self::collect_port_ids_from_expr(e, port_ids);
+                }
+            }
+            HirExpression::Call(call) => {
+                for arg in &call.args {
+                    Self::collect_port_ids_from_expr(arg, port_ids);
+                }
+            }
+            _ => {}
         }
     }
 }
