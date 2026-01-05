@@ -4831,7 +4831,30 @@ impl<'hir> HirToMir<'hir> {
                 }
                 let left = Box::new(left);
                 let right = Box::new(right);
-                let op = self.convert_binary_op(&binary.op, &binary.left);
+
+                // BUG #184 FIX: Check for built-in Float32/Float16/Float64 types
+                // and use floating-point operations instead of integer operations.
+                // This handles the case where fp32 maps to Float32 without stdlib.
+                let left_hir_type = self.infer_hir_type(&binary.left);
+                let is_fp_type = matches!(
+                    left_hir_type,
+                    Some(hir::HirType::Float16 | hir::HirType::Float32 | hir::HirType::Float64)
+                );
+
+                let op = if is_fp_type {
+                    // Use floating-point binary operations
+                    match binary.op {
+                        hir::HirBinaryOp::Add => BinaryOp::FAdd,
+                        hir::HirBinaryOp::Sub => BinaryOp::FSub,
+                        hir::HirBinaryOp::Mul => BinaryOp::FMul,
+                        hir::HirBinaryOp::Div => BinaryOp::FDiv,
+                        // Comparisons remain the same (they work for both int and float)
+                        _ => self.convert_binary_op(&binary.op, &binary.left),
+                    }
+                } else {
+                    self.convert_binary_op(&binary.op, &binary.left)
+                };
+
                 Some(Expression::new(
                     ExpressionKind::Binary { op, left, right },
                     ty,

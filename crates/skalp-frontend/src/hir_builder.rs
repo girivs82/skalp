@@ -1348,8 +1348,9 @@ impl HirBuilderContext {
                     // Find the expression (after the colon)
                     if let Some(name) = name {
                         if let Some(expr_node) = arg_node.children().next() {
+                            // BUG #184 FIX: Use extract_hir_type for proper type resolution
                             let expr = if expr_node.kind() == SyntaxKind::TypeAnnotation {
-                                let ty = self.build_hir_type(&expr_node);
+                                let ty = self.extract_hir_type(&expr_node);
                                 Some(HirExpression::Cast(HirCastExpr {
                                     expr: Box::new(HirExpression::Literal(HirLiteral::Integer(0))),
                                     target_type: ty,
@@ -1373,9 +1374,10 @@ impl HirBuilderContext {
                 else if arg_node.kind() == SyntaxKind::Arg {
                     // Find the expression or type inside the Arg node
                     if let Some(expr_node) = arg_node.children().next() {
+                        // BUG #184 FIX: Use extract_hir_type for proper type resolution
                         let expr = if expr_node.kind() == SyntaxKind::TypeAnnotation {
                             // For type arguments, build the type and wrap in a Cast expression
-                            let ty = self.build_hir_type(&expr_node);
+                            let ty = self.extract_hir_type(&expr_node);
                             Some(HirExpression::Cast(HirCastExpr {
                                 expr: Box::new(HirExpression::Literal(HirLiteral::Integer(0))),
                                 target_type: ty,
@@ -4026,11 +4028,12 @@ impl HirBuilderContext {
                             let source_expr_node = &expr_children[pos - 1];
 
                             // Build the source expression and extract target type
+                            // BUG #184 FIX: Use extract_hir_type for proper type resolution
                             self.build_expression(source_expr_node)
                                 .and_then(|source_expr| {
                                     vn.children()
                                         .find(|n| n.kind() == SyntaxKind::TypeAnnotation)
-                                        .map(|n| self.build_hir_type(&n))
+                                        .map(|n| self.extract_hir_type(&n))
                                         .map(|target_type| {
                                             HirExpression::Cast(HirCastExpr {
                                                 expr: Box::new(source_expr),
@@ -6997,10 +7000,11 @@ impl HirBuilderContext {
                         } else if let Some(prev_expr) = result_expr.take() {
                             // CastExpr has no expression child - combine with previous result_expr
                             // Extract just the TypeAnnotation from the CastExpr
+                            // BUG #184 FIX: Use extract_hir_type for proper type resolution
                             if let Some(target_type) = child
                                 .children()
                                 .find(|n| n.kind() == SyntaxKind::TypeAnnotation)
-                                .map(|type_node| self.build_hir_type(&type_node))
+                                .map(|type_node| self.extract_hir_type(&type_node))
                             {
                                 result_expr = Some(HirExpression::Cast(HirCastExpr {
                                     expr: Box::new(prev_expr),
@@ -7148,10 +7152,13 @@ impl HirBuilderContext {
         }?;
 
         // Find the target type from TypeAnnotation
+        // BUG #184 FIX: Use extract_hir_type instead of build_hir_type
+        // build_hir_type doesn't handle IdentType/CustomType (e.g., fp32)
+        // which causes types like fp32 to fall through to default Bit(8)
         let target_type = node
             .children()
             .find(|n| n.kind() == SyntaxKind::TypeAnnotation)
-            .map(|type_node| self.build_hir_type(&type_node))?;
+            .map(|type_node| self.extract_hir_type(&type_node))?;
 
         Some(HirExpression::Cast(HirCastExpr {
             expr: Box::new(expr),
@@ -7171,10 +7178,11 @@ impl HirBuilderContext {
         let expr = self.build_expression(expr_node)?;
 
         // Find the target type from the TypeAnnotation in cast_node
+        // BUG #184 FIX: Use extract_hir_type for proper type resolution
         let target_type = cast_node
             .children()
             .find(|n| n.kind() == SyntaxKind::TypeAnnotation)
-            .map(|type_node| self.build_hir_type(&type_node))?;
+            .map(|type_node| self.extract_hir_type(&type_node))?;
 
         Some(HirExpression::Cast(HirCastExpr {
             expr: Box::new(expr),
@@ -11199,11 +11207,12 @@ impl HirBuilderContext {
 
         // Check for associated data types (tuple variant syntax)
         // Look for TypeAnnotation nodes between LParen and RParen
+        // BUG #184 FIX: Use extract_hir_type for proper type resolution
         let associated_data = if node.children().any(|n| n.kind() == SyntaxKind::LParen) {
             let types: Vec<HirType> = node
                 .children()
                 .filter(|n| n.kind() == SyntaxKind::TypeAnnotation)
-                .map(|type_node| self.build_hir_type(&type_node))
+                .map(|type_node| self.extract_hir_type(&type_node))
                 .collect();
 
             if types.is_empty() {
