@@ -975,6 +975,28 @@ impl<'hir> MonomorphizationEngine<'hir> {
                 )
             }
 
+            // Constant reference - look up in current_constants and return the value
+            // BUG #173 FIX: Constants like M = ConstantId(2) need to be resolved to their
+            // specialized values (e.g., Literal(23)) during expression substitution.
+            // Without this, range expressions like a[W-2:M] become a[30:ConstantId(2)]
+            // instead of a[30:23].
+            HirExpression::Constant(id) => {
+                // Look up the constant in current_constants (which have been specialized)
+                if let Some(constant) = self.current_constants.iter().find(|c| c.id == *id) {
+                    // Return the specialized value (should be a literal for numeric constants)
+                    constant.value.clone()
+                } else {
+                    // Constant not found in current_constants, try to evaluate via evaluator
+                    let mut eval = self.create_evaluator_with_constants();
+                    eval.bind_all(const_args.clone());
+                    if let Ok(result) = eval.eval(expr) {
+                        self.const_value_to_expr(&result)
+                    } else {
+                        expr.clone()
+                    }
+                }
+            }
+
             // Other expressions pass through
             _ => expr.clone(),
         }
