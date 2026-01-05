@@ -217,6 +217,13 @@ pub struct HirToMir<'hir> {
     /// This is set during inline_function_call_with_mir_args so that Variable references
     /// to parameters can be resolved via pending_mir_param_subs
     pending_param_var_to_name: HashMap<hir::VariableId, String>,
+
+    /// BUG #167 FIX: Maps placeholder signal VariableIds to entity output SignalIds
+    /// During trait method inlining, when `let adder = FpAdd{result: result}` is processed
+    /// and `result` is a placeholder signal connected to entity output port `result`,
+    /// this maps VariableId(result) -> SignalId of the created `adder_result` wire.
+    /// Used to correctly wire up return expressions that reference these placeholder signals.
+    placeholder_signal_to_entity_output: HashMap<hir::VariableId, SignalId>,
 }
 
 /// Context for converting HIR expressions within a synthesized module
@@ -318,6 +325,7 @@ impl<'hir> HirToMir<'hir> {
             next_generate_block_id: 0,
             pending_mir_param_subs: HashMap::new(),
             pending_param_var_to_name: HashMap::new(),
+            placeholder_signal_to_entity_output: HashMap::new(),
         }
     }
 
@@ -327,6 +335,10 @@ impl<'hir> HirToMir<'hir> {
         let transform_start = Instant::now();
 
         self.hir = Some(hir);
+        println!(
+            "[HIR_TO_MIR] transform: HIR has {} trait_implementations",
+            hir.trait_implementations.len()
+        );
 
         // Register all user-defined const functions in the evaluator
         self.const_evaluator.register_functions(&hir.functions);
@@ -955,6 +967,11 @@ impl<'hir> HirToMir<'hir> {
                     }
                     for (idx, hir_assign) in impl_block.assignments.iter().enumerate() {
                         let assignment_start = Instant::now();
+                        println!(
+                            "🟢🟢🟢 FOR_LOOP_ENTRY: Processing assignment {}/{} 🟢🟢🟢",
+                            idx + 1,
+                            impl_block.assignments.len()
+                        );
                         eprintln!(
                             "⏱️  [PERF]       Starting assignment {}/{}: LHS={:?}, RHS={:?}",
                             idx + 1,
@@ -962,11 +979,17 @@ impl<'hir> HirToMir<'hir> {
                             std::mem::discriminant(&hir_assign.lhs),
                             std::mem::discriminant(&hir_assign.rhs)
                         );
+                        eprintln!(
+                            "[TRAIT_DEBUG_ENTRY] Entering convert_continuous_assignment_expanded for assignment {}", idx
+                        );
                         // Clear any pending statements from previous assignments
                         self.pending_statements.clear();
 
                         // Convert the assignment (may generate pending statements from block expressions)
                         let assigns = self.convert_continuous_assignment_expanded(hir_assign);
+                        eprintln!(
+                            "[TRAIT_DEBUG_EXIT] convert_continuous_assignment_expanded returned {} assigns", assigns.len()
+                        );
                         eprintln!(
                             "⏱️  [PERF]       Finished assignment {}/{} in {:?}",
                             idx + 1,
@@ -1532,30 +1555,65 @@ impl<'hir> HirToMir<'hir> {
                     debug_println!("[MIR_LET_TRACE] *** Processing _tuple_tmp_66 - will trace through entire function ***");
                 }
 
+                // Check if this is a placeholder signal - these are output wires that receive values from entity outputs
+                // They still need to be registered as variables, but should NOT generate an assignment
+                let is_placeholder_signal = matches!(
+                    &let_stmt.value,
+                    hir::HirExpression::Literal(hir::HirLiteral::Integer(0))
+                );
+                if is_placeholder_signal {
+                    eprintln!(
+                        "[PLACEHOLDER_SIGNAL] Signal '{}' is placeholder, will register but skip assignment",
+                        let_stmt.name
+                    );
+                }
+
                 // BUG FIX #13-16, #21-23: Detect entity instantiation via struct literal syntax
                 // Pattern: let inner = Inner { data };
                 // If the RHS is a StructLiteral and the type_name matches an entity, create a module instance
                 if let hir::HirExpression::StructLiteral(struct_lit) = &let_stmt.value {
+                    println!(
+                        "[ENTITY_DETECT] StructLiteral type_name='{}', checking against entities",
+                        struct_lit.type_name
+                    );
                     // Check if this type_name matches an entity
                     let hir = self.hir.as_ref();
                     if let Some(hir) = hir {
+                        println!(
+                            "[ENTITY_DETECT] HIR has {} entities: {:?}",
+                            hir.entities.len(),
+                            hir.entities.iter().map(|e| &e.name).collect::<Vec<_>>()
+                        );
                         if let Some(entity) =
                             hir.entities.iter().find(|e| e.name == struct_lit.type_name)
                         {
-                            eprintln!(
+                            println!(
                                 "[HIERARCHICAL] Detected entity instantiation: let {} = {} {{ ... }}",
                                 let_stmt.name, struct_lit.type_name
                             );
 
                             // Get the module ID for this entity
+                            println!(
+                                "[HIERARCHICAL] Looking up entity.id={:?} in entity_map (size={})",
+                                entity.id,
+                                self.entity_map.len()
+                            );
                             if let Some(&module_id) = self.entity_map.get(&entity.id) {
+                                println!(
+                                    "[HIERARCHICAL] Found module_id={:?} for entity {:?}",
+                                    module_id, entity.id
+                                );
                                 // Create module instance
                                 let instance_name = let_stmt.name.clone();
 
                                 // Convert connections from the struct literal fields
                                 let mut connections = std::collections::HashMap::new();
+                                println!(
+                                    "[HIER_CONN] Converting {} fields for entity instantiation",
+                                    struct_lit.fields.len()
+                                );
                                 for field_init in &struct_lit.fields {
-                                    eprintln!(
+                                    println!(
                                         "[HIER_CONN] Converting field '{}' <- HIR expr: {:?}",
                                         field_init.name,
                                         std::mem::discriminant(&field_init.value)
@@ -1563,11 +1621,16 @@ impl<'hir> HirToMir<'hir> {
                                     if let Some(expr) =
                                         self.convert_expression(&field_init.value, 0)
                                     {
-                                        eprintln!(
+                                        println!(
                                             "[HIER_CONN] Field '{}' <- MIR expr: {:?}",
                                             field_init.name, expr.kind
                                         );
                                         connections.insert(field_init.name.clone(), expr);
+                                    } else {
+                                        println!(
+                                            "[HIER_CONN] FAILED: convert_expression returned None for field '{}'",
+                                            field_init.name
+                                        );
                                     }
                                 }
 
@@ -1596,6 +1659,40 @@ impl<'hir> HirToMir<'hir> {
                                                 LValue::Signal(signal_id),
                                             )),
                                         );
+
+                                        // BUG #167 FIX: Track placeholder signal -> entity output mapping
+                                        // If this output port is connected to a Variable in the struct literal,
+                                        // map that variable ID to this output wire for return expression wiring
+                                        if let Some(field_init) =
+                                            struct_lit.fields.iter().find(|f| f.name == port.name)
+                                        {
+                                            // Extract the Variable ID from the field value
+                                            // Handle both plain Variable and Cast(Variable)
+                                            let maybe_var_id = match &field_init.value {
+                                                hir::HirExpression::Variable(var_id) => {
+                                                    Some(*var_id)
+                                                }
+                                                hir::HirExpression::Cast(cast_expr) => {
+                                                    if let hir::HirExpression::Variable(var_id) =
+                                                        &*cast_expr.expr
+                                                    {
+                                                        Some(*var_id)
+                                                    } else {
+                                                        None
+                                                    }
+                                                }
+                                                _ => None,
+                                            };
+
+                                            if let Some(var_id) = maybe_var_id {
+                                                eprintln!(
+                                                    "[BUG #167] Mapping placeholder variable {:?} -> entity output signal '{}'",
+                                                    var_id, signal_name
+                                                );
+                                                self.placeholder_signal_to_entity_output
+                                                    .insert(var_id, signal_id);
+                                            }
+                                        }
 
                                         // The signal will be created by the module
                                         // We need to return a statement that adds both the signal and the instance
@@ -1655,6 +1752,11 @@ impl<'hir> HirToMir<'hir> {
 
                                 // Return None - the instance will be added during drain
                                 return None;
+                            } else {
+                                println!(
+                                    "[HIERARCHICAL] FAILED: entity_map doesn't contain entity.id={:?}",
+                                    entity.id
+                                );
                             }
                         }
                     }
@@ -2115,6 +2217,16 @@ impl<'hir> HirToMir<'hir> {
                         .unwrap_or(&"unknown".to_string())
                 );
                 self.dynamic_variable_rhs.insert(var_id, final_rhs.clone());
+
+                // Skip creating assignment for placeholder signals
+                // These are output wires that receive their value from entity outputs, not from initialization
+                if is_placeholder_signal {
+                    eprintln!(
+                        "[PLACEHOLDER_SIGNAL] Skipping assignment creation for '{}', returning None",
+                        let_stmt.name
+                    );
+                    return None;
+                }
 
                 Some(Statement::Assignment(Assignment {
                     lhs,
@@ -3289,13 +3401,19 @@ impl<'hir> HirToMir<'hir> {
         &mut self,
         assign: &hir::HirAssignment,
     ) -> Vec<ContinuousAssign> {
+        println!(
+            "[TRAIT_DEBUG] convert_continuous_assignment_expanded: type={:?}",
+            assign.assignment_type
+        );
         // Only combinational assignments become continuous assigns
         if !matches!(
             assign.assignment_type,
             hir::HirAssignmentType::Combinational
         ) {
+            println!("[TRAIT_DEBUG] Skipping non-combinational assignment");
             return vec![];
         }
+        println!("[TRAIT_DEBUG] Passed combinational check");
 
         // BUG FIX #13-16, #21-23: Detect entity instantiation via struct literal assignment
         // Pattern: variable = EntityName { ... }
@@ -3485,7 +3603,12 @@ impl<'hir> HirToMir<'hir> {
 
         let lhs = self.convert_lvalue(&assign.lhs)?;
 
+        println!(
+            "[TRAIT_DEBUG] About to call convert_expression for RHS: {:?}",
+            std::mem::discriminant(&assign.rhs)
+        );
         let rhs = self.convert_expression(&assign.rhs, 0)?;
+        println!("[TRAIT_DEBUG] convert_expression returned successfully");
 
         Some(ContinuousAssign {
             lhs,
@@ -4374,6 +4497,13 @@ impl<'hir> HirToMir<'hir> {
         expr: &hir::HirExpression,
         depth: usize,
     ) -> Option<Expression> {
+        // TEMP DEBUG: Always log what expressions are being converted
+        if depth == 0 {
+            println!(
+                "[CONVERT_EXPR_DEBUG] depth=0, expr_type={:?}",
+                std::mem::discriminant(expr)
+            );
+        }
         // BUG #187 DEBUG: Trace what convert_expression receives
         if depth == 0 && matches!(expr, hir::HirExpression::TupleLiteral(_)) {
             println!("🟡🟡🟡 [BUG #187] convert_expression at depth 0 with TupleLiteral! stack_len={} 🟡🟡🟡",
@@ -4427,6 +4557,19 @@ impl<'hir> HirToMir<'hir> {
                 }
             }
             hir::HirExpression::Variable(id) => {
+                // BUG #167 FIX: Check if this variable is a placeholder connected to an entity output
+                // If so, return a reference to the entity output wire instead
+                if let Some(&output_signal_id) = self.placeholder_signal_to_entity_output.get(id) {
+                    eprintln!(
+                        "[BUG #167] Variable {:?} is placeholder -> returning entity output signal {:?}",
+                        id, output_signal_id
+                    );
+                    return Some(Expression::new(
+                        ExpressionKind::Ref(LValue::Signal(output_signal_id)),
+                        ty,
+                    ));
+                }
+
                 // CRITICAL FIX #IMPORT_MATCH: Use context-aware lookup for ALL variable resolutions
                 //
                 // ROOT CAUSE: When inlining nested functions (e.g., test_func calls my_fp_add),
@@ -4614,6 +4757,10 @@ impl<'hir> HirToMir<'hir> {
                 ))
             }
             hir::HirExpression::Binary(binary) => {
+                println!(
+                    "[MIR_BINARY_DEBUG] Converting Binary expression: op={:?}, depth={}",
+                    binary.op, depth
+                );
                 if matches!(
                     binary.op,
                     hir::HirBinaryOp::LogicalAnd | hir::HirBinaryOp::LogicalOr
@@ -4633,7 +4780,7 @@ impl<'hir> HirToMir<'hir> {
                 if let Some((type_name, trait_name, method_name)) =
                     self.try_resolve_trait_operator(&binary.op, &binary.left)
                 {
-                    eprintln!(
+                    println!(
                         "[TRAIT_OP] Attempting to inline {}::{} for type '{}' (op: {:?})",
                         trait_name, method_name, type_name, binary.op
                     );
@@ -4646,7 +4793,7 @@ impl<'hir> HirToMir<'hir> {
                         &binary.left,
                         &binary.right,
                     ) {
-                        eprintln!(
+                        println!(
                             "[TRAIT_OP] Successfully inlined {}::{} for type '{}'",
                             trait_name, method_name, type_name
                         );
@@ -4654,7 +4801,7 @@ impl<'hir> HirToMir<'hir> {
                     }
 
                     // If inlining fails, fall back to FunctionCall (for debugging)
-                    eprintln!(
+                    println!(
                         "[TRAIT_OP] Failed to inline {}::{}, falling back to FunctionCall",
                         trait_name, method_name
                     );
@@ -6444,7 +6591,19 @@ impl<'hir> HirToMir<'hir> {
                 // Preserve the cast in MIR so codegen knows the intended type
                 // For FP/bit reinterpretation casts, this is a no-op in hardware
                 // but critical for type tracking
-                let inner_expr = self.convert_expression(&cast_expr.expr, depth + 1)?;
+                println!(
+                    "[CAST_DEBUG] Cast inner expr type: {:?}, target: {:?}",
+                    std::mem::discriminant(&*cast_expr.expr),
+                    cast_expr.target_type
+                );
+                let inner_expr_opt = self.convert_expression(&cast_expr.expr, depth + 1);
+                if inner_expr_opt.is_none() {
+                    println!(
+                        "[CAST_DEBUG] FAILED: convert_expression returned None for Cast inner expr"
+                    );
+                    return None;
+                }
+                let inner_expr = inner_expr_opt.unwrap();
                 let mut target_type = self.convert_type(&cast_expr.target_type);
 
                 // BUG #65/#66 FIX: Detect and correct erroneous Float16 casts from 32-bit values
@@ -9350,16 +9509,28 @@ impl<'hir> HirToMir<'hir> {
                                 );
                                 mutable_var_names.insert(let_stmt.name.clone());
                             } else {
-                                // Add immutable variable to local map for subsequent statements
-                                // Use the actual substituted value (e.g., StructLiteral) instead of a Variable reference
-                                // Example: let ray_dir = vec3{x,y,z}; vec_dot(ray_dir, ...) should inline the vec3 literal
-                                local_var_map.insert(let_stmt.name.clone(), substituted_value);
-                            }
-                            if !let_stmt.mutable {
-                                eprintln!(
-                                    "[DEBUG] Block: added {} (id {:?}) to local_var_map immediately",
-                                    let_stmt.name, let_stmt.id
+                                // Check if this is a placeholder signal (value is Literal(0) or similar)
+                                // Placeholder signals are output wires that receive their value from entity outputs
+                                // They should NOT be substituted in the result expression
+                                let is_placeholder = matches!(
+                                    &substituted_value,
+                                    hir::HirExpression::Literal(hir::HirLiteral::Integer(0))
                                 );
+                                if is_placeholder {
+                                    eprintln!(
+                                        "[DEBUG] Block: '{}' is placeholder signal (value=0), NOT adding to local_var_map",
+                                        let_stmt.name
+                                    );
+                                } else {
+                                    // Add immutable variable to local map for subsequent statements
+                                    // Use the actual substituted value (e.g., StructLiteral) instead of a Variable reference
+                                    // Example: let ray_dir = vec3{x,y,z}; vec_dot(ray_dir, ...) should inline the vec3 literal
+                                    local_var_map.insert(let_stmt.name.clone(), substituted_value);
+                                    eprintln!(
+                                        "[DEBUG] Block: added {} (id {:?}) to local_var_map immediately",
+                                        let_stmt.name, let_stmt.id
+                                    );
+                                }
                             }
                         }
                         // BUG #86: Handle If statements with parameter substitution
@@ -13235,6 +13406,10 @@ impl<'hir> HirToMir<'hir> {
                 let entity_id = self.current_entity_id?;
                 let entity = hir.entities.iter().find(|e| e.id == entity_id)?;
                 let port = entity.ports.iter().find(|p| p.id == *port_id)?;
+                println!(
+                    "[TYPE_DEBUG] Port '{}' has type: {:?}",
+                    port.name, port.port_type
+                );
                 Some(port.port_type.clone())
             }
             hir::HirExpression::Variable(var_id) => {
@@ -13491,29 +13666,53 @@ impl<'hir> HirToMir<'hir> {
         left_expr: &hir::HirExpression,
         right_expr: &hir::HirExpression,
     ) -> Option<Expression> {
-        eprintln!(
+        println!(
             "[TRAIT_INLINE] Inlining {}::{} for type '{}'",
             trait_name, method_name, type_name
         );
 
         // Get the method definition (parameters) from the trait
-        let method_def = self.find_trait_method_definition(trait_name, method_name)?;
+        let method_def = self.find_trait_method_definition(trait_name, method_name);
+        if method_def.is_none() {
+            println!(
+                "[TRAIT_INLINE] FAILED: Could not find method definition for {}::{}",
+                trait_name, method_name
+            );
+            return None;
+        }
+        let method_def = method_def.unwrap();
         let params = method_def.parameters.clone();
 
         // Get the method implementation (body) from the impl
-        let trait_impl = self.find_trait_impl(type_name, trait_name)?;
+        let trait_impl = self.find_trait_impl(type_name, trait_name);
+        if trait_impl.is_none() {
+            println!(
+                "[TRAIT_INLINE] FAILED: Could not find trait impl for {} on {}",
+                trait_name, type_name
+            );
+            return None;
+        }
+        let trait_impl = trait_impl.unwrap();
         let method_impl = trait_impl
             .method_implementations
             .iter()
-            .find(|m| m.name == method_name)?;
+            .find(|m| m.name == method_name);
+        if method_impl.is_none() {
+            println!(
+                "[TRAIT_INLINE] FAILED: Could not find method impl '{}' in trait impl",
+                method_name
+            );
+            return None;
+        }
+        let method_impl = method_impl.unwrap();
         let body = method_impl.body.clone();
 
         if body.is_empty() {
-            eprintln!("[TRAIT_INLINE] Method body is empty, cannot inline");
+            println!("[TRAIT_INLINE] FAILED: Method body is empty, cannot inline");
             return None;
         }
 
-        eprintln!(
+        println!(
             "[TRAIT_INLINE] Found {} parameters and {} body statements",
             params.len(),
             body.len()
@@ -13534,25 +13733,39 @@ impl<'hir> HirToMir<'hir> {
         self.collect_let_bindings(&body, &mut var_id_to_name);
 
         // Convert body to expression (like inline_function_call does)
-        let body_expr = self.convert_body_to_expression(&body)?;
+        let body_expr = self.convert_body_to_expression(&body);
+        if body_expr.is_none() {
+            println!("[TRAIT_INLINE] FAILED: convert_body_to_expression returned None");
+            return None;
+        }
+        let body_expr = body_expr.unwrap();
 
-        eprintln!(
+        println!(
             "[TRAIT_INLINE] Body expression type: {:?}",
             std::mem::discriminant(&body_expr)
         );
 
         // Substitute parameters in the body expression
         let substituted =
-            self.substitute_expression_with_var_map(&body_expr, &param_map, &var_id_to_name)?;
+            self.substitute_expression_with_var_map(&body_expr, &param_map, &var_id_to_name);
+        if substituted.is_none() {
+            println!("[TRAIT_INLINE] FAILED: substitute_expression_with_var_map returned None");
+            return None;
+        }
+        let substituted = substituted.unwrap();
 
-        eprintln!(
+        println!(
             "[TRAIT_INLINE] Substituted expression type: {:?}",
             std::mem::discriminant(&substituted)
         );
 
         // Convert the substituted expression to MIR
         // The Block expression handler will process let statements and entity instantiations
-        self.convert_expression(&substituted, 0)
+        let result = self.convert_expression(&substituted, 0);
+        if result.is_none() {
+            println!("[TRAIT_INLINE] FAILED: convert_expression returned None");
+        }
+        result
     }
 
     /// Find a trait implementation for a given type and trait name
@@ -13569,8 +13782,15 @@ impl<'hir> HirToMir<'hir> {
     ) -> Option<&'a hir::HirTraitImplementation> {
         let hir = self.hir.as_ref()?;
 
+        println!(
+            "[FIND_TRAIT_IMPL] Looking for trait '{}' on type '{}', HIR has {} trait_impls",
+            trait_name,
+            type_name,
+            hir.trait_implementations.len()
+        );
+
         // Look through all trait implementations for a match
-        hir.trait_implementations.iter().find(|impl_| {
+        let result = hir.trait_implementations.iter().find(|impl_| {
             // Check if the trait matches
             if impl_.trait_name != trait_name {
                 return false;
@@ -13581,14 +13801,28 @@ impl<'hir> HirToMir<'hir> {
                 hir::TraitImplTarget::Type(ty) => {
                     // Check if the type matches by name
                     if let hir::HirType::Custom(name) = ty {
-                        name == type_name
+                        let matches = name == type_name;
+                        if matches {
+                            println!(
+                                "[FIND_TRAIT_IMPL] FOUND: impl {} for {} matches!",
+                                trait_name, type_name
+                            );
+                        }
+                        matches
                     } else {
                         false
                     }
                 }
                 hir::TraitImplTarget::Entity(_) => false,
             }
-        })
+        });
+        if result.is_none() {
+            println!(
+                "[FIND_TRAIT_IMPL] NOT FOUND: no impl {} for {}",
+                trait_name, type_name
+            );
+        }
+        result
     }
 
     /// Get the trait name for a binary operator
@@ -13668,26 +13902,32 @@ impl<'hir> HirToMir<'hir> {
         left_expr: &hir::HirExpression,
     ) -> Option<(String, &'static str, &'static str)> {
         // Get the type of the left operand
-        let left_type = self.infer_hir_type(left_expr)?;
+        let left_type = self.infer_hir_type(left_expr);
+        println!(
+            "[TRAIT_OP_DEBUG] try_resolve_trait_operator: op={:?}, left_type={:?}",
+            op, left_type
+        );
+        let left_type = left_type?;
 
         // Extract the type name for Custom types (distinct types, user-defined types)
         let type_name = match &left_type {
-            hir::HirType::Custom(name) => name.clone(),
+            hir::HirType::Custom(name) => {
+                println!("[TRAIT_OP_DEBUG] Detected Custom type: {}", name);
+                name.clone()
+            }
             // For now, only support trait resolution for Custom types
             // Built-in types use hardcoded operators
-            _ => return None,
+            _ => {
+                println!(
+                    "[TRAIT_OP_DEBUG] Not a Custom type, skipping trait resolution for {:?}",
+                    left_type
+                );
+                return None;
+            }
         };
 
-        // Skip known float types - they use the proven hardcoded FP operator path
-        // which handles IEEE 754 synthesis correctly. Trait resolution for these
-        // types is for documentation/future use; actual synthesis uses BinaryOp::FAdd etc.
-        if self.is_distinct_float_type(&type_name) {
-            eprintln!(
-                "[TRAIT_OP] Skipping trait resolution for float type '{}' - using hardcoded FP path",
-                type_name
-            );
-            return None;
-        }
+        // Float types now use trait-based resolution exclusively
+        // The distinct fp16/fp32/fp64/bf16 types have trait implementations in stdlib
 
         // Get the trait and method names for this operator
         let trait_name = Self::operator_to_trait_name(op);
@@ -13700,7 +13940,7 @@ impl<'hir> HirToMir<'hir> {
 
         // Check if there's a trait implementation for this type
         if self.find_trait_impl(&type_name, trait_name).is_some() {
-            eprintln!(
+            println!(
                 "[TRAIT_OP] Resolved {:?} on {} to {}::{}",
                 op, type_name, trait_name, method_name
             );
@@ -13731,101 +13971,28 @@ impl<'hir> HirToMir<'hir> {
         )
     }
 
-    fn convert_binary_op(&self, op: &hir::HirBinaryOp, left_expr: &hir::HirExpression) -> BinaryOp {
-        // Infer type from left operand to determine if we need FP operators
-        let is_fp = if let Some(ty) = self.infer_hir_type(left_expr) {
-            eprintln!(
-                "[DEBUG] convert_binary_op: op={:?}, left_expr type={:?}, is_fp={}",
-                op,
-                ty,
-                self.is_float_type(&ty)
-            );
-            self.is_float_type(&ty)
-        } else {
-            eprintln!(
-                "[DEBUG] convert_binary_op: op={:?}, left_expr type=None, is_fp=false",
-                op
-            );
-            false
-        };
-
+    fn convert_binary_op(
+        &self,
+        op: &hir::HirBinaryOp,
+        _left_expr: &hir::HirExpression,
+    ) -> BinaryOp {
+        // FP operations are handled via trait-based resolution before reaching here.
+        // This function only handles integer/bitwise operations.
         match op {
-            hir::HirBinaryOp::Add => {
-                if is_fp {
-                    debug_println!("[DEBUG] convert_binary_op: Returning BinaryOp::FAdd");
-                    BinaryOp::FAdd
-                } else {
-                    debug_println!("[DEBUG] convert_binary_op: Returning BinaryOp::Add");
-                    BinaryOp::Add
-                }
-            }
-            hir::HirBinaryOp::Sub => {
-                if is_fp {
-                    BinaryOp::FSub
-                } else {
-                    BinaryOp::Sub
-                }
-            }
-            hir::HirBinaryOp::Mul => {
-                if is_fp {
-                    BinaryOp::FMul
-                } else {
-                    BinaryOp::Mul
-                }
-            }
-            hir::HirBinaryOp::Div => {
-                if is_fp {
-                    BinaryOp::FDiv
-                } else {
-                    BinaryOp::Div
-                }
-            }
-            hir::HirBinaryOp::Mod => BinaryOp::Mod, // No FP modulo
+            hir::HirBinaryOp::Add => BinaryOp::Add,
+            hir::HirBinaryOp::Sub => BinaryOp::Sub,
+            hir::HirBinaryOp::Mul => BinaryOp::Mul,
+            hir::HirBinaryOp::Div => BinaryOp::Div,
+            hir::HirBinaryOp::Mod => BinaryOp::Mod,
             hir::HirBinaryOp::And => BinaryOp::BitwiseAnd,
             hir::HirBinaryOp::Or => BinaryOp::BitwiseOr,
             hir::HirBinaryOp::Xor => BinaryOp::BitwiseXor,
-            hir::HirBinaryOp::Equal => {
-                if is_fp {
-                    BinaryOp::FEqual
-                } else {
-                    BinaryOp::Equal
-                }
-            }
-            hir::HirBinaryOp::NotEqual => {
-                if is_fp {
-                    BinaryOp::FNotEqual
-                } else {
-                    BinaryOp::NotEqual
-                }
-            }
-            hir::HirBinaryOp::Less => {
-                if is_fp {
-                    BinaryOp::FLess
-                } else {
-                    BinaryOp::Less
-                }
-            }
-            hir::HirBinaryOp::LessEqual => {
-                if is_fp {
-                    BinaryOp::FLessEqual
-                } else {
-                    BinaryOp::LessEqual
-                }
-            }
-            hir::HirBinaryOp::Greater => {
-                if is_fp {
-                    BinaryOp::FGreater
-                } else {
-                    BinaryOp::Greater
-                }
-            }
-            hir::HirBinaryOp::GreaterEqual => {
-                if is_fp {
-                    BinaryOp::FGreaterEqual
-                } else {
-                    BinaryOp::GreaterEqual
-                }
-            }
+            hir::HirBinaryOp::Equal => BinaryOp::Equal,
+            hir::HirBinaryOp::NotEqual => BinaryOp::NotEqual,
+            hir::HirBinaryOp::Less => BinaryOp::Less,
+            hir::HirBinaryOp::LessEqual => BinaryOp::LessEqual,
+            hir::HirBinaryOp::Greater => BinaryOp::Greater,
+            hir::HirBinaryOp::GreaterEqual => BinaryOp::GreaterEqual,
             hir::HirBinaryOp::LogicalAnd => BinaryOp::LogicalAnd,
             hir::HirBinaryOp::LogicalOr => BinaryOp::LogicalOr,
             hir::HirBinaryOp::LeftShift => BinaryOp::LeftShift,

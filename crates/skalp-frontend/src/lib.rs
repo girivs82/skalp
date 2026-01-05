@@ -214,6 +214,17 @@ fn rebuild_instances_with_imports(hir: &Hir, file_path: &Path) -> Result<Hir> {
         }
     }
 
+    // Pre-register distinct types so they're available during type resolution
+    // This is critical for trait-based FP operators: `use skalp::numeric::formats::fp32`
+    eprintln!(
+        "🔍 DEBUG: Pre-registering {} distinct types",
+        hir.distinct_types.len()
+    );
+    for distinct in &hir.distinct_types {
+        eprintln!("  Distinct type: {}", distinct.name);
+        builder.preregister_distinct_type(distinct);
+    }
+
     // Rebuild implementations (this will now find imported entities)
     let rebuilt_hir = builder.build(&syntax_tree).map_err(|errors| {
         anyhow::anyhow!(
@@ -227,7 +238,20 @@ fn rebuild_instances_with_imports(hir: &Hir, file_path: &Path) -> Result<Hir> {
 
     // Keep all entities from the merged HIR (including imports)
     // But use implementations from the rebuilt HIR (which now have correct instances)
+    // ALSO replace main file entities with rebuilt ones (they have correct port types from pre-registered distinct types)
     let mut final_hir = hir.clone();
+
+    // Replace main file entities with rebuilt entities (they have correct port types)
+    // The rebuilt HIR has types resolved with pre-registered distinct types (e.g., Custom("fp32") instead of Float32)
+    let rebuilt_entity_names: std::collections::HashSet<_> = rebuilt_hir
+        .entities
+        .iter()
+        .map(|e| e.name.clone())
+        .collect();
+    final_hir
+        .entities
+        .retain(|e| !rebuilt_entity_names.contains(&e.name));
+    final_hir.entities.extend(rebuilt_hir.entities.clone());
 
     // CRITICAL FIX (Bug #22 & #34): Don't overwrite ALL implementations!
     // The merged HIR includes implementations from imported modules (like AsyncFifo).
@@ -306,6 +330,10 @@ fn rebuild_instances_with_imports(hir: &Hir, file_path: &Path) -> Result<Hir> {
 fn merge_imports(hir: &Hir, dependencies: &[PathBuf], resolver: &ModuleResolver) -> Result<Hir> {
     use hir::HirImportPath;
 
+    eprintln!(
+        "🔀 [MERGE_IMPORTS] Starting merge, {} imports to process",
+        hir.imports.len()
+    );
     let mut merged_hir = hir.clone();
 
     // For each import in the current HIR
@@ -360,7 +388,50 @@ fn merge_imports(hir: &Hir, dependencies: &[PathBuf], resolver: &ModuleResolver)
         }
     }
 
+    eprintln!(
+        "🔀 [MERGE_IMPORTS] After merge: {} distinct_types, {} trait_implementations",
+        merged_hir.distinct_types.len(),
+        merged_hir.trait_implementations.len()
+    );
     Ok(merged_hir)
+}
+
+/// Merge trait implementations from source into target for types that already exist in target
+/// This is called after importing any symbol to ensure trait impls are available
+fn merge_trait_implementations_for_existing_types(target: &mut Hir, source: &Hir) {
+    // Get all type names we have in target (distinct types and user-defined types)
+    let target_types: std::collections::HashSet<String> = target
+        .distinct_types
+        .iter()
+        .map(|d| d.name.clone())
+        .chain(target.user_defined_types.iter().map(|t| t.name.clone()))
+        .collect();
+
+    eprintln!(
+        "[MERGE_TRAIT_IMPLS_DEBUG] source has {} trait_impls, target has {} types: {:?}",
+        source.trait_implementations.len(),
+        target_types.len(),
+        target_types
+    );
+
+    // Also include types from type aliases
+    // (Some trait impls might target type aliases)
+
+    // Merge trait implementations that target types we have
+    for trait_impl in &source.trait_implementations {
+        if let hir::TraitImplTarget::Type(hir::HirType::Custom(type_name)) = &trait_impl.target {
+            if target_types.contains(type_name) {
+                // Check if we already have this trait implementation
+                let already_exists = target.trait_implementations.iter().any(|ti| {
+                    ti.trait_name == trait_impl.trait_name
+                        && matches!(&ti.target, hir::TraitImplTarget::Type(hir::HirType::Custom(tn)) if tn == type_name)
+                });
+                if !already_exists {
+                    target.trait_implementations.push(trait_impl.clone());
+                }
+            }
+        }
+    }
 }
 
 /// Remap port IDs in an implementation (BUG #33 FIX)
@@ -561,6 +632,11 @@ fn remap_statement_ports(
 
 /// Merge a specific symbol from a module into the current HIR
 fn merge_symbol(target: &mut Hir, source: &Hir, symbol_name: &str) -> Result<()> {
+    // FIRST: Merge trait implementations for types we already have
+    // This ensures that when we import an entity from a module that has trait impls
+    // for types we already have (like fp32), those impls are available
+    merge_trait_implementations_for_existing_types(target, source);
+
     // Try to find the symbol in entities
     if let Some(entity) = source.entities.iter().find(|e| e.name == symbol_name) {
         let old_entity_id = entity.id;
@@ -640,6 +716,31 @@ fn merge_symbol(target: &mut Hir, source: &Hir, symbol_name: &str) -> Result<()>
         .find(|t| t.name == symbol_name)
     {
         target.user_defined_types.push(user_type.clone());
+        return Ok(());
+    }
+
+    // Try to find the symbol in distinct types (e.g., fp32)
+    if let Some(distinct) = source.distinct_types.iter().find(|d| d.name == symbol_name) {
+        target.distinct_types.push(distinct.clone());
+
+        // Also merge all trait implementations that target this type
+        // This is critical for trait-based operator resolution (e.g., impl Add for fp32)
+        for trait_impl in &source.trait_implementations {
+            if let hir::TraitImplTarget::Type(hir::HirType::Custom(type_name)) = &trait_impl.target
+            {
+                if type_name == symbol_name {
+                    // Check if we already have this trait implementation
+                    let already_exists = target.trait_implementations.iter().any(|ti| {
+                        ti.trait_name == trait_impl.trait_name
+                            && matches!(&ti.target, hir::TraitImplTarget::Type(hir::HirType::Custom(tn)) if tn == symbol_name)
+                    });
+                    if !already_exists {
+                        target.trait_implementations.push(trait_impl.clone());
+                    }
+                }
+            }
+        }
+
         return Ok(());
     }
 
@@ -917,6 +1018,19 @@ fn merge_all_symbols(target: &mut Hir, source: &Hir) -> Result<()> {
     for trait_def in &source.trait_definitions {
         // Traits don't have visibility in current HIR, so import all
         target.trait_definitions.push(trait_def.clone());
+    }
+
+    // Merge all trait implementations (needed for trait-based operator resolution)
+    for trait_impl in &source.trait_implementations {
+        // Trait implementations don't have visibility, import all
+        target.trait_implementations.push(trait_impl.clone());
+    }
+
+    // Merge all public distinct types (needed for proper type resolution)
+    for distinct in &source.distinct_types {
+        if distinct.visibility == HirVisibility::Public {
+            target.distinct_types.push(distinct.clone());
+        }
     }
 
     // Merge all public functions

@@ -410,6 +410,20 @@ impl HirBuilderContext {
         }
     }
 
+    /// Pre-register distinct types from merged HIR (for handling imports)
+    /// This ensures imported distinct types like `fp32` resolve to `HirType::Custom("fp32")`
+    /// instead of falling back to hardcoded `HirType::Float32`
+    pub fn preregister_distinct_type(&mut self, distinct: &crate::hir::HirDistinctType) {
+        eprintln!(
+            "📦 Pre-registering distinct type '{}' -> Custom(\"{}\")",
+            distinct.name, distinct.name
+        );
+        self.symbols.user_types.insert(
+            distinct.name.clone(),
+            HirType::Custom(distinct.name.clone()),
+        );
+    }
+
     /// Build HIR from syntax tree
     pub fn build(&mut self, root: &SyntaxNode) -> Result<Hir, Vec<HirError>> {
         // Type checking is temporarily disabled during HIR building to avoid conflicts
@@ -603,6 +617,16 @@ impl HirBuilderContext {
                 }
                 SyntaxKind::DistinctTypeDecl => {
                     if let Some(distinct_type) = self.build_distinct_type(&child) {
+                        // Register distinct type in user_types for type lookup
+                        // Store as HirType::Custom so trait resolution can work
+                        println!(
+                            "[DISTINCT_DEBUG] Registering distinct type '{}' in user_types",
+                            distinct_type.name
+                        );
+                        self.symbols.user_types.insert(
+                            distinct_type.name.clone(),
+                            HirType::Custom(distinct_type.name.clone()),
+                        );
                         hir.distinct_types.push(distinct_type);
                     }
                 }
@@ -1532,6 +1556,47 @@ impl HirBuilderContext {
         })
     }
 
+    /// Build signal declaration as a let statement (for use in trait method inlining)
+    ///
+    /// Signal declarations inside trait method bodies need to be converted to let statements
+    /// for inlining purposes. This allows the signal to be captured in the method body and
+    /// properly substituted during inlining.
+    ///
+    /// E.g., `signal result: fp32;` becomes `let result: fp32 = __uninit__();`
+    fn build_signal_as_let(&mut self, node: &SyntaxNode) -> Option<HirLetStatement> {
+        let name = self.extract_name(node)?;
+
+        // Get type - look for TypeAnnotation first
+        let signal_type =
+            if let Some(type_node) = node.first_child_of_kind(SyntaxKind::TypeAnnotation) {
+                self.extract_hir_type(&type_node)
+            } else {
+                self.extract_hir_type(node)
+            };
+
+        // Create a variable ID for the let statement
+        let id = self.next_variable_id();
+
+        // Register in symbol table so the name can be resolved
+        self.symbols.variables.insert(name.clone(), id);
+        self.symbols.add_to_scope(&name, SymbolId::Variable(id));
+
+        // For signals used as outputs in entity instantiations, we need a placeholder value.
+        // Use a literal zero since signals are essentially wire declarations that receive
+        // their values from entity outputs. The actual value will come from the entity connection.
+        // This creates: `let result: fp32 = 0;` which becomes a wire in Verilog.
+        // The zero is just a placeholder - the real value comes from entity instantiation.
+        let value = HirExpression::Literal(HirLiteral::Integer(0));
+
+        Some(HirLetStatement {
+            id,
+            name,
+            mutable: false, // Signals are not mutable in the traditional sense
+            var_type: signal_type,
+            value,
+        })
+    }
+
     /// Extract power domain from signal's lifetime parameter
     /// Syntax: signal name<'domain>: type
     fn extract_signal_power_domain(&self, node: &SyntaxNode) -> Option<String> {
@@ -2055,6 +2120,18 @@ impl HirBuilderContext {
                     // Handle both simple let and tuple destructuring
                     let let_stmts = self.build_let_statements_from_node(&child);
                     statements.extend(let_stmts);
+                }
+                SyntaxKind::SignalDecl => {
+                    // Handle signal declarations inside trait method bodies
+                    // Convert them to let statements for inlining purposes
+                    // E.g., `signal result: fp32;` becomes `let result: fp32;`
+                    if let Some(let_stmt) = self.build_signal_as_let(&child) {
+                        println!(
+                            "[HIR_COLLECT] SignalDecl '{}' converted to Let statement",
+                            let_stmt.name
+                        );
+                        statements.push(HirStatement::Let(let_stmt));
+                    }
                 }
                 SyntaxKind::BlockStmt => {
                     let block_stmts = self.build_statements(&child);
@@ -10377,19 +10454,22 @@ impl HirBuilderContext {
                 SyntaxKind::IdentType | SyntaxKind::CustomType => {
                     if let Some(name) = child.first_token_of_kind(SyntaxKind::Ident) {
                         let type_name = name.text().to_string();
-                        // NOTE: fp16, fp32, fp64 are no longer reserved keywords.
-                        // Map them to built-in Float types for backward compatibility.
-                        // Eventually these will be resolved as distinct types from stdlib.
-                        match type_name.as_str() {
-                            "fp16" => return HirType::Float16,
-                            "fp32" => return HirType::Float32,
-                            "fp64" => return HirType::Float64,
-                            _ => {}
-                        }
-                        // Check if this is a user-defined type (struct, enum, union)
+                        // Check if this is a user-defined type (struct, enum, union, distinct) FIRST
+                        // This allows stdlib-defined distinct types like fp32 to take precedence
+                        println!(
+                            "[TYPE_LOOKUP_DEBUG] Looking up type '{}', user_types has {} entries",
+                            type_name,
+                            self.symbols.user_types.len()
+                        );
                         if let Some(user_type) = self.symbols.user_types.get(&type_name) {
+                            println!(
+                                "[TYPE_LOOKUP_DEBUG] Found '{}' in user_types: {:?}",
+                                type_name, user_type
+                            );
                             return user_type.clone();
                         }
+                        // All named types (including fp16, fp32, fp64) resolve to Custom(name)
+                        // Trait-based operator resolution handles FP operations via stdlib
                         return HirType::Custom(type_name);
                     }
                 }
@@ -11315,6 +11395,7 @@ impl HirBuilderContext {
 
     /// Build trait implementation
     fn build_trait_impl(&mut self, node: &SyntaxNode) -> Option<HirTraitImplementation> {
+        eprintln!("[TRAIT_IMPL_DEBUG] Building trait implementation from node");
         // Extract trait name from first identifier
         let ident_tokens: Vec<_> = node
             .children_with_tokens()
@@ -11327,6 +11408,7 @@ impl HirBuilderContext {
         }
 
         let trait_name = ident_tokens[0].text().to_string();
+        eprintln!("[TRAIT_IMPL_DEBUG] trait_name = {}", trait_name);
 
         // Find the target type (comes after 'for' keyword, now as TypeAnnotation)
         let target = if let Some(type_node) = node.first_child_of_kind(SyntaxKind::TypeAnnotation) {
@@ -11334,6 +11416,7 @@ impl HirBuilderContext {
             // BUG FIX: Use extract_hir_type which handles all type variants (nat, int, bit, etc.)
             // build_hir_type only handles a subset and falls through to Bit(8) as default
             let target_type = self.extract_hir_type(&type_node);
+            eprintln!("[TRAIT_IMPL_DEBUG] target_type = {:?}", target_type);
             TraitImplTarget::Type(target_type)
         } else if ident_tokens.len() >= 2 {
             // Old format: try parsing as entity name for backward compatibility
@@ -11687,11 +11770,42 @@ impl HirBuilderContext {
     /// Build trait method implementation
     fn build_trait_method_impl(&mut self, node: &SyntaxNode) -> Option<HirTraitMethodImpl> {
         let name = self.extract_name(node)?;
+
+        // Build parameters (like build_function does)
+        let mut params = Vec::new();
+        if let Some(param_list) = node.first_child_of_kind(SyntaxKind::ParameterList) {
+            for param_node in param_list.children_of_kind(SyntaxKind::Parameter) {
+                if let Some(param) = self.build_parameter(&param_node) {
+                    params.push(param);
+                }
+            }
+        }
+
+        // CRITICAL: Push a new scope for method parameters to avoid collisions
+        // with port names from entity contexts (like FpAdd's 'a' and 'b' ports)
+        self.symbols.enter_scope();
+
+        // Register method parameters in the local scope
+        // This ensures parameter references in the body are resolved as GenericParams,
+        // not as Port references from other entity contexts
+        for param in &params {
+            eprintln!(
+                "[TRAIT_METHOD_IMPL] Registering parameter '{}' in scope as GenericParam",
+                param.name
+            );
+            self.symbols
+                .add_to_scope(&param.name, SymbolId::GenericParam(param.name.clone()));
+        }
+
+        // Build method body with parameters in scope
         let body = if let Some(block) = node.first_child_of_kind(SyntaxKind::BlockStmt) {
             self.build_statements(&block)
         } else {
             Vec::new()
         };
+
+        // Pop the method parameter scope
+        self.symbols.exit_scope();
 
         Some(HirTraitMethodImpl { name, body })
     }
