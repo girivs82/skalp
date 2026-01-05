@@ -153,7 +153,6 @@ impl Testbench {
 
         // Find the top-level module: the module that is NOT instantiated by any other module
         // Collect all module IDs that are instantiated
-        eprintln!("🔍 DEBUG: Total modules in MIR: {}", mir.modules.len());
         for module in &mir.modules {
             eprintln!(
                 "  - Module '{}' (ID={:?}): {} ports, {} instances",

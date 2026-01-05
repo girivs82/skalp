@@ -278,6 +278,11 @@ impl TypeSubstitution {
             hir::HirExpression::StructLiteral(struct_lit) => {
                 hir::HirExpression::StructLiteral(hir::HirStructLiteral {
                     type_name: struct_lit.type_name.clone(),
+                    generic_args: struct_lit
+                        .generic_args
+                        .iter()
+                        .map(|arg| self.substitute_expression(arg))
+                        .collect(),
                     fields: struct_lit
                         .fields
                         .iter()
@@ -1624,6 +1629,11 @@ impl Monomorphizer {
             hir::HirExpression::StructLiteral(struct_lit) => {
                 hir::HirExpression::StructLiteral(hir::HirStructLiteral {
                     type_name: struct_lit.type_name.clone(),
+                    generic_args: struct_lit
+                        .generic_args
+                        .iter()
+                        .map(|arg| self.replace_calls_in_expression(arg, ctx))
+                        .collect(),
                     fields: struct_lit
                         .fields
                         .iter()

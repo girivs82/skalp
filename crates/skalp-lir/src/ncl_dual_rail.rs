@@ -1450,10 +1450,7 @@ impl DualRailConverter {
         let mut macro_outputs = Vec::new();
         for (i, &orig_out) in cell.outputs.iter().enumerate() {
             let out_net_id = self.alloc_net_id();
-            let out_net = GateNet::new(
-                out_net_id,
-                format!("{}_out_{}", cell.path, i),
-            );
+            let out_net = GateNet::new(out_net_id, format!("{}_out_{}", cell.path, i));
             output.nets.push(out_net);
             macro_outputs.push(out_net_id);
         }
@@ -1480,7 +1477,8 @@ impl DualRailConverter {
                 self.connect_nets(output, macro_out, out_dual.t);
 
                 // Create FALSE rail by inverting TRUE rail
-                let inv_out = self.create_inverter(output, &format!("{}_f_{}", cell.path, i), macro_out);
+                let inv_out =
+                    self.create_inverter(output, &format!("{}_f_{}", cell.path, i), macro_out);
                 self.connect_nets(output, inv_out, out_dual.f);
             }
         }

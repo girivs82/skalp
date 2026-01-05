@@ -1880,11 +1880,8 @@ impl<'a> TechMapper<'a> {
         // Create decomposer with current net/cell IDs
         let start_net_id = self.netlist.nets.len() as u32;
         let start_cell_id = self.next_cell_id;
-        let mut decomposer = Fp32Decomposer::new(
-            start_net_id,
-            start_cell_id,
-            self.library.name.clone(),
-        );
+        let mut decomposer =
+            Fp32Decomposer::new(start_net_id, start_cell_id, self.library.name.clone());
 
         // Decompose based on operation type
         match function {
@@ -1926,7 +1923,8 @@ impl<'a> TechMapper<'a> {
                 return;
             }
             _ => {
-                self.warnings.push(format!("Unknown FP operation: {:?}", function));
+                self.warnings
+                    .push(format!("Unknown FP operation: {:?}", function));
                 return;
             }
         }
@@ -2001,52 +1999,26 @@ impl<'a> TechMapper<'a> {
         // Create decomposer with current net/cell IDs
         let start_net_id = self.netlist.nets.len() as u32;
         let start_cell_id = self.next_cell_id;
-        let mut decomposer = Fp32Decomposer::new(
-            start_net_id,
-            start_cell_id,
-            self.library.name.clone(),
-        );
+        let mut decomposer =
+            Fp32Decomposer::new(start_net_id, start_cell_id, self.library.name.clone());
 
         // Decompose based on comparison type
         match function {
             CellFunction::FpLt32 => {
-                decomposer.decompose_fp32_lt(
-                    &mut self.netlist,
-                    path,
-                    &a_inputs,
-                    &b_inputs,
-                    output,
-                );
+                decomposer.decompose_fp32_lt(&mut self.netlist, path, &a_inputs, &b_inputs, output);
             }
             CellFunction::FpGt32 => {
-                decomposer.decompose_fp32_gt(
-                    &mut self.netlist,
-                    path,
-                    &a_inputs,
-                    &b_inputs,
-                    output,
-                );
+                decomposer.decompose_fp32_gt(&mut self.netlist, path, &a_inputs, &b_inputs, output);
             }
             CellFunction::FpLe32 => {
-                decomposer.decompose_fp32_le(
-                    &mut self.netlist,
-                    path,
-                    &a_inputs,
-                    &b_inputs,
-                    output,
-                );
+                decomposer.decompose_fp32_le(&mut self.netlist, path, &a_inputs, &b_inputs, output);
             }
             CellFunction::FpGe32 => {
-                decomposer.decompose_fp32_ge(
-                    &mut self.netlist,
-                    path,
-                    &a_inputs,
-                    &b_inputs,
-                    output,
-                );
+                decomposer.decompose_fp32_ge(&mut self.netlist, path, &a_inputs, &b_inputs, output);
             }
             _ => {
-                self.warnings.push(format!("Unknown FP comparison: {:?}", function));
+                self.warnings
+                    .push(format!("Unknown FP comparison: {:?}", function));
                 return;
             }
         }
