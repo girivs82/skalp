@@ -6101,33 +6101,48 @@ impl<'hir> HirToMir<'hir> {
                 }
             }
             hir::HirExpression::ArrayRepeat { value, count } => {
-                // Array repeat expression: [value; count]
-                // This creates an array with `count` copies of `value`
-                // For MIR, we could:
-                // 1. Expand the array at compile-time if count is a constant
-                // 2. Generate initialization code at runtime
+                // Array/bit repeat expression: {count{value}} in Verilog syntax
+                // This creates a bit vector with `count` copies of `value`
+                // We expand it into a Concat for hardware (bit concatenation)
                 //
-                // For now, we'll try to evaluate count as a const expression
-                // If it's constant and reasonably small, expand it
-                // Otherwise, return a placeholder (proper array support in MIR needed)
+                // BUG #181 FIX: Properly expand ArrayRepeat into Concat for hardware
+                // For {8{1'b1}}, we create Concat([1'b1, 1'b1, 1'b1, 1'b1, 1'b1, 1'b1, 1'b1, 1'b1])
 
-                // Try to evaluate count
+                // Try to evaluate count as a const expression
                 if let Ok(count_val) = self.const_evaluator.eval(count) {
                     if let Some(count_nat) = count_val.as_nat() {
-                        // For very large arrays, don't expand (could cause memory issues)
-                        // Just return a zero value as placeholder
-                        // TODO: Add proper array initialization support in MIR/codegen
+                        // For very large repeats, don't expand (could cause memory issues)
                         if count_nat > 1024 {
-                            // Return zero for large arrays
                             return Some(Expression::new(
                                 ExpressionKind::Literal(Value::Integer(0)),
                                 ty,
                             ));
                         }
 
-                        // For small arrays, we could expand, but for now just return
-                        // the value (proper array support needed)
-                        return self.convert_expression(value, depth + 1);
+                        // For count == 0, return empty (0)
+                        if count_nat == 0 {
+                            return Some(Expression::new(
+                                ExpressionKind::Literal(Value::Integer(0)),
+                                ty,
+                            ));
+                        }
+
+                        // For count == 1, just return the value
+                        if count_nat == 1 {
+                            return self.convert_expression(value, depth + 1);
+                        }
+
+                        // BUG #181 FIX: Expand into Concat with count copies of value
+                        // Convert the value expression to MIR first
+                        if let Some(value_mir) = self.convert_expression(value, depth + 1) {
+                            let mut elements = Vec::with_capacity(count_nat);
+                            for _ in 0..count_nat {
+                                elements.push(value_mir.clone());
+                            }
+                            return Some(Expression::with_unknown_type(ExpressionKind::Concat(
+                                elements,
+                            )));
+                        }
                     }
                 }
 
@@ -6141,18 +6156,6 @@ impl<'hir> HirToMir<'hir> {
                 // Bit concatenation: {a, b, c}
                 // In hardware, concatenation combines multiple bit vectors into a single wider vector
                 // The first element becomes the most significant bits
-
-                eprintln!(
-                    "[DEBUG] Converting Concat with {} elements",
-                    expressions.len()
-                );
-                for (i, expr) in expressions.iter().enumerate() {
-                    eprintln!(
-                        "[DEBUG] Concat element {}: {:?}",
-                        i,
-                        std::mem::discriminant(expr)
-                    );
-                }
 
                 if expressions.is_empty() {
                     return Some(Expression::new(
@@ -6208,11 +6211,6 @@ impl<'hir> HirToMir<'hir> {
                     known_widths.push(width);
                 }
 
-                eprintln!(
-                    "[DEBUG] Concat: target_width={:?}, total_known={}, num_unknown={}",
-                    target_width, total_known_width, num_unknown
-                );
-
                 // If we have exactly one unknown width element and know the target,
                 // we can infer the unknown width
                 let inferred_width = match (num_unknown, target_width) {
@@ -6221,11 +6219,6 @@ impl<'hir> HirToMir<'hir> {
                     }
                     _ => None,
                 };
-
-                eprintln!(
-                    "[DEBUG] Concat: inferred_width for unknown element = {:?}",
-                    inferred_width
-                );
 
                 // Convert all concat elements to MIR expressions
                 let mut mir_exprs = Vec::new();
@@ -6249,10 +6242,6 @@ impl<'hir> HirToMir<'hir> {
                     }
                 }
 
-                eprintln!(
-                    "[DEBUG] Concat successfully converted with {} MIR elements",
-                    mir_exprs.len()
-                );
                 Some(Expression::new(ExpressionKind::Concat(mir_exprs), ty))
             }
             hir::HirExpression::Ternary {

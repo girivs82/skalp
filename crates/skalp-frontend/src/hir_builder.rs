@@ -4837,6 +4837,7 @@ impl HirBuilderContext {
             SyntaxKind::ArrayLiteral => self.build_array_literal(node),
             SyntaxKind::TupleExpr => self.build_tuple_expr(node),
             SyntaxKind::ConcatExpr => self.build_concat_expr(node),
+            SyntaxKind::ReplicateExpr => self.build_replicate_expr(node),
             SyntaxKind::TernaryExpr => self.build_ternary_expr(node),
             SyntaxKind::FieldExpr => self.build_field_expr(node),
             SyntaxKind::IndexExpr => self.build_index_expr(node),
@@ -5719,6 +5720,7 @@ impl HirBuilderContext {
                         | SyntaxKind::StructLiteral
                         | SyntaxKind::ArrayLiteral
                         | SyntaxKind::ConcatExpr
+                        | SyntaxKind::ReplicateExpr // BUG #181 FIX: Include replication expressions in concat
                         | SyntaxKind::CastExpr
                 )
             })
@@ -5737,6 +5739,43 @@ impl HirBuilderContext {
                 expressions.len()
             );
             Some(HirExpression::Concat(expressions))
+        }
+    }
+
+    /// Build replication expression: {count{value}}
+    /// This is Verilog-style replication like {8{1'b1}} which repeats 1'b1 eight times.
+    /// BUG #181 FIX: Added support for ReplicateExpr nodes in HIR builder
+    fn build_replicate_expr(&mut self, node: &SyntaxNode) -> Option<HirExpression> {
+        // Collect all expression children - should be exactly 2: count and value
+        let expressions: Vec<HirExpression> = node
+            .children()
+            .filter(|n| {
+                matches!(
+                    n.kind(),
+                    SyntaxKind::LiteralExpr
+                        | SyntaxKind::IdentExpr
+                        | SyntaxKind::BinaryExpr
+                        | SyntaxKind::UnaryExpr
+                        | SyntaxKind::CallExpr
+                        | SyntaxKind::FieldExpr
+                        | SyntaxKind::IndexExpr
+                        | SyntaxKind::PathExpr
+                        | SyntaxKind::ParenExpr
+                        | SyntaxKind::ConcatExpr
+                        | SyntaxKind::CastExpr
+                )
+            })
+            .filter_map(|n| self.build_expression(&n))
+            .collect();
+
+        if expressions.len() >= 2 {
+            // First is count, second is value to replicate
+            Some(HirExpression::ArrayRepeat {
+                count: Box::new(expressions[0].clone()),
+                value: Box::new(expressions[1].clone()),
+            })
+        } else {
+            None
         }
     }
 

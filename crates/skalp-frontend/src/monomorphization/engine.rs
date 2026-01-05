@@ -1117,6 +1117,28 @@ impl<'hir> MonomorphizationEngine<'hir> {
                 }
             }
 
+            // Concat expression - substitute in all elements
+            // BUG #181 FIX: Concat elements need generic param substitution
+            HirExpression::Concat(elements) => {
+                let substituted: Vec<_> = elements
+                    .iter()
+                    .map(|e| self.substitute_expr(e, const_args))
+                    .collect();
+                HirExpression::Concat(substituted)
+            }
+
+            // ArrayRepeat expression - substitute in both count and value
+            // BUG #181 FIX: ArrayRepeat needs generic param substitution for count
+            // E.g., {E{1'b1}} where E is a const generic parameter
+            HirExpression::ArrayRepeat { count, value } => {
+                let count_subst = self.substitute_expr(count, const_args);
+                let value_subst = self.substitute_expr(value, const_args);
+                HirExpression::ArrayRepeat {
+                    count: Box::new(count_subst),
+                    value: Box::new(value_subst),
+                }
+            }
+
             // Other expressions pass through
             _ => expr.clone(),
         }
@@ -1446,6 +1468,15 @@ impl<'hir> MonomorphizationEngine<'hir> {
                     false_expr: Box::new(new_false),
                 }
             }
+            // BUG #181 FIX: Handle ArrayRepeat expressions
+            HirExpression::ArrayRepeat { count, value } => {
+                let new_count = self.remap_expr_ports(count, port_id_map);
+                let new_value = self.remap_expr_ports(value, port_id_map);
+                HirExpression::ArrayRepeat {
+                    count: Box::new(new_count),
+                    value: Box::new(new_value),
+                }
+            }
             _ => expr.clone(),
         }
     }
@@ -1526,6 +1557,11 @@ impl<'hir> MonomorphizationEngine<'hir> {
                 for arg in &call.args {
                     Self::collect_port_ids_from_expr(arg, port_ids);
                 }
+            }
+            // BUG #181 FIX: Handle ArrayRepeat expressions
+            HirExpression::ArrayRepeat { count, value } => {
+                Self::collect_port_ids_from_expr(count, port_ids);
+                Self::collect_port_ids_from_expr(value, port_ids);
             }
             _ => {}
         }
