@@ -974,11 +974,10 @@ impl<'hir> MonomorphizationEngine<'hir> {
     ) -> Option<&'a Instantiation> {
         // Evaluate instance's generic arguments
         let mut const_args = HashMap::new();
-        let mut evaluator = ConstEvaluator::new();
-        // Register enums for enum variant resolution in generic args
-        if let Some(hir) = self.hir {
-            self.register_enums_to_evaluator(&mut evaluator, hir);
-        }
+        // Use helper to create evaluator with constants AND enums registered
+        // BUG #168 FIX: Previously only enums were registered, causing FloatFormat
+        // constants like IEEE754_32 to not be found during evaluation
+        let mut evaluator = self.create_evaluator_with_constants();
 
         for (i, arg) in instance.generic_args.iter().enumerate() {
             if i >= entity.generics.len() {

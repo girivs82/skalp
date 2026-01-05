@@ -419,6 +419,52 @@ impl ConstEvaluator {
                 }
             }
 
+            // Struct literal evaluation
+            // Special handling for FloatFormatImpl -> convert to FloatFormat
+            HirExpression::StructLiteral(struct_lit) => {
+                // Evaluate all field values
+                let mut fields = HashMap::new();
+                for field_init in &struct_lit.fields {
+                    let value = self.eval(&field_init.value)?;
+                    fields.insert(field_init.name.clone(), value);
+                }
+
+                // Special case: Convert FloatFormatImpl to FloatFormat for IEEE 754 formats
+                if struct_lit.type_name == "FloatFormatImpl" {
+                    // Extract the field values
+                    let total_bits = fields
+                        .get("total_bits")
+                        .and_then(|v| v.as_nat())
+                        .unwrap_or(0);
+                    let exponent_bits = fields
+                        .get("exponent_bits")
+                        .and_then(|v| v.as_nat())
+                        .unwrap_or(0);
+                    let mantissa_bits = fields
+                        .get("mantissa_bits")
+                        .and_then(|v| v.as_nat())
+                        .unwrap_or(0);
+                    let bias = fields
+                        .get("bias")
+                        .and_then(|v| v.as_int())
+                        .unwrap_or(0);
+
+                    Ok(ConstValue::FloatFormat(FloatFormatValue {
+                        total_bits,
+                        exponent_bits,
+                        mantissa_bits,
+                        bias,
+                        name: format!(
+                            "fp{}",
+                            total_bits
+                        ),
+                    }))
+                } else {
+                    // General struct: return as Struct value
+                    Ok(ConstValue::Struct(fields))
+                }
+            }
+
             // Other expressions are not constant
             _ => Err(EvalError::NotConstant(format!(
                 "Expression {:?} is not constant",
