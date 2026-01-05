@@ -640,6 +640,48 @@ impl<'hir> HirToMir<'hir> {
                 // Set current entity for generic parameter resolution
                 self.current_entity_id = Some(impl_block.entity);
 
+                // Skip implementations for entities that are not used (0 instances) and are not the first entity
+                // The first entity is typically the top-level entity we're compiling
+                if let Some(entity) = hir.entities.iter().find(|e| e.id == impl_block.entity) {
+                    // Check if this is a generic entity (has unresolved generics)
+                    let has_unresolved_generics = entity.generics.iter().any(|g| {
+                        g.default_value.is_none()
+                            && !matches!(g.param_type, hir::HirGenericType::ClockDomain)
+                    });
+
+                    // Skip if: has unresolved generics OR (has 0 instances and is not entity index 0)
+                    // Entity 0 is typically the top-level entity that we're compiling
+                    let is_first_entity = hir.entities.first().map(|e| e.id) == Some(entity.id);
+
+                    if has_unresolved_generics && impl_block.instances.is_empty() {
+                        eprintln!(
+                            "⏭️  [SKIP] Skipping impl for generic entity '{}' (no instances, unresolved generics)",
+                            entity.name
+                        );
+                        continue;
+                    }
+
+                    // Also skip monomorphized entities with 0 instances that aren't the top-level
+                    if impl_block.instances.is_empty()
+                        && !is_first_entity
+                        && entity.name.contains('_')
+                    {
+                        // Check if it looks like a monomorphized entity (contains underscore followed by type suffix)
+                        let looks_monomorphized = entity.name.ends_with("_fp16")
+                            || entity.name.ends_with("_fp32")
+                            || entity.name.ends_with("_fp64")
+                            || entity.name.ends_with("_bf16");
+
+                        if looks_monomorphized {
+                            eprintln!(
+                                "⏭️  [SKIP] Skipping impl for unused monomorphized entity '{}'",
+                                entity.name
+                            );
+                            continue;
+                        }
+                    }
+                }
+
                 // Bind generic parameter default values into const evaluator for expression evaluation
                 // Track which names we bound so we can clean them up later
                 let mut bound_generic_names = Vec::new();
@@ -4831,30 +4873,7 @@ impl<'hir> HirToMir<'hir> {
                 }
                 let left = Box::new(left);
                 let right = Box::new(right);
-
-                // BUG #184 FIX: Check for built-in Float32/Float16/Float64 types
-                // and use floating-point operations instead of integer operations.
-                // This handles the case where fp32 maps to Float32 without stdlib.
-                let left_hir_type = self.infer_hir_type(&binary.left);
-                let is_fp_type = matches!(
-                    left_hir_type,
-                    Some(hir::HirType::Float16 | hir::HirType::Float32 | hir::HirType::Float64)
-                );
-
-                let op = if is_fp_type {
-                    // Use floating-point binary operations
-                    match binary.op {
-                        hir::HirBinaryOp::Add => BinaryOp::FAdd,
-                        hir::HirBinaryOp::Sub => BinaryOp::FSub,
-                        hir::HirBinaryOp::Mul => BinaryOp::FMul,
-                        hir::HirBinaryOp::Div => BinaryOp::FDiv,
-                        // Comparisons remain the same (they work for both int and float)
-                        _ => self.convert_binary_op(&binary.op, &binary.left),
-                    }
-                } else {
-                    self.convert_binary_op(&binary.op, &binary.left)
-                };
-
+                let op = self.convert_binary_op(&binary.op, &binary.left);
                 Some(Expression::new(
                     ExpressionKind::Binary { op, left, right },
                     ty,
@@ -13469,6 +13488,23 @@ impl<'hir> HirToMir<'hir> {
 
                 None
             }
+            hir::HirExpression::Constant(const_id) => {
+                // Look up constant in current entity's implementation
+                if let Some(entity_id) = self.current_entity_id {
+                    if let Some(impl_block) =
+                        hir.implementations.iter().find(|i| i.entity == entity_id)
+                    {
+                        if let Some(constant) =
+                            impl_block.constants.iter().find(|c| c.id == *const_id)
+                        {
+                            return Some(constant.const_type.clone());
+                        }
+                    }
+                }
+                // Constants are typically integer types (nat, uint, etc.)
+                // Default to Bit(32) for arithmetic if not found
+                Some(hir::HirType::Bit(32))
+            }
             hir::HirExpression::GenericParam(name) => {
                 // WORKAROUND for Bug #42/43: Parser creates malformed cast expression AST,
                 // causing some variable references to appear as GenericParam instead of Variable
@@ -13933,16 +13969,30 @@ impl<'hir> HirToMir<'hir> {
         let left_type = left_type?;
 
         // Extract the type name for Custom types (distinct types, user-defined types)
+        // Also map built-in Float types to their stdlib type names for trait lookup
         let type_name = match &left_type {
             hir::HirType::Custom(name) => {
                 println!("[TRAIT_OP_DEBUG] Detected Custom type: {}", name);
                 name.clone()
             }
-            // For now, only support trait resolution for Custom types
-            // Built-in types use hardcoded operators
+            // Map built-in float types to stdlib distinct type names
+            // This allows trait resolution to find impl Add for fp32, etc.
+            hir::HirType::Float16 => {
+                println!("[TRAIT_OP_DEBUG] Float16 -> mapping to 'fp16' for trait lookup");
+                "fp16".to_string()
+            }
+            hir::HirType::Float32 => {
+                println!("[TRAIT_OP_DEBUG] Float32 -> mapping to 'fp32' for trait lookup");
+                "fp32".to_string()
+            }
+            hir::HirType::Float64 => {
+                println!("[TRAIT_OP_DEBUG] Float64 -> mapping to 'fp64' for trait lookup");
+                "fp64".to_string()
+            }
+            // Other built-in types use primitive operators
             _ => {
                 println!(
-                    "[TRAIT_OP_DEBUG] Not a Custom type, skipping trait resolution for {:?}",
+                    "[TRAIT_OP_DEBUG] Not a Custom/Float type, skipping trait resolution for {:?}",
                     left_type
                 );
                 return None;

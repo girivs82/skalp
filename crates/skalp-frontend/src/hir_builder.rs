@@ -449,16 +449,34 @@ impl HirBuilderContext {
 
         let mut hir = Hir::new("main".to_string());
 
+        // Track pending visibility (from Visibility node that precedes item declarations)
+        let mut pending_visibility = HirVisibility::Private;
+
         // Build HIR from source file
         for child in root.children() {
             match child.kind() {
+                SyntaxKind::Visibility => {
+                    // Check if this Visibility node contains PubKw
+                    pending_visibility = if child.children_with_tokens().any(|c| {
+                        c.as_token()
+                            .map(|t| t.kind() == SyntaxKind::PubKw)
+                            .unwrap_or(false)
+                    }) {
+                        HirVisibility::Public
+                    } else {
+                        HirVisibility::Private
+                    };
+                }
                 SyntaxKind::Attribute => {
                     // Process top-level attributes (like #[pipeline(stages=N)] before entities/functions)
                     self.process_attribute(&child);
                 }
                 SyntaxKind::EntityDecl => {
-                    if let Some(entity) = self.build_entity(&child) {
-                        // Store entity for later access by implementations
+                    if let Some(mut entity) = self.build_entity(&child) {
+                        // Apply pending visibility
+                        entity.visibility = pending_visibility;
+                        pending_visibility = HirVisibility::Private; // Reset after use
+                                                                     // Store entity for later access by implementations
                         self.built_entities
                             .insert(entity.name.clone(), entity.clone());
                         hir.entities.push(entity);
@@ -663,6 +681,9 @@ impl HirBuilderContext {
     fn build_entity(&mut self, node: &SyntaxNode) -> Option<HirEntity> {
         let id = self.next_entity_id();
         let name = self.extract_name(node)?;
+
+        // Default visibility (will be overridden by caller using pending_visibility)
+        let visibility = HirVisibility::Private;
 
         // Check if this is an async (NCL) entity
         let is_async = node
@@ -992,7 +1013,7 @@ impl HirBuilderContext {
             id,
             name,
             is_async, // NCL async entity detection
-            visibility: crate::hir::HirVisibility::Private,
+            visibility,
             ports,
             generics,
             clock_domains,
