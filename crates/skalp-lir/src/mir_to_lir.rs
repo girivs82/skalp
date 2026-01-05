@@ -999,8 +999,6 @@ impl MirToLirTransform {
                 let low = (*index as u32) * expected_width;
                 let high = low + expected_width - 1;
 
-                eprintln!("🔍 TUPLE_FIELD_ACCESS: extracting bits [{}:{}]", high, low);
-
                 let out = self.alloc_temp_signal(expected_width);
                 self.lir.add_node(
                     LirOp::RangeSelect {

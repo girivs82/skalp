@@ -181,6 +181,22 @@ impl<'hir> InstantiationCollector<'hir> {
             }
         }
 
+        // Register ALL constants from ALL implementations (including global scope)
+        // Global constants (like IEEE754_32) are stored in an impl with EntityId(0)
+        for implementation in &hir.implementations {
+            if !implementation.constants.is_empty() {
+                eprintln!(
+                    "[COLLECTOR] Registering {} global constants from impl {:?}",
+                    implementation.constants.len(),
+                    implementation.entity
+                );
+                for constant in &implementation.constants {
+                    eprintln!("[COLLECTOR]   - Constant: {}", constant.name);
+                }
+                evaluator.register_constants(&implementation.constants);
+            }
+        }
+
         Self {
             instantiations: HashSet::new(),
             evaluator,
@@ -197,11 +213,49 @@ impl<'hir> InstantiationCollector<'hir> {
             self.collect_from_implementation(implementation);
         }
 
+        // Also collect from trait implementations (where entity instantiations live)
+        for trait_impl in &hir.trait_implementations {
+            eprintln!(
+                "[COLLECTOR] Processing trait impl '{}' on {:?}: {} methods",
+                trait_impl.trait_name,
+                trait_impl.target,
+                trait_impl.method_implementations.len()
+            );
+            for method_impl in &trait_impl.method_implementations {
+                eprintln!(
+                    "[COLLECTOR]   Method '{}' has {} body statements",
+                    method_impl.name,
+                    method_impl.body.len()
+                );
+                for stmt in &method_impl.body {
+                    self.collect_from_statement(stmt);
+                }
+            }
+        }
+
         self.instantiations
     }
 
     /// Collect instantiations from an implementation
     fn collect_from_implementation(&mut self, implementation: &'hir HirImplementation) {
+        // Find entity name for logging
+        let entity_name = self
+            .hir
+            .entities
+            .iter()
+            .find(|e| e.id == implementation.entity)
+            .map(|e| e.name.as_str())
+            .unwrap_or("unknown");
+
+        eprintln!(
+            "[COLLECTOR] Processing impl for entity '{}': {} instances, {} event_blocks, {} statements, {} assignments",
+            entity_name,
+            implementation.instances.len(),
+            implementation.event_blocks.len(),
+            implementation.statements.len(),
+            implementation.assignments.len()
+        );
+
         // Set current implementation context
         self.current_impl = Some(implementation);
 
@@ -214,8 +268,295 @@ impl<'hir> InstantiationCollector<'hir> {
             self.collect_from_instance(instance);
         }
 
+        // Collect from event blocks (which contain statements with struct literals)
+        for event_block in &implementation.event_blocks {
+            for stmt in &event_block.statements {
+                self.collect_from_statement(stmt);
+            }
+        }
+
+        // Collect from standalone statements
+        for stmt in &implementation.statements {
+            self.collect_from_statement(stmt);
+        }
+
+        // Collect from assignments (RHS can contain struct literals)
+        for assignment in &implementation.assignments {
+            self.collect_from_expression(&assignment.rhs);
+        }
+
         // Clear current implementation context
         self.current_impl = None;
+    }
+
+    /// Collect instantiations from a statement (walking nested expressions)
+    fn collect_from_statement(&mut self, stmt: &crate::hir::HirStatement) {
+        use crate::hir::HirStatement;
+        match stmt {
+            HirStatement::Let(let_stmt) => {
+                self.collect_from_expression(&let_stmt.value);
+            }
+            HirStatement::Assignment(assignment) => {
+                self.collect_from_expression(&assignment.rhs);
+            }
+            HirStatement::If(if_stmt) => {
+                self.collect_from_expression(&if_stmt.condition);
+                for s in &if_stmt.then_statements {
+                    self.collect_from_statement(s);
+                }
+                if let Some(else_stmts) = &if_stmt.else_statements {
+                    for s in else_stmts {
+                        self.collect_from_statement(s);
+                    }
+                }
+            }
+            HirStatement::For(for_stmt) => {
+                self.collect_from_expression(&for_stmt.range.start);
+                self.collect_from_expression(&for_stmt.range.end);
+                if let Some(step) = &for_stmt.range.step {
+                    self.collect_from_expression(step);
+                }
+                for s in &for_stmt.body {
+                    self.collect_from_statement(s);
+                }
+            }
+            HirStatement::Match(match_stmt) => {
+                self.collect_from_expression(&match_stmt.expr);
+                for arm in &match_stmt.arms {
+                    for s in &arm.statements {
+                        self.collect_from_statement(s);
+                    }
+                }
+            }
+            HirStatement::Return(Some(expr)) => {
+                self.collect_from_expression(expr);
+            }
+            _ => {}
+        }
+    }
+
+    /// Collect instantiations from an expression (looking for struct literal entity instantiations)
+    fn collect_from_expression(&mut self, expr: &HirExpression) {
+        match expr {
+            HirExpression::StructLiteral(struct_lit) => {
+                eprintln!(
+                    "[COLLECTOR] Found StructLiteral: type_name='{}', generic_args={}",
+                    struct_lit.type_name,
+                    struct_lit.generic_args.len()
+                );
+                // Check if this struct literal corresponds to an entity
+                self.try_collect_struct_literal_entity(struct_lit);
+                // Also recurse into field values
+                for field in &struct_lit.fields {
+                    self.collect_from_expression(&field.value);
+                }
+            }
+            HirExpression::Binary(binary) => {
+                self.collect_from_expression(&binary.left);
+                self.collect_from_expression(&binary.right);
+            }
+            HirExpression::Unary(unary) => {
+                self.collect_from_expression(&unary.operand);
+            }
+            HirExpression::Index(base, index) => {
+                self.collect_from_expression(base);
+                self.collect_from_expression(index);
+            }
+            HirExpression::Ternary {
+                condition,
+                true_expr,
+                false_expr,
+            } => {
+                self.collect_from_expression(condition);
+                self.collect_from_expression(true_expr);
+                self.collect_from_expression(false_expr);
+            }
+            HirExpression::Call(call) => {
+                for arg in &call.args {
+                    self.collect_from_expression(arg);
+                }
+            }
+            HirExpression::Cast(cast) => {
+                self.collect_from_expression(&cast.expr);
+            }
+            HirExpression::Concat(elements) => {
+                for elem in elements {
+                    self.collect_from_expression(elem);
+                }
+            }
+            HirExpression::ArrayRepeat { value, count } => {
+                self.collect_from_expression(value);
+                self.collect_from_expression(count);
+            }
+            HirExpression::ArrayLiteral(elements) => {
+                for elem in elements {
+                    self.collect_from_expression(elem);
+                }
+            }
+            HirExpression::FieldAccess { base, .. } => {
+                self.collect_from_expression(base);
+            }
+            HirExpression::If(if_expr) => {
+                self.collect_from_expression(&if_expr.condition);
+                self.collect_from_expression(&if_expr.then_expr);
+                self.collect_from_expression(&if_expr.else_expr);
+            }
+            HirExpression::Match(match_expr) => {
+                self.collect_from_expression(&match_expr.expr);
+                for arm in &match_expr.arms {
+                    self.collect_from_expression(&arm.expr);
+                }
+            }
+            HirExpression::Block {
+                statements,
+                result_expr,
+            } => {
+                for stmt in statements {
+                    self.collect_from_statement(stmt);
+                }
+                self.collect_from_expression(result_expr);
+            }
+            HirExpression::Range(start, end, _step) => {
+                self.collect_from_expression(start);
+                self.collect_from_expression(end);
+            }
+            HirExpression::TupleLiteral(elements) => {
+                for elem in elements {
+                    self.collect_from_expression(elem);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Try to collect an instantiation from a struct literal that matches an entity
+    fn try_collect_struct_literal_entity(&mut self, struct_lit: &crate::hir::HirStructLiteral) {
+        let type_name = &struct_lit.type_name;
+        eprintln!(
+            "[COLLECTOR] Looking for entity '{}' among {} entities (struct literal has {} generic_args)",
+            type_name,
+            self.hir.entities.len(),
+            struct_lit.generic_args.len()
+        );
+
+        // Find the entity by name
+        let entity = match self.hir.entities.iter().find(|e| e.name == *type_name) {
+            Some(e) => e.clone(),
+            None => {
+                eprintln!("[COLLECTOR] Entity '{}' NOT FOUND", type_name);
+                return;
+            }
+        };
+
+        eprintln!(
+            "[COLLECTOR] Found entity '{}' with {} generics",
+            entity.name,
+            entity.generics.len()
+        );
+
+        // If entity has no generics, nothing to collect
+        if entity.generics.is_empty() {
+            eprintln!(
+                "[COLLECTOR] Entity '{}' has no generics, skipping",
+                entity.name
+            );
+            return;
+        }
+
+        // Build instantiation record
+        let mut type_args = HashMap::new();
+        let mut const_args = HashMap::new();
+        let mut intent_args = HashMap::new();
+
+        // Extract generic arguments from the struct literal
+        for (i, arg) in struct_lit.generic_args.iter().enumerate() {
+            if i >= entity.generics.len() {
+                break;
+            }
+
+            let generic = &entity.generics[i];
+            eprintln!(
+                "[COLLECTOR] Processing generic arg[{}] for '{}' (type: {:?})",
+                i, generic.name, generic.param_type
+            );
+
+            match &generic.param_type {
+                HirGenericType::Type => {
+                    if let Some(ty) = self.extract_type_from_expr(arg) {
+                        type_args.insert(generic.name.clone(), ty);
+                    }
+                }
+                HirGenericType::Const(_const_type) => {
+                    if let Ok(value) = self.evaluator.eval(arg) {
+                        eprintln!(
+                            "[COLLECTOR] Evaluated const arg '{}' = {:?}",
+                            generic.name, value
+                        );
+                        const_args.insert(generic.name.clone(), value);
+                    } else {
+                        eprintln!(
+                            "[COLLECTOR] Failed to evaluate const arg '{}' (expr: {:?})",
+                            generic.name, arg
+                        );
+                    }
+                }
+                HirGenericType::Intent => {
+                    let intent_name = self.extract_intent_name(arg);
+                    let intent_value = IntentValue {
+                        name: intent_name,
+                        fields: HashMap::new(),
+                    };
+                    intent_args.insert(generic.name.clone(), intent_value);
+                }
+                _ => {}
+            }
+        }
+
+        // For generic parameters without provided arguments, use defaults
+        for (i, generic) in entity.generics.iter().enumerate() {
+            let provided_positionally = i < struct_lit.generic_args.len();
+
+            if !provided_positionally {
+                match &generic.param_type {
+                    HirGenericType::Const(_const_type) => {
+                        if let Some(ref default) = generic.default_value {
+                            if let Ok(value) = self.evaluator.eval(default) {
+                                const_args.entry(generic.name.clone()).or_insert(value);
+                            }
+                        }
+                    }
+                    HirGenericType::Intent => {
+                        if let Some(ref default) = generic.default_value {
+                            let intent_name = self.extract_intent_name(default);
+                            let intent_value = IntentValue {
+                                name: intent_name,
+                                fields: HashMap::new(),
+                            };
+                            intent_args
+                                .entry(generic.name.clone())
+                                .or_insert(intent_value);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        eprintln!(
+            "[COLLECTOR] Creating instantiation for '{}': const_args={:?}",
+            entity.name, const_args
+        );
+
+        // Create instantiation record
+        let instantiation = Instantiation {
+            entity_name: entity.name.clone(),
+            entity_id: entity.id,
+            type_args,
+            const_args,
+            intent_args,
+        };
+
+        self.instantiations.insert(instantiation);
     }
 
     /// Collect instantiation from a module instance

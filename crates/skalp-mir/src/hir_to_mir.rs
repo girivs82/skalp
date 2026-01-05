@@ -9939,6 +9939,7 @@ impl<'hir> HirToMir<'hir> {
                 );
                 Some(hir::HirExpression::StructLiteral(hir::HirStructLiteral {
                     type_name: struct_lit.type_name.clone(),
+                    generic_args: struct_lit.generic_args.clone(),
                     fields: substituted_fields,
                 }))
             }

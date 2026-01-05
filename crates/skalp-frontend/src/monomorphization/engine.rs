@@ -120,6 +120,21 @@ impl<'hir> MonomorphizationEngine<'hir> {
             let collector = InstantiationCollector::new(&current_hir);
             let new_instantiations_set = collector.collect(&current_hir);
 
+            // Debug: show what was found
+            eprintln!(
+                "[MONOMORPHIZE] Collected {} instantiations from {} entities, {} implementations, {} trait_impls",
+                new_instantiations_set.len(),
+                current_hir.entities.len(),
+                current_hir.implementations.len(),
+                current_hir.trait_implementations.len()
+            );
+            for inst in &new_instantiations_set {
+                eprintln!(
+                    "[MONOMORPHIZE]   - {} (entity_id={:?}) const_args={:?}",
+                    inst.entity_name, inst.entity_id, inst.const_args
+                );
+            }
+
             // Find truly new instantiations (not seen before)
             let new_instantiations: Vec<Instantiation> = new_instantiations_set
                 .into_iter()
@@ -128,6 +143,7 @@ impl<'hir> MonomorphizationEngine<'hir> {
 
             // If no new instantiations, we've reached a fixed point
             if new_instantiations.is_empty() {
+                eprintln!("[MONOMORPHIZE] No new instantiations, breaking loop");
                 break;
             }
 
@@ -328,10 +344,57 @@ impl<'hir> MonomorphizationEngine<'hir> {
         instantiation: &Instantiation,
         port_id_map: &HashMap<crate::hir::PortId, crate::hir::PortId>,
     ) -> HirImplementation {
-        use crate::hir::{HirAssignment, HirSignal, HirVariable};
+        use crate::hir::{HirAssignment, HirConstant, HirSignal, HirVariable};
 
-        // Store constants for this implementation (they'll be used by evaluators in substitute_* methods)
-        self.current_constants = impl_block.constants.clone();
+        // First, evaluate constants with bound generic arguments
+        // This is needed for constants like `const E: nat = F.exponent_bits`
+        // where F is a generic parameter bound to IEEE754_32
+        let mut evaluator = ConstEvaluator::new();
+        evaluator.bind_all(instantiation.const_args.clone());
+
+        // Register enums for variant resolution
+        if let Some(hir) = self.hir {
+            self.register_enums_to_evaluator(&mut evaluator, hir);
+        }
+
+        // Evaluate and specialize constants
+        // BUG #169 FIX: Evaluate constants with bound generic args and register by ID
+        // This handles cases like `const E: nat = F.exponent_bits` where F is bound to FloatFormat
+        let specialized_constants: Vec<HirConstant> = impl_block
+            .constants
+            .iter()
+            .map(|constant| {
+                // Substitute the value expression with bound generic args
+                let subst_value = self.substitute_expr(&constant.value, &instantiation.const_args);
+                // Try to evaluate to a concrete value
+                match evaluator.eval(&subst_value) {
+                    Ok(eval_value) => {
+                        // Convert evaluated value to expression for storage
+                        let specialized_expr = self.const_value_to_expr(&eval_value);
+
+                        // Register the evaluated value for subsequent evaluations
+                        // - By name for GenericParam resolution
+                        evaluator.bind(constant.name.clone(), eval_value.clone());
+                        // - By ID for Constant(ConstantId) resolution
+                        evaluator.register_constant(constant.id, specialized_expr.clone());
+
+                        HirConstant {
+                            id: constant.id,
+                            name: constant.name.clone(),
+                            const_type: constant.const_type.clone(),
+                            value: specialized_expr,
+                        }
+                    }
+                    Err(_) => {
+                        // Keep original if evaluation fails
+                        constant.clone()
+                    }
+                }
+            })
+            .collect();
+
+        // Store specialized constants for this implementation
+        self.current_constants = specialized_constants;
 
         // Specialize signals - substitute types
         let specialized_signals = impl_block
@@ -602,20 +665,26 @@ impl<'hir> MonomorphizationEngine<'hir> {
             }
 
             // Parametric types: evaluate to concrete types
+            // BUG #169 FIX: Handle fp<F> where F is a FloatFormat const generic
             HirType::FpParametric { format } => {
                 // Evaluate format expression to get concrete bit width
                 let mut eval = self.create_evaluator_with_constants();
                 eval.bind_all(instantiation.const_args.clone());
 
-                if let Ok(value) = eval.eval(format) {
-                    if let Some(n) = value.as_nat() {
-                        // For now, just use bit width
-                        HirType::Bit(n as u32)
-                    } else {
-                        ty.clone()
+                match eval.eval(format) {
+                    Ok(value) => {
+                        // Handle both direct nat values and FloatFormat values
+                        if let Some(n) = value.as_nat() {
+                            // Direct bit width specification
+                            HirType::Bit(n as u32)
+                        } else if let crate::const_eval::ConstValue::FloatFormat(fmt) = value {
+                            // FloatFormat struct - extract total_bits
+                            HirType::Bit(fmt.total_bits as u32)
+                        } else {
+                            ty.clone()
+                        }
                     }
-                } else {
-                    ty.clone()
+                    Err(_) => ty.clone(),
                 }
             }
 
@@ -825,14 +894,20 @@ impl<'hir> MonomorphizationEngine<'hir> {
                 })
             }
 
-            // Field access - might be intent field
+            // Field access - might be intent field or struct field access
             HirExpression::FieldAccess { base, field } => {
-                let base_subst = self.substitute_expr(base, const_args);
-
-                // Try to evaluate field access
+                // First, try to evaluate the ORIGINAL expression with bindings
+                // This handles cases like F.total_bits where F is bound to FloatFormat
                 let mut eval = self.create_evaluator_with_constants();
                 eval.bind_all(const_args.clone());
 
+                // Try evaluating the original expression directly
+                if let Ok(result) = eval.eval(expr) {
+                    return self.const_value_to_expr(&result);
+                }
+
+                // If direct evaluation failed, try substituting the base and evaluating again
+                let base_subst = self.substitute_expr(base, const_args);
                 let field_expr = HirExpression::FieldAccess {
                     base: Box::new(base_subst.clone()),
                     field: field.clone(),

@@ -740,13 +740,10 @@ impl HirBuilderContext {
                         }
                     }
                     SyntaxKind::AssignmentStmt => {
-                        eprintln!("[HIR_ENTITY_DEBUG] Processing entity body AssignmentStmt");
-
                         // Check if this is a tuple destructuring assignment (LHS is a TupleExpr)
                         if let Some(tuple_expr) =
                             child.children().find(|n| n.kind() == SyntaxKind::TupleExpr)
                         {
-                            eprintln!("[HIR_ENTITY_DEBUG] Detected tuple destructuring");
                             // Extract signal names from tuple expression
                             let signal_names: Vec<String> = tuple_expr
                                 .children()
@@ -763,7 +760,6 @@ impl HirBuilderContext {
                             // Skip the first child (LHS TupleExpr) and collect all RHS nodes
                             // Parser creates function calls as: IdentExpr + CallExpr siblings
                             // Use build_chained_rhs_expression to combine them
-                            eprintln!("[HIR_ENTITY_DEBUG] Assignment statement children:");
                             for (i, ch) in child.children().enumerate() {
                                 eprintln!("  [{}] {:?}", i, ch.kind());
                             }
@@ -808,7 +804,6 @@ impl HirBuilderContext {
                             };
 
                             if let Some(rhs_expr) = rhs_expr {
-                                eprintln!("[HIR_ENTITY_DEBUG] Expanding tuple destructuring into {} assignments", signal_names.len());
                                 eprintln!(
                                     "[HIR_ENTITY_DEBUG] RHS expression type: {:?}",
                                     std::mem::discriminant(&rhs_expr)
@@ -834,7 +829,6 @@ impl HirBuilderContext {
                         } else if let Some(assignment) =
                             self.build_assignment(&child, HirAssignmentType::Combinational)
                         {
-                            eprintln!("[HIR_ENTITY_DEBUG] Assignment built successfully");
                             assignments.push(assignment);
                         }
                     }
@@ -1145,18 +1139,13 @@ impl HirBuilderContext {
                     }
                 }
                 SyntaxKind::AssignmentStmt => {
-                    eprintln!("[HIR_IMPL_DEBUG] Processing AssignmentStmt");
                     if let Some(assignment) =
                         self.build_assignment(&child, HirAssignmentType::Combinational)
                     {
-                        eprintln!("[HIR_IMPL_DEBUG] Assignment built successfully, pushing to assignments vector");
                         assignments.push(assignment);
-                    } else {
-                        eprintln!("[HIR_IMPL_DEBUG] build_assignment returned None!");
                     }
                 }
                 SyntaxKind::LetStmt => {
-                    eprintln!("[HIR_IMPL_DEBUG] Processing LetStmt");
                     // Let bindings in impl blocks are treated as variables with combinational assignments
                     // Handle both simple let and tuple destructuring
                     let let_stmts = self.build_let_statements_from_node(&child);
@@ -1203,31 +1192,26 @@ impl HirBuilderContext {
                 }
                 // Formal verification statements in impl blocks
                 SyntaxKind::AssertStmt => {
-                    eprintln!("[HIR_IMPL_DEBUG] Processing AssertStmt in impl block");
                     if let Some(stmt) = self.build_assert_statement(&child) {
                         statements.push(HirStatement::Assert(stmt));
                     }
                 }
                 SyntaxKind::AssumeStmt => {
-                    eprintln!("[HIR_IMPL_DEBUG] Processing AssumeStmt in impl block");
                     if let Some(stmt) = self.build_assume_macro_statement(&child) {
                         statements.push(HirStatement::Assume(stmt));
                     }
                 }
                 SyntaxKind::CoverStmt => {
-                    eprintln!("[HIR_IMPL_DEBUG] Processing CoverStmt in impl block");
                     if let Some(stmt) = self.build_cover_macro_statement(&child) {
                         statements.push(HirStatement::Cover(stmt));
                     }
                 }
                 SyntaxKind::AssumeMacroStmt => {
-                    eprintln!("[HIR_IMPL_DEBUG] Processing AssumeMacroStmt in impl block");
                     if let Some(stmt) = self.build_assume_macro_statement(&child) {
                         statements.push(HirStatement::Assume(stmt));
                     }
                 }
                 SyntaxKind::CoverMacroStmt => {
-                    eprintln!("[HIR_IMPL_DEBUG] Processing CoverMacroStmt in impl block");
                     if let Some(stmt) = self.build_cover_macro_statement(&child) {
                         statements.push(HirStatement::Cover(stmt));
                     }
@@ -3808,7 +3792,6 @@ impl HirBuilderContext {
                 // Create tuple type with placeholders matching element count
                 // Type inference will refine these later
                 let element_types = vec![HirType::Nat(32); elements.len()];
-                eprintln!("🔍 TUPLE TYPE INFERENCE: TupleLiteral with {} elements -> Nat(32) placeholders", elements.len());
                 HirType::Tuple(element_types)
             } else if let HirExpression::Variable(var_id) = value {
                 // If RHS is a variable, look up its type from the variable_types map
@@ -3847,7 +3830,6 @@ impl HirBuilderContext {
             } else {
                 // Fallback: Create tuple type with Nat(32) placeholders for each element
                 let element_types = vec![HirType::Nat(32); var_names.len()];
-                eprintln!("🔍 TUPLE TYPE INFERENCE: Fallback (expr discriminant {:?}) -> Nat(32) placeholders", std::mem::discriminant(&value));
                 HirType::Tuple(element_types)
             }
         };
@@ -4916,9 +4898,7 @@ impl HirBuilderContext {
                 "[HIR_LITERAL_DEBUG] build_literal_expr: token.kind() = {:?}",
                 token.kind()
             );
-            if let Some(t) = token.as_token() {
-                eprintln!("[HIR_LITERAL_DEBUG] token text = '{}'", t.text());
-            }
+            if let Some(t) = token.as_token() {}
             match token.kind() {
                 SyntaxKind::IntLiteral => {
                     let text = token.as_token().map(|t| t.text())?;
@@ -5026,8 +5006,6 @@ impl HirBuilderContext {
         let name = node
             .first_token_of_kind(SyntaxKind::Ident)
             .map(|t| t.text().to_string())?;
-
-        eprintln!("[HIR_IDENT_DEBUG] build_ident_expr: name='{}'", name);
 
         // Look up symbol FIRST - user-defined symbols (ports, signals, variables) take
         // precedence over builtin functions. This allows users to name ports "min", "max", etc.
@@ -5435,6 +5413,7 @@ impl HirBuilderContext {
     fn build_struct_literal(&mut self, node: &SyntaxNode) -> Option<HirExpression> {
         // The StructLiteral node should have:
         // - A type name token (first Ident)
+        // - Optional generic arguments in ArgList
         // - Multiple StructFieldInit children
 
         // Get the type name - it's the first identifier token in the StructLiteral node
@@ -5444,13 +5423,39 @@ impl HirBuilderContext {
             .find(|t| t.kind() == SyntaxKind::Ident)
             .map(|t| t.text().to_string())?;
 
+        // Parse generic arguments if present (e.g., FpAdd<IEEE754_32> { ... })
+        let mut generic_args = Vec::new();
+        if let Some(arg_list) = node.first_child_of_kind(SyntaxKind::ArgList) {
+            eprintln!(
+                "[HIR_STRUCT_DEBUG] Found ArgList with {} children for struct '{}'",
+                arg_list.children().count(),
+                type_name
+            );
+            for arg_child in arg_list.children() {
+                if arg_child.kind() == SyntaxKind::Arg {
+                    // Find the expression inside the Arg node
+                    if let Some(expr_node) = arg_child.children().next() {
+                        if let Some(expr) = self.build_expression(&expr_node) {
+                            generic_args.push(expr);
+                        }
+                    }
+                } else {
+                    // Sometimes the expression is directly in ArgList
+                    if let Some(expr) = self.build_expression(&arg_child) {
+                        generic_args.push(expr);
+                    }
+                }
+            }
+        }
+
         // Parse field initializations
         let mut fields = Vec::new();
         let all_children: Vec<_> = node.children().collect();
         eprintln!(
-            "[HIR_STRUCT_DEBUG] StructLiteral {} has {} total children",
+            "[HIR_STRUCT_DEBUG] StructLiteral {} has {} total children, {} generic_args",
             type_name,
-            all_children.len()
+            all_children.len(),
+            generic_args.len()
         );
         for (i, child) in all_children.iter().enumerate() {
             eprintln!("  child[{}]: {:?}", i, child.kind());
@@ -5462,9 +5467,10 @@ impl HirBuilderContext {
         }
 
         eprintln!(
-            "[HIR_STRUCT_DEBUG] build_struct_literal: type={}, {} fields",
+            "[HIR_STRUCT_DEBUG] build_struct_literal: type={}, {} fields, {} generic_args",
             type_name,
-            fields.len()
+            fields.len(),
+            generic_args.len()
         );
         for (i, f) in fields.iter().enumerate() {
             eprintln!("  [{}] field: {}", i, f.name);
@@ -5472,6 +5478,7 @@ impl HirBuilderContext {
 
         Some(HirExpression::StructLiteral(HirStructLiteral {
             type_name,
+            generic_args,
             fields,
         }))
     }
@@ -5679,8 +5686,6 @@ impl HirBuilderContext {
 
     /// Build concatenation expression: {a, b, c}
     fn build_concat_expr(&mut self, node: &SyntaxNode) -> Option<HirExpression> {
-        eprintln!("[HIR_CONCAT_DEBUG] build_concat_expr called");
-        eprintln!("[HIR_CONCAT_DEBUG] Node children:");
         for child in node.children() {
             eprintln!("  - {:?}", child.kind());
         }
@@ -5716,7 +5721,6 @@ impl HirBuilderContext {
             expressions.len()
         );
         if expressions.is_empty() {
-            eprintln!("[HIR_CONCAT_DEBUG] No expressions found, returning None");
             None
         } else {
             eprintln!(
@@ -5853,7 +5857,6 @@ impl HirBuilderContext {
             return None;
         }
 
-        eprintln!("[HIR_FIELD_DEBUG] StructFieldInit '{}': SUCCESS", name);
         Some(HirStructFieldInit {
             name,
             value: value.unwrap(),
@@ -6478,7 +6481,6 @@ impl HirBuilderContext {
                         })
                         .map(|t| t.text().to_string());
 
-                    eprintln!("[HIR_FIELD_EXPR_DEBUG] build_field_expr: FieldExpr(.{}) followed by CallExpr - this is a method call, returning None", field_name.unwrap_or_else(|| "?".to_string()));
                     return None;
                 }
             }
@@ -6514,19 +6516,12 @@ impl HirBuilderContext {
         // Parser creates sibling structure: [IdentExpr, FieldExpr] instead of FieldExpr(IdentExpr)
         // Example: "a_col0.0" becomes siblings [IdentExpr(a_col0), FieldExpr(.0)]
         if children.is_empty() {
-            eprintln!("[HIR_FIELD_EXPR_DEBUG] build_field_expr: NO CHILDREN, looking for preceding sibling");
-
             // Find the field name from tokens
             let field_name = node
                 .children_with_tokens()
                 .filter_map(|elem| elem.into_token())
                 .find(|t| t.kind() == SyntaxKind::Ident || t.kind() == SyntaxKind::IntLiteral)
-                .map(|t| t.text().to_string());
-
-            if field_name.is_none() {
-                eprintln!("[HIR_FIELD_EXPR_DEBUG] build_field_expr: NO FIELD NAME, returning None");
-                return None;
-            }
+                .map(|t| t.text().to_string())?;
 
             // Look for a preceding sibling that could be the base
             if let Some(parent) = node.parent() {
@@ -6550,10 +6545,9 @@ impl HirBuilderContext {
                                 | SyntaxKind::ParenExpr
                         ) {
                             if let Some(base_expr) = self.build_expression(prev) {
-                                eprintln!("[HIR_FIELD_EXPR_DEBUG] build_field_expr: SUCCESS with sibling base, field='{}'", field_name.as_ref().unwrap());
                                 return Some(HirExpression::FieldAccess {
                                     base: Box::new(base_expr),
-                                    field: field_name.unwrap(),
+                                    field: field_name.clone(),
                                 });
                             }
                         }
@@ -6561,7 +6555,6 @@ impl HirBuilderContext {
                 }
             }
 
-            eprintln!("[HIR_FIELD_EXPR_DEBUG] build_field_expr: NO VALID PRECEDING SIBLING, returning None");
             return None;
         }
 
@@ -6569,12 +6562,7 @@ impl HirBuilderContext {
             "[HIR_FIELD_EXPR_DEBUG] build_field_expr: child[0] kind = {:?}",
             children[0].kind()
         );
-        let base_expr = self.build_expression(&children[0]);
-        if base_expr.is_none() {
-            eprintln!("[HIR_FIELD_EXPR_DEBUG] build_field_expr: BASE EXPRESSION BUILD FAILED, returning None");
-            return None;
-        }
-        let base = Box::new(base_expr.unwrap());
+        let base = Box::new(self.build_expression(&children[0])?);
 
         // Find the field name (identifier for struct fields, or numeric literal for tuple indices)
         let all_tokens: Vec<_> = node
@@ -9537,7 +9525,6 @@ impl HirBuilderContext {
                 .map(|t| (t.kind(), t.text()))
                 .collect::<Vec<_>>()
         );
-        eprintln!("🔍 [ATTR] has_safety_mechanism = {}", has_safety_mechanism);
 
         if !has_safety_mechanism {
             return None;
@@ -9668,7 +9655,6 @@ impl HirBuilderContext {
             mechanism_type, dc, lc
         );
         if mechanism_type.is_some() || dc.is_some() || lc.is_some() {
-            eprintln!("🔍 [ATTR] ✅ Returning SafetyMechanismConfig");
             Some(SafetyMechanismConfig {
                 mechanism_type,
                 dc,
@@ -10454,6 +10440,48 @@ impl HirBuilderContext {
                 SyntaxKind::IdentType | SyntaxKind::CustomType => {
                     if let Some(name) = child.first_token_of_kind(SyntaxKind::Ident) {
                         let type_name = name.text().to_string();
+
+                        // Check for generic type arguments (e.g., fp<F>, vec<T, N>)
+                        if let Some(arg_list) = child.first_child_of_kind(SyntaxKind::ArgList) {
+                            // This is a parametric type with generic arguments
+                            eprintln!(
+                                "[TYPE_PARAMETRIC] Found parametric type '{}' with ArgList",
+                                type_name
+                            );
+
+                            // Special case: fp<F> for floating-point types
+                            if type_name == "fp" {
+                                // Extract the format expression from the first argument
+                                for arg_child in arg_list.children() {
+                                    if arg_child.kind() == SyntaxKind::Arg {
+                                        if let Some(expr_node) = arg_child.children().next() {
+                                            if let Some(expr) = self.build_expression(&expr_node) {
+                                                eprintln!(
+                                                    "[TYPE_PARAMETRIC] fp<...> format expr: {:?}",
+                                                    expr
+                                                );
+                                                return HirType::FpParametric {
+                                                    format: Box::new(expr),
+                                                };
+                                            }
+                                        }
+                                    } else if let Some(expr) = self.build_expression(&arg_child) {
+                                        // Direct expression without Arg wrapper
+                                        eprintln!(
+                                            "[TYPE_PARAMETRIC] fp<...> direct format expr: {:?}",
+                                            expr
+                                        );
+                                        return HirType::FpParametric {
+                                            format: Box::new(expr),
+                                        };
+                                    }
+                                }
+                            }
+
+                            // TODO: Handle other parametric types (vec, fixed, etc.)
+                            // For now, fall through to Custom type handling
+                        }
+
                         // Check if this is a user-defined type (struct, enum, union, distinct) FIRST
                         // This allows stdlib-defined distinct types like fp32 to take precedence
                         println!(
@@ -10468,8 +10496,17 @@ impl HirBuilderContext {
                             );
                             return user_type.clone();
                         }
-                        // All named types (including fp16, fp32, fp64) resolve to Custom(name)
-                        // Trait-based operator resolution handles FP operations via stdlib
+
+                        // Fallback for fp16, fp32, fp64 when stdlib isn't loaded
+                        // With stdlib, these are distinct types in user_types; without, use primitives
+                        match type_name.as_str() {
+                            "fp16" => return HirType::Float16,
+                            "fp32" => return HirType::Float32,
+                            "fp64" => return HirType::Float64,
+                            _ => {}
+                        }
+
+                        // All other named types resolve to Custom(name)
                         return HirType::Custom(type_name);
                     }
                 }
@@ -10898,13 +10935,17 @@ impl HirBuilderContext {
     fn find_initial_value_expr(&mut self, node: &SyntaxNode) -> Option<HirExpression> {
         // Look for expression after '=' in the node's children_with_tokens
         let mut found_assign = false;
+        let mut expr_nodes: Vec<SyntaxNode> = Vec::new();
 
         // Iterate through all children and tokens
         for elem in node.children_with_tokens() {
             if found_assign {
-                // We've found the '=' token, now look for the expression node
+                // We've found the '=' token, collect all expression nodes after it
                 if let Some(child_node) = elem.as_node() {
-                    return self.build_expression(child_node);
+                    // Skip type annotation nodes
+                    if child_node.kind() != SyntaxKind::TypeAnnotation {
+                        expr_nodes.push(child_node.clone());
+                    }
                 }
             }
             // Check if this element is the '=' token
@@ -10914,7 +10955,51 @@ impl HirBuilderContext {
                 }
             }
         }
-        None
+
+        // Handle sibling expression nodes (e.g., F.total_bits → [IdentExpr("F"), FieldExpr(".total_bits")])
+        if expr_nodes.is_empty() {
+            return None;
+        }
+
+        if expr_nodes.len() == 1 {
+            // Single expression node - build normally
+            return self.build_expression(&expr_nodes[0]);
+        }
+
+        // Multiple nodes - check for IdentExpr + FieldExpr pattern (field access)
+        if expr_nodes.len() >= 2
+            && expr_nodes[0].kind() == SyntaxKind::IdentExpr
+            && expr_nodes[1].kind() == SyntaxKind::FieldExpr
+        {
+            // Build chained field access
+            let base = self.build_expression(&expr_nodes[0])?;
+            let mut result = base;
+
+            for node in expr_nodes.iter().skip(1) {
+                if node.kind() == SyntaxKind::FieldExpr {
+                    // Extract field name from FieldExpr
+                    let field_name = node
+                        .children_with_tokens()
+                        .filter_map(|e| e.into_token())
+                        .find(|t| {
+                            t.kind() == SyntaxKind::Ident || t.kind() == SyntaxKind::IntLiteral
+                        })
+                        .map(|t| t.text().to_string())?;
+
+                    result = HirExpression::FieldAccess {
+                        base: Box::new(result),
+                        field: field_name,
+                    };
+                } else {
+                    break;
+                }
+            }
+
+            return Some(result);
+        }
+
+        // Fallback: build chained expression
+        self.build_chained_rhs_expression(&expr_nodes)
     }
 
     /// Determine assignment type from operator
@@ -11395,7 +11480,6 @@ impl HirBuilderContext {
 
     /// Build trait implementation
     fn build_trait_impl(&mut self, node: &SyntaxNode) -> Option<HirTraitImplementation> {
-        eprintln!("[TRAIT_IMPL_DEBUG] Building trait implementation from node");
         // Extract trait name from first identifier
         let ident_tokens: Vec<_> = node
             .children_with_tokens()
@@ -11408,7 +11492,6 @@ impl HirBuilderContext {
         }
 
         let trait_name = ident_tokens[0].text().to_string();
-        eprintln!("[TRAIT_IMPL_DEBUG] trait_name = {}", trait_name);
 
         // Find the target type (comes after 'for' keyword, now as TypeAnnotation)
         let target = if let Some(type_node) = node.first_child_of_kind(SyntaxKind::TypeAnnotation) {
@@ -11416,7 +11499,6 @@ impl HirBuilderContext {
             // BUG FIX: Use extract_hir_type which handles all type variants (nat, int, bit, etc.)
             // build_hir_type only handles a subset and falls through to Bit(8) as default
             let target_type = self.extract_hir_type(&type_node);
-            eprintln!("[TRAIT_IMPL_DEBUG] target_type = {:?}", target_type);
             TraitImplTarget::Type(target_type)
         } else if ident_tokens.len() >= 2 {
             // Old format: try parsing as entity name for backward compatibility

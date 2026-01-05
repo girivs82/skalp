@@ -395,7 +395,6 @@ impl<'a> MetalShaderGenerator<'a> {
                                             driver_node_id, node_output.signal_id, source_width
                                         );
                                         let both_wide = output_width > 128 && source_width > 128;
-                                        eprintln!("🔍 [BUG #87] both_wide = {} (output_width={} > 128 && source_width={} > 128)", both_wide, output_width, source_width);
 
                                         if both_wide {
                                             // Both are wide bit types - use element-wise copy
@@ -3028,15 +3027,6 @@ impl<'a> MetalShaderGenerator<'a> {
                     let source_width = self.get_signal_width_from_sir(sir, signal);
                     let output_width = self.get_signal_width_from_sir(sir, output);
                     let is_wide_bits = source_width > 128 && output_width > 128;
-
-                    // Debug: log widths for problematic signals
-                    if output.contains("node")
-                        || output.contains("fu_result")
-                        || output.contains("computed")
-                    {
-                        eprintln!("🔍 SignalRef: {} <- {} | source_width={}, output_width={}, is_array={}, is_wide_bits={}",
-                                  output, signal, source_width, output_width, is_array, is_wide_bits);
-                    }
 
                     if is_array {
                         // Get array size for loop
