@@ -4951,6 +4951,15 @@ impl<'hir> HirToMir<'hir> {
                 // These return boolean constants based on the intent parameter
                 // For now, we default to latency-optimized behavior
                 // Booleans are represented as 1-bit values in hardware
+                // EXPLICIT TRAIT METHOD CALLS: Disabled due to module ID issues
+                // TODO: Re-enable once module ID management bug is fixed
+                // When trait implementations create entity instances, the module ID mapping gets
+                // corrupted during monomorphization.
+                //
+                // if call.function.contains("::") && call.args.len() == 1 {
+                //     ... trait method inlining code ...
+                // }
+
                 match call.function.as_str() {
                     "is_latency_optimized" => {
                         eprintln!(
@@ -13379,6 +13388,117 @@ impl<'hir> HirToMir<'hir> {
         result
     }
 
+    /// Inline a unary trait method call (e.g., Sqrt::sqrt(x))
+    ///
+    /// Similar to inline_trait_method but for single-argument trait methods like Sqrt, Abs, Neg.
+    /// This enables explicit trait method calls like `Sqrt::sqrt(x)` in the source code.
+    fn inline_trait_method_unary(
+        &mut self,
+        type_name: &str,
+        trait_name: &str,
+        method_name: &str,
+        arg_expr: &hir::HirExpression,
+    ) -> Option<Expression> {
+        println!(
+            "[TRAIT_INLINE_UNARY] Inlining {}::{} for type '{}'",
+            trait_name, method_name, type_name
+        );
+
+        // Get the method definition (parameters) from the trait
+        let method_def = self.find_trait_method_definition(trait_name, method_name);
+        if method_def.is_none() {
+            println!(
+                "[TRAIT_INLINE_UNARY] FAILED: Could not find method definition for {}::{}",
+                trait_name, method_name
+            );
+            return None;
+        }
+        let method_def = method_def.unwrap();
+        let params = method_def.parameters.clone();
+
+        // Get the method implementation (body) from the impl
+        let trait_impl = self.find_trait_impl(type_name, trait_name);
+        if trait_impl.is_none() {
+            println!(
+                "[TRAIT_INLINE_UNARY] FAILED: Could not find trait impl for {} on {}",
+                trait_name, type_name
+            );
+            return None;
+        }
+        let trait_impl = trait_impl.unwrap();
+        let method_impl = trait_impl
+            .method_implementations
+            .iter()
+            .find(|m| m.name == method_name);
+        if method_impl.is_none() {
+            println!(
+                "[TRAIT_INLINE_UNARY] FAILED: Could not find method impl '{}' in trait impl",
+                method_name
+            );
+            return None;
+        }
+        let method_impl = method_impl.unwrap();
+        let body = method_impl.body.clone();
+
+        if body.is_empty() {
+            println!("[TRAIT_INLINE_UNARY] FAILED: Method body is empty, cannot inline");
+            return None;
+        }
+
+        println!(
+            "[TRAIT_INLINE_UNARY] Found {} parameters and {} body statements",
+            params.len(),
+            body.len()
+        );
+
+        // Build parameter substitution map
+        // For unary methods: param[0] = arg
+        let mut param_map: HashMap<String, &hir::HirExpression> = HashMap::new();
+        if !params.is_empty() {
+            param_map.insert(params[0].name.clone(), arg_expr);
+        }
+
+        // Build var_id -> name mapping for let bindings in the body
+        let mut var_id_to_name: HashMap<hir::VariableId, String> = HashMap::new();
+        self.collect_let_bindings(&body, &mut var_id_to_name);
+
+        // Convert body to expression (like inline_function_call does)
+        let body_expr = self.convert_body_to_expression(&body);
+        if body_expr.is_none() {
+            println!("[TRAIT_INLINE_UNARY] FAILED: convert_body_to_expression returned None");
+            return None;
+        }
+        let body_expr = body_expr.unwrap();
+
+        println!(
+            "[TRAIT_INLINE_UNARY] Body expression type: {:?}",
+            std::mem::discriminant(&body_expr)
+        );
+
+        // Substitute parameters in the body expression
+        let substituted =
+            self.substitute_expression_with_var_map(&body_expr, &param_map, &var_id_to_name);
+        if substituted.is_none() {
+            println!(
+                "[TRAIT_INLINE_UNARY] FAILED: substitute_expression_with_var_map returned None"
+            );
+            return None;
+        }
+        let substituted = substituted.unwrap();
+
+        println!(
+            "[TRAIT_INLINE_UNARY] Substituted expression type: {:?}",
+            std::mem::discriminant(&substituted)
+        );
+
+        // Convert the substituted expression to MIR
+        let result = self.convert_expression(&substituted, 0);
+        if result.is_none() {
+            println!("[TRAIT_INLINE_UNARY] FAILED: convert_expression returned None");
+        }
+        result
+    }
+
     /// Find a trait implementation for a given type and trait name
     ///
     /// This is used for trait-based operator resolution. When `a + b` is encountered
@@ -13715,6 +13835,14 @@ impl<'hir> HirToMir<'hir> {
                             // Found the type alias - recursively convert its target type
                             // This handles nested type aliases correctly
                             return self.convert_type(&type_alias.target_type);
+                        }
+                    }
+
+                    // Check distinct types (newtype pattern like fp32 = bit[32])
+                    for distinct_type in &hir.distinct_types {
+                        if distinct_type.name == *name {
+                            // Found the distinct type - convert its base type
+                            return self.convert_type(&distinct_type.base_type);
                         }
                     }
                 }

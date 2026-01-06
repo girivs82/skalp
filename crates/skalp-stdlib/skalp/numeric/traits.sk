@@ -32,6 +32,16 @@ pub trait Neg {
     fn neg(a: Self) -> Self;
 }
 
+/// Square root trait: sqrt(a)
+pub trait Sqrt {
+    fn sqrt(a: Self) -> Self;
+}
+
+/// Absolute value trait: abs(a)
+pub trait Abs {
+    fn abs(a: Self) -> Self;
+}
+
 // ============================================================================
 // Comparison Traits
 // ============================================================================

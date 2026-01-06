@@ -1,7 +1,10 @@
 // Test fixture for fp32 sqrt operation
 // Tests basic square root computation using FP hardware
 
-use skalp::numeric::fp::*;
+// Import fp32 type and fp module to get arithmetic trait implementations
+use skalp::numeric::formats::{fp32};
+use skalp::numeric::fp::*;  // Import all from fp.sk to get trait implementations
+use skalp::numeric::cordic::CordicSqrt;
 
 entity FpSqrtSimple {
     in x: fp32
@@ -9,6 +12,11 @@ entity FpSqrtSimple {
 }
 
 impl FpSqrtSimple {
-    // Direct sqrt call - uses fp32 sqrt intrinsic
-    result = sqrt(x)
+    // Directly instantiate CordicSqrt entity
+    signal sqrt_result: fp32
+    let sqrt_op = CordicSqrt {
+        value: x,
+        result: sqrt_result
+    }
+    result = sqrt_result
 }

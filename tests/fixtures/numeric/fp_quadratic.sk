@@ -1,6 +1,9 @@
 // Test fixture for quadratic formula using fp32
 // Tests: x = (-b + sqrt(b^2 - 4ac)) / (2a)
 
+use skalp::numeric::fp::*;
+use skalp::numeric::cordic::CordicSqrt;
+
 entity FpQuadratic {
     in a: fp32
     in b: fp32
@@ -15,8 +18,14 @@ impl FpQuadratic {
     signal four_ac: fp32 = 4.0fp32 * a * c
     discriminant = b_squared - four_ac
 
+    // Directly instantiate CordicSqrt entity
+    signal sqrt_disc: fp32
+    let sqrt_op = CordicSqrt {
+        value: discriminant,
+        result: sqrt_disc
+    }
+
     // (-b + sqrt(discriminant)) / (2a)
-    signal sqrt_disc: fp32 = sqrt(discriminant)
     signal neg_b: fp32 = -b
     signal numerator: fp32 = neg_b + sqrt_disc
     signal two_a: fp32 = 2.0fp32 * a

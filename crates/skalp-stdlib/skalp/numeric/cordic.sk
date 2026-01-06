@@ -711,14 +711,5 @@ pub fn atan2(y: fp32, x: fp32) -> fp32 {
     ang
 }
 
-/// Compute sqrt using CORDIC
-pub fn cordic_sqrt(x: fp32) -> fp32 {
-    signal res: fp32
-
-    let sqrt = CordicSqrt {
-        value: x,
-        result: res
-    }
-
-    res
-}
+// Note: sqrt is now accessed via the Sqrt trait in fp.sk
+// Use: Sqrt::sqrt(x) or x.sqrt() for fp32/fp64/fp16 types

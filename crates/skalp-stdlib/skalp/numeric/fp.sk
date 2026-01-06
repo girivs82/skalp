@@ -7,8 +7,8 @@
 // - Exception flags (invalid, overflow, underflow, inexact)
 
 use skalp::numeric::formats::{FloatFormat, fp16, fp32, fp64, bf16, IEEE754_16, IEEE754_32, IEEE754_64, BFLOAT16};
-use skalp::numeric::traits::{Add, Sub, Mul, Div, Neg, PartialOrd, PartialEq};
-use skalp::numeric::cordic::{CordicSqrt, cordic_sqrt};
+use skalp::numeric::traits::{Add, Sub, Mul, Div, Neg, Sqrt, Abs, PartialOrd, PartialEq};
+use skalp::numeric::cordic::CordicSqrt;
 
 // ============================================================================
 // Type Definitions
@@ -16,9 +16,6 @@ use skalp::numeric::cordic::{CordicSqrt, cordic_sqrt};
 
 /// Generic floating-point type parameterized by format
 pub type fp<const F: FloatFormat> = bit[F.total_bits];
-
-// Re-export fp types from formats module for convenience
-// (fp16, fp32, fp64, bf16 are imported from formats.sk above)
 
 // ============================================================================
 // Addition
@@ -687,30 +684,6 @@ impl FpNeg<const F: FloatFormat> {
 }
 
 // ============================================================================
-// Convenient fp32 Function Wrappers
-// ============================================================================
-
-/// Absolute value of fp32: abs(x) = |x|
-pub fn abs(x: fp32) -> fp32 {
-    signal res: fp32
-    let op = FpAbs<IEEE754_SINGLE> {
-        x: x,
-        result: res
-    }
-    res
-}
-
-/// Square root of fp32 using CORDIC: sqrt(x)
-pub fn sqrt(x: fp32) -> fp32 {
-    signal res: fp32
-    let op = CordicSqrt {
-        value: x,
-        result: res
-    }
-    res
-}
-
-// ============================================================================
 // Trait Implementations for fp32
 // ============================================================================
 
@@ -785,6 +758,35 @@ impl Neg for fp32 {
         result
     }
 }
+
+// TODO: Sqrt and Abs trait implementations temporarily disabled due to module ID issue
+// when trait methods contain entity instances. Use sqrt() and abs() free functions instead.
+// Bug: When trait implementations create entity instances, the module ID mapping gets corrupted
+// during monomorphization, causing incorrect module references in the generated code.
+
+// /// Square root for fp32: sqrt(a) using CORDIC
+// impl Sqrt for fp32 {
+//     fn sqrt(a: Self) -> Self {
+//         signal result: fp32;
+//         let sqrt_op = CordicSqrt {
+//             value: a,
+//             result: result
+//         };
+//         result
+//     }
+// }
+
+// /// Absolute value for fp32: abs(a) = |a|
+// impl Abs for fp32 {
+//     fn abs(a: Self) -> Self {
+//         signal result: fp32;
+//         let abs_op = FpAbs<IEEE754_32> {
+//             x: a as fp<IEEE754_32>,
+//             result: result as fp<IEEE754_32>
+//         };
+//         result
+//     }
+// }
 
 /// Partial ordering for fp32: comparison operations
 impl PartialOrd for fp32 {
@@ -964,6 +966,32 @@ impl Neg for fp64 {
     }
 }
 
+// /// Square root for fp64: sqrt(a) using FpSqrt entity
+// impl Sqrt for fp64 {
+//     fn sqrt(a: Self) -> Self {
+//         signal result: fp64;
+//         signal flags: bit[5];
+//         let sqrt_op = FpSqrt<IEEE754_64> {
+//             x: a as fp<IEEE754_64>,
+//             result: result as fp<IEEE754_64>,
+//             flags: flags
+//         };
+//         result
+//     }
+// }
+
+// /// Absolute value for fp64: abs(a) = |a|
+// impl Abs for fp64 {
+//     fn abs(a: Self) -> Self {
+//         signal result: fp64;
+//         let abs_op = FpAbs<IEEE754_64> {
+//             x: a as fp<IEEE754_64>,
+//             result: result as fp<IEEE754_64>
+//         };
+//         result
+//     }
+// }
+
 // ============================================================================
 // Trait Implementations for fp16
 // ============================================================================
@@ -1039,3 +1067,60 @@ impl Neg for fp16 {
         result
     }
 }
+
+// /// Square root for fp16: sqrt(a) using FpSqrt entity
+// impl Sqrt for fp16 {
+//     fn sqrt(a: Self) -> Self {
+//         signal result: fp16;
+//         signal flags: bit[5];
+//         let sqrt_op = FpSqrt<IEEE754_16> {
+//             x: a as fp<IEEE754_16>,
+//             result: result as fp<IEEE754_16>,
+//             flags: flags
+//         };
+//         result
+//     }
+// }
+
+// /// Absolute value for fp16: abs(a) = |a|
+// impl Abs for fp16 {
+//     fn abs(a: Self) -> Self {
+//         signal result: fp16;
+//         let abs_op = FpAbs<IEEE754_16> {
+//             x: a as fp<IEEE754_16>,
+//             result: result as fp<IEEE754_16>
+//         };
+//         result
+//     }
+// }
+
+// ============================================================================
+// Convenience Functions (wrappers around trait methods)
+// ============================================================================
+// These exist for backward compatibility and because explicit trait method
+// calls (Sqrt::sqrt(x)) are not yet fully supported by the compiler.
+//
+// TODO: These functions cause module ID issues when imported via "use fp::*"
+// because entity instances inside functions are processed during monomorphization
+// and can corrupt the module ID mapping. For now, users should directly instantiate
+// CordicSqrt or FpAbs entities in their code.
+
+// /// Square root for fp32 (convenience wrapper)
+// pub fn sqrt(x: fp32) -> fp32 {
+//     signal result: fp32;
+//     let sqrt_op = CordicSqrt {
+//         value: x,
+//         result: result
+//     };
+//     result
+// }
+
+// /// Absolute value for fp32 (convenience wrapper)
+// pub fn abs(x: fp32) -> fp32 {
+//     signal result: fp32;
+//     let abs_op = FpAbs<IEEE754_32> {
+//         x: x as fp<IEEE754_32>,
+//         result: result as fp<IEEE754_32>
+//     };
+//     result
+// }

@@ -2,6 +2,7 @@
 // Tests: distance = sqrt(dx^2 + dy^2)
 
 use skalp::numeric::fp::*;
+use skalp::numeric::cordic::CordicSqrt;
 
 entity FpDistance {
     in x1: fp32
@@ -17,5 +18,12 @@ impl FpDistance {
     signal dx_sq: fp32 = dx * dx
     signal dy_sq: fp32 = dy * dy
     signal sum_sq: fp32 = dx_sq + dy_sq
-    distance = sqrt(sum_sq)
+
+    // Directly instantiate CordicSqrt entity
+    signal sqrt_result: fp32
+    let sqrt_op = CordicSqrt {
+        value: sum_sq,
+        result: sqrt_result
+    }
+    distance = sqrt_result
 }

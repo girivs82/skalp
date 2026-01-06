@@ -737,11 +737,43 @@ fn merge_symbol(target: &mut Hir, source: &Hir, symbol_name: &str) -> Result<()>
             .iter()
             .find(|i| i.entity == old_entity_id)
         {
+            // BUG FIX: Also import dependency entities referenced in instances
+            // This ensures sub-entities (like CordicHyperbolicIteration in CordicSqrt) are available
+            for instance in &impl_block.instances {
+                // Find the entity referenced by this instance
+                if let Some(dep_entity) = source.entities.iter().find(|e| e.id == instance.entity) {
+                    // Check if this entity is already in target
+                    let already_imported =
+                        target.entities.iter().any(|e| e.name == dep_entity.name);
+                    if !already_imported {
+                        eprintln!(
+                            "[MERGE_DEPENDENCY] Recursively importing dependency entity '{}' for '{}'",
+                            dep_entity.name, symbol_name
+                        );
+                        // Recursively import the dependency entity
+                        merge_symbol(target, source, &dep_entity.name)?;
+                    }
+                }
+            }
+
             let mut imported_impl = impl_block.clone();
             // Update implementation to point to the new entity ID
             imported_impl.entity = new_entity_id;
             // BUG #33 FIX: Remap port IDs in all assignments
             imported_impl = remap_impl_ports(imported_impl, &port_id_map);
+
+            // After recursively importing dependencies, update instance entity IDs to new IDs
+            for instance in &mut imported_impl.instances {
+                // Find the new entity ID by name
+                if let Some(dep_entity) = source.entities.iter().find(|e| e.id == instance.entity) {
+                    if let Some(new_dep_entity) =
+                        target.entities.iter().find(|e| e.name == dep_entity.name)
+                    {
+                        instance.entity = new_dep_entity.id;
+                    }
+                }
+            }
+
             target.implementations.push(imported_impl);
         }
 
