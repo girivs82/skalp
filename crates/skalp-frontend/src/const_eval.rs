@@ -148,6 +148,8 @@ pub enum EvalError {
     RecursionLimitExceeded,
     /// Non-const function cannot be evaluated at compile time
     NonConstFunction(String),
+    /// Arithmetic overflow
+    Overflow(String),
 }
 
 impl ConstEvaluator {
@@ -568,8 +570,14 @@ impl ConstEvaluator {
 
         match bin.op {
             HirBinaryOp::Add => match (left, right) {
-                (ConstValue::Nat(a), ConstValue::Nat(b)) => Ok(ConstValue::Nat(a + b)),
-                (ConstValue::Int(a), ConstValue::Int(b)) => Ok(ConstValue::Int(a + b)),
+                (ConstValue::Nat(a), ConstValue::Nat(b)) => a
+                    .checked_add(b)
+                    .map(ConstValue::Nat)
+                    .ok_or_else(|| EvalError::Overflow("Nat addition overflow".to_string())),
+                (ConstValue::Int(a), ConstValue::Int(b)) => a
+                    .checked_add(b)
+                    .map(ConstValue::Int)
+                    .ok_or_else(|| EvalError::Overflow("Int addition overflow".to_string())),
                 (ConstValue::Float(a), ConstValue::Float(b)) => Ok(ConstValue::Float(a + b)),
                 _ => Err(EvalError::TypeMismatch(
                     "Cannot add these types".to_string(),
@@ -589,8 +597,14 @@ impl ConstEvaluator {
             },
 
             HirBinaryOp::Mul => match (left, right) {
-                (ConstValue::Nat(a), ConstValue::Nat(b)) => Ok(ConstValue::Nat(a * b)),
-                (ConstValue::Int(a), ConstValue::Int(b)) => Ok(ConstValue::Int(a * b)),
+                (ConstValue::Nat(a), ConstValue::Nat(b)) => a
+                    .checked_mul(b)
+                    .map(ConstValue::Nat)
+                    .ok_or_else(|| EvalError::Overflow("Nat multiplication overflow".to_string())),
+                (ConstValue::Int(a), ConstValue::Int(b)) => a
+                    .checked_mul(b)
+                    .map(ConstValue::Int)
+                    .ok_or_else(|| EvalError::Overflow("Int multiplication overflow".to_string())),
                 (ConstValue::Float(a), ConstValue::Float(b)) => Ok(ConstValue::Float(a * b)),
                 _ => Err(EvalError::TypeMismatch(
                     "Cannot multiply these types".to_string(),
@@ -670,16 +684,45 @@ impl ConstEvaluator {
             },
 
             HirBinaryOp::LeftShift => match (left, right) {
-                (ConstValue::Nat(a), ConstValue::Nat(b)) => Ok(ConstValue::Nat(a << b)),
-                (ConstValue::Int(a), ConstValue::Nat(b)) => Ok(ConstValue::Int(a << b)),
+                (ConstValue::Nat(a), ConstValue::Nat(b)) => {
+                    if b >= usize::BITS as usize {
+                        Ok(ConstValue::Nat(0)) // Shift beyond width yields 0
+                    } else {
+                        a.checked_shl(b as u32).map(ConstValue::Nat).ok_or_else(|| {
+                            EvalError::Overflow("Nat left shift overflow".to_string())
+                        })
+                    }
+                }
+                (ConstValue::Int(a), ConstValue::Nat(b)) => {
+                    if b >= 64 {
+                        Ok(ConstValue::Int(0)) // Shift beyond width yields 0
+                    } else {
+                        a.checked_shl(b as u32).map(ConstValue::Int).ok_or_else(|| {
+                            EvalError::Overflow("Int left shift overflow".to_string())
+                        })
+                    }
+                }
                 _ => Err(EvalError::TypeMismatch(
                     "Cannot shift these types".to_string(),
                 )),
             },
 
             HirBinaryOp::RightShift => match (left, right) {
-                (ConstValue::Nat(a), ConstValue::Nat(b)) => Ok(ConstValue::Nat(a >> b)),
-                (ConstValue::Int(a), ConstValue::Nat(b)) => Ok(ConstValue::Int(a >> b)),
+                (ConstValue::Nat(a), ConstValue::Nat(b)) => {
+                    if b >= usize::BITS as usize {
+                        Ok(ConstValue::Nat(0)) // Shift beyond width yields 0
+                    } else {
+                        Ok(ConstValue::Nat(a >> b))
+                    }
+                }
+                (ConstValue::Int(a), ConstValue::Nat(b)) => {
+                    if b >= 64 {
+                        // For signed right shift, propagate sign bit
+                        Ok(ConstValue::Int(if a < 0 { -1 } else { 0 }))
+                    } else {
+                        Ok(ConstValue::Int(a >> b))
+                    }
+                }
                 _ => Err(EvalError::TypeMismatch(
                     "Cannot shift these types".to_string(),
                 )),
