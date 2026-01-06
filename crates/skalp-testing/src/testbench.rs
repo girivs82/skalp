@@ -201,11 +201,67 @@ impl Testbench {
             );
         }
 
-        // Prefer modules with instances (parent modules) over leaf modules
-        let top_module = uninstantiated
-            .iter()
-            .max_by_key(|m| m.instances.len())
-            .unwrap();
+        // Get the source file basename for matching
+        let source_basename = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .map(|s| s.to_string());
+
+        // BUG #180 FIX: Improved top module selection
+        // Priority order:
+        // 1. Module whose name matches the source file basename
+        // 2. Module that is NOT a trait specialization (no _fp32/_fp64/_fp16 suffix)
+        // 3. Module with the most instances (original logic)
+        let top_module = if let Some(ref basename) = source_basename {
+            // Convert basename to PascalCase for matching (e.g., "fp_sqrt_simple" -> "FpSqrtSimple")
+            let pascal_basename: String = basename
+                .split('_')
+                .map(|s| {
+                    let mut chars: Vec<char> = s.chars().collect();
+                    if !chars.is_empty() {
+                        chars[0] = chars[0].to_ascii_uppercase();
+                    }
+                    chars.into_iter().collect::<String>()
+                })
+                .collect();
+
+            // Try to find exact match first
+            if let Some(m) = uninstantiated.iter().find(|m| m.name == pascal_basename) {
+                eprintln!("  ✓ Found module matching source file name: '{}'", m.name);
+                *m
+            } else {
+                // Filter out trait specializations (modules with _fp32, _fp64, _fp16 suffixes)
+                let non_specialized: Vec<_> = uninstantiated
+                    .iter()
+                    .filter(|m| {
+                        !m.name.ends_with("_fp32")
+                            && !m.name.ends_with("_fp64")
+                            && !m.name.ends_with("_fp16")
+                    })
+                    .collect();
+
+                if !non_specialized.is_empty() {
+                    // Prefer non-specialized modules with the most instances
+                    non_specialized
+                        .iter()
+                        .max_by_key(|m| m.instances.len())
+                        .map(|m| **m)
+                        .unwrap()
+                } else {
+                    // Fallback to original logic
+                    *uninstantiated
+                        .iter()
+                        .max_by_key(|m| m.instances.len())
+                        .unwrap()
+                }
+            }
+        } else {
+            // No source basename - use original logic
+            *uninstantiated
+                .iter()
+                .max_by_key(|m| m.instances.len())
+                .unwrap()
+        };
 
         eprintln!(
             "✅ Selected top module: '{}' ({} instances)",

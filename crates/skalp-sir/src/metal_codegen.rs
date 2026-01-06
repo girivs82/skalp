@@ -526,6 +526,21 @@ impl<'a> MetalShaderGenerator<'a> {
                                             ));
                                             self.indent -= 1;
                                             self.write_indented("}\n");
+                                        } else if source_width > 32
+                                            && source_width <= 128
+                                            && output_width <= 32
+                                        {
+                                            // BUG FIX #179: Vector to scalar - extract .x component
+                                            // Source is uint2/uint4 (33-128 bits), destination is uint (<=32 bits)
+                                            self.write_indented(&format!(
+                                                "// Vector to scalar: extract .x from {}-bit source to {}-bit output\n",
+                                                source_width, output_width
+                                            ));
+                                            self.write_indented(&format!(
+                                                "signals->{} = signals->{}.x;\n",
+                                                self.sanitize_name(&output.name),
+                                                self.sanitize_name(&node_output.signal_id)
+                                            ));
                                         } else {
                                             // Both scalar - check for type reinterpretation
                                             // BUG FIX #62: Check if source and dest have different types (float <-> bits)

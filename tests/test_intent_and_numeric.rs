@@ -175,9 +175,7 @@ async fn test_fp32_comparison_equal() {
 // ============================================================================
 
 /// Test FP32 sqrt with perfect squares
-/// IGNORED: Infinite recursion in entity elaboration when trait implementations
-/// instantiate entities. The fp32 arithmetic inside CordicSqrt uses FpAdd/FpSub
-/// entities via traits, but elaboration incorrectly creates circular instances.
+/// IGNORED: BUG #181 - fp32/uint4 type mismatch in nested mux operations
 #[tokio::test]
 #[ignore]
 async fn test_fp32_sqrt_perfect_squares() {
