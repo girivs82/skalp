@@ -102,13 +102,18 @@ impl ModuleResolver {
             }
         }
 
-        // Add standard library path if it exists
-        if let Ok(stdlib_path) = std::env::var("SKALP_STDLIB_PATH") {
+        // Add standard library path(s) if they exist
+        // Supports colon-separated paths (e.g., "/path1:/path2")
+        if let Ok(stdlib_paths) = std::env::var("SKALP_STDLIB_PATH") {
             eprintln!(
                 "[MODULE_RESOLVER] Using SKALP_STDLIB_PATH from environment: {:?}",
-                stdlib_path
+                stdlib_paths
             );
-            search_paths.push(PathBuf::from(stdlib_path));
+            for path_str in stdlib_paths.split(':') {
+                if !path_str.is_empty() {
+                    search_paths.push(PathBuf::from(path_str));
+                }
+            }
         } else {
             // Default stdlib location relative to root
             let default_stdlib = root_dir.join("stdlib");
