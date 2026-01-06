@@ -817,14 +817,6 @@ pub enum UnaryOp {
     BitwiseNot,
     Negate,
     Reduce(ReduceOp),
-    /// Floating-point square root (compiler intrinsic)
-    /// Equivalent to SIR's FSqrt operation
-    /// Example: result = sqrt(value) where value is fp16/fp32
-    FSqrt,
-    /// BUG FIX #102: Floating-point negation
-    /// This is used when negating a floating-point value (after cast to fp32/fp16)
-    /// Distinct from Negate which is for integer/bitwise negation
-    FNegate,
 }
 
 /// Reduction operators

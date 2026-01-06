@@ -1317,43 +1317,9 @@ impl MirToLirTransform {
                 1,
             ),
             UnaryOp::Reduce(_) => {
-                // Other reductions (Nand, Nor, Xnor) - treat as unsupported for now
+                // Reductions are handled specially above - this is for unsupported reduction ops
                 self.warnings
                     .push(format!("Unsupported reduction op: {:?}", op));
-                (
-                    LirOp::Buffer {
-                        width: operand_width,
-                    },
-                    operand_width,
-                )
-            }
-            UnaryOp::FNegate => {
-                // BUG FIX #190: FP negation flips the sign bit (bit 31 for fp32, bit 15 for fp16)
-                // This is done by XORing with 0x80000000 (for 32-bit) or 0x8000 (for 16-bit)
-                let sign_bit_mask = if operand_width == 32 {
-                    0x80000000u64
-                } else if operand_width == 16 {
-                    0x8000u64
-                } else {
-                    // For other widths, flip the MSB
-                    1u64 << (operand_width - 1)
-                };
-                let mask_signal =
-                    self.create_constant(&Value::Integer(sign_bit_mask as i64), operand_width);
-                let out = self.alloc_temp_signal(operand_width);
-                self.lir.add_node(
-                    LirOp::Xor {
-                        width: operand_width,
-                    },
-                    vec![operand_signal, mask_signal],
-                    out,
-                    format!("{}.fp_neg", self.hierarchy_path),
-                );
-                return out;
-            }
-            _ => {
-                self.warnings
-                    .push(format!("Unsupported unary op: {:?}", op));
                 (
                     LirOp::Buffer {
                         width: operand_width,

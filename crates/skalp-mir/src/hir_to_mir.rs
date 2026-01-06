@@ -16619,35 +16619,14 @@ impl<'hir> HirToMir<'hir> {
                 }))
             }
 
-            // BUG FIX #100: Unary operations - convert operand in module context
+            // Unary operations - convert operand in module context
             // Without this, Unary falls back to convert_expression which loses module context
             // and causes GenericParams to resolve to 0 instead of port references.
-            // BUG FIX #102: For Negate operations, check if the operand is a Cast to fp32/fp16.
-            // If so, use FNeg instead of Negate for proper floating-point negation.
+            // Note: FP negation is handled via stdlib Neg trait impl, not special compiler handling.
             hir::HirExpression::Unary(unary_expr) => {
-                println!(
-                    "🔢🔢🔢 MODULE_UNARY: Converting Unary op {:?} in module context 🔢🔢🔢",
-                    unary_expr.op
-                );
-
-                // BUG FIX #102: Check if this is a Negate on a floating-point value
-                let is_fp_negate = matches!(&unary_expr.op, hir::HirUnaryOp::Negate)
-                    && matches!(&*unary_expr.operand, hir::HirExpression::Cast(cast)
-                        if matches!(cast.target_type, hir::HirType::Float32 | hir::HirType::Float16));
-
-                if is_fp_negate {
-                    println!("🔢🔢🔢 MODULE_UNARY: Detected FP Negate (cast to fp32/fp16) - using FNeg 🔢🔢🔢");
-                }
-
                 let operand =
                     self.convert_hir_expr_for_module(&unary_expr.operand, ctx, depth + 1)?;
-
-                // Use FNeg for floating-point negation, regular Negate otherwise
-                let op = if is_fp_negate {
-                    UnaryOp::FNegate
-                } else {
-                    self.convert_unary_op(&unary_expr.op)
-                };
+                let op = self.convert_unary_op(&unary_expr.op);
 
                 Some(Expression::with_unknown_type(ExpressionKind::Unary {
                     op,
