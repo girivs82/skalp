@@ -29,7 +29,6 @@
 pub mod async_sta;
 pub mod async_sta_fix;
 pub mod compiled_ip;
-pub mod fp32_decompose;
 pub mod gate_netlist;
 pub mod gate_optimizer;
 pub mod hierarchical_netlist;

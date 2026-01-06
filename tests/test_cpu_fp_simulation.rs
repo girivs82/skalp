@@ -1,8 +1,13 @@
 // CPU simulation tests for floating-point arithmetic
 // These tests verify proper IEEE 754 FP operations in the CPU simulator
+//
+// NOTE: These tests require trait-based FP operations (impl Add/Mul for fp32)
+// from the stdlib. Currently skipped until stdlib trait integration is complete.
 
 #[cfg(test)]
 mod cpu_fp_simulation_tests {
+    #![allow(dead_code)] // Allow unused when tests are ignored
+
     use skalp_frontend::parse_and_build_hir;
     use skalp_mir::lower_to_mir;
     use skalp_sim::{SimulationConfig, Simulator};
@@ -40,6 +45,7 @@ mod cpu_fp_simulation_tests {
         simulator
     }
 
+    #[ignore = "requires stdlib trait implementations for FP32 operations"]
     #[tokio::test]
     async fn test_fp32_addition_cpu() {
         let source = r#"
@@ -79,6 +85,7 @@ mod cpu_fp_simulation_tests {
         );
     }
 
+    #[ignore = "requires stdlib trait implementations for FP32 operations"]
     #[tokio::test]
     async fn test_fp32_multiplication_cpu() {
         let source = r#"

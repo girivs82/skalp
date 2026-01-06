@@ -1095,9 +1095,23 @@ impl HirBuilderContext {
     fn build_implementation(&mut self, node: &SyntaxNode) -> Option<HirImplementation> {
         // Get target entity name
         let entity_name = self.extract_name(node)?;
+        eprintln!(
+            "[HIR_IMPL_DEBUG] build_implementation: entity_name='{}', symbols.entities has {} entries",
+            entity_name,
+            self.symbols.entities.len()
+        );
 
         // Look up entity ID
-        let entity = *self.symbols.entities.get(&entity_name)?;
+        let entity = match self.symbols.entities.get(&entity_name) {
+            Some(e) => *e,
+            None => {
+                eprintln!(
+                    "[HIR_IMPL_DEBUG] build_implementation: entity '{}' NOT FOUND in symbols.entities, skipping impl block",
+                    entity_name
+                );
+                return None;
+            }
+        };
 
         // Enter new scope and add ports to symbol table
         self.symbols.enter_scope();
@@ -1136,7 +1150,13 @@ impl HirBuilderContext {
         let mut statements: Vec<HirStatement> = Vec::new();
 
         // Build implementation items
+        let children_count = node.children().count();
+        eprintln!(
+            "[HIR_IMPL_DEBUG] build_implementation for '{}': {} children in impl block",
+            entity_name, children_count
+        );
         for child in node.children() {
+            eprintln!("[HIR_IMPL_DEBUG]   child kind: {:?}", child.kind());
             match child.kind() {
                 SyntaxKind::Attribute => {
                     // Process attribute to set pending configs (e.g., #[implements(...)])
@@ -1266,6 +1286,11 @@ impl HirBuilderContext {
                 _ => {}
             }
         }
+
+        eprintln!(
+            "[HIR_IMPL_DEBUG] build_implementation '{}' complete: {} signals, {} constants, {} assignments",
+            entity_name, signals.len(), constants.len(), assignments.len()
+        );
 
         // Exit scope
         self.symbols.exit_scope();

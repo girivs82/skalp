@@ -1226,130 +1226,26 @@ impl MirToLirTransform {
                 )
             }
 
-            // Floating-Point Arithmetic (IEEE 754)
-            BinaryOp::FAdd => {
-                let left_sig = self.transform_expression(left, operand_width);
-                let right_sig = self.transform_expression(right, operand_width);
-                (
-                    left_sig,
-                    right_sig,
-                    LirOp::FpAdd {
-                        width: operand_width,
-                    },
-                    operand_width,
-                )
-            }
-            BinaryOp::FSub => {
-                let left_sig = self.transform_expression(left, operand_width);
-                let right_sig = self.transform_expression(right, operand_width);
-                (
-                    left_sig,
-                    right_sig,
-                    LirOp::FpSub {
-                        width: operand_width,
-                    },
-                    operand_width,
-                )
-            }
-            BinaryOp::FMul => {
-                let left_sig = self.transform_expression(left, operand_width);
-                let right_sig = self.transform_expression(right, operand_width);
-                (
-                    left_sig,
-                    right_sig,
-                    LirOp::FpMul {
-                        width: operand_width,
-                    },
-                    operand_width,
-                )
-            }
-            BinaryOp::FDiv => {
-                let left_sig = self.transform_expression(left, operand_width);
-                let right_sig = self.transform_expression(right, operand_width);
-                (
-                    left_sig,
-                    right_sig,
-                    LirOp::FpDiv {
-                        width: operand_width,
-                    },
-                    operand_width,
+            // Floating-Point Arithmetic - should be handled via stdlib entity instantiation
+            // If we hit these, the trait resolution in HIR->MIR failed to route through FpAdd/FpSub/etc.
+            BinaryOp::FAdd | BinaryOp::FSub | BinaryOp::FMul | BinaryOp::FDiv => {
+                unreachable!(
+                    "FP arithmetic ops should be handled via stdlib entity instantiation, not direct MIR BinaryOp"
                 )
             }
 
-            // Floating-Point Comparisons (IEEE 754)
-            BinaryOp::FLess => {
-                let left_sig = self.transform_expression(left, operand_width);
-                let right_sig = self.transform_expression(right, operand_width);
-                (
-                    left_sig,
-                    right_sig,
-                    LirOp::FpLt {
-                        width: operand_width,
-                    },
-                    1, // Comparison results are 1-bit
+            // Floating-Point Comparisons - should be handled via stdlib entity instantiation
+            BinaryOp::FLess
+            | BinaryOp::FLessEqual
+            | BinaryOp::FGreater
+            | BinaryOp::FGreaterEqual => {
+                unreachable!(
+                    "FP comparison ops should be handled via stdlib entity instantiation, not direct MIR BinaryOp"
                 )
             }
-            BinaryOp::FLessEqual => {
-                let left_sig = self.transform_expression(left, operand_width);
-                let right_sig = self.transform_expression(right, operand_width);
-                (
-                    left_sig,
-                    right_sig,
-                    LirOp::FpLe {
-                        width: operand_width,
-                    },
-                    1,
-                )
-            }
-            BinaryOp::FGreater => {
-                let left_sig = self.transform_expression(left, operand_width);
-                let right_sig = self.transform_expression(right, operand_width);
-                (
-                    left_sig,
-                    right_sig,
-                    LirOp::FpGt {
-                        width: operand_width,
-                    },
-                    1,
-                )
-            }
-            BinaryOp::FGreaterEqual => {
-                let left_sig = self.transform_expression(left, operand_width);
-                let right_sig = self.transform_expression(right, operand_width);
-                (
-                    left_sig,
-                    right_sig,
-                    LirOp::FpGe {
-                        width: operand_width,
-                    },
-                    1,
-                )
-            }
-            BinaryOp::FEqual => {
-                // FP equality comparison - for now use bit equality
-                // (IEEE 754 equality is complex with NaN handling)
-                let left_sig = self.transform_expression(left, operand_width);
-                let right_sig = self.transform_expression(right, operand_width);
-                (
-                    left_sig,
-                    right_sig,
-                    LirOp::Eq {
-                        width: operand_width,
-                    },
-                    1,
-                )
-            }
-            BinaryOp::FNotEqual => {
-                // FP inequality comparison - for now use bit inequality
-                let left_sig = self.transform_expression(left, operand_width);
-                let right_sig = self.transform_expression(right, operand_width);
-                (
-                    left_sig,
-                    right_sig,
-                    LirOp::Ne {
-                        width: operand_width,
-                    },
-                    1,
+            BinaryOp::FEqual | BinaryOp::FNotEqual => {
+                unreachable!(
+                    "FP equality ops should be handled via stdlib entity instantiation, not direct MIR BinaryOp"
                 )
             }
 

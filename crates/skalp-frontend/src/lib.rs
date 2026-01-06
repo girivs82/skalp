@@ -1030,8 +1030,18 @@ fn merge_symbol_with_rename(
 fn merge_all_symbols(target: &mut Hir, source: &Hir) -> Result<()> {
     use hir::HirVisibility;
 
+    eprintln!(
+        "[MERGE_ALL_SYMBOLS] source has {} entities, {} implementations",
+        source.entities.len(),
+        source.implementations.len()
+    );
+
     // Merge all public entities (and their implementations)
     for entity in &source.entities {
+        eprintln!(
+            "[MERGE_ALL_SYMBOLS] Entity '{}' visibility={:?}",
+            entity.name, entity.visibility
+        );
         if entity.visibility == HirVisibility::Public {
             let old_entity_id = entity.id;
 
@@ -1070,12 +1080,23 @@ fn merge_all_symbols(target: &mut Hir, source: &Hir) -> Result<()> {
                 .iter()
                 .find(|i| i.entity == old_entity_id)
             {
+                eprintln!(
+                    "[MERGE_ALL_SYMBOLS] Found impl for '{}' with {} signals, {} assignments",
+                    entity.name,
+                    impl_block.signals.len(),
+                    impl_block.assignments.len()
+                );
                 let mut imported_impl = impl_block.clone();
                 // Update implementation to point to the new entity ID
                 imported_impl.entity = new_entity_id;
                 // BUG #33 FIX: Remap port IDs in all assignments
                 imported_impl = remap_impl_ports(imported_impl, &port_id_map);
                 target.implementations.push(imported_impl);
+            } else {
+                eprintln!(
+                    "[MERGE_ALL_SYMBOLS] NO impl found for entity '{}' (entity_id={:?})",
+                    entity.name, old_entity_id
+                );
             }
         }
     }

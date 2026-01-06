@@ -671,24 +671,6 @@ pub enum LirOp {
     /// Multiplication: result = a * b
     Mul { width: u32, result_width: u32 },
 
-    // === Floating-Point Arithmetic ===
-    /// FP32 Addition: result = a + b (IEEE 754)
-    FpAdd { width: u32 },
-    /// FP32 Subtraction: result = a - b (IEEE 754)
-    FpSub { width: u32 },
-    /// FP32 Multiplication: result = a * b (IEEE 754)
-    FpMul { width: u32 },
-    /// FP32 Division: result = a / b (IEEE 754)
-    FpDiv { width: u32 },
-    /// FP32 Less than: result = (a < b) (IEEE 754)
-    FpLt { width: u32 },
-    /// FP32 Greater than: result = (a > b) (IEEE 754)
-    FpGt { width: u32 },
-    /// FP32 Less than or equal: result = (a <= b) (IEEE 754)
-    FpLe { width: u32 },
-    /// FP32 Greater than or equal: result = (a >= b) (IEEE 754)
-    FpGe { width: u32 },
-
     // === Bitwise Logic ===
     /// Bitwise AND
     And { width: u32 },
@@ -861,10 +843,6 @@ impl LirOp {
                 }
             }
             LirOp::Mul { result_width, .. } => *result_width,
-            LirOp::FpAdd { width }
-            | LirOp::FpSub { width }
-            | LirOp::FpMul { width }
-            | LirOp::FpDiv { width } => *width, // FP operations preserve width
             LirOp::And { width }
             | LirOp::Or { width }
             | LirOp::Xor { width }
@@ -878,11 +856,7 @@ impl LirOp {
             | LirOp::Le { .. }
             | LirOp::Gt { .. }
             | LirOp::Ge { .. }
-            | LirOp::Slt { .. }
-            | LirOp::FpLt { .. }
-            | LirOp::FpGt { .. }
-            | LirOp::FpLe { .. }
-            | LirOp::FpGe { .. } => 1, // Comparison results are 1-bit
+            | LirOp::Slt { .. } => 1, // Comparison results are 1-bit
             LirOp::Mux2 { width } => *width,
             LirOp::MuxN { width, .. } => *width,
             LirOp::Shl { width }
@@ -934,10 +908,6 @@ impl LirOp {
             LirOp::Add { .. }
             | LirOp::Sub { .. }
             | LirOp::Mul { .. }
-            | LirOp::FpAdd { .. }
-            | LirOp::FpSub { .. }
-            | LirOp::FpMul { .. }
-            | LirOp::FpDiv { .. }
             | LirOp::And { .. }
             | LirOp::Or { .. }
             | LirOp::Xor { .. }
@@ -950,10 +920,6 @@ impl LirOp {
             | LirOp::Gt { .. }
             | LirOp::Ge { .. }
             | LirOp::Slt { .. }
-            | LirOp::FpLt { .. }
-            | LirOp::FpGt { .. }
-            | LirOp::FpLe { .. }
-            | LirOp::FpGe { .. }
             | LirOp::Shl { .. }
             | LirOp::Shr { .. }
             | LirOp::Sar { .. }

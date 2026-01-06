@@ -335,11 +335,6 @@ impl<'hir> HirToMir<'hir> {
         let transform_start = Instant::now();
 
         self.hir = Some(hir);
-        println!(
-            "[HIR_TO_MIR] transform: HIR has {} trait_implementations",
-            hir.trait_implementations.len()
-        );
-
         // Register all user-defined const functions in the evaluator
         self.const_evaluator.register_functions(&hir.functions);
 
@@ -624,24 +619,14 @@ impl<'hir> HirToMir<'hir> {
             mir.add_module(module);
         }
 
-        eprintln!(
-            "⏱️  [PERF] Entities complete. Starting {} impl blocks...",
-            hir.implementations.len()
-        );
         // Second pass: add implementations
-        for (impl_idx, impl_block) in hir.implementations.iter().enumerate() {
+        for impl_block in &hir.implementations {
             let impl_start = Instant::now();
-            eprintln!(
-                "⏱️  [PERF]   Starting impl block {}/{}...",
-                impl_idx + 1,
-                hir.implementations.len()
-            );
             if let Some(&module_id) = self.entity_map.get(&impl_block.entity) {
                 // Set current entity for generic parameter resolution
                 self.current_entity_id = Some(impl_block.entity);
 
                 // Skip implementations for entities that are not used (0 instances) and are not the first entity
-                // The first entity is typically the top-level entity we're compiling
                 if let Some(entity) = hir.entities.iter().find(|e| e.id == impl_block.entity) {
                     // Check if this is a generic entity (has unresolved generics)
                     let has_unresolved_generics = entity.generics.iter().any(|g| {
@@ -649,37 +634,17 @@ impl<'hir> HirToMir<'hir> {
                             && !matches!(g.param_type, hir::HirGenericType::ClockDomain)
                     });
 
-                    // Skip if: has unresolved generics OR (has 0 instances and is not entity index 0)
-                    // Entity 0 is typically the top-level entity that we're compiling
-                    let is_first_entity = hir.entities.first().map(|e| e.id) == Some(entity.id);
-
+                    // Skip if: has unresolved generics AND no instances
+                    // This skips unspecialized generic entities that are never instantiated
                     if has_unresolved_generics && impl_block.instances.is_empty() {
-                        eprintln!(
-                            "⏭️  [SKIP] Skipping impl for generic entity '{}' (no instances, unresolved generics)",
-                            entity.name
-                        );
                         continue;
                     }
 
-                    // Also skip monomorphized entities with 0 instances that aren't the top-level
-                    if impl_block.instances.is_empty()
-                        && !is_first_entity
-                        && entity.name.contains('_')
-                    {
-                        // Check if it looks like a monomorphized entity (contains underscore followed by type suffix)
-                        let looks_monomorphized = entity.name.ends_with("_fp16")
-                            || entity.name.ends_with("_fp32")
-                            || entity.name.ends_with("_fp64")
-                            || entity.name.ends_with("_bf16");
-
-                        if looks_monomorphized {
-                            eprintln!(
-                                "⏭️  [SKIP] Skipping impl for unused monomorphized entity '{}'",
-                                entity.name
-                            );
-                            continue;
-                        }
-                    }
+                    // NOTE: We do NOT skip monomorphized entities even if they have 0 instances in their own impl block.
+                    // Monomorphized entities (like FpAdd_fp32) are created by monomorphization because some other
+                    // entity instantiates them. The instances are registered in the parent entity's impl block,
+                    // not in the monomorphized entity's own impl block.
+                    // Skipping them would cause their signals/logic to be missing from the final output.
                 }
 
                 // Bind generic parameter default values into const evaluator for expression evaluation

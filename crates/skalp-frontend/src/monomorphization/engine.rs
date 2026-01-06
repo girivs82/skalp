@@ -60,6 +60,19 @@ impl<'hir> MonomorphizationEngine<'hir> {
         }
 
         for impl_block in &hir.implementations {
+            // Find entity name for debugging
+            let entity_name = hir
+                .entities
+                .iter()
+                .find(|e| e.id == impl_block.entity)
+                .map(|e| e.name.as_str())
+                .unwrap_or("unknown");
+            eprintln!(
+                "[MONO_ENGINE] Registering impl for '{}' (entity_id={:?}) with {} signals",
+                entity_name,
+                impl_block.entity,
+                impl_block.signals.len()
+            );
             impl_map.insert(impl_block.entity, impl_block.clone());
         }
 
@@ -184,6 +197,17 @@ impl<'hir> MonomorphizationEngine<'hir> {
                     });
 
                     if let Some(impl_block) = impl_block {
+                        let impl_for_entity = hir
+                            .entities
+                            .iter()
+                            .find(|e| e.id == impl_block.entity)
+                            .map(|e| e.name.as_str())
+                            .unwrap_or("unknown");
+                        eprintln!(
+                            "[MONO_ENGINE] Found impl for instantiation '{}' with {} signals",
+                            impl_for_entity,
+                            impl_block.signals.len()
+                        );
                         // BUG #175 FIX: The impl_block was parsed with port IDs starting from 0,
                         // but after module merging, the entity's port IDs may have been reassigned
                         // to different values (e.g., 3, 4, 5, 6). We need to create a combined
@@ -264,6 +288,11 @@ impl<'hir> MonomorphizationEngine<'hir> {
                             &specialized_entity,
                             instantiation,
                             &impl_to_specialized_map,
+                        );
+                        eprintln!(
+                            "[MONO_ENGINE] Specialized impl for '{}' has {} signals",
+                            specialized_entity.name,
+                            specialized_impl.signals.len()
                         );
                         all_specialized_implementations.push(specialized_impl);
                     }
