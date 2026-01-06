@@ -343,8 +343,18 @@ impl<'hir> HirToMir<'hir> {
         // Propagate safety definitions from HIR to MIR
         mir.safety_definitions = hir.safety_definitions.clone();
 
+        eprintln!(
+            "[HIR_TO_MIR] transform: hir has {} entities, {} implementations",
+            hir.entities.len(),
+            hir.implementations.len()
+        );
+
         // First pass: create modules for entities
         for entity in &hir.entities {
+            eprintln!(
+                "[HIR_TO_MIR] First pass: processing entity '{}'",
+                entity.name
+            );
             let entity_start = Instant::now();
             let module_id = self.next_module_id();
             self.entity_map.insert(entity.id, module_id);
@@ -2023,19 +2033,30 @@ impl<'hir> HirToMir<'hir> {
                             }
                         } else {
                             // Complex RHS case: use HIR placeholder, will be refined later if needed
-                            eprintln!(
-                                "[BUG #67] Variable '{}': Using HIR placeholder type {:?} for complex RHS",
-                                var_name, let_stmt.var_type
-                            );
-                            eprintln!(
-                                "[BUG #71] Variable '{}'  (MIR ID={:?}): HIR type={:?}, RHS discriminant={:?}",
-                                var_name, new_id, let_stmt.var_type, std::mem::discriminant(&let_stmt.value)
-                            );
-                            // BUG #71 FIX: For complex RHS with tuple type placeholders, try to infer from RHS after conversion
-                            if matches!(let_stmt.var_type, hir::HirType::Nat(32)) {
-                                debug_println!("[BUG #71] Variable '{}': HIR type is Nat(32) placeholder - will need to infer from RHS later", var_name);
+                            // BUG FIX #FP_TRAIT: For Cast expressions, ALWAYS use the Cast's target_type
+                            // This ensures `let a_fp = a as fp32` gets type fp32, not Bit(32)
+                            // Critical for FP trait resolution to work correctly
+                            if let hir::HirExpression::Cast(cast_expr) = &let_stmt.value {
+                                eprintln!(
+                                    "[BUG #FP_TRAIT] Variable '{}': Using Cast target_type {:?} instead of HIR placeholder {:?}",
+                                    var_name, cast_expr.target_type, let_stmt.var_type
+                                );
+                                cast_expr.target_type.clone()
+                            } else {
+                                eprintln!(
+                                    "[BUG #67] Variable '{}': Using HIR placeholder type {:?} for complex RHS",
+                                    var_name, let_stmt.var_type
+                                );
+                                eprintln!(
+                                    "[BUG #71] Variable '{}'  (MIR ID={:?}): HIR type={:?}, RHS discriminant={:?}",
+                                    var_name, new_id, let_stmt.var_type, std::mem::discriminant(&let_stmt.value)
+                                );
+                                // BUG #71 FIX: For complex RHS with tuple type placeholders, try to infer from RHS after conversion
+                                if matches!(let_stmt.var_type, hir::HirType::Nat(32)) {
+                                    debug_println!("[BUG #71] Variable '{}': HIR type is Nat(32) placeholder - will need to infer from RHS later", var_name);
+                                }
+                                let_stmt.var_type.clone()
                             }
-                            let_stmt.var_type.clone()
                         };
 
                         // Track this dynamically created variable so we can add it to the module later
@@ -13512,6 +13533,10 @@ impl<'hir> HirToMir<'hir> {
     /// Infer HIR expression type
     fn infer_hir_type(&self, expr: &hir::HirExpression) -> Option<hir::HirType> {
         let hir = self.hir?;
+        println!(
+            "[INFER_TYPE_DEBUG] infer_hir_type called with expr type: {:?}",
+            std::mem::discriminant(expr)
+        );
         match expr {
             hir::HirExpression::Literal(lit) => match lit {
                 hir::HirLiteral::Integer(_) => Some(hir::HirType::Bit(32)), // Default integer width
@@ -13545,10 +13570,18 @@ impl<'hir> HirToMir<'hir> {
                         hir.implementations.iter().find(|i| i.entity == entity_id)
                     {
                         if let Some(var) = impl_block.variables.iter().find(|v| v.id == *var_id) {
+                            println!(
+                                "[INFER_TYPE_DEBUG] Variable {:?} found in impl_block: {:?}",
+                                var_id, var.var_type
+                            );
                             return Some(var.var_type.clone());
                         }
                     }
                 }
+                println!(
+                    "[INFER_TYPE_DEBUG] Variable {:?} NOT found in impl_block, checking dynamic_variables (len={})",
+                    var_id, self.dynamic_variables.len()
+                );
 
                 // CRITICAL FIX #IMPORT_MATCH: Check context_variable_map first when in ANY context
                 // to avoid finding wrong variable type due to HIR VariableId collisions
@@ -13577,9 +13610,17 @@ impl<'hir> HirToMir<'hir> {
                         );
                         return Some(accurate_type.clone());
                     }
+                    println!(
+                        "[INFER_TYPE_DEBUG] Variable {:?} found in dynamic_variables: {:?}",
+                        var_id, var_type
+                    );
                     return Some(var_type.clone());
                 }
 
+                println!(
+                    "[INFER_TYPE_DEBUG] Variable {:?} NOT found anywhere, returning None",
+                    var_id
+                );
                 None
             }
             hir::HirExpression::Constant(const_id) => {
@@ -13666,6 +13707,40 @@ impl<'hir> HirToMir<'hir> {
                 match base_type {
                     hir::HirType::Array(elem_type, _) => Some(*elem_type),
                     _ => Some(hir::HirType::Bit(1)), // Bit select
+                }
+            }
+            hir::HirExpression::Range(base, high, low) => {
+                // For range/bit slice, calculate the width from high and low indices
+                // The result is Bit(high - low + 1)
+                // Try to evaluate high and low as constants using the frontend's const_eval
+                use skalp_frontend::const_eval::{ConstEvaluator, ConstValue};
+                let mut evaluator = ConstEvaluator::new();
+
+                // Register constants from current entity implementation
+                if let Some(entity_id) = self.current_entity_id {
+                    if let Some(hir) = self.hir {
+                        for implementation in &hir.implementations {
+                            if implementation.entity == entity_id {
+                                evaluator.register_constants(&implementation.constants);
+                            }
+                        }
+                    }
+                }
+
+                if let (Ok(high_val), Ok(low_val)) = (evaluator.eval(high), evaluator.eval(low)) {
+                    if let (ConstValue::Nat(h), ConstValue::Nat(l)) = (high_val, low_val) {
+                        let width = (h - l + 1) as u32;
+                        return Some(hir::HirType::Bit(width));
+                    }
+                }
+
+                // Can't determine width statically - fall back to base type
+                // For bit vectors, a range still produces a bit type
+                let base_type = self.infer_hir_type(base);
+                match base_type {
+                    Some(hir::HirType::Bit(_)) => Some(hir::HirType::Bit(32)), // Default width
+                    Some(hir::HirType::Custom(_)) => Some(hir::HirType::Bit(32)),
+                    _ => Some(hir::HirType::Bit(32)),
                 }
             }
             hir::HirExpression::Cast(cast) => {
