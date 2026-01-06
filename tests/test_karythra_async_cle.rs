@@ -30,9 +30,10 @@ fn compile_karythra_async_cle() -> &'static GateNetlist {
 
         // Set up module search path BEFORE parsing
         // This must be set before the module resolver is initialized
+        // Include both Karythra lib and HLS stdlib for FP trait imports
         std::env::set_var(
             "SKALP_STDLIB_PATH",
-            "/Users/girivs/src/hw/karythra/rtl/skalp/cle/lib",
+            "/Users/girivs/src/hw/karythra/rtl/skalp/cle/lib:/Users/girivs/src/hw/hls/crates/skalp-stdlib",
         );
 
         // Use file-based parsing which properly handles module resolution

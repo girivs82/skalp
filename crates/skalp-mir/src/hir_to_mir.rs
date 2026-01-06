@@ -14197,19 +14197,26 @@ impl<'hir> HirToMir<'hir> {
     /// Primitive operations are converted directly to MIR Binary operations.
     /// User-defined functions (like quadratic_solve) should NOT match this.
     fn is_primitive_fp_operation(&self, name: &str) -> bool {
+        // NOTE: We intentionally do NOT include trait method names like "add", "sub", "mul", "div"
+        // here. Those should go through normal trait resolution which inlines the trait
+        // implementation body containing entity instantiation (FpAdd, FpMul, etc.).
+        // The stdlib entities synthesize naturally into gates - no special compiler handling needed.
+        //
+        // Only legacy fp_* function names are handled here for backwards compatibility.
         matches!(
             name,
-            // Explicit fp_* primitives
-            "fp_add" | "fp_sub" | "fp_mul" | "fp_div" |
-            "fp_sqrt" | "fp_neg" | "fp_abs" |
-            "fp_lt" | "fp_le" | "fp_gt" | "fp_ge" | "fp_eq" | "fp_ne" |
-            "fp_min" | "fp_max" | "fp_floor" | "fp_ceil" | "fp_round" |
-            "fp_trunc" | "fp_fma" | "fp_copysign" |
-            // Method-style calls on FP types (receiver.method())
-            "add" | "sub" | "mul" | "div" |
-            "sqrt" | "neg" | "abs" |
-            "lt" | "le" | "gt" | "ge" | "eq" | "ne" |
-            "min" | "max" | "floor" | "ceil" | "round" | "trunc"
+            // Legacy fp_* primitives (deprecated - use trait operators instead)
+            "fp_sqrt"
+                | "fp_neg"
+                | "fp_abs"
+                | "fp_min"
+                | "fp_max"
+                | "fp_floor"
+                | "fp_ceil"
+                | "fp_round"
+                | "fp_trunc"
+                | "fp_fma"
+                | "fp_copysign"
         )
     }
 
