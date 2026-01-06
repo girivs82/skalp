@@ -148,6 +148,9 @@ struct MirToSirConverter<'a> {
     // BUG FIX #124: Store port_mapping for each instance by prefix
     // This allows nested instances to resolve parent port references during expression conversion
     instance_port_mappings: HashMap<String, HashMap<String, Expression>>,
+    // BUG FIX: Track elaborated instance paths to detect circular references
+    // This prevents infinite recursion when modules have circular instantiation chains
+    elaborated_instances: std::collections::HashSet<String>,
 }
 
 impl<'a> MirToSirConverter<'a> {
@@ -164,6 +167,7 @@ impl<'a> MirToSirConverter<'a> {
             conditional_contexts: HashMap::new(),
             tuple_source_map,
             instance_port_mappings: HashMap::new(),
+            elaborated_instances: std::collections::HashSet::new(),
         }
     }
 
@@ -3091,23 +3095,49 @@ impl<'a> MirToSirConverter<'a> {
         let true_signal = self.node_to_signal_ref(true_val);
         let false_signal = self.node_to_signal_ref(false_val);
 
-        // Get type from true/false branches - use the wider type
+        // Get type from true/false branches
         let true_type = self.get_signal_type(&true_signal.signal_id);
         let false_type = self.get_signal_type(&false_signal.signal_id);
         let true_width = true_type.width();
         let false_width = false_type.width();
-        let sir_type = if true_width >= false_width {
-            true_type
+
+        // BUG FIX #181: Prefer Float32 type over wider Bits types
+        // When one branch is Float32 (32-bit) and another is a wider Bits type (e.g., 65-bit
+        // from concat operations), the semantic output should be Float32, not the wider Bits.
+        // This happens in FP operations where intermediate concat results get mixed with fp32 values.
+        let true_is_float = true_type.is_float();
+        let false_is_float = false_type.is_float();
+
+        let (sir_type, width) = if true_is_float && !false_is_float {
+            // True branch is Float32, false branch is Bits - prefer Float32
+            eprintln!(
+                "[BUG #181 FIX] Mux: preferring Float32 (true) over Bits({}) (false)",
+                false_width
+            );
+            (true_type.clone(), true_width)
+        } else if false_is_float && !true_is_float {
+            // False branch is Float32, true branch is Bits - prefer Float32
+            eprintln!(
+                "[BUG #181 FIX] Mux: preferring Float32 (false) over Bits({}) (true)",
+                true_width
+            );
+            (false_type.clone(), false_width)
         } else {
-            false_type
+            // Both same type category - use the wider type (original behavior)
+            if true_width >= false_width {
+                (true_type.clone(), true_width)
+            } else {
+                (false_type.clone(), false_width)
+            }
         };
-        let width = sir_type.width();
 
         // BUG #125 FIX: Handle width mismatch in mux inputs
         // When one input is narrower than the other, check if it's a zero constant
         // and replace it with a properly-sized zero to avoid truncation issues
         let mut actual_true_signal = true_signal;
         let mut actual_false_signal = false_signal;
+        let mut actual_true_val = true_val;
+        let mut actual_false_val = false_val;
 
         if true_width != false_width {
             eprintln!(
@@ -3115,28 +3145,53 @@ impl<'a> MirToSirConverter<'a> {
                 true_width, false_width, width
             );
 
-            // Check if the narrower input is a zero constant that needs widening
-            #[allow(clippy::comparison_chain)]
-            if false_width < true_width {
-                // false branch is narrower - check if it's a zero constant
-                if let Some(zero_value) = self.is_zero_constant_node(false_val) {
-                    eprintln!("[BUG #125] Replacing narrow zero constant (width={}) with wide zero (width={})",
-                             false_width, width);
-                    // Create a new zero constant with the correct width
-                    let wide_zero = self.create_constant_node(zero_value, width);
-                    actual_false_signal = self.node_to_signal_ref(wide_zero);
-                }
-            } else if true_width < false_width {
-                // true branch is narrower - check if it's a zero constant
-                if let Some(zero_value) = self.is_zero_constant_node(true_val) {
-                    eprintln!("[BUG #125] Replacing narrow zero constant (width={}) with wide zero (width={})",
-                             true_width, width);
-                    // Create a new zero constant with the correct width
-                    let wide_zero = self.create_constant_node(zero_value, width);
-                    actual_true_signal = self.node_to_signal_ref(wide_zero);
+            // BUG FIX #181: When preferring Float32, slice wider Bits branch to 32 bits
+            if true_is_float && false_width > width {
+                // Slice the false branch (Bits) to match Float32 width
+                eprintln!(
+                    "[BUG #181 FIX] Slicing false branch from {} to {} bits for Float32 mux",
+                    false_width, width
+                );
+                let sliced_false = self.create_slice_node(false_val, width - 1, 0);
+                actual_false_val = sliced_false;
+                actual_false_signal = self.node_to_signal_ref(sliced_false);
+            } else if false_is_float && true_width > width {
+                // Slice the true branch (Bits) to match Float32 width
+                eprintln!(
+                    "[BUG #181 FIX] Slicing true branch from {} to {} bits for Float32 mux",
+                    true_width, width
+                );
+                let sliced_true = self.create_slice_node(true_val, width - 1, 0);
+                actual_true_val = sliced_true;
+                actual_true_signal = self.node_to_signal_ref(sliced_true);
+            } else {
+                // Check if the narrower input is a zero constant that needs widening
+                #[allow(clippy::comparison_chain)]
+                if false_width < true_width {
+                    // false branch is narrower - check if it's a zero constant
+                    if let Some(zero_value) = self.is_zero_constant_node(actual_false_val) {
+                        eprintln!("[BUG #125] Replacing narrow zero constant (width={}) with wide zero (width={})",
+                                 false_width, width);
+                        // Create a new zero constant with the correct width
+                        let wide_zero = self.create_constant_node(zero_value, width);
+                        actual_false_signal = self.node_to_signal_ref(wide_zero);
+                    }
+                } else if true_width < false_width {
+                    // true branch is narrower - check if it's a zero constant
+                    if let Some(zero_value) = self.is_zero_constant_node(actual_true_val) {
+                        eprintln!("[BUG #125] Replacing narrow zero constant (width={}) with wide zero (width={})",
+                                 true_width, width);
+                        // Create a new zero constant with the correct width
+                        let wide_zero = self.create_constant_node(zero_value, width);
+                        actual_true_signal = self.node_to_signal_ref(wide_zero);
+                    }
                 }
             }
         }
+
+        // Suppress unused variable warnings
+        let _ = actual_true_val;
+        let _ = actual_false_val;
 
         // Create output signal for this node
         let output_signal_name = format!("node_{}_out", node_id);
@@ -4118,6 +4173,18 @@ impl<'a> MirToSirConverter<'a> {
         parent_module_for_signals: Option<&Module>,
         parent_prefix: &str,
     ) {
+        // BUG FIX: Detect circular elaboration to prevent infinite recursion
+        // This can happen when trait implementations create entity instances that
+        // indirectly reference back to the original entity
+        if self.elaborated_instances.contains(inst_prefix) {
+            eprintln!(
+                "⚠️  WARNING: Skipping circular elaboration of '{}' (already elaborated)",
+                inst_prefix
+            );
+            return;
+        }
+        self.elaborated_instances.insert(inst_prefix.to_string());
+
         println!(
             "      🔨 Elaborating instance '{}' (module has {} signals)",
             inst_prefix,

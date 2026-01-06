@@ -1646,20 +1646,109 @@ impl<'a> MetalShaderGenerator<'a> {
                 // BUG FIX #131: Vector types (33-128 bits = uint2/uint4) need direct vector assignment
                 // NOT component extraction! The previous scalar mux code incorrectly extracted .x
                 // which loses other components (y, z, w).
-                let (metal_type, _) = self.get_metal_type_for_wide_bits(output_width);
+                let (metal_type, num_elements_opt) =
+                    self.get_metal_type_for_wide_bits(output_width);
+                let num_elements = num_elements_opt.unwrap_or(output_width.div_ceil(32));
                 self.write_indented(&format!(
                     "// Vector mux for {}-bit operands ({})\n",
                     output_width, metal_type
                 ));
-                // Use Metal's select() for vectors, or simple ternary if types match
-                // For uint2/uint4, the ternary operator works directly
-                self.write_indented(&format!(
-                    "signals->{} = signals->{} ? signals->{} : signals->{};\n",
-                    self.sanitize_name(output),
-                    self.sanitize_name(sel),
-                    self.sanitize_name(true_val),
-                    self.sanitize_name(false_val)
-                ));
+
+                // BUG FIX #181: Check for Float32/Bits type mismatch in vector mux
+                // When one input is float (32-bit fp32) and another is uint2/uint4 (Bits),
+                // Metal's ternary operator cannot mix these types directly.
+                let true_type = self.get_signal_sir_type(sir, true_val);
+                let false_type = self.get_signal_sir_type(sir, false_val);
+                let true_is_float = true_type.as_ref().is_some_and(|t| t.is_float());
+                let false_is_float = false_type.as_ref().is_some_and(|t| t.is_float());
+
+                // Check for type mismatch where widths differ significantly
+                let width_mismatch = (true_val_width <= 32 && false_val_width > 32)
+                    || (false_val_width <= 32 && true_val_width > 32);
+                let type_mismatch = true_is_float != false_is_float;
+
+                if width_mismatch || type_mismatch {
+                    // BUG FIX #181: Use element-wise mux when types don't match
+                    self.write_indented(&format!(
+                        "// BUG #181 FIX: Type/width mismatch - true({}-bit, float={}) vs false({}-bit, float={})\n",
+                        true_val_width, true_is_float, false_val_width, false_is_float
+                    ));
+                    self.write_indented(&format!(
+                        "for (uint i = 0; i < {}; i++) {{\n",
+                        num_elements
+                    ));
+                    self.indent += 1;
+
+                    // Format true value access with proper type conversion
+                    let true_access = if true_val_width <= 32 {
+                        // Scalar - broadcast to first element, zero others
+                        if true_is_float {
+                            // Float32 - convert to uint bits
+                            format!(
+                                "(i == 0 ? as_type<uint>(signals->{}) : 0)",
+                                self.sanitize_name(true_val)
+                            )
+                        } else {
+                            format!("(i == 0 ? signals->{} : 0)", self.sanitize_name(true_val))
+                        }
+                    } else if true_val_width <= 128 {
+                        // Vector type - use element indexing
+                        let true_elements = true_val_width.div_ceil(32);
+                        format!(
+                            "(i < {} ? signals->{}[i] : 0)",
+                            true_elements,
+                            self.sanitize_name(true_val)
+                        )
+                    } else {
+                        // Array type
+                        format!("signals->{}[i]", self.sanitize_name(true_val))
+                    };
+
+                    // Format false value access with proper type conversion
+                    let false_access = if false_val_width <= 32 {
+                        // Scalar - broadcast to first element, zero others
+                        if false_is_float {
+                            // Float32 - convert to uint bits
+                            format!(
+                                "(i == 0 ? as_type<uint>(signals->{}) : 0)",
+                                self.sanitize_name(false_val)
+                            )
+                        } else {
+                            format!("(i == 0 ? signals->{} : 0)", self.sanitize_name(false_val))
+                        }
+                    } else if false_val_width <= 128 {
+                        // Vector type - use element indexing
+                        let false_elements = false_val_width.div_ceil(32);
+                        format!(
+                            "(i < {} ? signals->{}[i] : 0)",
+                            false_elements,
+                            self.sanitize_name(false_val)
+                        )
+                    } else {
+                        // Array type
+                        format!("signals->{}[i]", self.sanitize_name(false_val))
+                    };
+
+                    self.write_indented(&format!(
+                        "signals->{}[i] = signals->{} ? {} : {};\n",
+                        self.sanitize_name(output),
+                        self.sanitize_name(sel),
+                        true_access,
+                        false_access
+                    ));
+                    self.indent -= 1;
+                    self.write_indented("}\n");
+                } else {
+                    // Use Metal's select() for vectors, or simple ternary if types match
+                    // For uint2/uint4, the ternary operator works directly
+                    self.write_indented(&format!(
+                        "signals->{} = signals->{} ? signals->{} : signals->{};\n",
+                        self.sanitize_name(output),
+                        self.sanitize_name(sel),
+                        self.sanitize_name(true_val),
+                        self.sanitize_name(false_val)
+                    ));
+                }
             } else {
                 // Scalar mux - check for type reinterpretation
                 // BUG FIX #62: If mux inputs/output have different types, add reinterpretation
