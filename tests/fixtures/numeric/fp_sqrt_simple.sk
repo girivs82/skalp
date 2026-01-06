@@ -1,6 +1,8 @@
 // Test fixture for fp32 sqrt operation
 // Tests basic square root computation using FP hardware
 
+use skalp::numeric::fp::*;
+
 entity FpSqrtSimple {
     in x: fp32
     out result: fp32

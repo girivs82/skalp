@@ -1,6 +1,8 @@
 // Test fixture for 2D distance calculation using fp32
 // Tests: distance = sqrt(dx^2 + dy^2)
 
+use skalp::numeric::fp::*;
+
 entity FpDistance {
     in x1: fp32
     in y1: fp32

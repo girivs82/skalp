@@ -10372,143 +10372,6 @@ impl<'hir> HirToMir<'hir> {
         }
     }
 
-    /// Convert an FP method call to MIR expression
-    /// This is a helper to handle FP methods when type-based detection fails
-    fn convert_fp_method_call(&mut self, call: &hir::HirCallExpr) -> Option<Expression> {
-        match call.function.as_str() {
-            // Binary FP operations
-            "add" if call.args.len() == 2 => {
-                let left = Box::new(self.convert_expression(&call.args[0], 0)?);
-                let right = Box::new(self.convert_expression(&call.args[1], 0)?);
-                Some(Expression::with_unknown_type(ExpressionKind::Binary {
-                    op: BinaryOp::FAdd,
-                    left,
-                    right,
-                }))
-            }
-            "sub" if call.args.len() == 2 => {
-                let left = Box::new(self.convert_expression(&call.args[0], 0)?);
-                let right = Box::new(self.convert_expression(&call.args[1], 0)?);
-                Some(Expression::with_unknown_type(ExpressionKind::Binary {
-                    op: BinaryOp::FSub,
-                    left,
-                    right,
-                }))
-            }
-            "mul" if call.args.len() == 2 => {
-                let left = Box::new(self.convert_expression(&call.args[0], 0)?);
-                let right = Box::new(self.convert_expression(&call.args[1], 0)?);
-                Some(Expression::with_unknown_type(ExpressionKind::Binary {
-                    op: BinaryOp::FMul,
-                    left,
-                    right,
-                }))
-            }
-            "div" if call.args.len() == 2 => {
-                let left = Box::new(self.convert_expression(&call.args[0], 0)?);
-                let right = Box::new(self.convert_expression(&call.args[1], 0)?);
-                Some(Expression::with_unknown_type(ExpressionKind::Binary {
-                    op: BinaryOp::FDiv,
-                    left,
-                    right,
-                }))
-            }
-            // Unary FP operations
-            "neg" if call.args.len() == 1 => {
-                // Negate is handled as unary minus (0 - x)
-                let zero = Box::new(Expression::with_unknown_type(ExpressionKind::Literal(
-                    Value::Float(0.0),
-                )));
-                let operand = Box::new(self.convert_expression(&call.args[0], 0)?);
-                Some(Expression::with_unknown_type(ExpressionKind::Binary {
-                    op: BinaryOp::FSub,
-                    left: zero,
-                    right: operand,
-                }))
-            }
-            "abs" if call.args.len() == 1 => {
-                // abs is handled as a function call to fabs
-                let arg = self.convert_expression(&call.args[0], 0)?;
-                Some(Expression::with_unknown_type(
-                    ExpressionKind::FunctionCall {
-                        name: "fabs".to_string(),
-                        args: vec![arg],
-                    },
-                ))
-            }
-            "sqrt" if call.args.len() == 1 => {
-                let operand = Box::new(self.convert_expression(&call.args[0], 0)?);
-                Some(Expression::with_unknown_type(ExpressionKind::Unary {
-                    op: UnaryOp::FSqrt,
-                    operand,
-                }))
-            }
-            // Comparison FP operations
-            "lt" if call.args.len() == 2 => {
-                let left = Box::new(self.convert_expression(&call.args[0], 0)?);
-                let right = Box::new(self.convert_expression(&call.args[1], 0)?);
-                Some(Expression::with_unknown_type(ExpressionKind::Binary {
-                    op: BinaryOp::FLess,
-                    left,
-                    right,
-                }))
-            }
-            "gt" if call.args.len() == 2 => {
-                let left = Box::new(self.convert_expression(&call.args[0], 0)?);
-                let right = Box::new(self.convert_expression(&call.args[1], 0)?);
-                Some(Expression::with_unknown_type(ExpressionKind::Binary {
-                    op: BinaryOp::FGreater,
-                    left,
-                    right,
-                }))
-            }
-            "le" if call.args.len() == 2 => {
-                let left = Box::new(self.convert_expression(&call.args[0], 0)?);
-                let right = Box::new(self.convert_expression(&call.args[1], 0)?);
-                Some(Expression::with_unknown_type(ExpressionKind::Binary {
-                    op: BinaryOp::FLessEqual,
-                    left,
-                    right,
-                }))
-            }
-            "ge" if call.args.len() == 2 => {
-                let left = Box::new(self.convert_expression(&call.args[0], 0)?);
-                let right = Box::new(self.convert_expression(&call.args[1], 0)?);
-                Some(Expression::with_unknown_type(ExpressionKind::Binary {
-                    op: BinaryOp::FGreaterEqual,
-                    left,
-                    right,
-                }))
-            }
-            "eq" if call.args.len() == 2 => {
-                let left = Box::new(self.convert_expression(&call.args[0], 0)?);
-                let right = Box::new(self.convert_expression(&call.args[1], 0)?);
-                Some(Expression::with_unknown_type(ExpressionKind::Binary {
-                    op: BinaryOp::FEqual,
-                    left,
-                    right,
-                }))
-            }
-            "ne" if call.args.len() == 2 => {
-                let left = Box::new(self.convert_expression(&call.args[0], 0)?);
-                let right = Box::new(self.convert_expression(&call.args[1], 0)?);
-                Some(Expression::with_unknown_type(ExpressionKind::Binary {
-                    op: BinaryOp::FNotEqual,
-                    left,
-                    right,
-                }))
-            }
-            _ => {
-                eprintln!(
-                    "[DEBUG] convert_fp_method_call: Unknown FP method '{}' with {} args",
-                    call.function,
-                    call.args.len()
-                );
-                None
-            }
-        }
-    }
-
     /// Inline a function call and return the substituted HIR expression (before MIR conversion)
     /// This is used when we need to perform HIR-level operations on the inlined result
     /// (e.g., field access on struct-returning functions)
@@ -12474,38 +12337,6 @@ impl<'hir> HirToMir<'hir> {
             call.args.len()
         );
 
-        // BUG FIX #177: Check if a user-defined function exists BEFORE assuming it's an FP method
-        // This prevents user-defined functions named "add", "sub", etc. from being incorrectly
-        // treated as floating-point methods. User-defined functions take priority.
-        let has_user_defined_function = self.find_function(&call.function).is_some();
-
-        // BUG FIX #69: Don't attempt to inline FP built-in methods
-        // FP methods should be handled by convert_expression's FP method detection.
-        // If we reach here for an FP method, treat it as an FP operation directly.
-        // This handles cases where type inference fails during nested inlining.
-        // BUT ONLY if there's no user-defined function with this name (BUG #177 FIX)
-        let is_binary_fp_method = !has_user_defined_function
-            && matches!(
-                call.function.as_str(),
-                "add" | "sub" | "mul" | "div" | "lt" | "gt" | "le" | "ge" | "eq" | "ne"
-            )
-            && call.args.len() == 2;
-
-        let is_unary_fp_method = !has_user_defined_function
-            && matches!(call.function.as_str(), "neg" | "abs" | "sqrt")
-            && call.args.len() == 1;
-
-        if is_binary_fp_method || is_unary_fp_method {
-            eprintln!(
-                "[DEBUG] inline_function_call: Detected FP method '{}' with {} args, handling as FP operation",
-                call.function,
-                call.args.len()
-            );
-            // Assume this is an FP method call and convert it directly
-            // This bypasses the normal FP detection which may fail with complex expressions
-            return self.convert_fp_method_call(call);
-        }
-
         // Step 1: Find the function and clone its body to avoid borrow checker issues
         let func = match self.find_function(&call.function) {
             Some(f) => {
@@ -13378,36 +13209,7 @@ impl<'hir> HirToMir<'hir> {
                 Some(cast.target_type.clone())
             }
             hir::HirExpression::Call(call) => {
-                // BUG FIX #7: Infer type from function return type
-                // This is needed for chained method calls like vec_dot(a, b).add(c)
-                // where vec_dot returns fp32, enabling type inference for the add method
-
-                // CRITICAL FIX: Check if this is an FP method call FIRST
-                // FP methods like mul, add, sub, div should return the same type as their receiver
-                if !call.args.is_empty() {
-                    // Check if receiver (arg[0]) is a float type
-                    if let Some(receiver_type) = self.infer_hir_type(&call.args[0]) {
-                        if self.is_float_type(&receiver_type) {
-                            // FP binary methods return the same float type as receiver
-                            if matches!(call.function.as_str(), "add" | "sub" | "mul" | "div") {
-                                return Some(receiver_type);
-                            }
-                            // FP comparison methods return bit
-                            if matches!(
-                                call.function.as_str(),
-                                "lt" | "gt" | "le" | "ge" | "eq" | "ne"
-                            ) {
-                                return Some(hir::HirType::Bit(1));
-                            }
-                            // FP unary methods return the same float type
-                            if matches!(call.function.as_str(), "sqrt" | "abs") {
-                                return Some(receiver_type);
-                            }
-                        }
-                    }
-                }
-
-                // Fall back to looking up regular function
+                // Infer type from function return type
                 if let Some(func) = self.find_function(&call.function) {
                     func.return_type.clone()
                 } else {
@@ -13416,45 +13218,6 @@ impl<'hir> HirToMir<'hir> {
             }
             _ => None,
         }
-    }
-
-    /// Check if HIR type is a floating-point type
-    ///
-    /// This recognizes both:
-    /// - Built-in FP types: Float16, Float32, Float64 (deprecated, for backward compat)
-    /// - Distinct FP types: fp16, fp32, fp64 from stdlib (preferred)
-    fn is_float_type(&self, hir_type: &hir::HirType) -> bool {
-        // Check built-in FP types (deprecated, kept for backward compatibility)
-        if matches!(
-            hir_type,
-            hir::HirType::Float16 | hir::HirType::Float32 | hir::HirType::Float64
-        ) {
-            return true;
-        }
-
-        // Check for distinct FP types from stdlib (e.g., fp32, fp64, fp16, bf16)
-        if let hir::HirType::Custom(name) = hir_type {
-            if self.is_distinct_float_type(name) {
-                return true;
-            }
-        }
-
-        false
-    }
-
-    /// Check if a type name corresponds to a distinct floating-point type
-    ///
-    /// Only recognizes the well-known FP type names from stdlib:
-    /// - fp16, fp32, fp64, bf16
-    ///
-    /// This is intentionally restrictive. We only want to use the hardcoded
-    /// FP synthesis path for types that are specifically meant to be IEEE 754
-    /// floating-point types. Other distinct types (like `distinct myint = bit[32]`)
-    /// should use trait-based operator resolution instead.
-    fn is_distinct_float_type(&self, name: &str) -> bool {
-        // Only recognize well-known stdlib FP type names
-        // These types use the proven hardcoded FP synthesis path
-        matches!(name, "fp16" | "fp32" | "fp64" | "bf16")
     }
 
     /// Find a trait method implementation for a given type, trait name, and method name
@@ -14195,44 +13958,9 @@ impl<'hir> HirToMir<'hir> {
                     LValue::Concat(_) => DataType::Nat(32),
                 }
             }
-            ExpressionKind::Binary { op, left, right } => {
-                // BUG #65/#66 FIX: For FP binary operations, infer Float32 if operands are Float types
-                // Check if this is an FP operation (Add, Sub, Mul, Div)
-                if matches!(
-                    op,
-                    BinaryOp::Add
-                        | BinaryOp::Sub
-                        | BinaryOp::Mul
-                        | BinaryOp::Div
-                        | BinaryOp::FAdd
-                        | BinaryOp::FSub
-                        | BinaryOp::FMul
-                        | BinaryOp::FDiv
-                ) {
-                    let left_type = self.infer_expression_type_internal(left, module_opt);
-                    let right_type = self.infer_expression_type_internal(right, module_opt);
-
-                    // If either operand is a Float type, result is Float
-                    if matches!(
-                        left_type,
-                        DataType::Float16 | DataType::Float32 | DataType::Float64
-                    ) || matches!(
-                        right_type,
-                        DataType::Float16 | DataType::Float32 | DataType::Float64
-                    ) {
-                        // Use the wider type
-                        match (left_type, right_type) {
-                            (DataType::Float64, _) | (_, DataType::Float64) => DataType::Float64,
-                            (DataType::Float32, _) | (_, DataType::Float32) => DataType::Float32,
-                            (DataType::Float16, DataType::Float16) => DataType::Float16,
-                            _ => DataType::Float32, // Fallback
-                        }
-                    } else {
-                        DataType::Nat(32) // Integer arithmetic
-                    }
-                } else {
-                    DataType::Nat(32) // Other binary ops
-                }
+            ExpressionKind::Binary { left, .. } => {
+                // Infer type from left operand (binary ops preserve operand type)
+                self.infer_expression_type_internal(left, module_opt)
             }
             ExpressionKind::Unary { .. } => DataType::Nat(32),
             ExpressionKind::Conditional { then_expr, .. } => {
