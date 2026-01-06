@@ -1317,44 +1317,12 @@ fn format_expression_with_context(expr: &skalp_mir::Expression, module: &Module)
         skalp_mir::ExpressionKind::Literal(val) => format_value(val),
         skalp_mir::ExpressionKind::Ref(lval) => format_lvalue_with_context(lval, module),
         skalp_mir::ExpressionKind::Binary { op, left, right } => {
-            // BUG FIX #17: FP operations need shortreal conversion
-            if matches!(
-                op,
-                skalp_mir::BinaryOp::FAdd
-                    | skalp_mir::BinaryOp::FSub
-                    | skalp_mir::BinaryOp::FMul
-                    | skalp_mir::BinaryOp::FDiv
-            ) {
-                format!(
-                    "$shortrealtobits($bitstoshortreal({}) {} $bitstoshortreal({}))",
-                    format_expression_with_context(left, module),
-                    format_binary_op(op),
-                    format_expression_with_context(right, module)
-                )
-            } else if matches!(
-                op,
-                skalp_mir::BinaryOp::FEqual
-                    | skalp_mir::BinaryOp::FNotEqual
-                    | skalp_mir::BinaryOp::FLess
-                    | skalp_mir::BinaryOp::FLessEqual
-                    | skalp_mir::BinaryOp::FGreater
-                    | skalp_mir::BinaryOp::FGreaterEqual
-            ) {
-                // FP comparisons also need shortreal conversion
-                format!(
-                    "($bitstoshortreal({}) {} $bitstoshortreal({}))",
-                    format_expression_with_context(left, module),
-                    format_binary_op(op),
-                    format_expression_with_context(right, module)
-                )
-            } else {
-                format!(
-                    "({} {} {})",
-                    format_expression_with_context(left, module),
-                    format_binary_op(op),
-                    format_expression_with_context(right, module)
-                )
-            }
+            format!(
+                "({} {} {})",
+                format_expression_with_context(left, module),
+                format_binary_op(op),
+                format_expression_with_context(right, module)
+            )
         }
         skalp_mir::ExpressionKind::Unary { op, operand } => {
             // Special handling for FSqrt - it's a function call in SystemVerilog
@@ -1486,45 +1454,12 @@ fn format_expression(expr: &skalp_mir::Expression) -> String {
         skalp_mir::ExpressionKind::Literal(val) => format_value(val),
         skalp_mir::ExpressionKind::Ref(lval) => format_lvalue(lval),
         skalp_mir::ExpressionKind::Binary { op, left, right } => {
-            // BUG FIX #17: FP operations need shortreal conversion
-            // Hardware represents floats as bit patterns, but arithmetic needs real type
-            if matches!(
-                op,
-                skalp_mir::BinaryOp::FAdd
-                    | skalp_mir::BinaryOp::FSub
-                    | skalp_mir::BinaryOp::FMul
-                    | skalp_mir::BinaryOp::FDiv
-            ) {
-                format!(
-                    "$shortrealtobits($bitstoshortreal({}) {} $bitstoshortreal({}))",
-                    format_expression(left),
-                    format_binary_op(op),
-                    format_expression(right)
-                )
-            } else if matches!(
-                op,
-                skalp_mir::BinaryOp::FEqual
-                    | skalp_mir::BinaryOp::FNotEqual
-                    | skalp_mir::BinaryOp::FLess
-                    | skalp_mir::BinaryOp::FLessEqual
-                    | skalp_mir::BinaryOp::FGreater
-                    | skalp_mir::BinaryOp::FGreaterEqual
-            ) {
-                // FP comparisons also need shortreal conversion
-                format!(
-                    "($bitstoshortreal({}) {} $bitstoshortreal({}))",
-                    format_expression(left),
-                    format_binary_op(op),
-                    format_expression(right)
-                )
-            } else {
-                format!(
-                    "({} {} {})",
-                    format_expression(left),
-                    format_binary_op(op),
-                    format_expression(right)
-                )
-            }
+            format!(
+                "({} {} {})",
+                format_expression(left),
+                format_binary_op(op),
+                format_expression(right)
+            )
         }
         skalp_mir::ExpressionKind::Unary { op, operand } => {
             // BUG FIX #73: FSqrt must convert to/from bits
@@ -1614,10 +1549,6 @@ fn format_binary_op(op: &skalp_mir::BinaryOp) -> &'static str {
         skalp_mir::BinaryOp::Mul => "*",
         skalp_mir::BinaryOp::Div => "/",
         skalp_mir::BinaryOp::Mod => "%",
-        skalp_mir::BinaryOp::FAdd => "+",
-        skalp_mir::BinaryOp::FSub => "-",
-        skalp_mir::BinaryOp::FMul => "*",
-        skalp_mir::BinaryOp::FDiv => "/",
         skalp_mir::BinaryOp::And => "&", // Logical operations (same as bitwise in Verilog context)
         skalp_mir::BinaryOp::Or => "|",
         skalp_mir::BinaryOp::Xor => "^",
@@ -1632,12 +1563,6 @@ fn format_binary_op(op: &skalp_mir::BinaryOp) -> &'static str {
         skalp_mir::BinaryOp::LessEqual => "<=",
         skalp_mir::BinaryOp::Greater => ">",
         skalp_mir::BinaryOp::GreaterEqual => ">=",
-        skalp_mir::BinaryOp::FEqual => "==",
-        skalp_mir::BinaryOp::FNotEqual => "!=",
-        skalp_mir::BinaryOp::FLess => "<",
-        skalp_mir::BinaryOp::FLessEqual => "<=",
-        skalp_mir::BinaryOp::FGreater => ">",
-        skalp_mir::BinaryOp::FGreaterEqual => ">=",
         skalp_mir::BinaryOp::LeftShift => "<<",
         skalp_mir::BinaryOp::RightShift => ">>",
     }

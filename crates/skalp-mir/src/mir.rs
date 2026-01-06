@@ -781,35 +781,23 @@ impl Value {
 /// Binary operators
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BinaryOp {
-    // Integer Arithmetic
+    // Arithmetic
     Add,
     Sub,
     Mul,
     Div,
     Mod,
-    // Floating-Point Arithmetic
-    FAdd,
-    FSub,
-    FMul,
-    FDiv,
     // Logical
     And,
     Or,
     Xor,
-    // Integer Comparison
+    // Comparison
     Equal,
     NotEqual,
     Less,
     LessEqual,
     Greater,
     GreaterEqual,
-    // Floating-Point Comparison
-    FEqual,
-    FNotEqual,
-    FLess,
-    FLessEqual,
-    FGreater,
-    FGreaterEqual,
     // Bitwise
     BitwiseAnd,
     BitwiseOr,

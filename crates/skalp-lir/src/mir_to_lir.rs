@@ -1226,29 +1226,6 @@ impl MirToLirTransform {
                 )
             }
 
-            // Floating-Point Arithmetic - should be handled via stdlib entity instantiation
-            // If we hit these, the trait resolution in HIR->MIR failed to route through FpAdd/FpSub/etc.
-            BinaryOp::FAdd | BinaryOp::FSub | BinaryOp::FMul | BinaryOp::FDiv => {
-                unreachable!(
-                    "FP arithmetic ops should be handled via stdlib entity instantiation, not direct MIR BinaryOp"
-                )
-            }
-
-            // Floating-Point Comparisons - should be handled via stdlib entity instantiation
-            BinaryOp::FLess
-            | BinaryOp::FLessEqual
-            | BinaryOp::FGreater
-            | BinaryOp::FGreaterEqual => {
-                unreachable!(
-                    "FP comparison ops should be handled via stdlib entity instantiation, not direct MIR BinaryOp"
-                )
-            }
-            BinaryOp::FEqual | BinaryOp::FNotEqual => {
-                unreachable!(
-                    "FP equality ops should be handled via stdlib entity instantiation, not direct MIR BinaryOp"
-                )
-            }
-
             _ => {
                 self.warnings
                     .push(format!("Unsupported binary op: {:?}", op));

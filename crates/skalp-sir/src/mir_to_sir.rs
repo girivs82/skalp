@@ -1977,33 +1977,6 @@ impl<'a> MirToSirConverter<'a> {
                 }
             }
             ExpressionKind::Binary { op, left, right } => {
-                // BUG #71 DEBUG: Check if operands are variable references to Concat
-                if matches!(
-                    op,
-                    BinaryOp::FAdd | BinaryOp::FSub | BinaryOp::FMul | BinaryOp::FDiv
-                ) {
-                    eprintln!("[BUG #71 BINARY] FP Binary operation: op={:?}", op);
-                    eprintln!(
-                        "[BUG #71 BINARY]   left: {:?}",
-                        std::mem::discriminant(&left.kind)
-                    );
-                    eprintln!(
-                        "[BUG #71 BINARY]   right: {:?}",
-                        std::mem::discriminant(&right.kind)
-                    );
-                    if let ExpressionKind::Ref(_lval) = &left.kind {
-                        eprintln!(
-                            "[BUG #71 BINARY]   left is Ref: {:?}",
-                            std::mem::discriminant(_lval)
-                        );
-                    }
-                    if let ExpressionKind::Ref(_lval) = &right.kind {
-                        eprintln!(
-                            "[BUG #71 BINARY]   right is Ref: {:?}",
-                            std::mem::discriminant(_lval)
-                        );
-                    }
-                }
                 let left_node = self.create_expression_with_local_context(left, local_context);
                 let right_node = self.create_expression_with_local_context(right, local_context);
                 self.create_binary_op_node(op, left_node, right_node)
@@ -2518,47 +2491,7 @@ impl<'a> MirToSirConverter<'a> {
             }
             ExpressionKind::Ref(lvalue) => self.create_lvalue_ref_node(lvalue),
             ExpressionKind::Binary { op, left, right } => {
-                // BUG #71 DEBUG: Check if operands contain Cast with Concat inside
-                if matches!(
-                    op,
-                    BinaryOp::FAdd | BinaryOp::FSub | BinaryOp::FMul | BinaryOp::FDiv
-                ) {
-                    eprintln!("[BUG #71 BINARY NODE] FP Binary operation: op={:?}", op);
-                    eprintln!(
-                        "[BUG #71 BINARY NODE]   left: {:?}",
-                        std::mem::discriminant(&left.kind)
-                    );
-                    eprintln!(
-                        "[BUG #71 BINARY NODE]   right: {:?}",
-                        std::mem::discriminant(&right.kind)
-                    );
-
-                    // Check if left is Cast wrapping a Ref to a variable
-                    if let ExpressionKind::Cast {
-                        expr,
-                        target_type: _target_type,
-                    } = &left.kind
-                    {
-                        if let ExpressionKind::Ref(LValue::Variable(_var_id)) = &expr.kind {
-                            eprintln!(
-                                "[BUG #71 BINARY NODE]   left is Cast(Ref(Variable({:?}))) to {:?}",
-                                _var_id, _target_type
-                            );
-                        }
-                    }
-
-                    // Check if right is Cast wrapping a Ref to a variable
-                    if let ExpressionKind::Cast {
-                        expr,
-                        target_type: _target_type,
-                    } = &right.kind
-                    {
-                        if let ExpressionKind::Ref(LValue::Variable(_var_id)) = &expr.kind {
-                            eprintln!("[BUG #71 BINARY NODE]   right is Cast(Ref(Variable({:?}))) to {:?}", _var_id, _target_type);
-                        }
-                    }
-                }
-                // BUG FIX: Propagate target width to operands so integer literals get correct width
+                // Propagate target width to operands so integer literals get correct width
                 let left_node = self.create_expression_node_with_width(left, target_width);
                 let right_node = self.create_expression_node_with_width(right, target_width);
                 self.create_binary_op_node(op, left_node, right_node)
@@ -3955,10 +3888,6 @@ impl<'a> MirToSirConverter<'a> {
             Mul => BinaryOperation::Mul,
             Div => BinaryOperation::Div,
             Mod => BinaryOperation::Mod,
-            FAdd => BinaryOperation::FAdd,
-            FSub => BinaryOperation::FSub,
-            FMul => BinaryOperation::FMul,
-            FDiv => BinaryOperation::FDiv,
             BitwiseAnd => BinaryOperation::And,
             BitwiseOr => BinaryOperation::Or,
             BitwiseXor => BinaryOperation::Xor,
@@ -3971,12 +3900,6 @@ impl<'a> MirToSirConverter<'a> {
             LessEqual => BinaryOperation::Lte,
             Greater => BinaryOperation::Gt,
             GreaterEqual => BinaryOperation::Gte,
-            FEqual => BinaryOperation::FEq,
-            FNotEqual => BinaryOperation::FNeq,
-            FLess => BinaryOperation::FLt,
-            FLessEqual => BinaryOperation::FLte,
-            FGreater => BinaryOperation::FGt,
-            FGreaterEqual => BinaryOperation::FGte,
             LeftShift => BinaryOperation::Shl,
             RightShift => BinaryOperation::Shr,
             LogicalAnd => BinaryOperation::And, // Boolean AND
