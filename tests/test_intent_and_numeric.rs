@@ -175,7 +175,9 @@ async fn test_fp32_comparison_equal() {
 // ============================================================================
 
 /// Test FP32 sqrt with perfect squares
-/// IGNORED: Port ID remapping issue in SIR conversion for nested entity instances
+/// IGNORED: Infinite recursion in entity elaboration when trait implementations
+/// instantiate entities. The fp32 arithmetic inside CordicSqrt uses FpAdd/FpSub
+/// entities via traits, but elaboration incorrectly creates circular instances.
 #[tokio::test]
 #[ignore]
 async fn test_fp32_sqrt_perfect_squares() {

@@ -517,6 +517,28 @@ fn remap_impl_ports(
         }
     }
 
+    // BUG FIX: Remap ports in instance connections
+    // When entities are merged, their sub-instances' connection expressions may reference ports
+    for instance in &mut impl_block.instances {
+        for connection in &mut instance.connections {
+            connection.expr = remap_expr_ports(&connection.expr, port_id_map);
+        }
+        // Also remap any generic arguments that might reference ports
+        for arg in &mut instance.generic_args {
+            *arg = remap_expr_ports(arg, port_id_map);
+        }
+        for arg in instance.named_generic_args.values_mut() {
+            *arg = remap_expr_ports(arg, port_id_map);
+        }
+    }
+
+    // Remap ports in signal initial values
+    for signal in &mut impl_block.signals {
+        if let Some(ref init) = signal.initial_value {
+            signal.initial_value = Some(remap_expr_ports(init, port_id_map));
+        }
+    }
+
     impl_block
 }
 
