@@ -1090,7 +1090,19 @@ fn merge_all_symbols(target: &mut Hir, source: &Hir) -> Result<()> {
         source.implementations.len()
     );
 
-    // Merge all public entities (and their implementations)
+    // BUG #183 FIX: Use two-pass approach to ensure all entities are available
+    // before processing implementations (which may reference other entities)
+
+    // PASS 1: Merge all public entities (without implementations)
+    // Build mapping from old entity ID to (new entity ID, port ID map)
+    let mut entity_id_map: std::collections::HashMap<
+        hir::EntityId,
+        (
+            hir::EntityId,
+            std::collections::HashMap<hir::PortId, hir::PortId>,
+        ),
+    > = std::collections::HashMap::new();
+
     for entity in &source.entities {
         eprintln!(
             "[MERGE_ALL_SYMBOLS] Entity '{}' visibility={:?}",
@@ -1125,33 +1137,66 @@ fn merge_all_symbols(target: &mut Hir, source: &Hir) -> Result<()> {
                 port.id = new_id;
             }
 
-            target.entities.push(imported_entity);
+            // Store mapping for pass 2
+            entity_id_map.insert(old_entity_id, (new_entity_id, port_id_map));
 
-            // Also merge the implementation for this entity (needed for generic entities)
-            // BUG #33 FIX: Remap port IDs in the implementation to match the renumbered ports!
-            if let Some(impl_block) = source
-                .implementations
-                .iter()
-                .find(|i| i.entity == old_entity_id)
-            {
-                eprintln!(
-                    "[MERGE_ALL_SYMBOLS] Found impl for '{}' with {} signals, {} assignments",
-                    entity.name,
-                    impl_block.signals.len(),
-                    impl_block.assignments.len()
-                );
-                let mut imported_impl = impl_block.clone();
-                // Update implementation to point to the new entity ID
-                imported_impl.entity = new_entity_id;
-                // BUG #33 FIX: Remap port IDs in all assignments
-                imported_impl = remap_impl_ports(imported_impl, &port_id_map);
-                target.implementations.push(imported_impl);
-            } else {
-                eprintln!(
-                    "[MERGE_ALL_SYMBOLS] NO impl found for entity '{}' (entity_id={:?})",
-                    entity.name, old_entity_id
-                );
+            target.entities.push(imported_entity);
+        }
+    }
+
+    // PASS 2: Merge all implementations (now all entities are in target)
+    for entity in &source.entities {
+        if entity.visibility != HirVisibility::Public {
+            continue;
+        }
+
+        let old_entity_id = entity.id;
+
+        // Get the mapping we created in pass 1
+        let (new_entity_id, port_id_map) = match entity_id_map.get(&old_entity_id) {
+            Some((id, map)) => (*id, map.clone()),
+            None => continue,
+        };
+
+        // Find and merge the implementation for this entity
+        if let Some(impl_block) = source
+            .implementations
+            .iter()
+            .find(|i| i.entity == old_entity_id)
+        {
+            eprintln!(
+                "[MERGE_ALL_SYMBOLS] Found impl for '{}' with {} signals, {} assignments, {} instances",
+                entity.name,
+                impl_block.signals.len(),
+                impl_block.assignments.len(),
+                impl_block.instances.len()
+            );
+            let mut imported_impl = impl_block.clone();
+            // Update implementation to point to the new entity ID
+            imported_impl.entity = new_entity_id;
+            // BUG #33 FIX: Remap port IDs in all assignments
+            imported_impl = remap_impl_ports(imported_impl, &port_id_map);
+
+            // BUG #183 FIX: Update instance entity IDs to point to entities in target
+            // This is critical for nested generic instantiations (e.g., FpSub -> FpAdd)
+            for instance in &mut imported_impl.instances {
+                // Find the entity in source by the instance's current entity ID
+                if let Some(dep_entity) = source.entities.iter().find(|e| e.id == instance.entity) {
+                    // Find the corresponding entity in target by name
+                    if let Some(new_dep_entity) =
+                        target.entities.iter().find(|e| e.name == dep_entity.name)
+                    {
+                        instance.entity = new_dep_entity.id;
+                    }
+                }
             }
+
+            target.implementations.push(imported_impl);
+        } else {
+            eprintln!(
+                "[MERGE_ALL_SYMBOLS] NO impl found for entity '{}' (entity_id={:?})",
+                entity.name, old_entity_id
+            );
         }
     }
 

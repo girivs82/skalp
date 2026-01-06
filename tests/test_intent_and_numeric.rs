@@ -176,7 +176,9 @@ async fn test_fp32_comparison_equal() {
 
 /// Test FP32 sqrt with perfect squares
 /// BUG #181 - fp32/uint4 type mismatch in nested mux operations
-/// IGNORED: BUG #182 - Const generic replication {E{1'b1}} generates 32-bit instead of E-bit
+/// BUG #182 - Const generic replication {E{1'b1}} generates 32-bit instead of E-bit - FIXED
+/// BUG #183 - Instance entity ID assignment during glob import merge - FIXED
+/// BUG #184 - FP computation returns 0 instead of correct value (pending investigation)
 #[tokio::test]
 #[ignore]
 async fn test_fp32_sqrt_perfect_squares() {

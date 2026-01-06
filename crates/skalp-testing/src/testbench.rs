@@ -209,9 +209,9 @@ impl Testbench {
 
         // BUG #180 FIX: Improved top module selection
         // Priority order:
-        // 1. Module whose name matches the source file basename
-        // 2. Module that is NOT a trait specialization (no _fp32/_fp64/_fp16 suffix)
-        // 3. Module with the most instances (original logic)
+        // 1. Module whose name matches the source file basename (search ALL modules first!)
+        // 2. Among uninstantiated modules: Module that is NOT a trait specialization
+        // 3. Among uninstantiated modules: Module with the most instances (original logic)
         let top_module = if let Some(ref basename) = source_basename {
             // Convert basename to PascalCase for matching (e.g., "fp_sqrt_simple" -> "FpSqrtSimple")
             let pascal_basename: String = basename
@@ -225,8 +225,16 @@ impl Testbench {
                 })
                 .collect();
 
-            // Try to find exact match first
-            if let Some(m) = uninstantiated.iter().find(|m| m.name == pascal_basename) {
+            // BUG #183 FIX: First search ALL modules for exact match, not just uninstantiated
+            // This handles cases where a module may be incorrectly marked as instantiated
+            // due to module ID assignment issues during monomorphization
+            if let Some(m) = mir.modules.iter().find(|m| m.name == pascal_basename) {
+                eprintln!(
+                    "  ✓ Found module matching source file name: '{}' (searching all modules)",
+                    m.name
+                );
+                m
+            } else if let Some(m) = uninstantiated.iter().find(|m| m.name == pascal_basename) {
                 eprintln!("  ✓ Found module matching source file name: '{}'", m.name);
                 *m
             } else {
