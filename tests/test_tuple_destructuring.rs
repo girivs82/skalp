@@ -4,12 +4,13 @@
 
 #[cfg(test)]
 mod tuple_destructuring_tests {
-    use skalp_frontend::parse_and_build_hir;
+    use skalp_frontend::{parse_and_build_hir, parse_and_build_hir_from_file};
     use skalp_mir::lower_to_mir;
     use skalp_sim::{SimulationConfig, Simulator};
+    use std::io::Write;
 
     async fn setup_cpu_simulator_with_entity(source: &str, entity_name: &str) -> Simulator {
-        // Parse and build HIR
+        // Parse and build HIR (for non-stdlib tests)
         let hir = parse_and_build_hir(source).expect("Failed to parse design");
 
         // Compile to MIR
@@ -33,6 +34,60 @@ mod tuple_destructuring_tests {
         // Create CPU simulator
         let config = SimulationConfig {
             use_gpu: false, // CPU simulation
+            max_cycles: 100,
+            timeout_ms: 5000,
+            capture_waveforms: false,
+            parallel_threads: 1,
+        };
+
+        let mut simulator = Simulator::new(config)
+            .await
+            .expect("Failed to create simulator");
+
+        simulator
+            .load_module(&sir)
+            .await
+            .expect("Failed to load module");
+
+        simulator
+    }
+
+    async fn setup_cpu_simulator_with_stdlib(source: &str, entity_name: &str) -> Simulator {
+        // Set stdlib path
+        std::env::set_var("SKALP_STDLIB_PATH", "./crates/skalp-stdlib");
+
+        // Write source to temp file for module resolution
+        let temp_dir = std::env::temp_dir();
+        let temp_file = temp_dir.join("tuple_fp_test.sk");
+        let mut file = std::fs::File::create(&temp_file).expect("Failed to create temp file");
+        file.write_all(source.as_bytes())
+            .expect("Failed to write temp file");
+
+        // Parse with module resolution (loads stdlib imports)
+        let hir =
+            parse_and_build_hir_from_file(&temp_file).expect("Failed to parse design with stdlib");
+
+        // Compile to MIR
+        let mir = lower_to_mir(&hir).expect("Failed to compile to MIR");
+
+        // Find the entity module by name
+        assert!(!mir.modules.is_empty());
+        let top_module = mir
+            .modules
+            .iter()
+            .find(|m| m.name == entity_name)
+            .unwrap_or_else(|| {
+                panic!(
+                    "Entity '{}' not found in MIR modules: {:?}",
+                    entity_name,
+                    mir.modules.iter().map(|m| &m.name).collect::<Vec<_>>()
+                )
+            });
+        let sir = skalp_sir::convert_mir_to_sir_with_hierarchy(&mir, top_module);
+
+        // Create CPU simulator
+        let config = SimulationConfig {
+            use_gpu: false,
             max_cycles: 100,
             timeout_ms: 5000,
             capture_waveforms: false,
@@ -227,59 +282,62 @@ mod tuple_destructuring_tests {
 
     /// Test floating-point tuple return (quadratic solver pattern)
     /// This is the exact test case that exposed BUG #85
-    #[ignore = "requires stdlib trait implementations for FP32 operations"]
+    #[ignore = "requires stdlib parsing support for fp.sk advanced syntax"]
     #[tokio::test]
     async fn test_tuple_fp32_quadratic_solver() {
         let source = r#"
-        fn fp_mul(a: bit[32], b: bit[32]) -> bit[32] {
-            return (a as fp32 * b as fp32) as bit[32]
+        use skalp::numeric::fp::*;
+        use skalp::numeric::formats::fp32;
+
+        fn fp_mul(a: fp32, b: fp32) -> fp32 {
+            return a * b
         }
 
-        fn fp_sub(a: bit[32], b: bit[32]) -> bit[32] {
-            return (a as fp32 - b as fp32) as bit[32]
+        fn fp_sub(a: fp32, b: fp32) -> fp32 {
+            return a - b
         }
 
-        fn fp_add(a: bit[32], b: bit[32]) -> bit[32] {
-            return (a as fp32 + b as fp32) as bit[32]
+        fn fp_add(a: fp32, b: fp32) -> fp32 {
+            return a + b
         }
 
-        fn fp_div(a: bit[32], b: bit[32]) -> bit[32] {
-            return (a as fp32 / b as fp32) as bit[32]
+        fn fp_div(a: fp32, b: fp32) -> fp32 {
+            return a / b
         }
 
-        fn fp_sqrt(x: bit[32]) -> bit[32] {
+        fn fp_sqrt(x: fp32) -> fp32 {
             // Hardware sqrt - simplified for test
-            return (x as fp32).sqrt() as bit[32]
+            return x.sqrt()
         }
 
-        fn fp_lt(a: bit[32], b: bit[32]) -> bit {
-            return (a as fp32) < (b as fp32)
+        fn fp_lt(a: fp32, b: fp32) -> bit {
+            return a < b
         }
 
-        fn fp_neg(x: bit[32]) -> bit[32] {
-            return (-(x as fp32)) as bit[32]
+        fn fp_neg(x: fp32) -> fp32 {
+            return -x
         }
 
         /// Quadratic Solver: Solves ax² + bx + c = 0
         /// Returns (valid, x1, x2) where valid indicates if real solutions exist
-        fn quadratic_solve(a: bit[32], b: bit[32], c: bit[32]) -> (bit, bit[32], bit[32]) {
+        fn quadratic_solve(a: fp32, b: fp32, c: fp32) -> (bit, fp32, fp32) {
             // Compute discriminant: b² - 4ac
-            let four_fp = (4.0 as fp32) as bit[32];
+            let four_fp: fp32 = 4.0 as fp32;
             let b_squared = fp_mul(b, b);
             let four_a = fp_mul(four_fp, a);
             let four_ac = fp_mul(four_a, c);
             let discriminant = fp_sub(b_squared, four_ac);
 
-            let zero_fp = (0.0 as fp32) as bit[32];
+            let zero_fp: fp32 = 0.0 as fp32;
 
             // Check if discriminant is negative (no real solutions)
             if fp_lt(discriminant, zero_fp) != 0 {
-                return (0, 0, 0)
+                return (0, 0 as fp32, 0 as fp32)
             }
 
             // Compute roots: x = (-b ± √discriminant) / 2a
             let sqrt_disc = fp_sqrt(discriminant);
-            let two_fp = (2.0 as fp32) as bit[32];
+            let two_fp: fp32 = 2.0 as fp32;
             let two_a = fp_mul(two_fp, a);
             let neg_b = fp_neg(b);
 
@@ -290,12 +348,12 @@ mod tuple_destructuring_tests {
         }
 
         entity QuadraticSolver {
-            in a: bit[32]
-            in b: bit[32]
-            in c: bit[32]
+            in a: fp32
+            in b: fp32
+            in c: fp32
             out valid: bit[32]
-            out x1: bit[32]
-            out x2: bit[32]
+            out x1: fp32
+            out x2: fp32
         }
 
         impl QuadraticSolver {
@@ -306,7 +364,7 @@ mod tuple_destructuring_tests {
         }
         "#;
 
-        let mut sim = setup_cpu_simulator_with_entity(source, "QuadraticSolver").await;
+        let mut sim = setup_cpu_simulator_with_stdlib(source, "QuadraticSolver").await;
 
         // Test: x² - 5x + 6 = 0 has roots x=2 and x=3
         // a=1.0, b=-5.0, c=6.0
@@ -365,53 +423,56 @@ mod tuple_destructuring_tests {
     /// NOTE: This test is disabled because conditional early returns in synthesized
     /// functions are not yet properly handled (separate bug from tuple destructuring).
     /// The if-return pattern needs to be converted to mux logic during inlining.
-    #[ignore = "requires stdlib trait implementations for FP32 operations"]
+    #[ignore = "requires stdlib parsing support for fp.sk advanced syntax"]
     #[tokio::test]
     async fn test_tuple_fp32_quadratic_no_real_roots() {
         let source = r#"
-        fn fp_mul(a: bit[32], b: bit[32]) -> bit[32] {
-            return (a as fp32 * b as fp32) as bit[32]
+        use skalp::numeric::fp::*;
+        use skalp::numeric::formats::fp32;
+
+        fn fp_mul(a: fp32, b: fp32) -> fp32 {
+            return a * b
         }
 
-        fn fp_sub(a: bit[32], b: bit[32]) -> bit[32] {
-            return (a as fp32 - b as fp32) as bit[32]
+        fn fp_sub(a: fp32, b: fp32) -> fp32 {
+            return a - b
         }
 
-        fn fp_add(a: bit[32], b: bit[32]) -> bit[32] {
-            return (a as fp32 + b as fp32) as bit[32]
+        fn fp_add(a: fp32, b: fp32) -> fp32 {
+            return a + b
         }
 
-        fn fp_div(a: bit[32], b: bit[32]) -> bit[32] {
-            return (a as fp32 / b as fp32) as bit[32]
+        fn fp_div(a: fp32, b: fp32) -> fp32 {
+            return a / b
         }
 
-        fn fp_sqrt(x: bit[32]) -> bit[32] {
-            return (x as fp32).sqrt() as bit[32]
+        fn fp_sqrt(x: fp32) -> fp32 {
+            return x.sqrt()
         }
 
-        fn fp_lt(a: bit[32], b: bit[32]) -> bit {
-            return (a as fp32) < (b as fp32)
+        fn fp_lt(a: fp32, b: fp32) -> bit {
+            return a < b
         }
 
-        fn fp_neg(x: bit[32]) -> bit[32] {
-            return (-(x as fp32)) as bit[32]
+        fn fp_neg(x: fp32) -> fp32 {
+            return -x
         }
 
-        fn quadratic_solve(a: bit[32], b: bit[32], c: bit[32]) -> (bit, bit[32], bit[32]) {
-            let four_fp = (4.0 as fp32) as bit[32];
+        fn quadratic_solve(a: fp32, b: fp32, c: fp32) -> (bit, fp32, fp32) {
+            let four_fp: fp32 = 4.0 as fp32;
             let b_squared = fp_mul(b, b);
             let four_a = fp_mul(four_fp, a);
             let four_ac = fp_mul(four_a, c);
             let discriminant = fp_sub(b_squared, four_ac);
 
-            let zero_fp = (0.0 as fp32) as bit[32];
+            let zero_fp: fp32 = 0.0 as fp32;
 
             if fp_lt(discriminant, zero_fp) != 0 {
-                return (0, 0, 0)
+                return (0, 0 as fp32, 0 as fp32)
             }
 
             let sqrt_disc = fp_sqrt(discriminant);
-            let two_fp = (2.0 as fp32) as bit[32];
+            let two_fp: fp32 = 2.0 as fp32;
             let two_a = fp_mul(two_fp, a);
             let neg_b = fp_neg(b);
 
@@ -422,12 +483,12 @@ mod tuple_destructuring_tests {
         }
 
         entity QuadraticSolver {
-            in a: bit[32]
-            in b: bit[32]
-            in c: bit[32]
+            in a: fp32
+            in b: fp32
+            in c: fp32
             out valid: bit[32]
-            out x1: bit[32]
-            out x2: bit[32]
+            out x1: fp32
+            out x2: fp32
         }
 
         impl QuadraticSolver {
@@ -438,7 +499,7 @@ mod tuple_destructuring_tests {
         }
         "#;
 
-        let mut sim = setup_cpu_simulator_with_entity(source, "QuadraticSolver").await;
+        let mut sim = setup_cpu_simulator_with_stdlib(source, "QuadraticSolver").await;
 
         // Test: x² + x + 1 = 0 has no real roots (discriminant = 1 - 4 = -3)
         // a=1.0, b=1.0, c=1.0

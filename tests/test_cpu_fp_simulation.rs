@@ -1,20 +1,27 @@
 // CPU simulation tests for floating-point arithmetic
 // These tests verify proper IEEE 754 FP operations in the CPU simulator
-//
-// NOTE: These tests require trait-based FP operations (impl Add/Mul for fp32)
-// from the stdlib. Currently skipped until stdlib trait integration is complete.
 
 #[cfg(test)]
 mod cpu_fp_simulation_tests {
-    #![allow(dead_code)] // Allow unused when tests are ignored
-
-    use skalp_frontend::parse_and_build_hir;
+    use skalp_frontend::parse_and_build_hir_from_file;
     use skalp_mir::lower_to_mir;
     use skalp_sim::{SimulationConfig, Simulator};
+    use std::io::Write;
 
     async fn setup_cpu_simulator(source: &str) -> Simulator {
-        // Parse and build HIR
-        let hir = parse_and_build_hir(source).expect("Failed to parse design");
+        // Set stdlib path
+        std::env::set_var("SKALP_STDLIB_PATH", "./crates/skalp-stdlib");
+
+        // Write source to temp file for module resolution
+        let temp_dir = std::env::temp_dir();
+        let temp_file = temp_dir.join("cpu_fp_test.sk");
+        let mut file = std::fs::File::create(&temp_file).expect("Failed to create temp file");
+        file.write_all(source.as_bytes())
+            .expect("Failed to write temp file");
+
+        // Parse with module resolution (loads stdlib imports)
+        let hir =
+            parse_and_build_hir_from_file(&temp_file).expect("Failed to parse design with stdlib");
 
         // Compile to MIR
         let mir = lower_to_mir(&hir).expect("Failed to compile to MIR");
@@ -45,10 +52,13 @@ mod cpu_fp_simulation_tests {
         simulator
     }
 
-    #[ignore = "requires stdlib trait implementations for FP32 operations"]
+    #[ignore = "requires stdlib parsing support for fp.sk advanced syntax"]
     #[tokio::test]
     async fn test_fp32_addition_cpu() {
         let source = r#"
+        use skalp::numeric::fp::*;
+        use skalp::numeric::formats::fp32;
+
         entity FP32Add {
             in a: fp32
             in b: fp32
@@ -85,10 +95,13 @@ mod cpu_fp_simulation_tests {
         );
     }
 
-    #[ignore = "requires stdlib trait implementations for FP32 operations"]
+    #[ignore = "requires stdlib parsing support for fp.sk advanced syntax"]
     #[tokio::test]
     async fn test_fp32_multiplication_cpu() {
         let source = r#"
+        use skalp::numeric::fp::*;
+        use skalp::numeric::formats::fp32;
+
         entity FP32Mul {
             in a: fp32
             in b: fp32
@@ -125,9 +138,13 @@ mod cpu_fp_simulation_tests {
         );
     }
 
+    #[ignore = "requires stdlib parsing support for fp.sk advanced syntax"]
     #[tokio::test]
     async fn test_fp32_comparison_cpu() {
         let source = r#"
+        use skalp::numeric::fp::*;
+        use skalp::numeric::formats::fp32;
+
         entity FP32Compare {
             in a: fp32
             in b: fp32
@@ -162,9 +179,13 @@ mod cpu_fp_simulation_tests {
         assert_eq!(gt_bytes[0], 0, "2.5 > 3.5 should be false");
     }
 
+    #[ignore = "requires stdlib parsing support for fp.sk advanced syntax"]
     #[tokio::test]
     async fn test_fp32_negation_cpu() {
         let source = r#"
+        use skalp::numeric::fp::*;
+        use skalp::numeric::formats::fp32;
+
         entity FP32Negate {
             in x: fp32
             out neg: fp32

@@ -1,12 +1,13 @@
 #[cfg(all(test, target_os = "macos"))]
 mod gpu_simulation_tests {
-    use skalp_frontend::parse_and_build_hir;
+    use skalp_frontend::{parse_and_build_hir, parse_and_build_hir_from_file};
     use skalp_mir::{MirCompiler, OptimizationLevel};
     use skalp_sim::testbench::{TestVectorBuilder, Testbench};
     use skalp_sim::waveform::Waveform;
     use skalp_sim::{SimulationConfig, Simulator};
     use skalp_sir::convert_mir_to_sir;
     use std::fs;
+    use std::io::Write;
     use std::path::PathBuf;
 
     #[tokio::test]
@@ -374,49 +375,48 @@ mod gpu_simulation_tests {
         println!("✅ GPU 256-bit operations test PASSED!");
     }
 
-    #[ignore = "requires stdlib trait implementations for FP32 operations"]
+    #[ignore = "requires stdlib parsing support for fp.sk advanced syntax"]
     #[tokio::test]
     async fn test_bug_66_chained_fp32_addition() {
         // Bug #66: Chained FP32 addition returns wrong values
         // Pattern: (a + b) + c only computes first two terms
         // Expected: a + b + c = all three terms
         let source = r#"
+        use skalp::numeric::fp::*;
+        use skalp::numeric::formats::fp32;
+
         entity TestChainedAddition {
             in clk: clock
             in rst: reset
-            in a: bit[32]
-            in b: bit[32]
-            in c: bit[32]
-            out result_broken: bit[32]
-            out result_working: bit[32]
+            in a: fp32
+            in b: fp32
+            in c: fp32
+            out result_broken: fp32
+            out result_working: fp32
         }
 
         impl TestChainedAddition {
-            signal result_broken_reg: bit[32]
-            signal result_working_reg: bit[32]
-
-            let a_fp = a as fp32;
-            let b_fp = b as fp32;
-            let c_fp = c as fp32;
+            signal result_broken_reg: fp32
+            signal result_working_reg: fp32
 
             // BROKEN: Chained addition
-            signal broken: bit[32]
-            let broken_fp = a_fp + b_fp + c_fp;
-            broken = broken_fp as bit[32]
+            signal broken: fp32
+            let broken_fp = a + b + c;
+            broken = broken_fp
 
             // WORKING: Separate statements
-            signal working: bit[32]
-            let sum_ab = a_fp + b_fp;
-            let working_fp = sum_ab + c_fp;
-            working = working_fp as bit[32]
+            signal working: fp32
+            let sum_ab = a + b;
+            let working_fp = sum_ab + c;
+            working = working_fp
 
             result_broken = result_broken_reg
             result_working = result_working_reg
 
             on(clk.rise) {
                 if rst {
-                    result_broken_reg = 0
-                    result_working_reg = 0
+                    result_broken_reg = 0 as fp32
+                    result_working_reg = 0 as fp32
                 } else {
                     result_broken_reg = broken
                     result_working_reg = working
@@ -427,9 +427,19 @@ mod gpu_simulation_tests {
 
         println!("\n=== Bug #66: Chained FP32 Addition Test ===");
 
-        // Parse and build HIR
-        let hir =
-            parse_and_build_hir(source).expect("Failed to parse chained addition test design");
+        // Set stdlib path
+        std::env::set_var("SKALP_STDLIB_PATH", "./crates/skalp-stdlib");
+
+        // Write source to temp file for module resolution
+        let temp_dir = std::env::temp_dir();
+        let temp_file = temp_dir.join("chained_fp32_test.sk");
+        let mut file = std::fs::File::create(&temp_file).expect("Failed to create temp file");
+        file.write_all(source.as_bytes())
+            .expect("Failed to write temp file");
+
+        // Parse with module resolution (loads stdlib imports)
+        let hir = parse_and_build_hir_from_file(&temp_file)
+            .expect("Failed to parse chained addition test design with stdlib");
 
         // Compile to MIR
         let compiler = MirCompiler::new()

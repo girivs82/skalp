@@ -1,6 +1,9 @@
 // Test fixture for basic fp32 arithmetic operations
 // Tests addition, subtraction, multiplication, division
 
+use skalp::numeric::fp::*;
+use skalp::numeric::formats::fp32;
+
 entity FpArithmetic {
     in a: fp32
     in b: fp32

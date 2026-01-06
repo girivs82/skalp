@@ -3,12 +3,26 @@
 
 #[cfg(test)]
 mod vec_arithmetic_tests {
-    use skalp_frontend::parse_and_build_hir;
+    use skalp_frontend::parse_and_build_hir_from_file;
     use skalp_mir::lower_to_mir;
     use skalp_sim::{SimulationConfig, Simulator};
+    use std::io::Write;
 
     async fn setup_simulator(source: &str, use_gpu: bool) -> Simulator {
-        let hir = parse_and_build_hir(source).expect("Failed to parse design");
+        // Set stdlib path
+        std::env::set_var("SKALP_STDLIB_PATH", "./crates/skalp-stdlib");
+
+        // Write source to temp file for module resolution
+        let temp_dir = std::env::temp_dir();
+        let temp_file = temp_dir.join("vec_arith_test.sk");
+        let mut file = std::fs::File::create(&temp_file).expect("Failed to create temp file");
+        file.write_all(source.as_bytes())
+            .expect("Failed to write temp file");
+
+        // Parse with module resolution (loads stdlib imports)
+        let hir =
+            parse_and_build_hir_from_file(&temp_file).expect("Failed to parse design with stdlib");
+
         let mir = lower_to_mir(&hir).expect("Failed to compile to MIR");
         assert!(!mir.modules.is_empty());
         let top_module = &mir.modules[mir.modules.len() - 1];
@@ -32,7 +46,7 @@ mod vec_arithmetic_tests {
         simulator
     }
 
-    #[ignore = "requires stdlib trait implementations for FP32 operations"]
+    #[ignore = "requires stdlib parsing support for fp.sk advanced syntax"]
     #[tokio::test]
     #[cfg_attr(
         not(target_os = "macos"),
@@ -40,6 +54,9 @@ mod vec_arithmetic_tests {
     )]
     async fn test_vec2_component_addition_gpu() {
         let source = r#"
+        use skalp::numeric::fp::*;
+        use skalp::numeric::formats::fp32;
+
         entity Vec2Add {
             in a: vec2<fp32>
             in b: vec2<fp32>
@@ -83,10 +100,13 @@ mod vec_arithmetic_tests {
         assert_eq!(y_sum, 6.0, "y component: 2.0 + 4.0 should equal 6.0");
     }
 
-    #[ignore = "requires stdlib trait implementations for FP32 operations"]
+    #[ignore = "requires stdlib parsing support for fp.sk advanced syntax"]
     #[tokio::test]
     async fn test_vec2_component_addition_cpu() {
         let source = r#"
+        use skalp::numeric::fp::*;
+        use skalp::numeric::formats::fp32;
+
         entity Vec2Add {
             in a: vec2<fp32>
             in b: vec2<fp32>
@@ -129,7 +149,7 @@ mod vec_arithmetic_tests {
         assert_eq!(y_sum, 6.0, "CPU: y component should equal 6.0");
     }
 
-    #[ignore = "requires stdlib trait implementations for FP32 operations"]
+    #[ignore = "requires stdlib parsing support for fp.sk advanced syntax"]
     #[tokio::test]
     #[cfg_attr(
         not(target_os = "macos"),
@@ -137,6 +157,9 @@ mod vec_arithmetic_tests {
     )]
     async fn test_vec3_component_multiply_gpu() {
         let source = r#"
+        use skalp::numeric::fp::*;
+        use skalp::numeric::formats::fp32;
+
         entity Vec3Mul {
             in a: vec3<fp32>
             in b: vec3<fp32>
@@ -193,10 +216,13 @@ mod vec_arithmetic_tests {
         assert_eq!(z, 28.0, "z: 4.0 * 7.0 should equal 28.0");
     }
 
-    #[ignore = "requires stdlib trait implementations for FP32 operations"]
+    #[ignore = "requires stdlib parsing support for fp.sk advanced syntax"]
     #[tokio::test]
     async fn test_vec3_component_multiply_cpu() {
         let source = r#"
+        use skalp::numeric::fp::*;
+        use skalp::numeric::formats::fp32;
+
         entity Vec3Mul {
             in a: vec3<fp32>
             in b: vec3<fp32>
