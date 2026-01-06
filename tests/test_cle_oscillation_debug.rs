@@ -9,6 +9,7 @@ use skalp_sim::{CircuitMode, HwAccel, SimLevel, UnifiedSimConfig, UnifiedSimulat
 use std::path::Path;
 
 #[test]
+#[ignore = "requires karythra CLE with FP trait imports (use skalp::numeric::fp::*)"]
 fn test_identify_oscillating_cells() {
     println!("\n=== CLE Oscillation Diagnostic ===");
 
