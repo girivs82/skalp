@@ -477,6 +477,7 @@ impl<'hir> MonomorphizationEngine<'hir> {
             .map(|constant| {
                 // Substitute the value expression with bound generic args
                 let subst_value = self.substitute_expr(&constant.value, &instantiation.const_args);
+
                 // Try to evaluate to a concrete value
                 match evaluator.eval(&subst_value) {
                     Ok(eval_value) => {
@@ -611,12 +612,15 @@ impl<'hir> MonomorphizationEngine<'hir> {
             .collect();
 
         // Create specialized implementation
+        // BUG #127 FIX: Use the specialized constants from self.current_constants, NOT
+        // the original impl_block.constants. The specialized constants have generic params
+        // like F.total_bits already evaluated to concrete values like 32.
         HirImplementation {
             entity: specialized_entity.id,
             signals: specialized_signals,
             variables: specialized_variables,
-            constants: impl_block.constants.clone(), // Constants are already evaluated
-            functions: impl_block.functions.clone(), // TODO: specialize functions if needed
+            constants: self.current_constants.clone(), // Use SPECIALIZED constants!
+            functions: impl_block.functions.clone(),   // TODO: specialize functions if needed
             event_blocks: specialized_event_blocks,
             assignments: specialized_assignments,
             instances: specialized_instances,
@@ -1187,6 +1191,40 @@ impl<'hir> MonomorphizationEngine<'hir> {
                 HirExpression::Literal(crate::hir::HirLiteral::String(s.clone()))
             }
             ConstValue::Float(f) => HirExpression::Literal(crate::hir::HirLiteral::Float(*f)),
+            // BUG #127 FIX: Convert FloatFormat back to StructLiteral
+            // This is critical because FloatFormat constants like IEEE754_32 need to be
+            // preserved as StructLiterals so they can be re-evaluated correctly.
+            ConstValue::FloatFormat(ff) => {
+                use crate::hir::{HirLiteral, HirStructFieldInit, HirStructLiteral};
+                HirExpression::StructLiteral(HirStructLiteral {
+                    type_name: "FloatFormatImpl".to_string(),
+                    generic_args: vec![],
+                    fields: vec![
+                        HirStructFieldInit {
+                            name: "total_bits".to_string(),
+                            value: HirExpression::Literal(HirLiteral::Integer(
+                                ff.total_bits as u64,
+                            )),
+                        },
+                        HirStructFieldInit {
+                            name: "exponent_bits".to_string(),
+                            value: HirExpression::Literal(HirLiteral::Integer(
+                                ff.exponent_bits as u64,
+                            )),
+                        },
+                        HirStructFieldInit {
+                            name: "mantissa_bits".to_string(),
+                            value: HirExpression::Literal(HirLiteral::Integer(
+                                ff.mantissa_bits as u64,
+                            )),
+                        },
+                        HirStructFieldInit {
+                            name: "bias".to_string(),
+                            value: HirExpression::Literal(HirLiteral::Integer(ff.bias as u64)),
+                        },
+                    ],
+                })
+            }
             _ => {
                 // Complex values can't be directly converted
                 HirExpression::Literal(crate::hir::HirLiteral::Integer(0))

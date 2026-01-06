@@ -3578,6 +3578,7 @@ impl<'hir> HirToMir<'hir> {
                 "\n\n❌❌❌ COMPILATION ERROR: Assignment conversion failed! ❌❌❌\n\
                  \n\
                  Assignment: {} = {}\n\
+                 Current entity ID: {:?}\n\
                  \n\
                  This assignment could not be converted to MIR. Common causes:\n\
                  1. Function inlining failed due to excessive complexity or recursion depth\n\
@@ -3591,7 +3592,7 @@ impl<'hir> HirToMir<'hir> {
                  \n\
                  This is Bug #85: Assignments must never be silently dropped!\n\
                  ❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌\n",
-                lhs_name, rhs_desc
+                lhs_name, rhs_desc, self.current_entity_id
             );
         }
     }
@@ -4527,6 +4528,17 @@ impl<'hir> HirToMir<'hir> {
         // BUG #76 FIX: Infer type first for proper type propagation
         let ty = self.infer_hir_expression_type(expr, depth);
 
+        // BUG #127 DEBUG: Print discriminant and check for Concat
+        let is_concat = matches!(expr, hir::HirExpression::Concat(_));
+        println!(
+            "[BUG127_DEBUG] depth={}, is_concat={}, disc={:?}",
+            depth,
+            is_concat,
+            std::mem::discriminant(expr)
+        );
+        use std::io::Write;
+        let _ = std::io::stdout().flush();
+
         match expr {
             hir::HirExpression::Literal(lit) => self
                 .convert_literal(lit)
@@ -4681,27 +4693,55 @@ impl<'hir> HirToMir<'hir> {
                         evaluator.register_constants(&implementation.constants);
                     }
 
-                    // Find the constant and evaluate it
+                    // BUG #127 FIX: Search for constants with entity filtering
+                    // Prioritize the current entity's implementation, then fall back to others.
+                    // This is needed because monomorphized entities have specialized constant
+                    // values (e.g., W = 32) while the original generic entity has unresolved
+                    // expressions (e.g., W = F.total_bits).
+
+                    // First pass: look in the current entity's implementation
                     for implementation in &hir.implementations {
+                        if Some(implementation.entity) != self.current_entity_id {
+                            continue;
+                        }
                         for constant in &implementation.constants {
                             if constant.id == *id {
-                                // Evaluate the constant's value expression to a concrete value
-                                if let Ok(const_value) = evaluator.eval(&constant.value) {
-                                    // Convert ConstValue to MIR literal expression
-                                    return Some(self.const_value_to_mir_expression(&const_value));
-                                } else {
-                                    // If evaluation fails, try recursive conversion as fallback
-                                    return self.convert_expression(&constant.value, depth + 1);
+                                match evaluator.eval(&constant.value) {
+                                    Ok(const_value) => {
+                                        return Some(
+                                            self.const_value_to_mir_expression(&const_value),
+                                        );
+                                    }
+                                    Err(_) => {
+                                        // Current entity's constant failed, try recursive
+                                        return self.convert_expression(&constant.value, depth + 1);
+                                    }
                                 }
                             }
                         }
                     }
+
+                    // Second pass: fall back to any implementation with matching constant
+                    for implementation in &hir.implementations {
+                        for constant in &implementation.constants {
+                            if constant.id == *id {
+                                match evaluator.eval(&constant.value) {
+                                    Ok(const_value) => {
+                                        return Some(
+                                            self.const_value_to_mir_expression(&const_value),
+                                        );
+                                    }
+                                    Err(_) => {
+                                        // If evaluation fails, try recursive conversion as fallback
+                                        return self.convert_expression(&constant.value, depth + 1);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    return None;
                 }
-                // Fallback if constant not found
-                Some(Expression::new(
-                    ExpressionKind::Literal(Value::Integer(0)),
-                    ty,
-                ))
+                None
             }
             hir::HirExpression::GenericParam(param_name) => {
                 // BUG #178 FIX: Check pending MIR parameter substitutions first
@@ -4826,8 +4866,31 @@ impl<'hir> HirToMir<'hir> {
                 }
 
                 // Fall back to primitive binary operation
-                let left = self.convert_expression(&binary.left, depth + 1)?;
-                let right = self.convert_expression(&binary.right, depth + 1)?;
+                let left = match self.convert_expression(&binary.left, depth + 1) {
+                    Some(e) => e,
+                    None => {
+                        println!(
+                            "[BUG127_BINARY] LEFT operand conversion FAILED: op={:?}, left type={:?}",
+                            binary.op,
+                            std::mem::discriminant(&*binary.left)
+                        );
+                        if let hir::HirExpression::Constant(id) = &*binary.left {
+                            println!("[BUG127_BINARY]   Constant id={:?}", id);
+                        }
+                        return None;
+                    }
+                };
+                let right = match self.convert_expression(&binary.right, depth + 1) {
+                    Some(e) => e,
+                    None => {
+                        println!(
+                            "[BUG127_BINARY] RIGHT operand conversion FAILED: op={:?}, right type={:?}",
+                            binary.op,
+                            std::mem::discriminant(&*binary.right)
+                        );
+                        return None;
+                    }
+                };
                 if matches!(
                     binary.op,
                     hir::HirBinaryOp::LogicalAnd | hir::HirBinaryOp::LogicalOr
@@ -5905,8 +5968,38 @@ impl<'hir> HirToMir<'hir> {
                 }
 
                 // Fall back to bit select
-                let base_lval = self.expr_to_lvalue(base)?;
-                let index_expr = self.convert_expression(index, depth + 1)?;
+                println!(
+                    "[BUG127_INDEX_DEBUG] Fallback to bit select: base type={:?}, index type={:?}",
+                    std::mem::discriminant(base.as_ref()),
+                    std::mem::discriminant(index.as_ref())
+                );
+                if let hir::HirExpression::Port(id) = base.as_ref() {
+                    println!(
+                        "[BUG127_INDEX_DEBUG]   base is Port({:?}), in port_map={}",
+                        id,
+                        self.port_map.contains_key(id)
+                    );
+                }
+                let base_lval = match self.expr_to_lvalue(base) {
+                    Some(lval) => lval,
+                    None => {
+                        println!(
+                            "[BUG127_INDEX_DEBUG]   expr_to_lvalue FAILED for base type={:?}",
+                            std::mem::discriminant(base.as_ref())
+                        );
+                        return None;
+                    }
+                };
+                let index_expr = match self.convert_expression(index, depth + 1) {
+                    Some(expr) => expr,
+                    None => {
+                        println!(
+                            "[BUG127_INDEX_DEBUG]   INDEX EXPR conversion FAILED for index type={:?}",
+                            std::mem::discriminant(index.as_ref())
+                        );
+                        return None;
+                    }
+                };
                 Some(Expression::new(
                     ExpressionKind::Ref(LValue::BitSelect {
                         base: Box::new(base_lval),
@@ -6163,6 +6256,18 @@ impl<'hir> HirToMir<'hir> {
                 // Bit concatenation: {a, b, c}
                 // In hardware, concatenation combines multiple bit vectors into a single wider vector
                 // The first element becomes the most significant bits
+                println!(
+                    "🔵🔵🔵 BUG #127: Concat handler entered with {} elements at depth {} 🔵🔵🔵",
+                    expressions.len(),
+                    depth
+                );
+                for (idx, expr) in expressions.iter().enumerate() {
+                    println!(
+                        "🔵🔵🔵   element[{}] type: {:?} 🔵🔵🔵",
+                        idx,
+                        std::mem::discriminant(expr)
+                    );
+                }
 
                 if expressions.is_empty() {
                     return Some(Expression::new(
@@ -6245,6 +6350,30 @@ impl<'hir> HirToMir<'hir> {
                     if let Some(mir_expr) = self.convert_expression(expr, depth + 1) {
                         mir_exprs.push(mir_expr);
                     } else {
+                        println!(
+                            "🔴🔴🔴 BUG #127: Concat element[{}] conversion FAILED! Type: {:?} 🔴🔴🔴",
+                            idx,
+                            std::mem::discriminant(expr)
+                        );
+                        // Print more info about the element
+                        match expr {
+                            hir::HirExpression::Unary(unary) => {
+                                println!(
+                                    "🔴🔴🔴   Unary op: {:?}, operand type: {:?} 🔴🔴🔴",
+                                    unary.op,
+                                    std::mem::discriminant(&*unary.operand)
+                                );
+                            }
+                            hir::HirExpression::Range(base, high, low) => {
+                                println!(
+                                    "🔴🔴🔴   Range: base={:?}, high={:?}, low={:?} 🔴🔴🔴",
+                                    std::mem::discriminant(&**base),
+                                    std::mem::discriminant(&**high),
+                                    std::mem::discriminant(&**low)
+                                );
+                            }
+                            _ => {}
+                        }
                         return None;
                     }
                 }
@@ -17223,8 +17352,36 @@ impl<'hir> HirToMir<'hir> {
             // Concatenation
             hir::HirExpression::Concat(parts) => {
                 let mut converted = Vec::new();
-                for part in parts {
-                    converted.push(self.convert_hir_expr_for_module(part, ctx, depth + 1)?);
+                for (idx, part) in parts.iter().enumerate() {
+                    if let Some(conv) = self.convert_hir_expr_for_module(part, ctx, depth + 1) {
+                        converted.push(conv);
+                    } else {
+                        eprintln!(
+                            "🔴🔴🔴 BUG #127 MODULE: Concat element[{}] conversion FAILED! Type: {:?} 🔴🔴🔴",
+                            idx,
+                            std::mem::discriminant(part)
+                        );
+                        // Print more info about the element
+                        match part {
+                            hir::HirExpression::Unary(unary) => {
+                                eprintln!(
+                                    "🔴🔴🔴   MODULE Unary op: {:?}, operand type: {:?} 🔴🔴🔴",
+                                    unary.op,
+                                    std::mem::discriminant(&*unary.operand)
+                                );
+                            }
+                            hir::HirExpression::Range(base, high, low) => {
+                                eprintln!(
+                                    "🔴🔴🔴   MODULE Range: base={:?}, high={:?}, low={:?} 🔴🔴🔴",
+                                    std::mem::discriminant(&**base),
+                                    std::mem::discriminant(&**high),
+                                    std::mem::discriminant(&**low)
+                                );
+                            }
+                            _ => {}
+                        }
+                        return None;
+                    }
                 }
                 Some(Expression::with_unknown_type(ExpressionKind::Concat(
                     converted,

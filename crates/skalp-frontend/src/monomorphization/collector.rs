@@ -185,14 +185,6 @@ impl<'hir> InstantiationCollector<'hir> {
         // Global constants (like IEEE754_32) are stored in an impl with EntityId(0)
         for implementation in &hir.implementations {
             if !implementation.constants.is_empty() {
-                eprintln!(
-                    "[COLLECTOR] Registering {} global constants from impl {:?}",
-                    implementation.constants.len(),
-                    implementation.entity
-                );
-                for constant in &implementation.constants {
-                    eprintln!("[COLLECTOR]   - Constant: {}", constant.name);
-                }
                 evaluator.register_constants(&implementation.constants);
             }
         }
@@ -488,16 +480,7 @@ impl<'hir> InstantiationCollector<'hir> {
                 }
                 HirGenericType::Const(_const_type) => {
                     if let Ok(value) = self.evaluator.eval(arg) {
-                        eprintln!(
-                            "[COLLECTOR] Evaluated const arg '{}' = {:?}",
-                            generic.name, value
-                        );
                         const_args.insert(generic.name.clone(), value);
-                    } else {
-                        eprintln!(
-                            "[COLLECTOR] Failed to evaluate const arg '{}' (expr: {:?})",
-                            generic.name, arg
-                        );
                     }
                 }
                 HirGenericType::Intent => {
