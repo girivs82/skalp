@@ -814,8 +814,8 @@ impl Neg for fp32 {
 /// Clears the sign bit (IEEE 754 sign-magnitude representation)
 impl Abs for fp32 {
     fn abs(a: Self) -> Self {
-        // Clear sign bit: {0, exponent, mantissa}
-        {1'b0, a[30:0]} as fp32
+        // Clear sign bit using AND mask: 0x7FFFFFFF = 0111...1111 (bit 31 = 0)
+        ((a as bit[32]) & 32'h7FFFFFFF) as fp32
     }
 }
 
@@ -1015,8 +1015,8 @@ impl Neg for fp64 {
 /// Clears the sign bit (IEEE 754 sign-magnitude representation)
 impl Abs for fp64 {
     fn abs(a: Self) -> Self {
-        // Clear sign bit: {0, exponent, mantissa}
-        {1'b0, a[62:0]} as fp64
+        // Clear sign bit using AND mask: 0x7FFF... = 0111...1111 (bit 63 = 0)
+        ((a as bit[64]) & 64'h7FFFFFFFFFFFFFFF) as fp64
     }
 }
 
@@ -1114,8 +1114,8 @@ impl Neg for fp16 {
 /// Clears the sign bit (IEEE 754 sign-magnitude representation)
 impl Abs for fp16 {
     fn abs(a: Self) -> Self {
-        // Clear sign bit: {0, exponent, mantissa}
-        {1'b0, a[14:0]} as fp16
+        // Clear sign bit using AND mask: 0x7FFF = 0111...1111 (bit 15 = 0)
+        ((a as bit[16]) & 16'h7FFF) as fp16
     }
 }
 
