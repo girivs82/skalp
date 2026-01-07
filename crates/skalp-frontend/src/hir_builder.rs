@@ -5135,6 +5135,7 @@ impl HirBuilderContext {
                     self.build_expression(binary)
                 } else {
                     // No binary expressions - just unwrap to the single expression inside
+                    // BUG #188 FIX: Include TernaryExpr, ConcatExpr, ReplicateExpr
                     node.children()
                         .find(|n| {
                             matches!(
@@ -5152,6 +5153,9 @@ impl HirBuilderContext {
                                     | SyntaxKind::IfExpr
                                     | SyntaxKind::MatchExpr
                                     | SyntaxKind::CastExpr // BUG #7: Support cast expressions in parentheses
+                                    | SyntaxKind::TernaryExpr // BUG #188: Support ternary expressions in parentheses
+                                    | SyntaxKind::ConcatExpr // BUG #188: Support concat expressions in parentheses
+                                    | SyntaxKind::ReplicateExpr // BUG #188: Support replicate expressions in parentheses
                             )
                         })
                         .and_then(|n| self.build_expression(&n))
@@ -6043,32 +6047,63 @@ impl HirBuilderContext {
 
     /// Build ternary conditional expression: condition ? true_expr : false_expr
     fn build_ternary_expr(&mut self, node: &SyntaxNode) -> Option<HirExpression> {
-        // Collect all expression children (ignoring ? and : tokens)
-        let expressions: Vec<HirExpression> = node
-            .children()
-            .filter(|n| {
-                matches!(
-                    n.kind(),
-                    SyntaxKind::LiteralExpr
-                        | SyntaxKind::IdentExpr
-                        | SyntaxKind::BinaryExpr
-                        | SyntaxKind::UnaryExpr
-                        | SyntaxKind::CallExpr
-                        | SyntaxKind::FieldExpr
-                        | SyntaxKind::IndexExpr
-                        | SyntaxKind::PathExpr
-                        | SyntaxKind::ParenExpr
-                        | SyntaxKind::IfExpr
-                        | SyntaxKind::MatchExpr
-                        | SyntaxKind::StructLiteral
-                        | SyntaxKind::ArrayLiteral
-                        | SyntaxKind::ConcatExpr
-                        | SyntaxKind::TernaryExpr
-                        | SyntaxKind::CastExpr
-                )
-            })
-            .filter_map(|n| self.build_expression(&n))
-            .collect();
+        // BUG #188 FIX: Collect child nodes and handle IdentExpr+IndexExpr pairs
+        // The parser creates separate IdentExpr and IndexExpr siblings for expressions like a[i]
+        let child_nodes: Vec<SyntaxNode> = node.children().collect();
+
+        let mut expressions: Vec<HirExpression> = Vec::new();
+        let mut i = 0;
+        while i < child_nodes.len() {
+            let n = &child_nodes[i];
+
+            // Check if this is an IdentExpr followed by IndexExpr (e.g., mant_rounded[M])
+            if n.kind() == SyntaxKind::IdentExpr
+                && i + 1 < child_nodes.len()
+                && child_nodes[i + 1].kind() == SyntaxKind::IndexExpr
+            {
+                // Build the IdentExpr as base
+                if let Some(base) = self.build_expression(n) {
+                    // Build index expression with base context
+                    if let Some(indexed) =
+                        self.build_index_expr_with_base(&child_nodes[i + 1], base)
+                    {
+                        expressions.push(indexed);
+                        i += 2; // Skip both IdentExpr and IndexExpr
+                        continue;
+                    }
+                }
+                // Fallback: try building normally
+                if let Some(expr) = self.build_expression(n) {
+                    expressions.push(expr);
+                }
+                i += 1;
+            } else if matches!(
+                n.kind(),
+                SyntaxKind::LiteralExpr
+                    | SyntaxKind::IdentExpr
+                    | SyntaxKind::BinaryExpr
+                    | SyntaxKind::UnaryExpr
+                    | SyntaxKind::CallExpr
+                    | SyntaxKind::FieldExpr
+                    | SyntaxKind::IndexExpr
+                    | SyntaxKind::PathExpr
+                    | SyntaxKind::ParenExpr
+                    | SyntaxKind::IfExpr
+                    | SyntaxKind::MatchExpr
+                    | SyntaxKind::StructLiteral
+                    | SyntaxKind::ArrayLiteral
+                    | SyntaxKind::ConcatExpr
+                    | SyntaxKind::TernaryExpr
+                    | SyntaxKind::CastExpr
+            ) {
+                if let Some(expr) = self.build_expression(n) {
+                    expressions.push(expr);
+                }
+                i += 1;
+            } else {
+                i += 1;
+            }
+        }
 
         // Ternary expression should have exactly 3 parts: condition, true_expr, false_expr
         if expressions.len() == 3 {
@@ -6175,6 +6210,17 @@ impl HirBuilderContext {
 
     /// Build binary expression
     fn build_binary_expr(&mut self, node: &SyntaxNode) -> Option<HirExpression> {
+        // Debug: Show all children before filtering
+        let node_text = node.text().to_string();
+        if node_text.contains("swap?a_exp_eff") || node_text.contains("swap ? a_exp_eff") {
+            println!(
+                "[BUILD_BINARY_DEBUG] BinaryExpr text: {}, all children: {:?}",
+                node_text,
+                node.children()
+                    .map(|c| (c.kind(), c.text().to_string()))
+                    .collect::<Vec<_>>()
+            );
+        }
         // Find all expression children (filter out tokens and other nodes)
         let mut expr_children: Vec<_> = node
             .children()
@@ -6194,6 +6240,10 @@ impl HirBuilderContext {
                         | SyntaxKind::CallExpr
                         | SyntaxKind::ArrayLiteral
                         | SyntaxKind::CastExpr // BUG #127: Include CastExpr as valid operand
+                        | SyntaxKind::TernaryExpr // BUG #188: Include TernaryExpr as valid operand
+                        | SyntaxKind::ConcatExpr // BUG #188: Include ConcatExpr as valid operand
+                        | SyntaxKind::ReplicateExpr // BUG #188: Include ReplicateExpr as valid operand
+                        | SyntaxKind::TupleExpr // BUG #188: Include TupleExpr as valid operand
                 )
             })
             .collect();
@@ -6383,6 +6433,11 @@ impl HirBuilderContext {
                                         | SyntaxKind::MatchExpr
                                         | SyntaxKind::CallExpr
                                         | SyntaxKind::ArrayLiteral
+                                        | SyntaxKind::CastExpr
+                                        | SyntaxKind::TernaryExpr
+                                        | SyntaxKind::ConcatExpr
+                                        | SyntaxKind::ReplicateExpr
+                                        | SyntaxKind::TupleExpr
                                 )
                             })
                             .collect();
@@ -6708,6 +6763,7 @@ impl HirBuilderContext {
         // the base might also be a child. For "~a[3]", we might have [IdentExpr(a), IndexExpr([3])]
         // We want to use IndexExpr, not IdentExpr
         // BUG #157 FIX: Added CastExpr to allow expressions like "-5.0 as fp32"
+        // BUG #188 FIX: Added TernaryExpr, ConcatExpr, ReplicateExpr, TupleExpr for complex operands
         let expr_children: Vec<_> = node
             .children()
             .filter(|n| {
@@ -6726,6 +6782,10 @@ impl HirBuilderContext {
                         | SyntaxKind::CallExpr
                         | SyntaxKind::ArrayLiteral
                         | SyntaxKind::CastExpr
+                        | SyntaxKind::TernaryExpr
+                        | SyntaxKind::ConcatExpr
+                        | SyntaxKind::ReplicateExpr
+                        | SyntaxKind::TupleExpr
                 )
             })
             .collect();
@@ -6753,6 +6813,7 @@ impl HirBuilderContext {
         let operand = self.build_expression(operand_node)?;
 
         // Get operator
+        // BUG #188 FIX: Include Pipe for reduction OR operator (|expr)
         let op = node
             .children_with_tokens()
             .filter_map(|elem| elem.into_token())
@@ -6764,6 +6825,7 @@ impl HirBuilderContext {
                         | SyntaxKind::Minus
                         | SyntaxKind::Amp
                         | SyntaxKind::Caret
+                        | SyntaxKind::Pipe // Reduction OR
                 )
             })
             .and_then(|t| self.token_to_unary_op(t.kind()))?;
@@ -7609,6 +7671,45 @@ impl HirBuilderContext {
 
             let index = Box::new(self.build_expression(index_node)?);
             Some(HirExpression::Index(base, index))
+        }
+    }
+
+    /// Build index expression with an explicitly provided base (BUG #188 FIX)
+    /// Used when the parser creates IdentExpr and IndexExpr as siblings (not parent-child)
+    fn build_index_expr_with_base(
+        &mut self,
+        node: &SyntaxNode,
+        base: HirExpression,
+    ) -> Option<HirExpression> {
+        let children: Vec<_> = node.children().collect();
+        // Determine if this is a range by checking for colon token
+        let has_colon = node
+            .children_with_tokens()
+            .any(|e| e.as_token().is_some_and(|t| t.kind() == SyntaxKind::Colon));
+
+        if has_colon {
+            // Range expression: base[high:low]
+            if children.len() < 2 {
+                return None;
+            }
+            let high = Box::new(self.build_expression(&children[0])?);
+            let low = Box::new(self.build_expression(&children[1])?);
+            Some(HirExpression::Range(Box::new(base), high, low))
+        } else {
+            // Single index: base[index]
+            if children.is_empty() {
+                return None;
+            }
+
+            // Prefer BinaryExpr over IdentExpr for complex array indices
+            let index_node = children
+                .iter()
+                .find(|n| n.kind() == SyntaxKind::BinaryExpr)
+                .or_else(|| children.first())
+                .expect("At least one child should exist");
+
+            let index = Box::new(self.build_expression(index_node)?);
+            Some(HirExpression::Index(Box::new(base), index))
         }
     }
 
@@ -11252,6 +11353,9 @@ impl HirBuilderContext {
         let mut found_assign = false;
         let mut expr_nodes: Vec<SyntaxNode> = Vec::new();
 
+        // Get signal name for debugging
+        let signal_name = self.extract_name(node).unwrap_or_else(|| "?".to_string());
+
         // Iterate through all children and tokens
         for elem in node.children_with_tokens() {
             if found_assign {
@@ -11311,6 +11415,65 @@ impl HirBuilderContext {
             }
 
             return Some(result);
+        }
+
+        // BUG #188 FIX: Handle IdentExpr + CallExpr pattern (function calls like clz(x))
+        if expr_nodes.len() >= 2
+            && expr_nodes[0].kind() == SyntaxKind::IdentExpr
+            && expr_nodes[1].kind() == SyntaxKind::CallExpr
+        {
+            eprintln!(
+                "[FIND_INIT_VALUE] Signal '{}' using IdentExpr+CallExpr pattern for function call (node text: {:?})",
+                signal_name,
+                expr_nodes.iter().map(|n| n.text().to_string()).collect::<Vec<_>>()
+            );
+            // Extract function name from IdentExpr
+            let func_name = expr_nodes[0]
+                .children_with_tokens()
+                .filter_map(|e| e.into_token())
+                .find(|t| t.kind() == SyntaxKind::Ident)
+                .map(|t| t.text().to_string())?;
+
+            // Extract arguments from CallExpr
+            let call_node = &expr_nodes[1];
+            let mut args = Vec::new();
+            for child in call_node.children() {
+                if matches!(
+                    child.kind(),
+                    SyntaxKind::LiteralExpr
+                        | SyntaxKind::IdentExpr
+                        | SyntaxKind::BinaryExpr
+                        | SyntaxKind::UnaryExpr
+                        | SyntaxKind::FieldExpr
+                        | SyntaxKind::IndexExpr
+                        | SyntaxKind::PathExpr
+                        | SyntaxKind::ParenExpr
+                        | SyntaxKind::CallExpr
+                        | SyntaxKind::CastExpr
+                        | SyntaxKind::TernaryExpr
+                        | SyntaxKind::ConcatExpr
+                        | SyntaxKind::ReplicateExpr
+                        | SyntaxKind::TupleExpr
+                ) {
+                    if let Some(arg_expr) = self.build_expression(&child) {
+                        args.push(arg_expr);
+                    }
+                }
+            }
+
+            eprintln!(
+                "[FIND_INIT_VALUE] Signal '{}' IdentExpr+CallExpr: built Call expr with func='{}', {} args",
+                signal_name,
+                func_name,
+                args.len()
+            );
+            return Some(HirExpression::Call(HirCallExpr {
+                function: func_name,
+                args,
+                type_args: Vec::new(),
+                named_type_args: std::collections::HashMap::new(),
+                impl_style: ImplStyle::Auto,
+            }));
         }
 
         // Fallback: build chained expression

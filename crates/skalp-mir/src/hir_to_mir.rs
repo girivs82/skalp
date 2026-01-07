@@ -343,7 +343,7 @@ impl<'hir> HirToMir<'hir> {
         // Propagate safety definitions from HIR to MIR
         mir.safety_definitions = hir.safety_definitions.clone();
 
-        eprintln!(
+        println!(
             "[HIR_TO_MIR] transform: hir has {} entities, {} implementations",
             hir.entities.len(),
             hir.implementations.len()
@@ -351,10 +351,12 @@ impl<'hir> HirToMir<'hir> {
 
         // First pass: create modules for entities
         for entity in &hir.entities {
-            eprintln!(
-                "[HIR_TO_MIR] First pass: processing entity '{}'",
-                entity.name
-            );
+            if entity.name.contains("FpAdd") {
+                println!(
+                    "[HIR_TO_MIR] First pass: FpAdd entity '{}' with id {:?}",
+                    entity.name, entity.id
+                );
+            }
             let entity_start = Instant::now();
             let module_id = self.next_module_id();
             self.entity_map.insert(entity.id, module_id);
@@ -632,6 +634,21 @@ impl<'hir> HirToMir<'hir> {
         // Second pass: add implementations
         for impl_block in &hir.implementations {
             let impl_start = Instant::now();
+            // Debug: Find entity name
+            let impl_entity_name = hir
+                .entities
+                .iter()
+                .find(|e| e.id == impl_block.entity)
+                .map(|e| e.name.clone())
+                .unwrap_or_else(|| "?".to_string());
+            if impl_entity_name.contains("FpAdd") {
+                println!(
+                    "[HIR_TO_MIR] Second pass: impl for '{}' ({:?}), {} signals",
+                    impl_entity_name,
+                    impl_block.entity,
+                    impl_block.signals.len()
+                );
+            }
             if let Some(&module_id) = self.entity_map.get(&impl_block.entity) {
                 // Set current entity for generic parameter resolution
                 self.current_entity_id = Some(impl_block.entity);
@@ -747,6 +764,17 @@ impl<'hir> HirToMir<'hir> {
 
                         // BUG FIX: Generate continuous assignment for impl signals with non-literal initial expressions
                         // e.g., "signal dx: fp32 = x2 - x1" needs to generate an assignment dx = x2 - x1
+                        // Debug: Check if signal has initial_value
+                        if hir_signal.name == "sum_lz"
+                            || hir_signal.name == "exp_diff"
+                            || hir_signal.name == "sticky"
+                        {
+                            println!(
+                                "[HIR_TO_MIR] Signal '{}' initial_value: {:?}",
+                                hir_signal.name,
+                                hir_signal.initial_value.is_some()
+                            );
+                        }
                         if let Some(init_expr) = &hir_signal.initial_value {
                             // Only generate assignment if it's NOT a literal (literals are handled above)
                             if !matches!(init_expr, hir::HirExpression::Literal(_)) {
@@ -4988,7 +5016,69 @@ impl<'hir> HirToMir<'hir> {
                             Value::BitVector { width: 1, value: 0 },
                         )));
                     }
-                    _ => {} // Not an intent helper, continue to regular function handling
+                    // BUG #188 FIX: Handle hardware intrinsic functions (clz, ctz)
+                    // These are special functions that map directly to hardware operations
+                    "intrinsic_clz" => {
+                        eprintln!(
+                            "[INTRINSIC] intrinsic_clz() - generating FunctionCall expression"
+                        );
+                        // Convert the argument and generate a FunctionCall expression
+                        // This will be converted to appropriate hardware (priority encoder)
+                        // by the codegen stage
+                        if call.args.len() == 1 {
+                            if let Some(arg_expr) =
+                                self.convert_expression(&call.args[0], depth + 1)
+                            {
+                                // Infer the width from the argument type
+                                let arg_width: u32 = match &arg_expr.ty {
+                                    Type::Bit(skalp_frontend::types::Width::Fixed(w)) => *w,
+                                    Type::Int(skalp_frontend::types::Width::Fixed(w)) => *w,
+                                    Type::Nat(skalp_frontend::types::Width::Fixed(w)) => *w,
+                                    Type::Logic(skalp_frontend::types::Width::Fixed(w)) => *w,
+                                    _ => 32, // Default to 32-bit
+                                };
+                                // Result type is nat (enough bits to represent 0..width)
+                                let result_width = (32 - arg_width.leading_zeros()).max(1);
+                                return Some(Expression::new(
+                                    ExpressionKind::FunctionCall {
+                                        name: "clz".to_string(),
+                                        args: vec![arg_expr],
+                                    },
+                                    Type::Nat(skalp_frontend::types::Width::Fixed(result_width)),
+                                ));
+                            }
+                        }
+                        return None;
+                    }
+                    "intrinsic_ctz" => {
+                        eprintln!(
+                            "[INTRINSIC] intrinsic_ctz() - generating FunctionCall expression"
+                        );
+                        // Convert the argument and generate a FunctionCall expression
+                        if call.args.len() == 1 {
+                            if let Some(arg_expr) =
+                                self.convert_expression(&call.args[0], depth + 1)
+                            {
+                                let arg_width: u32 = match &arg_expr.ty {
+                                    Type::Bit(skalp_frontend::types::Width::Fixed(w)) => *w,
+                                    Type::Int(skalp_frontend::types::Width::Fixed(w)) => *w,
+                                    Type::Nat(skalp_frontend::types::Width::Fixed(w)) => *w,
+                                    Type::Logic(skalp_frontend::types::Width::Fixed(w)) => *w,
+                                    _ => 32,
+                                };
+                                let result_width = (32 - arg_width.leading_zeros()).max(1);
+                                return Some(Expression::new(
+                                    ExpressionKind::FunctionCall {
+                                        name: "ctz".to_string(),
+                                        args: vec![arg_expr],
+                                    },
+                                    Type::Nat(skalp_frontend::types::Width::Fixed(result_width)),
+                                ));
+                            }
+                        }
+                        return None;
+                    }
+                    _ => {} // Not an intent helper or intrinsic, continue to regular function handling
                 }
 
                 // BUG #184 FIX: Check if this call is to an entity (from trait method inlining)
