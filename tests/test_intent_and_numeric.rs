@@ -95,7 +95,7 @@ async fn test_intent_conditional() {
 // ============================================================================
 
 /// Test FP32 basic arithmetic operations
-#[ignore = "requires stdlib parsing support for fp.sk advanced syntax"]
+#[ignore = "Bug #184: Trait method inlining drops entity instances (FpAdd, etc.)"]
 #[tokio::test]
 async fn test_fp32_arithmetic() {
     let mut tb = Testbench::new("tests/fixtures/numeric/fp_arithmetic.sk")
