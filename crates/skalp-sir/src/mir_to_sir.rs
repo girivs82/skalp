@@ -4318,6 +4318,40 @@ impl<'a> MirToSirConverter<'a> {
             }
         }
 
+        // Step 1d: Create signals for OUTPUT ports of the child module
+        // BUG #185 FIX: Output port signals need to be declared so they can be used
+        // as assignment targets when the port isn't connected to a parent signal.
+        // This happens with trait method inlining where entity instances have their
+        // output ports assigned internally (e.g., FpSub's `flags` and `result` ports).
+        for port in &child_module.ports {
+            if matches!(port.direction, skalp_mir::PortDirection::Output) {
+                let full_name = format!("{}.{}", inst_prefix, port.name);
+                let sir_type = self.convert_type(&port.port_type);
+                let width = sir_type.width();
+
+                // Only create if not connected to parent (handled via port_mapping)
+                // and if it doesn't already exist
+                if !instance.connections.contains_key(&port.name)
+                    && !self.sir.signals.iter().any(|s| s.name == full_name)
+                {
+                    println!(
+                        "         ├─ Output Port: {} (type={:?}) → SIR signal (width={}) [BUG #185 FIX]",
+                        port.name, port.port_type, width
+                    );
+
+                    self.sir.signals.push(SirSignal {
+                        name: full_name.clone(),
+                        width,
+                        sir_type: sir_type.clone(),
+                        driver_node: None,
+                        fanout_nodes: Vec::new(),
+                        is_state: false, // Output ports are not registers
+                        span: None,
+                    });
+                }
+            }
+        }
+
         eprintln!(
             "         📊 After elaborating '{}': total {} state_elements",
             inst_prefix,
@@ -4625,7 +4659,18 @@ impl<'a> MirToSirConverter<'a> {
         let lhs_signal = match &assign.lhs {
             LValue::Signal(sig_id) => {
                 if let Some(signal) = child_module.signals.iter().find(|s| s.id == *sig_id) {
-                    format!("{}.{}", inst_prefix, signal.name)
+                    // BUG #185 FIX: Check if this signal shares a name with a port that is in port_mapping
+                    // This happens when an output port like 'result' is used as assignment LHS.
+                    // If the port is mapped to a parent signal, use that instead of the instance-prefixed name.
+                    if let Some(parent_expr) = port_mapping.get(&signal.name) {
+                        self.get_signal_name_from_expression_with_context(
+                            parent_expr,
+                            parent_module_for_signals,
+                            parent_prefix,
+                        )
+                    } else {
+                        format!("{}.{}", inst_prefix, signal.name)
+                    }
                 } else if let Some(port) = child_module.ports.iter().find(|p| p.id.0 == sig_id.0) {
                     // Output port - this connects to parent signal
                     if let Some(parent_expr) = port_mapping.get(&port.name) {
@@ -6413,6 +6458,25 @@ impl<'a> MirToSirConverter<'a> {
                         // First try parent module if provided
                         if let Some(parent) = parent_module {
                             if let Some(port) = parent.ports.iter().find(|p| p.id == *port_id) {
+                                // BUG #185 FIX: Check if the parent instance has this port mapped
+                                // to yet another signal (nested port mapping chain).
+                                // The inst_prefix without trailing dot is the parent instance name.
+                                let parent_inst_name = inst_prefix.trim_end_matches('.');
+                                if let Some(parent_port_mapping) =
+                                    self.instance_port_mappings.get(parent_inst_name)
+                                {
+                                    if let Some(grandparent_expr) =
+                                        parent_port_mapping.get(&port.name)
+                                    {
+                                        // The parent's port is mapped to grandparent signal
+                                        // Recursively resolve without parent context
+                                        return self.get_signal_name_from_expression_with_context(
+                                            grandparent_expr,
+                                            None,
+                                            "",
+                                        );
+                                    }
+                                }
                                 return format!("{}{}", inst_prefix, port.name);
                             }
                         }

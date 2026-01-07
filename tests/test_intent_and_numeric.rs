@@ -95,7 +95,7 @@ async fn test_intent_conditional() {
 // ============================================================================
 
 /// Test FP32 basic arithmetic operations
-#[ignore = "Metal shader gen bug: FpSub instance ports (flags, result) not declared in Signals struct"]
+#[ignore = "FP arithmetic produces zero - needs debugging of FP logic simulation"]
 #[tokio::test]
 async fn test_fp32_arithmetic() {
     let mut tb = Testbench::new("tests/fixtures/numeric/fp_arithmetic.sk")
