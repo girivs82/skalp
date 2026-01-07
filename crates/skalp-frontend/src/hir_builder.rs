@@ -1672,8 +1672,9 @@ impl HirBuilderContext {
 
         // Build the port connections from the connection list
         // InstanceDecl uses ConnectionList > Connection syntax, not StructLiteral
-        let mut input_args = Vec::new();
-        let mut output_bindings: Vec<(String, String)> = Vec::new(); // (port_name, signal_name)
+        // BUG #187 FIX: Track ALL port bindings with proper names for MIR processing
+        let mut port_bindings: Vec<(String, HirExpression, bool)> = Vec::new(); // (port_name, expr, is_output)
+        let mut output_bindings: Vec<(String, String)> = Vec::new(); // (port_name, signal_name) - for creating assignments
 
         if let Some(conn_list) = node.first_child_of_kind(SyntaxKind::ConnectionList) {
             for connection in conn_list.children_of_kind(SyntaxKind::Connection) {
@@ -1714,8 +1715,11 @@ impl HirBuilderContext {
                             || name == "q"
                             || name == "flags";
 
+                        // Add to port bindings with proper port name (not positional)
+                        port_bindings.push((name.clone(), expr.clone(), is_output));
+
                         if is_output {
-                            // For output ports, record the binding
+                            // For output ports, also record the binding for creating assignments
                             if let HirExpression::Variable(var_id) = &expr {
                                 // Look up the variable name
                                 for (vname, vid) in &self.symbols.variables {
@@ -1735,9 +1739,6 @@ impl HirBuilderContext {
                                     }
                                 }
                             }
-                        } else {
-                            // Input port - add to arguments
-                            input_args.push(expr);
                         }
                     }
                 }
@@ -1773,13 +1774,14 @@ impl HirBuilderContext {
         // Create a StructLiteral expression to represent the entity instantiation
         // This is essential for the InstantiationCollector to find and process
         // entity instantiations inside trait method bodies.
+        // BUG #187 FIX: Include ALL port bindings with proper port names, not just inputs.
+        // The MIR needs to find output port bindings (like "result: result") to create
+        // the placeholder_signal_to_entity_output mapping for proper wiring.
         let mut struct_fields = Vec::new();
-        for (i, arg) in input_args.iter().enumerate() {
-            // For now, use positional names - the actual port names aren't critical
-            // for collection, only for later MIR processing
+        for (port_name, expr, _is_output) in &port_bindings {
             struct_fields.push(HirStructFieldInit {
-                name: format!("param_{}", i),
-                value: arg.clone(),
+                name: port_name.clone(),
+                value: expr.clone(),
             });
         }
 
@@ -1809,15 +1811,22 @@ impl HirBuilderContext {
 
         let mut stmts = vec![inst_stmt];
 
-        // For each output binding, create an assignment from the call result to the bound signal
-        // This represents: signal_name = __instance_result (or __instance_result.port_name for multiple outputs)
+        // For each output binding, create an assignment from the entity output port to the bound signal
+        // This represents: signal_name = __instance_result.port_name
+        // BUG #187 FIX: Use field access to reference specific output ports from entity instances.
+        // Previously we assigned the whole struct which doesn't work in Verilog codegen.
         for (port_name, signal_name) in &output_bindings {
             if let Some(&signal_var_id) = self.symbols.variables.get(signal_name) {
-                // Create assignment: signal = result
+                // Create assignment: signal = __instance_result.port_name
+                // This field access will be resolved during MIR conversion to the actual wire name
+                let field_access = HirExpression::FieldAccess {
+                    base: Box::new(HirExpression::Variable(result_var_id)),
+                    field: port_name.clone(),
+                };
                 let assignment = HirAssignment {
                     id: self.next_assignment_id(),
                     lhs: HirLValue::Variable(signal_var_id),
-                    rhs: HirExpression::Variable(result_var_id),
+                    rhs: field_access,
                     assignment_type: HirAssignmentType::Blocking,
                 };
                 stmts.push(HirStatement::Assignment(assignment));
@@ -2356,10 +2365,6 @@ impl HirBuilderContext {
                     // Convert them to let statements for inlining purposes
                     // E.g., `signal result: fp32;` becomes `let result: fp32;`
                     if let Some(let_stmt) = self.build_signal_as_let(&child) {
-                        println!(
-                            "[HIR_COLLECT] SignalDecl '{}' converted to Let statement",
-                            let_stmt.name
-                        );
                         statements.push(HirStatement::Let(let_stmt));
                     }
                 }
