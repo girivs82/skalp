@@ -3264,6 +3264,8 @@ impl HirBuilderContext {
                 }
                 // Capture any expression node (prefer complex over simple)
                 // BUG FIX #7: Include CallExpr and FieldExpr for method calls like a.lt(0.0)
+                // BUG FIX: IndexExpr must be treated as complex because the parser creates
+                // IdentExpr and IndexExpr as siblings for conditions like x[31]
                 let is_complex = matches!(
                     child.kind(),
                     SyntaxKind::BinaryExpr
@@ -3271,6 +3273,7 @@ impl HirBuilderContext {
                         | SyntaxKind::ParenExpr
                         | SyntaxKind::CallExpr // BUG #7: Method calls like lt(), gt()
                         | SyntaxKind::FieldExpr // BUG #7: Field access (part of chained calls)
+                        | SyntaxKind::IndexExpr // BUG FIX: x[31] conditions - IndexExpr is sibling to IdentExpr
                 );
                 let is_simple = matches!(
                     child.kind(),

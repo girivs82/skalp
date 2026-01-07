@@ -776,6 +776,13 @@ impl<'hir> HirToMir<'hir> {
                             );
                         }
                         if let Some(init_expr) = &hir_signal.initial_value {
+                            // Debug: print expression type
+                            eprintln!(
+                                "[HIR→MIR DEBUG] Signal '{}' init_expr discriminant: {:?}, is_literal: {}",
+                                hir_signal.name,
+                                std::mem::discriminant(init_expr),
+                                matches!(init_expr, hir::HirExpression::Literal(_))
+                            );
                             // Only generate assignment if it's NOT a literal (literals are handled above)
                             if !matches!(init_expr, hir::HirExpression::Literal(_)) {
                                 eprintln!(
@@ -5016,68 +5023,6 @@ impl<'hir> HirToMir<'hir> {
                             Value::BitVector { width: 1, value: 0 },
                         )));
                     }
-                    // BUG #188 FIX: Handle hardware intrinsic functions (clz, ctz)
-                    // These are special functions that map directly to hardware operations
-                    "intrinsic_clz" => {
-                        eprintln!(
-                            "[INTRINSIC] intrinsic_clz() - generating FunctionCall expression"
-                        );
-                        // Convert the argument and generate a FunctionCall expression
-                        // This will be converted to appropriate hardware (priority encoder)
-                        // by the codegen stage
-                        if call.args.len() == 1 {
-                            if let Some(arg_expr) =
-                                self.convert_expression(&call.args[0], depth + 1)
-                            {
-                                // Infer the width from the argument type
-                                let arg_width: u32 = match &arg_expr.ty {
-                                    Type::Bit(skalp_frontend::types::Width::Fixed(w)) => *w,
-                                    Type::Int(skalp_frontend::types::Width::Fixed(w)) => *w,
-                                    Type::Nat(skalp_frontend::types::Width::Fixed(w)) => *w,
-                                    Type::Logic(skalp_frontend::types::Width::Fixed(w)) => *w,
-                                    _ => 32, // Default to 32-bit
-                                };
-                                // Result type is nat (enough bits to represent 0..width)
-                                let result_width = (32 - arg_width.leading_zeros()).max(1);
-                                return Some(Expression::new(
-                                    ExpressionKind::FunctionCall {
-                                        name: "clz".to_string(),
-                                        args: vec![arg_expr],
-                                    },
-                                    Type::Nat(skalp_frontend::types::Width::Fixed(result_width)),
-                                ));
-                            }
-                        }
-                        return None;
-                    }
-                    "intrinsic_ctz" => {
-                        eprintln!(
-                            "[INTRINSIC] intrinsic_ctz() - generating FunctionCall expression"
-                        );
-                        // Convert the argument and generate a FunctionCall expression
-                        if call.args.len() == 1 {
-                            if let Some(arg_expr) =
-                                self.convert_expression(&call.args[0], depth + 1)
-                            {
-                                let arg_width: u32 = match &arg_expr.ty {
-                                    Type::Bit(skalp_frontend::types::Width::Fixed(w)) => *w,
-                                    Type::Int(skalp_frontend::types::Width::Fixed(w)) => *w,
-                                    Type::Nat(skalp_frontend::types::Width::Fixed(w)) => *w,
-                                    Type::Logic(skalp_frontend::types::Width::Fixed(w)) => *w,
-                                    _ => 32,
-                                };
-                                let result_width = (32 - arg_width.leading_zeros()).max(1);
-                                return Some(Expression::new(
-                                    ExpressionKind::FunctionCall {
-                                        name: "ctz".to_string(),
-                                        args: vec![arg_expr],
-                                    },
-                                    Type::Nat(skalp_frontend::types::Width::Fixed(result_width)),
-                                ));
-                            }
-                        }
-                        return None;
-                    }
                     _ => {} // Not an intent helper or intrinsic, continue to regular function handling
                 }
 
@@ -5780,33 +5725,53 @@ impl<'hir> HirToMir<'hir> {
                         self.port_map.contains_key(id)
                     );
                 }
-                let base_lval = match self.expr_to_lvalue(base) {
-                    Some(lval) => lval,
-                    None => {
-                        println!(
-                            "[BUG127_INDEX_DEBUG]   expr_to_lvalue FAILED for base type={:?}",
-                            std::mem::discriminant(base.as_ref())
-                        );
-                        return None;
-                    }
-                };
-                let index_expr = match self.convert_expression(index, depth + 1) {
-                    Some(expr) => expr,
-                    None => {
-                        println!(
-                            "[BUG127_INDEX_DEBUG]   INDEX EXPR conversion FAILED for index type={:?}",
-                            std::mem::discriminant(index.as_ref())
-                        );
-                        return None;
-                    }
-                };
-                Some(Expression::new(
-                    ExpressionKind::Ref(LValue::BitSelect {
-                        base: Box::new(base_lval),
-                        index: Box::new(index_expr),
-                    }),
-                    ty,
-                ))
+
+                // BUG FIX: Handle cases where base is not an LValue (e.g., Concat expressions
+                // from function inlining like clz32({sum_raw, 4'b0000})[31])
+                // When the base is a Concat or other non-LValue expression, we need to:
+                // 1. Try the LValue path first (common case for signals/variables)
+                // 2. Fall back to shift/mask operations: (base >> index) & 1
+                if let Some(base_lval) = self.expr_to_lvalue(base) {
+                    let index_expr = match self.convert_expression(index, depth + 1) {
+                        Some(expr) => expr,
+                        None => {
+                            println!(
+                                "[BUG127_INDEX_DEBUG]   INDEX EXPR conversion FAILED for index type={:?}",
+                                std::mem::discriminant(index.as_ref())
+                            );
+                            return None;
+                        }
+                    };
+                    return Some(Expression::new(
+                        ExpressionKind::Ref(LValue::BitSelect {
+                            base: Box::new(base_lval),
+                            index: Box::new(index_expr),
+                        }),
+                        ty,
+                    ));
+                }
+
+                // Base is not an LValue - use shift/mask operations: (base >> index) & 1
+                println!(
+                    "[BUG127_INDEX_DEBUG] Using shift/mask fallback for non-LValue base type={:?}",
+                    std::mem::discriminant(base.as_ref())
+                );
+                let base_expr = self.convert_expression(base, depth + 1)?;
+                let index_expr = self.convert_expression(index, depth + 1)?;
+
+                // Compute: (base >> index) & 1 to extract single bit
+                let shifted = Expression::with_unknown_type(ExpressionKind::Binary {
+                    op: BinaryOp::RightShift,
+                    left: Box::new(base_expr),
+                    right: Box::new(index_expr),
+                });
+                // Mask with 1 to get single bit
+                let one = Expression::with_unknown_type(ExpressionKind::Literal(Value::Integer(1)));
+                Some(Expression::with_unknown_type(ExpressionKind::Binary {
+                    op: BinaryOp::And,
+                    left: Box::new(shifted),
+                    right: Box::new(one),
+                }))
             }
             hir::HirExpression::Range(base, high, low) => {
                 // Convert range expression to range select
@@ -9120,30 +9085,15 @@ impl<'hir> HirToMir<'hir> {
         param_map: &HashMap<String, &hir::HirExpression>,
         var_id_to_name: &HashMap<hir::VariableId, String>,
     ) -> Option<hir::HirExpression> {
-        let is_block = matches!(expr, hir::HirExpression::Block { .. });
-        println!(
-            "[DEBUG] substitute_expression_with_var_map: expr type: {:?}, is_block: {}",
-            std::mem::discriminant(expr),
-            is_block
-        );
         match expr {
             // GenericParam - function parameters are parsed as generic params
             // Check if this matches a function parameter and substitute
             hir::HirExpression::GenericParam(name) => {
                 if let Some(arg_expr) = param_map.get(name) {
                     // Clone the argument expression
-                    println!(
-                        "[DEBUG] GenericParam substitution: '{}' -> {:?}",
-                        name,
-                        std::mem::discriminant(&**arg_expr)
-                    );
                     Some((*arg_expr).clone())
                 } else {
                     // Not a function parameter, keep as-is
-                    println!(
-                        "[DEBUG] GenericParam substitution: '{}' NOT FOUND in param_map, keeping as-is",
-                        name
-                    );
                     Some(expr.clone())
                 }
             }
@@ -9250,20 +9200,11 @@ impl<'hir> HirToMir<'hir> {
 
             // If expression - substitute all parts
             hir::HirExpression::If(if_expr) => {
-                if let hir::HirExpression::Binary(bin) = &*if_expr.condition {
-                    if let hir::HirExpression::Variable(left_id) = &*bin.left {}
-                }
-
                 let condition = Box::new(self.substitute_expression_with_var_map(
                     &if_expr.condition,
                     param_map,
                     var_id_to_name,
                 )?);
-
-                if let hir::HirExpression::Binary(bin) = &*condition {
-                    if let hir::HirExpression::Variable(left_id) = &*bin.left {}
-                }
-
                 let then_expr = Box::new(self.substitute_expression_with_var_map(
                     &if_expr.then_expr,
                     param_map,
@@ -9707,15 +9648,20 @@ impl<'hir> HirToMir<'hir> {
 
             // Index expression - substitute base and index
             hir::HirExpression::Index(base, index) => {
-                eprintln!(
-                    "[DEBUG] Index substitution: base type {:?}",
-                    std::mem::discriminant(&**base)
+                println!(
+                    "🔴🔴🔴 [CLZ_DEBUG] Index substitution: base type {:?}, index type {:?} 🔴🔴🔴",
+                    std::mem::discriminant(&**base),
+                    std::mem::discriminant(&**index)
                 );
                 let substituted_base = Box::new(self.substitute_expression_with_var_map(
                     base,
                     param_map,
                     var_id_to_name,
                 )?);
+                println!(
+                    "🔴🔴🔴 [CLZ_DEBUG] Index substitution: substituted_base type {:?} 🔴🔴🔴",
+                    std::mem::discriminant(&*substituted_base)
+                );
                 let substituted_index = Box::new(self.substitute_expression_with_var_map(
                     index,
                     param_map,
