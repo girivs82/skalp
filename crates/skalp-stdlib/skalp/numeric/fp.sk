@@ -810,17 +810,14 @@ impl Neg for fp32 {
 //     }
 // }
 
-// /// Absolute value for fp32: abs(a) = |a|
-// impl Abs for fp32 {
-//     fn abs(a: Self) -> Self {
-//         signal result: fp32;
-//         let abs_op = FpAbs<IEEE754_32> {
-//             x: a as fp<IEEE754_32>,
-//             result: result as fp<IEEE754_32>
-//         };
-//         result
-//     }
-// }
+/// Absolute value for fp32: abs(a) = |a|
+/// Clears the sign bit (IEEE 754 sign-magnitude representation)
+impl Abs for fp32 {
+    fn abs(a: Self) -> Self {
+        // Clear sign bit: {0, exponent, mantissa}
+        {1'b0, a[30:0]} as fp32
+    }
+}
 
 /// Partial ordering for fp32: comparison operations
 impl PartialOrd for fp32 {
@@ -1014,17 +1011,14 @@ impl Neg for fp64 {
 //     }
 // }
 
-// /// Absolute value for fp64: abs(a) = |a|
-// impl Abs for fp64 {
-//     fn abs(a: Self) -> Self {
-//         signal result: fp64;
-//         let abs_op = FpAbs<IEEE754_64> {
-//             x: a as fp<IEEE754_64>,
-//             result: result as fp<IEEE754_64>
-//         };
-//         result
-//     }
-// }
+/// Absolute value for fp64: abs(a) = |a|
+/// Clears the sign bit (IEEE 754 sign-magnitude representation)
+impl Abs for fp64 {
+    fn abs(a: Self) -> Self {
+        // Clear sign bit: {0, exponent, mantissa}
+        {1'b0, a[62:0]} as fp64
+    }
+}
 
 // ============================================================================
 // Trait Implementations for fp16
@@ -1116,17 +1110,14 @@ impl Neg for fp16 {
 //     }
 // }
 
-// /// Absolute value for fp16: abs(a) = |a|
-// impl Abs for fp16 {
-//     fn abs(a: Self) -> Self {
-//         signal result: fp16;
-//         let abs_op = FpAbs<IEEE754_16> {
-//             x: a as fp<IEEE754_16>,
-//             result: result as fp<IEEE754_16>
-//         };
-//         result
-//     }
-// }
+/// Absolute value for fp16: abs(a) = |a|
+/// Clears the sign bit (IEEE 754 sign-magnitude representation)
+impl Abs for fp16 {
+    fn abs(a: Self) -> Self {
+        // Clear sign bit: {0, exponent, mantissa}
+        {1'b0, a[14:0]} as fp16
+    }
+}
 
 // ============================================================================
 // Convenience Functions (wrappers around trait methods)

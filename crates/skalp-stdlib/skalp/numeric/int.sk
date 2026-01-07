@@ -678,3 +678,10 @@ fn ctz<const W: nat>(x: bit[W]) -> nat {
     else if W > 31 && x[31] { 31 }
     else { W - 1 }
 }
+
+/// Absolute value for signed integers
+/// Returns the absolute value of a signed integer
+/// Note: For MIN_VALUE (e.g., -128 for int[8]), the result overflows
+fn abs_int<const W: nat>(x: int[W]) -> int[W] {
+    if x[W-1] { -x } else { x }
+}

@@ -1358,17 +1358,13 @@ fn format_expression_with_context(expr: &skalp_mir::Expression, module: &Module)
             )
         }
         skalp_mir::ExpressionKind::FunctionCall { name, args } => {
-            // BUG FIX #76: Handle fabs for floating-point absolute value
-            if name == "fabs" && args.len() == 1 {
-                let arg_str = format_expression_with_context(&args[0], module);
-                format!("{{1'b0, {}[30:0]}}", arg_str)
-            } else {
-                let arg_strs: Vec<_> = args
-                    .iter()
-                    .map(|a| format_expression_with_context(a, module))
-                    .collect();
-                format!("{}({})", name, arg_strs.join(", "))
-            }
+            // Function calls are inlined by MIR, so reaching here means
+            // an unresolved function call (should be rare)
+            let arg_strs: Vec<_> = args
+                .iter()
+                .map(|a| format_expression_with_context(a, module))
+                .collect();
+            format!("{}({})", name, arg_strs.join(", "))
         }
         skalp_mir::ExpressionKind::Cast { expr, .. } => {
             // Cast is a no-op for SystemVerilog (bitwise reinterpretation)
@@ -1469,14 +1465,10 @@ fn format_expression(expr: &skalp_mir::Expression) -> String {
             )
         }
         skalp_mir::ExpressionKind::FunctionCall { name, args } => {
-            // BUG FIX #76: Handle fabs for floating-point absolute value
-            if name == "fabs" && args.len() == 1 {
-                let arg_str = format_expression(&args[0]);
-                format!("{{1'b0, {}[30:0]}}", arg_str)
-            } else {
-                let arg_strs: Vec<_> = args.iter().map(format_expression).collect();
-                format!("{}({})", name, arg_strs.join(", "))
-            }
+            // Function calls are inlined by MIR, so reaching here means
+            // an unresolved function call (should be rare)
+            let arg_strs: Vec<_> = args.iter().map(format_expression).collect();
+            format!("{}({})", name, arg_strs.join(", "))
         }
         skalp_mir::ExpressionKind::Cast { expr, .. } => {
             // Cast is a no-op for SystemVerilog (bitwise reinterpretation)
@@ -2497,17 +2489,6 @@ fn convert_mir_expr_to_sv(expr: &skalp_mir::Expression) -> String {
                         format!("(1 << {})", convert_mir_expr_to_sv(&args[0]))
                     } else {
                         "1".to_string() // Fallback
-                    }
-                }
-                "fabs" => {
-                    // BUG FIX #76: fabs(x) → clear sign bit for IEEE 754 float
-                    // For 32-bit float (shortreal), bit 31 is sign bit
-                    // Absolute value = {1'b0, x[30:0]}
-                    if args.len() == 1 {
-                        let arg_str = convert_mir_expr_to_sv(&args[0]);
-                        format!("{{1'b0, {}[30:0]}}", arg_str)
-                    } else {
-                        "32'b0".to_string() // Fallback
                     }
                 }
                 _ => {
