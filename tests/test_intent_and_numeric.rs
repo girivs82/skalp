@@ -95,7 +95,7 @@ async fn test_intent_conditional() {
 // ============================================================================
 
 /// Test FP32 basic arithmetic operations
-#[ignore = "FP arithmetic produces zero - needs debugging of FP logic simulation"]
+#[ignore = "Bug #187: FP simulation produces zero - const generics work but simulation logic needs investigation"]
 #[tokio::test]
 async fn test_fp32_arithmetic() {
     let mut tb = Testbench::new("tests/fixtures/numeric/fp_arithmetic.sk")

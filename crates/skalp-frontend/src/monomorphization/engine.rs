@@ -596,7 +596,7 @@ impl<'hir> MonomorphizationEngine<'hir> {
             .collect();
 
         // Specialize instances - substitute generic arguments
-        let specialized_instances = impl_block
+        let specialized_instances: Vec<_> = impl_block
             .instances
             .iter()
             .map(|instance| {

@@ -1744,19 +1744,53 @@ impl HirBuilderContext {
             }
         }
 
-        // Create a Call expression that represents this entity instantiation
-        // The call will be to a function with the same name as the entity
-        // When this is inlined, the entity instance mechanism will handle it
-        let call_expr = HirExpression::Call(HirCallExpr {
-            function: entity_name.clone(),
-            args: input_args,
-            type_args: Vec::new(), // TODO: Extract type args from ArgList
-            named_type_args: std::collections::HashMap::new(),
-            impl_style: ImplStyle::Auto,
+        // BUG #186 FIX: Extract generic arguments from ArgList for entity instantiation
+        // This is critical for monomorphization to work correctly with generic entities
+        // like FpAdd<IEEE754_32>. Without this, the collector can't see the const args.
+        let mut generic_args: Vec<HirExpression> = Vec::new();
+
+        // Try ArgList first (for Entity<IEEE754_32> syntax)
+        if let Some(arg_list) = node.first_child_of_kind(SyntaxKind::ArgList) {
+            for arg_node in arg_list.children() {
+                // Generic args are wrapped in Arg nodes
+                if arg_node.kind() == SyntaxKind::Arg {
+                    // Look for the actual expression inside the Arg node
+                    // It could be an IdentExpr (for IEEE754_32 constant reference)
+                    for inner in arg_node.children() {
+                        if let Some(arg_expr) = self.build_expression(&inner) {
+                            generic_args.push(arg_expr);
+                        }
+                    }
+                } else if arg_node.kind() != SyntaxKind::Comma {
+                    // Try building the expression directly if not wrapped
+                    if let Some(arg_expr) = self.build_expression(&arg_node) {
+                        generic_args.push(arg_expr);
+                    }
+                }
+            }
+        }
+
+        // Create a StructLiteral expression to represent the entity instantiation
+        // This is essential for the InstantiationCollector to find and process
+        // entity instantiations inside trait method bodies.
+        let mut struct_fields = Vec::new();
+        for (i, arg) in input_args.iter().enumerate() {
+            // For now, use positional names - the actual port names aren't critical
+            // for collection, only for later MIR processing
+            struct_fields.push(HirStructFieldInit {
+                name: format!("param_{}", i),
+                value: arg.clone(),
+            });
+        }
+
+        let struct_expr = HirExpression::StructLiteral(HirStructLiteral {
+            type_name: entity_name.clone(),
+            generic_args,
+            fields: struct_fields,
         });
 
-        // Create a let statement that binds the call result
-        // This represents: let __instance_result = EntityName(args...)
+        // Create a let statement that binds the entity instantiation result
+        // This represents: let __instance_result = EntityName<...> { fields... }
         let result_var_id = self.next_variable_id();
         let result_name = format!("__{}_result", instance_name);
         self.symbols
@@ -1765,15 +1799,15 @@ impl HirBuilderContext {
         self.symbols
             .add_to_scope(&result_name, SymbolId::Variable(result_var_id));
 
-        let call_stmt = HirStatement::Let(HirLetStatement {
+        let inst_stmt = HirStatement::Let(HirLetStatement {
             id: result_var_id,
             name: result_name.clone(),
             mutable: false,
             var_type: HirType::Bit(32), // Placeholder type - will be inferred during MIR conversion
-            value: call_expr,
+            value: struct_expr,
         });
 
-        let mut stmts = vec![call_stmt];
+        let mut stmts = vec![inst_stmt];
 
         // For each output binding, create an assignment from the call result to the bound signal
         // This represents: signal_name = __instance_result (or __instance_result.port_name for multiple outputs)
