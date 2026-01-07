@@ -4179,58 +4179,9 @@ impl<'a> MirToSirConverter<'a> {
         parent_module_for_signals: Option<&Module>,
         parent_prefix: &str,
     ) -> bool {
-        // Check if this is an FP operation module
         let module_name = &child_module.name;
-        let fp_op = if module_name.starts_with("FpAdd") {
-            Some(BinaryOperation::FAdd)
-        } else if module_name.starts_with("FpSub") {
-            Some(BinaryOperation::FSub)
-        } else if module_name.starts_with("FpMul") {
-            Some(BinaryOperation::FMul)
-        } else if module_name.starts_with("FpDiv") {
-            Some(BinaryOperation::FDiv)
-        } else {
-            None
-        };
 
-        let fp_op = match fp_op {
-            Some(op) => op,
-            None => return false, // Not an FP module, use normal elaboration
-        };
-
-        println!(
-            "      ⚡ [FP_SPECIALIZE] Detected FP module '{}' -> {:?}",
-            module_name, fp_op
-        );
-
-        // Get the input connections (a, b) and output (result)
-        // FpAdd/FpSub/FpMul/FpDiv all have: input a, input b, output result, output flags
-        let a_expr = instance.connections.get("a");
-        let b_expr = instance.connections.get("b");
-        let result_expr = instance.connections.get("result");
-
-        // Validate we have the required connections
-        let (a_expr, b_expr, result_expr) = match (a_expr, b_expr, result_expr) {
-            (Some(a), Some(b), Some(r)) => (a, b, r),
-            _ => {
-                println!(
-                    "      ⚠️ [FP_SPECIALIZE] Missing connections for '{}', falling back to elaboration",
-                    inst_prefix
-                );
-                println!(
-                    "         Available connections: {:?}",
-                    instance.connections.keys().collect::<Vec<_>>()
-                );
-                return false;
-            }
-        };
-
-        println!(
-            "      ⚡ [FP_SPECIALIZE] a={:?}, b={:?}, result={:?}",
-            a_expr, b_expr, result_expr
-        );
-
-        // Determine the FP type from the module name or child module ports
+        // Determine FP width from module name
         let fp_width = if module_name.contains("fp64") || module_name.contains("IEEE754_64") {
             64
         } else if module_name.contains("fp16") || module_name.contains("IEEE754_16") {
@@ -4245,18 +4196,114 @@ impl<'a> MirToSirConverter<'a> {
             _ => SirType::Float32,
         };
 
-        // Build port mapping for the child module (maps child port names to parent expressions)
+        // Build port mapping for expression conversion
         let mut port_mapping: HashMap<String, Expression> = HashMap::new();
         for (port_name, expr) in &instance.connections {
             port_mapping.insert(port_name.clone(), expr.clone());
         }
 
-        // Convert input expressions to SIR node IDs using instance context
-        // The expressions (a_expr, b_expr) reference signals/ports in the parent module context
+        let module_for_lookup = parent_module_for_signals.unwrap_or(self.mir);
+
+        // Check for different FP module types
+        if module_name.starts_with("FpAdd")
+            || module_name.starts_with("FpSub")
+            || module_name.starts_with("FpMul")
+            || module_name.starts_with("FpDiv")
+        {
+            // Binary FP operations: FpAdd, FpSub, FpMul, FpDiv
+            let fp_op = if module_name.starts_with("FpAdd") {
+                BinaryOperation::FAdd
+            } else if module_name.starts_with("FpSub") {
+                BinaryOperation::FSub
+            } else if module_name.starts_with("FpMul") {
+                BinaryOperation::FMul
+            } else {
+                BinaryOperation::FDiv
+            };
+
+            return self.specialize_fp_binary_op(
+                instance,
+                child_module,
+                inst_prefix,
+                parent_module_for_signals,
+                parent_prefix,
+                &port_mapping,
+                module_for_lookup,
+                fp_op,
+                fp_width,
+                sir_type,
+            );
+        } else if module_name.starts_with("FpSqrt") {
+            // Unary FP operation: FpSqrt
+            return self.specialize_fp_sqrt(
+                instance,
+                child_module,
+                inst_prefix,
+                parent_module_for_signals,
+                parent_prefix,
+                &port_mapping,
+                module_for_lookup,
+                fp_width,
+                sir_type,
+            );
+        } else if module_name.starts_with("FpCompare") {
+            // FP comparison: FpCompare
+            return self.specialize_fp_compare(
+                instance,
+                child_module,
+                inst_prefix,
+                parent_module_for_signals,
+                parent_prefix,
+                &port_mapping,
+                module_for_lookup,
+                fp_width,
+            );
+        }
+
+        false // Not an FP module we can specialize
+    }
+
+    /// Specialize binary FP operations (FpAdd, FpSub, FpMul, FpDiv)
+    #[allow(clippy::too_many_arguments)]
+    fn specialize_fp_binary_op(
+        &mut self,
+        instance: &skalp_mir::ModuleInstance,
+        child_module: &Module,
+        inst_prefix: &str,
+        parent_module_for_signals: Option<&Module>,
+        parent_prefix: &str,
+        port_mapping: &HashMap<String, Expression>,
+        module_for_lookup: &Module,
+        fp_op: BinaryOperation,
+        fp_width: usize,
+        sir_type: SirType,
+    ) -> bool {
+        println!(
+            "      ⚡ [FP_SPECIALIZE] Detected binary FP module '{}' -> {:?}",
+            child_module.name, fp_op
+        );
+
+        // Get connections: a, b, result
+        let (a_expr, b_expr, result_expr) = match (
+            instance.connections.get("a"),
+            instance.connections.get("b"),
+            instance.connections.get("result"),
+        ) {
+            (Some(a), Some(b), Some(r)) => (a, b, r),
+            _ => {
+                println!(
+                    "      ⚠️ [FP_SPECIALIZE] Missing connections for '{}', falling back",
+                    inst_prefix
+                );
+                return false;
+            }
+        };
+
+        // Convert inputs
         let a_node = self.create_expression_node_for_instance_with_context(
             a_expr,
             inst_prefix,
-            &port_mapping,
+            port_mapping,
             child_module,
             parent_module_for_signals,
             parent_prefix,
@@ -4264,88 +4311,20 @@ impl<'a> MirToSirConverter<'a> {
         let b_node = self.create_expression_node_for_instance_with_context(
             b_expr,
             inst_prefix,
-            &port_mapping,
+            port_mapping,
             child_module,
             parent_module_for_signals,
             parent_prefix,
         );
 
-        // Determine the output signal name
-        // The result_expr is the parent's lvalue that should receive the output
-        // We need to look up in the parent module's context, not self.mir (top-level)
-        let module_for_lookup = parent_module_for_signals.unwrap_or(self.mir);
+        // Get output signal name
+        let output_signal_name = self
+            .get_output_signal_name(result_expr, module_for_lookup, parent_prefix)
+            .unwrap_or_else(|| {
+                self.create_fallback_signal(inst_prefix, "result", fp_width, &sir_type)
+            });
 
-        let output_signal_name = match &result_expr.kind {
-            skalp_mir::ExpressionKind::Ref(lvalue) => match lvalue {
-                skalp_mir::LValue::Signal(sig_id) => {
-                    // Find signal in parent module and return its full name
-                    module_for_lookup
-                        .signals
-                        .iter()
-                        .find(|s| s.id == *sig_id)
-                        .map(|s| {
-                            if parent_prefix.is_empty() {
-                                s.name.clone()
-                            } else {
-                                format!("{}.{}", parent_prefix, s.name)
-                            }
-                        })
-                }
-                skalp_mir::LValue::Port(port_id) => {
-                    // Find port in parent module and return its full name
-                    module_for_lookup
-                        .ports
-                        .iter()
-                        .find(|p| p.id == *port_id)
-                        .map(|p| {
-                            if parent_prefix.is_empty() {
-                                p.name.clone()
-                            } else {
-                                format!("{}.{}", parent_prefix, p.name)
-                            }
-                        })
-                }
-                skalp_mir::LValue::Variable(var_id) => {
-                    // Find variable in parent module and return its full name
-                    module_for_lookup
-                        .variables
-                        .iter()
-                        .find(|v| v.id == *var_id)
-                        .map(|v| {
-                            if parent_prefix.is_empty() {
-                                v.name.clone()
-                            } else {
-                                format!("{}.{}", parent_prefix, v.name)
-                            }
-                        })
-                }
-                _ => None,
-            },
-            _ => None,
-        };
-
-        let output_signal_name = match output_signal_name {
-            Some(name) => name,
-            None => {
-                // Fall back to creating a signal for the instance output
-                let name = format!("{}.result", inst_prefix);
-                // Ensure the signal exists
-                if !self.sir.signals.iter().any(|s| s.name == name) {
-                    self.sir.signals.push(SirSignal {
-                        name: name.clone(),
-                        width: fp_width,
-                        sir_type: sir_type.clone(),
-                        is_state: false,
-                        driver_node: None,
-                        fanout_nodes: Vec::new(),
-                        span: None,
-                    });
-                }
-                name
-            }
-        };
-
-        // Create signal references for inputs using node_to_signal_ref
+        // Create the native FP binary operation node
         let a_signal = self.node_to_signal_ref(a_node);
         let b_signal = self.node_to_signal_ref(b_node);
         let output_signal = SignalRef {
@@ -4353,7 +4332,6 @@ impl<'a> MirToSirConverter<'a> {
             bit_range: None,
         };
 
-        // Create the native FP binary operation node
         let node_id = self.next_node_id();
         let node = SirNode {
             id: node_id,
@@ -4366,26 +4344,320 @@ impl<'a> MirToSirConverter<'a> {
         };
 
         self.sir.combinational_nodes.push(node);
-
-        // Update the output signal's driver_node
-        if let Some(sig) = self
-            .sir
-            .signals
-            .iter_mut()
-            .find(|s| s.name == output_signal_name)
-        {
-            sig.driver_node = Some(node_id);
-        }
-
-        // Note: We ignore the 'flags' output for GPU simulation
-        // IEEE 754 flags (overflow, underflow, inexact, etc.) are not needed for simulation
+        self.update_signal_driver(&output_signal_name, node_id);
 
         println!(
             "      ✅ [FP_SPECIALIZE] Created native {:?} operation (node_id={}) -> {}",
             fp_op, node_id, output_signal_name
         );
+        true
+    }
 
-        true // Specialization successful
+    /// Specialize FpSqrt to native FSqrt
+    #[allow(clippy::too_many_arguments)]
+    fn specialize_fp_sqrt(
+        &mut self,
+        instance: &skalp_mir::ModuleInstance,
+        child_module: &Module,
+        inst_prefix: &str,
+        parent_module_for_signals: Option<&Module>,
+        parent_prefix: &str,
+        port_mapping: &HashMap<String, Expression>,
+        module_for_lookup: &Module,
+        fp_width: usize,
+        sir_type: SirType,
+    ) -> bool {
+        println!(
+            "      ⚡ [FP_SPECIALIZE] Detected FpSqrt module '{}'",
+            child_module.name
+        );
+
+        // FpSqrt has: in x, out result, out flags
+        let (x_expr, result_expr) = match (
+            instance.connections.get("x"),
+            instance.connections.get("result"),
+        ) {
+            (Some(x), Some(r)) => (x, r),
+            _ => {
+                println!(
+                    "      ⚠️ [FP_SPECIALIZE] Missing connections for FpSqrt '{}', falling back",
+                    inst_prefix
+                );
+                return false;
+            }
+        };
+
+        // Convert input
+        let x_node = self.create_expression_node_for_instance_with_context(
+            x_expr,
+            inst_prefix,
+            port_mapping,
+            child_module,
+            parent_module_for_signals,
+            parent_prefix,
+        );
+
+        // Get output signal name
+        let output_signal_name = self
+            .get_output_signal_name(result_expr, module_for_lookup, parent_prefix)
+            .unwrap_or_else(|| {
+                self.create_fallback_signal(inst_prefix, "result", fp_width, &sir_type)
+            });
+
+        // Create the native FSqrt unary operation node
+        let x_signal = self.node_to_signal_ref(x_node);
+        let output_signal = SignalRef {
+            signal_id: output_signal_name.clone(),
+            bit_range: None,
+        };
+
+        let node_id = self.next_node_id();
+        let node = SirNode {
+            id: node_id,
+            kind: SirNodeKind::UnaryOp(UnaryOperation::FSqrt),
+            inputs: vec![x_signal],
+            outputs: vec![output_signal],
+            clock_domain: None,
+            impl_style_hint: ImplStyleHint::default(),
+            span: None,
+        };
+
+        self.sir.combinational_nodes.push(node);
+        self.update_signal_driver(&output_signal_name, node_id);
+
+        println!(
+            "      ✅ [FP_SPECIALIZE] Created native FSqrt operation (node_id={}) -> {}",
+            node_id, output_signal_name
+        );
+        true
+    }
+
+    /// Specialize FpCompare to native FP comparison operations
+    #[allow(clippy::too_many_arguments)]
+    fn specialize_fp_compare(
+        &mut self,
+        instance: &skalp_mir::ModuleInstance,
+        child_module: &Module,
+        inst_prefix: &str,
+        parent_module_for_signals: Option<&Module>,
+        parent_prefix: &str,
+        port_mapping: &HashMap<String, Expression>,
+        module_for_lookup: &Module,
+        _fp_width: usize,
+    ) -> bool {
+        println!(
+            "      ⚡ [FP_SPECIALIZE] Detected FpCompare module '{}'",
+            child_module.name
+        );
+
+        // FpCompare has: in a, in b, out lt, out eq, out gt, out unordered
+        let (a_expr, b_expr) = match (instance.connections.get("a"), instance.connections.get("b"))
+        {
+            (Some(a), Some(b)) => (a, b),
+            _ => {
+                println!(
+                    "      ⚠️ [FP_SPECIALIZE] Missing input connections for FpCompare '{}', falling back",
+                    inst_prefix
+                );
+                return false;
+            }
+        };
+
+        // Convert inputs
+        let a_node = self.create_expression_node_for_instance_with_context(
+            a_expr,
+            inst_prefix,
+            port_mapping,
+            child_module,
+            parent_module_for_signals,
+            parent_prefix,
+        );
+        let b_node = self.create_expression_node_for_instance_with_context(
+            b_expr,
+            inst_prefix,
+            port_mapping,
+            child_module,
+            parent_module_for_signals,
+            parent_prefix,
+        );
+
+        let a_signal = self.node_to_signal_ref(a_node);
+        let b_signal = self.node_to_signal_ref(b_node);
+
+        let mut created_ops = Vec::new();
+
+        // Create comparison operations for each connected output
+        // lt output -> FLt
+        if let Some(lt_expr) = instance.connections.get("lt") {
+            if let Some(output_name) =
+                self.get_output_signal_name(lt_expr, module_for_lookup, parent_prefix)
+            {
+                let output_signal = SignalRef {
+                    signal_id: output_name.clone(),
+                    bit_range: None,
+                };
+                let node_id = self.next_node_id();
+                let node = SirNode {
+                    id: node_id,
+                    kind: SirNodeKind::BinaryOp(BinaryOperation::FLt),
+                    inputs: vec![a_signal.clone(), b_signal.clone()],
+                    outputs: vec![output_signal],
+                    clock_domain: None,
+                    impl_style_hint: ImplStyleHint::default(),
+                    span: None,
+                };
+                self.sir.combinational_nodes.push(node);
+                self.update_signal_driver(&output_name, node_id);
+                created_ops.push(("FLt", node_id, output_name));
+            }
+        }
+
+        // eq output -> FEq
+        if let Some(eq_expr) = instance.connections.get("eq") {
+            if let Some(output_name) =
+                self.get_output_signal_name(eq_expr, module_for_lookup, parent_prefix)
+            {
+                let output_signal = SignalRef {
+                    signal_id: output_name.clone(),
+                    bit_range: None,
+                };
+                let node_id = self.next_node_id();
+                let node = SirNode {
+                    id: node_id,
+                    kind: SirNodeKind::BinaryOp(BinaryOperation::FEq),
+                    inputs: vec![a_signal.clone(), b_signal.clone()],
+                    outputs: vec![output_signal],
+                    clock_domain: None,
+                    impl_style_hint: ImplStyleHint::default(),
+                    span: None,
+                };
+                self.sir.combinational_nodes.push(node);
+                self.update_signal_driver(&output_name, node_id);
+                created_ops.push(("FEq", node_id, output_name));
+            }
+        }
+
+        // gt output -> FGt
+        if let Some(gt_expr) = instance.connections.get("gt") {
+            if let Some(output_name) =
+                self.get_output_signal_name(gt_expr, module_for_lookup, parent_prefix)
+            {
+                let output_signal = SignalRef {
+                    signal_id: output_name.clone(),
+                    bit_range: None,
+                };
+                let node_id = self.next_node_id();
+                let node = SirNode {
+                    id: node_id,
+                    kind: SirNodeKind::BinaryOp(BinaryOperation::FGt),
+                    inputs: vec![a_signal.clone(), b_signal.clone()],
+                    outputs: vec![output_signal],
+                    clock_domain: None,
+                    impl_style_hint: ImplStyleHint::default(),
+                    span: None,
+                };
+                self.sir.combinational_nodes.push(node);
+                self.update_signal_driver(&output_name, node_id);
+                created_ops.push(("FGt", node_id, output_name));
+            }
+        }
+
+        // Note: 'unordered' output (NaN check) is not directly supported as a native op
+        // We skip it for GPU simulation - NaN handling uses native FP behavior
+
+        if created_ops.is_empty() {
+            println!(
+                "      ⚠️ [FP_SPECIALIZE] No comparison outputs connected for FpCompare '{}', falling back",
+                inst_prefix
+            );
+            return false;
+        }
+
+        for (op_name, node_id, output_name) in &created_ops {
+            println!(
+                "      ✅ [FP_SPECIALIZE] Created native {} operation (node_id={}) -> {}",
+                op_name, node_id, output_name
+            );
+        }
+        true
+    }
+
+    /// Helper: Get output signal name from an expression
+    fn get_output_signal_name(
+        &self,
+        expr: &Expression,
+        module_for_lookup: &Module,
+        parent_prefix: &str,
+    ) -> Option<String> {
+        match &expr.kind {
+            skalp_mir::ExpressionKind::Ref(lvalue) => match lvalue {
+                skalp_mir::LValue::Signal(sig_id) => module_for_lookup
+                    .signals
+                    .iter()
+                    .find(|s| s.id == *sig_id)
+                    .map(|s| {
+                        if parent_prefix.is_empty() {
+                            s.name.clone()
+                        } else {
+                            format!("{}.{}", parent_prefix, s.name)
+                        }
+                    }),
+                skalp_mir::LValue::Port(port_id) => module_for_lookup
+                    .ports
+                    .iter()
+                    .find(|p| p.id == *port_id)
+                    .map(|p| {
+                        if parent_prefix.is_empty() {
+                            p.name.clone()
+                        } else {
+                            format!("{}.{}", parent_prefix, p.name)
+                        }
+                    }),
+                skalp_mir::LValue::Variable(var_id) => module_for_lookup
+                    .variables
+                    .iter()
+                    .find(|v| v.id == *var_id)
+                    .map(|v| {
+                        if parent_prefix.is_empty() {
+                            v.name.clone()
+                        } else {
+                            format!("{}.{}", parent_prefix, v.name)
+                        }
+                    }),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// Helper: Create a fallback signal for instance output
+    fn create_fallback_signal(
+        &mut self,
+        inst_prefix: &str,
+        port_name: &str,
+        width: usize,
+        sir_type: &SirType,
+    ) -> String {
+        let name = format!("{}.{}", inst_prefix, port_name);
+        if !self.sir.signals.iter().any(|s| s.name == name) {
+            self.sir.signals.push(SirSignal {
+                name: name.clone(),
+                width,
+                sir_type: sir_type.clone(),
+                is_state: false,
+                driver_node: None,
+                fanout_nodes: Vec::new(),
+                span: None,
+            });
+        }
+        name
+    }
+
+    /// Helper: Update a signal's driver_node
+    fn update_signal_driver(&mut self, signal_name: &str, node_id: usize) {
+        if let Some(sig) = self.sir.signals.iter_mut().find(|s| s.name == signal_name) {
+            sig.driver_node = Some(node_id);
+        }
     }
 
     /// Elaborate a single instance with optional parent module context
