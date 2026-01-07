@@ -178,7 +178,12 @@ async fn test_fp32_comparison_equal() {
 /// BUG #181 - fp32/uint4 type mismatch in nested mux operations
 /// BUG #182 - Const generic replication {E{1'b1}} generates 32-bit instead of E-bit - FIXED
 /// BUG #183 - Instance entity ID assignment during glob import merge - FIXED
-/// BUG #184 - FP computation returns 0 instead of correct value (pending investigation)
+/// BUG #184 - Trait method inlining ignores signal declarations and entity instances
+///            Root cause: convert_body_to_expression() extracts Let statements but ignores
+///            HirStatement::Signal declarations. Trait methods like `impl Add for fp32`
+///            that create signals and entity instances don't get properly inlined.
+///            Workaround: Use explicit entity instantiation (FpAdd<IEEE754_32>{...}) instead
+///            of trait operators (a + b).
 #[tokio::test]
 #[ignore]
 async fn test_fp32_sqrt_perfect_squares() {
