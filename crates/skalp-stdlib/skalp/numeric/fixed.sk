@@ -246,7 +246,7 @@ impl FixedConvert<W_IN, F_IN, S_IN, W_OUT, F_OUT, S_OUT> {
 /// Convert fixed-point to integer
 pub entity FixedToInt<const W: nat, const F: nat, const S: bool> {
     in x: fixed<W, F, S>
-    out result: int<W-F, S>
+    out result: Int<W-F, S>
 }
 
 impl FixedToInt<const W: nat, const F: nat, const S: bool> {
@@ -257,7 +257,7 @@ impl FixedToInt<const W: nat, const F: nat, const S: bool> {
 
 /// Convert integer to fixed-point
 pub entity IntToFixed<const W_INT: nat, const S: bool, const W: nat, const F: nat> {
-    in x: int<W_INT, S>
+    in x: Int<W_INT, S>
     out result: fixed<W, F, S>
     out overflow: bit
 }

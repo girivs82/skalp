@@ -620,19 +620,19 @@ impl FpConvert<const FROM: FloatFormat, const TO: FloatFormat> {
 /// Convert floating-point to integer
 pub entity FpToInt<const F: FloatFormat, const W: nat, const S: bool> {
     in x: fp<F>
-    out result: int<W, S>
+    out result: Int<W, S>
     out flags: bit[5]
 }
 
 impl FpToInt<const F: FloatFormat, const W: nat, const S: bool> {
     // TODO: Implement FP to int conversion
-    result = x as int<W, S>  // Placeholder
+    result = x as Int<W, S>  // Placeholder
     flags = 5'b00000
 }
 
 /// Convert integer to floating-point
 pub entity IntToFp<const W: nat, const S: bool, const F: FloatFormat> {
-    in x: int<W, S>
+    in x: Int<W, S>
     out result: fp<F>
     out flags: bit[5]
 }

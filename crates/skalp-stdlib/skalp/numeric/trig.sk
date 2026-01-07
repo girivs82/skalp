@@ -5,7 +5,7 @@
 
 use skalp::numeric::fp::{fp, fp32};
 use skalp::numeric::cordic::{
-    CordicRotate16, CordicVector16,
+    CordicRotate16, CordicVector16, CordicSqrt,
     PI, PI_HALF, CORDIC_GAIN_16, CORDIC_GAIN_INV_16
 };
 
@@ -45,8 +45,8 @@ impl AngleReduce {
     signal normalized: fp32 = angle
 
     // Check which quadrant
-    signal in_q1: bit = (normalized >= 0.0fp32) && (normalized = PI_HALF)
-    signal in_q2: bit = (normalized > PI_HALF) && (normalized = PI)
+    signal in_q1: bit = (normalized >= 0.0fp32) && (normalized <= PI_HALF)
+    signal in_q2: bit = (normalized > PI_HALF) && (normalized <= PI)
     signal in_q3: bit = (normalized >= -PI) && (normalized < -PI_HALF)
     signal in_q4: bit = (normalized >= -PI_HALF) && (normalized < 0.0fp32)
 
@@ -222,7 +222,7 @@ pub entity Acos {
 
 impl Acos {
     // Check valid range
-    valid = (x >= -1.0fp32) && (x = 1.0fp32)
+    valid = (x >= -1.0fp32) && (x <= 1.0fp32)
 
     // Compute sqrt(1 - x^2)
     signal x_sq: fp32 = x * x
@@ -231,7 +231,7 @@ impl Acos {
     // For sqrt, we use CORDIC or the sqrt function
     // Here we use a simple approach: sqrt via the hyperbolic CORDIC
     signal y: fp32
-    let sqrt_ent = crate::numeric::cordic::CordicSqrt {
+    let sqrt_ent = CordicSqrt {
         value: one_minus_x_sq,
         result: y
     }
@@ -281,13 +281,13 @@ pub entity Asin {
 }
 
 impl Asin {
-    valid = (x >= -1.0fp32) && (x = 1.0fp32)
+    valid = (x >= -1.0fp32) && (x <= 1.0fp32)
 
     signal x_sq: fp32 = x * x
     signal one_minus_x_sq: fp32 = 1.0fp32 - x_sq
 
     signal y: fp32
-    let sqrt_ent = crate::numeric::cordic::CordicSqrt {
+    let sqrt_ent = CordicSqrt {
         value: one_minus_x_sq,
         result: y
     }

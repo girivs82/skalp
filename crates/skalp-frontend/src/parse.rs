@@ -139,6 +139,11 @@ impl<'a> ParseState<'a> {
             self.parse_generic_params();
         }
 
+        // Optional where clause
+        if self.at(SyntaxKind::WhereKw) {
+            self.parse_where_clause();
+        }
+
         // Port list
         self.expect(SyntaxKind::LBrace);
         self.parse_port_list();
@@ -890,7 +895,69 @@ impl<'a> ParseState<'a> {
                 Some(SyntaxKind::ConstKw) => {
                     self.parse_constant_decl();
                 }
-                Some(SyntaxKind::LetKw) => self.parse_let_statement(),
+                Some(SyntaxKind::LetKw) => {
+                    // Disambiguate between instance declaration and let binding
+                    // Instance: let name = EntityName { ... } or let name = EntityName<T> { ... }
+                    // Let binding: let name = expression
+                    // Look ahead to see if we have: let ident = ident { or let ident = ident < ... >
+                    let mut is_instance = false;
+                    if self.peek_kind(1) == Some(SyntaxKind::Ident)
+                        && self.peek_kind(2) == Some(SyntaxKind::Assign)
+                        && self.peek_kind(3) == Some(SyntaxKind::Ident)
+                    {
+                        // Check if followed by { or <
+                        if self.peek_kind(4) == Some(SyntaxKind::LBrace) {
+                            is_instance = true;
+                        } else if self.peek_kind(4) == Some(SyntaxKind::Lt) {
+                            // Generic instantiation - scan forward to find the closing >
+                            let mut depth = 0;
+                            let mut offset = 4;
+                            loop {
+                                match self.peek_kind(offset) {
+                                    Some(SyntaxKind::Lt) => depth += 1,
+                                    Some(SyntaxKind::Gt) => {
+                                        depth -= 1;
+                                        if depth == 0 {
+                                            if self.peek_kind(offset + 1)
+                                                == Some(SyntaxKind::LBrace)
+                                            {
+                                                is_instance = true;
+                                            }
+                                            break;
+                                        }
+                                    }
+                                    Some(SyntaxKind::Shr) => {
+                                        depth -= 2;
+                                        if depth <= 0 {
+                                            if self.peek_kind(offset + 1)
+                                                == Some(SyntaxKind::LBrace)
+                                            {
+                                                is_instance = true;
+                                            }
+                                            break;
+                                        }
+                                    }
+                                    None => break,
+                                    _ => {}
+                                }
+                                offset += 1;
+                                if offset > 20 {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+
+                    if is_instance {
+                        self.parse_instance_decl();
+                        // Consume optional trailing semicolon
+                        if self.at(SyntaxKind::Semicolon) {
+                            self.bump();
+                        }
+                    } else {
+                        self.parse_let_statement()
+                    }
+                }
                 Some(SyntaxKind::AssertKw) => self.parse_assert_statement(),
                 Some(SyntaxKind::PropertyKw) => self.parse_property_statement(),
                 Some(SyntaxKind::CoverKw) => self.parse_cover_statement(),
@@ -1058,6 +1125,18 @@ impl<'a> ParseState<'a> {
                 }
                 Some(SyntaxKind::ReturnKw) => {
                     self.parse_return_statement();
+                }
+                // BUG #185 FIX: Support signal declarations inside block expressions
+                // This enables patterns like:
+                //   overflow = if S {
+                //       signal a_sign: bit = a[W-1]
+                //       (a_sign == b_sign) && (a_sign != r_sign)
+                //   } else { ... }
+                Some(SyntaxKind::SignalKw) => {
+                    self.parse_signal_decl();
+                    if self.at(SyntaxKind::Semicolon) {
+                        self.bump();
+                    }
                 }
                 Some(SyntaxKind::IfKw) => {
                     // Bug #80/#81 fix: Determine if this is an if-statement or if-expression
@@ -3450,12 +3529,21 @@ impl<'a> ParseState<'a> {
     fn parse_where_predicate(&mut self) {
         self.start_node(SyntaxKind::WherePredicate);
 
-        // Type parameter
-        self.expect(SyntaxKind::Ident);
-
-        // Colon and bounds
-        self.expect(SyntaxKind::Colon);
-        self.parse_trait_bound_list();
+        // Where predicates can be:
+        // 1. Type bounds: T: Trait
+        // 2. Constraint expressions: W % 8 == 0, W > 0, W_OUT = W_IN
+        //
+        // Check if this is a type bound (Ident followed by ':')
+        // or a constraint expression (anything else)
+        if self.at(SyntaxKind::Ident) && self.peek_kind(1) == Some(SyntaxKind::Colon) {
+            // Type bound: T: Trait
+            self.expect(SyntaxKind::Ident);
+            self.expect(SyntaxKind::Colon);
+            self.parse_trait_bound_list();
+        } else {
+            // Constraint expression: parse as a general expression
+            self.parse_expression();
+        }
 
         self.finish_node();
     }
@@ -3840,6 +3928,17 @@ impl<'a> ParseState<'a> {
             if matches!(next, Some(SyntaxKind::Lt) | Some(SyntaxKind::LBracket)) {
                 // Looks like a generic type
                 self.parse_type();
+            } else if matches!(
+                next,
+                Some(SyntaxKind::Plus)
+                    | Some(SyntaxKind::Minus)
+                    | Some(SyntaxKind::Star)
+                    | Some(SyntaxKind::Slash)
+                    | Some(SyntaxKind::Percent)
+            ) {
+                // Expression with arithmetic operator (e.g., W-F, N+1)
+                // Use additive_expr to handle +/- but not comparison operators (>/<)
+                self.parse_additive_expr();
             } else {
                 // Simple identifier - treat as const argument
                 self.start_node(SyntaxKind::IdentExpr);
@@ -6059,6 +6158,20 @@ impl ParseState<'_> {
             self.bump();
         } else {
             self.error("expected identifier");
+        }
+
+        // Check for rename on simple identifiers in use trees (e.g., {sin as trig_sin})
+        // This handles cases where there's no :: path following
+        if self.at(SyntaxKind::AsKw) {
+            self.bump(); // as
+                         // Alias can also be a keyword used as identifier
+            if self.at(SyntaxKind::Ident) || self.current_kind().is_some_and(|k| k.is_keyword()) {
+                self.bump();
+            } else {
+                self.error("expected identifier after 'as'");
+            }
+            self.finish_node();
+            return;
         }
 
         while self.at(SyntaxKind::ColonColon) {

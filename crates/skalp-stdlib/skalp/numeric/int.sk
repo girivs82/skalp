@@ -13,21 +13,21 @@ use skalp::numeric::traits::Numeric;
 /// # Parameters
 /// - W: Word width in bits
 /// - S: Signed (true) or unsigned (false)
-pub type int<const W: nat, const S: bool> = bit[W];
+pub type Int<const W: nat, const S: bool> = bit[W];
 
 // Common signed integer aliases
-pub type i8 = int<8, true>;
-pub type i16 = int<16, true>;
-pub type i32 = int<32, true>;
-pub type i64 = int<64, true>;
-pub type i128 = int<128, true>;
+pub type i8 = Int<8, true>;
+pub type i16 = Int<16, true>;
+pub type i32 = Int<32, true>;
+pub type i64 = Int<64, true>;
+pub type i128 = Int<128, true>;
 
 // Common unsigned integer aliases
-pub type u8 = int<8, false>;
-pub type u16 = int<16, false>;
-pub type u32 = int<32, false>;
-pub type u64 = int<64, false>;
-pub type u128 = int<128, false>;
+pub type u8 = Int<8, false>;
+pub type u16 = Int<16, false>;
+pub type u32 = Int<32, false>;
+pub type u64 = Int<64, false>;
+pub type u128 = Int<128, false>;
 
 // ============================================================================
 // Arithmetic Operations
@@ -35,9 +35,9 @@ pub type u128 = int<128, false>;
 
 /// Integer addition with overflow detection
 pub entity IntAdd<const W: nat, const S: bool> {
-    in a: int<W, S>
-    in b: int<W, S>
-    out result: int<W, S>
+    in a: Int<W, S>
+    in b: Int<W, S>
+    out result: Int<W, S>
     out overflow: bit
 }
 
@@ -59,9 +59,9 @@ impl IntAdd<const W: nat, const S: bool> {
 
 /// Integer subtraction with overflow/underflow detection
 pub entity IntSub<const W: nat, const S: bool> {
-    in a: int<W, S>
-    in b: int<W, S>
-    out result: int<W, S>
+    in a: Int<W, S>
+    in b: Int<W, S>
+    out result: Int<W, S>
     out overflow: bit
 }
 
@@ -83,9 +83,9 @@ impl IntSub<const W: nat, const S: bool> {
 
 /// Integer multiplication with overflow detection
 pub entity IntMul<const W: nat, const S: bool> {
-    in a: int<W, S>
-    in b: int<W, S>
-    out result: int<W, S>
+    in a: Int<W, S>
+    in b: Int<W, S>
+    out result: Int<W, S>
     out overflow: bit
 }
 
@@ -117,10 +117,10 @@ impl IntMul<const W: nat, const S: bool> {
 
 /// Integer division
 pub entity IntDiv<const W: nat, const S: bool> {
-    in a: int<W, S>
-    in b: int<W, S>
-    out quotient: int<W, S>
-    out remainder: int<W, S>
+    in a: Int<W, S>
+    in b: Int<W, S>
+    out quotient: Int<W, S>
+    out remainder: Int<W, S>
     out div_by_zero: bit
     out overflow: bit
 }
@@ -138,24 +138,17 @@ impl IntDiv<const W: nat, const S: bool> {
     }
 
     // Perform division
+    // Note: Signed division is handled at the SystemVerilog level via $signed()
     quotient = if div_by_zero || overflow {
         0
     } else {
-        if S {
-            (a as signed bit[W]) / (b as signed bit[W])
-        } else {
-            a / b
-        }
+        a / b
     }
 
     remainder = if div_by_zero || overflow {
         0
     } else {
-        if S {
-            (a as signed bit[W]) % (b as signed bit[W])
-        } else {
-            a % b
-        }
+        a % b
     }
 }
 
@@ -165,13 +158,13 @@ impl IntDiv<const W: nat, const S: bool> {
 
 /// Saturating addition (clamps to min/max on overflow)
 pub entity IntAddSat<const W: nat, const S: bool> {
-    in a: int<W, S>
-    in b: int<W, S>
-    out result: int<W, S>
+    in a: Int<W, S>
+    in b: Int<W, S>
+    out result: Int<W, S>
 }
 
 impl IntAddSat<const W: nat, const S: bool> {
-    signal sum: int<W, S>
+    signal sum: Int<W, S>
     signal overflow: bit
 
     let adder = IntAdd<W, S> {
@@ -197,13 +190,13 @@ impl IntAddSat<const W: nat, const S: bool> {
 
 /// Saturating subtraction
 pub entity IntSubSat<const W: nat, const S: bool> {
-    in a: int<W, S>
-    in b: int<W, S>
-    out result: int<W, S>
+    in a: Int<W, S>
+    in b: Int<W, S>
+    out result: Int<W, S>
 }
 
 impl IntSubSat<const W: nat, const S: bool> {
-    signal diff: int<W, S>
+    signal diff: Int<W, S>
     signal overflow: bit
 
     let subber = IntSub<W, S> {
@@ -302,9 +295,9 @@ impl IntShr<const W: nat> {
 
 /// Arithmetic right shift (sign-extend for signed)
 pub entity IntSar<const W: nat, const S: bool> {
-    in a: int<W, S>
+    in a: Int<W, S>
     in shift: nat
-    out result: int<W, S>
+    out result: Int<W, S>
 }
 
 impl IntSar<const W: nat, const S: bool> {
@@ -349,8 +342,8 @@ impl IntRotr<const W: nat> {
 
 /// Integer comparison
 pub entity IntCompare<const W: nat, const S: bool> {
-    in a: int<W, S>
-    in b: int<W, S>
+    in a: Int<W, S>
+    in b: Int<W, S>
     out lt: bit
     out eq: bit
     out gt: bit
@@ -378,8 +371,8 @@ impl IntCompare<const W: nat, const S: bool> {
 
 /// Absolute value (signed only)
 pub entity IntAbs<const W: nat> {
-    in x: int<W, true>
-    out result: int<W, true>
+    in x: Int<W, true>
+    out result: Int<W, true>
     out overflow: bit  // True if x = MIN_VALUE
 }
 
@@ -396,8 +389,8 @@ impl IntAbs<const W: nat> {
 
 /// Negate
 pub entity IntNeg<const W: nat, const S: bool> {
-    in x: int<W, S>
-    out result: int<W, S>
+    in x: Int<W, S>
+    out result: Int<W, S>
     out overflow: bit
 }
 
@@ -414,9 +407,9 @@ impl IntNeg<const W: nat, const S: bool> {
 
 /// Minimum of two values
 pub entity IntMin<const W: nat, const S: bool> {
-    in a: int<W, S>
-    in b: int<W, S>
-    out result: int<W, S>
+    in a: Int<W, S>
+    in b: Int<W, S>
+    out result: Int<W, S>
 }
 
 impl IntMin<const W: nat, const S: bool> {
@@ -435,9 +428,9 @@ impl IntMin<const W: nat, const S: bool> {
 
 /// Maximum of two values
 pub entity IntMax<const W: nat, const S: bool> {
-    in a: int<W, S>
-    in b: int<W, S>
-    out result: int<W, S>
+    in a: Int<W, S>
+    in b: Int<W, S>
+    out result: Int<W, S>
 }
 
 impl IntMax<const W: nat, const S: bool> {
@@ -456,14 +449,14 @@ impl IntMax<const W: nat, const S: bool> {
 
 /// Clamp value to range [min, max]
 pub entity IntClamp<const W: nat, const S: bool> {
-    in x: int<W, S>
-    in min_val: int<W, S>
-    in max_val: int<W, S>
-    out result: int<W, S>
+    in x: Int<W, S>
+    in min_val: Int<W, S>
+    in max_val: Int<W, S>
+    out result: Int<W, S>
 }
 
 impl IntClamp<const W: nat, const S: bool> {
-    signal clamped_min: int<W, S>
+    signal clamped_min: Int<W, S>
 
     let min_op = IntMax<W, S> {
         a: x,
@@ -574,8 +567,8 @@ impl IntZeroExtend<const W_IN: nat, const W_OUT: nat> {
 /// Sign-extend to wider width
 pub entity IntSignExtend<const W_IN: nat, const W_OUT: nat>
 where W_OUT >= W_IN {
-    in x: int<W_IN, true>
-    out result: int<W_OUT, true>
+    in x: Int<W_IN, true>
+    out result: Int<W_OUT, true>
 }
 
 impl IntSignExtend<const W_IN: nat, const W_OUT: nat> {
@@ -586,7 +579,7 @@ impl IntSignExtend<const W_IN: nat, const W_OUT: nat> {
 
 /// Truncate to narrower width
 pub entity IntTruncate<const W_IN: nat, const W_OUT: nat>
-where W_OUT = W_IN {
+where W_OUT <= W_IN {
     in x: bit[W_IN]
     out result: bit[W_OUT]
     out overflow: bit  // True if discarded bits were non-zero

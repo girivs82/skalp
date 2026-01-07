@@ -6,6 +6,7 @@
 use skalp::numeric::traits::Numeric;
 use skalp::numeric::fp::{fp, fp32, FpMul, FpAdd, FpDiv, FpSqrt};
 use skalp::numeric::trig::{sin as trig_sin, cos as trig_cos, acos as trig_acos};
+use skalp::numeric::cordic::CordicSqrt;
 
 // ============================================================================
 // Type Definitions
@@ -667,7 +668,7 @@ fn acos<T>(x: T) -> T {
 ///
 /// result = a - b (component-wise)
 pub fn vec3_sub(a: vec3<fp32>, b: vec3<fp32>) -> vec3<fp32> {
-    signal res: vec3<fp32>
+    signal res: vec3<fp32>;
     let sub = VecSub<fp32, 3> {
         a: a,
         b: b,
@@ -693,8 +694,8 @@ pub fn vec3_dot(a: vec3<fp32>, b: vec3<fp32>) -> fp32 {
 ///
 /// result = a × b
 pub fn vec3_cross(a: vec3<fp32>, b: vec3<fp32>) -> vec3<fp32> {
-    signal res: vec3<fp32>
-    let cross = Vec3Cross<fp32> {
+    signal res: vec3<fp32>;
+    let cross_op = Vec3Cross<fp32> {
         a: a,
         b: b,
         result: res
@@ -706,7 +707,7 @@ pub fn vec3_cross(a: vec3<fp32>, b: vec3<fp32>) -> vec3<fp32> {
 ///
 /// result = a + b (component-wise)
 pub fn vec3_add(a: vec3<fp32>, b: vec3<fp32>) -> vec3<fp32> {
-    signal res: vec3<fp32>
+    signal res: vec3<fp32>;
     let add = VecAdd<fp32, 3> {
         a: a,
         b: b,
@@ -719,7 +720,7 @@ pub fn vec3_add(a: vec3<fp32>, b: vec3<fp32>) -> vec3<fp32> {
 ///
 /// result = v * scalar (component-wise)
 pub fn vec3_scale(v: vec3<fp32>, scalar: fp32) -> vec3<fp32> {
-    signal res: vec3<fp32>
+    signal res: vec3<fp32>;
     let scale = VecScale<fp32, 3> {
         v: v,
         scalar: scalar,
@@ -740,7 +741,7 @@ pub fn vec3_length(v: vec3<fp32>) -> fp32 {
     }
     // Use CORDIC sqrt for synthesizable hardware
     signal sqrt_res: fp32
-    let sqrt = crate::numeric::cordic::CordicSqrt {
+    let sqrt = CordicSqrt {
         value: dot_res,
         result: sqrt_res
     }
