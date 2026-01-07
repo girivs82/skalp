@@ -4991,6 +4991,56 @@ impl<'hir> HirToMir<'hir> {
                     _ => {} // Not an intent helper, continue to regular function handling
                 }
 
+                // BUG #184 FIX: Check if this call is to an entity (from trait method inlining)
+                // Entity instances in trait method bodies are converted to Call expressions
+                // We need to instantiate the entity and return a reference to its output
+                if let Some(hir) = self.hir {
+                    if let Some(entity) = hir.entities.iter().find(|e| e.name == call.function) {
+                        // Look up the module ID for this entity
+                        if let Some(&module_id) = self.entity_map.get(&entity.id) {
+                            // Convert arguments to MIR expressions
+                            let mut arg_exprs = Vec::new();
+                            for arg in &call.args {
+                                if let Some(mir_arg) = self.convert_expression(arg, depth + 1) {
+                                    arg_exprs.push(mir_arg);
+                                }
+                            }
+
+                            // Find the "result" output port to determine return type
+                            let result_port = entity.ports.iter().find(|p| {
+                                matches!(p.direction, hir::HirPortDirection::Output)
+                                    && (p.name == "result" || p.name.starts_with("out"))
+                            });
+
+                            // Create a signal for the result
+                            let result_signal_id = self.next_signal_id();
+                            let instance_name =
+                                format!("__inlined_{}_{}", call.function, result_signal_id.0);
+
+                            // Store pending instance for later materialization
+                            // The signal will be connected to the instance's result port
+                            self.pending_module_instances.push((
+                                vec![result_signal_id],
+                                call.function.clone(),
+                                module_id,
+                                arg_exprs,
+                                Some(
+                                    result_port
+                                        .map(|p| p.port_type.clone())
+                                        .unwrap_or(hir::HirType::Bit(32)),
+                                ),
+                                Type::Unknown,
+                            ));
+
+                            // Return a reference to the result signal
+                            return Some(Expression::with_unknown_type(ExpressionKind::Ref(
+                                LValue::Signal(result_signal_id),
+                            )));
+                        }
+                        // If entity not in entity_map, fall through to function handling
+                    }
+                }
+
                 // TIER 2: USER-DEFINED FUNCTION - Apply hybrid inlining strategy
                 // This is NOT a primitive FP operation (like fp_mul, fp_add)
                 // User-defined functions like quadratic_solve reach here

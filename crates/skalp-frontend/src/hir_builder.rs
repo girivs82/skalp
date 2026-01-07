@@ -1637,6 +1637,162 @@ impl HirBuilderContext {
         })
     }
 
+    /// Convert an entity instance declaration in a function body to statements
+    ///
+    /// This handles Bug #184: Entity instances in trait method bodies need to be
+    /// captured so they can be hoisted to the calling module during inlining.
+    ///
+    /// Pattern: `let adder = FpAdd { a: x, b: y, result: out, flags: _ };`
+    ///
+    /// We convert this to:
+    /// 1. A call expression representing the entity instantiation
+    /// 2. The call returns the output port value(s)
+    ///
+    /// The key insight is that entity instances in function bodies are syntactic sugar
+    /// for creating an entity instance and connecting its ports. The "result" we want
+    /// is whatever signal is connected to the entity's output port.
+    fn build_instance_as_statements(&mut self, node: &SyntaxNode) -> Option<Vec<HirStatement>> {
+        // Get instance name (first identifier after 'let')
+        let tokens: Vec<_> = node
+            .children_with_tokens()
+            .filter_map(|element| element.into_token())
+            .collect();
+
+        let instance_name = tokens
+            .iter()
+            .find(|token| token.kind() == SyntaxKind::Ident)
+            .map(|t| t.text().to_string())?;
+
+        // Get entity name (second identifier, after '=')
+        let entity_name = tokens
+            .iter()
+            .filter(|token| token.kind() == SyntaxKind::Ident)
+            .nth(1)
+            .map(|t| t.text().to_string())?;
+
+        // Build the port connections from the connection list
+        // InstanceDecl uses ConnectionList > Connection syntax, not StructLiteral
+        let mut input_args = Vec::new();
+        let mut output_bindings: Vec<(String, String)> = Vec::new(); // (port_name, signal_name)
+
+        if let Some(conn_list) = node.first_child_of_kind(SyntaxKind::ConnectionList) {
+            for connection in conn_list.children_of_kind(SyntaxKind::Connection) {
+                // Get port name (first identifier in the connection)
+                let port_name = connection
+                    .first_token_of_kind(SyntaxKind::Ident)
+                    .map(|t| t.text().to_string());
+
+                // Check if this is a wildcard (_) binding - underscore is an Ident with text "_"
+                let is_wildcard = connection.children_with_tokens().any(|e| {
+                    matches!(e.as_token(), Some(tok) if tok.kind() == SyntaxKind::Ident && tok.text() == "_")
+                });
+
+                if is_wildcard {
+                    // Skip wildcard bindings (output ports we don't care about)
+                    continue;
+                }
+
+                // Get the expression for this connection
+                // Look for expression nodes (IdentExpr, CastExpr, etc.)
+                if let Some(expr_node) = connection.children().find(|n| {
+                    matches!(
+                        n.kind(),
+                        SyntaxKind::IdentExpr
+                            | SyntaxKind::CallExpr
+                            | SyntaxKind::LiteralExpr
+                            | SyntaxKind::CastExpr
+                            | SyntaxKind::BinaryExpr
+                    )
+                }) {
+                    if let (Some(name), Some(expr)) =
+                        (port_name.clone(), self.build_expression(&expr_node))
+                    {
+                        // Determine if this is an input or output port based on common naming
+                        // Output ports are typically: result, out, output, q, data_out, etc.
+                        let is_output = name == "result"
+                            || name.starts_with("out")
+                            || name == "q"
+                            || name == "flags";
+
+                        if is_output {
+                            // For output ports, record the binding
+                            if let HirExpression::Variable(var_id) = &expr {
+                                // Look up the variable name
+                                for (vname, vid) in &self.symbols.variables {
+                                    if vid == var_id {
+                                        output_bindings.push((name.clone(), vname.clone()));
+                                        break;
+                                    }
+                                }
+                            } else if let HirExpression::Cast(cast) = &expr {
+                                // Handle cast expressions like `result as fp<IEEE754_32>`
+                                if let HirExpression::Variable(var_id) = cast.expr.as_ref() {
+                                    for (vname, vid) in &self.symbols.variables {
+                                        if vid == var_id {
+                                            output_bindings.push((name.clone(), vname.clone()));
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        } else {
+                            // Input port - add to arguments
+                            input_args.push(expr);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Create a Call expression that represents this entity instantiation
+        // The call will be to a function with the same name as the entity
+        // When this is inlined, the entity instance mechanism will handle it
+        let call_expr = HirExpression::Call(HirCallExpr {
+            function: entity_name.clone(),
+            args: input_args,
+            type_args: Vec::new(), // TODO: Extract type args from ArgList
+            named_type_args: std::collections::HashMap::new(),
+            impl_style: ImplStyle::Auto,
+        });
+
+        // Create a let statement that binds the call result
+        // This represents: let __instance_result = EntityName(args...)
+        let result_var_id = self.next_variable_id();
+        let result_name = format!("__{}_result", instance_name);
+        self.symbols
+            .variables
+            .insert(result_name.clone(), result_var_id);
+        self.symbols
+            .add_to_scope(&result_name, SymbolId::Variable(result_var_id));
+
+        let call_stmt = HirStatement::Let(HirLetStatement {
+            id: result_var_id,
+            name: result_name.clone(),
+            mutable: false,
+            var_type: HirType::Bit(32), // Placeholder type - will be inferred during MIR conversion
+            value: call_expr,
+        });
+
+        let mut stmts = vec![call_stmt];
+
+        // For each output binding, create an assignment from the call result to the bound signal
+        // This represents: signal_name = __instance_result (or __instance_result.port_name for multiple outputs)
+        for (port_name, signal_name) in &output_bindings {
+            if let Some(&signal_var_id) = self.symbols.variables.get(signal_name) {
+                // Create assignment: signal = result
+                let assignment = HirAssignment {
+                    id: self.next_assignment_id(),
+                    lhs: HirLValue::Variable(signal_var_id),
+                    rhs: HirExpression::Variable(result_var_id),
+                    assignment_type: HirAssignmentType::Blocking,
+                };
+                stmts.push(HirStatement::Assignment(assignment));
+            }
+        }
+
+        Some(stmts)
+    }
+
     /// Extract power domain from signal's lifetime parameter
     /// Syntax: signal name<'domain>: type
     fn extract_signal_power_domain(&self, node: &SyntaxNode) -> Option<String> {
@@ -2172,6 +2328,23 @@ impl HirBuilderContext {
                         );
                         statements.push(HirStatement::Let(let_stmt));
                     }
+                }
+                SyntaxKind::InstanceDecl => {
+                    // Handle entity instantiation inside function bodies (e.g., trait method implementations)
+                    // This is Bug #184: Entity instances in trait methods need special handling
+                    //
+                    // For now, we extract the output port connections as assignments.
+                    // The entity instance itself needs to be hoisted to the calling module.
+                    //
+                    // Pattern: `let adder = FpAdd { a: x, b: y, result: out, flags: _ };`
+                    // We need to track that `out` is driven by `FpAdd.result`
+                    if let Some(instance_stmts) = self.build_instance_as_statements(&child) {
+                        for stmt in instance_stmts {
+                            statements.push(stmt);
+                        }
+                    }
+                    // Note: If instance_stmts is None, the InstanceDecl couldn't be processed
+                    // This is typically handled by the entity instance mechanism in MIR
                 }
                 SyntaxKind::BlockStmt => {
                     let block_stmts = self.build_statements(&child);
