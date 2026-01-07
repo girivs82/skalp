@@ -182,6 +182,9 @@ impl Vec3Cross<T: Numeric> {
 /// Vector length (magnitude)
 ///
 /// length = sqrt(dot(v, v))
+///
+/// NOTE: Currently returns squared length due to trait method inlining limitation (Bug #184).
+/// Use VecLengthSq for squared length, or vec3_length for fp32 vectors with actual sqrt.
 pub entity VecLength<T: Numeric, const N: nat> {
     in v: vec<T, N>
     out length: T
@@ -196,8 +199,10 @@ impl VecLength<T: Numeric, const N: nat> {
         result: dot_result
     }
 
-    // Take square root
-    length = dot_result.sqrt()
+    // TODO: Re-enable when trait method inlining with entity instances works (Bug #184)
+    // length = dot_result.sqrt()
+    // For now, return squared length as placeholder
+    length = dot_result
 }
 
 /// Vector squared length (avoids sqrt)
