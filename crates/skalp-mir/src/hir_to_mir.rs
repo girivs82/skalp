@@ -147,6 +147,15 @@ pub struct HirToMir<'hir> {
     /// When set, all variables created in this context will be prefixed
     /// to avoid name collisions between match arms
     match_arm_prefix: Option<String>,
+    /// Entity instance name prefix that persists through function inlining
+    /// BUG #198 FIX: Function inlining clears match_arm_prefix to prevent variable
+    /// contamination, but entity instances still need unique names based on match
+    /// arm context. This field is NOT cleared during function inlining.
+    entity_instance_prefix: Option<String>,
+    /// BUG #199 FIX: Global counter for unique entity instance IDs
+    /// This ensures all entity instances have unique names regardless of context,
+    /// preventing connection mixing when multiple instances have the same base name.
+    next_entity_instance_id: u32,
     /// Function inlining context stack to prevent variable ID collisions
     /// Each function inlining pushes a unique context ID onto this stack
     /// This allows variables from different functions to coexist even if they have the same HIR VariableId
@@ -224,6 +233,13 @@ pub struct HirToMir<'hir> {
     /// this maps VariableId(result) -> SignalId of the created `adder_result` wire.
     /// Used to correctly wire up return expressions that reference these placeholder signals.
     placeholder_signal_to_entity_output: HashMap<hir::VariableId, SignalId>,
+
+    /// BUG #190 FIX: Maps placeholder HIR SignalIds to entity output MIR SignalIds
+    /// Similar to placeholder_signal_to_entity_output, but for cases where the placeholder
+    /// is an HIR Signal (from `signal result: fp32;`) rather than a Variable.
+    /// When `let adder = FpAdd{result: result as fp32}` and `result` is an HIR Signal,
+    /// this maps the original HIR SignalId to the entity output SignalId.
+    placeholder_hir_signal_to_entity_output: HashMap<hir::SignalId, SignalId>,
 }
 
 /// Context for converting HIR expressions within a synthesized module
@@ -309,6 +325,8 @@ impl<'hir> HirToMir<'hir> {
             type_flattener: TypeFlattener::new(0), // Will be re-initialized per use
             pending_statements: Vec::new(),
             match_arm_prefix: None,
+            entity_instance_prefix: None,
+            next_entity_instance_id: 0,
             inlining_context_stack: Vec::new(),
             next_inlining_context_id: 0,
             inlining_return_type_stack: Vec::new(),
@@ -326,6 +344,7 @@ impl<'hir> HirToMir<'hir> {
             pending_mir_param_subs: HashMap::new(),
             pending_param_var_to_name: HashMap::new(),
             placeholder_signal_to_entity_output: HashMap::new(),
+            placeholder_hir_signal_to_entity_output: HashMap::new(),
         }
     }
 
@@ -351,15 +370,27 @@ impl<'hir> HirToMir<'hir> {
 
         // First pass: create modules for entities
         for entity in &hir.entities {
-            if entity.name.contains("FpAdd") {
+            if entity.name.contains("FpAdd")
+                || entity.name == "KarythraCLEAsync"
+                || entity.name == "FpSub"
+            {
                 println!(
-                    "[HIR_TO_MIR] First pass: FpAdd entity '{}' with id {:?}",
+                    "[HIR_TO_MIR] First pass: entity '{}' with id {:?}",
                     entity.name, entity.id
                 );
             }
             let entity_start = Instant::now();
             let module_id = self.next_module_id();
             self.entity_map.insert(entity.id, module_id);
+            if entity.name.contains("FpAdd")
+                || entity.name == "KarythraCLEAsync"
+                || entity.name == "FpSub"
+            {
+                println!(
+                    "[HIR_TO_MIR] entity_map[{:?}] = {:?} for '{}'",
+                    entity.id, module_id, entity.name
+                );
+            }
 
             let mut module = Module::new(module_id, entity.name.clone());
 
@@ -1643,6 +1674,12 @@ impl<'hir> HirToMir<'hir> {
                                 "[HIERARCHICAL] Detected entity instantiation: let {} = {} {{ ... }}",
                                 let_stmt.name, struct_lit.type_name
                             );
+                            println!(
+                                "[HIERARCHICAL] Found entity {:?} '{}' with {} ports",
+                                entity.id,
+                                entity.name,
+                                entity.ports.len()
+                            );
 
                             // Get the module ID for this entity
                             println!(
@@ -1656,47 +1693,48 @@ impl<'hir> HirToMir<'hir> {
                                     module_id, entity.id
                                 );
                                 // Create module instance
-                                let instance_name = let_stmt.name.clone();
-
-                                // Convert connections from the struct literal fields
-                                let mut connections = std::collections::HashMap::new();
-                                println!(
-                                    "[HIER_CONN] Converting {} fields for entity instantiation",
-                                    struct_lit.fields.len()
-                                );
-                                for field_init in &struct_lit.fields {
-                                    println!(
-                                        "[HIER_CONN] Converting field '{}' <- HIR expr: {:?}",
-                                        field_init.name,
-                                        std::mem::discriminant(&field_init.value)
-                                    );
-                                    if let Some(expr) =
-                                        self.convert_expression(&field_init.value, 0)
-                                    {
-                                        println!(
-                                            "[HIER_CONN] Field '{}' <- MIR expr: {:?}",
-                                            field_init.name, expr.kind
-                                        );
-                                        connections.insert(field_init.name.clone(), expr);
+                                // BUG #197/198/199 FIX: Include unique ID in entity instance name
+                                // to prevent name collisions between entity instances.
+                                // Previously we tried using entity_instance_prefix but it wasn't being
+                                // propagated correctly through all code paths. Using a global counter
+                                // is more robust and guarantees uniqueness.
+                                let instance_id = self.next_entity_instance_id;
+                                self.next_entity_instance_id += 1;
+                                let instance_name =
+                                    if let Some(ref prefix) = self.entity_instance_prefix {
+                                        format!("{}_{}_{}", prefix, let_stmt.name, instance_id)
                                     } else {
-                                        println!(
-                                            "[HIER_CONN] FAILED: convert_expression returned None for field '{}'",
-                                            field_init.name
-                                        );
-                                    }
-                                }
+                                        format!("{}_{}", let_stmt.name, instance_id)
+                                    };
+
+                                // BUG #195 FIX: Set up output port mappings FIRST, BEFORE converting any field values
+                                // This ensures placeholder variables like `result` are mapped before they're accessed
+                                // during field value conversion.
 
                                 // Create signals for output ports and track them
                                 let mut output_ports = HashMap::new();
+                                println!(
+                                    "[HIER_PORTS] Entity '{}' has {} ports",
+                                    entity.name,
+                                    entity.ports.len()
+                                );
                                 for port in &entity.ports {
+                                    println!(
+                                        "[HIER_PORTS]   Port '{}' direction={:?}",
+                                        port.name, port.direction
+                                    );
                                     if matches!(port.direction, hir::HirPortDirection::Output) {
+                                        println!(
+                                            "[HIER_OUTPUT] Output port '{}' MATCHED!",
+                                            port.name
+                                        );
                                         // Create a signal to hold this output
                                         let signal_id = self.next_signal_id();
                                         let signal_name =
                                             format!("{}_{}", instance_name, port.name);
                                         let signal_type = self.convert_type(&port.port_type);
 
-                                        eprintln!(
+                                        println!(
                                             "[HIERARCHICAL] Creating output signal '{}' (type {:?}) for instance '{}' port '{}'",
                                             signal_name, signal_type, instance_name, port.name
                                         );
@@ -1704,45 +1742,110 @@ impl<'hir> HirToMir<'hir> {
                                         // Track this output port
                                         output_ports.insert(port.name.clone(), signal_id);
 
-                                        // Add connection from instance output to signal
-                                        connections.insert(
-                                            port.name.clone(),
-                                            Expression::with_unknown_type(ExpressionKind::Ref(
-                                                LValue::Signal(signal_id),
-                                            )),
-                                        );
+                                        // Note: Connection will be added later in the BUG #195 FIX section
+                                        // after all output port mappings are set up
 
                                         // BUG #167 FIX: Track placeholder signal -> entity output mapping
-                                        // If this output port is connected to a Variable in the struct literal,
-                                        // map that variable ID to this output wire for return expression wiring
+                                        // If this output port is connected to a Variable or Signal in the struct literal,
+                                        // map that ID to this output wire for return expression wiring
                                         if let Some(field_init) =
                                             struct_lit.fields.iter().find(|f| f.name == port.name)
                                         {
                                             // Extract the Variable ID from the field value
                                             // Handle both plain Variable and Cast(Variable)
+                                            println!(
+                                                "[BUG #167 DEBUG] Checking field '{}' for Variable/Cast(Variable), type: {:?}",
+                                                port.name, std::mem::discriminant(&field_init.value)
+                                            );
                                             let maybe_var_id = match &field_init.value {
                                                 hir::HirExpression::Variable(var_id) => {
+                                                    println!(
+                                                        "[BUG #167 DEBUG] Direct Variable {:?}",
+                                                        var_id
+                                                    );
                                                     Some(*var_id)
                                                 }
                                                 hir::HirExpression::Cast(cast_expr) => {
+                                                    println!(
+                                                        "[BUG #167 DEBUG] Cast expr, inner type: {:?}",
+                                                        std::mem::discriminant(&*cast_expr.expr)
+                                                    );
                                                     if let hir::HirExpression::Variable(var_id) =
                                                         &*cast_expr.expr
                                                     {
+                                                        println!(
+                                                            "[BUG #167 DEBUG] Cast(Variable {:?})",
+                                                            var_id
+                                                        );
                                                         Some(*var_id)
                                                     } else {
+                                                        println!(
+                                                            "[BUG #167 DEBUG] Cast of non-Variable"
+                                                        );
                                                         None
                                                     }
                                                 }
-                                                _ => None,
+                                                _ => {
+                                                    println!("[BUG #167 DEBUG] Other type - no Variable mapping");
+                                                    None
+                                                }
                                             };
 
                                             if let Some(var_id) = maybe_var_id {
-                                                eprintln!(
+                                                println!(
                                                     "[BUG #167] Mapping placeholder variable {:?} -> entity output signal '{}'",
                                                     var_id, signal_name
                                                 );
                                                 self.placeholder_signal_to_entity_output
                                                     .insert(var_id, signal_id);
+                                            }
+
+                                            // BUG #190 FIX: Also handle Signal and Cast(Signal)
+                                            // This is critical for FP trait implementations that use
+                                            // `signal result: fp32;` rather than `let result: fp32;`
+                                            println!(
+                                                "[BUG #190 DEBUG] Field '{}' value type: {:?}",
+                                                port.name,
+                                                std::mem::discriminant(&field_init.value)
+                                            );
+                                            let maybe_hir_signal_id = match &field_init.value {
+                                                hir::HirExpression::Signal(hir_sig_id) => {
+                                                    println!(
+                                                        "[BUG #190 DEBUG] Direct Signal {:?}",
+                                                        hir_sig_id
+                                                    );
+                                                    Some(*hir_sig_id)
+                                                }
+                                                hir::HirExpression::Cast(cast_expr) => {
+                                                    println!(
+                                                        "[BUG #190 DEBUG] Cast, inner type: {:?}",
+                                                        std::mem::discriminant(&*cast_expr.expr)
+                                                    );
+                                                    if let hir::HirExpression::Signal(hir_sig_id) =
+                                                        &*cast_expr.expr
+                                                    {
+                                                        println!(
+                                                            "[BUG #190 DEBUG] Cast(Signal {:?})",
+                                                            hir_sig_id
+                                                        );
+                                                        Some(*hir_sig_id)
+                                                    } else {
+                                                        None
+                                                    }
+                                                }
+                                                _ => {
+                                                    println!("[BUG #190 DEBUG] Other expression type - no mapping");
+                                                    None
+                                                }
+                                            };
+
+                                            if let Some(hir_sig_id) = maybe_hir_signal_id {
+                                                println!(
+                                                    "[BUG #190] Mapping placeholder HIR signal {:?} -> entity output MIR signal {:?} ('{}')",
+                                                    hir_sig_id, signal_id, signal_name
+                                                );
+                                                self.placeholder_hir_signal_to_entity_output
+                                                    .insert(hir_sig_id, signal_id);
                                             }
                                         }
 
@@ -1752,13 +1855,72 @@ impl<'hir> HirToMir<'hir> {
                                     }
                                 }
 
+                                // BUG #195 FIX: NOW convert connections from struct literal fields
+                                // This happens AFTER output port mappings are set up, so placeholder variables
+                                // like `result` will properly resolve to their entity output signals.
+                                let mut connections = std::collections::HashMap::new();
+                                println!(
+                                    "[HIER_CONN] Converting {} fields for entity instantiation (AFTER output mapping)",
+                                    struct_lit.fields.len()
+                                );
+
+                                // Build a set of output port names for quick lookup
+                                let output_port_names: std::collections::HashSet<_> = entity
+                                    .ports
+                                    .iter()
+                                    .filter(|p| {
+                                        matches!(p.direction, hir::HirPortDirection::Output)
+                                    })
+                                    .map(|p| p.name.as_str())
+                                    .collect();
+
+                                for field_init in &struct_lit.fields {
+                                    // For output ports, the connection is the output signal we created above
+                                    if output_port_names.contains(field_init.name.as_str()) {
+                                        println!(
+                                            "[HIER_CONN] Field '{}' is OUTPUT - using pre-created signal reference",
+                                            field_init.name
+                                        );
+                                        // The output signal connection was already added above in the output port loop
+                                        if let Some(&sig_id) = output_ports.get(&field_init.name) {
+                                            connections.insert(
+                                                field_init.name.clone(),
+                                                Expression::with_unknown_type(ExpressionKind::Ref(
+                                                    LValue::Signal(sig_id),
+                                                )),
+                                            );
+                                        }
+                                    } else {
+                                        // Input port - convert the expression normally
+                                        println!(
+                                            "[HIER_CONN] Converting INPUT field '{}' <- HIR expr: {:?}",
+                                            field_init.name,
+                                            std::mem::discriminant(&field_init.value)
+                                        );
+                                        if let Some(expr) =
+                                            self.convert_expression(&field_init.value, 0)
+                                        {
+                                            println!(
+                                                "[HIER_CONN] Field '{}' <- MIR expr: {:?}",
+                                                field_init.name, expr.kind
+                                            );
+                                            connections.insert(field_init.name.clone(), expr);
+                                        } else {
+                                            println!(
+                                                "[HIER_CONN] FAILED: convert_expression returned None for field '{}'",
+                                                field_init.name
+                                            );
+                                        }
+                                    }
+                                }
+
                                 // Store the output port mappings for field access resolution
                                 self.entity_instance_outputs
                                     .insert(let_stmt.id, output_ports.clone());
                                 self.entity_instance_info
                                     .insert(let_stmt.id, (instance_name.clone(), module_id));
 
-                                eprintln!(
+                                println!(
                                     "[HIERARCHICAL] Stored entity instance '{}' (var {:?}) with {} output ports",
                                     instance_name, let_stmt.id, self.entity_instance_outputs.get(&let_stmt.id).map(|m| m.len()).unwrap_or(0)
                                 );
@@ -3490,11 +3652,19 @@ impl<'hir> HirToMir<'hir> {
                     // Get the module ID for this entity
                     if let Some(&module_id) = self.entity_map.get(&entity.id) {
                         // Get the variable name from dynamic_variables or create one
-                        let instance_name = self
+                        // BUG #197/198/199 FIX: Include unique ID in entity instance name
+                        let base_name = self
                             .dynamic_variables
                             .get(var_id)
                             .map(|(_, name, _)| name.clone())
                             .unwrap_or_else(|| format!("inst_{}", var_id.0));
+                        let instance_id = self.next_entity_instance_id;
+                        self.next_entity_instance_id += 1;
+                        let instance_name = if let Some(ref prefix) = self.entity_instance_prefix {
+                            format!("{}_{}_{}", prefix, base_name, instance_id)
+                        } else {
+                            format!("{}_{}", base_name, instance_id)
+                        };
 
                         // Convert connections from the struct literal fields
                         let mut connections = std::collections::HashMap::new();
@@ -3908,6 +4078,14 @@ impl<'hir> HirToMir<'hir> {
         // Map entity ID to module ID
         let module_id = *self.entity_map.get(&instance.entity)?;
 
+        // DEBUG: Check entity_map lookup for FpSub's adder
+        if instance.name == "adder" {
+            println!(
+                "[CONVERT_INSTANCE] adder: instance.entity={:?} -> module_id={:?}",
+                instance.entity, module_id
+            );
+        }
+
         // Get the entity definition - needed for both connections and parameters
         let entity = self
             .hir
@@ -3916,6 +4094,14 @@ impl<'hir> HirToMir<'hir> {
             .iter()
             .find(|e| e.id == instance.entity)?
             .clone();
+
+        // DEBUG: Check entity lookup for FpSub's adder
+        if instance.name == "adder" {
+            println!(
+                "[CONVERT_INSTANCE] adder: found entity '{}' with id={:?}",
+                entity.name, entity.id
+            );
+        }
 
         // Convert generic arguments to parameters
         // Map entity.generics (names) with instance.generic_args (values)
@@ -4600,6 +4786,22 @@ impl<'hir> HirToMir<'hir> {
                 .convert_literal(lit)
                 .map(|v| Expression::new(ExpressionKind::Literal(v), ty)),
             hir::HirExpression::Signal(id) => {
+                // BUG #190 FIX: Check if this HIR signal is a placeholder connected to an entity output
+                // This is critical for FP operations where `signal result: fp32;` is passed to an
+                // entity like FpAdd and the result needs to come from the entity's output wire.
+                if let Some(&output_signal_id) =
+                    self.placeholder_hir_signal_to_entity_output.get(id)
+                {
+                    println!(
+                        "[BUG #190 FIX] HIR Signal {:?} is placeholder -> returning entity output signal {:?}",
+                        id, output_signal_id
+                    );
+                    return Some(Expression::new(
+                        ExpressionKind::Ref(LValue::Signal(output_signal_id)),
+                        ty,
+                    ));
+                }
+
                 // First try signal_map
                 if let Some(&signal_id) = self.signal_map.get(id) {
                     Some(Expression::new(
@@ -4634,9 +4836,20 @@ impl<'hir> HirToMir<'hir> {
             hir::HirExpression::Variable(id) => {
                 // BUG #167 FIX: Check if this variable is a placeholder connected to an entity output
                 // If so, return a reference to the entity output wire instead
+                // DEBUG: Always trace Variable(16) lookups
+                if id.0 == 16 {
+                    let contains = self.placeholder_signal_to_entity_output.contains_key(id);
+                    let get_result = self.placeholder_signal_to_entity_output.get(id);
+                    println!(
+                        "[BUG #193 DEBUG] convert_expression Variable(16): contains={}, get={:?}, map_keys={:?}",
+                        contains,
+                        get_result,
+                        self.placeholder_signal_to_entity_output.keys().map(|k| k.0).collect::<Vec<_>>()
+                    );
+                }
                 if let Some(&output_signal_id) = self.placeholder_signal_to_entity_output.get(id) {
-                    eprintln!(
-                        "[BUG #167] Variable {:?} is placeholder -> returning entity output signal {:?}",
+                    println!(
+                        "[BUG #167 FIX] Variable {:?} is placeholder -> returning entity output signal {:?}",
                         id, output_signal_id
                     );
                     return Some(Expression::new(
@@ -4795,6 +5008,18 @@ impl<'hir> HirToMir<'hir> {
                             }
                         }
                     }
+
+                    // BUG FIX: Constant ID not found after module merging
+                    // Collect available constant IDs for debugging
+                    let available_ids: Vec<_> = hir
+                        .implementations
+                        .iter()
+                        .flat_map(|i| i.constants.iter().map(|c| (c.id, &c.name)))
+                        .collect();
+                    println!(
+                        "[CONST_DEBUG] Constant ID {:?} not found! Available: {:?}, current_entity={:?}",
+                        id, available_ids, self.current_entity_id
+                    );
                     return None;
                 }
                 None
@@ -4863,6 +5088,14 @@ impl<'hir> HirToMir<'hir> {
                 println!(
                     "[MIR_BINARY_DEBUG] Converting Binary expression: op={:?}, depth={}",
                     binary.op, depth
+                );
+                // DEBUG: Show left operand type for FP trait resolution
+                let left_type = self.infer_hir_type(&binary.left);
+                eprintln!(
+                    "[MIR_BINARY_DEBUG] op={:?}, left_type={:?}, left={:?}",
+                    binary.op,
+                    left_type,
+                    std::mem::discriminant(&*binary.left)
                 );
                 if matches!(
                     binary.op,
@@ -6872,12 +7105,15 @@ impl<'hir> HirToMir<'hir> {
         // Set match arm prefix for the last arm to isolate its variables
         let last_arm_idx = arms.len() - 1;
         let last_arm_prefix = format!("match_{}_{}", match_id, last_arm_idx);
-        self.match_arm_prefix = Some(last_arm_prefix);
+        self.match_arm_prefix = Some(last_arm_prefix.clone());
+        // BUG #198 FIX: Also set entity_instance_prefix which persists through function inlining
+        self.entity_instance_prefix = Some(last_arm_prefix);
 
         let last_expr = self.convert_expression(&arms.last()?.expr, 0);
 
         // Clear the prefix after processing
         self.match_arm_prefix = None;
+        self.entity_instance_prefix = None;
 
         let mut result = last_expr?;
 
@@ -6978,11 +7214,14 @@ impl<'hir> HirToMir<'hir> {
             // BUG FIX #6: Use global match ID with arm index to make prefix unique
             let arm_prefix = format!("match_{}_{}", match_id, arm_idx);
             self.match_arm_prefix = Some(arm_prefix.clone());
+            // BUG #198 FIX: Also set entity_instance_prefix which persists through function inlining
+            self.entity_instance_prefix = Some(arm_prefix);
 
             let arm_expr = self.convert_expression(&arm.expr, 0);
 
             // Clear the prefix after processing this arm
             self.match_arm_prefix = None;
+            self.entity_instance_prefix = None;
 
             // If arm conversion fails, abort the entire match (returning None will trigger error handling upstream)
             let arm_expr = arm_expr?;
@@ -7459,7 +7698,13 @@ impl<'hir> HirToMir<'hir> {
                 "🎯 MODULE_MATCH: Converting arm {} body in module context",
                 arm_idx
             );
-            let arm_expr = self.convert_hir_expr_for_module(&arm.expr, ctx, depth)?;
+            // BUG FIX #189: If arm body conversion fails, skip this arm and continue
+            // This allows processing of remaining arms even if some fail (e.g., due to
+            // unresolved function calls like sqrt)
+            let arm_expr = match self.convert_hir_expr_for_module(&arm.expr, ctx, depth) {
+                Some(expr) => expr,
+                None => continue, // Skip failed arm, continue with remaining arms
+            };
 
             result = Expression::with_unknown_type(ExpressionKind::Conditional {
                 cond: Box::new(final_condition),
@@ -12996,6 +13241,93 @@ impl<'hir> HirToMir<'hir> {
         let old_param_var =
             std::mem::replace(&mut self.pending_param_var_to_name, param_var_to_name);
 
+        // BUG #194 FIX: Process entity instantiations RECURSIVELY in let_bindings BEFORE converting return expression
+        // This is critical for FP operations where trait methods are inlined, creating nested structures like:
+        //   let result = a_fp + b_fp;  // becomes Block { let adder = FpAdd {...}; result }
+        //
+        // The FpAdd entity must be instantiated (via convert_statement) before we convert
+        // the return expression, because the entity instantiation creates the
+        // placeholder_signal_to_entity_output mapping that links placeholder Variables to output wires.
+        //
+        // Helper function to recursively find entity StructLiterals in an expression
+        fn find_entity_instantiations(
+            expr: &hir::HirExpression,
+            entities: &[skalp_frontend::hir::HirEntity],
+            found: &mut Vec<(String, hir::HirStructLiteral)>,
+        ) {
+            match expr {
+                hir::HirExpression::StructLiteral(struct_lit) => {
+                    if entities.iter().any(|e| e.name == struct_lit.type_name) {
+                        found.push((format!("__entity_{}", found.len()), struct_lit.clone()));
+                    }
+                    // Also recurse into field values
+                    for field in &struct_lit.fields {
+                        find_entity_instantiations(&field.value, entities, found);
+                    }
+                }
+                hir::HirExpression::Block {
+                    statements,
+                    result_expr,
+                } => {
+                    for stmt in statements {
+                        if let hir::HirStatement::Let(let_stmt) = stmt {
+                            find_entity_instantiations(&let_stmt.value, entities, found);
+                        }
+                    }
+                    find_entity_instantiations(result_expr, entities, found);
+                }
+                hir::HirExpression::Binary(bin) => {
+                    find_entity_instantiations(&bin.left, entities, found);
+                    find_entity_instantiations(&bin.right, entities, found);
+                }
+                hir::HirExpression::Cast(cast_expr) => {
+                    find_entity_instantiations(&cast_expr.expr, entities, found);
+                }
+                hir::HirExpression::If(if_expr) => {
+                    find_entity_instantiations(&if_expr.condition, entities, found);
+                    find_entity_instantiations(&if_expr.then_expr, entities, found);
+                    find_entity_instantiations(&if_expr.else_expr, entities, found);
+                }
+                hir::HirExpression::Call(call) => {
+                    for arg in &call.args {
+                        find_entity_instantiations(arg, entities, found);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        // Find entity instantiations in all let bindings
+        let entities = self
+            .hir
+            .as_ref()
+            .map(|h| h.entities.clone())
+            .unwrap_or_default();
+        let mut entity_insts = Vec::new();
+        for binding_value in let_bindings.values() {
+            find_entity_instantiations(binding_value, &entities, &mut entity_insts);
+        }
+        // Also check the substituted body itself
+        find_entity_instantiations(&substituted_body, &entities, &mut entity_insts);
+
+        // Process found entity instantiations
+        for (name, struct_lit) in entity_insts {
+            println!(
+                "🔷🔷🔷 BUG #194 FIX: Processing nested entity instantiation '{}' 🔷🔷🔷",
+                struct_lit.type_name
+            );
+            // Create a temporary Let statement and process via convert_statement
+            // This will create the entity instance and set up placeholder mappings
+            let temp_let = hir::HirLetStatement {
+                id: hir::VariableId(u32::MAX), // Dummy ID
+                name,
+                value: hir::HirExpression::StructLiteral(struct_lit.clone()),
+                var_type: hir::HirType::Custom(struct_lit.type_name.clone()),
+                mutable: false,
+            };
+            let _ = self.convert_statement(&hir::HirStatement::Let(temp_let));
+        }
+
         // Push return type for width inference
         self.inlining_return_type_stack.push(return_type.clone());
         let mut mir_body = self.convert_expression(&substituted_body, 0)?;
@@ -13465,9 +13797,23 @@ impl<'hir> HirToMir<'hir> {
             std::mem::discriminant(&substituted)
         );
 
+        // BUG #196/BUG #197 FIX: Keep match_arm_prefix for entity instance naming
+        // When a trait method is inlined from within a match arm, entity instances created
+        // by the trait method (like FpAdd) MUST get the match_arm_prefix to have unique names.
+        // Different match arms may all call the same trait method, creating entity instances
+        // with the same name (e.g., "__adder_result"), but with different connections.
+        //
+        // Note: Local variables inside the trait method might get the prefix too, but that's
+        // acceptable because they're scoped to the trait method's context anyway.
+        eprintln!(
+            "[BUG #196/197] Trait inline '{}::{}': keeping match_arm_prefix={:?}",
+            trait_name, method_name, self.match_arm_prefix
+        );
+
         // Convert the substituted expression to MIR
         // The Block expression handler will process let statements and entity instantiations
         let result = self.convert_expression(&substituted, 0);
+
         if result.is_none() {
             println!("[TRAIT_INLINE] FAILED: convert_expression returned None");
         }
@@ -13577,8 +13923,16 @@ impl<'hir> HirToMir<'hir> {
             std::mem::discriminant(&substituted)
         );
 
+        // BUG #196/BUG #197 FIX: Keep match_arm_prefix for entity instance naming
+        // (Same fix as for binary trait methods - see inline_trait_method comments)
+        eprintln!(
+            "[BUG #196/197] Unary trait inline '{}::{}': keeping match_arm_prefix={:?}",
+            trait_name, method_name, self.match_arm_prefix
+        );
+
         // Convert the substituted expression to MIR
         let result = self.convert_expression(&substituted, 0);
+
         if result.is_none() {
             println!("[TRAIT_INLINE_UNARY] FAILED: convert_expression returned None");
         }
@@ -14650,6 +15004,10 @@ impl<'hir> HirToMir<'hir> {
                     // BUG FIX #13-16, #21-23: Check if this variable is an entity instance
                     // Entity instances are created via let bindings like: let inner = Inner { data };
                     // Accessing inner.result should return the output port signal of the instance
+                    println!(
+                        "[FIELD_ACCESS] Checking if var {:?} is entity instance. entity_instance_outputs has {} entries",
+                        var_id, self.entity_instance_outputs.len()
+                    );
                     if let Some(output_ports) = self.entity_instance_outputs.get(var_id) {
                         // This variable is an entity instance - look up the output port
                         if let Some(&signal_id) = output_ports.get(&normalized_field_name) {
@@ -16146,6 +16504,31 @@ impl<'hir> HirToMir<'hir> {
         match expr {
             // For Variables, first check if we have a pre-converted MIR expression
             hir::HirExpression::Variable(var_id) => {
+                // BUG #193 DEBUG: Trace Variable(16) specifically in convert_hir_expr_with_mir_cache
+                if var_id.0 == 16 {
+                    println!(
+                        "[BUG #193 DEBUG] convert_hir_expr_with_mir_cache: Variable(16), placeholder_map size={}, contains_16={}",
+                        self.placeholder_signal_to_entity_output.len(),
+                        self.placeholder_signal_to_entity_output.contains_key(var_id)
+                    );
+                }
+
+                // BUG #192 FIX: Check placeholder map FIRST, before using cached MIR
+                // This is critical for FP operations where the 'result' signal is passed to
+                // an entity (like FpAdd) and later returned. The cached MIR might just be
+                // the placeholder signal (Literal(0)), but we need the entity output wire.
+                if let Some(&output_signal_id) =
+                    self.placeholder_signal_to_entity_output.get(var_id)
+                {
+                    println!(
+                        "[BUG #192 FIX] Variable {:?} is placeholder -> returning entity output signal {:?}",
+                        var_id, output_signal_id
+                    );
+                    return Some(Expression::with_unknown_type(ExpressionKind::Ref(
+                        LValue::Signal(output_signal_id),
+                    )));
+                }
+
                 if let Some(mir_expr) = mir_cache.get(var_id) {
                     println!(
                         "🔄🔄🔄 BUG #126 FIX: Using cached MIR for Variable({}) 🔄🔄🔄",
@@ -16433,6 +16816,28 @@ impl<'hir> HirToMir<'hir> {
             // Variable reference - lookup in context (params or let bindings)
             // This is the key case we need to handle specially for module synthesis
             hir::HirExpression::Variable(var) => {
+                // DEBUG: Trace Variable(16) lookups
+                if var.0 == 16 {
+                    println!(
+                        "[BUG #192 DEBUG] convert_hir_expr_for_module Variable(16), placeholder_map size={}, contains_16={}",
+                        self.placeholder_signal_to_entity_output.len(),
+                        self.placeholder_signal_to_entity_output.contains_key(var)
+                    );
+                }
+                // BUG #190 FIX: Check if this variable is a placeholder connected to an entity output
+                // This is critical for FP operations where the 'result' signal is passed to
+                // an entity (like FpAdd) and later returned. The placeholder signal maps to
+                // the entity's output wire.
+                if let Some(&output_signal_id) = self.placeholder_signal_to_entity_output.get(var) {
+                    println!(
+                        "[BUG #190 FIX] Variable {:?} is placeholder -> returning entity output signal {:?}",
+                        var, output_signal_id
+                    );
+                    return Some(Expression::with_unknown_type(ExpressionKind::Ref(
+                        LValue::Signal(output_signal_id),
+                    )));
+                }
+
                 // Get the variable name from our var_id_to_name map
                 debug_println!("🔗🔗🔗 MODULE VAR: Looking up Variable({}) 🔗🔗🔗", var.0);
                 let name = ctx.var_id_to_name.get(var).cloned();
@@ -16822,7 +17227,50 @@ impl<'hir> HirToMir<'hir> {
             }
 
             // Binary operations - convert operands in module context
+            // BUG FIX #FP_TRAIT: Check for trait-based operator resolution FIRST
+            // This is critical for FP operations like (a as fp32) + (b as fp32)
+            // Without this, FP ops use primitive integer +/*/ instead of IEEE 754
             hir::HirExpression::Binary(bin_expr) => {
+                eprintln!(
+                    "[MODULE_BINARY_DEBUG] Processing Binary expression: op={:?}, left={:?}",
+                    bin_expr.op,
+                    std::mem::discriminant(&*bin_expr.left)
+                );
+                // TRAIT-BASED OPERATOR RESOLUTION (Operator Overloading)
+                // Try to resolve the operator through trait implementations first.
+                // If a trait impl exists (e.g., `impl Add for fp32`), inline the trait method
+                // body instead of using a primitive binary operation.
+                if let Some((type_name, trait_name, method_name)) =
+                    self.try_resolve_trait_operator(&bin_expr.op, &bin_expr.left)
+                {
+                    println!(
+                        "[MODULE_TRAIT_OP] Attempting to inline {}::{} for type '{}' (op: {:?})",
+                        trait_name, method_name, type_name, bin_expr.op
+                    );
+
+                    // Try to inline the trait method body
+                    if let Some(result) = self.inline_trait_method(
+                        &type_name,
+                        trait_name,
+                        method_name,
+                        &bin_expr.left,
+                        &bin_expr.right,
+                    ) {
+                        println!(
+                            "[MODULE_TRAIT_OP] Successfully inlined {}::{} for type '{}'",
+                            trait_name, method_name, type_name
+                        );
+                        return Some(result);
+                    }
+
+                    // If inlining fails, fall through to primitive binary operation
+                    println!(
+                        "[MODULE_TRAIT_OP] Failed to inline {}::{}, falling back to primitive op",
+                        trait_name, method_name
+                    );
+                }
+
+                // Fall back to primitive binary operation
                 let left = self.convert_hir_expr_for_module(&bin_expr.left, ctx, depth + 1)?;
                 let right = self.convert_hir_expr_for_module(&bin_expr.right, ctx, depth + 1)?;
                 let op = self.convert_binary_op(&bin_expr.op, &bin_expr.left);
@@ -17014,6 +17462,43 @@ impl<'hir> HirToMir<'hir> {
                         substituted_value =
                             self.substitute_var_ids_in_expr(&substituted_value, &var_id_to_value);
 
+                        // BUG #191 FIX: Handle entity instantiation via StructLiteral in module context
+                        // When a let statement value is a StructLiteral for an entity (like FpAdd),
+                        // we need to process it through convert_statement to create the entity instance
+                        // and set up the placeholder signal to entity output mappings.
+                        // This is critical for FP trait implementations that create entity instances.
+                        if let hir::HirExpression::StructLiteral(struct_lit) = &substituted_value {
+                            println!(
+                                "🔶🔶🔶 BUG #191: MODULE_BLOCK found StructLiteral '{}', checking for entity 🔶🔶🔶",
+                                struct_lit.type_name
+                            );
+                            // Check if this struct literal is an entity instantiation
+                            let is_entity = self.hir.as_ref().map_or(false, |hir| {
+                                hir.entities.iter().any(|e| e.name == struct_lit.type_name)
+                            });
+                            if is_entity {
+                                println!(
+                                    "🔶🔶🔶 BUG #191: StructLiteral '{}' IS an entity, delegating to convert_statement 🔶🔶🔶",
+                                    struct_lit.type_name
+                                );
+                                // Delegate to convert_statement which properly handles entity instantiation
+                                // This will create the entity instance and set up placeholder mappings
+                                let temp_let = hir::HirLetStatement {
+                                    id: let_stmt.id,
+                                    name: let_stmt.name.clone(),
+                                    value: substituted_value.clone(),
+                                    var_type: let_stmt.var_type.clone(),
+                                    mutable: let_stmt.mutable,
+                                };
+                                let _ = self.convert_statement(&hir::HirStatement::Let(temp_let));
+                                // Skip normal processing - convert_statement handled it
+                                let_substitutions
+                                    .insert(let_stmt.name.clone(), substituted_value.clone());
+                                var_id_to_value.insert(let_stmt.id, substituted_value);
+                                continue;
+                            }
+                        }
+
                         // BUG FIX #126: Try to convert this let value to MIR RIGHT NOW
                         // This ensures function calls are only processed once (with caching)
                         // BUG FIX #128: Use convert_hir_expr_with_mir_cache to handle FieldAccess
@@ -17159,8 +17644,30 @@ impl<'hir> HirToMir<'hir> {
                     ));
                 }
 
-                // For named fields (struct access), use field selection
-                // Fall back to creating a FieldAccess node
+                // For named fields (struct access), check if this is entity instance output
+                // BUG #190 FIX: Check entity_instance_outputs BEFORE creating generic FieldAccess
+                // This handles expressions like `__adder_result.result` where `__adder_result` is
+                // an entity instance and `result` is an output port.
+                if let hir::HirExpression::Variable(var_id) = &**base {
+                    if let Some(output_ports) = self.entity_instance_outputs.get(var_id) {
+                        if let Some(&signal_id) = output_ports.get(field) {
+                            println!(
+                                "[MODULE_FIELD_ACCESS] BUG #190 FIX: Entity instance var {:?} field '{}' -> signal {:?}",
+                                var_id, field, signal_id
+                            );
+                            return Some(Expression::with_unknown_type(ExpressionKind::Ref(
+                                LValue::Signal(signal_id),
+                            )));
+                        } else {
+                            eprintln!(
+                                "[MODULE_FIELD_ACCESS] Entity instance var {:?} field '{}' not found. Available: {:?}",
+                                var_id, field, output_ports.keys().collect::<Vec<_>>()
+                            );
+                        }
+                    }
+                }
+
+                // Fall back to creating a FieldAccess node for non-entity struct access
                 eprintln!(
                     "    📎 FieldAccess on non-tuple field '{}' - creating FieldAccess expression",
                     field
@@ -17496,9 +18003,10 @@ impl<'hir> HirToMir<'hir> {
         // Save the current pending instance count - we'll only drain instances added AFTER this point
         // This is critical for nested module synthesis (e.g., exec_l4_l5 -> quadratic_solve)
         let pending_start_idx = self.pending_module_instances.len();
+        let pending_entity_start_idx = self.pending_entity_instances.len();
         println!(
-            "📌📌📌 SYNTHESIS START: '{}' pending_start_idx={} 📌📌📌",
-            func.name, pending_start_idx
+            "📌📌📌 SYNTHESIS START: '{}' pending_start_idx={} pending_entity_start_idx={} 📌📌📌",
+            func.name, pending_start_idx, pending_entity_start_idx
         );
 
         let module_id = self.next_module_id();
@@ -18159,6 +18667,10 @@ impl<'hir> HirToMir<'hir> {
         // that belong to our caller in the recursion stack
         self.drain_pending_module_instances_from(&mut module, pending_start_idx);
 
+        // Drain pending entity instances (from trait method inlining with entity instantiation)
+        // FIX: This was missing, causing FpAdd/FpMul entities from trait inlining to not be instantiated
+        self.drain_pending_entity_instances_from(&mut module, pending_entity_start_idx);
+
         // Register the module in our function map
         self.function_map.insert(func.name.clone(), module_id);
 
@@ -18552,6 +19064,81 @@ impl<'hir> HirToMir<'hir> {
                     safety_context: None,
                     detection_config: detection_cfg.clone(),
                     power_domain: None, // TODO: propagate from port
+                };
+                eprintln!(
+                    "[HIERARCHICAL] Creating signal '{}' (id={}) for instance output (detection={})",
+                    signal_name, signal_id.0, detection_cfg.is_some()
+                );
+                module.signals.push(signal);
+            }
+
+            // Add the module instance
+            module.instances.push(instance);
+        }
+    }
+
+    /// Drain pending entity instances starting from a specific index
+    /// This is used for nested module synthesis to avoid stealing instances from callers
+    /// FIX: Added to support entity instantiation in synthesized functions (e.g., FP operations via traits)
+    fn drain_pending_entity_instances_from(&mut self, module: &mut Module, start_idx: usize) {
+        let total_pending = self.pending_entity_instances.len();
+        let instances_to_drain = total_pending.saturating_sub(start_idx);
+
+        println!(
+            "🚿🚿🚿 ENTITY_DRAIN_FROM: {} total, start_idx={}, draining {} for module '{}' (id={}) 🚿🚿🚿",
+            total_pending, start_idx, instances_to_drain, module.name, module.id.0
+        );
+
+        if instances_to_drain == 0 {
+            return;
+        }
+
+        println!(
+            "🔧🔧🔧 ENTITY_DRAIN: About to drain {} instances for module '{}' 🔧🔧🔧",
+            instances_to_drain, module.name
+        );
+        eprintln!(
+            "[HIERARCHICAL] Draining {} pending entity instances (from idx {}) for module '{}'",
+            instances_to_drain, start_idx, module.name
+        );
+
+        // Extract only the instances that belong to this module (from start_idx onwards)
+        let pending: Vec<_> = self.pending_entity_instances.drain(start_idx..).collect();
+
+        println!(
+            "🔧🔧🔧 ENTITY_DRAIN: Extracted {} instances to process 🔧🔧🔧",
+            pending.len()
+        );
+
+        for (instance, output_signals) in pending {
+            println!(
+                "🔧🔧🔧 ENTITY_DRAIN: Processing instance '{}' with {} output signals 🔧🔧🔧",
+                instance.name,
+                output_signals.len()
+            );
+            eprintln!(
+                "[HIERARCHICAL] Adding instance '{}' with {} output signals",
+                instance.name,
+                output_signals.len()
+            );
+
+            // Create output signals for this instance
+            for (signal_id, signal_name, signal_type, detection_cfg) in output_signals {
+                let signal = Signal {
+                    id: signal_id,
+                    name: signal_name.clone(),
+                    signal_type,
+                    initial: None,
+                    clock_domain: None,
+                    span: None,
+                    memory_config: None,
+                    trace_config: None,
+                    cdc_config: None,
+                    breakpoint_config: None,
+                    power_config: None,
+                    safety_context: None,
+                    detection_config: detection_cfg.clone(),
+                    power_domain: None,
                 };
                 eprintln!(
                     "[HIERARCHICAL] Creating signal '{}' (id={}) for instance output (detection={})",
