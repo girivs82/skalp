@@ -890,14 +890,17 @@ fn merge_symbol(target: &mut Hir, source: &Hir, symbol_name: &str) -> Result<()>
                             // Check if entity already exists in target
                             if !target.entities.iter().any(|e| e.name == entity_name) {
                                 // Find and merge the entity from source
-                                if let Some(entity) = source.entities.iter().find(|e| e.name == entity_name) {
+                                if let Some(entity) =
+                                    source.entities.iter().find(|e| e.name == entity_name)
+                                {
                                     eprintln!(
                                         "[BUG #207 FIX] Merging entity '{}' referenced by trait impl '{}'",
                                         entity_name, trait_impl.trait_name
                                     );
                                     // Assign new entity ID
                                     let new_entity_id = hir::EntityId(
-                                        target.entities.iter().map(|e| e.id.0).max().unwrap_or(0) + 1,
+                                        target.entities.iter().map(|e| e.id.0).max().unwrap_or(0)
+                                            + 1,
                                     );
                                     let old_entity_id = entity.id;
 
@@ -906,7 +909,11 @@ fn merge_symbol(target: &mut Hir, source: &Hir, symbol_name: &str) -> Result<()>
                                     target.entities.push(new_entity);
 
                                     // Also merge the entity's implementation
-                                    if let Some(impl_block) = source.implementations.iter().find(|i| i.entity == old_entity_id) {
+                                    if let Some(impl_block) = source
+                                        .implementations
+                                        .iter()
+                                        .find(|i| i.entity == old_entity_id)
+                                    {
                                         let mut new_impl = impl_block.clone();
                                         new_impl.entity = new_entity_id;
                                         target.implementations.push(new_impl);
@@ -1180,11 +1187,10 @@ fn extract_entity_refs_from_stmt(stmt: &hir::HirStatement, names: &mut Vec<Strin
                 extract_entity_refs_from_stmt(sub_stmt, names);
             }
         }
-        hir::HirStatement::Return(ret_expr) => {
-            if let Some(expr) = ret_expr {
-                extract_entity_refs_from_expr(expr, names);
-            }
+        hir::HirStatement::Return(Some(expr)) => {
+            extract_entity_refs_from_expr(expr, names);
         }
+        hir::HirStatement::Return(None) => {}
         _ => {}
     }
 }
@@ -1230,7 +1236,11 @@ fn extract_entity_refs_from_expr(expr: &hir::HirExpression, names: &mut Vec<Stri
                 extract_entity_refs_from_expr(part, names);
             }
         }
-        hir::HirExpression::Ternary { condition, true_expr, false_expr } => {
+        hir::HirExpression::Ternary {
+            condition,
+            true_expr,
+            false_expr,
+        } => {
             extract_entity_refs_from_expr(condition, names);
             extract_entity_refs_from_expr(true_expr, names);
             extract_entity_refs_from_expr(false_expr, names);

@@ -611,7 +611,9 @@ impl ModuleResolver {
                         // Check if entity already exists in target
                         if !target.entities.iter().any(|e| e.name == entity_name) {
                             // Find and merge the entity from source
-                            if let Some(entity) = source.entities.iter().find(|e| e.name == entity_name) {
+                            if let Some(entity) =
+                                source.entities.iter().find(|e| e.name == entity_name)
+                            {
                                 eprintln!(
                                     "[MERGE_IMPORT] BUG #207: Merging entity '{}' referenced by trait impl '{}'",
                                     entity_name, trait_impl.trait_name
@@ -627,7 +629,11 @@ impl ModuleResolver {
                                 target.entities.push(new_entity);
 
                                 // Also merge the entity's implementation
-                                if let Some(impl_block) = source.implementations.iter().find(|i| i.entity == old_entity_id) {
+                                if let Some(impl_block) = source
+                                    .implementations
+                                    .iter()
+                                    .find(|i| i.entity == old_entity_id)
+                                {
                                     let mut new_impl = impl_block.clone();
                                     new_impl.entity = new_entity_id;
                                     target.implementations.push(new_impl);
@@ -703,7 +709,11 @@ impl ModuleResolver {
                 || symbol_names.contains(&distinct.name)
             {
                 // Check if we already have this distinct type
-                if !target.distinct_types.iter().any(|d| d.name == distinct.name) {
+                if !target
+                    .distinct_types
+                    .iter()
+                    .any(|d| d.name == distinct.name)
+                {
                     // For pub use re-exports, preserve the public visibility
                     // For private imports, the type becomes private in the target module
                     let mut imported_distinct = distinct.clone();
@@ -762,11 +772,10 @@ impl ModuleResolver {
                     Self::extract_entity_refs_from_stmt(sub_stmt, names);
                 }
             }
-            crate::hir::HirStatement::Return(ret_expr) => {
-                if let Some(expr) = ret_expr {
-                    Self::extract_entity_refs_from_expr(expr, names);
-                }
+            crate::hir::HirStatement::Return(Some(expr)) => {
+                Self::extract_entity_refs_from_expr(expr, names);
             }
+            crate::hir::HirStatement::Return(None) => {}
             _ => {}
         }
     }
@@ -812,7 +821,11 @@ impl ModuleResolver {
                     Self::extract_entity_refs_from_expr(part, names);
                 }
             }
-            crate::hir::HirExpression::Ternary { condition, true_expr, false_expr } => {
+            crate::hir::HirExpression::Ternary {
+                condition,
+                true_expr,
+                false_expr,
+            } => {
                 Self::extract_entity_refs_from_expr(condition, names);
                 Self::extract_entity_refs_from_expr(true_expr, names);
                 Self::extract_entity_refs_from_expr(false_expr, names);

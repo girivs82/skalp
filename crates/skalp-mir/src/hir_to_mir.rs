@@ -814,14 +814,14 @@ impl<'hir> HirToMir<'hir> {
                         // BUG FIX: Generate continuous assignment for impl signals with non-literal initial expressions
                         // e.g., "signal dx: fp32 = x2 - x1" needs to generate an assignment dx = x2 - x1
                         // BUG #207 DEBUG: Trace all signals with initial values for FP entities
-                        let is_fp_module = module.name.contains("FpAdd") || module.name.contains("FpSub") || module.name.contains("FpMul");
+                        let is_fp_module = module.name.contains("FpAdd")
+                            || module.name.contains("FpSub")
+                            || module.name.contains("FpMul");
                         let has_init = hir_signal.initial_value.is_some();
                         if is_fp_module {
                             println!(
                                 "[BUG #207 TRACE] Module '{}' Signal '{}' initial_value: {}",
-                                module.name,
-                                hir_signal.name,
-                                has_init
+                                module.name, hir_signal.name, has_init
                             );
                         }
                         if has_init {
@@ -838,7 +838,10 @@ impl<'hir> HirToMir<'hir> {
                         // Use separate variable to avoid borrow issues
                         let opt_init = &hir_signal.initial_value;
                         if is_fp_module {
-                            println!("[BUG #207 PRE-IF] Module '{}' Signal '{}'", module.name, hir_signal.name);
+                            println!(
+                                "[BUG #207 PRE-IF] Module '{}' Signal '{}'",
+                                module.name, hir_signal.name
+                            );
                         }
                         if let Some(init_expr) = opt_init {
                             if is_fp_module {
@@ -1775,16 +1778,10 @@ impl<'hir> HirToMir<'hir> {
                             // Evaluate generic_args to construct specialized name
                             let mut name_parts = vec![struct_lit.type_name.clone()];
                             for arg_expr in &struct_lit.generic_args {
-                                eprintln!(
-                                    "[BUG #207 DEBUG]   generic_arg: {:?}",
-                                    arg_expr
-                                );
+                                eprintln!("[BUG #207 DEBUG]   generic_arg: {:?}", arg_expr);
                                 match self.const_evaluator.eval(arg_expr) {
                                     Ok(const_val) => {
-                                        eprintln!(
-                                            "[BUG #207 DEBUG]     eval OK: {:?}",
-                                            const_val
-                                        );
+                                        eprintln!("[BUG #207 DEBUG]     eval OK: {:?}", const_val);
                                         let suffix = match &const_val {
                                             ConstValue::Nat(n) => n.to_string(),
                                             ConstValue::Int(i) => {
@@ -1807,10 +1804,7 @@ impl<'hir> HirToMir<'hir> {
                                         name_parts.push(suffix);
                                     }
                                     Err(e) => {
-                                        eprintln!(
-                                            "[BUG #207 DEBUG]     eval FAILED: {:?}",
-                                            e
-                                        );
+                                        eprintln!("[BUG #207 DEBUG]     eval FAILED: {:?}", e);
                                     }
                                 }
                             }
@@ -1826,9 +1820,7 @@ impl<'hir> HirToMir<'hir> {
                             .find(|e| e.name == target_entity_name)
                             .or_else(|| {
                                 // Fall back to generic entity name if specialized not found
-                                hir.entities
-                                    .iter()
-                                    .find(|e| e.name == struct_lit.type_name)
+                                hir.entities.iter().find(|e| e.name == struct_lit.type_name)
                             });
 
                         if let Some(entity) = entity {
@@ -3906,9 +3898,7 @@ impl<'hir> HirToMir<'hir> {
                     .find(|e| e.name == target_entity_name)
                     .or_else(|| {
                         // Fall back to generic entity name if specialized not found
-                        hir.entities
-                            .iter()
-                            .find(|e| e.name == struct_lit.type_name)
+                        hir.entities.iter().find(|e| e.name == struct_lit.type_name)
                     });
 
                 if let Some(entity) = entity {
@@ -5252,6 +5242,9 @@ impl<'hir> HirToMir<'hir> {
                     // expressions (e.g., W = F.total_bits).
 
                     // First pass: look in the current entity's implementation
+                    // BUG #127 FIX: Only return on success. On eval failure, fall through to
+                    // second pass which may find specialized Literal constants from monomorphized
+                    // entities.
                     for implementation in &hir.implementations {
                         if Some(implementation.entity) != self.current_entity_id {
                             continue;
@@ -5265,8 +5258,9 @@ impl<'hir> HirToMir<'hir> {
                                         );
                                     }
                                     Err(_) => {
-                                        // Current entity's constant failed, try recursive
-                                        return self.convert_expression(&constant.value, depth + 1);
+                                        // BUG #127 FIX: Don't return here! Fall through to second
+                                        // pass which may find specialized Literal constants.
+                                        break;
                                     }
                                 }
                             }
@@ -5274,22 +5268,40 @@ impl<'hir> HirToMir<'hir> {
                     }
 
                     // Second pass: fall back to any implementation with matching constant
+                    // BUG #127 FIX: Collect all matching constants and prefer Literal values
+                    // (specialized/evaluated) over non-Literal values (unspecialized expressions
+                    // like FieldAccess or Binary). This ensures we use monomorphized constant
+                    // values rather than the original generic expressions.
+                    let mut matching_constants: Vec<(&hir::HirConstant, hir::EntityId)> =
+                        Vec::new();
                     for implementation in &hir.implementations {
                         for constant in &implementation.constants {
                             if constant.id == *id {
-                                match evaluator.eval(&constant.value) {
-                                    Ok(const_value) => {
-                                        return Some(
-                                            self.const_value_to_mir_expression(&const_value),
-                                        );
-                                    }
-                                    Err(_) => {
-                                        // If evaluation fails, try recursive conversion as fallback
-                                        return self.convert_expression(&constant.value, depth + 1);
-                                    }
-                                }
+                                matching_constants.push((constant, implementation.entity));
                             }
                         }
+                    }
+
+                    // Sort: Literals first (specialized), then others (unspecialized)
+                    matching_constants
+                        .sort_by_key(|(c, _)| !matches!(c.value, hir::HirExpression::Literal(_)));
+
+                    for (constant, _entity_id) in &matching_constants {
+                        match evaluator.eval(&constant.value) {
+                            Ok(const_value) => {
+                                return Some(self.const_value_to_mir_expression(&const_value));
+                            }
+                            Err(_) => {
+                                // Try next constant with the same ID instead of immediately
+                                // falling back to recursive conversion
+                                continue;
+                            }
+                        }
+                    }
+
+                    // If no constant evaluated successfully, try recursive conversion on the first one
+                    if let Some((constant, _)) = matching_constants.first() {
+                        return self.convert_expression(&constant.value, depth + 1);
                     }
 
                     // BUG FIX: Constant ID not found after module merging
@@ -5614,15 +5626,21 @@ impl<'hir> HirToMir<'hir> {
                     } else if !call.named_type_args.is_empty() {
                         // Check named type args for FloatFormat constants
                         let mut name_parts = vec![call.function.clone()];
-                        for (_key, type_val) in &call.named_type_args {
+                        for type_val in call.named_type_args.values() {
                             // Try to evaluate as FloatFormat constant
                             if let hir::HirType::Custom(name) = type_val {
                                 // Check for well-known format names
                                 if name == "IEEE754_32" || name == "fp32" || name == "Float32" {
                                     name_parts.push("fp32".to_string());
-                                } else if name == "IEEE754_64" || name == "fp64" || name == "Float64" {
+                                } else if name == "IEEE754_64"
+                                    || name == "fp64"
+                                    || name == "Float64"
+                                {
                                     name_parts.push("fp64".to_string());
-                                } else if name == "IEEE754_16" || name == "fp16" || name == "Float16" {
+                                } else if name == "IEEE754_16"
+                                    || name == "fp16"
+                                    || name == "Float16"
+                                {
                                     name_parts.push("fp16".to_string());
                                 } else {
                                     name_parts.push(name.clone());
@@ -18669,10 +18687,8 @@ impl<'hir> HirToMir<'hir> {
         // BEFORE current_module_param_to_port (BUG #205). If "a" exists in pending_mir_param_subs
         // from a previous inline context (e.g., mapping to Signal(1137)), it will be returned
         // instead of the correct module input port.
-        let saved_mir_param_subs =
-            std::mem::replace(&mut self.pending_mir_param_subs, HashMap::new());
-        let saved_param_var_to_name =
-            std::mem::replace(&mut self.pending_param_var_to_name, HashMap::new());
+        let saved_mir_param_subs = std::mem::take(&mut self.pending_mir_param_subs);
+        let saved_param_var_to_name = std::mem::take(&mut self.pending_param_var_to_name);
         println!(
             "[BUG #206 FIX] Saved and cleared pending_mir_param_subs for module '{}' (had {} entries)",
             func.name,
