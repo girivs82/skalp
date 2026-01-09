@@ -289,30 +289,55 @@ impl GateNetlistToSirConverter {
 
         // Check for FP32 cells before stripping suffix (FP32_ADD, FP32_MUL, etc.)
         // These have underscores that are part of the cell name, not drive strength suffixes
-        if upper.starts_with("FP32_ADD") || upper.starts_with("FPADD32") {
+        // Tech library generates fp_add32 (uppercase: FP_ADD32), also match FP32_ADD variants
+        if upper.starts_with("FP32_ADD")
+            || upper.starts_with("FPADD32")
+            || upper.starts_with("FP_ADD32")
+        {
             return PrimitiveType::Fp32Add;
         }
-        if upper.starts_with("FP32_SUB") || upper.starts_with("FPSUB32") {
+        if upper.starts_with("FP32_SUB")
+            || upper.starts_with("FPSUB32")
+            || upper.starts_with("FP_SUB32")
+        {
             return PrimitiveType::Fp32Sub;
         }
-        if upper.starts_with("FP32_MUL") || upper.starts_with("FPMUL32") {
+        if upper.starts_with("FP32_MUL")
+            || upper.starts_with("FPMUL32")
+            || upper.starts_with("FP_MUL32")
+        {
             return PrimitiveType::Fp32Mul;
         }
-        if upper.starts_with("FP32_DIV") || upper.starts_with("FPDIV32") {
+        if upper.starts_with("FP32_DIV")
+            || upper.starts_with("FPDIV32")
+            || upper.starts_with("FP_DIV32")
+        {
             return PrimitiveType::Fp32Div;
         }
 
         // FP32 comparison cells (BUG #191 FIX)
-        if upper.starts_with("FP32_LT") || upper.starts_with("FPLT32") {
+        if upper.starts_with("FP32_LT")
+            || upper.starts_with("FPLT32")
+            || upper.starts_with("FP_LT32")
+        {
             return PrimitiveType::Fp32Lt;
         }
-        if upper.starts_with("FP32_GT") || upper.starts_with("FPGT32") {
+        if upper.starts_with("FP32_GT")
+            || upper.starts_with("FPGT32")
+            || upper.starts_with("FP_GT32")
+        {
             return PrimitiveType::Fp32Gt;
         }
-        if upper.starts_with("FP32_LE") || upper.starts_with("FPLE32") {
+        if upper.starts_with("FP32_LE")
+            || upper.starts_with("FPLE32")
+            || upper.starts_with("FP_LE32")
+        {
             return PrimitiveType::Fp32Le;
         }
-        if upper.starts_with("FP32_GE") || upper.starts_with("FPGE32") {
+        if upper.starts_with("FP32_GE")
+            || upper.starts_with("FPGE32")
+            || upper.starts_with("FP_GE32")
+        {
             return PrimitiveType::Fp32Ge;
         }
 

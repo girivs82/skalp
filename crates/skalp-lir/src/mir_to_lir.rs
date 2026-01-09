@@ -2007,6 +2007,23 @@ pub fn lower_mir_hierarchical(mir: &Mir) -> HierarchicalMirToLirResult {
     let module_by_name: HashMap<&str, &Module> =
         mir.modules.iter().map(|m| (m.name.as_str(), m)).collect();
 
+    // DEBUG: Print module ID to name mapping
+    println!(
+        "[HIER_LIR_DEBUG] Module ID mapping (first 10): {:?}",
+        mir.modules
+            .iter()
+            .take(10)
+            .map(|m| (m.id.0, &m.name))
+            .collect::<Vec<_>>()
+    );
+    // Find KarythraCLEAsync module ID
+    if let Some(kcle) = mir.modules.iter().find(|m| m.name == "KarythraCLEAsync") {
+        println!(
+            "[HIER_LIR_DEBUG] KarythraCLEAsync has ModuleId({})",
+            kcle.id.0
+        );
+    }
+
     // Find modules that are instantiated (have parents)
     let mut instantiated_modules: HashSet<ModuleId> = HashSet::new();
     let mut modules_with_instances: HashSet<ModuleId> = HashSet::new();
@@ -2016,22 +2033,128 @@ pub fn lower_mir_hierarchical(mir: &Mir) -> HierarchicalMirToLirResult {
             modules_with_instances.insert(module.id);
         }
         for inst in &module.instances {
+            // Debug: track what's instantiating what
+            if module.name == "FpSub" && inst.name == "adder" {
+                println!(
+                    "[HIER_LIR_DEBUG] FpSub's 'adder' instance has module=ModuleId({})",
+                    inst.module.0
+                );
+            }
+            if let Some(child_module) = mir.modules.iter().find(|m| m.id == inst.module) {
+                if child_module.name == "KarythraCLEAsync" {
+                    println!(
+                        "[HIER_LIR_DEBUG] Module '{}' instantiates 'KarythraCLEAsync' via instance '{}'",
+                        module.name, inst.name
+                    );
+                }
+            }
             instantiated_modules.insert(inst.module);
         }
     }
 
     // Find top module: has instances but is not instantiated by others
     // If no such module exists, fall back to first non-instantiated module
-    let top_module = mir
+    println!(
+        "[HIER_LIR] Looking for top module among {} modules",
+        mir.modules.len()
+    );
+    println!(
+        "[HIER_LIR] modules_with_instances: {:?}",
+        mir.modules
+            .iter()
+            .filter(|m| modules_with_instances.contains(&m.id))
+            .map(|m| &m.name)
+            .collect::<Vec<_>>()
+    );
+    println!(
+        "[HIER_LIR] instantiated_modules (have parents): {:?}",
+        mir.modules
+            .iter()
+            .filter(|m| instantiated_modules.contains(&m.id))
+            .map(|m| &m.name)
+            .collect::<Vec<_>>()
+    );
+
+    // BUG FIX: Select the top module with the most UNIQUE instance types.
+    // The user's main module typically instantiates many different module types
+    // (func_exec_l2, func_exec_l3, etc.), while stdlib modules like FpSub only
+    // instantiate one or two types (e.g., just FpAdd).
+    let top_candidates: Vec<_> = mir
         .modules
         .iter()
-        .find(|m| modules_with_instances.contains(&m.id) && !instantiated_modules.contains(&m.id))
-        .or_else(|| {
-            mir.modules
-                .iter()
-                .find(|m| !instantiated_modules.contains(&m.id))
-        })
-        .unwrap_or_else(|| &mir.modules[0]);
+        .filter(|m| modules_with_instances.contains(&m.id) && !instantiated_modules.contains(&m.id))
+        .collect();
+
+    // Helper to check if a module name looks like a stdlib module
+    fn is_stdlib_name(name: &str) -> bool {
+        // Stdlib modules typically start with these prefixes
+        let stdlib_prefixes = [
+            "Fp",
+            "Cordic",
+            "Int",
+            "Shift",
+            "Vec",
+            "Matrix",
+            "Fifo",
+            "Memory",
+            "Clz",
+            "Popcount",
+            "Parity",
+            "Bitreverse",
+        ];
+        stdlib_prefixes
+            .iter()
+            .any(|prefix| name.starts_with(prefix))
+    }
+
+    let top_module = if !top_candidates.is_empty() {
+        // First try: prefer user modules (non-stdlib names)
+        let user_candidates: Vec<_> = top_candidates
+            .iter()
+            .filter(|m| !is_stdlib_name(&m.name))
+            .copied()
+            .collect();
+
+        if !user_candidates.is_empty() {
+            // Among user modules, pick the one with most unique instance types
+            user_candidates
+                .into_iter()
+                .max_by_key(|m| {
+                    let unique_types: std::collections::HashSet<_> =
+                        m.instances.iter().map(|i| i.module).collect();
+                    unique_types.len()
+                })
+                .unwrap()
+        } else {
+            // No user modules found, fall back to most unique instance types
+            top_candidates
+                .into_iter()
+                .max_by_key(|m| {
+                    let unique_types: std::collections::HashSet<_> =
+                        m.instances.iter().map(|i| i.module).collect();
+                    unique_types.len()
+                })
+                .unwrap()
+        }
+    } else {
+        // Fallback: find the module with most unique instance types among non-instantiated
+        mir.modules
+            .iter()
+            .filter(|m| !instantiated_modules.contains(&m.id))
+            .max_by_key(|m| {
+                let unique_types: std::collections::HashSet<_> =
+                    m.instances.iter().map(|i| i.module).collect();
+                unique_types.len()
+            })
+            .unwrap_or(&mir.modules[0])
+    };
+
+    println!(
+        "[HIER_LIR] Selected top module: '{}' (id={}, {} instances)",
+        top_module.name,
+        top_module.id.0,
+        top_module.instances.len()
+    );
 
     let mut result = HierarchicalMirToLirResult {
         instances: HashMap::new(),
@@ -2094,17 +2217,72 @@ pub fn lower_mir_hierarchical_for_optimize_first(mir: &Mir) -> (HierarchicalMirT
         }
     }
 
-    // Find top module
-    let top_module = mir
+    // Find top module - prefer user modules (non-stdlib names)
+    let top_candidates: Vec<_> = mir
         .modules
         .iter()
-        .find(|m| modules_with_instances.contains(&m.id) && !instantiated_modules.contains(&m.id))
-        .or_else(|| {
-            mir.modules
-                .iter()
-                .find(|m| !instantiated_modules.contains(&m.id))
-        })
-        .unwrap_or_else(|| &mir.modules[0]);
+        .filter(|m| modules_with_instances.contains(&m.id) && !instantiated_modules.contains(&m.id))
+        .collect();
+
+    // Helper to check if a module name looks like a stdlib module
+    fn is_stdlib_name_opt(name: &str) -> bool {
+        let stdlib_prefixes = [
+            "Fp",
+            "Cordic",
+            "Int",
+            "Shift",
+            "Vec",
+            "Matrix",
+            "Fifo",
+            "Memory",
+            "Clz",
+            "Popcount",
+            "Parity",
+            "Bitreverse",
+        ];
+        stdlib_prefixes
+            .iter()
+            .any(|prefix| name.starts_with(prefix))
+    }
+
+    let top_module = if !top_candidates.is_empty() {
+        // First try: prefer user modules (non-stdlib names)
+        let user_candidates: Vec<_> = top_candidates
+            .iter()
+            .filter(|m| !is_stdlib_name_opt(&m.name))
+            .copied()
+            .collect();
+
+        if !user_candidates.is_empty() {
+            user_candidates
+                .into_iter()
+                .max_by_key(|m| {
+                    let unique_types: std::collections::HashSet<_> =
+                        m.instances.iter().map(|i| i.module).collect();
+                    unique_types.len()
+                })
+                .unwrap()
+        } else {
+            top_candidates
+                .into_iter()
+                .max_by_key(|m| {
+                    let unique_types: std::collections::HashSet<_> =
+                        m.instances.iter().map(|i| i.module).collect();
+                    unique_types.len()
+                })
+                .unwrap()
+        }
+    } else {
+        mir.modules
+            .iter()
+            .filter(|m| !instantiated_modules.contains(&m.id))
+            .max_by_key(|m| {
+                let unique_types: std::collections::HashSet<_> =
+                    m.instances.iter().map(|i| i.module).collect();
+                unique_types.len()
+            })
+            .unwrap_or(&mir.modules[0])
+    };
 
     let mut result = HierarchicalMirToLirResult {
         instances: HashMap::new(),
@@ -2374,8 +2552,81 @@ fn extract_connection_info(
                     }
                 }
             }
+            // BUG #190 FIX: Handle Cast expressions that wrap references
+            // When a Cast expression is used to connect an entity port (e.g., fp32(a) -> fp_adder.a),
+            // we need to unwrap the Cast to get at the underlying signal reference.
+            // The Cast is just a type annotation; the underlying signal is what we connect.
+            ExpressionKind::Cast { expr: inner, .. } => {
+                // Recursively unwrap casts until we hit the actual expression
+                fn extract_inner_ref(expr: &Expression) -> &Expression {
+                    if let ExpressionKind::Cast { expr: inner, .. } = &expr.kind {
+                        extract_inner_ref(inner)
+                    } else {
+                        expr
+                    }
+                }
+                let inner_expr = extract_inner_ref(expr);
+
+                match &inner_expr.kind {
+                    ExpressionKind::Ref(lvalue) => {
+                        // BUG #200 FIX: Handle RangeSelect and BitSelect properly inside Cast
+                        // When a Cast wraps a RangeSelect like Cast(Cast(var_12[15:0])),
+                        // we need to extract the Range info for proper NCL stitching,
+                        // not just convert to a string "var_12[15:0]" which doesn't exist as a signal
+                        match lvalue {
+                            LValue::RangeSelect { base, high, low } => {
+                                let base_name = lvalue_to_name_with_module(base, parent_module);
+                                let high_val = extract_const_index(high).unwrap_or(0);
+                                let low_val = extract_const_index(low).unwrap_or(0);
+                                eprintln!(
+                                    "[EXTRACT_CONN] BUG #200 FIX: Cast->RangeSelect: {}[{}:{}]",
+                                    base_name, high_val, low_val
+                                );
+                                PortConnectionInfo::Range(base_name, high_val, low_val)
+                            }
+                            LValue::BitSelect { base, index } => {
+                                let base_name = lvalue_to_name_with_module(base, parent_module);
+                                let bit_idx = extract_const_index(index).unwrap_or(0);
+                                eprintln!(
+                                    "[EXTRACT_CONN] BUG #200 FIX: Cast->BitSelect: {}[{}]",
+                                    base_name, bit_idx
+                                );
+                                PortConnectionInfo::BitSelect(base_name, bit_idx)
+                            }
+                            _ => {
+                                let signal_name = lvalue_to_name_with_module(lvalue, parent_module);
+                                eprintln!(
+                                    "[EXTRACT_CONN] BUG #190 FIX: Unwrapped Cast to signal '{}'",
+                                    signal_name
+                                );
+                                PortConnectionInfo::Signal(signal_name)
+                            }
+                        }
+                    }
+                    ExpressionKind::Literal(value) => {
+                        let const_val = value_to_u64(value);
+                        eprintln!(
+                            "[EXTRACT_CONN] BUG #190 FIX: Unwrapped Cast to constant 0x{:X}",
+                            const_val
+                        );
+                        PortConnectionInfo::Constant(const_val)
+                    }
+                    _ => {
+                        // Complex inner expression - still need to create synthetic signal
+                        eprintln!(
+                            "[EXTRACT_CONN] BUG #190: Cast inner is complex: {:?}",
+                            inner_expr.kind
+                        );
+                        PortConnectionInfo::Signal(format!("expr_{}", port_name))
+                    }
+                }
+            }
             _ => {
                 // Complex expression - treat as signal
+                eprintln!(
+                    "[EXTRACT_CONN] Complex expression for port '{}': {:?}",
+                    port_name, expr.kind
+                );
                 PortConnectionInfo::Signal(format!("expr_{}", port_name))
             }
         };
@@ -2518,7 +2769,58 @@ fn lvalue_to_name_with_module(lvalue: &LValue, module: &Module) -> String {
                 .map(|p| p.name.clone())
                 .unwrap_or_else(|| format!("port_{}", id.0))
         }
-        LValue::Variable(id) => format!("var_{}", id.0),
+        LValue::Variable(id) => {
+            // BUG #200 FIX: Look up variable by ID in the module to get actual name
+            // Variables representing function parameters become signals like "param_0", "param_1"
+            // We must use their actual names for NCL stitching to find the right nets
+            let result = module
+                .variables
+                .iter()
+                .find(|v| v.id == *id)
+                .map(|v| v.name.clone())
+                .unwrap_or_else(|| format!("var_{}", id.0));
+            // DEBUG: Log variable lookup
+            if result.starts_with("var_") {
+                // Check assignments for variable name
+                let from_assign = module.assignments.iter().find(|a| {
+                    if let LValue::Variable(var_id) = &a.lhs {
+                        var_id == id
+                    } else {
+                        false
+                    }
+                });
+                // BUG #200: Try to find a signal whose assignment RHS references this Variable
+                // The pattern is: continuous assignments like `assign a_0 = param_1[31:0]`
+                // where Variable(12) is used in the entity connection but a_0 is the actual signal.
+                // We need to find the signal that gets assigned from expressions involving this Variable.
+                //
+                // However, by this point, the assignments no longer have Variable LHS - they have Signal LHS.
+                // The Variables were converted to Signals during HIR→MIR.
+                //
+                // A simpler approach: Look for a signal whose name might match a pattern
+                // Check if there's a signal named "var_{id}", "_v_{something}", or look at assignment sources
+                let var_name = format!("var_{}", id.0);
+                let matching_signal = module.signals.iter().find(|s| s.name == var_name);
+
+                // Print first assignment RHS to understand the structure
+                if let Some(first_assign) = module.assignments.first() {
+                    eprintln!(
+                        "[BUG200_ASSIGN_DEBUG] First assignment LHS={:?}, RHS has Variable refs: {}",
+                        first_assign.lhs,
+                        contains_variable_ref(&first_assign.rhs, *id)
+                    );
+                }
+
+                eprintln!(
+                    "[BUG200_DEBUG] Variable({}) NOT FOUND in module '{}' - signals: {}, ports: {}",
+                    id.0,
+                    module.name,
+                    module.signals.len(),
+                    module.ports.len()
+                );
+            }
+            result
+        }
         LValue::BitSelect { base, index } => {
             let base_name = lvalue_to_name_with_module(base, module);
             // Try to get the index value if it's a literal
@@ -2550,6 +2852,39 @@ fn lvalue_to_name_with_module(lvalue: &LValue, module: &Module) -> String {
             .map(|p| lvalue_to_name_with_module(p, module))
             .collect::<Vec<_>>()
             .join("_"),
+    }
+}
+
+/// Check if an expression contains a reference to a specific Variable
+fn contains_variable_ref(expr: &Expression, var_id: VariableId) -> bool {
+    match &expr.kind {
+        ExpressionKind::Ref(lvalue) => match lvalue {
+            LValue::Variable(id) => *id == var_id,
+            LValue::RangeSelect { base, .. } | LValue::BitSelect { base, .. } => {
+                if let LValue::Variable(id) = base.as_ref() {
+                    *id == var_id
+                } else {
+                    false
+                }
+            }
+            _ => false,
+        },
+        ExpressionKind::Cast { expr: inner, .. } => contains_variable_ref(inner, var_id),
+        ExpressionKind::Binary { left, right, .. } => {
+            contains_variable_ref(left, var_id) || contains_variable_ref(right, var_id)
+        }
+        ExpressionKind::Unary { operand, .. } => contains_variable_ref(operand, var_id),
+        ExpressionKind::Conditional {
+            cond,
+            then_expr,
+            else_expr,
+        } => {
+            contains_variable_ref(cond, var_id)
+                || contains_variable_ref(then_expr, var_id)
+                || contains_variable_ref(else_expr, var_id)
+        }
+        ExpressionKind::Concat(parts) => parts.iter().any(|p| contains_variable_ref(p, var_id)),
+        _ => false,
     }
 }
 

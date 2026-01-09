@@ -6054,6 +6054,20 @@ impl HirBuilderContext {
         // The parser creates separate IdentExpr and IndexExpr siblings for expressions like a[i]
         let child_nodes: Vec<SyntaxNode> = node.children().collect();
 
+        // DEBUG: Show what children the TernaryExpr has
+        eprintln!(
+            "[TERNARY_DEBUG] TernaryExpr has {} children:",
+            child_nodes.len()
+        );
+        for (idx, child) in child_nodes.iter().enumerate() {
+            eprintln!(
+                "[TERNARY_DEBUG]   child[{}]: {:?} = '{}'",
+                idx,
+                child.kind(),
+                child.text()
+            );
+        }
+
         let mut expressions: Vec<HirExpression> = Vec::new();
         let mut i = 0;
         while i < child_nodes.len() {
@@ -6585,19 +6599,26 @@ impl HirBuilderContext {
                 // For flat parser structures like "a!=0&&b!=0" + "&&c!=0" as siblings under AssignmentStmt,
                 // the continuation BinaryExpr "&&c!=0" starts with the && operator.
                 // But "b!=0" as a sibling of "a!=0" under BinaryExpr parent doesn't start with an operator.
-                if parent.kind() != SyntaxKind::BinaryExpr {
+                // BUG FIX #189: Also exclude TernaryExpr parent - sibling BinaryExprs
+                // are the then/else branches, not chained operations!
+                if !matches!(
+                    parent.kind(),
+                    SyntaxKind::BinaryExpr | SyntaxKind::TernaryExpr
+                ) {
                     for next in siblings.iter().skip(pos + 1) {
                         if next.kind() == SyntaxKind::BinaryExpr {
                             // Only add this sibling if it's a continuation (starts with an operator)
-                            let first_token = next
-                                .children_with_tokens()
-                                .filter_map(|e| e.into_token())
-                                .next();
-                            if let Some(tok) = first_token {
-                                if tok.kind().is_operator() {
-                                    // This is a chained operation starting with an operator!
-                                    expr_children.push(next.clone());
-                                }
+                            // BUG FIX #189: Must check the FIRST ELEMENT (node or token), not
+                            // just the first TOKEN! For "a + b", first token would be "+" but
+                            // first element is IdentExpr(a), so it should NOT be added.
+                            let first_element = next.children_with_tokens().next();
+                            let starts_with_operator = match &first_element {
+                                Some(rowan::NodeOrToken::Token(t)) => t.kind().is_operator(),
+                                _ => false, // First element is a Node or nothing
+                            };
+                            if starts_with_operator {
+                                // This is a chained operation starting with an operator!
+                                expr_children.push(next.clone());
                             }
                         } else if matches!(
                             next.kind(),

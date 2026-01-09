@@ -612,12 +612,19 @@ impl UnifiedSimulator {
     ///
     /// Returns None if any bit is NULL or Invalid (not yet stable)
     pub fn get_ncl_output(&self, name: &str, width: usize) -> Option<u64> {
-        match &self.backend {
+        let result = match &self.backend {
             SimulatorBackend::NclCpu(ncl_sim) => ncl_sim.get_dual_rail_value(name, width),
             #[cfg(target_os = "macos")]
             SimulatorBackend::NclGpu(runtime) => runtime.get_dual_rail_value(name, width),
             _ => None,
+        };
+        if result.is_none() && name.contains("result") {
+            println!(
+                "[UNIFIED_DEBUG] get_ncl_output('{}', {}) = None",
+                name, width
+            );
         }
+        result
     }
 
     /// Check if NCL outputs are complete (all bits have valid DATA values)

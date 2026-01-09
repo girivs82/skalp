@@ -780,30 +780,31 @@ impl NclSimulator {
         }
 
         // FP32 soft macros - need explicit handling for NCL simulation
-        if base_type == "FP32_ADD" || upper.contains("FP32_ADD") {
+        // Tech library generates fp_add32 (uppercase: FP_ADD32), also match FP32_ADD variants
+        if base_type == "FP32_ADD" || upper.contains("FP32_ADD") || upper.starts_with("FP_ADD32") {
             return PrimitiveType::Fp32Add;
         }
-        if base_type == "FP32_SUB" || upper.contains("FP32_SUB") {
+        if base_type == "FP32_SUB" || upper.contains("FP32_SUB") || upper.starts_with("FP_SUB32") {
             return PrimitiveType::Fp32Sub;
         }
-        if base_type == "FP32_MUL" || upper.contains("FP32_MUL") {
+        if base_type == "FP32_MUL" || upper.contains("FP32_MUL") || upper.starts_with("FP_MUL32") {
             return PrimitiveType::Fp32Mul;
         }
-        if base_type == "FP32_DIV" || upper.contains("FP32_DIV") {
+        if base_type == "FP32_DIV" || upper.contains("FP32_DIV") || upper.starts_with("FP_DIV32") {
             return PrimitiveType::Fp32Div;
         }
 
         // FP32 comparisons (BUG #191 FIX)
-        if base_type == "FP32_LT" || upper.contains("FP32_LT") {
+        if base_type == "FP32_LT" || upper.contains("FP32_LT") || upper.starts_with("FP_LT32") {
             return PrimitiveType::Fp32Lt;
         }
-        if base_type == "FP32_GT" || upper.contains("FP32_GT") {
+        if base_type == "FP32_GT" || upper.contains("FP32_GT") || upper.starts_with("FP_GT32") {
             return PrimitiveType::Fp32Gt;
         }
-        if base_type == "FP32_LE" || upper.contains("FP32_LE") {
+        if base_type == "FP32_LE" || upper.contains("FP32_LE") || upper.starts_with("FP_LE32") {
             return PrimitiveType::Fp32Le;
         }
-        if base_type == "FP32_GE" || upper.contains("FP32_GE") {
+        if base_type == "FP32_GE" || upper.contains("FP32_GE") || upper.starts_with("FP_GE32") {
             return PrimitiveType::Fp32Ge;
         }
 

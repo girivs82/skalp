@@ -227,19 +227,28 @@ pub struct HirToMir<'hir> {
     /// to parameters can be resolved via pending_mir_param_subs
     pending_param_var_to_name: HashMap<hir::VariableId, String>,
 
-    /// BUG #167 FIX: Maps placeholder signal VariableIds to entity output SignalIds
+    /// BUG #167 FIX: Maps placeholder signal VariableIds to entity output SignalIds and their types
     /// During trait method inlining, when `let adder = FpAdd{result: result}` is processed
     /// and `result` is a placeholder signal connected to entity output port `result`,
-    /// this maps VariableId(result) -> SignalId of the created `adder_result` wire.
+    /// this maps VariableId(result) -> (SignalId, Type) of the created `adder_result` wire.
     /// Used to correctly wire up return expressions that reference these placeholder signals.
-    placeholder_signal_to_entity_output: HashMap<hir::VariableId, SignalId>,
+    /// BUG #201 FIX: Now includes Type so convert_expression uses the correct expression type
+    /// instead of the passed-in type which may be wrong (e.g., Bit(Fixed(1)) instead of Float32).
+    placeholder_signal_to_entity_output: HashMap<hir::VariableId, (SignalId, Type)>,
 
-    /// BUG #190 FIX: Maps placeholder HIR SignalIds to entity output MIR SignalIds
+    /// BUG #190 FIX: Maps placeholder HIR SignalIds to entity output MIR SignalIds and their types
     /// Similar to placeholder_signal_to_entity_output, but for cases where the placeholder
     /// is an HIR Signal (from `signal result: fp32;`) rather than a Variable.
     /// When `let adder = FpAdd{result: result as fp32}` and `result` is an HIR Signal,
-    /// this maps the original HIR SignalId to the entity output SignalId.
-    placeholder_hir_signal_to_entity_output: HashMap<hir::SignalId, SignalId>,
+    /// this maps the original HIR SignalId to (SignalId, Type) of the entity output.
+    /// BUG #201 FIX: Now includes Type for correct type propagation.
+    placeholder_hir_signal_to_entity_output: HashMap<hir::SignalId, (SignalId, Type)>,
+
+    /// BUG #200 FIX: Current module synthesis context's var_to_signal mapping
+    /// This is set when synthesizing a function as a module and is used by convert_expression
+    /// to resolve Variable references to Signal references for entity struct literal fields.
+    /// Without this, entity connections reference Variables that don't exist in the module.
+    current_module_var_to_signal: Option<HashMap<hir::VariableId, SignalId>>,
 }
 
 /// Context for converting HIR expressions within a synthesized module
@@ -345,6 +354,7 @@ impl<'hir> HirToMir<'hir> {
             pending_param_var_to_name: HashMap::new(),
             placeholder_signal_to_entity_output: HashMap::new(),
             placeholder_hir_signal_to_entity_output: HashMap::new(),
+            current_module_var_to_signal: None, // BUG #200 FIX
         }
     }
 
@@ -1792,12 +1802,16 @@ impl<'hir> HirToMir<'hir> {
                                             };
 
                                             if let Some(var_id) = maybe_var_id {
+                                                // BUG #201 FIX: Convert HIR type to frontend Type for correct expression typing
+                                                let expr_type =
+                                                    self.hir_type_to_type(&port.port_type);
                                                 println!(
-                                                    "[BUG #167] Mapping placeholder variable {:?} -> entity output signal '{}'",
-                                                    var_id, signal_name
+                                                    "[BUG #167] Mapping placeholder variable {:?} -> entity output signal '{}' (type {:?})",
+                                                    var_id, signal_name, expr_type
                                                 );
+                                                // BUG #201 FIX: Store Type along with signal_id for correct type propagation
                                                 self.placeholder_signal_to_entity_output
-                                                    .insert(var_id, signal_id);
+                                                    .insert(var_id, (signal_id, expr_type));
                                             }
 
                                             // BUG #190 FIX: Also handle Signal and Cast(Signal)
@@ -1840,12 +1854,16 @@ impl<'hir> HirToMir<'hir> {
                                             };
 
                                             if let Some(hir_sig_id) = maybe_hir_signal_id {
+                                                // BUG #201 FIX: Convert HIR type to frontend Type for correct expression typing
+                                                let expr_type =
+                                                    self.hir_type_to_type(&port.port_type);
                                                 println!(
-                                                    "[BUG #190] Mapping placeholder HIR signal {:?} -> entity output MIR signal {:?} ('{}')",
-                                                    hir_sig_id, signal_id, signal_name
+                                                    "[BUG #190] Mapping placeholder HIR signal {:?} -> entity output MIR signal {:?} ('{}', type {:?})",
+                                                    hir_sig_id, signal_id, signal_name, expr_type
                                                 );
+                                                // BUG #201 FIX: Store Type along with signal_id for correct type propagation
                                                 self.placeholder_hir_signal_to_entity_output
-                                                    .insert(hir_sig_id, signal_id);
+                                                    .insert(hir_sig_id, (signal_id, expr_type));
                                             }
                                         }
 
@@ -1897,6 +1915,55 @@ impl<'hir> HirToMir<'hir> {
                                             field_init.name,
                                             std::mem::discriminant(&field_init.value)
                                         );
+                                        // BUG #200 DEBUG: Print full structure of entity input field
+                                        fn debug_print_hir_expr(
+                                            expr: &hir::HirExpression,
+                                            indent: &str,
+                                        ) {
+                                            match expr {
+                                                hir::HirExpression::Cast(c) => {
+                                                    println!(
+                                                        "{}Cast(target={:?})",
+                                                        indent, c.target_type
+                                                    );
+                                                    debug_print_hir_expr(
+                                                        &c.expr,
+                                                        &format!("{}  ", indent),
+                                                    );
+                                                }
+                                                hir::HirExpression::Range(base, hi, lo) => {
+                                                    println!("{}Range[{:?}:{:?}]", indent, hi, lo);
+                                                    debug_print_hir_expr(
+                                                        base,
+                                                        &format!("{}  ", indent),
+                                                    );
+                                                }
+                                                hir::HirExpression::Variable(var_id) => {
+                                                    println!("{}Variable({:?})", indent, var_id);
+                                                }
+                                                hir::HirExpression::GenericParam(name) => {
+                                                    println!(
+                                                        "{}GenericParam(\"{}\")",
+                                                        indent, name
+                                                    );
+                                                }
+                                                hir::HirExpression::Port(port_id) => {
+                                                    println!("{}Port({:?})", indent, port_id);
+                                                }
+                                                hir::HirExpression::Signal(sig_id) => {
+                                                    println!("{}Signal({:?})", indent, sig_id);
+                                                }
+                                                _ => {
+                                                    println!(
+                                                        "{}Other({:?})",
+                                                        indent,
+                                                        std::mem::discriminant(expr)
+                                                    );
+                                                }
+                                            }
+                                        }
+                                        println!("[BUG #200 DEBUG] Entity '{}' input field '{}' structure:", struct_lit.type_name, field_init.name);
+                                        debug_print_hir_expr(&field_init.value, "  ");
                                         if let Some(expr) =
                                             self.convert_expression(&field_init.value, 0)
                                         {
@@ -4789,16 +4856,17 @@ impl<'hir> HirToMir<'hir> {
                 // BUG #190 FIX: Check if this HIR signal is a placeholder connected to an entity output
                 // This is critical for FP operations where `signal result: fp32;` is passed to an
                 // entity like FpAdd and the result needs to come from the entity's output wire.
-                if let Some(&output_signal_id) =
+                // BUG #201 FIX: Use stored signal type instead of passed-in ty
+                if let Some((output_signal_id, signal_type)) =
                     self.placeholder_hir_signal_to_entity_output.get(id)
                 {
                     println!(
-                        "[BUG #190 FIX] HIR Signal {:?} is placeholder -> returning entity output signal {:?}",
-                        id, output_signal_id
+                        "[BUG #190 FIX] HIR Signal {:?} is placeholder -> returning entity output signal {:?} (type {:?})",
+                        id, output_signal_id, signal_type
                     );
                     return Some(Expression::new(
-                        ExpressionKind::Ref(LValue::Signal(output_signal_id)),
-                        ty,
+                        ExpressionKind::Ref(LValue::Signal(*output_signal_id)),
+                        signal_type.clone(),
                     ));
                 }
 
@@ -4847,15 +4915,34 @@ impl<'hir> HirToMir<'hir> {
                         self.placeholder_signal_to_entity_output.keys().map(|k| k.0).collect::<Vec<_>>()
                     );
                 }
-                if let Some(&output_signal_id) = self.placeholder_signal_to_entity_output.get(id) {
+                // BUG #201 FIX: Use stored signal type instead of passed-in ty
+                if let Some((output_signal_id, signal_type)) =
+                    self.placeholder_signal_to_entity_output.get(id)
+                {
                     println!(
-                        "[BUG #167 FIX] Variable {:?} is placeholder -> returning entity output signal {:?}",
-                        id, output_signal_id
+                        "[BUG #167 FIX] Variable {:?} is placeholder -> returning entity output signal {:?} (type {:?})",
+                        id, output_signal_id, signal_type
                     );
                     return Some(Expression::new(
-                        ExpressionKind::Ref(LValue::Signal(output_signal_id)),
-                        ty,
+                        ExpressionKind::Ref(LValue::Signal(*output_signal_id)),
+                        signal_type.clone(),
                     ));
+                }
+
+                // BUG #200 FIX: Check if we're in module synthesis context with var_to_signal mapping
+                // This is critical for entity struct literal fields where Variables need to resolve
+                // to the synthesized module's internal signals, not remain as Variable references.
+                if let Some(ref var_to_signal) = self.current_module_var_to_signal {
+                    if let Some(&signal_id) = var_to_signal.get(id) {
+                        println!(
+                            "[BUG #200 FIX] Variable {:?} found in current_module_var_to_signal -> Signal {:?}",
+                            id, signal_id
+                        );
+                        return Some(Expression::new(
+                            ExpressionKind::Ref(LValue::Signal(signal_id)),
+                            ty,
+                        ));
+                    }
                 }
 
                 // CRITICAL FIX #IMPORT_MATCH: Use context-aware lookup for ALL variable resolutions
@@ -5120,6 +5207,37 @@ impl<'hir> HirToMir<'hir> {
                         "[TRAIT_OP] Attempting to inline {}::{} for type '{}' (op: {:?})",
                         trait_name, method_name, type_name, binary.op
                     );
+
+                    // BUG #200 DEBUG: Print what the operands look like BEFORE inlining
+                    println!(
+                        "[BUG #200 TRAIT_OP] left_expr: {:?}",
+                        std::mem::discriminant(&*binary.left)
+                    );
+                    println!(
+                        "[BUG #200 TRAIT_OP] right_expr: {:?}",
+                        std::mem::discriminant(&*binary.right)
+                    );
+                    // Show more details for specific expression types
+                    if let hir::HirExpression::Variable(var_id) = &*binary.left {
+                        println!("[BUG #200 TRAIT_OP]   left is Variable({:?})", var_id);
+                    }
+                    if let hir::HirExpression::Cast(c) = &*binary.left {
+                        println!(
+                            "[BUG #200 TRAIT_OP]   left is Cast({:?} -> {:?})",
+                            std::mem::discriminant(&*c.expr),
+                            c.target_type
+                        );
+                    }
+                    if let hir::HirExpression::Variable(var_id) = &*binary.right {
+                        println!("[BUG #200 TRAIT_OP]   right is Variable({:?})", var_id);
+                    }
+                    if let hir::HirExpression::Cast(c) = &*binary.right {
+                        println!(
+                            "[BUG #200 TRAIT_OP]   right is Cast({:?} -> {:?})",
+                            std::mem::discriminant(&*c.expr),
+                            c.target_type
+                        );
+                    }
 
                     // Try to inline the trait method body
                     if let Some(result) = self.inline_trait_method(
@@ -9587,11 +9705,28 @@ impl<'hir> HirToMir<'hir> {
                                 combined_map.insert(name.clone(), expr);
                             }
 
+                            // BUG #200 DEBUG: Check what the let value is before substitution
+                            println!(
+                                "[BUG #200 BLOCK] Let '{}' value type BEFORE sub: {:?}",
+                                let_stmt.name,
+                                std::mem::discriminant(&let_stmt.value)
+                            );
+                            if let hir::HirExpression::StructLiteral(sl) = &let_stmt.value {
+                                println!(
+                                    "[BUG #200 BLOCK] Let '{}' is StructLiteral type='{}'",
+                                    let_stmt.name, sl.type_name
+                                );
+                            }
                             let substituted_value = self.substitute_expression_with_var_map(
                                 &let_stmt.value,
                                 &combined_map,
                                 var_id_to_name,
                             )?;
+                            println!(
+                                "[BUG #200 BLOCK] Let '{}' value type AFTER sub: {:?}",
+                                let_stmt.name,
+                                std::mem::discriminant(&substituted_value)
+                            );
                             if let hir::HirExpression::Match(m) = &substituted_value {
                                 eprintln!(
                                     "[DEBUG] Block: let {} = Match with {} arms",
@@ -10025,30 +10160,104 @@ impl<'hir> HirToMir<'hir> {
 
             // StructLiteral expression - substitute field values
             hir::HirExpression::StructLiteral(struct_lit) => {
-                eprintln!(
+                println!(
                     "[DEBUG] StructLiteral substitution: type={}, {} fields BEFORE",
                     struct_lit.type_name,
                     struct_lit.fields.len()
                 );
+
+                // BUG #200 FIX: Check if this is an entity struct literal
+                // For entity struct literals, we need to substitute GenericParam references
+                // (the trait method parameters like 'a', 'b') with the actual arguments,
+                // BUT we should NOT further expand Variable references to their source expressions.
+                // Example: GenericParam("a") -> Variable(a_fp32) is OK
+                //          Variable(a_fp32) -> (a[15:0] as fp16 as fp32) is NOT OK
+                let is_entity_struct = self
+                    .hir
+                    .as_ref()
+                    .is_some_and(|hir| hir.entities.iter().any(|e| e.name == struct_lit.type_name));
+                println!(
+                    "[BUG #200 TRACE] StructLiteral type='{}', is_entity_struct={}",
+                    struct_lit.type_name, is_entity_struct
+                );
+
                 let mut substituted_fields = Vec::new();
                 for (i, field_init) in struct_lit.fields.iter().enumerate() {
-                    eprintln!(
+                    println!(
                         "[DEBUG] StructLiteral field[{}]: name={}, value type={:?}",
                         i,
                         field_init.name,
                         std::mem::discriminant(&field_init.value)
                     );
-                    let substituted_value = self.substitute_expression_with_var_map(
-                        &field_init.value,
-                        param_map,
-                        var_id_to_name,
-                    )?;
+
+                    let substituted_value = if is_entity_struct {
+                        // BUG #200: For entity struct literals, only substitute GenericParams
+                        // using param_map, but don't do full recursive substitution
+                        println!(
+                            "[BUG #200] Entity struct '{}' field '{}': using param-only substitution",
+                            struct_lit.type_name, field_init.name
+                        );
+                        // BUG #200 DEBUG: Show detailed field value structure
+                        fn show_expr_structure(
+                            expr: &hir::HirExpression,
+                            prefix: &str,
+                            depth: usize,
+                        ) {
+                            let indent = "  ".repeat(depth);
+                            match expr {
+                                hir::HirExpression::Cast(c) => {
+                                    println!("{}{prefix}Cast(target={:?})", indent, c.target_type);
+                                    show_expr_structure(&c.expr, prefix, depth + 1);
+                                }
+                                hir::HirExpression::Variable(v) => {
+                                    println!("{}{prefix}Variable({:?})", indent, v);
+                                }
+                                hir::HirExpression::GenericParam(n) => {
+                                    println!("{}{prefix}GenericParam(\"{}\")", indent, n);
+                                }
+                                hir::HirExpression::Port(p) => {
+                                    println!("{}{prefix}Port({:?})", indent, p);
+                                }
+                                hir::HirExpression::Signal(s) => {
+                                    println!("{}{prefix}Signal({:?})", indent, s);
+                                }
+                                _ => {
+                                    println!(
+                                        "{}{prefix}Other({:?})",
+                                        indent,
+                                        std::mem::discriminant(expr)
+                                    );
+                                }
+                            }
+                        }
+                        println!(
+                            "[BUG #200 FIELD] '{}' BEFORE param-only sub:",
+                            field_init.name
+                        );
+                        show_expr_structure(&field_init.value, "[BUG #200 FIELD] ", 1);
+                        let result =
+                            self.substitute_generic_params_only(&field_init.value, param_map);
+                        println!(
+                            "[BUG #200 FIELD] '{}' AFTER param-only sub:",
+                            field_init.name
+                        );
+                        show_expr_structure(&result, "[BUG #200 FIELD] ", 1);
+                        result
+                    } else {
+                        // For regular structs, do full recursive substitution
+                        self.substitute_expression_with_var_map(
+                            &field_init.value,
+                            param_map,
+                            var_id_to_name,
+                        )?
+                    };
+
                     substituted_fields.push(hir::HirStructFieldInit {
                         name: field_init.name.clone(),
                         value: substituted_value,
                     });
                 }
-                eprintln!(
+                println!(
                     "[DEBUG] StructLiteral substitution: type={}, {} fields AFTER",
                     struct_lit.type_name,
                     substituted_fields.len()
@@ -10096,6 +10305,77 @@ impl<'hir> HirToMir<'hir> {
                 );
                 Some(expr.clone())
             }
+        }
+    }
+
+    /// BUG #200 FIX: Substitute only GenericParam references in an expression.
+    /// This is used for entity struct literal fields where we need to replace
+    /// the trait method parameters (like 'a', 'b') with the actual arguments,
+    /// but we DON'T want to further expand Variable references to their source expressions.
+    #[allow(clippy::only_used_in_recursion)]
+    fn substitute_generic_params_only(
+        &self,
+        expr: &hir::HirExpression,
+        param_map: &HashMap<String, &hir::HirExpression>,
+    ) -> hir::HirExpression {
+        match expr {
+            // GenericParam - substitute with param_map value
+            hir::HirExpression::GenericParam(name) => {
+                if let Some(arg_expr) = param_map.get(name) {
+                    eprintln!(
+                        "[BUG #200] Substituting GenericParam('{}') with {:?}",
+                        name,
+                        std::mem::discriminant(*arg_expr)
+                    );
+                    (*arg_expr).clone()
+                } else {
+                    // Not a parameter, keep as-is
+                    expr.clone()
+                }
+            }
+
+            // Variable - keep as-is, do NOT expand
+            hir::HirExpression::Variable(_) => expr.clone(),
+
+            // Cast - recursively process inner expression
+            hir::HirExpression::Cast(cast_expr) => {
+                let inner = self.substitute_generic_params_only(&cast_expr.expr, param_map);
+                hir::HirExpression::Cast(hir::HirCastExpr {
+                    expr: Box::new(inner),
+                    target_type: cast_expr.target_type.clone(),
+                })
+            }
+
+            // Range - recursively process base (high/low are typically literals)
+            hir::HirExpression::Range(base, high, low) => {
+                let new_base = self.substitute_generic_params_only(base, param_map);
+                let new_high = self.substitute_generic_params_only(high, param_map);
+                let new_low = self.substitute_generic_params_only(low, param_map);
+                hir::HirExpression::Range(Box::new(new_base), Box::new(new_high), Box::new(new_low))
+            }
+
+            // Binary - recursively process both sides
+            hir::HirExpression::Binary(bin) => {
+                let new_left = self.substitute_generic_params_only(&bin.left, param_map);
+                let new_right = self.substitute_generic_params_only(&bin.right, param_map);
+                hir::HirExpression::Binary(hir::HirBinaryExpr {
+                    left: Box::new(new_left),
+                    op: bin.op.clone(),
+                    right: Box::new(new_right),
+                })
+            }
+
+            // Unary - recursively process operand
+            hir::HirExpression::Unary(un) => {
+                let new_operand = self.substitute_generic_params_only(&un.operand, param_map);
+                hir::HirExpression::Unary(hir::HirUnaryExpr {
+                    op: un.op.clone(),
+                    operand: Box::new(new_operand),
+                })
+            }
+
+            // Other expressions - return as-is
+            _ => expr.clone(),
         }
     }
 
@@ -12713,6 +12993,15 @@ impl<'hir> HirToMir<'hir> {
         self.next_inlining_context_id += 1;
         self.inlining_context_stack.push(inlining_context_id);
 
+        // BUG #202 FIX: Save and clear placeholder maps when entering a new inlining context
+        // Different functions may use the same VariableId for different purposes (e.g., VariableId(30)
+        // might be a 1-bit comparator output in one function and an FP32 value in another).
+        // Without clearing, stale mappings from previous inlining contexts cause type mismatches.
+        let mut saved_placeholder_signal_map =
+            std::mem::take(&mut self.placeholder_signal_to_entity_output);
+        let mut saved_placeholder_hir_signal_map =
+            std::mem::take(&mut self.placeholder_hir_signal_to_entity_output);
+
         // Guard against excessive function inlining depth (indirect recursion)
         if self.inlining_context_stack.len() > MAX_EXPRESSION_RECURSION_DEPTH {
             panic!(
@@ -12764,6 +13053,9 @@ impl<'hir> HirToMir<'hir> {
                 "Error: Recursive function calls are not supported: function '{}'",
                 call.function
             );
+            // BUG #202 FIX: Restore placeholder maps before returning
+            self.placeholder_signal_to_entity_output = saved_placeholder_signal_map;
+            self.placeholder_hir_signal_to_entity_output = saved_placeholder_hir_signal_map;
             self.inlining_context_stack.pop();
             debug_println!("[CONTEXT] Popped inlining context (recursion check failed)");
             return None;
@@ -12777,6 +13069,9 @@ impl<'hir> HirToMir<'hir> {
                 params.len(),
                 call.args.len()
             );
+            // BUG #202 FIX: Restore placeholder maps before returning
+            self.placeholder_signal_to_entity_output = saved_placeholder_signal_map;
+            self.placeholder_hir_signal_to_entity_output = saved_placeholder_hir_signal_map;
             self.inlining_context_stack.pop();
             debug_println!("[CONTEXT] Popped inlining context (arity check failed)");
             return None;
@@ -12826,6 +13121,9 @@ impl<'hir> HirToMir<'hir> {
             eprintln!(
                 "[DEBUG] inline_function_call: convert_body_to_expression FAILED - returning None"
             );
+            // BUG #202 FIX: Restore placeholder maps before returning
+            self.placeholder_signal_to_entity_output = saved_placeholder_signal_map;
+            self.placeholder_hir_signal_to_entity_output = saved_placeholder_hir_signal_map;
             self.inlining_context_stack.pop();
             debug_println!("[CONTEXT] Popped inlining context (convert_body_to_expression failed)");
             return None;
@@ -12850,6 +13148,9 @@ impl<'hir> HirToMir<'hir> {
         );
         if substituted_expr.is_none() {
             debug_println!("[DEBUG] inline_function_call: substitute_expression_with_var_map FAILED - returning None");
+            // BUG #202 FIX: Restore placeholder maps before returning
+            self.placeholder_signal_to_entity_output = saved_placeholder_signal_map;
+            self.placeholder_hir_signal_to_entity_output = saved_placeholder_hir_signal_map;
             self.inlining_context_stack.pop();
             eprintln!(
                 "[CONTEXT] Popped inlining context (substitute_expression_with_var_map failed)"
@@ -13023,6 +13324,17 @@ impl<'hir> HirToMir<'hir> {
         // }
 
         // ARCHITECTURAL FIX: Pop the inlining context before returning
+        // BUG #202 FIX: Merge new placeholder mappings back into saved maps, then restore
+        // Entity instantiations inside the inlined function create new mappings that must persist
+        // at the module level. We merge the new mappings back rather than discarding them.
+        for (k, v) in std::mem::take(&mut self.placeholder_signal_to_entity_output) {
+            saved_placeholder_signal_map.entry(k).or_insert(v);
+        }
+        for (k, v) in std::mem::take(&mut self.placeholder_hir_signal_to_entity_output) {
+            saved_placeholder_hir_signal_map.entry(k).or_insert(v);
+        }
+        self.placeholder_signal_to_entity_output = saved_placeholder_signal_map;
+        self.placeholder_hir_signal_to_entity_output = saved_placeholder_hir_signal_map;
         self.inlining_context_stack.pop();
         eprintln!(
             "[CONTEXT] Popped inlining context for function '{}', stack depth: {}",
@@ -13374,6 +13686,19 @@ impl<'hir> HirToMir<'hir> {
             hir::HirExpression::Signal(id) => self.signal_map.get(id).map(|&id| LValue::Signal(id)),
             hir::HirExpression::Port(id) => self.port_map.get(id).map(|&id| LValue::Port(id)),
             hir::HirExpression::Variable(id) => {
+                // BUG #200 FIX: Check current_module_var_to_signal FIRST
+                // This is critical for entity struct literal fields in module synthesis context
+                // where Variables should resolve to Signals, not remain as Variables.
+                if let Some(ref var_to_signal) = self.current_module_var_to_signal {
+                    if let Some(&signal_id) = var_to_signal.get(id) {
+                        println!(
+                            "[BUG #200 FIX expr_to_lvalue] Variable {:?} -> Signal {:?}",
+                            id, signal_id
+                        );
+                        return Some(LValue::Signal(signal_id));
+                    }
+                }
+
                 // BUG #20 FIX: Check variable_map first, then fall back to dynamic_variables
                 // Dynamic variables are created during function inlining (e.g., in match arm blocks)
                 // and must be accessible for Index/Range operations.
@@ -13761,9 +14086,19 @@ impl<'hir> HirToMir<'hir> {
         let mut param_map: HashMap<String, &hir::HirExpression> = HashMap::new();
         if !params.is_empty() {
             param_map.insert(params[0].name.clone(), left_expr);
+            println!(
+                "[BUG #200 PARAM_MAP] param '{}' = {:?}",
+                params[0].name,
+                std::mem::discriminant(left_expr)
+            );
         }
         if params.len() >= 2 {
             param_map.insert(params[1].name.clone(), right_expr);
+            println!(
+                "[BUG #200 PARAM_MAP] param '{}' = {:?}",
+                params[1].name,
+                std::mem::discriminant(right_expr)
+            );
         }
 
         // Build var_id -> name mapping for let bindings in the body
@@ -16517,16 +16852,18 @@ impl<'hir> HirToMir<'hir> {
                 // This is critical for FP operations where the 'result' signal is passed to
                 // an entity (like FpAdd) and later returned. The cached MIR might just be
                 // the placeholder signal (Literal(0)), but we need the entity output wire.
-                if let Some(&output_signal_id) =
+                // BUG #201 FIX: Use stored signal type instead of unknown
+                if let Some((output_signal_id, signal_type)) =
                     self.placeholder_signal_to_entity_output.get(var_id)
                 {
                     println!(
-                        "[BUG #192 FIX] Variable {:?} is placeholder -> returning entity output signal {:?}",
-                        var_id, output_signal_id
+                        "[BUG #192 FIX] Variable {:?} is placeholder -> returning entity output signal {:?} (type {:?})",
+                        var_id, output_signal_id, signal_type
                     );
-                    return Some(Expression::with_unknown_type(ExpressionKind::Ref(
-                        LValue::Signal(output_signal_id),
-                    )));
+                    return Some(Expression::new(
+                        ExpressionKind::Ref(LValue::Signal(*output_signal_id)),
+                        signal_type.clone(),
+                    ));
                 }
 
                 if let Some(mir_expr) = mir_cache.get(var_id) {
@@ -16828,14 +17165,18 @@ impl<'hir> HirToMir<'hir> {
                 // This is critical for FP operations where the 'result' signal is passed to
                 // an entity (like FpAdd) and later returned. The placeholder signal maps to
                 // the entity's output wire.
-                if let Some(&output_signal_id) = self.placeholder_signal_to_entity_output.get(var) {
+                // BUG #201 FIX: Use stored signal type instead of unknown
+                if let Some((output_signal_id, signal_type)) =
+                    self.placeholder_signal_to_entity_output.get(var)
+                {
                     println!(
-                        "[BUG #190 FIX] Variable {:?} is placeholder -> returning entity output signal {:?}",
-                        var, output_signal_id
+                        "[BUG #190 FIX] Variable {:?} is placeholder -> returning entity output signal {:?} (type {:?})",
+                        var, output_signal_id, signal_type
                     );
-                    return Some(Expression::with_unknown_type(ExpressionKind::Ref(
-                        LValue::Signal(output_signal_id),
-                    )));
+                    return Some(Expression::new(
+                        ExpressionKind::Ref(LValue::Signal(*output_signal_id)),
+                        signal_type.clone(),
+                    ));
                 }
 
                 // Get the variable name from our var_id_to_name map
@@ -17454,13 +17795,38 @@ impl<'hir> HirToMir<'hir> {
                             let_stmt.name, let_stmt.id.0
                         );
 
-                        // Substitute any previous let bindings in this value
+                        // BUG #200 FIX: Check if this is an entity struct literal BEFORE substitution
+                        // Entity struct literal fields should NOT be further substituted by VariableId,
+                        // as this causes over-expansion: Variable(a_fp32) -> (a_fp16 as fp32) -> (a[15:0] as fp16 as fp32)
+                        // which results in incorrect port connections like var_12[15:0] instead of proper signal refs.
+                        let is_entity_struct = if let hir::HirExpression::StructLiteral(
+                            struct_lit,
+                        ) = &let_stmt.value
+                        {
+                            self.hir.as_ref().is_some_and(|hir| {
+                                hir.entities.iter().any(|e| e.name == struct_lit.type_name)
+                            })
+                        } else {
+                            false
+                        };
+
+                        // Substitute any previous let bindings in this value (name-based substitution)
+                        // This handles parameter substitution like self -> Variable(a_fp32_id)
                         let mut substituted_value =
                             self.substitute_hir_expr_with_map(&let_stmt.value, &let_substitutions);
 
                         // BUG FIX #92: Also substitute by VariableId for nested references
-                        substituted_value =
-                            self.substitute_var_ids_in_expr(&substituted_value, &var_id_to_value);
+                        // BUG #200 FIX: Skip VariableId substitution for entity struct literals
+                        // to prevent over-expansion of entity port connections
+                        if !is_entity_struct {
+                            substituted_value = self
+                                .substitute_var_ids_in_expr(&substituted_value, &var_id_to_value);
+                        } else {
+                            println!(
+                                "🔶🔶🔶 BUG #200 FIX: Skipping var_id substitution for entity struct literal '{}' 🔶🔶🔶",
+                                let_stmt.name
+                            );
+                        }
 
                         // BUG #191 FIX: Handle entity instantiation via StructLiteral in module context
                         // When a let statement value is a StructLiteral for an entity (like FpAdd),
@@ -17473,7 +17839,7 @@ impl<'hir> HirToMir<'hir> {
                                 struct_lit.type_name
                             );
                             // Check if this struct literal is an entity instantiation
-                            let is_entity = self.hir.as_ref().map_or(false, |hir| {
+                            let is_entity = self.hir.as_ref().is_some_and(|hir| {
                                 hir.entities.iter().any(|e| e.name == struct_lit.type_name)
                             });
                             if is_entity {
@@ -18366,6 +18732,15 @@ impl<'hir> HirToMir<'hir> {
             );
         }
 
+        // BUG #200 FIX: Store the var_to_signal mapping so that convert_expression can access it
+        // when processing entity struct literal fields during convert_statement calls.
+        // This is critical because convert_statement doesn't receive the ModuleSynthesisContext.
+        self.current_module_var_to_signal = Some(ctx.var_to_signal.clone());
+        eprintln!(
+            "    🔧 BUG #200 FIX: Set current_module_var_to_signal with {} entries",
+            ctx.var_to_signal.len()
+        );
+
         // Phase 3b: Convert let binding expressions to continuous assignments
         eprintln!(
             "  🔧 Phase 3b: Converting {} let bindings to assignments",
@@ -18705,6 +19080,9 @@ impl<'hir> HirToMir<'hir> {
         eprintln!(
             "  ✓ Module stored in synthesized_modules (will be added to MIR at end of transform)"
         );
+
+        // BUG #200 FIX: Clear the var_to_signal mapping as we're exiting module synthesis
+        self.current_module_var_to_signal = None;
 
         module_id
     }

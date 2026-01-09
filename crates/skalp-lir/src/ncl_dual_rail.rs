@@ -890,7 +890,21 @@ impl DualRailConverter {
             // FP32 macros: treat as synchronous operations
             // Use TRUE rails for computation, invert for FALSE rail
             // This matches the expand-first path behavior in ncl_expand.rs
-            cell_type if cell_type.starts_with("FP32_") => {
+            // Tech library generates: fp_add32, fp_sub32, fp_mul32, fp_div32, fp_lt32, etc.
+            // Also accept FP32_ADD, FP32_MUL style names
+            cell_type
+                if cell_type.starts_with("FP32_")
+                    || cell_type.starts_with("fp_add")
+                    || cell_type.starts_with("fp_sub")
+                    || cell_type.starts_with("fp_mul")
+                    || cell_type.starts_with("fp_div")
+                    || cell_type.starts_with("fp_lt")
+                    || cell_type.starts_with("fp_gt")
+                    || cell_type.starts_with("fp_le")
+                    || cell_type.starts_with("fp_ge")
+                    || cell_type.starts_with("fp_eq")
+                    || cell_type.starts_with("fp_ne") =>
+            {
                 self.convert_fp32_macro(cell, output);
             }
 

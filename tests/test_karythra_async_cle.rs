@@ -137,11 +137,11 @@ fn test_async_cle_operation(
     // Set route_sel (3 bits) - use register writeback mode
     sim.set_ncl_input("top.route_sel", 0, 3);
 
-    // Set data1 (256 bits, but we only use lower 32)
-    sim.set_ncl_input("top.data1", data1, 256);
+    // Set data1 (64-bit datapath)
+    sim.set_ncl_input("top.data1", data1, 64);
 
-    // Set data2 (256 bits, but we only use lower 32)
-    sim.set_ncl_input("top.data2", data2, 256);
+    // Set data2 (64-bit datapath)
+    sim.set_ncl_input("top.data2", data2, 64);
 
     println!("  [op={}] Running NCL simulation...", opcode);
 
@@ -208,8 +208,12 @@ fn test_l2_fp32_operation(
     sim.set_ncl_input("top.route_sel", 0, 3);
     // data1[31:0] = a, data1[63:32] = b
     let data1 = a_bits | (b_bits << 32);
-    sim.set_ncl_input("top.data1", data1, 256);
-    sim.set_ncl_input("top.data2", 0, 256);
+    println!(
+        "  DEBUG: Setting function_sel={}, data1=0x{:016X} (a=0x{:08X}, b=0x{:08X})",
+        opcode, data1, a_bits, b_bits
+    );
+    sim.set_ncl_input("top.data1", data1, 64);
+    sim.set_ncl_input("top.data2", 0, 64);
 
     let result = sim.run_until_stable();
     if !result.is_stable {
@@ -217,8 +221,24 @@ fn test_l2_fp32_operation(
         return None;
     }
 
-    // Read from debug_l2
-    sim.get_ncl_output("top.debug_l2", 32)
+    // DEBUG: Read back inputs to verify they were set correctly
+    if let Some(func_sel) = sim.get_ncl_output("top.function_sel", 6) {
+        println!("  DEBUG: function_sel (readback) = {}", func_sel);
+    }
+    if let Some(d1) = sim.get_ncl_output("top.data1", 64) {
+        println!("  DEBUG: data1 (readback) = 0x{:016X}", d1);
+    }
+
+    // DEBUG: Read both result and debug_l2 to diagnose routing
+    if let Some(debug_l2) = sim.get_ncl_output("top.debug_l2", 32) {
+        println!("  DEBUG: debug_l2 (direct L2 output) = 0x{:08X}", debug_l2);
+    }
+    if let Some(debug_l0) = sim.get_ncl_output("top.debug_l0_l1", 32) {
+        println!("  DEBUG: debug_l0_l1 = 0x{:08X}", debug_l0);
+    }
+
+    // Read from result (lower 32 bits) - with correct opcode, fu_result selects l2_result
+    sim.get_ncl_output("top.result", 32)
 }
 
 /// Test L3 Vec3 operation using UnifiedSimulator
@@ -244,8 +264,9 @@ fn test_l3_vec3_operation(
 
     sim.set_ncl_input("top.function_sel", opcode, 6);
     sim.set_ncl_input("top.route_sel", 0, 3);
-    sim.set_ncl_input_u128("top.data1", data1, 256);
-    sim.set_ncl_input_u128("top.data2", data2, 256);
+    // 64-bit datapath: only use lower 64 bits
+    sim.set_ncl_input("top.data1", data1 as u64, 64);
+    sim.set_ncl_input("top.data2", data2 as u64, 64);
 
     let result = sim.run_until_stable();
     if !result.is_stable {
@@ -253,8 +274,8 @@ fn test_l3_vec3_operation(
         return None;
     }
 
-    // Read from debug_l3
-    sim.get_ncl_output("top.debug_l3", 32)
+    // Read from result (lower 32 bits) - with correct opcode, fu_result selects l3_result
+    sim.get_ncl_output("top.result", 32)
 }
 
 /// Test L5 bit operation using UnifiedSimulator
@@ -274,8 +295,8 @@ fn test_l5_bit_operation(netlist: &GateNetlist, opcode: u64, data1: u64) -> Opti
 
     sim.set_ncl_input("top.function_sel", opcode, 6);
     sim.set_ncl_input("top.route_sel", 0, 3);
-    sim.set_ncl_input("top.data1", data1, 256);
-    sim.set_ncl_input("top.data2", 0, 256);
+    sim.set_ncl_input("top.data1", data1, 64);
+    sim.set_ncl_input("top.data2", 0, 64);
 
     let result = sim.run_until_stable();
     if !result.is_stable {
@@ -283,8 +304,8 @@ fn test_l5_bit_operation(netlist: &GateNetlist, opcode: u64, data1: u64) -> Opti
         return None;
     }
 
-    // Read from debug_l4_l5 (L4 and L5 share this debug output)
-    sim.get_ncl_output("top.debug_l4_l5", 32)
+    // Read from result (lower 32 bits) - with correct opcode, fu_result selects l4_l5_result
+    sim.get_ncl_output("top.result", 32)
 }
 
 // =============================================================================
@@ -292,7 +313,6 @@ fn test_l5_bit_operation(netlist: &GateNetlist, opcode: u64, data1: u64) -> Opti
 // =============================================================================
 
 #[test]
-#[ignore = "requires karythra CLE with FP trait imports"]
 fn test_signal_check() {
     println!("\n=== Signal Check Test ===");
     let netlist = compile_karythra_async_cle();
@@ -350,7 +370,6 @@ fn test_signal_check() {
 // =============================================================================
 
 #[test]
-#[ignore = "requires karythra CLE with FP trait imports"]
 fn test_async_cle_l0_add() {
     println!("\n=== Async CLE L0 ADD Test ===");
     let netlist = compile_karythra_async_cle();
@@ -374,7 +393,6 @@ fn test_async_cle_l0_add() {
 }
 
 #[test]
-#[ignore = "requires karythra CLE with FP trait imports"]
 fn test_async_cle_l0_sub() {
     println!("\n=== Async CLE L0 SUB Test ===");
     let netlist = compile_karythra_async_cle();
@@ -398,7 +416,6 @@ fn test_async_cle_l0_sub() {
 }
 
 #[test]
-#[ignore = "requires karythra CLE with FP trait imports"]
 fn test_async_cle_l0_and() {
     println!("\n=== Async CLE L0 AND Test ===");
     let netlist = compile_karythra_async_cle();
@@ -427,7 +444,6 @@ fn test_async_cle_l0_and() {
 }
 
 #[test]
-#[ignore = "requires karythra CLE with FP trait imports"]
 fn test_async_cle_l0_or() {
     println!("\n=== Async CLE L0 OR Test ===");
     let netlist = compile_karythra_async_cle();
@@ -456,7 +472,6 @@ fn test_async_cle_l0_or() {
 }
 
 #[test]
-#[ignore = "requires karythra CLE with FP trait imports"]
 fn test_async_cle_l0_xor() {
     println!("\n=== Async CLE L0 XOR Test ===");
     let netlist = compile_karythra_async_cle();
@@ -485,7 +500,6 @@ fn test_async_cle_l0_xor() {
 }
 
 #[test]
-#[ignore = "requires karythra CLE with FP trait imports"]
 fn test_async_cle_l0_comparisons() {
     println!("\n=== Async CLE L0 Comparison Tests ===");
     let netlist = compile_karythra_async_cle();
@@ -512,7 +526,6 @@ fn test_async_cle_l0_comparisons() {
 }
 
 #[test]
-#[ignore = "requires karythra CLE with FP trait imports"]
 fn test_async_cle_l0_shifts() {
     println!("\n=== Async CLE L0 Shift Tests ===");
     let netlist = compile_karythra_async_cle();
@@ -557,7 +570,6 @@ fn f32_approx_eq(a: f32, b: f32, tolerance: f32) -> bool {
 }
 
 #[test]
-#[ignore = "requires karythra CLE with FP trait imports"]
 fn test_async_cle_l2_fp32_add() {
     println!("\n=== Async CLE L2 FP32 ADD Test ===");
     let netlist = compile_karythra_async_cle();
@@ -612,7 +624,6 @@ fn test_async_cle_l2_fp32_add() {
 }
 
 #[test]
-#[ignore = "requires karythra CLE with FP trait imports"]
 fn test_async_cle_l2_fp32_mul() {
     println!("\n=== Async CLE L2 FP32 MUL Test ===");
     let netlist = compile_karythra_async_cle();
@@ -671,7 +682,6 @@ fn test_async_cle_l2_fp32_mul() {
 // =============================================================================
 
 #[test]
-#[ignore = "requires karythra CLE with FP trait imports"]
 fn test_async_cle_l3_vec3_add() {
     println!("\n=== Async CLE L3 VEC3 ADD Test ===");
     let netlist = compile_karythra_async_cle();
@@ -718,7 +728,6 @@ fn test_async_cle_l3_vec3_add() {
 }
 
 #[test]
-#[ignore = "requires karythra CLE with FP trait imports"]
 fn test_async_cle_l3_vec3_dot() {
     println!("\n=== Async CLE L3 VEC3 DOT Test ===");
     let netlist = compile_karythra_async_cle();
@@ -791,8 +800,9 @@ fn test_l4_algorithm_operation(
 
     sim.set_ncl_input("top.function_sel", opcode, 6);
     sim.set_ncl_input("top.route_sel", 0, 3);
-    sim.set_ncl_input_u256("top.data1", data1.0, data1.1, 256);
-    sim.set_ncl_input_u256("top.data2", data2.0, data2.1, 256);
+    // 64-bit datapath: use only lower 64 bits
+    sim.set_ncl_input("top.data1", data1.0 as u64, 64);
+    sim.set_ncl_input("top.data2", data2.0 as u64, 64);
 
     let result = sim.run_until_stable();
     if !result.is_stable {
@@ -800,12 +810,11 @@ fn test_l4_algorithm_operation(
         return None;
     }
 
-    // Read from debug_l4_l5 (L4 and L5 share this debug output)
-    sim.get_ncl_output("top.debug_l4_l5", 32)
+    // Read from result (lower 32 bits) - with correct opcode, fu_result selects l4_l5_result
+    sim.get_ncl_output("top.result", 32)
 }
 
 #[test]
-#[ignore = "requires karythra CLE with FP trait imports"]
 fn test_async_cle_l4_quadratic() {
     println!("\n=== Async CLE L4 QUADRATIC Test ===");
     let netlist = compile_karythra_async_cle();
@@ -850,7 +859,6 @@ fn test_async_cle_l4_quadratic() {
 }
 
 #[test]
-#[ignore = "requires karythra CLE with FP trait imports"]
 fn test_async_cle_l4_bezier() {
     println!("\n=== Async CLE L4 BEZIER Test ===");
     let netlist = compile_karythra_async_cle();
@@ -955,7 +963,6 @@ fn test_async_cle_l4_bezier() {
 }
 
 #[test]
-#[ignore = "requires karythra CLE with FP trait imports"]
 fn test_async_cle_l4_ray_aabb() {
     println!("\n=== Async CLE L4 RAY_AABB Test ===");
     let netlist = compile_karythra_async_cle();
@@ -1034,7 +1041,6 @@ fn test_async_cle_l4_ray_aabb() {
 // =============================================================================
 
 #[test]
-#[ignore = "requires karythra CLE with FP trait imports"]
 fn test_async_cle_l5_clz() {
     println!("\n=== Async CLE L5 CLZ Test ===");
     let netlist = compile_karythra_async_cle();
@@ -1075,7 +1081,6 @@ fn test_async_cle_l5_clz() {
 }
 
 #[test]
-#[ignore = "requires karythra CLE with FP trait imports"]
 fn test_async_cle_l5_popcount() {
     println!("\n=== Async CLE L5 POPCOUNT Test ===");
     let netlist = compile_karythra_async_cle();
@@ -1116,7 +1121,6 @@ fn test_async_cle_l5_popcount() {
 }
 
 #[test]
-#[ignore = "requires karythra CLE with FP trait imports"]
 fn test_async_cle_l5_bitreverse() {
     println!("\n=== Async CLE L5 BITREVERSE Test ===");
     let netlist = compile_karythra_async_cle();
@@ -1156,7 +1160,6 @@ fn test_async_cle_l5_bitreverse() {
 }
 
 #[test]
-#[ignore = "requires karythra CLE with FP trait imports"]
 fn test_async_cle_l5_parity() {
     println!("\n=== Async CLE L5 PARITY Test ===");
     let netlist = compile_karythra_async_cle();
@@ -1201,7 +1204,6 @@ fn test_async_cle_l5_parity() {
 // =============================================================================
 
 #[test]
-#[ignore = "requires karythra CLE with FP trait imports"]
 fn test_async_cle_compiles() {
     println!("\n=== Async CLE Compilation Test ===");
     let netlist = compile_karythra_async_cle();

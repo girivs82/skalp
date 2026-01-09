@@ -296,19 +296,42 @@ impl GpuNclRuntime {
 
         // Check if there are FP32 cells that need more than 8 inputs
         // GPU shader only supports 8 inputs per cell, so fallback to CPU for FP32
-        let has_fp32_cells = self.cells.iter().any(|c| {
-            matches!(
-                c.ptype,
-                NclPrimitiveType::Fp32Add
-                    | NclPrimitiveType::Fp32Sub
-                    | NclPrimitiveType::Fp32Mul
-                    | NclPrimitiveType::Fp32Div
-                    | NclPrimitiveType::Fp32Lt
-                    | NclPrimitiveType::Fp32Gt
-                    | NclPrimitiveType::Fp32Le
-                    | NclPrimitiveType::Fp32Ge
-            )
-        });
+        let fp32_cell_count = self
+            .cells
+            .iter()
+            .filter(|c| {
+                matches!(
+                    c.ptype,
+                    NclPrimitiveType::Fp32Add
+                        | NclPrimitiveType::Fp32Sub
+                        | NclPrimitiveType::Fp32Mul
+                        | NclPrimitiveType::Fp32Div
+                        | NclPrimitiveType::Fp32Lt
+                        | NclPrimitiveType::Fp32Gt
+                        | NclPrimitiveType::Fp32Le
+                        | NclPrimitiveType::Fp32Ge
+                )
+            })
+            .count();
+        let has_fp32_cells = fp32_cell_count > 0;
+
+        // Debug: Show FP32 cell detection
+        if fp32_cell_count > 0 {
+            println!("[GPU_NCL] Found {} FP32 cells", fp32_cell_count);
+        } else {
+            // Show first few cell types for debugging
+            let mut type_counts: std::collections::HashMap<String, usize> =
+                std::collections::HashMap::new();
+            for cell in &self.netlist.cells {
+                *type_counts.entry(cell.cell_type.clone()).or_default() += 1;
+            }
+            let mut types: Vec<_> = type_counts.iter().collect();
+            types.sort_by(|a, b| b.1.cmp(a.1));
+            println!(
+                "[GPU_NCL] Cell types (top 10): {:?}",
+                types.iter().take(10).collect::<Vec<_>>()
+            );
+        }
 
         if has_fp32_cells {
             println!(
@@ -370,29 +393,54 @@ impl GpuNclRuntime {
         }
 
         // FP32 soft macros (check before stripping suffix as underscore is part of name)
-        if upper.starts_with("FP32_ADD") || upper.starts_with("FPADD32") {
+        // Note: fp_add32 -> FP_ADD32 (from tech_library.rs), FP32_ADD (from old code)
+        if upper.starts_with("FP32_ADD")
+            || upper.starts_with("FPADD32")
+            || upper.starts_with("FP_ADD32")
+        {
             return NclPrimitiveType::Fp32Add;
         }
-        if upper.starts_with("FP32_SUB") || upper.starts_with("FPSUB32") {
+        if upper.starts_with("FP32_SUB")
+            || upper.starts_with("FPSUB32")
+            || upper.starts_with("FP_SUB32")
+        {
             return NclPrimitiveType::Fp32Sub;
         }
-        if upper.starts_with("FP32_MUL") || upper.starts_with("FPMUL32") {
+        if upper.starts_with("FP32_MUL")
+            || upper.starts_with("FPMUL32")
+            || upper.starts_with("FP_MUL32")
+        {
             return NclPrimitiveType::Fp32Mul;
         }
-        if upper.starts_with("FP32_DIV") || upper.starts_with("FPDIV32") {
+        if upper.starts_with("FP32_DIV")
+            || upper.starts_with("FPDIV32")
+            || upper.starts_with("FP_DIV32")
+        {
             return NclPrimitiveType::Fp32Div;
         }
         // FP32 comparison operations (BUG #191 FIX)
-        if upper.starts_with("FP32_LT") || upper.starts_with("FPLT32") {
+        if upper.starts_with("FP32_LT")
+            || upper.starts_with("FPLT32")
+            || upper.starts_with("FP_LT32")
+        {
             return NclPrimitiveType::Fp32Lt;
         }
-        if upper.starts_with("FP32_GT") || upper.starts_with("FPGT32") {
+        if upper.starts_with("FP32_GT")
+            || upper.starts_with("FPGT32")
+            || upper.starts_with("FP_GT32")
+        {
             return NclPrimitiveType::Fp32Gt;
         }
-        if upper.starts_with("FP32_LE") || upper.starts_with("FPLE32") {
+        if upper.starts_with("FP32_LE")
+            || upper.starts_with("FPLE32")
+            || upper.starts_with("FP_LE32")
+        {
             return NclPrimitiveType::Fp32Le;
         }
-        if upper.starts_with("FP32_GE") || upper.starts_with("FPGE32") {
+        if upper.starts_with("FP32_GE")
+            || upper.starts_with("FPGE32")
+            || upper.starts_with("FP_GE32")
+        {
             return NclPrimitiveType::Fp32Ge;
         }
 
@@ -940,6 +988,10 @@ kernel void eval_ncl(
             // Determine actual width from signal nets (t rails + f rails)
             let actual_width = nets.len() / 2;
             let width = width.min(actual_width);
+            println!(
+                "[GPU_NCL_SET] Setting '{}': {} bits, value=0x{:X}",
+                name, width, value
+            );
 
             for bit in 0..width {
                 // For bits beyond u64 range, value is 0
@@ -959,6 +1011,8 @@ kernel void eval_ncl(
                     self.set_net(f_net, !bit_value);
                 }
             }
+        } else {
+            println!("[GPU_NCL_SET] Signal '{}' NOT FOUND!", name);
         }
     }
 
@@ -1049,6 +1103,21 @@ kernel void eval_ncl(
         let nets = match self.signal_name_to_nets.get(name) {
             Some(n) => n,
             None => {
+                println!(
+                    "[GPU_NCL_DEBUG] Signal '{}' NOT FOUND in signal_name_to_nets",
+                    name
+                );
+                // Show available signal names containing "result"
+                let result_signals: Vec<_> = self
+                    .signal_name_to_nets
+                    .keys()
+                    .filter(|k| k.contains("result"))
+                    .take(20)
+                    .collect();
+                println!(
+                    "[GPU_NCL_DEBUG] Available signals with 'result': {:?}",
+                    result_signals
+                );
                 return None;
             }
         };
@@ -1057,6 +1126,11 @@ kernel void eval_ncl(
         // Determine actual width from signal nets
         let actual_width = nets.len() / 2;
         let width = width.min(actual_width);
+
+        let mut null_count = 0;
+        let mut data_true_count = 0;
+        let mut data_false_count = 0;
+        let mut invalid_count = 0;
 
         for bit in 0..width {
             // Layout: [t0, t1, ..., tN-1, f0, f1, ..., fN-1]
@@ -1070,16 +1144,37 @@ kernel void eval_ncl(
 
             // Check for valid DATA (exactly one rail high)
             if t && !f {
+                data_true_count += 1;
                 // Only set bits within u64 range
                 if bit < 64 {
                     result |= 1u64 << bit;
                 }
             } else if !t && f {
+                data_false_count += 1;
                 // DATA_FALSE, bit stays 0
+            } else if !t && !f {
+                null_count += 1;
             } else {
-                // NULL or Invalid
-                return None;
+                invalid_count += 1;
             }
+        }
+
+        // Debug output for signals
+        if name.contains("result")
+            || name.contains("l2_")
+            || name.contains("fu_")
+            || name.contains("function_sel")
+            || name.contains("data1")
+        {
+            println!(
+                "[GPU_NCL_DEBUG] Signal '{}': {} bits, {} null, {} data_true, {} data_false, {} invalid",
+                name, width, null_count, data_true_count, data_false_count, invalid_count
+            );
+        }
+
+        // Return None if any bit is NULL or Invalid
+        if null_count > 0 || invalid_count > 0 {
+            return None;
         }
 
         Some(result)

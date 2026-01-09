@@ -374,9 +374,11 @@ impl ModuleResolver {
         })?;
 
         eprintln!(
-            "[MODULE_RESOLVER] HIR built successfully for {:?}, found {} imports",
+            "[MODULE_RESOLVER] HIR built successfully for {:?}, found {} imports, {} trait_implementations, {} trait_definitions",
             path,
-            hir.imports.len()
+            hir.imports.len(),
+            hir.trait_implementations.len(),
+            hir.trait_definitions.len()
         );
 
         // Recursively load dependencies first
@@ -482,6 +484,119 @@ impl ModuleResolver {
                 {
                     target.trait_definitions.push(trait_def.clone());
                 }
+            }
+        }
+
+        // FP ENTITY FIX: Merge entities and their implementations from source
+        // This is critical for trait method inlining when trait methods instantiate entities
+        // (e.g., impl Add for fp32 { fn add() { let adder = FpAdd<IEEE754_32> {...}; }})
+        // For glob imports, merge ALL public entities. For specific imports, only merge named entities.
+        //
+        // BUG FIX: Build entity ID mapping for ALL source entities so that instances
+        // referencing other entities (e.g., FpSub's 'adder' instance referencing FpAdd)
+        // get their entity IDs properly remapped.
+
+        // Phase 1: Build entity ID mapping (source entity ID -> target entity ID)
+        let mut entity_id_map: std::collections::HashMap<
+            crate::hir::EntityId,
+            crate::hir::EntityId,
+        > = std::collections::HashMap::new();
+
+        // Track impl blocks to merge (source entity ID, impl block reference)
+        let mut impl_blocks_to_merge: Vec<(crate::hir::EntityId, crate::hir::HirImplementation)> =
+            Vec::new();
+
+        for entity in &source.entities {
+            if entity.visibility == crate::hir::HirVisibility::Public
+                || matches!(import.path, HirImportPath::Glob { .. })
+            {
+                // Check if entity already exists in target
+                if let Some(existing) = target.entities.iter().find(|e| e.name == entity.name) {
+                    // Entity already exists - map source ID to existing target ID
+                    entity_id_map.insert(entity.id, existing.id);
+                } else {
+                    // Assign new entity ID to avoid collision
+                    let new_entity_id = crate::hir::EntityId(
+                        target.entities.iter().map(|e| e.id.0).max().unwrap_or(0) + 1,
+                    );
+                    entity_id_map.insert(entity.id, new_entity_id);
+
+                    let mut new_entity = entity.clone();
+                    new_entity.id = new_entity_id;
+                    target.entities.push(new_entity);
+
+                    // Remember to merge the corresponding implementation
+                    if let Some(impl_block) = source
+                        .implementations
+                        .iter()
+                        .find(|i| i.entity == entity.id)
+                    {
+                        impl_blocks_to_merge.push((entity.id, impl_block.clone()));
+                    }
+                }
+            }
+        }
+
+        // Phase 2: Merge impl blocks and remap all entity references (including instances)
+        for (old_entity_id, impl_block) in impl_blocks_to_merge {
+            let new_entity_id = entity_id_map
+                .get(&old_entity_id)
+                .copied()
+                .unwrap_or(old_entity_id);
+
+            let mut new_impl = impl_block;
+            new_impl.entity = new_entity_id;
+
+            // CRITICAL: Remap entity IDs in instances that reference other entities
+            // This fixes the bug where FpSub's 'adder' instance had wrong EntityId
+            for instance in &mut new_impl.instances {
+                if let Some(remapped_entity_id) = entity_id_map.get(&instance.entity) {
+                    instance.entity = *remapped_entity_id;
+                }
+            }
+
+            target.implementations.push(new_impl);
+        }
+
+        // FP TRAIT FIX: Merge all trait IMPLEMENTATIONS from source
+        // This is critical for trait-based operator resolution (e.g., impl Add for fp32)
+        // For glob imports, merge ALL trait implementations. For specific imports, we still
+        // merge all because trait implementations don't have visibility and are needed
+        // for any code that uses the imported types.
+        for trait_impl in &source.trait_implementations {
+            // Check if we already have this trait implementation
+            let already_exists = target.trait_implementations.iter().any(|ti| {
+                ti.trait_name == trait_impl.trait_name && {
+                    // Compare targets - both Custom and primitive float types
+                    match (&ti.target, &trait_impl.target) {
+                        (
+                            crate::hir::TraitImplTarget::Type(t1),
+                            crate::hir::TraitImplTarget::Type(t2),
+                        ) => {
+                            // Compare type names
+                            let n1 = match t1 {
+                                crate::hir::HirType::Custom(n) => Some(n.as_str()),
+                                crate::hir::HirType::Float32 => Some("fp32"),
+                                crate::hir::HirType::Float64 => Some("fp64"),
+                                crate::hir::HirType::Float16 => Some("fp16"),
+                                _ => None,
+                            };
+                            let n2 = match t2 {
+                                crate::hir::HirType::Custom(n) => Some(n.as_str()),
+                                crate::hir::HirType::Float32 => Some("fp32"),
+                                crate::hir::HirType::Float64 => Some("fp64"),
+                                crate::hir::HirType::Float16 => Some("fp16"),
+                                _ => None,
+                            };
+                            n1 == n2
+                        }
+                        _ => false,
+                    }
+                }
+            });
+
+            if !already_exists {
+                target.trait_implementations.push(trait_impl.clone());
             }
         }
 

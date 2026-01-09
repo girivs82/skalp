@@ -532,6 +532,12 @@ impl HierarchicalNetlist {
                                             result
                                                 .merge_nets_by_name(&parent_bit_net, child_bit_net);
                                             stitched += 1;
+                                        } else if stitched == 0 && *child_idx == 0 {
+                                            // BUG #200 DEBUG: Log first missing parent net
+                                            eprintln!(
+                                                "[STITCH]     DEBUG: Parent net '{}' NOT FOUND for {}",
+                                                parent_bit_net, parent_base
+                                            );
                                         }
                                     }
                                 }

@@ -354,6 +354,11 @@ fn merge_imports(hir: &Hir, dependencies: &[PathBuf], resolver: &ModuleResolver)
             .get_module(&module_path)
             .ok_or_else(|| anyhow::anyhow!("Module not loaded: {:?}", module_path))?;
 
+        eprintln!(
+            "[MERGE_IMPORTS_DEBUG] Processing import {:?} from {:?}, loaded_module has {} trait_impls, {} trait_defs",
+            import.path, module_path, loaded_module.trait_implementations.len(), loaded_module.trait_definitions.len()
+        );
+
         // Extract and merge symbols based on import type
         match &import.path {
             HirImportPath::Simple { segments } => {
@@ -1085,9 +1090,11 @@ fn merge_all_symbols(target: &mut Hir, source: &Hir) -> Result<()> {
     use hir::HirVisibility;
 
     eprintln!(
-        "[MERGE_ALL_SYMBOLS] source has {} entities, {} implementations",
+        "[MERGE_ALL_SYMBOLS] source has {} entities, {} implementations, {} trait_impls, {} trait_defs",
         source.entities.len(),
-        source.implementations.len()
+        source.implementations.len(),
+        source.trait_implementations.len(),
+        source.trait_definitions.len()
     );
 
     // BUG #183 FIX: Use two-pass approach to ensure all entities are available
@@ -1180,14 +1187,30 @@ fn merge_all_symbols(target: &mut Hir, source: &Hir) -> Result<()> {
             // BUG #183 FIX: Update instance entity IDs to point to entities in target
             // This is critical for nested generic instantiations (e.g., FpSub -> FpAdd)
             for instance in &mut imported_impl.instances {
+                let old_entity_id = instance.entity;
                 // Find the entity in source by the instance's current entity ID
                 if let Some(dep_entity) = source.entities.iter().find(|e| e.id == instance.entity) {
                     // Find the corresponding entity in target by name
                     if let Some(new_dep_entity) =
                         target.entities.iter().find(|e| e.name == dep_entity.name)
                     {
+                        eprintln!(
+                            "[MERGE_INSTANCE] Instance '{}' in '{}': entity {:?} ('{}') -> {:?} ('{}') in target",
+                            instance.name, entity.name, old_entity_id, dep_entity.name,
+                            new_dep_entity.id, new_dep_entity.name
+                        );
                         instance.entity = new_dep_entity.id;
+                    } else {
+                        eprintln!(
+                            "[MERGE_INSTANCE] Instance '{}' in '{}': entity {:?} ('{}') NOT FOUND in target by name",
+                            instance.name, entity.name, old_entity_id, dep_entity.name
+                        );
                     }
+                } else {
+                    eprintln!(
+                        "[MERGE_INSTANCE] Instance '{}' in '{}': entity {:?} NOT FOUND in source",
+                        instance.name, entity.name, old_entity_id
+                    );
                 }
             }
 
