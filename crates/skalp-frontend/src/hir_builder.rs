@@ -632,7 +632,10 @@ impl HirBuilderContext {
                     }
                 }
                 SyntaxKind::UseDecl => {
-                    if let Some(import) = self.build_import(&child) {
+                    if let Some(mut import) = self.build_import(&child) {
+                        // Apply pending visibility (from pub use)
+                        import.visibility = pending_visibility;
+                        pending_visibility = HirVisibility::Private; // Reset after use
                         hir.imports.push(import);
                     }
                 }

@@ -851,16 +851,69 @@ fn merge_symbol(target: &mut Hir, source: &Hir, symbol_name: &str) -> Result<()>
         // Also merge all trait implementations that target this type
         // This is critical for trait-based operator resolution (e.g., impl Add for fp32)
         for trait_impl in &source.trait_implementations {
-            if let hir::TraitImplTarget::Type(hir::HirType::Custom(type_name)) = &trait_impl.target
-            {
-                if type_name == symbol_name {
-                    // Check if we already have this trait implementation
-                    let already_exists = target.trait_implementations.iter().any(|ti| {
-                        ti.trait_name == trait_impl.trait_name
-                            && matches!(&ti.target, hir::TraitImplTarget::Type(hir::HirType::Custom(tn)) if tn == symbol_name)
-                    });
-                    if !already_exists {
-                        target.trait_implementations.push(trait_impl.clone());
+            // BUG #207 FIX: Check for both Custom types and primitive float types
+            // Trait impls for fp32/fp64/fp16 may have target HirType::Float32/Float64/Float16
+            // due to fallback resolution during parsing
+            let target_matches = match &trait_impl.target {
+                hir::TraitImplTarget::Type(hir::HirType::Custom(type_name)) => {
+                    type_name == symbol_name
+                }
+                hir::TraitImplTarget::Type(hir::HirType::Float32) => symbol_name == "fp32",
+                hir::TraitImplTarget::Type(hir::HirType::Float64) => symbol_name == "fp64",
+                hir::TraitImplTarget::Type(hir::HirType::Float16) => symbol_name == "fp16",
+                _ => false,
+            };
+
+            if target_matches {
+                eprintln!(
+                    "[DISTINCT_TYPE_IMPORT] Merging trait impl '{}' for type '{}' (target: {:?})",
+                    trait_impl.trait_name, symbol_name, trait_impl.target
+                );
+                // Check if we already have this trait implementation
+                let already_exists = target.trait_implementations.iter().any(|ti| {
+                    ti.trait_name == trait_impl.trait_name
+                        && matches!(&ti.target, hir::TraitImplTarget::Type(hir::HirType::Custom(tn)) if tn == symbol_name)
+                });
+                if !already_exists {
+                    target.trait_implementations.push(trait_impl.clone());
+
+                    // BUG #207 FIX: Also merge entities that this trait impl's methods depend on
+                    // When a trait impl like `impl Add for fp32` has a method that instantiates
+                    // an entity (e.g., FpAdd<IEEE754_32>), we need to merge that entity
+                    for method in &trait_impl.method_implementations {
+                        let entity_names = extract_entity_refs_from_statements(&method.body);
+                        eprintln!(
+                            "[BUG #207 DEBUG] Trait impl '{}' method '{}' body has {} stmts, extracted entities: {:?}",
+                            trait_impl.trait_name, method.name, method.body.len(), entity_names
+                        );
+                        for entity_name in entity_names {
+                            // Check if entity already exists in target
+                            if !target.entities.iter().any(|e| e.name == entity_name) {
+                                // Find and merge the entity from source
+                                if let Some(entity) = source.entities.iter().find(|e| e.name == entity_name) {
+                                    eprintln!(
+                                        "[BUG #207 FIX] Merging entity '{}' referenced by trait impl '{}'",
+                                        entity_name, trait_impl.trait_name
+                                    );
+                                    // Assign new entity ID
+                                    let new_entity_id = hir::EntityId(
+                                        target.entities.iter().map(|e| e.id.0).max().unwrap_or(0) + 1,
+                                    );
+                                    let old_entity_id = entity.id;
+
+                                    let mut new_entity = entity.clone();
+                                    new_entity.id = new_entity_id;
+                                    target.entities.push(new_entity);
+
+                                    // Also merge the entity's implementation
+                                    if let Some(impl_block) = source.implementations.iter().find(|i| i.entity == old_entity_id) {
+                                        let mut new_impl = impl_block.clone();
+                                        new_impl.entity = new_entity_id;
+                                        target.implementations.push(new_impl);
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -1083,6 +1136,110 @@ fn merge_symbol_with_rename(
     }
 
     Ok(())
+}
+
+/// BUG #207 FIX: Extract entity names referenced in statements (via StructLiteral)
+/// This is used to find entities that trait impl methods depend on
+fn extract_entity_refs_from_statements(stmts: &[hir::HirStatement]) -> Vec<String> {
+    let mut entity_names = Vec::new();
+    for stmt in stmts {
+        extract_entity_refs_from_stmt(stmt, &mut entity_names);
+    }
+    entity_names
+}
+
+fn extract_entity_refs_from_stmt(stmt: &hir::HirStatement, names: &mut Vec<String>) {
+    match stmt {
+        hir::HirStatement::Let(let_stmt) => {
+            extract_entity_refs_from_expr(&let_stmt.value, names);
+        }
+        hir::HirStatement::Assignment(assign) => {
+            extract_entity_refs_from_expr(&assign.rhs, names);
+        }
+        hir::HirStatement::If(if_stmt) => {
+            extract_entity_refs_from_expr(&if_stmt.condition, names);
+            for then_stmt in &if_stmt.then_statements {
+                extract_entity_refs_from_stmt(then_stmt, names);
+            }
+            if let Some(else_stmts) = &if_stmt.else_statements {
+                for else_stmt in else_stmts {
+                    extract_entity_refs_from_stmt(else_stmt, names);
+                }
+            }
+        }
+        hir::HirStatement::Match(match_stmt) => {
+            extract_entity_refs_from_expr(&match_stmt.expr, names);
+            for arm in &match_stmt.arms {
+                for arm_stmt in &arm.statements {
+                    extract_entity_refs_from_stmt(arm_stmt, names);
+                }
+            }
+        }
+        hir::HirStatement::Block(stmts) => {
+            for sub_stmt in stmts {
+                extract_entity_refs_from_stmt(sub_stmt, names);
+            }
+        }
+        hir::HirStatement::Return(ret_expr) => {
+            if let Some(expr) = ret_expr {
+                extract_entity_refs_from_expr(expr, names);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn extract_entity_refs_from_expr(expr: &hir::HirExpression, names: &mut Vec<String>) {
+    match expr {
+        hir::HirExpression::StructLiteral(struct_lit) => {
+            // This might be an entity instantiation
+            if !names.contains(&struct_lit.type_name) {
+                names.push(struct_lit.type_name.clone());
+            }
+            // Also check field values
+            for field in &struct_lit.fields {
+                extract_entity_refs_from_expr(&field.value, names);
+            }
+        }
+        hir::HirExpression::Binary(bin) => {
+            extract_entity_refs_from_expr(&bin.left, names);
+            extract_entity_refs_from_expr(&bin.right, names);
+        }
+        hir::HirExpression::Unary(unary) => {
+            extract_entity_refs_from_expr(&unary.operand, names);
+        }
+        hir::HirExpression::Call(call) => {
+            for arg in &call.args {
+                extract_entity_refs_from_expr(arg, names);
+            }
+        }
+        hir::HirExpression::Index(base, index) => {
+            extract_entity_refs_from_expr(base, names);
+            extract_entity_refs_from_expr(index, names);
+        }
+        hir::HirExpression::Range(base, start, end) => {
+            extract_entity_refs_from_expr(base, names);
+            extract_entity_refs_from_expr(start, names);
+            extract_entity_refs_from_expr(end, names);
+        }
+        hir::HirExpression::Cast(cast) => {
+            extract_entity_refs_from_expr(&cast.expr, names);
+        }
+        hir::HirExpression::Concat(parts) => {
+            for part in parts {
+                extract_entity_refs_from_expr(part, names);
+            }
+        }
+        hir::HirExpression::Ternary { condition, true_expr, false_expr } => {
+            extract_entity_refs_from_expr(condition, names);
+            extract_entity_refs_from_expr(true_expr, names);
+            extract_entity_refs_from_expr(false_expr, names);
+        }
+        hir::HirExpression::FieldAccess { base, .. } => {
+            extract_entity_refs_from_expr(base, names);
+        }
+        _ => {}
+    }
 }
 
 /// Merge all public symbols from a module

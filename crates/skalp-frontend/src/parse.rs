@@ -6248,6 +6248,7 @@ impl ParseState<'_> {
         // Parse the actual item
         match self.current_kind() {
             Some(SyntaxKind::ModKw) => self.parse_module_decl(),
+            Some(SyntaxKind::UseKw) => self.parse_use_decl(), // pub use re-exports
             Some(SyntaxKind::EntityKw) => self.parse_entity_decl(),
             Some(SyntaxKind::TraitKw) => self.parse_trait_def(),
             Some(SyntaxKind::TypeKw) => self.parse_type_alias(),

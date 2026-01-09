@@ -813,33 +813,67 @@ impl<'hir> HirToMir<'hir> {
 
                         // BUG FIX: Generate continuous assignment for impl signals with non-literal initial expressions
                         // e.g., "signal dx: fp32 = x2 - x1" needs to generate an assignment dx = x2 - x1
-                        // Debug: Check if signal has initial_value
-                        if hir_signal.name == "sum_lz"
-                            || hir_signal.name == "exp_diff"
-                            || hir_signal.name == "sticky"
-                        {
+                        // BUG #207 DEBUG: Trace all signals with initial values for FP entities
+                        let is_fp_module = module.name.contains("FpAdd") || module.name.contains("FpSub") || module.name.contains("FpMul");
+                        let has_init = hir_signal.initial_value.is_some();
+                        if is_fp_module {
                             println!(
-                                "[HIR_TO_MIR] Signal '{}' initial_value: {:?}",
+                                "[BUG #207 TRACE] Module '{}' Signal '{}' initial_value: {}",
+                                module.name,
                                 hir_signal.name,
-                                hir_signal.initial_value.is_some()
+                                has_init
                             );
                         }
-                        if let Some(init_expr) = &hir_signal.initial_value {
-                            // Debug: print expression type
-                            eprintln!(
-                                "[HIR→MIR DEBUG] Signal '{}' init_expr discriminant: {:?}, is_literal: {}",
-                                hir_signal.name,
-                                std::mem::discriminant(init_expr),
-                                matches!(init_expr, hir::HirExpression::Literal(_))
-                            );
-                            // Only generate assignment if it's NOT a literal (literals are handled above)
-                            if !matches!(init_expr, hir::HirExpression::Literal(_)) {
-                                eprintln!(
-                                    "[HIR→MIR] Impl signal '{}' has non-literal initial_value, generating continuous assign",
-                                    hir_signal.name
+                        if has_init {
+                            let init_expr = hir_signal.initial_value.as_ref().unwrap();
+                            if is_fp_module {
+                                println!(
+                                    "[BUG #207 EXPR] Module '{}' Signal '{}' expr_type: {:?}",
+                                    module.name,
+                                    hir_signal.name,
+                                    std::mem::discriminant(init_expr)
                                 );
+                            }
+                        }
+                        // Use separate variable to avoid borrow issues
+                        let opt_init = &hir_signal.initial_value;
+                        if is_fp_module {
+                            println!("[BUG #207 PRE-IF] Module '{}' Signal '{}'", module.name, hir_signal.name);
+                        }
+                        if let Some(init_expr) = opt_init {
+                            if is_fp_module {
+                                // Debug: print expression type
+                                println!(
+                                    "[BUG #207 ENTRY] Module '{}' Signal '{}' is_literal: {}",
+                                    module.name,
+                                    hir_signal.name,
+                                    matches!(init_expr, hir::HirExpression::Literal(_))
+                                );
+                            }
+                            // Only generate assignment if it's NOT a literal (literals are handled above)
+                            let is_literal = matches!(init_expr, hir::HirExpression::Literal(_));
+                            if is_fp_module {
+                                println!(
+                                    "[BUG #207 NOT-LIT] Module '{}' Signal '{}' is_literal={}, entering non-literal block: {}",
+                                    module.name, hir_signal.name, is_literal, !is_literal
+                                );
+                            }
+                            if !is_literal {
+                                if is_fp_module {
+                                    println!(
+                                        "[BUG #207 CONVERT] Module '{}' Signal '{}' about to call convert_expression",
+                                        module.name, hir_signal.name
+                                    );
+                                }
                                 // Convert the expression
-                                if let Some(rhs) = self.convert_expression(init_expr, 0) {
+                                let convert_result = self.convert_expression(init_expr, 0);
+                                if is_fp_module {
+                                    println!(
+                                        "[BUG #207 RESULT] Module '{}' Signal '{}' convert_expression returned: {}",
+                                        module.name, hir_signal.name, if convert_result.is_some() { "Some" } else { "None" }
+                                    );
+                                }
+                                if let Some(rhs) = convert_result {
                                     // Get the first MIR signal ID for this HIR signal
                                     if let Some(&mir_signal_id) =
                                         self.signal_map.get(&hir_signal.id)
@@ -854,6 +888,50 @@ impl<'hir> HirToMir<'hir> {
                                             "[HIR→MIR] Created ContinuousAssign for impl signal '{}' -> SignalId({:?})",
                                             hir_signal.name, mir_signal_id
                                         );
+                                    }
+                                } else {
+                                    // BUG #207: Signal initializer conversion FAILED
+                                    eprintln!(
+                                        "⚠️ [BUG #207] SIGNAL INITIALIZER FAILED: Signal '{}' init_expr conversion returned None!",
+                                        hir_signal.name
+                                    );
+                                    eprintln!(
+                                        "⚠️ [BUG #207]   Expression type: {:?}",
+                                        std::mem::discriminant(init_expr)
+                                    );
+                                    // Print more details based on expression type
+                                    match init_expr {
+                                        hir::HirExpression::Index(base, idx) => {
+                                            eprintln!(
+                                                "⚠️ [BUG #207]   Index: base={:?}, idx={:?}",
+                                                std::mem::discriminant(&**base),
+                                                std::mem::discriminant(&**idx)
+                                            );
+                                        }
+                                        hir::HirExpression::Range(base, hi, lo) => {
+                                            eprintln!(
+                                                "⚠️ [BUG #207]   Range: base={:?}, hi={:?}, lo={:?}",
+                                                std::mem::discriminant(&**base),
+                                                std::mem::discriminant(&**hi),
+                                                std::mem::discriminant(&**lo)
+                                            );
+                                        }
+                                        hir::HirExpression::Cast(cast) => {
+                                            eprintln!(
+                                                "⚠️ [BUG #207]   Cast: inner={:?}, target={:?}",
+                                                std::mem::discriminant(&*cast.expr),
+                                                cast.target_type
+                                            );
+                                        }
+                                        hir::HirExpression::Binary(bin) => {
+                                            eprintln!(
+                                                "⚠️ [BUG #207]   Binary: op={:?}, left={:?}, right={:?}",
+                                                bin.op,
+                                                std::mem::discriminant(&*bin.left),
+                                                std::mem::discriminant(&*bin.right)
+                                            );
+                                        }
+                                        _ => {}
                                     }
                                 }
                             }
@@ -1685,9 +1763,75 @@ impl<'hir> HirToMir<'hir> {
                             hir.entities.len(),
                             hir.entities.iter().map(|e| &e.name).collect::<Vec<_>>()
                         );
-                        if let Some(entity) =
-                            hir.entities.iter().find(|e| e.name == struct_lit.type_name)
-                        {
+
+                        // BUG #207 FIX: When struct_lit has generic_args, construct the specialized entity name
+                        // For example, FpAdd<IEEE754_32>{...} should look for "FpAdd_fp32" entity
+                        let target_entity_name = if !struct_lit.generic_args.is_empty() {
+                            eprintln!(
+                                "[BUG #207 DEBUG] struct_lit '{}' has {} generic_args",
+                                struct_lit.type_name,
+                                struct_lit.generic_args.len()
+                            );
+                            // Evaluate generic_args to construct specialized name
+                            let mut name_parts = vec![struct_lit.type_name.clone()];
+                            for arg_expr in &struct_lit.generic_args {
+                                eprintln!(
+                                    "[BUG #207 DEBUG]   generic_arg: {:?}",
+                                    arg_expr
+                                );
+                                match self.const_evaluator.eval(arg_expr) {
+                                    Ok(const_val) => {
+                                        eprintln!(
+                                            "[BUG #207 DEBUG]     eval OK: {:?}",
+                                            const_val
+                                        );
+                                        let suffix = match &const_val {
+                                            ConstValue::Nat(n) => n.to_string(),
+                                            ConstValue::Int(i) => {
+                                                if *i >= 0 {
+                                                    i.to_string()
+                                                } else {
+                                                    format!("n{}", i.abs())
+                                                }
+                                            }
+                                            ConstValue::Bool(b) => {
+                                                if *b { "true" } else { "false" }.to_string()
+                                            }
+                                            ConstValue::String(s) => s.replace([' ', '-'], "_"),
+                                            ConstValue::Float(f) => format!("f{}", f.to_bits()),
+                                            ConstValue::FloatFormat(fmt) => {
+                                                format!("fp{}", fmt.total_bits)
+                                            }
+                                            ConstValue::Struct(_) => "struct".to_string(),
+                                        };
+                                        name_parts.push(suffix);
+                                    }
+                                    Err(e) => {
+                                        eprintln!(
+                                            "[BUG #207 DEBUG]     eval FAILED: {:?}",
+                                            e
+                                        );
+                                    }
+                                }
+                            }
+                            name_parts.join("_")
+                        } else {
+                            struct_lit.type_name.clone()
+                        };
+
+                        // BUG #207 FIX: Look for specialized entity first, then fall back to generic
+                        let entity = hir
+                            .entities
+                            .iter()
+                            .find(|e| e.name == target_entity_name)
+                            .or_else(|| {
+                                // Fall back to generic entity name if specialized not found
+                                hir.entities
+                                    .iter()
+                                    .find(|e| e.name == struct_lit.type_name)
+                            });
+
+                        if let Some(entity) = entity {
                             println!(
                                 "[HIERARCHICAL] Detected entity instantiation: let {} = {} {{ ... }}",
                                 let_stmt.name, struct_lit.type_name
@@ -3723,7 +3867,51 @@ impl<'hir> HirToMir<'hir> {
         {
             // Check if this type_name matches an entity
             if let Some(hir) = self.hir.as_ref() {
-                if let Some(entity) = hir.entities.iter().find(|e| e.name == struct_lit.type_name) {
+                // BUG #207 FIX: When struct_lit has generic_args, construct the specialized entity name
+                // For example, FpAdd<IEEE754_32>{...} should look for "FpAdd_fp32" entity
+                let target_entity_name = if !struct_lit.generic_args.is_empty() {
+                    // Evaluate generic_args to construct specialized name
+                    let mut name_parts = vec![struct_lit.type_name.clone()];
+                    for arg_expr in &struct_lit.generic_args {
+                        if let Ok(const_val) = self.const_evaluator.eval(arg_expr) {
+                            let suffix = match &const_val {
+                                ConstValue::Nat(n) => n.to_string(),
+                                ConstValue::Int(i) => {
+                                    if *i >= 0 {
+                                        i.to_string()
+                                    } else {
+                                        format!("n{}", i.abs())
+                                    }
+                                }
+                                ConstValue::Bool(b) => {
+                                    if *b { "true" } else { "false" }.to_string()
+                                }
+                                ConstValue::String(s) => s.replace([' ', '-'], "_"),
+                                ConstValue::Float(f) => format!("f{}", f.to_bits()),
+                                ConstValue::FloatFormat(fmt) => format!("fp{}", fmt.total_bits),
+                                ConstValue::Struct(_) => "struct".to_string(),
+                            };
+                            name_parts.push(suffix);
+                        }
+                    }
+                    name_parts.join("_")
+                } else {
+                    struct_lit.type_name.clone()
+                };
+
+                // BUG #207 FIX: Look for specialized entity first, then fall back to generic
+                let entity = hir
+                    .entities
+                    .iter()
+                    .find(|e| e.name == target_entity_name)
+                    .or_else(|| {
+                        // Fall back to generic entity name if specialized not found
+                        hir.entities
+                            .iter()
+                            .find(|e| e.name == struct_lit.type_name)
+                    });
+
+                if let Some(entity) = entity {
                     // Get the module ID for this entity
                     if let Some(&module_id) = self.entity_map.get(&entity.id) {
                         // Get the variable name from dynamic_variables or create one
@@ -5406,7 +5594,57 @@ impl<'hir> HirToMir<'hir> {
                 // Entity instances in trait method bodies are converted to Call expressions
                 // We need to instantiate the entity and return a reference to its output
                 if let Some(hir) = self.hir {
-                    if let Some(entity) = hir.entities.iter().find(|e| e.name == call.function) {
+                    // BUG #207 FIX: When call has type_args, construct the specialized entity name
+                    // For example, FpAdd::<IEEE754_32>(...) should look for "FpAdd_fp32" entity
+                    let target_entity_name = if !call.type_args.is_empty() {
+                        // Evaluate type_args to construct specialized name
+                        let mut name_parts = vec![call.function.clone()];
+                        for type_arg in &call.type_args {
+                            let suffix = match type_arg {
+                                hir::HirType::Custom(name) => name.clone(),
+                                hir::HirType::Bit(width) => format!("bit{}", width),
+                                hir::HirType::Float32 => "fp32".to_string(),
+                                hir::HirType::Float64 => "fp64".to_string(),
+                                hir::HirType::Float16 => "fp16".to_string(),
+                                _ => format!("{:?}", type_arg),
+                            };
+                            name_parts.push(suffix);
+                        }
+                        name_parts.join("_")
+                    } else if !call.named_type_args.is_empty() {
+                        // Check named type args for FloatFormat constants
+                        let mut name_parts = vec![call.function.clone()];
+                        for (_key, type_val) in &call.named_type_args {
+                            // Try to evaluate as FloatFormat constant
+                            if let hir::HirType::Custom(name) = type_val {
+                                // Check for well-known format names
+                                if name == "IEEE754_32" || name == "fp32" || name == "Float32" {
+                                    name_parts.push("fp32".to_string());
+                                } else if name == "IEEE754_64" || name == "fp64" || name == "Float64" {
+                                    name_parts.push("fp64".to_string());
+                                } else if name == "IEEE754_16" || name == "fp16" || name == "Float16" {
+                                    name_parts.push("fp16".to_string());
+                                } else {
+                                    name_parts.push(name.clone());
+                                }
+                            }
+                        }
+                        name_parts.join("_")
+                    } else {
+                        call.function.clone()
+                    };
+
+                    // BUG #207 FIX: Look for specialized entity first, then fall back to generic
+                    let entity = hir
+                        .entities
+                        .iter()
+                        .find(|e| e.name == target_entity_name)
+                        .or_else(|| {
+                            // Fall back to generic entity name if specialized not found
+                            hir.entities.iter().find(|e| e.name == call.function)
+                        });
+
+                    if let Some(entity) = entity {
                         // Look up the module ID for this entity
                         if let Some(&module_id) = self.entity_map.get(&entity.id) {
                             // Convert arguments to MIR expressions

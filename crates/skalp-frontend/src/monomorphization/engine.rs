@@ -322,21 +322,63 @@ impl<'hir> MonomorphizationEngine<'hir> {
         }
 
         for impl_block in &mut new_implementations {
+            // BUG #207 DEBUG: Find which impl this is
+            let impl_entity_name = all_entities_map
+                .get(&impl_block.entity)
+                .map(|e| e.name.as_str())
+                .unwrap_or("unknown");
+
             for instance in &mut impl_block.instances {
                 // Check if this instance uses a generic entity
                 // Look in both original and specialized entities
                 if let Some(entity) = all_entities_map.get(&instance.entity) {
+                    // BUG #207 DEBUG
+                    if instance.name == "adder" {
+                        eprintln!(
+                            "[BUG #207 INSTANCE_UPDATE] impl for '{}': instance '{}' entity='{}' (id={:?}) generics={} generic_args={}",
+                            impl_entity_name,
+                            instance.name,
+                            entity.name,
+                            instance.entity,
+                            entity.generics.len(),
+                            instance.generic_args.len()
+                        );
+                    }
+
                     if !entity.generics.is_empty() && !instance.generic_args.is_empty() {
                         // This is a generic instantiation - find the specialized entity
                         if let Some(instantiation) =
                             self.find_matching_instantiation(entity, instance, &instantiations)
                         {
+                            // BUG #207 DEBUG
+                            if instance.name == "adder" {
+                                eprintln!(
+                                    "[BUG #207 INSTANCE_UPDATE] Found instantiation for 'adder': {:?}",
+                                    instantiation.mangled_name()
+                                );
+                            }
+
                             if let Some(&specialized_id) = specialization_map.get(instantiation) {
+                                // BUG #207 DEBUG
+                                if instance.name == "adder" {
+                                    eprintln!(
+                                        "[BUG #207 INSTANCE_UPDATE] Updating 'adder' entity {:?} -> {:?}",
+                                        instance.entity, specialized_id
+                                    );
+                                }
                                 // Update instance to reference specialized entity
                                 instance.entity = specialized_id;
                                 // Clear generic args since specialized entity doesn't have generics
                                 instance.generic_args.clear();
+                            } else if instance.name == "adder" {
+                                eprintln!(
+                                    "[BUG #207 INSTANCE_UPDATE] No specialized_id for 'adder' instantiation!"
+                                );
                             }
+                        } else if instance.name == "adder" {
+                            eprintln!(
+                                "[BUG #207 INSTANCE_UPDATE] No matching instantiation found for 'adder'"
+                            );
                         }
                     }
                 }
