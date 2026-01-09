@@ -249,6 +249,13 @@ pub struct HirToMir<'hir> {
     /// to resolve Variable references to Signal references for entity struct literal fields.
     /// Without this, entity connections reference Variables that don't exist in the module.
     current_module_var_to_signal: Option<HashMap<hir::VariableId, SignalId>>,
+
+    /// BUG #205 FIX: Current module synthesis context's param_to_port mapping
+    /// This is set when synthesizing a function as a module and is used by convert_expression
+    /// to resolve GenericParam references to Port references for entity struct literal fields.
+    /// Without this, entity connections with GenericParam references resolve to 0 instead of
+    /// the correct input port.
+    current_module_param_to_port: Option<HashMap<String, PortId>>,
 }
 
 /// Context for converting HIR expressions within a synthesized module
@@ -355,6 +362,7 @@ impl<'hir> HirToMir<'hir> {
             placeholder_signal_to_entity_output: HashMap::new(),
             placeholder_hir_signal_to_entity_output: HashMap::new(),
             current_module_var_to_signal: None, // BUG #200 FIX
+            current_module_param_to_port: None, // BUG #205 FIX
         }
     }
 
@@ -5117,6 +5125,23 @@ impl<'hir> HirToMir<'hir> {
                 // MIR expressions for the arguments that need to be substituted.
                 if let Some(mir_expr) = self.pending_mir_param_subs.get(param_name) {
                     return Some(mir_expr.clone());
+                }
+
+                // BUG #205 FIX: Check current_module_param_to_port for module synthesis context
+                // When processing entity struct literal fields during module synthesis,
+                // GenericParam references need to resolve to the module's input ports.
+                // This is critical for entity connections like `FpMul { a: b, b: b }` where
+                // 'b' is a function parameter that should map to an input port.
+                if let Some(ref param_to_port) = self.current_module_param_to_port {
+                    if let Some(&port_id) = param_to_port.get(param_name) {
+                        println!(
+                            "[BUG #205 FIX] GenericParam '{}' resolved to Port({}) via current_module_param_to_port",
+                            param_name, port_id.0
+                        );
+                        return Some(Expression::with_unknown_type(ExpressionKind::Ref(
+                            LValue::Port(port_id),
+                        )));
+                    }
                 }
 
                 // BUG FIX #7: WORKAROUND for Bug #42/43 - Cast expressions create malformed AST
@@ -18378,6 +18403,44 @@ impl<'hir> HirToMir<'hir> {
             func.name
         );
 
+        // BUG #204 FIX: Save and restore current_module_var_to_signal for nested module synthesis
+        // When synthesizing nested modules (e.g., exec_l4_l5 -> quadratic_solve -> fp_sqrt),
+        // each module synthesis overwrites current_module_var_to_signal with its own mappings.
+        // Without save/restore, when we return to the parent module synthesis, the mapping
+        // is lost (set to None by the child), causing Variable references to be incorrectly
+        // resolved to signals from the wrong context.
+        let saved_var_to_signal = self.current_module_var_to_signal.take();
+        println!(
+            "[BUG #204 FIX] Saved current_module_var_to_signal for module '{}' (had {} entries)",
+            func.name,
+            saved_var_to_signal.as_ref().map(|m| m.len()).unwrap_or(0)
+        );
+
+        // BUG #205 FIX: Also save and restore current_module_param_to_port for nested module synthesis
+        // Similar to BUG #204, but for parameter->port mappings used by GenericParam resolution.
+        let saved_param_to_port = self.current_module_param_to_port.take();
+        println!(
+            "[BUG #205 FIX] Saved current_module_param_to_port for module '{}' (had {} entries)",
+            func.name,
+            saved_param_to_port.as_ref().map(|m| m.len()).unwrap_or(0)
+        );
+
+        // BUG #206 FIX: Save and clear pending_mir_param_subs for module synthesis boundary
+        // Without this, stale values from previous function inlining pollute the module context.
+        // When convert_expression encounters GenericParam("a"), it checks pending_mir_param_subs
+        // BEFORE current_module_param_to_port (BUG #205). If "a" exists in pending_mir_param_subs
+        // from a previous inline context (e.g., mapping to Signal(1137)), it will be returned
+        // instead of the correct module input port.
+        let saved_mir_param_subs =
+            std::mem::replace(&mut self.pending_mir_param_subs, HashMap::new());
+        let saved_param_var_to_name =
+            std::mem::replace(&mut self.pending_param_var_to_name, HashMap::new());
+        println!(
+            "[BUG #206 FIX] Saved and cleared pending_mir_param_subs for module '{}' (had {} entries)",
+            func.name,
+            saved_mir_param_subs.len()
+        );
+
         // Save the current pending instance count - we'll only drain instances added AFTER this point
         // This is critical for nested module synthesis (e.g., exec_l4_l5 -> quadratic_solve)
         let pending_start_idx = self.pending_module_instances.len();
@@ -18753,6 +18816,17 @@ impl<'hir> HirToMir<'hir> {
             ctx.var_to_signal.len()
         );
 
+        // BUG #205 FIX: Also store the param_to_port mapping so that convert_expression can resolve
+        // GenericParam references to Port references for entity struct literal fields.
+        // Without this, entity connections with GenericParam references resolve to 0 instead of
+        // the correct input port.
+        self.current_module_param_to_port = Some(ctx.param_to_port.clone());
+        println!(
+            "    🔧 BUG #205 FIX: Set current_module_param_to_port with {} entries: {:?}",
+            ctx.param_to_port.len(),
+            ctx.param_to_port.keys().collect::<Vec<_>>()
+        );
+
         // Phase 3b: Convert let binding expressions to continuous assignments
         eprintln!(
             "  🔧 Phase 3b: Converting {} let bindings to assignments",
@@ -19093,8 +19167,35 @@ impl<'hir> HirToMir<'hir> {
             "  ✓ Module stored in synthesized_modules (will be added to MIR at end of transform)"
         );
 
-        // BUG #200 FIX: Clear the var_to_signal mapping as we're exiting module synthesis
-        self.current_module_var_to_signal = None;
+        // BUG #204 FIX: Restore the var_to_signal mapping from parent module synthesis
+        // This ensures that when we return to processing the parent module's entity instances,
+        // the correct variable->signal mapping is available.
+        self.current_module_var_to_signal = saved_var_to_signal;
+        println!(
+            "[BUG #204 FIX] Restored current_module_var_to_signal for parent (now {} entries)",
+            self.current_module_var_to_signal
+                .as_ref()
+                .map(|m| m.len())
+                .unwrap_or(0)
+        );
+
+        // BUG #205 FIX: Also restore the param_to_port mapping from parent module synthesis
+        self.current_module_param_to_port = saved_param_to_port;
+        println!(
+            "[BUG #205 FIX] Restored current_module_param_to_port for parent (now {} entries)",
+            self.current_module_param_to_port
+                .as_ref()
+                .map(|m| m.len())
+                .unwrap_or(0)
+        );
+
+        // BUG #206 FIX: Restore pending_mir_param_subs for parent inlining context
+        self.pending_mir_param_subs = saved_mir_param_subs;
+        self.pending_param_var_to_name = saved_param_var_to_name;
+        println!(
+            "[BUG #206 FIX] Restored pending_mir_param_subs for parent (now {} entries)",
+            self.pending_mir_param_subs.len()
+        );
 
         module_id
     }
