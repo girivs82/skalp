@@ -18366,6 +18366,18 @@ impl<'hir> HirToMir<'hir> {
             func.name, MAX_INLINE_CALL_COUNT
         );
 
+        // BUG #203 FIX: Clear placeholder maps when starting a new module synthesis
+        // Each module has its own scope of VariableIds. Without clearing, VariableId(30)
+        // from a previous module (e.g., comparator output with type Bit(1)) contaminates
+        // a new module where VariableId(30) should map to Float32.
+        // We don't need to merge back because each module is independent.
+        self.placeholder_signal_to_entity_output.clear();
+        self.placeholder_hir_signal_to_entity_output.clear();
+        println!(
+            "[BUG #203 FIX] Cleared placeholder maps for module '{}'",
+            func.name
+        );
+
         // Save the current pending instance count - we'll only drain instances added AFTER this point
         // This is critical for nested module synthesis (e.g., exec_l4_l5 -> quadratic_solve)
         let pending_start_idx = self.pending_module_instances.len();
