@@ -348,7 +348,7 @@ impl SynthEngine {
     fn optimize_auto(&mut self, netlist: &GateNetlist, library: &TechLibrary) -> SynthResult {
         let start = Instant::now();
 
-        eprintln!("[AUTO] Running multiple optimization strategies in parallel...");
+        // DEBUG: eprintln!("[AUTO] Running multiple optimization strategies in parallel...");
 
         // Presets to try in parallel
         let presets = [SynthPreset::Resyn2, SynthPreset::Compress2];

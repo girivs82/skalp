@@ -135,6 +135,22 @@ pub struct Module {
     /// Each barrier defines a point where all signals must transition through NULL
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub barriers: Vec<BarrierStage>,
+    /// NCL boundary mode override
+    /// Controls whether NCL encode/decode is added at module boundaries
+    /// None = automatic detection (approach 3: sibling asyncs get boundaries)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ncl_boundary_mode: Option<NclBoundaryMode>,
+}
+
+/// NCL boundary mode for controlling where NCL encode/decode is inserted
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum NclBoundaryMode {
+    /// Force NCL boundary at this module's I/O (even if parent is async)
+    /// Use when this module is a separate async domain needing handshaking
+    ForceBoundary,
+    /// Force coalescing with parent (no NCL boundary, even if would normally have one)
+    /// Use for internal implementation modules that don't need separate handshaking
+    ForceCoalesce,
 }
 
 /// NCL barrier stage for completion detection
@@ -1299,6 +1315,7 @@ impl Module {
             safety_context: None,
             is_async: false,
             barriers: Vec::new(),
+            ncl_boundary_mode: None,
         }
     }
 }

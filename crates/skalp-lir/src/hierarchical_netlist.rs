@@ -219,12 +219,11 @@ impl HierarchicalNetlist {
         //     eprintln!("[FLATTEN] Removed {} dead cells after stitching", removed);
         // }
 
-        // Phase 5: Post-flatten buffer removal for NCL circuits
+        // Phase 5: Post-flatten buffer removal
         // Buffer removal reduces cell count by removing unnecessary BUF cells created
-        // during RangeSelect/Concat operations. The optimizer now properly transfers
-        // meaningful net names from removed buffer outputs to their inputs, ensuring
-        // NCL simulation can still look up values by their original names.
-        if result.is_ncl {
+        // during RangeSelect/Concat operations. The optimizer properly transfers
+        // meaningful net names from removed buffer outputs to their inputs.
+        {
             use crate::gate_optimizer::GateOptimizer;
             let cells_before = result.cells.len();
             let mut optimizer = GateOptimizer::new();
@@ -236,7 +235,7 @@ impl HierarchicalNetlist {
             let opt_stats = optimizer.optimize(&mut result);
             if opt_stats.cells_removed > 0 {
                 eprintln!(
-                    "[FLATTEN] Post-flatten NCL buffer removal: {} cells removed ({} → {})",
+                    "[FLATTEN] Post-flatten buffer removal: {} cells removed ({} → {})",
                     opt_stats.cells_removed,
                     cells_before,
                     result.cells.len()

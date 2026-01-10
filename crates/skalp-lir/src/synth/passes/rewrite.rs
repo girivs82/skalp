@@ -339,7 +339,7 @@ fn rebuild_aig_topological(aig: &mut Aig) {
         let node = match aig.get_node(id) {
             Some(n) => n,
             None => {
-                eprintln!("[REBUILD] Skipping non-existent node {:?}", id);
+                // DEBUG: eprintln!("[REBUILD] Skipping non-existent node {:?}", id);
                 continue;
             }
         };
@@ -817,17 +817,17 @@ impl Pass for Rewrite {
 
         // Apply all substitutions to update the AIG
         if !subst_map.is_empty() {
-            eprintln!("[REWRITE] Applying {} substitutions:", subst_map.len());
-            for (old, new) in &subst_map {
-                eprintln!("  {:?} -> {:?}", old, new);
-            }
+            // DEBUG: eprintln!("[REWRITE] Applying {} substitutions:", subst_map.len());
+            // DEBUG: for (old, new) in &subst_map {
+            //     eprintln!("  {:?} -> {:?}", old, new);
+            // }
 
             // Debug: check latch data BEFORE apply_substitutions
             for (id, node) in aig.iter_nodes() {
                 if let AigNode::Latch { data, .. } = node {
                     let exists = aig.get_node(data.node).is_some();
                     if !exists {
-                        eprintln!("[REWRITE PRE-BUG] Latch {:?} BEFORE subst already references non-existent data {:?}", id, data.node);
+                        // DEBUG: eprintln!("[REWRITE PRE-BUG] Latch {:?} BEFORE subst already references non-existent data {:?}", id, data.node);
                     }
                 }
             }
@@ -851,7 +851,7 @@ impl Pass for Rewrite {
                         // Check if any substitution points to this node
                         for (old, new) in &subst_map {
                             if new.node == data.node {
-                                eprintln!("[REWRITE BUG]   Substitution {:?} -> {:?} points to missing node", old, new);
+                                // DEBUG: eprintln!("[REWRITE BUG]   Substitution {:?} -> {:?} points to missing node", old, new);
                             }
                         }
                     }
@@ -866,7 +866,7 @@ impl Pass for Rewrite {
                 if let AigNode::Latch { data, .. } = node {
                     let exists = aig.get_node(data.node).is_some();
                     if !exists {
-                        eprintln!("[REWRITE POST-REBUILD BUG] Latch {:?} STILL references non-existent data {:?}", id, data.node);
+                        // DEBUG: eprintln!("[REWRITE POST-REBUILD BUG] Latch {:?} STILL references non-existent data {:?}", id, data.node);
                     }
                 }
             }

@@ -123,6 +123,11 @@ enum Commands {
         #[arg(long)]
         no_synth_opt: bool,
 
+        /// Disable async timing analysis for NCL circuits
+        /// Useful for faster builds when STA is not needed
+        #[arg(long)]
+        no_async_sta: bool,
+
         /// Custom pass sequence (comma-separated: strash,rewrite,balance,refactor,map)
         #[arg(long, value_name = "PASSES")]
         passes: Option<String>,
@@ -496,6 +501,7 @@ fn main() -> Result<()> {
             workproduct_formats,
             optimize,
             no_synth_opt,
+            no_async_sta,
             passes,
             ml_guided,
             ml_policy,
@@ -536,6 +542,7 @@ fn main() -> Result<()> {
                 safety_options,
                 optimization_options,
                 library.as_ref(),
+                no_async_sta,
             )?;
         }
 
@@ -788,6 +795,7 @@ fn build_design(
     safety_options: Option<SafetyBuildOptions>,
     optimization_options: OptimizationOptions,
     library_path: Option<&PathBuf>,
+    skip_async_sta: bool,
 ) -> Result<()> {
     use skalp_codegen::systemverilog::{
         generate_constraints_toml, generate_systemverilog_from_mir,
@@ -1067,7 +1075,7 @@ fn build_design(
             };
 
             // Run async STA for NCL circuits (detected by tech_mapper via is_ncl flag)
-            if optimized_netlist.is_ncl {
+            if optimized_netlist.is_ncl && !skip_async_sta {
                 info!("Running async timing analysis for NCL circuit...");
                 let sta_config = skalp_lir::AsyncStaConfig::default();
                 let sta_result = skalp_lir::analyze_async_timing(

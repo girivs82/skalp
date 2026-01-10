@@ -1776,6 +1776,9 @@ pub struct InstanceLirResult {
     pub children: Vec<String>,
     /// Whether this module is async (needs NCL)
     pub is_async: bool,
+    /// NCL boundary mode override (from module attribute)
+    /// None = automatic detection (sibling asyncs get boundaries, parent-child coalesce)
+    pub ncl_boundary_mode: Option<skalp_mir::NclBoundaryMode>,
 }
 
 /// Information about a port connection
@@ -2219,13 +2222,6 @@ pub fn lower_mir_hierarchical_for_optimize_first(mir: &Mir) -> (HierarchicalMirT
         }
     }
 
-    // Find top module - prefer user modules (non-stdlib names)
-    let top_candidates: Vec<_> = mir
-        .modules
-        .iter()
-        .filter(|m| modules_with_instances.contains(&m.id) && !instantiated_modules.contains(&m.id))
-        .collect();
-
     // Helper to check if a module name looks like a stdlib module
     fn is_stdlib_name_opt(name: &str) -> bool {
         let stdlib_prefixes = [
@@ -2247,44 +2243,83 @@ pub fn lower_mir_hierarchical_for_optimize_first(mir: &Mir) -> (HierarchicalMirT
             .any(|prefix| name.starts_with(prefix))
     }
 
-    let top_module = if !top_candidates.is_empty() {
-        // First try: prefer user modules (non-stdlib names)
-        let user_candidates: Vec<_> = top_candidates
-            .iter()
-            .filter(|m| !is_stdlib_name_opt(&m.name))
-            .copied()
-            .collect();
+    // Find top module - a module that is NOT instantiated by any other module
+    // Priority:
+    // 1. User modules (non-stdlib) that are not instantiated
+    // 2. Among those, prefer modules with more instances (has children)
+    // 3. If no user modules found, fall back to any non-instantiated module
 
-        if !user_candidates.is_empty() {
-            user_candidates
-                .into_iter()
-                .max_by_key(|m| {
-                    let unique_types: std::collections::HashSet<_> =
-                        m.instances.iter().map(|i| i.module).collect();
-                    unique_types.len()
-                })
-                .unwrap()
-        } else {
-            top_candidates
-                .into_iter()
-                .max_by_key(|m| {
-                    let unique_types: std::collections::HashSet<_> =
-                        m.instances.iter().map(|i| i.module).collect();
-                    unique_types.len()
-                })
-                .unwrap()
-        }
-    } else {
-        mir.modules
-            .iter()
-            .filter(|m| !instantiated_modules.contains(&m.id))
+    // All modules that are not instantiated by anyone (potential top modules)
+    let not_instantiated: Vec<_> = mir
+        .modules
+        .iter()
+        .filter(|m| !instantiated_modules.contains(&m.id))
+        .collect();
+
+    // First priority: user modules (non-stdlib names) that are not instantiated
+    let user_candidates: Vec<_> = not_instantiated
+        .iter()
+        .filter(|m| !is_stdlib_name_opt(&m.name))
+        .copied()
+        .collect();
+
+    // Helper to check if a module has actual content (not just a generic shell)
+    fn has_content(m: &Module) -> bool {
+        !m.instances.is_empty()
+            || !m.signals.is_empty()
+            || !m.processes.is_empty()
+            || !m.assignments.is_empty()
+    }
+
+    // Find valid top module: user module with content that's not instantiated
+    let user_with_content: Vec<_> = user_candidates
+        .iter()
+        .filter(|m| has_content(m))
+        .copied()
+        .collect();
+
+    let top_module = if !user_with_content.is_empty() {
+        // Pick user module with content, preferring more instances
+        user_with_content
+            .into_iter()
             .max_by_key(|m| {
                 let unique_types: std::collections::HashSet<_> =
                     m.instances.iter().map(|i| i.module).collect();
-                unique_types.len()
+                (unique_types.len(), m.id.0)
             })
-            .unwrap_or(&mir.modules[0])
+            .unwrap()
+    } else {
+        // No valid user module found - check if there are user modules without content
+        let empty_user_modules: Vec<_> = user_candidates
+            .iter()
+            .filter(|m| !has_content(m))
+            .map(|m| m.name.as_str())
+            .collect();
+
+        if !empty_user_modules.is_empty() {
+            panic!(
+                "Top module detection failed: Found user module(s) {:?} but they have no content. \
+                 This usually happens when an entity has generic parameters (like clock domains) \
+                 but is never instantiated. Either:\n\
+                 1. Remove generic parameters from the top-level entity, or\n\
+                 2. Create a wrapper entity that instantiates it with concrete types.",
+                empty_user_modules
+            );
+        } else {
+            panic!(
+                "Top module detection failed: No valid user module found. \
+                 Only stdlib modules are present in the design. \
+                 Ensure your source file defines a synthesizable entity."
+            );
+        }
     };
+
+    eprintln!(
+        "[TOP_DETECT] Selected '{}' as top module (has {} instances, is_async={})",
+        top_module.name,
+        top_module.instances.len(),
+        top_module.is_async
+    );
 
     let mut result = HierarchicalMirToLirResult {
         instances: HashMap::new(),
@@ -2389,6 +2424,7 @@ fn elaborate_instance_for_optimize_first(
             port_connections: parent_connections.clone(),
             children,
             is_async: module.is_async,
+            ncl_boundary_mode: module.ncl_boundary_mode,
         },
     );
 }
@@ -2497,6 +2533,7 @@ fn elaborate_instance(
             port_connections: parent_connections.clone(),
             children,
             is_async: effective_is_async,
+            ncl_boundary_mode: module.ncl_boundary_mode,
         },
     );
 }

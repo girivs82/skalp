@@ -38,10 +38,10 @@ pub use mir::{
     DataType, EdgeSensitivity, EdgeType, EnumType, EnumVariant, Expression, ExpressionKind,
     GenerateBlock, GenerateBlockId, GenerateBlockKind, GenerateBody, GenerateCase, GenerateCaseArm,
     GenerateFor, GenerateIf, GenericParameter, GenericParameterType, IfStatement, LValue,
-    LoopStatement, Mir, Module, ModuleId, ModuleInstance, MuxTree, ParallelCase, ParallelMux, Port,
-    PortDirection, PortId, PriorityMux, Process, ProcessId, ProcessKind, ReduceOp, SafetyContext,
-    SensitivityList, Signal, SignalId, Statement, StructField, StructType, UnaryOp, UnionType,
-    Value, Variable, VariableId,
+    LoopStatement, Mir, Module, ModuleId, ModuleInstance, MuxTree, NclBoundaryMode, ParallelCase,
+    ParallelMux, Port, PortDirection, PortId, PriorityMux, Process, ProcessId, ProcessKind,
+    ReduceOp, SafetyContext, SensitivityList, Signal, SignalId, Statement, StructField, StructType,
+    UnaryOp, UnionType, Value, Variable, VariableId,
 };
 pub use mir_validation::{validate_mir, ValidationError};
 pub use monomorphize::Monomorphizer;

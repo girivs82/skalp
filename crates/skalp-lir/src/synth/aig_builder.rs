@@ -4,6 +4,9 @@
 //! like NAND2, XOR2, DFF, etc.) to the AIG (And-Inverter Graph) representation.
 
 use crate::gate_netlist::{Cell, CellId, GateNet, GateNetId, GateNetlist};
+
+/// Set to true to enable verbose AIG builder debug output
+const AIG_DEBUG: bool = false;
 use crate::tech_library::CellFunction;
 
 use super::aig::{Aig, AigLit, AigNodeId, AigSafetyInfo, BarrierType};
@@ -80,8 +83,10 @@ impl<'a> AigBuilder<'a> {
                     .and_then(|r| self.net_map[r.0 as usize])
                     .map(|l| l.node);
 
-                eprintln!("[AIG_BUILDER] Pre-creating latch for cell {} (type={}), clock={:?}, reset={:?}",
-                    cell.id.0, cell.cell_type, clock, reset);
+                if AIG_DEBUG {
+                    eprintln!("[AIG_BUILDER] Pre-creating latch for cell {} (type={}), clock={:?}, reset={:?}",
+                        cell.id.0, cell.cell_type, clock, reset);
+                }
 
                 // Create latch with false_lit as placeholder - will be updated later
                 let latch_id = self.aig.add_latch(AigLit::false_lit(), None, clock, reset);
@@ -89,18 +94,22 @@ impl<'a> AigBuilder<'a> {
 
                 // Map all output nets to this latch
                 for &output_net in &cell.outputs {
-                    let net_name = &self.netlist.nets[output_net.0 as usize].name;
-                    eprintln!(
-                        "[AIG_BUILDER]   Mapping output net {} ({}) to latch {:?}",
-                        output_net.0, net_name, latch_id
-                    );
+                    if AIG_DEBUG {
+                        let net_name = &self.netlist.nets[output_net.0 as usize].name;
+                        eprintln!(
+                            "[AIG_BUILDER]   Mapping output net {} ({}) to latch {:?}",
+                            output_net.0, net_name, latch_id
+                        );
+                    }
                     self.net_map[output_net.0 as usize] = Some(latch_lit);
                     self.aig.register_net(output_net, latch_lit);
                 }
                 latch_count += 1;
             }
         }
-        eprintln!("[AIG_BUILDER] Pre-created {} latches", latch_count);
+        if AIG_DEBUG {
+            eprintln!("[AIG_BUILDER] Pre-created {} latches", latch_count);
+        }
     }
 
     /// Create AIG inputs for primary inputs
@@ -218,21 +227,23 @@ impl<'a> AigBuilder<'a> {
         let function = self.parse_cell_function(&cell.cell_type);
 
         // Get net names for debugging
-        let input_net_names: Vec<_> = cell
-            .inputs
-            .iter()
-            .map(|&net_id| {
-                let net_name = &self.netlist.nets[net_id.0 as usize].name;
-                format!("{}({})", net_id.0, net_name)
-            })
-            .collect();
-        eprintln!(
-            "[AIG_BUILDER] Processing cell {} (type={}, fn={:?})",
-            cell.id.0, cell.cell_type, function
-        );
-        eprintln!("              input_nets={:?}", input_net_names);
-        eprintln!("              input_lits={:?}", inputs);
-        eprintln!("              outputs={:?}", cell.outputs);
+        if AIG_DEBUG {
+            let input_net_names: Vec<_> = cell
+                .inputs
+                .iter()
+                .map(|&net_id| {
+                    let net_name = &self.netlist.nets[net_id.0 as usize].name;
+                    format!("{}({})", net_id.0, net_name)
+                })
+                .collect();
+            eprintln!(
+                "[AIG_BUILDER] Processing cell {} (type={}, fn={:?})",
+                cell.id.0, cell.cell_type, function
+            );
+            eprintln!("              input_nets={:?}", input_net_names);
+            eprintln!("              input_lits={:?}", inputs);
+            eprintln!("              outputs={:?}", cell.outputs);
+        }
 
         // Build AIG for this cell
         let safety =
@@ -496,19 +507,23 @@ impl<'a> AigBuilder<'a> {
             // Here we just update their data input with the computed value
             CellFunction::Dff | CellFunction::DffR | CellFunction::DffE | CellFunction::DffRE => {
                 let d = inputs.first().copied().unwrap_or(AigLit::false_lit());
-                eprintln!(
-                    "[AIG_BUILDER] Processing DFF cell {}, d input = {:?}",
-                    cell.id.0, d
-                );
+                if AIG_DEBUG {
+                    eprintln!(
+                        "[AIG_BUILDER] Processing DFF cell {}, d input = {:?}",
+                        cell.id.0, d
+                    );
+                }
 
                 // Find the pre-created latch for this cell's output
                 if let Some(&output_net) = cell.outputs.first() {
                     if let Some(existing_lit) = self.net_map[output_net.0 as usize] {
                         // Update the latch with the real data input
-                        eprintln!(
-                            "[AIG_BUILDER]   Updating pre-created latch {:?} with d={:?}",
-                            existing_lit.node, d
-                        );
+                        if AIG_DEBUG {
+                            eprintln!(
+                                "[AIG_BUILDER]   Updating pre-created latch {:?} with d={:?}",
+                                existing_lit.node, d
+                            );
+                        }
                         self.aig.update_latch_data(existing_lit.node, d);
                         return; // Already mapped, don't create new one
                     }

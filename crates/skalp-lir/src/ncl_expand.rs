@@ -2375,25 +2375,70 @@ pub fn expand_to_ncl_boundary(lir: &Lir, config: &NclConfig) -> NclExpandResult 
     }
 }
 
-/// Apply boundary-only NCL to all async modules in a hierarchical LIR result.
+/// Apply boundary-only NCL to async modules in a hierarchical LIR result.
 ///
-/// This iterates over all instances and applies `expand_to_ncl_boundary` to
-/// async modules, keeping internal logic single-rail (optimizable) while
-/// adding NCL encode/decode at module boundaries.
+/// Uses approach 3 for NCL boundary detection:
+/// - Sibling async modules (same parent, connected) → NCL boundaries between them
+/// - Parent-child async modules (one contains the other) → coalesce, no internal NCL
+///
+/// The rule is: only add NCL boundary when parent is sync (or at top level).
+/// This way, async modules inside an async parent are coalesced together.
+///
+/// Respects override attributes:
+/// - `NclBoundaryMode::ForceBoundary` - always add NCL boundary
+/// - `NclBoundaryMode::ForceCoalesce` - never add NCL boundary (even if parent is sync)
 pub fn apply_boundary_ncl_to_hierarchy(
     hier_lir: &crate::HierarchicalMirToLirResult,
     config: &NclConfig,
 ) -> crate::HierarchicalMirToLirResult {
     use crate::{HierarchicalMirToLirResult, InstanceLirResult, MirToLirResult};
+    use skalp_mir::NclBoundaryMode;
+
+    // Build child -> parent reverse mapping
+    let mut child_to_parent: std::collections::HashMap<&str, &str> = std::collections::HashMap::new();
+    for (parent, children) in &hier_lir.hierarchy {
+        for child in children {
+            child_to_parent.insert(child.as_str(), parent.as_str());
+        }
+    }
+
+    // Helper: check if parent instance is async
+    let parent_is_async = |path: &str| -> bool {
+        if let Some(parent_path) = child_to_parent.get(path) {
+            if let Some(parent_inst) = hier_lir.instances.get(*parent_path) {
+                return parent_inst.is_async;
+            }
+        }
+        false // No parent or parent not found → treat as sync parent
+    };
 
     let mut new_instances = std::collections::HashMap::new();
 
     for (path, instance) in &hier_lir.instances {
-        if instance.is_async {
-            // Apply boundary NCL to async modules
+        // Determine if this instance needs NCL boundary
+        let needs_ncl_boundary = if let Some(mode) = instance.ncl_boundary_mode {
+            // Override specified - respect it
+            match mode {
+                NclBoundaryMode::ForceBoundary => {
+                    eprintln!("🔧 NCL override: '{}' forced to have boundary", path);
+                    true
+                }
+                NclBoundaryMode::ForceCoalesce => {
+                    eprintln!("🔧 NCL override: '{}' forced to coalesce (no boundary)", path);
+                    false
+                }
+            }
+        } else {
+            // Automatic detection (approach 3):
+            // NCL boundary only if: async AND parent is sync (or no parent)
+            instance.is_async && !parent_is_async(path)
+        };
+
+        if needs_ncl_boundary {
+            // Apply boundary NCL
             let ncl_result = expand_to_ncl_boundary(&instance.lir_result.lir, config);
             eprintln!(
-                "⚡ Boundary NCL for '{}': {} -> {} signals, {} -> {} nodes",
+                "⚡ NCL boundary for '{}': {} -> {} signals, {} -> {} nodes (parent is sync)",
                 path,
                 instance.lir_result.lir.signals.len(),
                 ncl_result.lir.signals.len(),
@@ -2417,10 +2462,17 @@ pub fn apply_boundary_ncl_to_hierarchy(
                     port_connections: instance.port_connections.clone(),
                     children: instance.children.clone(),
                     is_async: instance.is_async,
+                    ncl_boundary_mode: instance.ncl_boundary_mode,
                 },
             );
         } else {
-            // Keep non-async modules as-is
+            // Coalesce - keep as single-rail (no NCL boundary)
+            if instance.is_async {
+                eprintln!(
+                    "🔗 NCL coalesce '{}': keeping single-rail (parent is async)",
+                    path
+                );
+            }
             new_instances.insert(
                 path.clone(),
                 InstanceLirResult {
@@ -2435,6 +2487,7 @@ pub fn apply_boundary_ncl_to_hierarchy(
                     port_connections: instance.port_connections.clone(),
                     children: instance.children.clone(),
                     is_async: instance.is_async,
+                    ncl_boundary_mode: instance.ncl_boundary_mode,
                 },
             );
         }
