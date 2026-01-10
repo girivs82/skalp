@@ -1733,11 +1733,11 @@ pub fn lower_mir_module_to_word_lir(module: &Module) -> MirToLirResult {
 
 /// Lower MIR module to LIR without NCL expansion
 ///
-/// This is used by the optimize-first NCL synthesis flow where we want to:
+/// This is used by the boundary-only NCL synthesis flow where we want to:
 /// 1. Lower to single-rail LIR (no NCL expansion)
-/// 2. Tech map to single-rail gates
-/// 3. Optimize the Boolean logic
-/// 4. Convert to dual-rail NCL using convert_to_dual_rail()
+/// 2. Apply boundary-only NCL using expand_to_ncl_boundary()
+/// 3. Tech map to gates (internal logic stays single-rail)
+/// 4. Optimize the single-rail internal logic (AIG/ABC passes)
 ///
 /// This function ALWAYS skips NCL expansion, even for async modules.
 pub fn lower_mir_module_to_lir_skip_ncl(module: &Module) -> MirToLirResult {
@@ -1774,6 +1774,8 @@ pub struct InstanceLirResult {
     pub port_connections: HashMap<String, PortConnectionInfo>,
     /// Child instance paths
     pub children: Vec<String>,
+    /// Whether this module is async (needs NCL)
+    pub is_async: bool,
 }
 
 /// Information about a port connection
@@ -2386,6 +2388,7 @@ fn elaborate_instance_for_optimize_first(
             lir_result,
             port_connections: parent_connections.clone(),
             children,
+            is_async: module.is_async,
         },
     );
 }
@@ -2493,6 +2496,7 @@ fn elaborate_instance(
             lir_result,
             port_connections: parent_connections.clone(),
             children,
+            is_async: effective_is_async,
         },
     );
 }

@@ -2265,12 +2265,15 @@ pub fn expand_to_ncl_boundary(lir: &Lir, config: &NclConfig) -> NclExpandResult 
     }
 
     // Step 3: Create output signals (will be encoded to dual-rail later)
+    // Note: Use a different name for internal single-rail signal to avoid collision
+    // with the dual-rail output signals (which will be named <name>_t and <name>_f)
     for &orig_output_id in &lir.outputs {
         let orig_sig = &lir.signals[orig_output_id.0 as usize];
         // If output is also an input, it's already mapped
+        // Use _sr suffix (single-rail) to distinguish from _t/_f rails
         signal_map
             .entry(orig_output_id)
-            .or_insert_with(|| new_lir.add_signal(orig_sig.name.clone(), orig_sig.width));
+            .or_insert_with(|| new_lir.add_signal(format!("{}_sr", orig_sig.name), orig_sig.width));
     }
 
     // Step 4: Copy all internal nodes with remapped signals
@@ -2369,6 +2372,78 @@ pub fn expand_to_ncl_boundary(lir: &Lir, config: &NclConfig) -> NclExpandResult 
         lir: new_lir,
         dual_rail_map,
         stage_completions,
+    }
+}
+
+/// Apply boundary-only NCL to all async modules in a hierarchical LIR result.
+///
+/// This iterates over all instances and applies `expand_to_ncl_boundary` to
+/// async modules, keeping internal logic single-rail (optimizable) while
+/// adding NCL encode/decode at module boundaries.
+pub fn apply_boundary_ncl_to_hierarchy(
+    hier_lir: &crate::HierarchicalMirToLirResult,
+    config: &NclConfig,
+) -> crate::HierarchicalMirToLirResult {
+    use crate::{HierarchicalMirToLirResult, InstanceLirResult, MirToLirResult};
+
+    let mut new_instances = std::collections::HashMap::new();
+
+    for (path, instance) in &hier_lir.instances {
+        if instance.is_async {
+            // Apply boundary NCL to async modules
+            let ncl_result = expand_to_ncl_boundary(&instance.lir_result.lir, config);
+            eprintln!(
+                "⚡ Boundary NCL for '{}': {} -> {} signals, {} -> {} nodes",
+                path,
+                instance.lir_result.lir.signals.len(),
+                ncl_result.lir.signals.len(),
+                instance.lir_result.lir.nodes.len(),
+                ncl_result.lir.nodes.len()
+            );
+
+            let new_lir_result = MirToLirResult {
+                lir: ncl_result.lir,
+                stats: instance.lir_result.stats.clone(),
+                warnings: instance.lir_result.warnings.clone(),
+                compiled_ip_path: instance.lir_result.compiled_ip_path.clone(),
+                blackbox_info: instance.lir_result.blackbox_info.clone(),
+            };
+
+            new_instances.insert(
+                path.clone(),
+                InstanceLirResult {
+                    module_name: instance.module_name.clone(),
+                    lir_result: new_lir_result,
+                    port_connections: instance.port_connections.clone(),
+                    children: instance.children.clone(),
+                    is_async: instance.is_async,
+                },
+            );
+        } else {
+            // Keep non-async modules as-is
+            new_instances.insert(
+                path.clone(),
+                InstanceLirResult {
+                    module_name: instance.module_name.clone(),
+                    lir_result: MirToLirResult {
+                        lir: instance.lir_result.lir.clone(),
+                        stats: instance.lir_result.stats.clone(),
+                        warnings: instance.lir_result.warnings.clone(),
+                        compiled_ip_path: instance.lir_result.compiled_ip_path.clone(),
+                        blackbox_info: instance.lir_result.blackbox_info.clone(),
+                    },
+                    port_connections: instance.port_connections.clone(),
+                    children: instance.children.clone(),
+                    is_async: instance.is_async,
+                },
+            );
+        }
+    }
+
+    HierarchicalMirToLirResult {
+        instances: new_instances,
+        top_module: hier_lir.top_module.clone(),
+        hierarchy: hier_lir.hierarchy.clone(),
     }
 }
 

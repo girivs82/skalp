@@ -1103,21 +1103,6 @@ kernel void eval_ncl(
         let nets = match self.signal_name_to_nets.get(name) {
             Some(n) => n,
             None => {
-                println!(
-                    "[GPU_NCL_DEBUG] Signal '{}' NOT FOUND in signal_name_to_nets",
-                    name
-                );
-                // Show available signal names containing "result"
-                let result_signals: Vec<_> = self
-                    .signal_name_to_nets
-                    .keys()
-                    .filter(|k| k.contains("result"))
-                    .take(20)
-                    .collect();
-                println!(
-                    "[GPU_NCL_DEBUG] Available signals with 'result': {:?}",
-                    result_signals
-                );
                 return None;
             }
         };
@@ -1128,8 +1113,6 @@ kernel void eval_ncl(
         let width = width.min(actual_width);
 
         let mut null_count = 0;
-        let mut data_true_count = 0;
-        let mut data_false_count = 0;
         let mut invalid_count = 0;
 
         for bit in 0..width {
@@ -1144,32 +1127,17 @@ kernel void eval_ncl(
 
             // Check for valid DATA (exactly one rail high)
             if t && !f {
-                data_true_count += 1;
-                // Only set bits within u64 range
+                // DATA_TRUE: set the bit
                 if bit < 64 {
                     result |= 1u64 << bit;
                 }
             } else if !t && f {
-                data_false_count += 1;
-                // DATA_FALSE, bit stays 0
+                // DATA_FALSE: bit stays 0
             } else if !t && !f {
                 null_count += 1;
             } else {
                 invalid_count += 1;
             }
-        }
-
-        // Debug output for signals
-        if name.contains("result")
-            || name.contains("l2_")
-            || name.contains("fu_")
-            || name.contains("function_sel")
-            || name.contains("data1")
-        {
-            println!(
-                "[GPU_NCL_DEBUG] Signal '{}': {} bits, {} null, {} data_true, {} data_false, {} invalid",
-                name, width, null_count, data_true_count, data_false_count, invalid_count
-            );
         }
 
         // Return None if any bit is NULL or Invalid

@@ -4242,7 +4242,18 @@ impl<'a> TechMapper<'a> {
         // For each bit: complete_i = t_i OR f_i
         // Total: complete = AND(complete_0, complete_1, ...)
 
-        let th12_info = self.get_ncl_cell_info(&CellFunction::Th12);
+        // Check if TH12 is available in the library, if not use OR2 as fallback
+        // TH12 is functionally equivalent to OR for completion detection
+        let th12_cells = self.library.find_cells_by_function(&CellFunction::Th12);
+        let use_th12 = !th12_cells.is_empty();
+
+        let gate_info = if use_th12 {
+            self.get_ncl_cell_info(&CellFunction::Th12)
+        } else {
+            // Fall back to OR2 gate for completion detection
+            self.get_cell_info(&CellFunction::Or2)
+        };
+
         let mut bit_completes = Vec::new();
 
         for i in 0..width as usize {
@@ -4265,12 +4276,12 @@ impl<'a> TechMapper<'a> {
                 format!("{}.complete_bit{}", path, i),
             ));
 
-            // TH12(t, f) - complete when either rail is high
+            // TH12(t, f) or OR2(t, f) - complete when either rail is high
             self.add_cell(Cell::new_comb(
                 CellId(0),
-                th12_info.name.clone(),
+                gate_info.name.clone(),
                 self.library.name.clone(),
-                th12_info.fit,
+                gate_info.fit,
                 format!("{}.complete_or{}", path, i),
                 vec![in_t, in_f],
                 vec![bit_complete],
@@ -4444,7 +4455,16 @@ impl<'a> TechMapper<'a> {
             return inputs[0];
         }
 
-        let th22_info = self.get_ncl_cell_info(&CellFunction::Th22);
+        // Check if TH22 is available in the library, if not use AND2 as fallback
+        // TH22 is functionally equivalent to AND for completion detection
+        let th22_cells = self.library.find_cells_by_function(&CellFunction::Th22);
+        let gate_info = if !th22_cells.is_empty() {
+            self.get_ncl_cell_info(&CellFunction::Th22)
+        } else {
+            // Fall back to AND2 gate
+            self.get_cell_info(&CellFunction::And2)
+        };
+
         let mut current = inputs.to_vec();
         let mut level = 0;
 
@@ -4459,9 +4479,9 @@ impl<'a> TechMapper<'a> {
                     ));
                     self.add_cell(Cell::new_comb(
                         CellId(0),
-                        th22_info.name.clone(),
+                        gate_info.name.clone(),
                         self.library.name.clone(),
-                        th22_info.fit,
+                        gate_info.fit,
                         format!("{}_{}_l{}_{}", path, prefix, level, i),
                         vec![chunk[0], chunk[1]],
                         vec![out],
@@ -4487,7 +4507,16 @@ impl<'a> TechMapper<'a> {
             return inputs[0];
         }
 
-        let th12_info = self.get_ncl_cell_info(&CellFunction::Th12);
+        // Check if TH12 is available in the library, if not use OR2 as fallback
+        // TH12 is functionally equivalent to OR
+        let th12_cells = self.library.find_cells_by_function(&CellFunction::Th12);
+        let gate_info = if !th12_cells.is_empty() {
+            self.get_ncl_cell_info(&CellFunction::Th12)
+        } else {
+            // Fall back to OR2 gate
+            self.get_cell_info(&CellFunction::Or2)
+        };
+
         let mut current = inputs.to_vec();
         let mut level = 0;
 
@@ -4502,9 +4531,9 @@ impl<'a> TechMapper<'a> {
                     ));
                     self.add_cell(Cell::new_comb(
                         CellId(0),
-                        th12_info.name.clone(),
+                        gate_info.name.clone(),
                         self.library.name.clone(),
-                        th12_info.fit,
+                        gate_info.fit,
                         format!("{}_{}_l{}_{}", path, prefix, level, i),
                         vec![chunk[0], chunk[1]],
                         vec![out],

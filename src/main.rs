@@ -886,23 +886,33 @@ fn build_design(
                 );
 
                 // Lower entire MIR hierarchy
-                // For async modules: skip NCL expansion, we'll convert to dual-rail after optimization
-                let (hier_lir, needs_dual_rail) =
+                // For async modules: skip NCL expansion, we'll apply boundary-only NCL
+                let (hier_lir, has_async) =
                     skalp_lir::lower_mir_hierarchical_for_optimize_first(&mir);
 
-                if needs_dual_rail {
-                    info!("Async modules detected - using optimize-first NCL synthesis");
+                if has_async {
+                    info!("Async modules detected - using boundary-only NCL synthesis");
                 }
 
+                // Apply boundary-only NCL to async modules at LIR level
+                // This keeps internal logic single-rail (optimizable) with NCL at I/O boundaries
+                let hier_lir = if has_async {
+                    let ncl_config = skalp_lir::NclConfig {
+                        boundary_only: true,
+                        use_weak_completion: true,
+                        completion_tree_depth: None,
+                        generate_null_wavefront: true,
+                        use_opaque_arithmetic: true,
+                    };
+                    skalp_lir::apply_boundary_ncl_to_hierarchy(&hier_lir, &ncl_config)
+                } else {
+                    hier_lir
+                };
+
                 info!(
-                    "Elaborated {} instances: top={}{}",
+                    "Elaborated {} instances: top={}",
                     hier_lir.instances.len(),
                     hier_lir.top_module,
-                    if needs_dual_rail {
-                        " (pending dual-rail conversion)"
-                    } else {
-                        ""
-                    }
                 );
 
                 // Map to hierarchical gate netlist
@@ -914,10 +924,12 @@ fn build_design(
                 );
 
                 // Parallel per-instance synthesis optimization
-                let mut flattened = if optimization_options.preset.is_some()
+                // For async: this optimizes the single-rail internal logic (AIG/ABC passes)
+                let flattened = if optimization_options.preset.is_some()
                     || optimization_options.passes.is_some()
                     || optimization_options.ml_guided
                 {
+                    let cells_before = hier_netlist.total_cell_count();
                     info!("Running parallel hierarchical synthesis optimization...");
                     let synth_config = build_synth_config(&optimization_options);
                     let mut engine = skalp_lir::synth::SynthEngine::with_config(synth_config);
@@ -937,47 +949,20 @@ fn build_design(
                         );
                     }
 
-                    // Flatten to single netlist with stitching
-                    // Note: flatten() now automatically runs buffer removal for NCL circuits
-                    hier_result.netlist.flatten()
-                } else {
-                    // No optimization, just flatten
-                    // Note: flatten() now automatically runs buffer removal for NCL circuits
-                    hier_netlist.flatten()
-                };
-
-                // For optimize-first NCL: Convert single-rail gates to dual-rail NCL
-                if needs_dual_rail {
-                    let cells_before = flattened.cells.len();
-                    info!(
-                        "Converting {} single-rail cells to dual-rail NCL...",
-                        cells_before
-                    );
-
-                    // Use library-aware config to auto-detect THmn vs std cells
-                    let dual_rail_config = skalp_lir::DualRailConfig::from_library(&library);
-                    let (ncl_netlist, stats) =
-                        skalp_lir::convert_to_dual_rail(&flattened, dual_rail_config);
-
-                    info!(
-                        "⚡ NCL Optimize-First conversion: {} -> {} cells ({:.1}% overhead vs 2x baseline)",
-                        cells_before,
-                        ncl_netlist.cells.len(),
-                        ((ncl_netlist.cells.len() as f64 / (cells_before * 2) as f64) - 1.0) * 100.0
-                    );
-                    if stats.c_element_macros > 0 {
+                    let flattened = hier_result.netlist.flatten();
+                    if has_async {
                         info!(
-                            "   Using C-element macros (no native THmn gates): {} macros, {} feedback loops",
-                            stats.c_element_macros, stats.feedback_loops
+                            "   Total: {} -> {} cells ({:.1}% reduction)",
+                            cells_before,
+                            flattened.cells.len(),
+                            (1.0 - flattened.cells.len() as f64 / cells_before as f64) * 100.0
                         );
                     }
-                    info!(
-                        "   TH12/OR2: {}, TH22/C-elem: {}, Completion: {} gates",
-                        stats.th12_count, stats.th22_count, stats.completion_gates
-                    );
-
-                    flattened = ncl_netlist;
-                }
+                    flattened
+                } else {
+                    // No optimization, just flatten
+                    hier_netlist.flatten()
+                };
 
                 flattened
             } else {
@@ -987,31 +972,61 @@ fn build_design(
                     .first()
                     .ok_or_else(|| anyhow::anyhow!("No modules found in MIR"))?;
 
-                // For async modules: skip NCL expansion, convert to dual-rail after optimization
-                let needs_dual_rail = top_module.is_async;
-
                 // Lower MIR module to LIR
-                // For async modules: skip NCL expansion, we'll convert after optimization
+                // For async modules: skip NCL expansion, we'll apply boundary-only NCL
                 let lir_result = if top_module.is_async {
-                    info!("Async module - using optimize-first NCL synthesis");
+                    info!("Async module - using boundary-only NCL synthesis");
                     skalp_lir::lower_mir_module_to_lir_skip_ncl(top_module)
                 } else {
                     lower_mir_module_to_lir(top_module)
                 };
 
+                // For async modules: apply boundary-only NCL at LIR level
+                // This keeps internal logic single-rail (optimizable) with NCL encode/decode at I/O
+                let final_lir = if top_module.is_async {
+                    let ncl_config = skalp_lir::NclConfig {
+                        boundary_only: true,
+                        use_weak_completion: true,
+                        completion_tree_depth: None,
+                        generate_null_wavefront: true,
+                        use_opaque_arithmetic: true,
+                    };
+                    let ncl_result =
+                        skalp_lir::expand_to_ncl_boundary(&lir_result.lir, &ncl_config);
+                    info!(
+                        "⚡ Boundary NCL: {} -> {} signals, {} -> {} nodes",
+                        lir_result.lir.signals.len(),
+                        ncl_result.lir.signals.len(),
+                        lir_result.lir.nodes.len(),
+                        ncl_result.lir.nodes.len()
+                    );
+                    ncl_result.lir
+                } else {
+                    lir_result.lir
+                };
+
                 // Map to gate netlist with configurable optimization level
                 let tech_result = skalp_lir::map_lir_to_gates_with_opt_level(
-                    &lir_result.lir,
+                    &final_lir,
                     &library,
                     optimization_options.gate_opt_level,
                 );
                 let mut gate_netlist = tech_result.netlist;
 
+                if top_module.is_async {
+                    info!(
+                        "   Gate netlist: {} cells (internal logic stays single-rail)",
+                        gate_netlist.cells.len()
+                    );
+                }
+
                 // Apply synthesis optimization if requested
+                // For async: this optimizes the single-rail internal logic (AIG/ABC passes)
                 if optimization_options.preset.is_some()
                     || optimization_options.passes.is_some()
                     || optimization_options.ml_guided
                 {
+                    let cells_before = gate_netlist.cells.len();
                     info!("Running synthesis optimization...");
                     let synth_result = apply_synthesis_optimization(
                         &gate_netlist,
@@ -1028,39 +1043,15 @@ fn build_design(
                     }
 
                     gate_netlist = synth_result.netlist;
-                }
 
-                // For optimize-first NCL: Convert single-rail gates to dual-rail NCL
-                if needs_dual_rail {
-                    let cells_before = gate_netlist.cells.len();
-                    info!(
-                        "Converting {} single-rail cells to dual-rail NCL...",
-                        cells_before
-                    );
-
-                    // Use library-aware config to auto-detect THmn vs std cells
-                    let dual_rail_config = skalp_lir::DualRailConfig::from_library(&library);
-                    let (ncl_netlist, stats) =
-                        skalp_lir::convert_to_dual_rail(&gate_netlist, dual_rail_config);
-
-                    info!(
-                        "⚡ NCL Optimize-First conversion: {} -> {} cells ({:.1}% overhead vs 2x baseline)",
-                        cells_before,
-                        ncl_netlist.cells.len(),
-                        ((ncl_netlist.cells.len() as f64 / (cells_before * 2) as f64) - 1.0) * 100.0
-                    );
-                    if stats.c_element_macros > 0 {
+                    if top_module.is_async {
                         info!(
-                            "   Using C-element macros (no native THmn gates): {} macros, {} feedback loops",
-                            stats.c_element_macros, stats.feedback_loops
+                            "   Optimized: {} -> {} cells ({:.1}% reduction)",
+                            cells_before,
+                            gate_netlist.cells.len(),
+                            (1.0 - gate_netlist.cells.len() as f64 / cells_before as f64) * 100.0
                         );
                     }
-                    info!(
-                        "   TH12/OR2: {}, TH22/C-elem: {}, Completion: {} gates",
-                        stats.th12_count, stats.th22_count, stats.completion_gates
-                    );
-
-                    gate_netlist = ncl_netlist;
                 }
 
                 gate_netlist
