@@ -309,7 +309,10 @@ impl SynthEngine {
         } else {
             AigWriter::new(library)
         };
-        let optimized = writer.write(&aig);
+        let mut optimized = writer.write(&aig);
+
+        // Preserve NCL flag from input netlist - needed for async-STA
+        optimized.is_ncl = netlist.is_ncl;
 
         self.total_time_ms = start.elapsed().as_millis() as u64;
 
