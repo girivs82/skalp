@@ -1214,6 +1214,34 @@ impl<'hir> MonomorphizationEngine<'hir> {
                 }
             }
 
+            // BUG #208 FIX: StructLiteral expression - substitute generic_args and field values
+            // Example: FpAdd<F> { a, b, result } where F is bound to IEEE754_32 (fp32)
+            // The generic_args need to be substituted so the correct specialized entity is used.
+            HirExpression::StructLiteral(struct_lit) => {
+                // Substitute generic_args
+                let substituted_generic_args: Vec<_> = struct_lit
+                    .generic_args
+                    .iter()
+                    .map(|arg| self.substitute_expr(arg, const_args))
+                    .collect();
+
+                // Substitute field values
+                let substituted_fields: Vec<_> = struct_lit
+                    .fields
+                    .iter()
+                    .map(|field| crate::hir::HirStructFieldInit {
+                        name: field.name.clone(),
+                        value: self.substitute_expr(&field.value, const_args),
+                    })
+                    .collect();
+
+                HirExpression::StructLiteral(crate::hir::HirStructLiteral {
+                    type_name: struct_lit.type_name.clone(),
+                    generic_args: substituted_generic_args,
+                    fields: substituted_fields,
+                })
+            }
+
             // Other expressions pass through
             _ => expr.clone(),
         }

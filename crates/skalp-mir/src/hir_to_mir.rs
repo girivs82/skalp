@@ -375,6 +375,14 @@ impl<'hir> HirToMir<'hir> {
         // Register all user-defined const functions in the evaluator
         self.const_evaluator.register_functions(&hir.functions);
 
+        // BUG #208 FIX: Register all implementation constants in the evaluator
+        // This is needed so that module-level constants like IEEE754_32 can be
+        // resolved when evaluating generic_args in StructLiteral entity instantiations.
+        for implementation in &hir.implementations {
+            self.const_evaluator
+                .register_constants(&implementation.constants);
+        }
+
         let mut mir = Mir::new(hir.name.clone());
 
         // Propagate safety definitions from HIR to MIR
@@ -1754,34 +1762,17 @@ impl<'hir> HirToMir<'hir> {
                 // Pattern: let inner = Inner { data };
                 // If the RHS is a StructLiteral and the type_name matches an entity, create a module instance
                 if let hir::HirExpression::StructLiteral(struct_lit) = &let_stmt.value {
-                    println!(
-                        "[ENTITY_DETECT] StructLiteral type_name='{}', checking against entities",
-                        struct_lit.type_name
-                    );
                     // Check if this type_name matches an entity
                     let hir = self.hir.as_ref();
                     if let Some(hir) = hir {
-                        println!(
-                            "[ENTITY_DETECT] HIR has {} entities: {:?}",
-                            hir.entities.len(),
-                            hir.entities.iter().map(|e| &e.name).collect::<Vec<_>>()
-                        );
-
                         // BUG #207 FIX: When struct_lit has generic_args, construct the specialized entity name
                         // For example, FpAdd<IEEE754_32>{...} should look for "FpAdd_fp32" entity
                         let target_entity_name = if !struct_lit.generic_args.is_empty() {
-                            eprintln!(
-                                "[BUG #207 DEBUG] struct_lit '{}' has {} generic_args",
-                                struct_lit.type_name,
-                                struct_lit.generic_args.len()
-                            );
                             // Evaluate generic_args to construct specialized name
                             let mut name_parts = vec![struct_lit.type_name.clone()];
                             for arg_expr in &struct_lit.generic_args {
-                                eprintln!("[BUG #207 DEBUG]   generic_arg: {:?}", arg_expr);
                                 match self.const_evaluator.eval(arg_expr) {
                                     Ok(const_val) => {
-                                        eprintln!("[BUG #207 DEBUG]     eval OK: {:?}", const_val);
                                         let suffix = match &const_val {
                                             ConstValue::Nat(n) => n.to_string(),
                                             ConstValue::Int(i) => {
@@ -1803,8 +1794,8 @@ impl<'hir> HirToMir<'hir> {
                                         };
                                         name_parts.push(suffix);
                                     }
-                                    Err(e) => {
-                                        eprintln!("[BUG #207 DEBUG]     eval FAILED: {:?}", e);
+                                    Err(_e) => {
+                                        // Generic arg eval failed - will fall back to generic entity name
                                     }
                                 }
                             }
@@ -1824,28 +1815,8 @@ impl<'hir> HirToMir<'hir> {
                             });
 
                         if let Some(entity) = entity {
-                            println!(
-                                "[HIERARCHICAL] Detected entity instantiation: let {} = {} {{ ... }}",
-                                let_stmt.name, struct_lit.type_name
-                            );
-                            println!(
-                                "[HIERARCHICAL] Found entity {:?} '{}' with {} ports",
-                                entity.id,
-                                entity.name,
-                                entity.ports.len()
-                            );
-
                             // Get the module ID for this entity
-                            println!(
-                                "[HIERARCHICAL] Looking up entity.id={:?} in entity_map (size={})",
-                                entity.id,
-                                self.entity_map.len()
-                            );
                             if let Some(&module_id) = self.entity_map.get(&entity.id) {
-                                println!(
-                                    "[HIERARCHICAL] Found module_id={:?} for entity {:?}",
-                                    module_id, entity.id
-                                );
                                 // Create module instance
                                 // BUG #197/198/199 FIX: Include unique ID in entity instance name
                                 // to prevent name collisions between entity instances.
@@ -1939,10 +1910,7 @@ impl<'hir> HirToMir<'hir> {
                                                         None
                                                     }
                                                 }
-                                                _ => {
-                                                    println!("[BUG #167 DEBUG] Other type - no Variable mapping");
-                                                    None
-                                                }
+                                                _ => None,
                                             };
 
                                             if let Some(var_id) = maybe_var_id {
@@ -1991,10 +1959,7 @@ impl<'hir> HirToMir<'hir> {
                                                         None
                                                     }
                                                 }
-                                                _ => {
-                                                    println!("[BUG #190 DEBUG] Other expression type - no mapping");
-                                                    None
-                                                }
+                                                _ => None,
                                             };
 
                                             if let Some(hir_sig_id) = maybe_hir_signal_id {
