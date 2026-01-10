@@ -20,6 +20,7 @@ impl WideNcl {
 
     std::fs::write("/tmp/test_wide_ncl.sk", sk_code).unwrap();
 
+    // Use --no-synth-opt to preserve NCL gate structure for simulation
     let output = Command::new("./target/release/skalp")
         .env("SKALP_STDLIB_PATH", "./crates/skalp-stdlib")
         .args([
@@ -30,6 +31,7 @@ impl WideNcl {
             "/tmp/wide_ncl_out",
             "--target",
             "gates",
+            "--no-synth-opt",
         ])
         .output()
         .expect("Failed to run skalp");

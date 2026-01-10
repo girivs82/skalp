@@ -112,9 +112,16 @@ enum Commands {
         workproduct_formats: String,
 
         // === Logic Synthesis Optimization Options ===
-        /// Optimization preset (quick, balanced, full, timing, area, resyn2, compress2)
-        #[arg(long, value_name = "PRESET")]
-        optimize: Option<String>,
+        /// Optimization preset (quick, balanced, full, timing, area, resyn2, compress2, auto)
+        /// Default: "auto" (runs multiple strategies and picks the best result)
+        /// Use --no-synth-opt to disable synthesis optimization entirely
+        #[arg(long, value_name = "PRESET", default_value = "auto")]
+        optimize: String,
+
+        /// Disable synthesis optimization (AIG/ABC passes)
+        /// Useful for debugging or when you need raw gate-level output
+        #[arg(long)]
+        no_synth_opt: bool,
 
         /// Custom pass sequence (comma-separated: strash,rewrite,balance,refactor,map)
         #[arg(long, value_name = "PASSES")]
@@ -488,6 +495,7 @@ fn main() -> Result<()> {
             workproducts,
             workproduct_formats,
             optimize,
+            no_synth_opt,
             passes,
             ml_guided,
             ml_policy,
@@ -511,8 +519,9 @@ fn main() -> Result<()> {
             };
 
             // Build optimization options
+            // If --no-synth-opt is specified, disable synthesis optimization
             let optimization_options = OptimizationOptions {
-                preset: optimize,
+                preset: if no_synth_opt { None } else { Some(optimize) },
                 passes,
                 ml_guided,
                 ml_policy_path: ml_policy,

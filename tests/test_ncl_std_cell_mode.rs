@@ -30,6 +30,8 @@ fn compile_ncl_with_library(source: &str, library_path: Option<&str>) -> GateNet
     std::fs::write(&source_path, source).unwrap();
 
     // Build args
+    // Note: Use --no-synth-opt to preserve NCL gate structure for simulation
+    // The synth engine would otherwise optimize away the NCL-specific gates
     let mut args = vec![
         "build".to_string(),
         "-s".to_string(),
@@ -38,6 +40,7 @@ fn compile_ncl_with_library(source: &str, library_path: Option<&str>) -> GateNet
         output_dir.clone(),
         "--target".to_string(),
         "gates".to_string(),
+        "--no-synth-opt".to_string(),
     ];
 
     // Add library path if specified

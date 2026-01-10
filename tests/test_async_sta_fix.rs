@@ -22,6 +22,7 @@ fn compile_to_ncl_gates(source: &str) -> GateNetlist {
 
     std::fs::write(&source_path, source).unwrap();
 
+    // Use --no-synth-opt to preserve NCL gate structure for simulation
     let output = Command::new("./target/release/skalp")
         .env("SKALP_STDLIB_PATH", "./crates/skalp-stdlib")
         .args([
@@ -32,6 +33,7 @@ fn compile_to_ncl_gates(source: &str) -> GateNetlist {
             &output_dir,
             "--target",
             "gates",
+            "--no-synth-opt",
         ])
         .output()
         .expect("Failed to run skalp");
