@@ -54,6 +54,16 @@ pub struct NclConfig {
     /// This reduces LIR size by ~12x for arithmetic operations and lets tech_mapper
     /// handle the gate-level expansion directly.
     pub use_opaque_arithmetic: bool,
+    /// Boundary-only NCL: Keep internal logic as combinational (single-rail),
+    /// only encode/decode at module boundaries. This dramatically reduces gate count
+    /// since internal signals don't need dual-rail encoding.
+    ///
+    /// Architecture:
+    /// - Inputs: NCL dual-rail → decode → single-rail
+    /// - Internal: Pure combinational logic (unchanged)
+    /// - Outputs: single-rail → encode → NCL dual-rail
+    /// - Completion detection on outputs
+    pub boundary_only: bool,
 }
 
 impl Default for NclConfig {
@@ -63,6 +73,7 @@ impl Default for NclConfig {
             completion_tree_depth: None,
             generate_null_wavefront: true,
             use_opaque_arithmetic: true, // Enable by default for performance
+            boundary_only: false,        // Disabled until hierarchical issues are resolved
         }
     }
 }
@@ -1807,10 +1818,15 @@ impl NclExpander {
 /// # Returns
 /// * `NclExpandResult` containing the transformed NCL LIR
 pub fn expand_to_ncl(lir: &Lir, config: &NclConfig) -> NclExpandResult {
+    // Dispatch to boundary-only expansion if configured
+    if config.boundary_only {
+        return expand_to_ncl_boundary(lir, config);
+    }
+
     let mut expander = NclExpander::new(&lir.name, config.clone());
 
     // Debug: print original LIR structure
-    eprintln!("=== NCL Expand: Original LIR ===");
+    eprintln!("=== NCL Expand (Full Dual-Rail): Original LIR ===");
     eprintln!("Signals ({}):", lir.signals.len());
     for sig in &lir.signals {
         eprintln!(
@@ -2181,6 +2197,177 @@ pub fn expand_to_ncl(lir: &Lir, config: &NclConfig) -> NclExpandResult {
     NclExpandResult {
         lir: expander.lir,
         dual_rail_map: expander.dual_rail_map,
+        stage_completions,
+    }
+}
+
+/// Boundary-only NCL expansion: Keep internal logic combinatorial (single-rail),
+/// only add NCL encode/decode at module boundaries.
+///
+/// This dramatically reduces gate count compared to full dual-rail expansion
+/// because internal signals don't need to be doubled.
+///
+/// Architecture:
+/// ```text
+/// NCL Inputs (dual-rail) → [NclDecode] → Combinational Logic → [NclEncode] → NCL Outputs (dual-rail)
+///                                              ↑                                      ↑
+///                                        Single-rail                          Completion detection
+///                                        (original LIR)
+/// ```
+pub fn expand_to_ncl_boundary(lir: &Lir, config: &NclConfig) -> NclExpandResult {
+    eprintln!("=== NCL Expand (Boundary-Only): {} ===", lir.name);
+    eprintln!(
+        "Original: {} signals, {} nodes",
+        lir.signals.len(),
+        lir.nodes.len()
+    );
+
+    // Create a new LIR
+    let mut new_lir = Lir::new(lir.name.clone());
+    new_lir.is_ncl = true;
+
+    // Mapping from original signal IDs to new signal IDs
+    let mut signal_map: HashMap<LirSignalId, LirSignalId> = HashMap::new();
+    // Mapping from original signal IDs to their dual-rail pairs (for inputs/outputs)
+    let mut dual_rail_map: HashMap<LirSignalId, DualRailPair> = HashMap::new();
+
+    // Step 1: Process inputs - create dual-rail ports and decode nodes
+    for &orig_input_id in &lir.inputs {
+        let orig_sig = &lir.signals[orig_input_id.0 as usize];
+        let width = orig_sig.width;
+
+        // Create dual-rail input signals (t and f rails)
+        let t_id = new_lir.add_input(format!("{}_t", orig_sig.name), width);
+        let f_id = new_lir.add_input(format!("{}_f", orig_sig.name), width);
+
+        // Create single-rail decoded signal for internal use
+        let decoded_id = new_lir.add_signal(format!("{}_dec", orig_sig.name), width);
+
+        // Add decode node: NclDecode(t, f) -> decoded
+        new_lir.add_node(
+            LirOp::NclDecode { width },
+            vec![t_id, f_id],
+            decoded_id,
+            format!("ncl_decode_{}", orig_sig.name),
+        );
+
+        // Map original input to decoded signal for internal logic
+        signal_map.insert(orig_input_id, decoded_id);
+        dual_rail_map.insert(orig_input_id, DualRailPair { t: t_id, f: f_id });
+    }
+
+    // Step 2: Copy internal signals (non-input, non-output)
+    for orig_sig in &lir.signals {
+        if !lir.inputs.contains(&orig_sig.id) && !lir.outputs.contains(&orig_sig.id) {
+            let new_id = new_lir.add_signal(orig_sig.name.clone(), orig_sig.width);
+            signal_map.insert(orig_sig.id, new_id);
+        }
+    }
+
+    // Step 3: Create output signals (will be encoded to dual-rail later)
+    for &orig_output_id in &lir.outputs {
+        let orig_sig = &lir.signals[orig_output_id.0 as usize];
+        // If output is also an input, it's already mapped
+        signal_map
+            .entry(orig_output_id)
+            .or_insert_with(|| new_lir.add_signal(orig_sig.name.clone(), orig_sig.width));
+    }
+
+    // Step 4: Copy all internal nodes with remapped signals
+    for orig_node in &lir.nodes {
+        let new_inputs: Vec<LirSignalId> = orig_node
+            .inputs
+            .iter()
+            .map(|&id| *signal_map.get(&id).unwrap_or(&id))
+            .collect();
+        let new_output = *signal_map
+            .get(&orig_node.output)
+            .unwrap_or(&orig_node.output);
+
+        new_lir.add_node(
+            orig_node.op.clone(),
+            new_inputs,
+            new_output,
+            orig_node.path.clone(),
+        );
+    }
+
+    // Step 5: Encode outputs to dual-rail and add completion detection
+    let mut output_pairs: Vec<DualRailPair> = Vec::new();
+
+    for &orig_output_id in &lir.outputs {
+        let orig_sig = &lir.signals[orig_output_id.0 as usize];
+        let width = orig_sig.width;
+        let single_rail_id = *signal_map.get(&orig_output_id).unwrap();
+
+        // Create dual-rail output signals
+        let t_id = new_lir.add_output(format!("{}_t", orig_sig.name), width);
+        let f_id = new_lir.add_output(format!("{}_f", orig_sig.name), width);
+
+        // Add encode node: NclEncode(single_rail) -> t
+        // For boundary NCL, t-rail = value (when DATA), f-rail = !value
+        new_lir.add_node(
+            LirOp::NclEncode { width },
+            vec![single_rail_id],
+            t_id,
+            format!("ncl_encode_{}_t", orig_sig.name),
+        );
+
+        // Add NOT node to generate f-rail: f = !single_rail
+        new_lir.add_node(
+            LirOp::Not { width },
+            vec![single_rail_id],
+            f_id,
+            format!("ncl_encode_{}_f", orig_sig.name),
+        );
+
+        let pair = DualRailPair { t: t_id, f: f_id };
+        output_pairs.push(pair);
+        dual_rail_map.insert(orig_output_id, pair);
+    }
+
+    // Step 6: Add completion detection for outputs
+    let mut stage_completions = Vec::new();
+    if config.use_weak_completion && !output_pairs.is_empty() {
+        // Calculate total logical width for completion
+        let total_width: u32 = output_pairs
+            .iter()
+            .map(|p| new_lir.signals[p.t.0 as usize].width)
+            .sum();
+
+        // Create completion signal
+        let completion_id = new_lir.add_detection_output("ncl_complete".to_string(), 1);
+
+        // Collect all t and f rails for completion check
+        let mut completion_inputs: Vec<LirSignalId> = Vec::new();
+        for pair in &output_pairs {
+            completion_inputs.push(pair.t);
+            completion_inputs.push(pair.f);
+        }
+
+        // Add completion node
+        new_lir.add_node(
+            LirOp::NclComplete { width: total_width },
+            completion_inputs,
+            completion_id,
+            "ncl_completion".to_string(),
+        );
+
+        stage_completions.push(completion_id);
+    }
+
+    eprintln!(
+        "Boundary NCL: {} signals, {} nodes (was {} signals, {} nodes)",
+        new_lir.signals.len(),
+        new_lir.nodes.len(),
+        lir.signals.len(),
+        lir.nodes.len()
+    );
+    eprintln!("=== NCL Expand (Boundary-Only) Complete ===");
+
+    NclExpandResult {
+        lir: new_lir,
+        dual_rail_map,
         stage_completions,
     }
 }

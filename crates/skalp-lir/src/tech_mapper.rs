@@ -2311,8 +2311,8 @@ impl<'a> TechMapper<'a> {
     // - TH22: 2-of-2 (C-element, Muller gate)
     // - TH23: 2-of-3 threshold, etc.
 
-    /// Map NCL encode: single-rail → dual-rail
-    /// For each input bit, generates (t, f) where t=input, f=!input
+    /// Map NCL encode: single-rail → t-rail (buffer only)
+    /// The f-rail is handled by a separate LirOp::Not node in the LIR
     fn map_ncl_encode(
         &mut self,
         width: u32,
@@ -2325,15 +2325,14 @@ impl<'a> TechMapper<'a> {
             return;
         }
 
-        let inv_info = self.get_cell_info(&CellFunction::Inv);
+        let buf_info = self.get_cell_info(&CellFunction::Buf);
 
         for i in 0..width as usize {
             let input_bit = inputs[0].get(i).copied().unwrap_or(GateNetId(0));
-            let out_t = outputs.get(i * 2).copied().unwrap_or(GateNetId(0));
-            let out_f = outputs.get(i * 2 + 1).copied().unwrap_or(GateNetId(0));
+            // NclEncode only outputs the t-rail; f-rail is a separate NOT node
+            let out_t = outputs.get(i).copied().unwrap_or(GateNetId(0));
 
             // True rail is the input directly (via buffer)
-            let buf_info = self.get_cell_info(&CellFunction::Buf);
             let mut buf_cell = Cell::new_comb(
                 CellId(0),
                 buf_info.name.clone(),
@@ -2345,19 +2344,6 @@ impl<'a> TechMapper<'a> {
             );
             buf_cell.source_op = Some("NclEncode_T".to_string());
             self.add_cell(buf_cell);
-
-            // False rail is inverted input
-            let mut inv_cell = Cell::new_comb(
-                CellId(0),
-                inv_info.name.clone(),
-                self.library.name.clone(),
-                inv_info.fit,
-                format!("{}.enc_f{}", path, i),
-                vec![input_bit],
-                vec![out_f],
-            );
-            inv_cell.source_op = Some("NclEncode_F".to_string());
-            self.add_cell(inv_cell);
         }
 
         self.stats.decomposed_mappings += 1;
@@ -2380,8 +2366,9 @@ impl<'a> TechMapper<'a> {
         let buf_info = self.get_cell_info(&CellFunction::Buf);
 
         for i in 0..width as usize {
-            // Input is dual-rail: [t0, f0, t1, f1, ...]
-            let in_t = inputs[0].get(i * 2).copied().unwrap_or(GateNetId(0));
+            // inputs[0] = t-rail signal (all t bits), inputs[1] = f-rail signal (all f bits)
+            // We only use the t-rail for decode (single-rail = just the true rail)
+            let in_t = inputs[0].get(i).copied().unwrap_or(GateNetId(0));
             let out = outputs.get(i).copied().unwrap_or(GateNetId(0));
 
             // Decode just takes the true rail
