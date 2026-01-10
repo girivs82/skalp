@@ -1075,6 +1075,7 @@ fn build_design(
             };
 
             // Run async STA for NCL circuits (detected by tech_mapper via is_ncl flag)
+            let mut optimized_netlist = optimized_netlist;
             if optimized_netlist.is_ncl && !skip_async_sta {
                 info!("Running async timing analysis for NCL circuit...");
                 let sta_config = skalp_lir::AsyncStaConfig::default();
@@ -1094,7 +1095,7 @@ fn build_design(
                     println!("   Max skew: {:.1}ps", sta_result.stats.max_skew_ps);
                 }
 
-                // Report violations
+                // Report violations and apply fix
                 if sta_result.has_violations() {
                     let errors = sta_result.error_count();
                     if errors > 0 {
@@ -1108,6 +1109,27 @@ fn build_design(
                                 eprintln!("{}", violation.format());
                             }
                         }
+                    }
+
+                    // Apply fix: delay ready signal to cover worst-case skew
+                    // This inserts buffers on completion detection outputs
+                    let fix_config = skalp_lir::AsyncStaFixConfig {
+                        strategy: skalp_lir::FixStrategy::DelayReadySignal,
+                        ready_delay_margin_ps: 10.0, // 10ps extra margin
+                        ..Default::default()
+                    };
+                    let fix_result =
+                        skalp_lir::fix_fork_violations(&mut optimized_netlist, &sta_result, &fix_config);
+
+                    if fix_result.buffers_inserted > 0 {
+                        println!(
+                            "🔧 Async STA Fix: Inserted {} buffer(s) to delay ready signal",
+                            fix_result.buffers_inserted
+                        );
+                        println!(
+                            "   Fixed {} violation(s), {} skipped",
+                            fix_result.violations_fixed, fix_result.violations_skipped
+                        );
                     }
 
                     // Save full report
