@@ -89,7 +89,11 @@ impl FpAdd<const F: FloatFormat> {
     // Shift small fraction with guard bits
     const GUARD_BITS: nat = 3
     const ALIGNED_BITS: nat = FRAC_BITS + GUARD_BITS
-    signal small_aligned: bit[ALIGNED_BITS] = ({small_frac, {GUARD_BITS{1'b0}}}) >> exp_diff
+    // If exp_diff >= ALIGNED_BITS, the small fraction is completely shifted out
+    // (shift amounts >= bit width cause undefined behavior in hardware)
+    signal shift_overflow: bit = (exp_diff >= ALIGNED_BITS)
+    signal small_shifted: bit[ALIGNED_BITS] = ({small_frac, {GUARD_BITS{1'b0}}}) >> exp_diff
+    signal small_aligned: bit[ALIGNED_BITS] = shift_overflow ? 0 : small_shifted
     signal large_aligned: bit[ALIGNED_BITS] = {large_frac, {GUARD_BITS{1'b0}}}
 
     // Add or subtract based on signs
@@ -102,16 +106,27 @@ impl FpAdd<const F: FloatFormat> {
 
     // Normalize (find leading one)
     // Pad sum_raw to 32 bits (MSB-aligned) for clz32
+    // After padding: bit 31 = sum_raw[27] (overflow bit)
+    // clz32 returns 0 for overflow, 1 for normal, 2+ for underflow from subtraction
     signal sum_lz: nat = clz32({sum_raw, 4'b0000})
     signal sum_normalized: bit[ALIGNED_BITS+1] = sum_raw << sum_lz
-    signal result_exp_raw: int = (large_exp as int) - (sum_lz as int) +
-                                 (sum_raw[ALIGNED_BITS] ? 1 : 0)
+    // Exponent adjustment: +1 base (accounts for normalization), -sum_lz (leading zeros)
+    // Overflow (sum_lz=0): exp = large_exp + 1
+    // Normal (sum_lz=1): exp = large_exp
+    // Underflow (sum_lz=2): exp = large_exp - 1
+    // Note: Zero-extend large_exp before casting to int to avoid sign extension
+    // (e.g., exp=128 in 8 bits = 0x80 would become -128 if sign-extended)
+    signal large_exp_wide: bit[32] = {24'b0, large_exp}
+    signal result_exp_raw: int = (large_exp_wide as int) + 1 - (sum_lz as int)
 
     // Extract mantissa and round bits
-    signal mant_raw: bit[M] = sum_normalized[ALIGNED_BITS-1:GUARD_BITS]
-    signal guard: bit = sum_normalized[GUARD_BITS-1]
-    signal round: bit = sum_normalized[GUARD_BITS-2]
-    signal sticky: bit = |sum_normalized[GUARD_BITS-3:0]
+    // After normalization, bit ALIGNED_BITS (27) is the implicit 1
+    // Mantissa is bits [ALIGNED_BITS-1:GUARD_BITS+1] = [26:4] = 23 bits for fp32
+    // Guard/round/sticky are bits [3:0]
+    signal mant_raw: bit[M] = sum_normalized[ALIGNED_BITS-1:GUARD_BITS+1]
+    signal guard: bit = sum_normalized[GUARD_BITS]
+    signal round: bit = sum_normalized[GUARD_BITS-1]
+    signal sticky: bit = |sum_normalized[GUARD_BITS-2:0]
 
     // Round to nearest even
     signal round_up: bit = guard && (round || sticky || mant_raw[0])

@@ -6,7 +6,10 @@
 #![cfg(not(debug_assertions))]
 
 use skalp_frontend::parse_and_build_compilation_context;
-use skalp_lir::{get_stdlib_library, lower_mir_hierarchical, map_hierarchical_to_gates};
+use skalp_lir::{
+    apply_boundary_ncl_to_hierarchy, get_stdlib_library, lower_mir_hierarchical_for_optimize_first,
+    map_hierarchical_to_gates, NclConfig,
+};
 use skalp_mir::MirCompiler;
 use skalp_sim::{CircuitMode, HwAccel, SimLevel, UnifiedSimConfig, UnifiedSimulator};
 use std::path::Path;
@@ -27,7 +30,18 @@ fn compile_fp32_test(source_path: &Path) -> skalp_lir::GateNetlist {
         .compile_to_mir_with_modules(&context.main_hir, &context.module_hirs)
         .expect("Failed to compile to MIR");
 
-    let hier_lir = lower_mir_hierarchical(&mir);
+    // Use optimize-first approach for proper boundary-only NCL handling
+    // This ensures child async modules are coalesced with parent (not separately expanded)
+    let (hier_lir_raw, has_async) = lower_mir_hierarchical_for_optimize_first(&mir);
+
+    // Apply boundary-only NCL to the hierarchy
+    let hier_lir = if has_async {
+        let ncl_config = NclConfig::default(); // boundary_only is true by default
+        apply_boundary_ncl_to_hierarchy(&hier_lir_raw, &ncl_config)
+    } else {
+        hier_lir_raw
+    };
+
     let library = get_stdlib_library("generic_asic").expect("Failed to load library");
     let hier_result = map_hierarchical_to_gates(&hier_lir, &library);
     hier_result.flatten()
@@ -38,7 +52,7 @@ fn simulate_fp32_add(netlist: &skalp_lir::GateNetlist, a: f32, b: f32) -> Option
     let config = UnifiedSimConfig {
         level: SimLevel::GateLevel,
         circuit_mode: CircuitMode::Ncl,
-        hw_accel: HwAccel::Cpu, // Force CPU to check if GPU has bug
+        hw_accel: HwAccel::Cpu, // Force CPU for consistency
         max_iterations: 10000,
         ncl_debug: false,
         ..Default::default()

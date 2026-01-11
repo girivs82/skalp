@@ -243,6 +243,10 @@ impl HierarchicalNetlist {
             }
         }
 
+        // Phase 6: Final rebuild of net connectivity after all optimizations
+        // This ensures fanout and driver info is accurate after buffer removal
+        result.rebuild_net_connectivity();
+
         result.update_stats();
         result
     }

@@ -942,7 +942,7 @@ fn build_design(
 
                 // Parallel per-instance synthesis optimization
                 // For async: this optimizes the single-rail internal logic (AIG/ABC passes)
-                let flattened = if optimization_options.preset.is_some()
+                if optimization_options.preset.is_some()
                     || optimization_options.passes.is_some()
                     || optimization_options.ml_guided
                 {
@@ -979,9 +979,7 @@ fn build_design(
                 } else {
                     // No optimization, just flatten
                     hier_netlist.flatten()
-                };
-
-                flattened
+                }
             } else {
                 // Flat synthesis for single-module designs
                 let top_module = mir

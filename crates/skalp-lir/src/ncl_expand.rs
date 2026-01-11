@@ -73,7 +73,7 @@ impl Default for NclConfig {
             completion_tree_depth: None,
             generate_null_wavefront: true,
             use_opaque_arithmetic: true, // Enable by default for performance
-            boundary_only: false,        // Disabled until hierarchical issues are resolved
+            boundary_only: true, // Boundary-only NCL for efficiency (simulation needs hybrid mode)
         }
     }
 }
@@ -869,6 +869,172 @@ impl NclExpander {
         );
     }
 
+    /// Expand signed less-than comparison to NCL
+    /// For signed comparison:
+    /// - If a_sign=1 and b_sign=0: a is negative, b is positive -> a < b (true)
+    /// - If a_sign=0 and b_sign=1: a is positive, b is negative -> a > b (false)
+    /// - If signs are equal: use unsigned comparison
+    ///
+    /// Formula: result = (a_sign AND NOT b_sign) OR ((a_sign XNOR b_sign) AND (a < b unsigned))
+    fn expand_signed_lt(
+        &mut self,
+        a: DualRailPair,
+        b: DualRailPair,
+        dest: DualRailPair,
+        width: u32,
+    ) {
+        let id = self.next_signal_id;
+        self.next_signal_id += 1;
+
+        // Extract sign bits (MSB)
+        let a_sign_t = self.alloc_signal(format!("slt_asign_t_{}", id), 1);
+        let a_sign_f = self.alloc_signal(format!("slt_asign_f_{}", id), 1);
+        let b_sign_t = self.alloc_signal(format!("slt_bsign_t_{}", id), 1);
+        let b_sign_f = self.alloc_signal(format!("slt_bsign_f_{}", id), 1);
+
+        self.alloc_node(
+            LirOp::RangeSelect {
+                width,
+                high: width - 1,
+                low: width - 1,
+            },
+            vec![a.t],
+            a_sign_t,
+        );
+        self.alloc_node(
+            LirOp::RangeSelect {
+                width,
+                high: width - 1,
+                low: width - 1,
+            },
+            vec![a.f],
+            a_sign_f,
+        );
+        self.alloc_node(
+            LirOp::RangeSelect {
+                width,
+                high: width - 1,
+                low: width - 1,
+            },
+            vec![b.t],
+            b_sign_t,
+        );
+        self.alloc_node(
+            LirOp::RangeSelect {
+                width,
+                high: width - 1,
+                low: width - 1,
+            },
+            vec![b.f],
+            b_sign_f,
+        );
+
+        let a_sign = DualRailPair {
+            t: a_sign_t,
+            f: a_sign_f,
+        };
+        let b_sign = DualRailPair {
+            t: b_sign_t,
+            f: b_sign_f,
+        };
+
+        // Case 1: a_sign=1 and b_sign=0 (a negative, b positive) -> a < b is TRUE
+        // NCL AND: a_sign_t AND b_sign_f
+        let neg_pos_t = self.alloc_signal(format!("slt_negpos_t_{}", id), 1);
+        let neg_pos_f = self.alloc_signal(format!("slt_negpos_f_{}", id), 1);
+        self.alloc_node(
+            LirOp::Th22 { width: 1 },
+            vec![a_sign.t, b_sign.f],
+            neg_pos_t,
+        );
+        self.alloc_node(
+            LirOp::Th12 { width: 1 },
+            vec![a_sign.f, b_sign.t],
+            neg_pos_f,
+        );
+
+        // Case 2: a_sign=0 and b_sign=1 (a positive, b negative) -> a < b is FALSE
+        // This contributes to the false rail
+
+        // Case 3: Signs equal (same_sign) - use unsigned comparison
+        // same_sign = (a_sign XNOR b_sign) = (a_sign_t AND b_sign_t) OR (a_sign_f AND b_sign_f)
+        // Actually, for NCL we need:
+        // same_sign_t = TH12(TH22(a_sign_t, b_sign_t), TH22(a_sign_f, b_sign_f))
+        // same_sign_f = TH12(TH22(a_sign_t, b_sign_f), TH22(a_sign_f, b_sign_t))
+        let both_true = self.alloc_signal(format!("slt_bothtrue_{}", id), 1);
+        let both_false = self.alloc_signal(format!("slt_bothfalse_{}", id), 1);
+        let same_sign_t = self.alloc_signal(format!("slt_same_t_{}", id), 1);
+        let same_sign_f = self.alloc_signal(format!("slt_same_f_{}", id), 1);
+
+        self.alloc_node(
+            LirOp::Th22 { width: 1 },
+            vec![a_sign.t, b_sign.t],
+            both_true,
+        );
+        self.alloc_node(
+            LirOp::Th22 { width: 1 },
+            vec![a_sign.f, b_sign.f],
+            both_false,
+        );
+        self.alloc_node(
+            LirOp::Th12 { width: 1 },
+            vec![both_true, both_false],
+            same_sign_t,
+        );
+
+        let diff_ab = self.alloc_signal(format!("slt_diffab_{}", id), 1);
+        let diff_ba = self.alloc_signal(format!("slt_diffba_{}", id), 1);
+        self.alloc_node(LirOp::Th22 { width: 1 }, vec![a_sign.t, b_sign.f], diff_ab);
+        self.alloc_node(LirOp::Th22 { width: 1 }, vec![a_sign.f, b_sign.t], diff_ba);
+        self.alloc_node(
+            LirOp::Th12 { width: 1 },
+            vec![diff_ab, diff_ba],
+            same_sign_f,
+        );
+
+        let same_sign = DualRailPair {
+            t: same_sign_t,
+            f: same_sign_f,
+        };
+
+        // Unsigned comparison result
+        let unsigned_lt_t = self.alloc_signal(format!("slt_ult_t_{}", id), 1);
+        let unsigned_lt_f = self.alloc_signal(format!("slt_ult_f_{}", id), 1);
+        let unsigned_lt = DualRailPair {
+            t: unsigned_lt_t,
+            f: unsigned_lt_f,
+        };
+        self.expand_lt(a, b, unsigned_lt, width);
+
+        // (same_sign AND unsigned_lt)
+        let same_and_lt_t = self.alloc_signal(format!("slt_same_and_lt_t_{}", id), 1);
+        let same_and_lt_f = self.alloc_signal(format!("slt_same_and_lt_f_{}", id), 1);
+        self.alloc_node(
+            LirOp::Th22 { width: 1 },
+            vec![same_sign.t, unsigned_lt.t],
+            same_and_lt_t,
+        );
+        self.alloc_node(
+            LirOp::Th12 { width: 1 },
+            vec![same_sign.f, unsigned_lt.f],
+            same_and_lt_f,
+        );
+
+        // Final result: neg_pos OR (same_sign AND unsigned_lt)
+        // true rail: TH12(neg_pos_t, same_and_lt_t)
+        // false rail: TH22(neg_pos_f, same_and_lt_f)
+        self.alloc_node(
+            LirOp::Th12 { width: 1 },
+            vec![neg_pos_t, same_and_lt_t],
+            dest.t,
+        );
+        self.alloc_node(
+            LirOp::Th22 { width: 1 },
+            vec![neg_pos_f, same_and_lt_f],
+            dest.f,
+        );
+    }
+
     /// Expand an NCL equality comparator using proper dual-rail encoding
     /// For multi-bit equality: all bits must be equal for overall equality
     /// 1. Per-bit equality using TH22/TH12
@@ -1077,6 +1243,201 @@ impl NclExpander {
                 vec![first_reduced, second_reduced],
                 output,
             );
+        }
+    }
+
+    /// Expand a single-rail ReduceOr to NCL dual-rail
+    /// RedOr(a): checks if ANY bit of a is true
+    /// - True rail: TH12 chain of all bit t rails (result true if any bit true)
+    /// - False rail: TH22 chain of all bit f rails (result false only if ALL bits false)
+    fn expand_reduce_or(&mut self, a: DualRailPair, dest: DualRailPair, width: u32) {
+        if width == 1 {
+            // Single bit: just buffer - OR of 1 bit is that bit
+            self.alloc_node(LirOp::Buf { width: 1 }, vec![a.t], dest.t);
+            self.alloc_node(LirOp::Buf { width: 1 }, vec![a.f], dest.f);
+        } else {
+            // Multi-bit: extract all bits and reduce
+            // True rail: OR all t rails with TH12 chain
+            // False rail: AND all f rails with TH22 chain
+            self.reduce_with_th12_chain(a.t, dest.t, width);
+            self.reduce_with_th22_chain(a.f, dest.f, width);
+        }
+    }
+
+    /// Expand a single-rail ReduceAnd to NCL dual-rail
+    /// RedAnd(a): checks if ALL bits of a are true
+    /// - True rail: TH22 chain of all bit t rails (result true only if ALL bits true)
+    /// - False rail: TH12 chain of all bit f rails (result false if any bit false)
+    fn expand_reduce_and(&mut self, a: DualRailPair, dest: DualRailPair, width: u32) {
+        if width == 1 {
+            // Single bit: just buffer - AND of 1 bit is that bit
+            self.alloc_node(LirOp::Buf { width: 1 }, vec![a.t], dest.t);
+            self.alloc_node(LirOp::Buf { width: 1 }, vec![a.f], dest.f);
+        } else {
+            // Multi-bit: extract all bits and reduce
+            // True rail: AND all t rails with TH22 chain
+            // False rail: OR all f rails with TH12 chain
+            self.reduce_with_th22_chain(a.t, dest.t, width);
+            self.reduce_with_th12_chain(a.f, dest.f, width);
+        }
+    }
+
+    /// Expand a single-rail ReduceXor (parity) to NCL dual-rail
+    /// RedXor(a): XOR of all bits (parity)
+    /// Uses XOR reduction tree: XOR pairs, then XOR the results, etc.
+    fn expand_reduce_xor(&mut self, a: DualRailPair, dest: DualRailPair, width: u32) {
+        if width == 1 {
+            // Single bit: just buffer - XOR of 1 bit is that bit
+            self.alloc_node(LirOp::Buf { width: 1 }, vec![a.t], dest.t);
+            self.alloc_node(LirOp::Buf { width: 1 }, vec![a.f], dest.f);
+        } else {
+            // Build XOR reduction tree
+            self.reduce_xor_tree(a, dest, width);
+        }
+    }
+
+    /// Build a XOR reduction tree for parity calculation
+    fn reduce_xor_tree(&mut self, a: DualRailPair, dest: DualRailPair, width: u32) {
+        if width == 1 {
+            self.alloc_node(LirOp::Buf { width: 1 }, vec![a.t], dest.t);
+            self.alloc_node(LirOp::Buf { width: 1 }, vec![a.f], dest.f);
+        } else if width == 2 {
+            // XOR two bits: extract bits 0 and 1, then XOR them
+            let bit0_t = self.alloc_signal(format!("red_xor_b0t_{}", self.next_signal_id), 1);
+            let bit0_f = self.alloc_signal(format!("red_xor_b0f_{}", self.next_signal_id), 1);
+            let bit1_t = self.alloc_signal(format!("red_xor_b1t_{}", self.next_signal_id), 1);
+            let bit1_f = self.alloc_signal(format!("red_xor_b1f_{}", self.next_signal_id), 1);
+
+            self.alloc_node(
+                LirOp::RangeSelect {
+                    width,
+                    high: 0,
+                    low: 0,
+                },
+                vec![a.t],
+                bit0_t,
+            );
+            self.alloc_node(
+                LirOp::RangeSelect {
+                    width,
+                    high: 0,
+                    low: 0,
+                },
+                vec![a.f],
+                bit0_f,
+            );
+            self.alloc_node(
+                LirOp::RangeSelect {
+                    width,
+                    high: 1,
+                    low: 1,
+                },
+                vec![a.t],
+                bit1_t,
+            );
+            self.alloc_node(
+                LirOp::RangeSelect {
+                    width,
+                    high: 1,
+                    low: 1,
+                },
+                vec![a.f],
+                bit1_f,
+            );
+
+            let bit0 = DualRailPair {
+                t: bit0_t,
+                f: bit0_f,
+            };
+            let bit1 = DualRailPair {
+                t: bit1_t,
+                f: bit1_f,
+            };
+            self.expand_xor(bit0, bit1, dest, 1);
+        } else {
+            // Divide and conquer: split in half, reduce each half, XOR results
+            let half = width / 2;
+            let remaining = width - half;
+
+            // Extract first half
+            let first_half_t =
+                self.alloc_signal(format!("red_xor_h0t_{}", self.next_signal_id), half);
+            let first_half_f =
+                self.alloc_signal(format!("red_xor_h0f_{}", self.next_signal_id), half);
+            self.alloc_node(
+                LirOp::RangeSelect {
+                    width,
+                    high: half - 1,
+                    low: 0,
+                },
+                vec![a.t],
+                first_half_t,
+            );
+            self.alloc_node(
+                LirOp::RangeSelect {
+                    width,
+                    high: half - 1,
+                    low: 0,
+                },
+                vec![a.f],
+                first_half_f,
+            );
+
+            // Extract second half
+            let second_half_t =
+                self.alloc_signal(format!("red_xor_h1t_{}", self.next_signal_id), remaining);
+            let second_half_f =
+                self.alloc_signal(format!("red_xor_h1f_{}", self.next_signal_id), remaining);
+            self.alloc_node(
+                LirOp::RangeSelect {
+                    width,
+                    high: width - 1,
+                    low: half,
+                },
+                vec![a.t],
+                second_half_t,
+            );
+            self.alloc_node(
+                LirOp::RangeSelect {
+                    width,
+                    high: width - 1,
+                    low: half,
+                },
+                vec![a.f],
+                second_half_f,
+            );
+
+            // Reduce each half
+            let first_reduced_t =
+                self.alloc_signal(format!("red_xor_h0rt_{}", self.next_signal_id), 1);
+            let first_reduced_f =
+                self.alloc_signal(format!("red_xor_h0rf_{}", self.next_signal_id), 1);
+            let first_half = DualRailPair {
+                t: first_half_t,
+                f: first_half_f,
+            };
+            let first_reduced = DualRailPair {
+                t: first_reduced_t,
+                f: first_reduced_f,
+            };
+            self.reduce_xor_tree(first_half, first_reduced, half);
+
+            let second_reduced_t =
+                self.alloc_signal(format!("red_xor_h1rt_{}", self.next_signal_id), 1);
+            let second_reduced_f =
+                self.alloc_signal(format!("red_xor_h1rf_{}", self.next_signal_id), 1);
+            let second_half = DualRailPair {
+                t: second_half_t,
+                f: second_half_f,
+            };
+            let second_reduced = DualRailPair {
+                t: second_reduced_t,
+                f: second_reduced_f,
+            };
+            self.reduce_xor_tree(second_half, second_reduced, remaining);
+
+            // XOR the two reduced values
+            self.expand_xor(first_reduced, second_reduced, dest, 1);
         }
     }
 
@@ -2138,6 +2499,58 @@ pub fn expand_to_ncl(lir: &Lir, config: &NclConfig) -> NclExpandResult {
                     }
                 }
             }
+            // Signed less than: Slt
+            // For signed comparison: compare sign bits, then use unsigned comparison
+            LirOp::Slt { width } => {
+                if node.inputs.len() >= 2 {
+                    let a = expander.dual_rail_map.get(&node.inputs[0]).copied();
+                    let b = expander.dual_rail_map.get(&node.inputs[1]).copied();
+                    if let (Some(a), Some(b), Some(dest)) = (a, b, output_pair) {
+                        expander.expand_signed_lt(a, b, dest, *width);
+                    }
+                }
+            }
+            // Signed greater than or equal: Sge = NOT(Slt)
+            LirOp::Sge { width } => {
+                if node.inputs.len() >= 2 {
+                    let a = expander.dual_rail_map.get(&node.inputs[0]).copied();
+                    let b = expander.dual_rail_map.get(&node.inputs[1]).copied();
+                    if let (Some(a), Some(b), Some(dest)) = (a, b, output_pair) {
+                        // Sge = NOT(Slt), swap output rails
+                        let swapped_dest = DualRailPair {
+                            t: dest.f,
+                            f: dest.t,
+                        };
+                        expander.expand_signed_lt(a, b, swapped_dest, *width);
+                    }
+                }
+            }
+            // Signed greater than: Sgt(a, b) = Slt(b, a)
+            LirOp::Sgt { width } => {
+                if node.inputs.len() >= 2 {
+                    let a = expander.dual_rail_map.get(&node.inputs[0]).copied();
+                    let b = expander.dual_rail_map.get(&node.inputs[1]).copied();
+                    if let (Some(a), Some(b), Some(dest)) = (a, b, output_pair) {
+                        // Swap inputs: Sgt(a, b) = Slt(b, a)
+                        expander.expand_signed_lt(b, a, dest, *width);
+                    }
+                }
+            }
+            // Signed less than or equal: Sle(a, b) = NOT(Sgt(a, b)) = NOT(Slt(b, a))
+            LirOp::Sle { width } => {
+                if node.inputs.len() >= 2 {
+                    let a = expander.dual_rail_map.get(&node.inputs[0]).copied();
+                    let b = expander.dual_rail_map.get(&node.inputs[1]).copied();
+                    if let (Some(a), Some(b), Some(dest)) = (a, b, output_pair) {
+                        // Swap both inputs and outputs: Sle(a, b) = NOT(Slt(b, a))
+                        let swapped_dest = DualRailPair {
+                            t: dest.f,
+                            f: dest.t,
+                        };
+                        expander.expand_signed_lt(b, a, swapped_dest, *width);
+                    }
+                }
+            }
             // BUG #184 FIX: ZeroExtend - copy lower bits, pad upper bits with NCL DATA_FALSE (t=0, f=1)
             LirOp::ZeroExtend { from, to } => {
                 if !node.inputs.is_empty() {
@@ -2153,6 +2566,38 @@ pub fn expand_to_ncl(lir: &Lir, config: &NclConfig) -> NclExpandResult {
                     let input = expander.dual_rail_map.get(&node.inputs[0]).copied();
                     if let (Some(input), Some(dest)) = (input, output_pair) {
                         expander.expand_sign_extend(input, dest, *from, *to);
+                    }
+                }
+            }
+            // Reduction OR: result = |a (any bit true)
+            // NCL: true rail is TH12 chain (OR of all input t rails)
+            // false rail is TH22 chain (AND of all input f rails)
+            LirOp::RedOr { width } => {
+                if !node.inputs.is_empty() {
+                    let a = expander.dual_rail_map.get(&node.inputs[0]).copied();
+                    if let (Some(a), Some(dest)) = (a, output_pair) {
+                        expander.expand_reduce_or(a, dest, *width);
+                    }
+                }
+            }
+            // Reduction AND: result = &a (all bits true)
+            // NCL: true rail is TH22 chain (AND of all input t rails)
+            // false rail is TH12 chain (OR of all input f rails)
+            LirOp::RedAnd { width } => {
+                if !node.inputs.is_empty() {
+                    let a = expander.dual_rail_map.get(&node.inputs[0]).copied();
+                    if let (Some(a), Some(dest)) = (a, output_pair) {
+                        expander.expand_reduce_and(a, dest, *width);
+                    }
+                }
+            }
+            // Reduction XOR: result = ^a (parity)
+            // NCL: XOR reduction tree using NCL XOR gates
+            LirOp::RedXor { width } => {
+                if !node.inputs.is_empty() {
+                    let a = expander.dual_rail_map.get(&node.inputs[0]).copied();
+                    if let (Some(a), Some(dest)) = (a, output_pair) {
+                        expander.expand_reduce_xor(a, dest, *width);
                     }
                 }
             }

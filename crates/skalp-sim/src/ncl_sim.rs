@@ -319,14 +319,32 @@ impl NclSimulator {
         if let Some(t_net) = t_net {
             self.set_net(t_net, value.true_rail());
             if bit == 0 {
-                eprintln!(
-                    "[NCL_SIM] set_dual_rail: '{}' bit {} t_net={:?} f_net={:?} width={} value={:?}",
-                    name, bit, t_net, f_net, width, value
-                );
+                std::io::Write::write_all(
+                    &mut std::io::stderr(),
+                    format!(
+                        "[NCL_SIM] set_dual_rail: '{}' bit {} t_net={:?} f_net={:?} width={} value={:?}\n",
+                        name, bit, t_net, f_net, width, value
+                    )
+                    .as_bytes(),
+                )
+                .ok();
             }
         }
         if let Some(f_net) = f_net {
             self.set_net(f_net, value.false_rail());
+            if bit == 0 {
+                std::io::Write::write_all(
+                    &mut std::io::stderr(),
+                    format!(
+                        "[NCL_SIM] set_dual_rail: f_net={:?} set to {} (verify: {})\n",
+                        f_net,
+                        value.false_rail(),
+                        self.get_net(f_net)
+                    )
+                    .as_bytes(),
+                )
+                .ok();
+            }
         }
     }
 
