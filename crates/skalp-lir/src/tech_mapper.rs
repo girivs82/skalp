@@ -539,10 +539,19 @@ impl<'a> TechMapper<'a> {
             }
             LirOp::Slt { width } => {
                 // Signed less-than: compare as signed integers
-                // For now, treat same as unsigned - TODO: implement proper signed comparison
-                self.map_less_than(*width, &input_nets, &output_nets, &node.path);
-                self.warnings
-                    .push("Signed LessThan treated as unsigned - may be incorrect".to_string());
+                self.map_signed_less_than(*width, &input_nets, &output_nets, &node.path);
+            }
+            LirOp::Sle { width } => {
+                // Signed less-than-or-equal: compare as signed integers
+                self.map_signed_less_equal(*width, &input_nets, &output_nets, &node.path);
+            }
+            LirOp::Sgt { width } => {
+                // Signed greater-than: compare as signed integers
+                self.map_signed_greater_than(*width, &input_nets, &output_nets, &node.path);
+            }
+            LirOp::Sge { width } => {
+                // Signed greater-than-or-equal: compare as signed integers
+                self.map_signed_greater_equal(*width, &input_nets, &output_nets, &node.path);
             }
 
             // Register
@@ -2090,6 +2099,216 @@ impl<'a> TechMapper<'a> {
         }
 
         self.stats.decomposed_mappings += 1;
+    }
+
+    /// Map a signed less-than comparison: result = (a < b) for signed integers
+    /// Implementation: XOR the MSB of both operands to flip the sign bit,
+    /// then use unsigned comparison. This correctly maps the signed ordering.
+    fn map_signed_less_than(
+        &mut self,
+        width: u32,
+        inputs: &[Vec<GateNetId>],
+        outputs: &[GateNetId],
+        path: &str,
+    ) {
+        if inputs.len() < 2 {
+            self.warnings.push(format!(
+                "SignedLessThan needs 2 inputs, got {}",
+                inputs.len()
+            ));
+            return;
+        }
+
+        let y = outputs.first().copied().unwrap_or(GateNetId(0));
+        let a = &inputs[0];
+        let b = &inputs[1];
+
+        // For signed comparison, we flip the MSB of both operands
+        // This converts signed ordering to unsigned ordering:
+        //   -128 (0b10000000) -> 0 (0b00000000) [smallest]
+        //   -1   (0b11111111) -> 127 (0b01111111)
+        //   0    (0b00000000) -> 128 (0b10000000)
+        //   127  (0b01111111) -> 255 (0b11111111) [largest]
+
+        let xor_info = self.get_cell_info(&CellFunction::Xor2);
+        let const1_info = self.get_cell_info(&CellFunction::TieHigh);
+
+        // Create constant 1 for XOR with MSB
+        let const1_net = self
+            .netlist
+            .add_net(GateNet::new(GateNetId(0), format!("{}.const1", path)));
+        let const1_cell = Cell::new_comb(
+            CellId(0),
+            const1_info.name.clone(),
+            self.library.name.clone(),
+            const1_info.fit,
+            format!("{}.const1", path),
+            vec![],
+            vec![const1_net],
+        );
+        self.add_cell(const1_cell);
+
+        // Create modified inputs with flipped MSB
+        let msb_idx = width as usize - 1;
+        let a_msb = a.get(msb_idx).copied().unwrap_or(a[0]);
+        let b_msb = b.get(msb_idx).copied().unwrap_or(b[0]);
+
+        // Flip a's MSB
+        let a_msb_flipped = self
+            .netlist
+            .add_net(GateNet::new(GateNetId(0), format!("{}.a_msb_flip", path)));
+        let xor_a_cell = Cell::new_comb(
+            CellId(0),
+            xor_info.name.clone(),
+            self.library.name.clone(),
+            xor_info.fit,
+            format!("{}.a_msb_xor", path),
+            vec![a_msb, const1_net],
+            vec![a_msb_flipped],
+        );
+        self.add_cell(xor_a_cell);
+
+        // Flip b's MSB
+        let b_msb_flipped = self
+            .netlist
+            .add_net(GateNet::new(GateNetId(0), format!("{}.b_msb_flip", path)));
+        let xor_b_cell = Cell::new_comb(
+            CellId(0),
+            xor_info.name.clone(),
+            self.library.name.clone(),
+            xor_info.fit,
+            format!("{}.b_msb_xor", path),
+            vec![b_msb, const1_net],
+            vec![b_msb_flipped],
+        );
+        self.add_cell(xor_b_cell);
+
+        // Build modified input vectors
+        let mut a_modified: Vec<GateNetId> = a.iter().take(msb_idx).copied().collect();
+        a_modified.push(a_msb_flipped);
+
+        let mut b_modified: Vec<GateNetId> = b.iter().take(msb_idx).copied().collect();
+        b_modified.push(b_msb_flipped);
+
+        // Now use unsigned less-than on the modified inputs
+        self.map_less_than(
+            width,
+            &[a_modified, b_modified],
+            outputs,
+            &format!("{}.unsigned_cmp", path),
+        );
+
+        self.stats.decomposed_mappings += 1;
+    }
+
+    /// Map a signed less-than-or-equal comparison: result = (a <= b) for signed integers
+    fn map_signed_less_equal(
+        &mut self,
+        width: u32,
+        inputs: &[Vec<GateNetId>],
+        outputs: &[GateNetId],
+        path: &str,
+    ) {
+        // a <= b is equivalent to !(a > b) which is !(b < a)
+        // So we compute b < a (signed) and invert the result
+        if inputs.len() < 2 {
+            self.warnings.push(format!(
+                "SignedLessEqual needs 2 inputs, got {}",
+                inputs.len()
+            ));
+            return;
+        }
+
+        let y = outputs.first().copied().unwrap_or(GateNetId(0));
+
+        // First compute b < a (swap inputs for signed less than)
+        let gt_result = self
+            .netlist
+            .add_net(GateNet::new(GateNetId(0), format!("{}.gt_result", path)));
+        self.map_signed_less_than(
+            width,
+            &[inputs[1].clone(), inputs[0].clone()],
+            &[gt_result],
+            path,
+        );
+
+        // Invert to get a <= b
+        let inv_info = self.get_cell_info(&CellFunction::Inv);
+        let inv_cell = Cell::new_comb(
+            CellId(0),
+            inv_info.name.clone(),
+            self.library.name.clone(),
+            inv_info.fit,
+            format!("{}.inv", path),
+            vec![gt_result],
+            vec![y],
+        );
+        self.add_cell(inv_cell);
+    }
+
+    /// Map a signed greater-than comparison: result = (a > b) for signed integers
+    fn map_signed_greater_than(
+        &mut self,
+        width: u32,
+        inputs: &[Vec<GateNetId>],
+        outputs: &[GateNetId],
+        path: &str,
+    ) {
+        // a > b is equivalent to b < a
+        if inputs.len() < 2 {
+            self.warnings.push(format!(
+                "SignedGreaterThan needs 2 inputs, got {}",
+                inputs.len()
+            ));
+            return;
+        }
+
+        // Swap inputs and use signed less than
+        self.map_signed_less_than(
+            width,
+            &[inputs[1].clone(), inputs[0].clone()],
+            outputs,
+            path,
+        );
+    }
+
+    /// Map a signed greater-than-or-equal comparison: result = (a >= b) for signed integers
+    fn map_signed_greater_equal(
+        &mut self,
+        width: u32,
+        inputs: &[Vec<GateNetId>],
+        outputs: &[GateNetId],
+        path: &str,
+    ) {
+        // a >= b is equivalent to !(a < b)
+        if inputs.len() < 2 {
+            self.warnings.push(format!(
+                "SignedGreaterEqual needs 2 inputs, got {}",
+                inputs.len()
+            ));
+            return;
+        }
+
+        let y = outputs.first().copied().unwrap_or(GateNetId(0));
+
+        // First compute a < b (signed)
+        let lt_result = self
+            .netlist
+            .add_net(GateNet::new(GateNetId(0), format!("{}.lt_result", path)));
+        self.map_signed_less_than(width, inputs, &[lt_result], path);
+
+        // Invert to get a >= b
+        let inv_info = self.get_cell_info(&CellFunction::Inv);
+        let inv_cell = Cell::new_comb(
+            CellId(0),
+            inv_info.name.clone(),
+            self.library.name.clone(),
+            inv_info.fit,
+            format!("{}.inv", path),
+            vec![lt_result],
+            vec![y],
+        );
+        self.add_cell(inv_cell);
     }
 
     /// Map a register

@@ -100,6 +100,10 @@ pub struct MirToLirTransform {
     /// Width of each port/signal
     port_widths: HashMap<PortId, u32>,
     signal_widths: HashMap<SignalId, u32>,
+    /// Signedness of each port/signal/variable (for signed comparisons)
+    port_is_signed: HashMap<PortId, bool>,
+    signal_is_signed: HashMap<SignalId, bool>,
+    variable_is_signed: HashMap<VariableId, bool>,
     /// Current hierarchy path (for node naming)
     hierarchy_path: String,
     /// Warnings
@@ -125,6 +129,9 @@ impl MirToLirTransform {
             variable_widths: HashMap::new(),
             port_widths: HashMap::new(),
             signal_widths: HashMap::new(),
+            port_is_signed: HashMap::new(),
+            signal_is_signed: HashMap::new(),
+            variable_is_signed: HashMap::new(),
             hierarchy_path: "top".to_string(),
             warnings: Vec::new(),
             clock_signals: Vec::new(),
@@ -352,6 +359,12 @@ impl MirToLirTransform {
     fn create_port_signal(&mut self, port: &skalp_mir::mir::Port) {
         let width = Self::get_type_width(&port.port_type);
         self.port_widths.insert(port.id, width);
+        // Track signedness for signed comparison operations
+        let is_signed = matches!(
+            port.port_type,
+            DataType::Int(_) | DataType::IntParam { .. } | DataType::IntExpr { .. }
+        );
+        self.port_is_signed.insert(port.id, is_signed);
 
         let signal_id = match port.direction {
             PortDirection::Input => {
@@ -393,6 +406,12 @@ impl MirToLirTransform {
     fn create_internal_signal(&mut self, signal: &skalp_mir::mir::Signal) {
         let width = Self::get_type_width(&signal.signal_type);
         self.signal_widths.insert(signal.id, width);
+        // Track signedness for signed comparison operations
+        let is_signed = matches!(
+            signal.signal_type,
+            DataType::Int(_) | DataType::IntParam { .. } | DataType::IntExpr { .. }
+        );
+        self.signal_is_signed.insert(signal.id, is_signed);
 
         let signal_id = self.lir.add_signal(signal.name.clone(), width);
         self.signal_to_lir_signal.insert(signal.id, signal_id);
@@ -422,6 +441,12 @@ impl MirToLirTransform {
     fn create_variable_signal(&mut self, variable: &Variable) {
         let width = Self::get_type_width(&variable.var_type);
         self.variable_widths.insert(variable.id, width);
+        // Track signedness for signed comparison operations
+        let is_signed = matches!(
+            variable.var_type,
+            DataType::Int(_) | DataType::IntParam { .. } | DataType::IntExpr { .. }
+        );
+        self.variable_is_signed.insert(variable.id, is_signed);
 
         // Create a signal for the variable
         let signal_id = self.lir.add_signal(format!("_v_{}", variable.name), width);
@@ -1154,50 +1179,70 @@ impl MirToLirTransform {
             BinaryOp::Less => {
                 let left_sig = self.transform_expression(left, operand_width);
                 let right_sig = self.transform_expression(right, operand_width);
-                (
-                    left_sig,
-                    right_sig,
+                // Use signed comparison if either operand is signed
+                let is_signed =
+                    self.infer_expression_is_signed(left) || self.infer_expression_is_signed(right);
+                let op = if is_signed {
+                    LirOp::Slt {
+                        width: operand_width,
+                    }
+                } else {
                     LirOp::Lt {
                         width: operand_width,
-                    },
-                    1,
-                )
+                    }
+                };
+                (left_sig, right_sig, op, 1)
             }
             BinaryOp::LessEqual => {
                 let left_sig = self.transform_expression(left, operand_width);
                 let right_sig = self.transform_expression(right, operand_width);
-                (
-                    left_sig,
-                    right_sig,
+                // Use signed comparison if either operand is signed
+                let is_signed =
+                    self.infer_expression_is_signed(left) || self.infer_expression_is_signed(right);
+                let op = if is_signed {
+                    LirOp::Sle {
+                        width: operand_width,
+                    }
+                } else {
                     LirOp::Le {
                         width: operand_width,
-                    },
-                    1,
-                )
+                    }
+                };
+                (left_sig, right_sig, op, 1)
             }
             BinaryOp::Greater => {
                 let left_sig = self.transform_expression(left, operand_width);
                 let right_sig = self.transform_expression(right, operand_width);
-                (
-                    left_sig,
-                    right_sig,
+                // Use signed comparison if either operand is signed
+                let is_signed =
+                    self.infer_expression_is_signed(left) || self.infer_expression_is_signed(right);
+                let op = if is_signed {
+                    LirOp::Sgt {
+                        width: operand_width,
+                    }
+                } else {
                     LirOp::Gt {
                         width: operand_width,
-                    },
-                    1,
-                )
+                    }
+                };
+                (left_sig, right_sig, op, 1)
             }
             BinaryOp::GreaterEqual => {
                 let left_sig = self.transform_expression(left, operand_width);
                 let right_sig = self.transform_expression(right, operand_width);
-                (
-                    left_sig,
-                    right_sig,
+                // Use signed comparison if either operand is signed
+                let is_signed =
+                    self.infer_expression_is_signed(left) || self.infer_expression_is_signed(right);
+                let op = if is_signed {
+                    LirOp::Sge {
+                        width: operand_width,
+                    }
+                } else {
                     LirOp::Ge {
                         width: operand_width,
-                    },
-                    1,
-                )
+                    }
+                };
+                (left_sig, right_sig, op, 1)
             }
 
             // Shifts
@@ -1590,6 +1635,53 @@ impl MirToLirTransform {
             // BUG #164 FIX: Cast expressions should return target type width
             ExpressionKind::Cast { target_type, .. } => self.get_datatype_width(target_type),
             _ => 1,
+        }
+    }
+
+    /// Infer whether an expression is signed (uses int type)
+    fn infer_expression_is_signed(&self, expr: &Expression) -> bool {
+        match &expr.kind {
+            // Integer literals can be treated as signed
+            ExpressionKind::Literal(Value::Integer(_)) => true,
+            ExpressionKind::Ref(lvalue) => self.is_lvalue_signed(lvalue),
+            ExpressionKind::Binary { left, right, .. } => {
+                // If either operand is signed, treat as signed comparison
+                self.infer_expression_is_signed(left) || self.infer_expression_is_signed(right)
+            }
+            ExpressionKind::Unary { operand, .. } => self.infer_expression_is_signed(operand),
+            ExpressionKind::Conditional {
+                then_expr,
+                else_expr,
+                ..
+            } => {
+                self.infer_expression_is_signed(then_expr)
+                    || self.infer_expression_is_signed(else_expr)
+            }
+            ExpressionKind::Cast { target_type, .. } => matches!(
+                target_type,
+                DataType::Int(_) | DataType::IntParam { .. } | DataType::IntExpr { .. }
+            ),
+            _ => false,
+        }
+    }
+
+    /// Check if an lvalue has a signed type
+    fn is_lvalue_signed(&self, lvalue: &LValue) -> bool {
+        match lvalue {
+            LValue::Signal(signal_id) => self
+                .signal_is_signed
+                .get(signal_id)
+                .copied()
+                .unwrap_or(false),
+            LValue::Port(port_id) => self.port_is_signed.get(port_id).copied().unwrap_or(false),
+            LValue::Variable(var_id) => self
+                .variable_is_signed
+                .get(var_id)
+                .copied()
+                .unwrap_or(false),
+            LValue::BitSelect { base, .. } => self.is_lvalue_signed(base),
+            LValue::RangeSelect { base, .. } => self.is_lvalue_signed(base),
+            LValue::Concat(_) => false, // Concatenation is typically bit-level
         }
     }
 

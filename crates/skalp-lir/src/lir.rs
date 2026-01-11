@@ -703,6 +703,12 @@ pub enum LirOp {
     Ge { width: u32 },
     /// Less than (signed)
     Slt { width: u32 },
+    /// Less than or equal (signed)
+    Sle { width: u32 },
+    /// Greater than (signed)
+    Sgt { width: u32 },
+    /// Greater than or equal (signed)
+    Sge { width: u32 },
 
     // === Multiplexing ===
     /// 2:1 Multiplexer: result = sel ? b : a
@@ -856,7 +862,10 @@ impl LirOp {
             | LirOp::Le { .. }
             | LirOp::Gt { .. }
             | LirOp::Ge { .. }
-            | LirOp::Slt { .. } => 1, // Comparison results are 1-bit
+            | LirOp::Slt { .. }
+            | LirOp::Sle { .. }
+            | LirOp::Sgt { .. }
+            | LirOp::Sge { .. } => 1, // Comparison results are 1-bit
             LirOp::Mux2 { width } => *width,
             LirOp::MuxN { width, .. } => *width,
             LirOp::Shl { width }
@@ -920,6 +929,9 @@ impl LirOp {
             | LirOp::Gt { .. }
             | LirOp::Ge { .. }
             | LirOp::Slt { .. }
+            | LirOp::Sle { .. }
+            | LirOp::Sgt { .. }
+            | LirOp::Sge { .. }
             | LirOp::Shl { .. }
             | LirOp::Shr { .. }
             | LirOp::Sar { .. }
@@ -1254,7 +1266,10 @@ impl LirStats {
                 | LirOp::Le { .. }
                 | LirOp::Gt { .. }
                 | LirOp::Ge { .. }
-                | LirOp::Slt { .. } => {
+                | LirOp::Slt { .. }
+                | LirOp::Sle { .. }
+                | LirOp::Sgt { .. }
+                | LirOp::Sge { .. } => {
                     stats.comparison_ops += 1;
                 }
                 LirOp::Mux2 { .. } | LirOp::MuxN { .. } => {
