@@ -30,6 +30,7 @@ fn test_const_arithmetic() {
         op: HirBinaryOp::Add,
         left: Box::new(HirExpression::Literal(HirLiteral::Integer(2))),
         right: Box::new(HirExpression::Literal(HirLiteral::Integer(3))),
+        is_trait_op: false,
     });
     assert_eq!(eval.eval(&expr).unwrap(), ConstValue::Nat(5));
 
@@ -38,6 +39,7 @@ fn test_const_arithmetic() {
         op: HirBinaryOp::Mul,
         left: Box::new(HirExpression::Literal(HirLiteral::Integer(10))),
         right: Box::new(HirExpression::Literal(HirLiteral::Integer(5))),
+        is_trait_op: false,
     });
     assert_eq!(eval.eval(&expr).unwrap(), ConstValue::Nat(50));
 
@@ -46,6 +48,7 @@ fn test_const_arithmetic() {
         op: HirBinaryOp::Sub,
         left: Box::new(HirExpression::Literal(HirLiteral::Integer(20))),
         right: Box::new(HirExpression::Literal(HirLiteral::Integer(5))),
+        is_trait_op: false,
     });
     assert_eq!(eval.eval(&expr).unwrap(), ConstValue::Nat(15));
 }
@@ -60,6 +63,7 @@ fn test_const_generic_param() {
         op: HirBinaryOp::Add,
         left: Box::new(HirExpression::GenericParam("WIDTH".to_string())),
         right: Box::new(HirExpression::Literal(HirLiteral::Integer(1))),
+        is_trait_op: false,
     });
     assert_eq!(eval.eval(&expr).unwrap(), ConstValue::Nat(9));
 }
@@ -408,6 +412,7 @@ fn test_enum_variant_in_expressions() {
             enum_type: "Level".to_string(),
             variant: "High".to_string(),
         }),
+        is_trait_op: false,
     });
     assert_eq!(eval.eval(&expr).unwrap(), ConstValue::Nat(30));
 
@@ -422,6 +427,7 @@ fn test_enum_variant_in_expressions() {
             enum_type: "Level".to_string(),
             variant: "Low".to_string(),
         }),
+        is_trait_op: false,
     });
     assert_eq!(eval.eval(&expr).unwrap(), ConstValue::Nat(10));
 }

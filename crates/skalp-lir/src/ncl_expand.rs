@@ -2395,7 +2395,8 @@ pub fn apply_boundary_ncl_to_hierarchy(
     use skalp_mir::NclBoundaryMode;
 
     // Build child -> parent reverse mapping
-    let mut child_to_parent: std::collections::HashMap<&str, &str> = std::collections::HashMap::new();
+    let mut child_to_parent: std::collections::HashMap<&str, &str> =
+        std::collections::HashMap::new();
     for (parent, children) in &hier_lir.hierarchy {
         for child in children {
             child_to_parent.insert(child.as_str(), parent.as_str());
@@ -2424,7 +2425,10 @@ pub fn apply_boundary_ncl_to_hierarchy(
                     true
                 }
                 NclBoundaryMode::ForceCoalesce => {
-                    eprintln!("🔧 NCL override: '{}' forced to coalesce (no boundary)", path);
+                    eprintln!(
+                        "🔧 NCL override: '{}' forced to coalesce (no boundary)",
+                        path
+                    );
                     false
                 }
             }

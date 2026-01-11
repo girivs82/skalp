@@ -1635,6 +1635,11 @@ pub struct HirBinaryExpr {
     pub op: HirBinaryOp,
     /// Right operand
     pub right: Box<HirExpression>,
+    /// Whether this operation uses a trait implementation (e.g., impl Add for fp32)
+    /// This is set during HIR building when trait resolution succeeds.
+    /// Used by the inlining heuristic to count trait operations as complex calls.
+    #[serde(default)]
+    pub is_trait_op: bool,
 }
 
 /// Binary operators in HIR

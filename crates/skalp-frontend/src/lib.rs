@@ -594,6 +594,7 @@ fn remap_expr_ports(
                 op: bin.op.clone(),
                 left: Box::new(left),
                 right: Box::new(right),
+                is_trait_op: bin.is_trait_op,
             })
         }
         hir::HirExpression::Unary(unary) => {

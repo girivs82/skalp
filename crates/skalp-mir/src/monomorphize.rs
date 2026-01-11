@@ -238,6 +238,7 @@ impl TypeSubstitution {
                 left: Box::new(self.substitute_expression(&binary.left)),
                 op: binary.op.clone(),
                 right: Box::new(self.substitute_expression(&binary.right)),
+                is_trait_op: binary.is_trait_op,
             }),
             hir::HirExpression::Unary(unary) => hir::HirExpression::Unary(hir::HirUnaryExpr {
                 op: unary.op.clone(),
@@ -1586,6 +1587,7 @@ impl Monomorphizer {
                 left: Box::new(self.replace_calls_in_expression(&binary.left, ctx)),
                 op: binary.op.clone(),
                 right: Box::new(self.replace_calls_in_expression(&binary.right, ctx)),
+                is_trait_op: binary.is_trait_op,
             }),
             hir::HirExpression::Unary(unary) => hir::HirExpression::Unary(hir::HirUnaryExpr {
                 op: unary.op.clone(),

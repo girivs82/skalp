@@ -3006,6 +3006,7 @@ impl HirBuilderContext {
             left: Box::new(left_expr),
             op,
             right: Box::new(right_expr),
+            is_trait_op: false, // Set during type resolution/monomorphization
         }))
     }
 
@@ -5958,6 +5959,7 @@ impl HirBuilderContext {
                     left: Box::new(processed_nodes[0].clone()),
                     op: bin_expr.op.clone(),
                     right: bin_expr.right.clone(),
+                    is_trait_op: bin_expr.is_trait_op,
                 }));
             }
         }
@@ -6490,6 +6492,7 @@ impl HirBuilderContext {
                                     left: Box::new(left_expr),
                                     op,
                                     right,
+                                    is_trait_op: false,
                                 }));
                             } else {
                                 return None; // Error: found BinaryExpr but no left operand yet
@@ -6675,7 +6678,12 @@ impl HirBuilderContext {
 
             let op = op?;
 
-            return Some(HirExpression::Binary(HirBinaryExpr { left, op, right }));
+            return Some(HirExpression::Binary(HirBinaryExpr {
+                left,
+                op,
+                right,
+                is_trait_op: false,
+            }));
         }
 
         // BUG FIX #66: Handle chained operations (a + b + c)
@@ -6744,6 +6752,7 @@ impl HirBuilderContext {
                                 left: Box::new(result),
                                 op,
                                 right,
+                                is_trait_op: false,
                             });
                         }
                     }
@@ -6755,6 +6764,7 @@ impl HirBuilderContext {
                             left: Box::new(result),
                             op: op.clone(),
                             right,
+                            is_trait_op: false,
                         });
                     }
                 }
@@ -6781,7 +6791,12 @@ impl HirBuilderContext {
 
         let op = op?;
 
-        Some(HirExpression::Binary(HirBinaryExpr { left, op, right }))
+        Some(HirExpression::Binary(HirBinaryExpr {
+            left,
+            op,
+            right,
+            is_trait_op: false,
+        }))
     }
 
     /// Build unary expression

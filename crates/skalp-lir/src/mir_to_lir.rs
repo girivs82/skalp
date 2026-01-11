@@ -3025,6 +3025,7 @@ mod tests {
             power_domain_config: None,
             safety_context: None,
             is_async: false,
+            ncl_boundary_mode: None,
             barriers: Vec::new(),
         }
     }
@@ -3132,6 +3133,7 @@ mod tests {
             power_domain_config: None,
             safety_context: None,
             is_async: false,
+            ncl_boundary_mode: None,
             barriers: Vec::new(),
         };
 
@@ -3238,6 +3240,7 @@ mod tests {
             power_domain_config: None,
             safety_context: None,
             is_async: false,
+            ncl_boundary_mode: None,
             barriers: Vec::new(),
         };
 

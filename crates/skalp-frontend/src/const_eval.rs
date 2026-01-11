@@ -1275,6 +1275,7 @@ mod tests {
             op: HirBinaryOp::Add,
             left: Box::new(HirExpression::Literal(HirLiteral::Integer(2))),
             right: Box::new(HirExpression::Literal(HirLiteral::Integer(3))),
+            is_trait_op: false,
         });
         assert_eq!(eval.eval(&expr).unwrap(), ConstValue::Nat(5));
 
@@ -1283,6 +1284,7 @@ mod tests {
             op: HirBinaryOp::Mul,
             left: Box::new(HirExpression::Literal(HirLiteral::Integer(10))),
             right: Box::new(HirExpression::Literal(HirLiteral::Integer(5))),
+            is_trait_op: false,
         });
         assert_eq!(eval.eval(&expr).unwrap(), ConstValue::Nat(50));
     }
@@ -1322,6 +1324,7 @@ mod tests {
             op: HirBinaryOp::Add,
             left: Box::new(HirExpression::GenericParam("N".to_string())),
             right: Box::new(HirExpression::Literal(HirLiteral::Integer(1))),
+            is_trait_op: false,
         });
         assert_eq!(eval.eval(&expr).unwrap(), ConstValue::Nat(9));
     }
@@ -1391,6 +1394,7 @@ mod tests {
             op: HirBinaryOp::Mul,
             left: Box::new(HirExpression::GenericParam("DEPTH".to_string())),
             right: Box::new(HirExpression::Literal(HirLiteral::Integer(2))),
+            is_trait_op: false,
         });
         assert_eq!(eval.eval(&expr).unwrap(), ConstValue::Nat(32));
     }
@@ -1432,6 +1436,7 @@ mod tests {
                 op: HirBinaryOp::Mul,
                 left: Box::new(HirExpression::Literal(HirLiteral::Integer(8))),
                 right: Box::new(HirExpression::Literal(HirLiteral::Integer(4))),
+                is_trait_op: false,
             }),
         };
 

@@ -1118,8 +1118,11 @@ fn build_design(
                         ready_delay_margin_ps: 10.0, // 10ps extra margin
                         ..Default::default()
                     };
-                    let fix_result =
-                        skalp_lir::fix_fork_violations(&mut optimized_netlist, &sta_result, &fix_config);
+                    let fix_result = skalp_lir::fix_fork_violations(
+                        &mut optimized_netlist,
+                        &sta_result,
+                        &fix_config,
+                    );
 
                     if fix_result.buffers_inserted > 0 {
                         println!(

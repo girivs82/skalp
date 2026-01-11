@@ -119,6 +119,7 @@ fn create_simple_entity() -> Hir {
                     left: Box::new(HirExpression::Signal(SignalId(1))),
                     op: HirBinaryOp::Add,
                     right: Box::new(HirExpression::Literal(HirLiteral::Integer(1))),
+                    is_trait_op: false,
                 }),
                 assignment_type: HirAssignmentType::NonBlocking,
             })],

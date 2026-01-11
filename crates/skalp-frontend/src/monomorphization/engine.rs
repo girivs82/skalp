@@ -839,6 +839,109 @@ impl<'hir> MonomorphizationEngine<'hir> {
         }
     }
 
+    /// Map a binary operator to its corresponding trait name
+    fn operator_to_trait_name(op: &crate::hir::HirBinaryOp) -> Option<&'static str> {
+        use crate::hir::HirBinaryOp;
+        match op {
+            HirBinaryOp::Add => Some("Add"),
+            HirBinaryOp::Sub => Some("Sub"),
+            HirBinaryOp::Mul => Some("Mul"),
+            HirBinaryOp::Div => Some("Div"),
+            HirBinaryOp::Mod => Some("Mod"),
+            HirBinaryOp::Less => Some("Ord"),
+            HirBinaryOp::LessEqual => Some("Ord"),
+            HirBinaryOp::Greater => Some("Ord"),
+            HirBinaryOp::GreaterEqual => Some("Ord"),
+            HirBinaryOp::Equal => Some("Eq"),
+            HirBinaryOp::NotEqual => Some("Eq"),
+            // Bitwise and logical operators don't use traits
+            _ => None,
+        }
+    }
+
+    /// Check if a type has a trait implementation for the given trait name
+    fn has_trait_impl_for_type(&self, ty: &HirType, trait_name: &str) -> bool {
+        let Some(hir) = self.hir else {
+            return false;
+        };
+
+        // Resolve the type to handle type aliases
+        let resolved_type = self.resolve_custom_type(ty);
+
+        for trait_impl in &hir.trait_implementations {
+            if trait_impl.trait_name != trait_name {
+                continue;
+            }
+
+            match &trait_impl.target {
+                crate::hir::TraitImplTarget::Type(impl_type) => {
+                    // Check if types match (simple comparison for now)
+                    if Self::types_match(&resolved_type, impl_type) {
+                        return true;
+                    }
+                }
+                crate::hir::TraitImplTarget::Entity(_) => {
+                    // Entity trait impls are handled separately
+                }
+            }
+        }
+
+        false
+    }
+
+    /// Check if two types match (for trait impl lookup)
+    fn types_match(ty1: &HirType, ty2: &HirType) -> bool {
+        match (ty1, ty2) {
+            (HirType::Float32, HirType::Float32) => true,
+            (HirType::Float16, HirType::Float16) => true,
+            (HirType::Float64, HirType::Float64) => true,
+            (HirType::Custom(n1), HirType::Custom(n2)) => n1 == n2,
+            (HirType::Bit(w1), HirType::Bit(w2)) => w1 == w2,
+            (HirType::Nat(w1), HirType::Nat(w2)) => w1 == w2,
+            // Add more type matching as needed
+            _ => false,
+        }
+    }
+
+    /// Infer the type of an expression (limited, for trait detection)
+    fn infer_expr_type(&self, expr: &HirExpression) -> Option<HirType> {
+        match expr {
+            HirExpression::Cast(cast_expr) => Some(cast_expr.target_type.clone()),
+            HirExpression::Literal(lit) => match lit {
+                crate::hir::HirLiteral::Integer(_) => None, // Could be various integer types
+                crate::hir::HirLiteral::Float(_) => Some(HirType::Float32),
+                crate::hir::HirLiteral::Boolean(_) => Some(HirType::Bool),
+                _ => None,
+            },
+            HirExpression::Binary(bin) => {
+                // For binary expressions, the result type is typically the operand type
+                self.infer_expr_type(&bin.left)
+                    .or_else(|| self.infer_expr_type(&bin.right))
+            }
+            HirExpression::Call(call) => {
+                // Look up function return type
+                if let Some(hir) = self.hir {
+                    for func in &hir.functions {
+                        if func.name == call.function {
+                            return func.return_type.clone();
+                        }
+                    }
+                    // Check in implementations
+                    for impl_block in &hir.implementations {
+                        for func in &impl_block.functions {
+                            if func.name == call.function {
+                                return func.return_type.clone();
+                            }
+                        }
+                    }
+                }
+                None
+            }
+            // Variable types require context - can't infer here
+            _ => None,
+        }
+    }
+
     /// Substitute type parameters in a type
     #[allow(clippy::only_used_in_recursion)]
     fn substitute_type(&self, ty: &HirType, instantiation: &Instantiation) -> HirType {
@@ -1055,10 +1158,28 @@ impl<'hir> MonomorphizationEngine<'hir> {
                 let mut eval = self.create_evaluator_with_constants();
                 eval.bind_all(const_args.clone());
 
+                // Determine if this is a trait operation by checking:
+                // 1. Does the operator map to a trait?
+                // 2. Does the operand type have a trait impl?
+                let is_trait_op = if bin.is_trait_op {
+                    // Already marked as trait op
+                    true
+                } else if let Some(trait_name) = Self::operator_to_trait_name(&bin.op) {
+                    // Try to infer the operand type and check for trait impl
+                    if let Some(operand_type) = self.infer_expr_type(&left) {
+                        self.has_trait_impl_for_type(&operand_type, trait_name)
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                };
+
                 let new_bin = crate::hir::HirBinaryExpr {
                     op: bin.op.clone(),
                     left: Box::new(left.clone()),
                     right: Box::new(right.clone()),
+                    is_trait_op,
                 };
 
                 // If we can evaluate, replace with literal
@@ -1532,6 +1653,7 @@ impl<'hir> MonomorphizationEngine<'hir> {
                     op: bin.op.clone(),
                     left: Box::new(left),
                     right: Box::new(right),
+                    is_trait_op: bin.is_trait_op,
                 })
             }
             HirExpression::Unary(unary) => {

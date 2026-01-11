@@ -403,46 +403,93 @@ impl SynthEngine {
 
     /// Optimize a hierarchical netlist with per-instance parallel synthesis
     ///
-    /// Each instance in the hierarchy is optimized independently using the Auto
-    /// preset (which tries multiple strategies and picks the best). All instances
-    /// are processed in parallel using rayon.
+    /// Uses module-type caching: identical module types (same name + cell count)
+    /// are optimized only once, and the result is reused for all instances.
+    /// This dramatically speeds up designs with many identical FP/arithmetic units.
     pub fn optimize_hierarchical(
         &mut self,
         hier: &crate::hierarchical_netlist::HierarchicalNetlist,
         library: &TechLibrary,
     ) -> crate::hierarchical_netlist::HierarchicalSynthResult {
         use crate::hierarchical_netlist::{HierarchicalNetlist, HierarchicalSynthResult};
+        use std::sync::Mutex;
 
         let start = Instant::now();
 
+        // Group instances by module signature (name + cell count + output count)
+        // This allows caching optimization results for identical modules
+        let mut module_groups: std::collections::HashMap<String, Vec<String>> =
+            std::collections::HashMap::new();
+
+        for (path, inst) in &hier.instances {
+            // Create signature from module name + cell count + output count
+            let signature = format!(
+                "{}_{}_{}",
+                inst.module_name,
+                inst.netlist.cell_count(),
+                inst.netlist.outputs.len()
+            );
+            module_groups
+                .entry(signature)
+                .or_default()
+                .push(path.clone());
+        }
+
+        let unique_modules = module_groups.len();
+        let total_instances = hier.instances.len();
+        let cache_hits = total_instances - unique_modules;
+
         eprintln!(
-            "[HIER] Optimizing {} instances in parallel...",
-            hier.instances.len()
+            "[HIER] Optimizing {} unique module types ({} instances, {} cache hits)",
+            unique_modules, total_instances, cache_hits
         );
 
-        // Optimize each instance in parallel using Auto preset
-        let optimized: std::collections::HashMap<String, SynthResult> = hier
-            .instances
-            .par_iter()
-            .map(|(path, inst)| {
-                eprintln!(
-                    "[HIER] {} ({}) -> optimizing... ({} cells, {} outputs)",
-                    path,
-                    inst.module_name,
-                    inst.netlist.cell_count(),
-                    inst.netlist.outputs.len()
-                );
-                let mut engine = SynthEngine::with_preset(SynthPreset::Auto);
-                let result = engine.optimize(&inst.netlist, library);
-                eprintln!(
-                    "[HIER] {} -> {} cells (was {})",
-                    path,
-                    result.netlist.cell_count(),
-                    inst.netlist.cell_count()
-                );
-                (path.clone(), result)
-            })
-            .collect();
+        // Optimize each unique module type in parallel
+        // Use the first instance of each type as the representative
+        let cache: Mutex<std::collections::HashMap<String, SynthResult>> =
+            Mutex::new(std::collections::HashMap::new());
+
+        let unique_sigs: Vec<_> = module_groups.keys().cloned().collect();
+
+        unique_sigs.par_iter().for_each(|signature| {
+            let paths = &module_groups[signature];
+            let first_path = &paths[0];
+            let inst = &hier.instances[first_path];
+
+            let original_cells = inst.netlist.cell_count();
+            eprintln!(
+                "[HIER] {} ({}) -> optimizing... ({} cells, {} outputs) [{}x instances]",
+                first_path,
+                inst.module_name,
+                original_cells,
+                inst.netlist.outputs.len(),
+                paths.len()
+            );
+
+            let mut engine = SynthEngine::with_preset(SynthPreset::Auto);
+            let result = engine.optimize(&inst.netlist, library);
+
+            let optimized_cells = result.netlist.cell_count();
+            eprintln!(
+                "[HIER] {} -> {} cells (was {})",
+                first_path, optimized_cells, original_cells
+            );
+
+            cache.lock().unwrap().insert(signature.clone(), result);
+        });
+
+        let cached_results = cache.into_inner().unwrap();
+
+        // Build result map by applying cached results to all instances
+        let mut optimized: std::collections::HashMap<String, SynthResult> =
+            std::collections::HashMap::new();
+
+        for (signature, paths) in &module_groups {
+            let result = &cached_results[signature];
+            for path in paths {
+                optimized.insert(path.clone(), result.clone());
+            }
+        }
 
         // Build optimized hierarchical netlist
         let mut opt_hier = hier.clone();
@@ -455,8 +502,9 @@ impl SynthEngine {
         let total_time = start.elapsed().as_millis() as u64;
 
         eprintln!(
-            "[HIER] Hierarchical synthesis complete: {} instances in {}ms",
+            "[HIER] Hierarchical synthesis complete: {} instances ({} unique) in {}ms",
             hier.instances.len(),
+            unique_modules,
             total_time
         );
 

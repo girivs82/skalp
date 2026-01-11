@@ -12,6 +12,7 @@ fn test_basic_arithmetic() {
         op: HirBinaryOp::Add,
         left: Box::new(HirExpression::Literal(HirLiteral::Integer(5))),
         right: Box::new(HirExpression::Literal(HirLiteral::Integer(3))),
+        is_trait_op: false,
     });
 
     let result = eval.eval(&expr).unwrap();
@@ -27,6 +28,7 @@ fn test_multiplication() {
         op: HirBinaryOp::Mul,
         left: Box::new(HirExpression::Literal(HirLiteral::Integer(4))),
         right: Box::new(HirExpression::Literal(HirLiteral::Integer(7))),
+        is_trait_op: false,
     });
 
     let result = eval.eval(&expr).unwrap();
@@ -42,6 +44,7 @@ fn test_subtraction() {
         op: HirBinaryOp::Sub,
         left: Box::new(HirExpression::Literal(HirLiteral::Integer(10))),
         right: Box::new(HirExpression::Literal(HirLiteral::Integer(3))),
+        is_trait_op: false,
     });
 
     let result = eval.eval(&expr).unwrap();
@@ -57,6 +60,7 @@ fn test_division() {
         op: HirBinaryOp::Div,
         left: Box::new(HirExpression::Literal(HirLiteral::Integer(20))),
         right: Box::new(HirExpression::Literal(HirLiteral::Integer(4))),
+        is_trait_op: false,
     });
 
     let result = eval.eval(&expr).unwrap();
@@ -72,12 +76,14 @@ fn test_nested_arithmetic() {
         op: HirBinaryOp::Add,
         left: Box::new(HirExpression::Literal(HirLiteral::Integer(5))),
         right: Box::new(HirExpression::Literal(HirLiteral::Integer(3))),
+        is_trait_op: false,
     });
 
     let mul_expr = HirExpression::Binary(HirBinaryExpr {
         op: HirBinaryOp::Mul,
         left: Box::new(add_expr),
         right: Box::new(HirExpression::Literal(HirLiteral::Integer(2))),
+        is_trait_op: false,
     });
 
     let result = eval.eval(&mul_expr).unwrap();
@@ -93,6 +99,7 @@ fn test_comparison_operators() {
         op: HirBinaryOp::Less,
         left: Box::new(HirExpression::Literal(HirLiteral::Integer(5))),
         right: Box::new(HirExpression::Literal(HirLiteral::Integer(10))),
+        is_trait_op: false,
     });
 
     let result = eval.eval(&expr).unwrap();
@@ -103,6 +110,7 @@ fn test_comparison_operators() {
         op: HirBinaryOp::Greater,
         left: Box::new(HirExpression::Literal(HirLiteral::Integer(5))),
         right: Box::new(HirExpression::Literal(HirLiteral::Integer(10))),
+        is_trait_op: false,
     });
 
     let result2 = eval.eval(&expr2).unwrap();
@@ -118,6 +126,7 @@ fn test_equality() {
         op: HirBinaryOp::Equal,
         left: Box::new(HirExpression::Literal(HirLiteral::Integer(5))),
         right: Box::new(HirExpression::Literal(HirLiteral::Integer(5))),
+        is_trait_op: false,
     });
 
     let result = eval.eval(&expr).unwrap();
@@ -133,6 +142,7 @@ fn test_logical_and() {
         op: HirBinaryOp::LogicalAnd,
         left: Box::new(HirExpression::Literal(HirLiteral::Boolean(true))),
         right: Box::new(HirExpression::Literal(HirLiteral::Boolean(false))),
+        is_trait_op: false,
     });
 
     let result = eval.eval(&expr).unwrap();
@@ -148,6 +158,7 @@ fn test_logical_or() {
         op: HirBinaryOp::LogicalOr,
         left: Box::new(HirExpression::Literal(HirLiteral::Boolean(true))),
         right: Box::new(HirExpression::Literal(HirLiteral::Boolean(false))),
+        is_trait_op: false,
     });
 
     let result = eval.eval(&expr).unwrap();
@@ -163,6 +174,7 @@ fn test_bitwise_operations() {
         op: HirBinaryOp::Or,
         left: Box::new(HirExpression::Literal(HirLiteral::Integer(5))),
         right: Box::new(HirExpression::Literal(HirLiteral::Integer(3))),
+        is_trait_op: false,
     });
 
     let result = eval.eval(&expr).unwrap();
@@ -178,6 +190,7 @@ fn test_shift_left() {
         op: HirBinaryOp::LeftShift,
         left: Box::new(HirExpression::Literal(HirLiteral::Integer(1))),
         right: Box::new(HirExpression::Literal(HirLiteral::Integer(3))),
+        is_trait_op: false,
     });
 
     let result = eval.eval(&expr).unwrap();
@@ -193,6 +206,7 @@ fn test_shift_right() {
         op: HirBinaryOp::RightShift,
         left: Box::new(HirExpression::Literal(HirLiteral::Integer(16))),
         right: Box::new(HirExpression::Literal(HirLiteral::Integer(2))),
+        is_trait_op: false,
     });
 
     let result = eval.eval(&expr).unwrap();
@@ -211,6 +225,7 @@ fn test_generic_parameter_binding() {
         op: HirBinaryOp::Add,
         left: Box::new(HirExpression::GenericParam("N".to_string())),
         right: Box::new(HirExpression::Literal(HirLiteral::Integer(1))),
+        is_trait_op: false,
     });
 
     let result = eval.eval(&expr).unwrap();
@@ -229,12 +244,14 @@ fn test_complex_expression_with_params() {
         op: HirBinaryOp::Mul,
         left: Box::new(HirExpression::GenericParam("WIDTH".to_string())),
         right: Box::new(HirExpression::Literal(HirLiteral::Integer(2))),
+        is_trait_op: false,
     });
 
     let add_expr = HirExpression::Binary(HirBinaryExpr {
         op: HirBinaryOp::Add,
         left: Box::new(mul_expr),
         right: Box::new(HirExpression::Literal(HirLiteral::Integer(8))),
+        is_trait_op: false,
     });
 
     let result = eval.eval(&add_expr).unwrap();
@@ -263,6 +280,7 @@ fn test_modulo_operation() {
         op: HirBinaryOp::Mod,
         left: Box::new(HirExpression::Literal(HirLiteral::Integer(17))),
         right: Box::new(HirExpression::Literal(HirLiteral::Integer(5))),
+        is_trait_op: false,
     });
 
     let result = eval.eval(&expr).unwrap();

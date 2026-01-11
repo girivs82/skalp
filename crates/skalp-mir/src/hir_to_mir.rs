@@ -8942,6 +8942,7 @@ impl<'hir> HirToMir<'hir> {
                 op: bin.op.clone(),
                 left: Box::new(self.substitute_variables(&bin.left, var_exprs, _let_bindings)),
                 right: Box::new(self.substitute_variables(&bin.right, var_exprs, _let_bindings)),
+                is_trait_op: bin.is_trait_op,
             }),
             hir::HirExpression::Unary(un) => hir::HirExpression::Unary(hir::HirUnaryExpr {
                 op: un.op.clone(),
@@ -9645,6 +9646,7 @@ impl<'hir> HirToMir<'hir> {
                     left,
                     op: binary.op.clone(),
                     right,
+                    is_trait_op: binary.is_trait_op,
                 }))
             }
 
@@ -9791,6 +9793,7 @@ impl<'hir> HirToMir<'hir> {
                     left,
                     op: binary.op.clone(),
                     right,
+                    is_trait_op: binary.is_trait_op,
                 }))
             }
 
@@ -10608,6 +10611,7 @@ impl<'hir> HirToMir<'hir> {
                     left: Box::new(new_left),
                     op: bin.op.clone(),
                     right: Box::new(new_right),
+                    is_trait_op: bin.is_trait_op,
                 })
             }
 
@@ -11668,6 +11672,7 @@ impl<'hir> HirToMir<'hir> {
                     op: bin_expr.op.clone(),
                     left: Box::new(left_sub),
                     right: Box::new(right_sub),
+                    is_trait_op: bin_expr.is_trait_op,
                 }))
             }
 
@@ -12184,6 +12189,7 @@ impl<'hir> HirToMir<'hir> {
                     op: bin_expr.op.clone(),
                     left: Box::new(left_sub),
                     right: Box::new(right_sub),
+                    is_trait_op: bin_expr.is_trait_op,
                 })
             }
 
@@ -12540,6 +12546,7 @@ impl<'hir> HirToMir<'hir> {
                     op: bin_expr.op.clone(),
                     left: Box::new(left_sub),
                     right: Box::new(right_sub),
+                    is_trait_op: bin_expr.is_trait_op,
                 })
             }
 
@@ -12917,6 +12924,7 @@ impl<'hir> HirToMir<'hir> {
                     op: bin_expr.op.clone(),
                     left: Box::new(left_sub),
                     right: Box::new(right_sub),
+                    is_trait_op: bin_expr.is_trait_op,
                 })
             }
 
@@ -16832,7 +16840,31 @@ impl<'hir> HirToMir<'hir> {
                 1 + self.count_calls_in_call_expr(expr)
             }
             hir::HirExpression::Binary(bin) => {
-                self.count_function_calls(&bin.left) + self.count_function_calls(&bin.right)
+                // Count nested calls in operands
+                let nested_count =
+                    self.count_function_calls(&bin.left) + self.count_function_calls(&bin.right);
+
+                // BUG FIX: Check if this binary expression uses a trait operator
+                // The is_trait_op flag is set during monomorphization when we detect
+                // that a binary operation uses a trait implementation (like fp32 arithmetic).
+                // Trait operators effectively become entity instantiations (FpAdd, FpMul, etc.)
+                // which are complex operations that should count toward the inlining threshold.
+                if bin.is_trait_op {
+                    println!(
+                        "[COUNT_CALLS] Binary op {:?} is trait operator (is_trait_op=true) - counting as 1",
+                        bin.op
+                    );
+                    1 + nested_count
+                } else if self.is_trait_operator_binary(&bin.op, &bin.left) {
+                    // Fallback: try to detect via type inference (for cases where monomorphization didn't mark it)
+                    println!(
+                        "[COUNT_CALLS] Binary op {:?} detected as trait operator via type inference - counting as 1",
+                        bin.op
+                    );
+                    1 + nested_count
+                } else {
+                    nested_count
+                }
             }
             hir::HirExpression::Unary(un) => self.count_function_calls(&un.operand),
             hir::HirExpression::Index(base, index) => {
@@ -16890,11 +16922,26 @@ impl<'hir> HirToMir<'hir> {
             hir::HirExpression::ArrayLiteral(elements) => {
                 elements.iter().map(|e| self.count_function_calls(e)).sum()
             }
-            hir::HirExpression::StructLiteral(struct_lit) => struct_lit
-                .fields
-                .iter()
-                .map(|f| self.count_function_calls(&f.value))
-                .sum(),
+            hir::HirExpression::StructLiteral(struct_lit) => {
+                // Count nested calls in field values
+                let nested_count: usize = struct_lit
+                    .fields
+                    .iter()
+                    .map(|f| self.count_function_calls(&f.value))
+                    .sum();
+
+                // BUG FIX: Check if this is an entity instantiation (like FpMul, FpAdd)
+                // Entity instantiations are complex operations that should count toward the inlining threshold.
+                if self.is_entity_struct_literal(&struct_lit.type_name) {
+                    println!(
+                        "[COUNT_CALLS] StructLiteral '{}' is entity - counting as 1",
+                        struct_lit.type_name
+                    );
+                    1 + nested_count
+                } else {
+                    nested_count
+                }
+            }
             hir::HirExpression::Cast(cast_expr) => {
                 println!(
                     "[COUNT_CALLS] Cast inner expr type: {:?}",
@@ -16943,6 +16990,121 @@ impl<'hir> HirToMir<'hir> {
                 .sum()
         } else {
             0
+        }
+    }
+
+    /// Check if a struct literal is an entity instantiation (like FpMul, FpAdd)
+    /// This is used by count_function_calls to count entity instantiations toward the inlining threshold.
+    fn is_entity_struct_literal(&self, type_name: &str) -> bool {
+        if let Some(hir) = self.hir {
+            // Check if the type name matches any entity in the HIR
+            // Also check for monomorphized names (e.g., "FpMul_fp32" from "FpMul")
+            let base_name = type_name.split('_').next().unwrap_or(type_name);
+            hir.entities
+                .iter()
+                .any(|e| e.name == type_name || e.name == base_name)
+        } else {
+            false
+        }
+    }
+
+    /// Check if a binary expression uses a trait operator (like fp32 arithmetic)
+    /// This is used by count_function_calls to count trait operators toward the inlining threshold.
+    fn is_trait_operator_binary(
+        &self,
+        op: &hir::HirBinaryOp,
+        left_expr: &hir::HirExpression,
+    ) -> bool {
+        // Check if the operator is one that might have a trait implementation
+        // (arithmetic and comparison operators - not logical operators)
+        let is_trait_op = matches!(
+            op,
+            hir::HirBinaryOp::Add
+                | hir::HirBinaryOp::Sub
+                | hir::HirBinaryOp::Mul
+                | hir::HirBinaryOp::Div
+                | hir::HirBinaryOp::Mod
+                | hir::HirBinaryOp::Less
+                | hir::HirBinaryOp::LessEqual
+                | hir::HirBinaryOp::Greater
+                | hir::HirBinaryOp::GreaterEqual
+                | hir::HirBinaryOp::Equal
+                | hir::HirBinaryOp::NotEqual
+        );
+
+        if !is_trait_op {
+            return false;
+        }
+
+        // Try to determine if the operand has a trait type
+        // Method 1: Check if the left operand is a Cast to a float type
+        if let hir::HirExpression::Cast(cast_expr) = left_expr {
+            if matches!(
+                cast_expr.target_type,
+                hir::HirType::Float16 | hir::HirType::Float32 | hir::HirType::Float64
+            ) || matches!(cast_expr.target_type, hir::HirType::Custom(_))
+            {
+                println!(
+                    "[IS_TRAIT_OP] op={:?} is trait op (Cast to {:?})",
+                    op, cast_expr.target_type
+                );
+                return true;
+            }
+        }
+
+        // Method 2: Try to infer the type (works when type info is available)
+        if let Some(left_type) = self.infer_hir_type(left_expr) {
+            let has_trait_type = matches!(
+                left_type,
+                hir::HirType::Float16 | hir::HirType::Float32 | hir::HirType::Float64
+            ) || matches!(left_type, hir::HirType::Custom(_));
+
+            if has_trait_type {
+                println!(
+                    "[IS_TRAIT_OP] op={:?} is trait op (inferred type {:?})",
+                    op, left_type
+                );
+                return true;
+            }
+        }
+
+        // Method 3: Check if left expression recursively contains float operations
+        // This handles cases like `t1 + t2` where t1 and t2 are results of fp operations
+        if self.expression_involves_float_type(left_expr) {
+            println!(
+                "[IS_TRAIT_OP] op={:?} is trait op (expression involves float)",
+                op
+            );
+            return true;
+        }
+
+        false
+    }
+
+    /// Helper to check if an expression involves float types (recursively)
+    #[allow(clippy::only_used_in_recursion)]
+    fn expression_involves_float_type(&self, expr: &hir::HirExpression) -> bool {
+        match expr {
+            hir::HirExpression::Cast(cast_expr) => {
+                matches!(
+                    cast_expr.target_type,
+                    hir::HirType::Float16 | hir::HirType::Float32 | hir::HirType::Float64
+                ) || matches!(cast_expr.target_type, hir::HirType::Custom(ref s) if s.starts_with("fp"))
+            }
+            hir::HirExpression::Binary(bin) => {
+                self.expression_involves_float_type(&bin.left)
+                    || self.expression_involves_float_type(&bin.right)
+            }
+            hir::HirExpression::Unary(un) => self.expression_involves_float_type(&un.operand),
+            hir::HirExpression::Variable(_) => {
+                // For variables, we can't determine without type info
+                // Check if the variable name hints at float type
+                false
+            }
+            hir::HirExpression::FieldAccess { base, .. } => {
+                self.expression_involves_float_type(base)
+            }
+            _ => false,
         }
     }
 
