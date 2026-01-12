@@ -321,6 +321,14 @@ impl MirToLirTransform {
             self.create_internal_signal(signal);
         }
 
+        // Phase 2b: Create signals for all variables (BUG #150 FIX)
+        // Variables in MIR are intermediate values from let bindings.
+        // They need to be transformed to LIR signals so that subsequent
+        // assignments can reference them.
+        for variable in &module.variables {
+            self.create_variable_signal(variable);
+        }
+
         // Phase 3: Transform continuous assignments
         for assign in &module.assignments {
             self.transform_continuous_assign(assign);
@@ -2381,28 +2389,48 @@ pub fn lower_mir_hierarchical_for_optimize_first(mir: &Mir) -> (HierarchicalMirT
             })
             .unwrap()
     } else {
-        // No valid user module found - check if there are user modules without content
-        let empty_user_modules: Vec<_> = user_candidates
+        // No valid user module found - fall back to stdlib-looking modules with content
+        // This handles user modules that happen to have stdlib-like prefixes (e.g., "BitreverseMWE")
+        let stdlib_with_content: Vec<_> = not_instantiated
             .iter()
-            .filter(|m| !has_content(m))
-            .map(|m| m.name.as_str())
+            .filter(|m| is_stdlib_name_opt(&m.name) && has_content(m))
+            .copied()
             .collect();
 
-        if !empty_user_modules.is_empty() {
-            panic!(
-                "Top module detection failed: Found user module(s) {:?} but they have no content. \
-                 This usually happens when an entity has generic parameters (like clock domains) \
-                 but is never instantiated. Either:\n\
-                 1. Remove generic parameters from the top-level entity, or\n\
-                 2. Create a wrapper entity that instantiates it with concrete types.",
-                empty_user_modules
-            );
+        if !stdlib_with_content.is_empty() {
+            // Found a module with stdlib-like prefix that has content - use it
+            stdlib_with_content
+                .into_iter()
+                .max_by_key(|m| {
+                    let unique_types: std::collections::HashSet<_> =
+                        m.instances.iter().map(|i| i.module).collect();
+                    (unique_types.len(), m.id.0)
+                })
+                .unwrap()
         } else {
-            panic!(
-                "Top module detection failed: No valid user module found. \
-                 Only stdlib modules are present in the design. \
-                 Ensure your source file defines a synthesizable entity."
-            );
+            // No valid user module found - check if there are user modules without content
+            let empty_user_modules: Vec<_> = user_candidates
+                .iter()
+                .filter(|m| !has_content(m))
+                .map(|m| m.name.as_str())
+                .collect();
+
+            if !empty_user_modules.is_empty() {
+                panic!(
+                    "Top module detection failed: Found user module(s) {:?} but they have no content. \
+                     This usually happens when an entity has generic parameters (like clock domains) \
+                     but is never instantiated. Either:\n\
+                     1. Remove generic parameters from the top-level entity, or\n\
+                     2. Create a wrapper entity that instantiates it with concrete types.",
+                    empty_user_modules
+                );
+            } else {
+                panic!(
+                    "Top module detection failed: No valid user module found. \
+                     Only stdlib modules are present in the design. \
+                     Ensure your source file defines a synthesizable entity."
+                );
+            }
         }
     };
 

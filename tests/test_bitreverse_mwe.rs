@@ -7,7 +7,22 @@
 #![cfg(not(debug_assertions))]
 
 use skalp_frontend::parse_and_build_hir;
-use skalp_lir::{get_stdlib_library, lower_mir_hierarchical, map_hierarchical_to_gates};
+use skalp_lir::ncl_expand::NclConfig;
+use skalp_lir::{
+    apply_boundary_ncl_to_hierarchy, get_stdlib_library, lower_mir_hierarchical_for_optimize_first,
+    map_hierarchical_to_gates, HierarchicalMirToLirResult,
+};
+
+/// Helper function to lower MIR with proper NCL boundary handling for async entities
+fn lower_mir_with_ncl(mir: &skalp_mir::Mir) -> HierarchicalMirToLirResult {
+    let (hier_lir_raw, has_async) = lower_mir_hierarchical_for_optimize_first(mir);
+    if has_async {
+        let ncl_config = NclConfig::default();
+        apply_boundary_ncl_to_hierarchy(&hier_lir_raw, &ncl_config)
+    } else {
+        hier_lir_raw
+    }
+}
 use skalp_mir::MirCompiler;
 use skalp_sim::{CircuitMode, HwAccel, SimLevel, UnifiedSimConfig, UnifiedSimulator};
 
@@ -86,7 +101,7 @@ fn compile_and_test(source: &str, name: &str, input: u64, expected: u64) {
         .compile(&hir)
         .expect("Failed to compile to MIR");
 
-    let hier_lir = lower_mir_hierarchical(&mir);
+    let hier_lir = lower_mir_with_ncl(&mir);
     let library = get_stdlib_library("generic_asic").expect("lib");
     let hier_result = map_hierarchical_to_gates(&hier_lir, &library);
     let netlist = hier_result.flatten();
@@ -202,7 +217,7 @@ fn test_func_in_match() {
         .compile(&hir)
         .expect("Failed to compile to MIR");
 
-    let hier_lir = lower_mir_hierarchical(&mir);
+    let hier_lir = lower_mir_with_ncl(&mir);
     let library = get_stdlib_library("generic_asic").expect("lib");
     let hier_result = map_hierarchical_to_gates(&hier_lir, &library);
     let netlist = hier_result.flatten();
@@ -320,7 +335,7 @@ fn test_cle_like_popcount() {
         .compile(&hir)
         .expect("Failed to compile to MIR");
 
-    let hier_lir = lower_mir_hierarchical(&mir);
+    let hier_lir = lower_mir_with_ncl(&mir);
     let library = get_stdlib_library("generic_asic").expect("lib");
     let hier_result = map_hierarchical_to_gates(&hier_lir, &library);
     let netlist = hier_result.flatten();
@@ -393,7 +408,7 @@ fn test_cle_like_bitreverse() {
         .compile(&hir)
         .expect("Failed to compile to MIR");
 
-    let hier_lir = lower_mir_hierarchical(&mir);
+    let hier_lir = lower_mir_with_ncl(&mir);
     let library = get_stdlib_library("generic_asic").expect("lib");
     let hier_result = map_hierarchical_to_gates(&hier_lir, &library);
     let netlist = hier_result.flatten();
@@ -455,7 +470,7 @@ fn test_cle_like_signals_debug() {
         .compile(&hir)
         .expect("Failed to compile to MIR");
 
-    let hier_lir = lower_mir_hierarchical(&mir);
+    let hier_lir = lower_mir_with_ncl(&mir);
     let library = get_stdlib_library("generic_asic").expect("lib");
     let hier_result = map_hierarchical_to_gates(&hier_lir, &library);
     let netlist = hier_result.flatten();
@@ -584,7 +599,7 @@ fn test_cle_like_swapped() {
         .compile(&hir)
         .expect("Failed to compile to MIR");
 
-    let hier_lir = lower_mir_hierarchical(&mir);
+    let hier_lir = lower_mir_with_ncl(&mir);
     let library = get_stdlib_library("generic_asic").expect("lib");
     let hier_result = map_hierarchical_to_gates(&hier_lir, &library);
     let netlist = hier_result.flatten();
@@ -670,7 +685,7 @@ fn test_popcount_direct() {
         .compile(&hir)
         .expect("Failed to compile to MIR");
 
-    let hier_lir = lower_mir_hierarchical(&mir);
+    let hier_lir = lower_mir_with_ncl(&mir);
     let library = get_stdlib_library("generic_asic").expect("lib");
     let hier_result = map_hierarchical_to_gates(&hier_lir, &library);
     let netlist = hier_result.flatten();
@@ -740,7 +755,7 @@ fn test_popcount_nat() {
         .compile(&hir)
         .expect("Failed to compile to MIR");
 
-    let hier_lir = lower_mir_hierarchical(&mir);
+    let hier_lir = lower_mir_with_ncl(&mir);
     let library = get_stdlib_library("generic_asic").expect("lib");
     let hier_result = map_hierarchical_to_gates(&hier_lir, &library);
     let netlist = hier_result.flatten();
@@ -831,7 +846,7 @@ fn test_debug_input_check() {
         .compile(&hir)
         .expect("Failed to compile to MIR");
 
-    let hier_lir = lower_mir_hierarchical(&mir);
+    let hier_lir = lower_mir_with_ncl(&mir);
     let library = get_stdlib_library("generic_asic").expect("lib");
     let hier_result = map_hierarchical_to_gates(&hier_lir, &library);
     let netlist = hier_result.flatten();
@@ -928,7 +943,7 @@ fn test_concat_only() {
         .compile(&hir)
         .expect("Failed to compile to MIR");
 
-    let hier_lir = lower_mir_hierarchical(&mir);
+    let hier_lir = lower_mir_with_ncl(&mir);
     let library = get_stdlib_library("generic_asic").expect("lib");
     let hier_result = map_hierarchical_to_gates(&hier_lir, &library);
     let netlist = hier_result.flatten();
@@ -1006,7 +1021,7 @@ fn test_constant_256() {
         .compile(&hir)
         .expect("Failed to compile to MIR");
 
-    let hier_lir = lower_mir_hierarchical(&mir);
+    let hier_lir = lower_mir_with_ncl(&mir);
     let library = get_stdlib_library("generic_asic").expect("lib");
     let hier_result = map_hierarchical_to_gates(&hier_lir, &library);
     let netlist = hier_result.flatten();
@@ -1052,7 +1067,7 @@ fn test_constant_concat_64() {
         .compile(&hir)
         .expect("Failed to compile to MIR");
 
-    let hier_lir = lower_mir_hierarchical(&mir);
+    let hier_lir = lower_mir_with_ncl(&mir);
     let library = get_stdlib_library("generic_asic").expect("lib");
     let hier_result = map_hierarchical_to_gates(&hier_lir, &library);
     let netlist = hier_result.flatten();
@@ -1152,7 +1167,7 @@ fn test_parallel_mux_popcount() {
         .compile(&hir)
         .expect("Failed to compile to MIR");
 
-    let hier_lir = lower_mir_hierarchical(&mir);
+    let hier_lir = lower_mir_with_ncl(&mir);
     let library = get_stdlib_library("generic_asic").expect("lib");
     let hier_result = map_hierarchical_to_gates(&hier_lir, &library);
     let netlist = hier_result.flatten();
@@ -1201,7 +1216,7 @@ fn test_parallel_mux_bitreverse() {
         .compile(&hir)
         .expect("Failed to compile to MIR");
 
-    let hier_lir = lower_mir_hierarchical(&mir);
+    let hier_lir = lower_mir_with_ncl(&mir);
     let library = get_stdlib_library("generic_asic").expect("lib");
     let hier_result = map_hierarchical_to_gates(&hier_lir, &library);
     let netlist = hier_result.flatten();

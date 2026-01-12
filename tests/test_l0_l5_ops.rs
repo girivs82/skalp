@@ -26,7 +26,8 @@ fn compile_to_gates(source: &str) -> GateNetlist {
     let temp_path_str = format!("/tmp/test_l0_l5_{:?}.sk", thread_id);
     let temp_path = std::path::Path::new(&temp_path_str);
     let mut file = std::fs::File::create(temp_path).expect("Failed to create temp file");
-    file.write_all(source.as_bytes()).expect("Failed to write temp file");
+    file.write_all(source.as_bytes())
+        .expect("Failed to write temp file");
     drop(file);
 
     let context = parse_and_build_compilation_context(temp_path).expect("Failed to parse");
@@ -125,7 +126,7 @@ fn test_l0_add_8bit() {
     let test_cases: Vec<(u64, u64, u64)> = vec![
         (5, 3, 8),
         (0, 0, 0),
-        (255, 1, 0),   // overflow wraps
+        (255, 1, 0), // overflow wraps
         (100, 50, 150),
         (1, 1, 2),
     ];
@@ -166,7 +167,7 @@ fn test_l0_sub_8bit() {
         (10, 3, 7),
         (100, 50, 50),
         (5, 5, 0),
-        (0, 1, 255),   // underflow wraps
+        (0, 1, 255), // underflow wraps
         (255, 255, 0),
     ];
 
@@ -218,7 +219,10 @@ fn test_l0_and_8bit() {
                 println!("  0x{:02X} & 0x{:02X} = 0x{:02X} ✓", a, b, r);
                 passed += 1;
             }
-            Some(r) => println!("  0x{:02X} & 0x{:02X} = 0x{:02X} ✗ (expected 0x{:02X})", a, b, r, expected),
+            Some(r) => println!(
+                "  0x{:02X} & 0x{:02X} = 0x{:02X} ✗ (expected 0x{:02X})",
+                a, b, r, expected
+            ),
             None => println!("  0x{:02X} & 0x{:02X} = FAILED", a, b),
         }
     }
@@ -258,7 +262,10 @@ fn test_l0_or_8bit() {
                 println!("  0x{:02X} | 0x{:02X} = 0x{:02X} ✓", a, b, r);
                 passed += 1;
             }
-            Some(r) => println!("  0x{:02X} | 0x{:02X} = 0x{:02X} ✗ (expected 0x{:02X})", a, b, r, expected),
+            Some(r) => println!(
+                "  0x{:02X} | 0x{:02X} = 0x{:02X} ✗ (expected 0x{:02X})",
+                a, b, r, expected
+            ),
             None => println!("  0x{:02X} | 0x{:02X} = FAILED", a, b),
         }
     }
@@ -298,7 +305,10 @@ fn test_l0_xor_8bit() {
                 println!("  0x{:02X} ^ 0x{:02X} = 0x{:02X} ✓", a, b, r);
                 passed += 1;
             }
-            Some(r) => println!("  0x{:02X} ^ 0x{:02X} = 0x{:02X} ✗ (expected 0x{:02X})", a, b, r, expected),
+            Some(r) => println!(
+                "  0x{:02X} ^ 0x{:02X} = 0x{:02X} ✗ (expected 0x{:02X})",
+                a, b, r, expected
+            ),
             None => println!("  0x{:02X} ^ 0x{:02X} = FAILED", a, b),
         }
     }
@@ -327,7 +337,7 @@ fn test_l0_shl_8bit() {
         (0x01, 1, 0x02),
         (0x01, 4, 0x10),
         (0x0F, 4, 0xF0),
-        (0x80, 1, 0x00),  // shift out
+        (0x80, 1, 0x00), // shift out
     ];
 
     let mut passed = 0;
@@ -338,7 +348,10 @@ fn test_l0_shl_8bit() {
                 println!("  0x{:02X} << {} = 0x{:02X} ✓", a, b, r);
                 passed += 1;
             }
-            Some(r) => println!("  0x{:02X} << {} = 0x{:02X} ✗ (expected 0x{:02X})", a, b, r, expected),
+            Some(r) => println!(
+                "  0x{:02X} << {} = 0x{:02X} ✗ (expected 0x{:02X})",
+                a, b, r, expected
+            ),
             None => println!("  0x{:02X} << {} = FAILED", a, b),
         }
     }
@@ -367,7 +380,7 @@ fn test_l0_shr_8bit() {
         (0x80, 1, 0x40),
         (0x80, 4, 0x08),
         (0xF0, 4, 0x0F),
-        (0x01, 1, 0x00),  // shift out
+        (0x01, 1, 0x00), // shift out
     ];
 
     let mut passed = 0;
@@ -378,7 +391,10 @@ fn test_l0_shr_8bit() {
                 println!("  0x{:02X} >> {} = 0x{:02X} ✓", a, b, r);
                 passed += 1;
             }
-            Some(r) => println!("  0x{:02X} >> {} = 0x{:02X} ✗ (expected 0x{:02X})", a, b, r, expected),
+            Some(r) => println!(
+                "  0x{:02X} >> {} = 0x{:02X} ✗ (expected 0x{:02X})",
+                a, b, r, expected
+            ),
             None => println!("  0x{:02X} >> {} = FAILED", a, b),
         }
     }
@@ -406,13 +422,8 @@ fn test_l0_eq_8bit() {
     let netlist = compile_to_gates(source);
     println!("Compiled: {} cells", netlist.cells.len());
 
-    let test_cases: Vec<(u64, u64, u64)> = vec![
-        (5, 5, 1),
-        (0, 0, 1),
-        (255, 255, 1),
-        (5, 6, 0),
-        (0, 255, 0),
-    ];
+    let test_cases: Vec<(u64, u64, u64)> =
+        vec![(5, 5, 1), (0, 0, 1), (255, 255, 1), (5, 6, 0), (0, 255, 0)];
 
     let mut passed = 0;
     for (a, b, expected) in test_cases {
@@ -446,13 +457,8 @@ fn test_l0_lt_8bit() {
     let netlist = compile_to_gates(source);
     println!("Compiled: {} cells", netlist.cells.len());
 
-    let test_cases: Vec<(u64, u64, u64)> = vec![
-        (3, 5, 1),
-        (5, 5, 0),
-        (5, 3, 0),
-        (0, 255, 1),
-        (254, 255, 1),
-    ];
+    let test_cases: Vec<(u64, u64, u64)> =
+        vec![(3, 5, 1), (5, 5, 0), (5, 3, 0), (0, 255, 1), (254, 255, 1)];
 
     let mut passed = 0;
     for (a, b, expected) in test_cases {
@@ -576,7 +582,8 @@ fn test_l3_vec3_add() {
     };
 
     let mut sim = UnifiedSimulator::new(config).expect("Failed to create simulator");
-    sim.load_ncl_gate_level(netlist).expect("Failed to load NCL netlist");
+    sim.load_ncl_gate_level(netlist)
+        .expect("Failed to load NCL netlist");
 
     sim.set_ncl_input("top.ax", 1.0f32.to_bits() as u64, 32);
     sim.set_ncl_input("top.ay", 2.0f32.to_bits() as u64, 32);
@@ -588,9 +595,15 @@ fn test_l3_vec3_add() {
     let result = sim.run_until_stable();
     println!("Converged in {} iterations", result.iterations);
 
-    let rx = sim.get_ncl_output("top.rx", 32).map(|v| f32::from_bits(v as u32));
-    let ry = sim.get_ncl_output("top.ry", 32).map(|v| f32::from_bits(v as u32));
-    let rz = sim.get_ncl_output("top.rz", 32).map(|v| f32::from_bits(v as u32));
+    let rx = sim
+        .get_ncl_output("top.rx", 32)
+        .map(|v| f32::from_bits(v as u32));
+    let ry = sim
+        .get_ncl_output("top.ry", 32)
+        .map(|v| f32::from_bits(v as u32));
+    let rz = sim
+        .get_ncl_output("top.rz", 32)
+        .map(|v| f32::from_bits(v as u32));
 
     println!("  (1,2,3) + (4,5,6) = ({:?}, {:?}, {:?})", rx, ry, rz);
 
@@ -645,7 +658,8 @@ fn test_l3_vec3_dot() {
     };
 
     let mut sim = UnifiedSimulator::new(config).expect("Failed to create simulator");
-    sim.load_ncl_gate_level(netlist).expect("Failed to load NCL netlist");
+    sim.load_ncl_gate_level(netlist)
+        .expect("Failed to load NCL netlist");
 
     // Test: (1,2,3) . (4,5,6) = 4 + 10 + 18 = 32
     sim.set_ncl_input("top.ax", 1.0f32.to_bits() as u64, 32);
@@ -658,7 +672,9 @@ fn test_l3_vec3_dot() {
     let result = sim.run_until_stable();
     println!("Converged in {} iterations", result.iterations);
 
-    let dot = sim.get_ncl_output("top.result", 32).map(|v| f32::from_bits(v as u32));
+    let dot = sim
+        .get_ncl_output("top.result", 32)
+        .map(|v| f32::from_bits(v as u32));
     println!("  (1,2,3) . (4,5,6) = {:?}", dot);
 
     assert_eq!(dot, Some(32.0), "Dot product wrong");
@@ -693,11 +709,11 @@ fn test_l5_popcount_8bit() {
 
     // Test 4-bit popcount (lower nibble only)
     let test_cases: Vec<(u64, u64)> = vec![
-        (0x00, 0),  // 0 bits
-        (0x0F, 4),  // 4 bits
-        (0x05, 2),  // 0101 = 2 bits
-        (0x0A, 2),  // 1010 = 2 bits
-        (0x01, 1),  // 1 bit
+        (0x00, 0), // 0 bits
+        (0x0F, 4), // 4 bits
+        (0x05, 2), // 0101 = 2 bits
+        (0x0A, 2), // 1010 = 2 bits
+        (0x01, 1), // 1 bit
     ];
 
     let mut passed = 0;
@@ -737,11 +753,11 @@ fn test_l5_parity_8bit() {
 
     // Test 4-bit parity (lower nibble only)
     let test_cases: Vec<(u64, u64)> = vec![
-        (0x00, 0),  // 0 bits = even
-        (0x01, 1),  // 1 bit = odd
-        (0x03, 0),  // 2 bits = even
-        (0x07, 1),  // 3 bits = odd
-        (0x0F, 0),  // 4 bits = even
+        (0x00, 0), // 0 bits = even
+        (0x01, 1), // 1 bit = odd
+        (0x03, 0), // 2 bits = even
+        (0x07, 1), // 3 bits = odd
+        (0x0F, 0), // 4 bits = even
     ];
 
     let mut passed = 0;
@@ -783,11 +799,11 @@ fn test_l5_bitreverse_8bit() {
     // Input 0x01 (binary 0001) -> reversed 1000 = 0x08
     // Input 0x08 (binary 1000) -> reversed 0001 = 0x01
     let test_cases: Vec<(u64, u64)> = vec![
-        (0x01, 0x08),  // 0001 -> 1000
-        (0x08, 0x01),  // 1000 -> 0001
-        (0x0F, 0x0F),  // 1111 -> 1111
-        (0x00, 0x00),  // 0000 -> 0000
-        (0x05, 0x0A),  // 0101 -> 1010
+        (0x01, 0x08), // 0001 -> 1000
+        (0x08, 0x01), // 1000 -> 0001
+        (0x0F, 0x0F), // 1111 -> 1111
+        (0x00, 0x00), // 0000 -> 0000
+        (0x05, 0x0A), // 0101 -> 1010
     ];
 
     let mut passed = 0;
@@ -798,7 +814,10 @@ fn test_l5_bitreverse_8bit() {
                 println!("  bitreverse(0x{:02X}) = 0x{:02X} ✓", a, r);
                 passed += 1;
             }
-            Some(r) => println!("  bitreverse(0x{:02X}) = 0x{:02X} ✗ (expected 0x{:02X})", a, r, expected),
+            Some(r) => println!(
+                "  bitreverse(0x{:02X}) = 0x{:02X} ✗ (expected 0x{:02X})",
+                a, r, expected
+            ),
             None => println!("  bitreverse(0x{:02X}) = FAILED", a),
         }
     }
@@ -830,7 +849,7 @@ fn test_simple_fp32_add() {
     // Test: 2.0 + 3.0 = 5.0
     let a = 2.0f32.to_bits() as u64;
     let b = 3.0f32.to_bits() as u64;
-    
+
     let result = simulate_32bit(&netlist, a, b);
     match result {
         Some(r) => {

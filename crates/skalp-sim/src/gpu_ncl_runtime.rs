@@ -129,6 +129,7 @@ enum NclPrimitiveType {
     Oai22 = 16, // OR-AND-Invert: ~((A1 | A2) & (B1 | B2))
     Nand2 = 17,
     Nor2 = 18,
+    Xnor = 19,
 
     // NCL threshold gates (stateful - need hysteresis)
     Th12 = 20,
@@ -456,6 +457,7 @@ impl GpuNclRuntime {
             "OR3" => NclPrimitiveType::Or3,
             "OR4" => NclPrimitiveType::Or4,
             "XOR" | "XOR2" => NclPrimitiveType::Xor,
+            "XNOR" | "XNOR2" => NclPrimitiveType::Xnor,
             "INV" | "NOT" => NclPrimitiveType::Inv,
             "BUF" | "BUFFER" => NclPrimitiveType::Buf,
             "MUX2" => NclPrimitiveType::Mux2,
@@ -634,6 +636,10 @@ constant uint PTYPE_CONST1 = 11;
 // Arithmetic cells
 constant uint PTYPE_HALFADDER = 12;
 constant uint PTYPE_FULLADDER = 13;
+// Additional gates
+constant uint PTYPE_NAND2 = 17;
+constant uint PTYPE_NOR2 = 18;
+constant uint PTYPE_XNOR = 19;
 
 // THmn threshold gates (stateful)
 constant uint PTYPE_TH12 = 20;
@@ -708,6 +714,9 @@ uint eval_comb_gate(uint ptype, uint in0, uint in1, uint in2, uint in3) {
         case PTYPE_OR3: return in0 | in1 | in2;
         case PTYPE_OR4: return in0 | in1 | in2 | in3;
         case PTYPE_XOR: return in0 ^ in1;
+        case PTYPE_XNOR: return (~(in0 ^ in1)) & 1;
+        case PTYPE_NAND2: return (~(in0 & in1)) & 1;
+        case PTYPE_NOR2: return (~(in0 | in1)) & 1;
         case PTYPE_INV: return (~in0) & 1;
         case PTYPE_BUF: return in0;
         // MUX2: inputs are [sel, d0, d1], output = sel ? d1 : d0
@@ -1288,6 +1297,10 @@ kernel void eval_ncl(
                     inputs.first().copied().unwrap_or(false)
                         ^ inputs.get(1).copied().unwrap_or(false)
                 }
+                NclPrimitiveType::Xnor => {
+                    !(inputs.first().copied().unwrap_or(false)
+                        ^ inputs.get(1).copied().unwrap_or(false))
+                }
                 NclPrimitiveType::Inv => !inputs.first().copied().unwrap_or(false),
                 NclPrimitiveType::Buf => inputs.first().copied().unwrap_or(false),
                 NclPrimitiveType::Mux2 => {
@@ -1837,6 +1850,11 @@ kernel void eval_ncl(
             NclPrimitiveType::Xor => {
                 let result = inputs.iter().fold(false, |acc, &x| acc ^ x);
                 (result, false)
+            }
+            NclPrimitiveType::Xnor => {
+                let a = inputs.first().copied().unwrap_or(false);
+                let b = inputs.get(1).copied().unwrap_or(false);
+                (!(a ^ b), false)
             }
             NclPrimitiveType::Inv => (!inputs.first().copied().unwrap_or(false), false),
             NclPrimitiveType::Buf => (inputs.first().copied().unwrap_or(false), false),
