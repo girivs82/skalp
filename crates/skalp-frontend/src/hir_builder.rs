@@ -3206,27 +3206,66 @@ impl HirBuilderContext {
 
         if has_colon {
             // Range indexing: base[high:low]
-            let index_exprs: Vec<_> = index_node
-                .children()
-                .filter(|n| {
-                    matches!(
-                        n.kind(),
-                        SyntaxKind::IdentExpr | SyntaxKind::LiteralExpr | SyntaxKind::BinaryExpr
-                    )
-                })
-                .collect();
+            // BUG FIX: We must split children by the colon position, not just take first two BinaryExpr.
+            // For PROD_BITS-3:PROD_BITS-3-M-GUARD_BITS+1, the parser creates multiple BinaryExpr children
+            // and we need to take only those BEFORE the colon for high, and AFTER for low.
 
-            if index_exprs.len() >= 2 {
-                let high_expr = self.build_expression(&index_exprs[0])?;
-                let low_expr = self.build_expression(&index_exprs[1])?;
-                Some(HirExpression::Range(
-                    Box::new(base),
-                    Box::new(high_expr),
-                    Box::new(low_expr),
-                ))
+            // Find the colon token's position among children_with_tokens
+            let children_with_tokens: Vec<_> = index_node.children_with_tokens().collect();
+
+            let colon_pos = children_with_tokens
+                .iter()
+                .position(|e| e.as_token().is_some_and(|t| t.kind() == SyntaxKind::Colon));
+
+            // Get syntax nodes before and after colon
+            let (before_colon, after_colon): (Vec<_>, Vec<_>) = if let Some(pos) = colon_pos {
+                let before: Vec<_> = children_with_tokens[..pos]
+                    .iter()
+                    .filter_map(|e| e.as_node())
+                    .filter(|n| {
+                        matches!(
+                            n.kind(),
+                            SyntaxKind::IdentExpr
+                                | SyntaxKind::LiteralExpr
+                                | SyntaxKind::BinaryExpr
+                        )
+                    })
+                    .cloned()
+                    .collect();
+                let after: Vec<_> = children_with_tokens[pos + 1..]
+                    .iter()
+                    .filter_map(|e| e.as_node())
+                    .filter(|n| {
+                        matches!(
+                            n.kind(),
+                            SyntaxKind::IdentExpr
+                                | SyntaxKind::LiteralExpr
+                                | SyntaxKind::BinaryExpr
+                        )
+                    })
+                    .cloned()
+                    .collect();
+                (before, after)
             } else {
-                None
+                return None;
+            };
+
+            if before_colon.is_empty() || after_colon.is_empty() {
+                return None;
             }
+
+            // For HIGH: if there's only one node, use it. If multiple, chain them.
+            let high_expr = self.build_chained_expression(&before_colon)?;
+
+            // For LOW: if there's only one node, use it. If multiple (like PROD_BITS-3 then -M then -GUARD_BITS then +1),
+            // we need to chain them together into a single expression.
+            let low_expr = self.build_chained_expression(&after_colon)?;
+
+            Some(HirExpression::Range(
+                Box::new(base),
+                Box::new(high_expr),
+                Box::new(low_expr),
+            ))
         } else {
             // Single index: base[index]
             let index_expr = index_node
@@ -3241,6 +3280,79 @@ impl HirBuilderContext {
 
             Some(HirExpression::Index(Box::new(base), Box::new(index_expr)))
         }
+    }
+
+    /// Build a chained expression from multiple sibling nodes.
+    ///
+    /// Used for cases like `PROD_BITS-3-M-GUARD_BITS+1` where the parser creates:
+    /// - BinaryExpr("PROD_BITS-3")
+    /// - BinaryExpr("-M")
+    /// - BinaryExpr("-GUARD_BITS")
+    /// - BinaryExpr("+1")
+    ///
+    /// as siblings. We need to chain them: ((((PROD_BITS-3)-M)-GUARD_BITS)+1)
+    fn build_chained_expression(&mut self, nodes: &[SyntaxNode]) -> Option<HirExpression> {
+        if nodes.is_empty() {
+            return None;
+        }
+
+        // Start with the first node as the base expression
+        let mut result = self.build_expression(&nodes[0])?;
+
+        // Chain subsequent nodes
+        for node in &nodes[1..] {
+            // Each continuation node should start with an operator token
+            // For BinaryExpr nodes like "-M", the structure is: operator + operand
+            let first_token = node
+                .children_with_tokens()
+                .filter_map(|e| e.into_token())
+                .next();
+
+            if let Some(op_tok) = first_token {
+                if op_tok.kind().is_operator() {
+                    let op = self.token_to_binary_op(op_tok.kind())?;
+
+                    // Get the operand - it's the child node(s) of this BinaryExpr
+                    let operand_node = node.children().find(|n| {
+                        matches!(
+                            n.kind(),
+                            SyntaxKind::LiteralExpr
+                                | SyntaxKind::IdentExpr
+                                | SyntaxKind::BinaryExpr
+                                | SyntaxKind::UnaryExpr
+                                | SyntaxKind::FieldExpr
+                                | SyntaxKind::IndexExpr
+                                | SyntaxKind::PathExpr
+                                | SyntaxKind::ParenExpr
+                                | SyntaxKind::CallExpr
+                                | SyntaxKind::CastExpr
+                        )
+                    });
+
+                    if let Some(operand) = operand_node {
+                        let right = self.build_expression(&operand)?;
+                        result = HirExpression::Binary(HirBinaryExpr {
+                            left: Box::new(result),
+                            op,
+                            right: Box::new(right),
+                            is_trait_op: false,
+                        });
+                    }
+                }
+            } else {
+                // No operator token - this might be a direct operand, just build and chain with Add by default?
+                // This shouldn't happen in well-formed expressions, but handle gracefully
+                let right = self.build_expression(node)?;
+                result = HirExpression::Binary(HirBinaryExpr {
+                    left: Box::new(result),
+                    op: crate::hir::HirBinaryOp::Add,
+                    right: Box::new(right),
+                    is_trait_op: false,
+                });
+            }
+        }
+
+        Some(result)
     }
 
     /// Build if statement
@@ -6607,9 +6719,13 @@ impl HirBuilderContext {
                 // But "b!=0" as a sibling of "a!=0" under BinaryExpr parent doesn't start with an operator.
                 // BUG FIX #189: Also exclude TernaryExpr parent - sibling BinaryExprs
                 // are the then/else branches, not chained operations!
+                // BUG FIX #190: Also exclude IndexExpr parent - sibling BinaryExprs in
+                // range expressions like `a[high:low]` are the HIGH and LOW expressions
+                // which should NOT be chained together! We handle chaining separately
+                // in build_chained_expression when building Range expressions.
                 if !matches!(
                     parent.kind(),
-                    SyntaxKind::BinaryExpr | SyntaxKind::TernaryExpr
+                    SyntaxKind::BinaryExpr | SyntaxKind::TernaryExpr | SyntaxKind::IndexExpr
                 ) {
                     for next in siblings.iter().skip(pos + 1) {
                         if next.kind() == SyntaxKind::BinaryExpr {
@@ -6746,15 +6862,32 @@ impl HirBuilderContext {
                             })
                             .collect();
 
-                        if let Some(right_node) = binary_expr_children.first() {
-                            let right = Box::new(self.build_expression(right_node)?);
-                            result = HirExpression::Binary(HirBinaryExpr {
-                                left: Box::new(result),
-                                op,
-                                right,
-                                is_trait_op: false,
-                            });
-                        }
+                        // BUG FIX #191: Check if first child is IdentExpr/FieldExpr/PathExpr
+                        // followed by IndexExpr (e.g., data[0]). If so, combine them properly.
+                        let right_expr = if binary_expr_children.len() >= 2
+                            && matches!(
+                                binary_expr_children[0].kind(),
+                                SyntaxKind::IdentExpr
+                                    | SyntaxKind::FieldExpr
+                                    | SyntaxKind::PathExpr
+                            )
+                            && binary_expr_children[1].kind() == SyntaxKind::IndexExpr
+                        {
+                            // Build the IdentExpr as base, then use it with the IndexExpr
+                            let base = self.build_expression(&binary_expr_children[0])?;
+                            self.build_index_expr_with_base(&binary_expr_children[1], base)?
+                        } else if let Some(right_node) = binary_expr_children.first() {
+                            self.build_expression(right_node)?
+                        } else {
+                            return None;
+                        };
+
+                        result = HirExpression::Binary(HirBinaryExpr {
+                            left: Box::new(result),
+                            op,
+                            right: Box::new(right_expr),
+                            is_trait_op: false,
+                        });
                     }
                 } else {
                     // This is a direct RHS operand - use the PARENT's operator
@@ -7081,8 +7214,53 @@ impl HirBuilderContext {
 
         if has_colon && indices.len() >= 2 {
             // Range access: base[start:end]
-            let start = Box::new(self.build_expression(&indices[0])?);
-            let end = Box::new(self.build_expression(&indices[1])?);
+            // BUG FIX: Split by colon position, not just first two indices
+            let children_with_tokens: Vec<_> = index_node.children_with_tokens().collect();
+            let colon_pos = children_with_tokens
+                .iter()
+                .position(|e| e.as_token().is_some_and(|t| t.kind() == SyntaxKind::Colon));
+
+            let (before_colon, after_colon): (Vec<_>, Vec<_>) = if let Some(pos) = colon_pos {
+                let before: Vec<_> = children_with_tokens[..pos]
+                    .iter()
+                    .filter_map(|e| e.as_node())
+                    .filter(|n| {
+                        matches!(
+                            n.kind(),
+                            SyntaxKind::LiteralExpr
+                                | SyntaxKind::IdentExpr
+                                | SyntaxKind::BinaryExpr
+                                | SyntaxKind::UnaryExpr
+                        )
+                    })
+                    .cloned()
+                    .collect();
+                let after: Vec<_> = children_with_tokens[pos + 1..]
+                    .iter()
+                    .filter_map(|e| e.as_node())
+                    .filter(|n| {
+                        matches!(
+                            n.kind(),
+                            SyntaxKind::LiteralExpr
+                                | SyntaxKind::IdentExpr
+                                | SyntaxKind::BinaryExpr
+                                | SyntaxKind::UnaryExpr
+                        )
+                    })
+                    .cloned()
+                    .collect();
+                (before, after)
+            } else {
+                return None;
+            };
+
+            if before_colon.is_empty() || after_colon.is_empty() {
+                return None;
+            }
+
+            // Use build_chained_expression to handle multiple sibling BinaryExpr nodes
+            let start = Box::new(self.build_chained_expression(&before_colon)?);
+            let end = Box::new(self.build_chained_expression(&after_colon)?);
             Some(HirExpression::Range(base, start, end))
         } else {
             // Single index access: base[index]
@@ -7685,13 +7863,52 @@ impl HirBuilderContext {
 
         if has_colon {
             // Range expression: base[high:low]
-            // children should be [high, low]
-            if children.len() < 2 {
+            // BUG FIX: Split children by colon position (same fix as build_index_with_base)
+            let children_with_tokens: Vec<_> = node.children_with_tokens().collect();
+            let colon_pos = children_with_tokens
+                .iter()
+                .position(|e| e.as_token().is_some_and(|t| t.kind() == SyntaxKind::Colon));
+
+            let (before_colon, after_colon): (Vec<_>, Vec<_>) = if let Some(pos) = colon_pos {
+                let before: Vec<_> = children_with_tokens[..pos]
+                    .iter()
+                    .filter_map(|e| e.as_node())
+                    .filter(|n| {
+                        matches!(
+                            n.kind(),
+                            SyntaxKind::IdentExpr
+                                | SyntaxKind::LiteralExpr
+                                | SyntaxKind::BinaryExpr
+                        )
+                    })
+                    .cloned()
+                    .collect();
+                let after: Vec<_> = children_with_tokens[pos + 1..]
+                    .iter()
+                    .filter_map(|e| e.as_node())
+                    .filter(|n| {
+                        matches!(
+                            n.kind(),
+                            SyntaxKind::IdentExpr
+                                | SyntaxKind::LiteralExpr
+                                | SyntaxKind::BinaryExpr
+                        )
+                    })
+                    .cloned()
+                    .collect();
+                (before, after)
+            } else {
+                return None;
+            };
+
+            if before_colon.is_empty() || after_colon.is_empty() {
                 return None;
             }
+
+            // Use build_chained_expression to handle multiple sibling BinaryExpr nodes
             let base = Box::new(self.build_expression(&base_expr)?);
-            let high = Box::new(self.build_expression(&children[0])?);
-            let low = Box::new(self.build_expression(&children[1])?);
+            let high = Box::new(self.build_chained_expression(&before_colon)?);
+            let low = Box::new(self.build_chained_expression(&after_colon)?);
             Some(HirExpression::Range(base, high, low))
         } else {
             // Single index: base[index]
@@ -7731,11 +7948,50 @@ impl HirBuilderContext {
 
         if has_colon {
             // Range expression: base[high:low]
-            if children.len() < 2 {
+            // BUG FIX: Split children by colon position and use build_chained_expression
+            let children_with_tokens: Vec<_> = node.children_with_tokens().collect();
+            let colon_pos = children_with_tokens
+                .iter()
+                .position(|e| e.as_token().is_some_and(|t| t.kind() == SyntaxKind::Colon));
+
+            let (before_colon, after_colon): (Vec<_>, Vec<_>) = if let Some(pos) = colon_pos {
+                let before: Vec<_> = children_with_tokens[..pos]
+                    .iter()
+                    .filter_map(|e| e.as_node())
+                    .filter(|n| {
+                        matches!(
+                            n.kind(),
+                            SyntaxKind::IdentExpr
+                                | SyntaxKind::LiteralExpr
+                                | SyntaxKind::BinaryExpr
+                        )
+                    })
+                    .cloned()
+                    .collect();
+                let after: Vec<_> = children_with_tokens[pos + 1..]
+                    .iter()
+                    .filter_map(|e| e.as_node())
+                    .filter(|n| {
+                        matches!(
+                            n.kind(),
+                            SyntaxKind::IdentExpr
+                                | SyntaxKind::LiteralExpr
+                                | SyntaxKind::BinaryExpr
+                        )
+                    })
+                    .cloned()
+                    .collect();
+                (before, after)
+            } else {
+                return None;
+            };
+
+            if before_colon.is_empty() || after_colon.is_empty() {
                 return None;
             }
-            let high = Box::new(self.build_expression(&children[0])?);
-            let low = Box::new(self.build_expression(&children[1])?);
+
+            let high = Box::new(self.build_chained_expression(&before_colon)?);
+            let low = Box::new(self.build_chained_expression(&after_colon)?);
             Some(HirExpression::Range(Box::new(base), high, low))
         } else {
             // Single index: base[index]
