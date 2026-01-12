@@ -427,6 +427,25 @@ impl NclSimulator {
         }
     }
 
+    /// Get raw dual-rail values (t, f) for a specific bit
+    /// Returns (t_value, f_value) tuple
+    pub fn get_dual_rail_raw(&self, name: &str, bit: usize) -> (bool, bool) {
+        if let Some(nets) = self.output_nets.get(name) {
+            let width = nets.len() / 2;
+            let t_idx = bit;
+            let f_idx = width + bit;
+
+            let t_net = nets.get(t_idx).copied();
+            let f_net = nets.get(f_idx).copied();
+            let t = t_net.map(|n| self.get_net(n)).unwrap_or(false);
+            let f = f_net.map(|n| self.get_net(n)).unwrap_or(false);
+
+            (t, f)
+        } else {
+            (false, false)
+        }
+    }
+
     /// Get a multi-bit dual-rail value as integer (returns None if any bit is NULL/Invalid)
     /// Note: Only the lower 64 bits are returned in the u64 result
     pub fn get_dual_rail_value(&self, name: &str, width: usize) -> Option<u64> {

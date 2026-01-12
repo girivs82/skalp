@@ -71,10 +71,13 @@ fn test_ncl_cpu(
     // Check outputs
     let mut all_pass = true;
     for (name, expected, width) in expected_outputs {
-        // Debug: show individual rail values
+        // Debug: show individual rail values with actual net info
+        println!("  OUTPUT '{}' ({} bits):", name, width);
         for bit in 0..*width {
             let ncl_val = sim.get_dual_rail(name, bit);
-            println!("  DEBUG: {}[{}] = {:?}", name, bit, ncl_val);
+            // Also show the raw t and f rail values
+            let (t_val, f_val) = sim.get_dual_rail_raw(name, bit);
+            println!("    [{}] t={} f={} -> {:?}", bit, t_val, f_val, ncl_val);
         }
         match sim.get_dual_rail_value(name, *width) {
             Some(actual) => {
@@ -594,7 +597,6 @@ fn test_ncl_sub_8bit() {
 }
 
 #[test]
-#[ignore = "Pre-existing bug: NCL multiplication produces incorrect results for some inputs"]
 fn test_ncl_mul_4bit() {
     println!("\n=== NCL 4-bit MUL Test ===");
 

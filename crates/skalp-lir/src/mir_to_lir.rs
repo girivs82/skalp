@@ -1108,13 +1108,16 @@ impl MirToLirTransform {
                 )
             }
             BinaryOp::Mul => {
-                let left_sig = self.transform_expression(left, arithmetic_operand_width);
-                let right_sig = self.transform_expression(right, arithmetic_operand_width);
+                // For multiplication, use the natural operand width (not widened to expected_width)
+                // because the multiplier produces a wider result from narrower inputs.
+                // E.g., 4-bit * 4-bit = 8-bit uses a 4x4 multiplier, not an 8x8 multiplier.
+                let left_sig = self.transform_expression(left, operand_width);
+                let right_sig = self.transform_expression(right, operand_width);
                 (
                     left_sig,
                     right_sig,
                     LirOp::Mul {
-                        width: arithmetic_operand_width,
+                        width: operand_width,
                         result_width: expected_width,
                     },
                     expected_width,
