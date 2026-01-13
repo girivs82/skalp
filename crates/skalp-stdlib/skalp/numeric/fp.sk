@@ -250,19 +250,41 @@ impl FpMul<const F: FloatFormat> {
     signal product_norm: bit[PROD_BITS] = prod_overflow ? (product >> 1) : product
 
     // Calculate exponent
-    signal exp_sum: int = (a_exp_eff as int) + (b_exp_eff as int) - BIAS +
+    // Note: Direct cast from bit[E] to int may sign-extend when E's MSB is set
+    // (e.g., 128 as bit[8] becomes -128 as int because bit 7 is 1)
+    // Fix: Extend to E+1 bits with explicit zero MSB to guarantee unsigned semantics
+    signal a_exp_ext: bit[E+1] = {1'b0, a_exp_eff}
+    signal b_exp_ext: bit[E+1] = {1'b0, b_exp_eff}
+    signal exp_sum: int = (a_exp_ext as int) + (b_exp_ext as int) - BIAS +
                          (prod_overflow ? 1 : 0)
 
     // Extract mantissa and round bits
-    const GUARD_BITS: nat = 3
+    // After normalization, the implicit 1 is at bit PROD_BITS-2 (MSB of mant_with_guard)
+    // We extract mantissa from bit PROD_BITS-3 down (excluding the implicit 1)
+    // GUARD_BITS is min(3, M) to support small mantissa formats like fp8 E5M2
+    const GUARD_BITS: nat = (M < 3) ? M : 3
     signal mant_with_guard: bit[M+GUARD_BITS] =
         product_norm[PROD_BITS-2:PROD_BITS-2-M-GUARD_BITS+1]
 
-    signal mant_raw: bit[M] = mant_with_guard[M+GUARD_BITS-1:GUARD_BITS]
-    signal guard: bit = mant_with_guard[GUARD_BITS-1]
-    signal round: bit = mant_with_guard[GUARD_BITS-2]
-    signal sticky: bit = |mant_with_guard[GUARD_BITS-3:0] ||
-                        |product_norm[PROD_BITS-2-M-GUARD_BITS:0]
+    // mant_with_guard[M+GUARD_BITS-1] = implicit 1 (excluded from mant_raw)
+    // mant_with_guard[M+GUARD_BITS-2:GUARD_BITS-1] = mantissa bits
+    signal mant_raw: bit[M] = mant_with_guard[M+GUARD_BITS-2:GUARD_BITS-1]
+
+    // Guard/round/sticky extraction depends on available bits
+    // For GUARD_BITS >= 2: guard is in mant_with_guard
+    // For GUARD_BITS == 1: guard comes from product_norm (M=1 edge case)
+    signal guard: bit = (GUARD_BITS >= 2) ? mant_with_guard[GUARD_BITS-2] :
+                        product_norm[PROD_BITS-2-M-1]
+
+    // For GUARD_BITS >= 3: round is in mant_with_guard[0]
+    // For GUARD_BITS == 2: round is next bit in product_norm
+    // For GUARD_BITS == 1: round = 0 (not enough bits)
+    signal round: bit = (GUARD_BITS >= 3) ? mant_with_guard[0] :
+                        (GUARD_BITS == 2) ? product_norm[PROD_BITS-2-M-GUARD_BITS] : 1'b0
+
+    // Sticky: OR of remaining bits below round
+    // Only available when GUARD_BITS >= 3 (i.e., M >= 3)
+    signal sticky: bit = (GUARD_BITS >= 3) ? |product_norm[PROD_BITS-2-M-GUARD_BITS:0] : 1'b0
 
     // Round
     signal round_up: bit = guard && (round || sticky || mant_raw[0])
@@ -361,7 +383,11 @@ impl FpDiv<const F: FloatFormat> {
     signal quotient_norm: bit[DIV_BITS] = quotient << (DIV_BITS - 1 - quot_msb)
 
     // Calculate exponent
-    signal exp_diff: int = (a_exp_eff as int) - (b_exp_eff as int) + BIAS +
+    // Note: Direct cast from bit[E] to int may sign-extend when E's MSB is set
+    // Fix: Extend to E+1 bits with explicit zero MSB to guarantee unsigned semantics
+    signal a_exp_ext: bit[E+1] = {1'b0, a_exp_eff}
+    signal b_exp_ext: bit[E+1] = {1'b0, b_exp_eff}
+    signal exp_diff: int = (a_exp_ext as int) - (b_exp_ext as int) + BIAS +
                           ((quot_msb as int) - (M + 3))
 
     // Extract mantissa and round bits
