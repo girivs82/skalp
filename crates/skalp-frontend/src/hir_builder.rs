@@ -6086,8 +6086,10 @@ impl HirBuilderContext {
             eprintln!("  - {:?}", child.kind());
         }
 
-        // Collect all expression children
-        let expressions: Vec<HirExpression> = node
+        // BUG #210 FIX: Handle parser quirk where `a[0]` is split into [IdentExpr(a), IndexExpr([0])]
+        // We need to detect IdentExpr + IndexExpr pairs and skip the IdentExpr, letting IndexExpr
+        // incorporate its base from the preceding sibling.
+        let child_nodes: Vec<_> = node
             .children()
             .filter(|n| {
                 matches!(
@@ -6110,8 +6112,33 @@ impl HirBuilderContext {
                         | SyntaxKind::CastExpr
                 )
             })
-            .filter_map(|n| self.build_expression(&n))
             .collect();
+
+        // Process nodes, skipping IdentExpr that are followed by IndexExpr (parser bug workaround)
+        let mut expressions: Vec<HirExpression> = Vec::new();
+        let mut i = 0;
+        while i < child_nodes.len() {
+            // Check if this is an IdentExpr/FieldExpr/PathExpr followed by IndexExpr
+            if i + 1 < child_nodes.len()
+                && matches!(
+                    child_nodes[i].kind(),
+                    SyntaxKind::IdentExpr | SyntaxKind::FieldExpr | SyntaxKind::PathExpr
+                )
+                && child_nodes[i + 1].kind() == SyntaxKind::IndexExpr
+            {
+                // Build the IndexExpr - it will incorporate its base from the preceding sibling
+                if let Some(expr) = self.build_expression(&child_nodes[i + 1]) {
+                    expressions.push(expr);
+                }
+                i += 2; // Skip both IdentExpr and IndexExpr
+            } else {
+                // Build the node normally
+                if let Some(expr) = self.build_expression(&child_nodes[i]) {
+                    expressions.push(expr);
+                }
+                i += 1;
+            }
+        }
 
         eprintln!(
             "[HIR_CONCAT_DEBUG] Found {} expressions in concat",
