@@ -763,11 +763,15 @@ impl<'hir> MonomorphizationEngine<'hir> {
         // for const generic argument evaluation to work correctly
         if let Some(hir) = self.hir {
             self.register_enums_to_evaluator(&mut eval, hir);
-            // Register constants from ALL impl blocks
-            // This includes module-level constants (which may have various entity IDs
-            // depending on parse order) and implementation-specific constants
+            // BUG #179 FIX: Only register constants from GLOBAL impl blocks (EntityId(0))
+            // Entity-specific constants (like W, E, M in impl FpAdd<F>) have IDs that may
+            // collide with global constants (like MODE_SYSTOLIC). If we register all constants
+            // from all impl blocks, entity-specific constants can overwrite global constants.
+            // Entity-specific constants should only be used when processing that entity.
             for impl_block in &hir.implementations {
-                eval.register_constants(&impl_block.constants);
+                if impl_block.entity == crate::hir::EntityId(0) {
+                    eval.register_constants(&impl_block.constants);
+                }
             }
         }
         // BUG #171 FIX: Register specialized constants LAST so they take precedence

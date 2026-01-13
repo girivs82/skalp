@@ -181,10 +181,15 @@ impl<'hir> InstantiationCollector<'hir> {
             }
         }
 
-        // Register ALL constants from ALL implementations (including global scope)
-        // Global constants (like IEEE754_32) are stored in an impl with EntityId(0)
+        // BUG #179 FIX: Only register constants from GLOBAL impl blocks (EntityId(0))
+        // Entity-specific constants (like W, E, M in impl FpAdd<F>) have IDs that may
+        // collide with global constants. Entity-specific constants should only be used
+        // when processing that entity.
+        // Global constants (like IEEE754_32, MODE_SYSTOLIC) are stored in impl with EntityId(0)
         for implementation in &hir.implementations {
-            if !implementation.constants.is_empty() {
+            if implementation.entity == crate::hir::EntityId(0)
+                && !implementation.constants.is_empty()
+            {
                 evaluator.register_constants(&implementation.constants);
             }
         }

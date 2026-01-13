@@ -60,6 +60,10 @@ pub struct HirBuilderContext {
     next_signal_id: u32,
     next_variable_id: u32,
     next_constant_id: u32,
+    /// BUG #179 FIX: Track current impl entity name for generating unique constant IDs
+    /// When building constants inside `impl FpAdd<F> { const W = ... }`, this is "FpAdd"
+    /// When building top-level constants, this is None (global namespace)
+    current_impl_entity_name: Option<String>,
     next_function_id: u32,
     next_block_id: u32,
     next_assignment_id: u32,
@@ -272,6 +276,7 @@ impl HirBuilderContext {
             next_signal_id: 0,
             next_variable_id: 0,
             next_constant_id: 0,
+            current_impl_entity_name: None,
             next_function_id: 0,
             next_block_id: 0,
             next_assignment_id: 0,
@@ -1104,6 +1109,9 @@ impl HirBuilderContext {
             self.symbols.entities.len()
         );
 
+        // BUG #179 FIX: Set current impl entity name for generating unique constant IDs
+        self.current_impl_entity_name = Some(entity_name.clone());
+
         // Look up entity ID
         let entity = match self.symbols.entities.get(&entity_name) {
             Some(e) => *e,
@@ -1112,6 +1120,7 @@ impl HirBuilderContext {
                     "[HIR_IMPL_DEBUG] build_implementation: entity '{}' NOT FOUND in symbols.entities, skipping impl block",
                     entity_name
                 );
+                self.current_impl_entity_name = None; // Clear on early return
                 return None;
             }
         };
@@ -1317,6 +1326,9 @@ impl HirBuilderContext {
 
         // Clear the current entity's default power domain (leaving impl scope)
         self.current_default_power_domain = None;
+
+        // BUG #179 FIX: Clear current impl entity name (leaving impl scope)
+        self.current_impl_entity_name = None;
 
         Some(implementation)
     }
@@ -1882,8 +1894,9 @@ impl HirBuilderContext {
 
     /// Build constant declaration
     fn build_constant(&mut self, node: &SyntaxNode) -> Option<HirConstant> {
-        let id = self.next_constant_id();
+        // BUG #179 FIX: Extract name first, then generate ID based on qualified name hash
         let name = self.extract_name(node)?;
+        let id = self.next_constant_id(&name);
         let const_type = self.extract_hir_type(node);
 
         // Constants must have a value
@@ -12100,10 +12113,25 @@ impl HirBuilderContext {
         id
     }
 
-    fn next_constant_id(&mut self) -> ConstantId {
-        let id = ConstantId(self.next_constant_id);
-        self.next_constant_id += 1;
-        id
+    /// BUG #179 FIX: Generate a unique constant ID based on qualified name hash
+    /// This prevents ID collisions between constants in different modules/entities
+    /// that would otherwise get sequential IDs like 0, 1, 2 which collide.
+    fn next_constant_id(&mut self, constant_name: &str) -> ConstantId {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        // Build qualified name: "EntityName::constant_name" or "global::constant_name"
+        let qualified_name = match &self.current_impl_entity_name {
+            Some(entity) => format!("{}::{}", entity, constant_name),
+            None => format!("global::{}", constant_name),
+        };
+
+        // Hash the qualified name to get a unique ID
+        let mut hasher = DefaultHasher::new();
+        qualified_name.hash(&mut hasher);
+        let hash = hasher.finish() as u32;
+
+        ConstantId(hash)
     }
 
     fn next_function_id(&mut self) -> FunctionId {

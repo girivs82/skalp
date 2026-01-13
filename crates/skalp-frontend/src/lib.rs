@@ -951,8 +951,23 @@ fn merge_symbol(target: &mut Hir, source: &Hir, symbol_name: &str) -> Result<()>
                 });
             }
             // Add constant to the first implementation (global scope)
+            // BUG #179 FIX: Remap constant ID to avoid collisions with existing constants
+            // When modules are merged, constants from different modules may have the same IDs.
+            // We need to assign new unique IDs to avoid collisions.
+            let next_const_id = target
+                .implementations
+                .iter()
+                .flat_map(|i| i.constants.iter())
+                .map(|c| c.id.0)
+                .max()
+                .unwrap_or(0)
+                + 1;
+
+            let mut remapped_constant = constant.clone();
+            remapped_constant.id = hir::ConstantId(next_const_id);
+
             if let Some(impl_block) = target.implementations.first_mut() {
-                impl_block.constants.push(constant.clone());
+                impl_block.constants.push(remapped_constant);
             }
             return Ok(());
         }
@@ -1134,9 +1149,21 @@ fn merge_symbol_with_rename(
                 });
             }
             // Add renamed constant to the first implementation (global scope)
+            // BUG #179 FIX: Remap constant ID to avoid collisions
+            let next_const_id = target
+                .implementations
+                .iter()
+                .flat_map(|i| i.constants.iter())
+                .map(|c| c.id.0)
+                .max()
+                .unwrap_or(0)
+                + 1;
+
+            let mut renamed_constant = constant.clone();
+            renamed_constant.name = alias.to_string();
+            renamed_constant.id = hir::ConstantId(next_const_id);
+
             if let Some(impl_block) = target.implementations.first_mut() {
-                let mut renamed_constant = constant.clone();
-                renamed_constant.name = alias.to_string();
                 impl_block.constants.push(renamed_constant);
             }
             return Ok(());
@@ -1454,8 +1481,21 @@ fn merge_all_symbols(target: &mut Hir, source: &Hir) -> Result<()> {
                     });
                 }
                 // Add constant to the first implementation (global scope)
+                // BUG #179 FIX: Remap constant ID to avoid collisions during glob import
+                let next_const_id = target
+                    .implementations
+                    .iter()
+                    .flat_map(|i| i.constants.iter())
+                    .map(|c| c.id.0)
+                    .max()
+                    .unwrap_or(0)
+                    + 1;
+
+                let mut remapped_constant = constant.clone();
+                remapped_constant.id = hir::ConstantId(next_const_id);
+
                 if let Some(impl_block) = target.implementations.first_mut() {
-                    impl_block.constants.push(constant.clone());
+                    impl_block.constants.push(remapped_constant);
                 }
             }
         }
