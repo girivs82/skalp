@@ -244,6 +244,40 @@ impl<'a> MetalShaderGenerator<'a> {
                 self.generate_signal_field(&signal.name, &signal.sir_type);
             }
         }
+
+        // BUG FIX: Also collect all intermediate signals from combinational node outputs
+        // These signals (like "iter12..__cmp_result_3_lt" or "node_123_out") may not be in
+        // sir.signals but are written to during kernel execution and need struct fields.
+        // Build a lookup map for signal widths from sir.signals for type inference
+        let signal_widths: std::collections::HashMap<String, usize> = sir
+            .signals
+            .iter()
+            .map(|s| (s.name.clone(), s.width))
+            .collect();
+
+        for node in &sir.combinational_nodes {
+            for output in &node.outputs {
+                let signal_id = &output.signal_id;
+                let sanitized_name = self.sanitize_name(signal_id);
+
+                // Skip if already added (from outputs or signals)
+                if !added_names.insert(sanitized_name.clone()) {
+                    continue;
+                }
+
+                // Skip input ports and state elements
+                if input_names.contains(signal_id) || sir.state_elements.contains_key(signal_id) {
+                    continue;
+                }
+
+                // Determine width: check sir.signals first, then default to 32 bits
+                let width = signal_widths.get(signal_id).copied().unwrap_or(32);
+                let sir_type = SirType::Bits(width);
+
+                self.generate_signal_field(signal_id, &sir_type);
+            }
+        }
+
         self.indent -= 1;
         writeln!(self.output, "}};\n").unwrap();
     }

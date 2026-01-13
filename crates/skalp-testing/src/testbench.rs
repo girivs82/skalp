@@ -39,6 +39,10 @@ pub struct Testbench {
     sim: Simulator,
     pending_inputs: HashMap<String, Vec<u8>>,
     cycle_count: u64,
+    /// Available input port names
+    input_names: Vec<String>,
+    /// Available output port names
+    output_names: Vec<String>,
 }
 
 impl Testbench {
@@ -68,9 +72,44 @@ impl Testbench {
 
     /// Create a new testbench with custom simulation config
     pub async fn with_config(source_path: &str, config: SimulationConfig) -> Result<Self> {
+        Self::with_config_and_top_module(source_path, config, None).await
+    }
+
+    /// Create a new testbench with an explicit top module name
+    ///
+    /// Use this when the source file name doesn't match the entity name.
+    /// For example, if `main.sk` contains `entity MyDesign`, use:
+    /// ```rust,ignore
+    /// let tb = Testbench::with_top_module("main.sk", "MyDesign").await.unwrap();
+    /// ```
+    pub async fn with_top_module(source_path: &str, top_module: &str) -> Result<Self> {
+        let use_gpu = std::env::var("SKALP_SIM_MODE")
+            .map(|v| v.to_lowercase() != "cpu")
+            .unwrap_or(true);
+
+        let config = SimulationConfig {
+            use_gpu,
+            max_cycles: 1_000_000,
+            timeout_ms: 60_000,
+            capture_waveforms: true,
+            parallel_threads: 4,
+        };
+
+        Self::with_config_and_top_module(source_path, config, Some(top_module.to_string())).await
+    }
+
+    /// Create a new testbench with custom config and explicit top module name
+    pub async fn with_config_and_top_module(
+        source_path: &str,
+        config: SimulationConfig,
+        top_module_name: Option<String>,
+    ) -> Result<Self> {
         use std::time::Instant;
         let start_total = Instant::now();
         eprintln!("⏱️  [TESTBENCH] Starting compilation of '{}'", source_path);
+        if let Some(ref name) = top_module_name {
+            eprintln!("⏱️  [TESTBENCH] Using explicit top module: '{}'", name);
+        }
 
         let path = Path::new(source_path);
 
@@ -79,23 +118,38 @@ impl Testbench {
         let dependencies = collect_dependencies(path).unwrap_or_default();
         let cache_key = cache.compute_cache_key(path, &dependencies).ok();
 
-        // Try to load from cache
-        let sir = if let Some(ref key) = cache_key {
+        // Try to load from cache (but skip cache if explicit top module specified)
+        let sir = if top_module_name.is_some() {
+            // Always recompile when explicit top module is specified
+            // because the cache key doesn't include the top module name
+            Self::compile_to_sir_with_top(
+                path,
+                &cache,
+                cache_key.as_ref(),
+                top_module_name.as_deref(),
+            )?
+        } else if let Some(ref key) = cache_key {
             if let Ok(Some(cached_sir)) = cache.load(key) {
                 eprintln!("⏱️  [TESTBENCH] Using cached SIR (skipped HIR→MIR→SIR)");
                 cached_sir
             } else {
                 // Cache miss - compile from source
-                Self::compile_to_sir(path, &cache, Some(key))?
+                Self::compile_to_sir_with_top(path, &cache, Some(key), None)?
             }
         } else {
             // No cache key - compile without caching
-            Self::compile_to_sir(path, &cache, None)?
+            Self::compile_to_sir_with_top(path, &cache, None, None)?
         };
+
+        // Extract input/output names from SIR module before passing to simulator
+        let input_names: Vec<String> = sir.inputs.iter().map(|i| i.name.clone()).collect();
+        let output_names: Vec<String> = sir.outputs.iter().map(|o| o.name.clone()).collect();
 
         // Create simulator and load design
         let start_sim = Instant::now();
         eprintln!("⏱️  [TESTBENCH] Creating simulator and loading design...");
+        eprintln!("⏱️  [TESTBENCH] Available inputs: {:?}", input_names);
+        eprintln!("⏱️  [TESTBENCH] Available outputs: {:?}", output_names);
         let mut sim = Simulator::new(config).await?;
         sim.load_module(&sir).await?;
         eprintln!(
@@ -112,14 +166,17 @@ impl Testbench {
             sim,
             pending_inputs: HashMap::new(),
             cycle_count: 0,
+            input_names,
+            output_names,
         })
     }
 
     /// Compile source to SIR (HIR → MIR → SIR), optionally caching the result
-    fn compile_to_sir(
+    fn compile_to_sir_with_top(
         path: &Path,
         cache: &CompilationCache,
         cache_key: Option<&String>,
+        explicit_top: Option<&str>,
     ) -> Result<skalp_sir::SirModule> {
         use std::time::Instant;
 
@@ -209,10 +266,23 @@ impl Testbench {
 
         // BUG #180 FIX: Improved top module selection
         // Priority order:
+        // 0. Explicit top module name (if provided via with_top_module)
         // 1. Module whose name matches the source file basename (search ALL modules first!)
         // 2. Among uninstantiated modules: Module that is NOT a trait specialization
         // 3. Among uninstantiated modules: Module with the most instances (original logic)
-        let top_module = if let Some(ref basename) = source_basename {
+        let top_module = if let Some(explicit_name) = explicit_top {
+            // User specified an explicit top module name
+            if let Some(m) = mir.modules.iter().find(|m| m.name == explicit_name) {
+                eprintln!("  ✓ Using explicit top module: '{}'", m.name);
+                m
+            } else {
+                anyhow::bail!(
+                    "Explicit top module '{}' not found. Available modules: {:?}",
+                    explicit_name,
+                    mir.modules.iter().map(|m| &m.name).collect::<Vec<_>>()
+                );
+            }
+        } else if let Some(ref basename) = source_basename {
             // Convert basename to PascalCase for matching (e.g., "fp_sqrt_simple" -> "FpSqrtSimple")
             let pascal_basename: String = basename
                 .split('_')
@@ -542,6 +612,42 @@ impl Testbench {
         );
 
         self
+    }
+
+    /// Get the list of available input port names
+    ///
+    /// This is useful for debugging when you're not sure what inputs are available.
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// let tb = Testbench::new("design.sk").await.unwrap();
+    /// println!("Inputs: {:?}", tb.get_input_names());
+    /// ```
+    pub fn get_input_names(&self) -> &[String] {
+        &self.input_names
+    }
+
+    /// Get the list of available output port names
+    ///
+    /// This is useful for debugging when you're not sure what outputs are available.
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// let tb = Testbench::new("design.sk").await.unwrap();
+    /// println!("Outputs: {:?}", tb.get_output_names());
+    /// ```
+    pub fn get_output_names(&self) -> &[String] {
+        &self.output_names
+    }
+
+    /// Check if an input port exists
+    pub fn has_input(&self, name: &str) -> bool {
+        self.input_names.iter().any(|n| n == name)
+    }
+
+    /// Check if an output port exists
+    pub fn has_output(&self, name: &str) -> bool {
+        self.output_names.iter().any(|n| n == name)
     }
 }
 

@@ -2770,20 +2770,39 @@ impl<'a> MirToSirConverter<'a> {
                 self.get_or_create_signal_driver(&signal_name)
             }
             LValue::Port(port_id) => {
-                let port = self
-                    .mir
-                    .ports
-                    .iter()
-                    .find(|p| p.id == *port_id)
-                    .unwrap_or_else(|| panic!("Port {:?} not found", port_id));
-
-                // For input ports, create a direct signal reference node
-                if matches!(port.direction, MirPortDirection::Input) {
-                    self.create_port_input_node(&port.name)
-                } else {
-                    // For output ports, create a signal driver
-                    self.get_or_create_signal_driver(&port.name)
+                // First try to find the port in the current (top-level) module
+                if let Some(port) = self.mir.ports.iter().find(|p| p.id == *port_id) {
+                    // For input ports, create a direct signal reference node
+                    if matches!(port.direction, MirPortDirection::Input) {
+                        return self.create_port_input_node(&port.name);
+                    } else {
+                        // For output ports, create a signal driver
+                        return self.get_or_create_signal_driver(&port.name);
+                    }
                 }
+
+                // BUG FIX: Port not found in top-level module - search in child modules
+                // After monomorphization/module merging, expressions may still contain
+                // LValue::Port references with port IDs from child modules. These ports
+                // were converted to signals during the merge, so we need to find the
+                // original port name and use it as a signal reference.
+                for child_module in &self.mir_design.modules {
+                    if let Some(port) = child_module.ports.iter().find(|p| p.id == *port_id) {
+                        eprintln!(
+                            "🔧 BUG FIX: Port {:?} found in child module '{}' as '{}', using as signal",
+                            port_id, child_module.name, port.name
+                        );
+                        // The port has been merged as a signal - use it directly
+                        return self.get_or_create_signal_driver(&port.name);
+                    }
+                }
+
+                // Still not found - this is a bug in the MIR, but provide graceful fallback
+                eprintln!(
+                    "⚠️ WARNING: Port {:?} not found in any module! Creating fallback constant(0)",
+                    port_id
+                );
+                self.create_constant_node(0, 1)
             }
             LValue::Variable(var_id) => {
                 // BUG FIX #86: Use unique signal names to prevent combinational cycles
