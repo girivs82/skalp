@@ -4882,7 +4882,12 @@ pub fn map_hierarchical_to_gates(
     let mut result = HierarchicalNetlist::new(hier_lir.top_module.clone(), library.name.clone());
 
     // Map each instance's LIR to a GateNetlist
-    for (path, inst_lir) in &hier_lir.instances {
+    // Sort instance paths for deterministic iteration order (HashMap is non-deterministic)
+    let mut sorted_paths: Vec<_> = hier_lir.instances.keys().collect();
+    sorted_paths.sort();
+
+    for path in sorted_paths {
+        let inst_lir = hier_lir.instances.get(path).unwrap();
         // Check if this is a compiled IP (pre-compiled netlist)
         let tech_result = if let Some(ref compiled_ip_path) = inst_lir.lir_result.compiled_ip_path {
             // Load the pre-compiled netlist directly
@@ -4933,7 +4938,12 @@ pub fn map_hierarchical_to_gates(
             InstanceNetlist::new(inst_lir.module_name.clone(), tech_result.netlist);
 
         // Record connection context
-        for (port_name, conn_info) in &inst_lir.port_connections {
+        // Sort port names for deterministic ordering (HashMap is non-deterministic)
+        let mut sorted_port_names: Vec<_> = inst_lir.port_connections.keys().collect();
+        sorted_port_names.sort();
+
+        for port_name in sorted_port_names {
+            let conn_info = inst_lir.port_connections.get(port_name).unwrap();
             let port_conn = match conn_info {
                 PortConnectionInfo::Signal(signal_name) => {
                     PortConnection::ParentNet(signal_name.clone())

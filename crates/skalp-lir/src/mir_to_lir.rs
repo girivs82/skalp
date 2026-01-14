@@ -2670,7 +2670,12 @@ fn extract_connection_info(
 ) -> HashMap<String, PortConnectionInfo> {
     let mut result = HashMap::new();
 
-    for (port_name, expr) in connections {
+    // Sort port names for deterministic iteration order (HashMap is non-deterministic)
+    let mut sorted_port_names: Vec<_> = connections.keys().collect();
+    sorted_port_names.sort();
+
+    for port_name in sorted_port_names {
+        let expr = connections.get(port_name).unwrap();
         let info = match &expr.kind {
             ExpressionKind::Literal(value) => {
                 // Constant connection

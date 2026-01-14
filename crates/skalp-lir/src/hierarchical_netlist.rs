@@ -117,7 +117,14 @@ impl HierarchicalNetlist {
         let mut net_id_maps: HashMap<&InstancePath, HashMap<GateNetId, GateNetId>> = HashMap::new();
 
         // Phase 1: Add all cells from all instances with hierarchical path prefix
-        for (path, inst) in &self.instances {
+        // IMPORTANT: Sort instance paths to ensure deterministic ordering.
+        // HashMap iteration order is non-deterministic, which causes flaky tests
+        // when net IDs are assigned differently between runs.
+        let mut sorted_paths: Vec<_> = self.instances.keys().collect();
+        sorted_paths.sort();
+
+        for path in sorted_paths {
+            let inst = self.instances.get(path).unwrap();
             let mut net_map = HashMap::new();
 
             // First, create remapped nets for this instance
@@ -262,7 +269,12 @@ impl HierarchicalNetlist {
             self.instances.len()
         );
 
-        for (path, inst) in &self.instances {
+        // Sort instance paths for deterministic ordering
+        let mut sorted_paths: Vec<_> = self.instances.keys().collect();
+        sorted_paths.sort();
+
+        for path in sorted_paths {
+            let inst = self.instances.get(path).unwrap();
             // Get parent path (everything before the last '.')
             let parent_path = path.rfind('.').map(|pos| &path[..pos]).unwrap_or("");
 
@@ -274,7 +286,12 @@ impl HierarchicalNetlist {
                 );
             }
 
-            for (port_name, conn) in &inst.port_connections {
+            // Sort port names for deterministic ordering
+            let mut sorted_port_names: Vec<_> = inst.port_connections.keys().collect();
+            sorted_port_names.sort();
+
+            for port_name in sorted_port_names {
+                let conn = inst.port_connections.get(port_name).unwrap();
                 match conn {
                     PortConnection::ParentNet(parent_signal) => {
                         // Merge child port net with parent net

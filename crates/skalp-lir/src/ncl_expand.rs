@@ -2840,9 +2840,13 @@ pub fn apply_boundary_ncl_to_hierarchy(
     use skalp_mir::NclBoundaryMode;
 
     // Build child -> parent reverse mapping
+    // Sort keys for deterministic iteration order (HashMap order is non-deterministic)
     let mut child_to_parent: std::collections::HashMap<&str, &str> =
         std::collections::HashMap::new();
-    for (parent, children) in &hier_lir.hierarchy {
+    let mut sorted_hierarchy_keys: Vec<_> = hier_lir.hierarchy.keys().collect();
+    sorted_hierarchy_keys.sort();
+    for parent in sorted_hierarchy_keys {
+        let children = hier_lir.hierarchy.get(parent).unwrap();
         for child in children {
             child_to_parent.insert(child.as_str(), parent.as_str());
         }
@@ -2860,7 +2864,12 @@ pub fn apply_boundary_ncl_to_hierarchy(
 
     let mut new_instances = std::collections::HashMap::new();
 
-    for (path, instance) in &hier_lir.instances {
+    // Sort instance paths for deterministic iteration order
+    let mut sorted_instance_paths: Vec<_> = hier_lir.instances.keys().collect();
+    sorted_instance_paths.sort();
+
+    for path in sorted_instance_paths {
+        let instance = hier_lir.instances.get(path).unwrap();
         // Determine if this instance needs NCL boundary
         let needs_ncl_boundary = if let Some(mode) = instance.ncl_boundary_mode {
             // Override specified - respect it
