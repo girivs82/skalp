@@ -3764,23 +3764,19 @@ impl<'a> MirToSirConverter<'a> {
                 return;
             }
 
-            // BUG FIX #8: Update signal width to match node output width if different
+            // BUG FIX #8: DISABLED - was corrupting signal widths
+            // The original intent was to fix cases like `signal foo: bit[32]; foo = {a,b,c};`
+            // where concat produces more bits than declared. But this was also corrupting
+            // correctly-declared signals (64-bit → 128-bit) because node output widths
+            // can be computed incorrectly.
+            // BUG FIX #117: Use declared signal widths - they are authoritative.
+            // If a node outputs different width than declared, that's a bug in node creation.
             if let Some(output_width) = node_output_width {
                 if signal.width != output_width {
                     eprintln!(
-                        "   🔧 BUG #8 FIX: Updating signal '{}' width: {} → {} bits (node {} output)",
-                        signal_name, signal.width, output_width, node_id
+                        "   ⚠️  BUG #117: Signal '{}' width mismatch: declared {} bits, node wants {} bits (keeping declared)",
+                        signal_name, signal.width, output_width
                     );
-                    signal.width = output_width;
-                    // Also update the SirType to match the new width
-                    signal.sir_type = SirType::Bits(output_width);
-
-                    // BUG FIX: Also update StateElement width if this is a state element
-                    // This fixes inconsistency where signal is updated to Bits(new_width)
-                    // but StateElement remains at old width, causing Metal type mismatches
-                    if let Some(state_elem) = self.sir.state_elements.get_mut(signal_name) {
-                        state_elem.width = output_width;
-                    }
                 }
             }
 

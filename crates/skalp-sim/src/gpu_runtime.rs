@@ -147,30 +147,56 @@ impl GpuRuntime {
     }
 
     fn calculate_input_size(&self, module: &SirModule) -> u64 {
-        let mut size = 0u64;
+        // BUG FIX #182: Account for Metal struct alignment padding
+        let mut offset = 0u64;
         for input in &module.inputs {
-            size += self.get_metal_type_size(input.width) as u64;
+            let metal_size = self.get_metal_type_size(input.width) as u64;
+            let metal_align = self.get_metal_type_alignment(input.width) as u64;
+
+            // Align offset to the required alignment boundary
+            let remainder = offset % metal_align;
+            if remainder != 0 {
+                offset += metal_align - remainder;
+            }
+            offset += metal_size;
         }
-        size
+        offset
     }
 
     fn calculate_register_size(&self, module: &SirModule) -> u64 {
-        let mut size = 0u64;
+        // BUG FIX #182: Account for Metal struct alignment padding
+        let mut offset = 0u64;
         // Sort state elements by name for consistent ordering with Metal shader
         let mut sorted_states: Vec<_> = module.state_elements.values().collect();
         sorted_states.sort_by_key(|state| &state.name);
         for state in sorted_states {
-            size += self.get_metal_type_size(state.width) as u64;
+            let metal_size = self.get_metal_type_size(state.width) as u64;
+            let metal_align = self.get_metal_type_alignment(state.width) as u64;
+
+            // Align offset to the required alignment boundary
+            let remainder = offset % metal_align;
+            if remainder != 0 {
+                offset += metal_align - remainder;
+            }
+            offset += metal_size;
         }
-        size
+        offset
     }
 
     fn calculate_signal_size(&self, module: &SirModule) -> u64 {
-        let mut size = 0u64;
+        // BUG FIX #182: Account for Metal struct alignment padding
+        let mut offset = 0u64;
 
         // Outputs go in signals
         for output in &module.outputs {
-            size += self.get_metal_type_size(output.width) as u64;
+            let metal_size = self.get_metal_type_size(output.width) as u64;
+            let metal_align = self.get_metal_type_alignment(output.width) as u64;
+
+            let remainder = offset % metal_align;
+            if remainder != 0 {
+                offset += metal_align - remainder;
+            }
+            offset += metal_size;
         }
 
         // Build set of input port names to exclude
@@ -181,19 +207,49 @@ impl GpuRuntime {
         // Input ports are in the Inputs struct, not the Signals struct
         for signal in &module.signals {
             if !signal.is_state && !input_names.contains(signal.name.as_str()) {
-                size += self.get_metal_type_size(signal.width) as u64;
+                let metal_size = self.get_metal_type_size(signal.width) as u64;
+                let metal_align = self.get_metal_type_alignment(signal.width) as u64;
+
+                let remainder = offset % metal_align;
+                if remainder != 0 {
+                    offset += metal_align - remainder;
+                }
+                offset += metal_size;
             }
         }
 
-        size
+        offset
     }
 
     fn calculate_output_size(&self, module: &SirModule) -> u64 {
-        let mut size = 0u64;
+        // BUG FIX #182: Account for Metal struct alignment padding
+        let mut offset = 0u64;
         for output in &module.outputs {
-            size += self.get_metal_type_size(output.width) as u64;
+            let metal_size = self.get_metal_type_size(output.width) as u64;
+            let metal_align = self.get_metal_type_alignment(output.width) as u64;
+
+            // Align offset to the required alignment boundary
+            let remainder = offset % metal_align;
+            if remainder != 0 {
+                offset += metal_align - remainder;
+            }
+            offset += metal_size;
         }
-        size
+        offset
+    }
+
+    /// Get the alignment requirement for a Metal type based on bit width
+    /// Metal requires types to be naturally aligned:
+    /// - uint (32-bit) -> 4-byte alignment
+    /// - uint2 (64-bit) -> 8-byte alignment
+    /// - uint4 (128-bit) -> 16-byte alignment
+    fn get_metal_type_alignment(&self, width: usize) -> usize {
+        match width {
+            1..=32 => 4,     // uint aligns to 4 bytes
+            33..=64 => 8,    // uint2 aligns to 8 bytes
+            65..=128 => 16,  // uint4 aligns to 16 bytes
+            _ => 4,          // Arrays of uint align to 4 bytes
+        }
     }
 
     fn get_metal_type_size(&self, width: usize) -> usize {
@@ -869,8 +925,18 @@ impl SimulationRuntime for GpuRuntime {
                 let mut offset = 0usize;
 
                 // Find the input and write to its location
+                // BUG FIX #182: Account for Metal struct alignment padding
+                // Metal naturally aligns struct fields: uint2 to 8-byte, uint4 to 16-byte
                 for input in &module.inputs {
                     let metal_size = self.get_metal_type_size(input.width);
+                    let metal_align = self.get_metal_type_alignment(input.width);
+
+                    // Align offset to the required alignment boundary
+                    let remainder = offset % metal_align;
+                    if remainder != 0 {
+                        offset += metal_align - remainder;
+                    }
+
                     let bytes_needed = input.width.div_ceil(8);
                     if input.name == name {
                         if value.len() != bytes_needed {
@@ -911,8 +977,17 @@ impl SimulationRuntime for GpuRuntime {
                 let mut offset = 0usize;
 
                 // Find the output in the output buffer
+                // BUG FIX #182: Account for Metal struct alignment padding
                 for output in &module.outputs {
                     let metal_size = self.get_metal_type_size(output.width);
+                    let metal_align = self.get_metal_type_alignment(output.width);
+
+                    // Align offset to the required alignment boundary
+                    let remainder = offset % metal_align;
+                    if remainder != 0 {
+                        offset += metal_align - remainder;
+                    }
+
                     let bytes_needed = output.width.div_ceil(8);
                     if output.name == name {
                         let mut value = vec![0u8; bytes_needed];
