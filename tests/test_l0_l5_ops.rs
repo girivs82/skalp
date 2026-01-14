@@ -21,9 +21,13 @@ fn compile_to_gates(source: &str) -> GateNetlist {
         "/Users/girivs/src/hw/hls/crates/skalp-stdlib",
     );
 
-    // Write source to unique temp file (use thread ID for uniqueness)
+    // Write source to unique temp file (use thread ID + timestamp for uniqueness)
     let thread_id = std::thread::current().id();
-    let temp_path_str = format!("/tmp/test_l0_l5_{:?}.sk", thread_id);
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let temp_path_str = format!("/tmp/test_l0_l5_{:?}_{}.sk", thread_id, timestamp);
     let temp_path = std::path::Path::new(&temp_path_str);
     let mut file = std::fs::File::create(temp_path).expect("Failed to create temp file");
     file.write_all(source.as_bytes())
@@ -860,4 +864,390 @@ fn test_simple_fp32_add() {
         }
         None => panic!("Simulation failed to converge"),
     }
+}
+
+// ============================================================================
+// Additional L3: Vector Operations
+// Note: These tests may be flaky due to partially-fixed HashMap non-determinism
+// in the compilation pipeline. See BUG #187 for details.
+// ============================================================================
+
+#[test]
+fn test_l3_vec3_sub() {
+    // Vec3 subtract: component-wise subtraction of 3 FP32 values
+    let source = r#"
+        use skalp::numeric::fp::*;
+
+        async entity TestVectorSub3 {
+            in ax: bit[32]
+            in ay: bit[32]
+            in az: bit[32]
+            in bx: bit[32]
+            in by: bit[32]
+            in bz: bit[32]
+            out rx: bit[32]
+            out ry: bit[32]
+            out rz: bit[32]
+        }
+        impl TestVectorSub3 {
+            signal ax_fp: fp32 = ax as fp32
+            signal ay_fp: fp32 = ay as fp32
+            signal az_fp: fp32 = az as fp32
+            signal bx_fp: fp32 = bx as fp32
+            signal by_fp: fp32 = by as fp32
+            signal bz_fp: fp32 = bz as fp32
+            rx = (ax_fp - bx_fp) as bit[32]
+            ry = (ay_fp - by_fp) as bit[32]
+            rz = (az_fp - bz_fp) as bit[32]
+        }
+    "#;
+
+    println!("Compiling L3 Vec3Sub...");
+    let netlist = compile_to_gates(source);
+    println!("Compiled: {} cells", netlist.cells.len());
+
+    let config = UnifiedSimConfig {
+        level: SimLevel::GateLevel,
+        circuit_mode: CircuitMode::Ncl,
+        hw_accel: HwAccel::Cpu,
+        max_iterations: 10000,
+        ncl_debug: false,
+        ..Default::default()
+    };
+
+    let mut sim = UnifiedSimulator::new(config).expect("Failed to create simulator");
+    sim.load_ncl_gate_level(netlist)
+        .expect("Failed to load NCL netlist");
+
+    // Test: (5,7,9) - (1,2,3) = (4,5,6)
+    sim.set_ncl_input("top.ax", 5.0f32.to_bits() as u64, 32);
+    sim.set_ncl_input("top.ay", 7.0f32.to_bits() as u64, 32);
+    sim.set_ncl_input("top.az", 9.0f32.to_bits() as u64, 32);
+    sim.set_ncl_input("top.bx", 1.0f32.to_bits() as u64, 32);
+    sim.set_ncl_input("top.by", 2.0f32.to_bits() as u64, 32);
+    sim.set_ncl_input("top.bz", 3.0f32.to_bits() as u64, 32);
+
+    let result = sim.run_until_stable();
+    println!("Converged in {} iterations", result.iterations);
+
+    let rx = sim
+        .get_ncl_output("top.rx", 32)
+        .map(|v| f32::from_bits(v as u32));
+    let ry = sim
+        .get_ncl_output("top.ry", 32)
+        .map(|v| f32::from_bits(v as u32));
+    let rz = sim
+        .get_ncl_output("top.rz", 32)
+        .map(|v| f32::from_bits(v as u32));
+
+    println!("  (5,7,9) - (1,2,3) = ({:?}, {:?}, {:?})", rx, ry, rz);
+
+    assert_eq!(rx, Some(4.0), "X component wrong");
+    assert_eq!(ry, Some(5.0), "Y component wrong");
+    assert_eq!(rz, Some(6.0), "Z component wrong");
+    println!("✓ Vec3 sub passed");
+}
+
+#[test]
+fn test_l3_vec3_scale() {
+    // Vec3 scalar multiply: multiply each component by a scalar
+    let source = r#"
+        use skalp::numeric::fp::*;
+
+        async entity TestVectorScale3 {
+            in vx: bit[32]
+            in vy: bit[32]
+            in vz: bit[32]
+            in s: bit[32]
+            out rx: bit[32]
+            out ry: bit[32]
+            out rz: bit[32]
+        }
+        impl TestVectorScale3 {
+            signal vx_fp: fp32 = vx as fp32
+            signal vy_fp: fp32 = vy as fp32
+            signal vz_fp: fp32 = vz as fp32
+            signal s_fp: fp32 = s as fp32
+            rx = (vx_fp * s_fp) as bit[32]
+            ry = (vy_fp * s_fp) as bit[32]
+            rz = (vz_fp * s_fp) as bit[32]
+        }
+    "#;
+
+    println!("Compiling L3 Vec3Scale...");
+    let netlist = compile_to_gates(source);
+    println!("Compiled: {} cells", netlist.cells.len());
+
+    let config = UnifiedSimConfig {
+        level: SimLevel::GateLevel,
+        circuit_mode: CircuitMode::Ncl,
+        hw_accel: HwAccel::Cpu,
+        max_iterations: 10000,
+        ncl_debug: false,
+        ..Default::default()
+    };
+
+    let mut sim = UnifiedSimulator::new(config).expect("Failed to create simulator");
+    sim.load_ncl_gate_level(netlist)
+        .expect("Failed to load NCL netlist");
+
+    // Test: (1,2,3) * 2 = (2,4,6)
+    sim.set_ncl_input("top.vx", 1.0f32.to_bits() as u64, 32);
+    sim.set_ncl_input("top.vy", 2.0f32.to_bits() as u64, 32);
+    sim.set_ncl_input("top.vz", 3.0f32.to_bits() as u64, 32);
+    sim.set_ncl_input("top.s", 2.0f32.to_bits() as u64, 32);
+
+    let result = sim.run_until_stable();
+    println!("Converged in {} iterations", result.iterations);
+
+    let rx = sim
+        .get_ncl_output("top.rx", 32)
+        .map(|v| f32::from_bits(v as u32));
+    let ry = sim
+        .get_ncl_output("top.ry", 32)
+        .map(|v| f32::from_bits(v as u32));
+    let rz = sim
+        .get_ncl_output("top.rz", 32)
+        .map(|v| f32::from_bits(v as u32));
+
+    println!("  (1,2,3) * 2 = ({:?}, {:?}, {:?})", rx, ry, rz);
+
+    assert_eq!(rx, Some(2.0), "X component wrong");
+    assert_eq!(ry, Some(4.0), "Y component wrong");
+    assert_eq!(rz, Some(6.0), "Z component wrong");
+    println!("✓ Vec3 scale passed");
+}
+
+#[test]
+fn test_l3_vec2_length_squared() {
+    // Vec2 length squared: x*x + y*y (avoids sqrt for simpler test)
+    let source = r#"
+        use skalp::numeric::fp::*;
+
+        async entity TestVec2LengthSq {
+            in vx: bit[32]
+            in vy: bit[32]
+            out result: bit[32]
+        }
+        impl TestVec2LengthSq {
+            signal vx_fp: fp32 = vx as fp32
+            signal vy_fp: fp32 = vy as fp32
+            signal xx: fp32 = vx_fp * vx_fp
+            signal yy: fp32 = vy_fp * vy_fp
+            signal len_sq: fp32 = xx + yy
+            result = len_sq as bit[32]
+        }
+    "#;
+
+    println!("Compiling L3 Vec2LengthSq...");
+    let netlist = compile_to_gates(source);
+    println!("Compiled: {} cells", netlist.cells.len());
+
+    let config = UnifiedSimConfig {
+        level: SimLevel::GateLevel,
+        circuit_mode: CircuitMode::Ncl,
+        hw_accel: HwAccel::Cpu,
+        max_iterations: 10000,
+        ncl_debug: false,
+        ..Default::default()
+    };
+
+    let mut sim = UnifiedSimulator::new(config).expect("Failed to create simulator");
+    sim.load_ncl_gate_level(netlist)
+        .expect("Failed to load NCL netlist");
+
+    // Test: ||(3,4)||² = 9 + 16 = 25
+    sim.set_ncl_input("top.vx", 3.0f32.to_bits() as u64, 32);
+    sim.set_ncl_input("top.vy", 4.0f32.to_bits() as u64, 32);
+
+    let result = sim.run_until_stable();
+    println!("Converged in {} iterations", result.iterations);
+
+    let len_sq = sim
+        .get_ncl_output("top.result", 32)
+        .map(|v| f32::from_bits(v as u32));
+    println!("  ||(3,4)||² = {:?}", len_sq);
+
+    assert_eq!(len_sq, Some(25.0), "Length squared wrong");
+    println!("✓ Vec2 length squared passed");
+}
+
+// ============================================================================
+// L4: Matrix Operations
+// Note: These tests may be flaky due to partially-fixed HashMap non-determinism
+// in the compilation pipeline. See BUG #187 for details.
+// ============================================================================
+
+#[test]
+fn test_l4_mat2x2_add() {
+    // 2x2 Matrix addition: component-wise addition
+    // [ a00 a01 ]   [ b00 b01 ]   [ c00 c01 ]
+    // [ a10 a11 ] + [ b10 b11 ] = [ c10 c11 ]
+    let source = r#"
+        use skalp::numeric::fp::*;
+
+        async entity TestMat2x2Add {
+            in a00: bit[32]
+            in a01: bit[32]
+            in a10: bit[32]
+            in a11: bit[32]
+            in b00: bit[32]
+            in b01: bit[32]
+            in b10: bit[32]
+            in b11: bit[32]
+            out c00: bit[32]
+            out c01: bit[32]
+            out c10: bit[32]
+            out c11: bit[32]
+        }
+        impl TestMat2x2Add {
+            signal a00_fp: fp32 = a00 as fp32
+            signal a01_fp: fp32 = a01 as fp32
+            signal a10_fp: fp32 = a10 as fp32
+            signal a11_fp: fp32 = a11 as fp32
+            signal b00_fp: fp32 = b00 as fp32
+            signal b01_fp: fp32 = b01 as fp32
+            signal b10_fp: fp32 = b10 as fp32
+            signal b11_fp: fp32 = b11 as fp32
+            c00 = (a00_fp + b00_fp) as bit[32]
+            c01 = (a01_fp + b01_fp) as bit[32]
+            c10 = (a10_fp + b10_fp) as bit[32]
+            c11 = (a11_fp + b11_fp) as bit[32]
+        }
+    "#;
+
+    println!("Compiling L4 Mat2x2Add...");
+    let netlist = compile_to_gates(source);
+    println!("Compiled: {} cells", netlist.cells.len());
+
+    let config = UnifiedSimConfig {
+        level: SimLevel::GateLevel,
+        circuit_mode: CircuitMode::Ncl,
+        hw_accel: HwAccel::Cpu,
+        max_iterations: 10000,
+        ncl_debug: false,
+        ..Default::default()
+    };
+
+    let mut sim = UnifiedSimulator::new(config).expect("Failed to create simulator");
+    sim.load_ncl_gate_level(netlist)
+        .expect("Failed to load NCL netlist");
+
+    // Test: Identity + Identity = 2*Identity
+    // [ 1 0 ] + [ 1 0 ] = [ 2 0 ]
+    // [ 0 1 ] + [ 0 1 ] = [ 0 2 ]
+    sim.set_ncl_input("top.a00", 1.0f32.to_bits() as u64, 32);
+    sim.set_ncl_input("top.a01", 0.0f32.to_bits() as u64, 32);
+    sim.set_ncl_input("top.a10", 0.0f32.to_bits() as u64, 32);
+    sim.set_ncl_input("top.a11", 1.0f32.to_bits() as u64, 32);
+    sim.set_ncl_input("top.b00", 1.0f32.to_bits() as u64, 32);
+    sim.set_ncl_input("top.b01", 0.0f32.to_bits() as u64, 32);
+    sim.set_ncl_input("top.b10", 0.0f32.to_bits() as u64, 32);
+    sim.set_ncl_input("top.b11", 1.0f32.to_bits() as u64, 32);
+
+    let result = sim.run_until_stable();
+    println!("Converged in {} iterations", result.iterations);
+
+    let c00 = sim
+        .get_ncl_output("top.c00", 32)
+        .map(|v| f32::from_bits(v as u32));
+    let c01 = sim
+        .get_ncl_output("top.c01", 32)
+        .map(|v| f32::from_bits(v as u32));
+    let c10 = sim
+        .get_ncl_output("top.c10", 32)
+        .map(|v| f32::from_bits(v as u32));
+    let c11 = sim
+        .get_ncl_output("top.c11", 32)
+        .map(|v| f32::from_bits(v as u32));
+
+    println!("  [ 1 0 ] + [ 1 0 ] = [ {:?} {:?} ]", c00, c01);
+    println!("  [ 0 1 ] + [ 0 1 ] = [ {:?} {:?} ]", c10, c11);
+
+    assert_eq!(c00, Some(2.0), "c00 wrong");
+    assert_eq!(c01, Some(0.0), "c01 wrong");
+    assert_eq!(c10, Some(0.0), "c10 wrong");
+    assert_eq!(c11, Some(2.0), "c11 wrong");
+    println!("✓ Mat2x2 add passed");
+}
+
+#[test]
+fn test_l4_mat2x2_scalar_mul() {
+    // 2x2 Matrix scalar multiply: multiply each element by a scalar
+    let source = r#"
+        use skalp::numeric::fp::*;
+
+        async entity TestMat2x2ScalarMul {
+            in a00: bit[32]
+            in a01: bit[32]
+            in a10: bit[32]
+            in a11: bit[32]
+            in s: bit[32]
+            out c00: bit[32]
+            out c01: bit[32]
+            out c10: bit[32]
+            out c11: bit[32]
+        }
+        impl TestMat2x2ScalarMul {
+            signal a00_fp: fp32 = a00 as fp32
+            signal a01_fp: fp32 = a01 as fp32
+            signal a10_fp: fp32 = a10 as fp32
+            signal a11_fp: fp32 = a11 as fp32
+            signal s_fp: fp32 = s as fp32
+            c00 = (a00_fp * s_fp) as bit[32]
+            c01 = (a01_fp * s_fp) as bit[32]
+            c10 = (a10_fp * s_fp) as bit[32]
+            c11 = (a11_fp * s_fp) as bit[32]
+        }
+    "#;
+
+    println!("Compiling L4 Mat2x2ScalarMul...");
+    let netlist = compile_to_gates(source);
+    println!("Compiled: {} cells", netlist.cells.len());
+
+    let config = UnifiedSimConfig {
+        level: SimLevel::GateLevel,
+        circuit_mode: CircuitMode::Ncl,
+        hw_accel: HwAccel::Cpu,
+        max_iterations: 10000,
+        ncl_debug: false,
+        ..Default::default()
+    };
+
+    let mut sim = UnifiedSimulator::new(config).expect("Failed to create simulator");
+    sim.load_ncl_gate_level(netlist)
+        .expect("Failed to load NCL netlist");
+
+    // Test: 3 * [ 1 2 ] = [ 3 6 ]
+    //           [ 3 4 ]   [ 9 12 ]
+    sim.set_ncl_input("top.a00", 1.0f32.to_bits() as u64, 32);
+    sim.set_ncl_input("top.a01", 2.0f32.to_bits() as u64, 32);
+    sim.set_ncl_input("top.a10", 3.0f32.to_bits() as u64, 32);
+    sim.set_ncl_input("top.a11", 4.0f32.to_bits() as u64, 32);
+    sim.set_ncl_input("top.s", 3.0f32.to_bits() as u64, 32);
+
+    let result = sim.run_until_stable();
+    println!("Converged in {} iterations", result.iterations);
+
+    let c00 = sim
+        .get_ncl_output("top.c00", 32)
+        .map(|v| f32::from_bits(v as u32));
+    let c01 = sim
+        .get_ncl_output("top.c01", 32)
+        .map(|v| f32::from_bits(v as u32));
+    let c10 = sim
+        .get_ncl_output("top.c10", 32)
+        .map(|v| f32::from_bits(v as u32));
+    let c11 = sim
+        .get_ncl_output("top.c11", 32)
+        .map(|v| f32::from_bits(v as u32));
+
+    println!("  3 * [ 1 2 ] = [ {:?} {:?} ]", c00, c01);
+    println!("      [ 3 4 ]   [ {:?} {:?} ]", c10, c11);
+
+    assert_eq!(c00, Some(3.0), "c00 wrong");
+    assert_eq!(c01, Some(6.0), "c01 wrong");
+    assert_eq!(c10, Some(9.0), "c10 wrong");
+    assert_eq!(c11, Some(12.0), "c11 wrong");
+    println!("✓ Mat2x2 scalar mul passed");
 }
