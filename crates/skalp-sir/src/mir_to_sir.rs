@@ -4613,6 +4613,9 @@ impl<'a> MirToSirConverter<'a> {
                     .map(|s| {
                         if parent_prefix.is_empty() {
                             s.name.clone()
+                        } else if parent_prefix.ends_with('.') {
+                            // BUG #186 FIX: parent_prefix already has trailing dot, don't add another
+                            format!("{}{}", parent_prefix, s.name)
                         } else {
                             format!("{}.{}", parent_prefix, s.name)
                         }
@@ -4624,6 +4627,9 @@ impl<'a> MirToSirConverter<'a> {
                     .map(|p| {
                         if parent_prefix.is_empty() {
                             p.name.clone()
+                        } else if parent_prefix.ends_with('.') {
+                            // BUG #186 FIX: parent_prefix already has trailing dot, don't add another
+                            format!("{}{}", parent_prefix, p.name)
                         } else {
                             format!("{}.{}", parent_prefix, p.name)
                         }
@@ -4635,6 +4641,9 @@ impl<'a> MirToSirConverter<'a> {
                     .map(|v| {
                         if parent_prefix.is_empty() {
                             v.name.clone()
+                        } else if parent_prefix.ends_with('.') {
+                            // BUG #186 FIX: parent_prefix already has trailing dot, don't add another
+                            format!("{}{}", parent_prefix, v.name)
                         } else {
                             format!("{}.{}", parent_prefix, v.name)
                         }
@@ -6658,6 +6667,20 @@ impl<'a> MirToSirConverter<'a> {
                     parent_prefix,
                 )
             }
+            ExpressionKind::Cast { expr, .. } => {
+                // BUG #186 FIX: Cast is a no-op for hardware generation (bitwise reinterpretation)
+                // Just process the inner expression. This is critical for FP operations where
+                // bit[32] is cast to fp32 - the bits stay the same.
+                println!("🎨🎨🎨   -> ExpressionKind::Cast - processing inner expression");
+                self.create_expression_node_for_instance_with_context(
+                    expr,
+                    inst_prefix,
+                    port_mapping,
+                    child_module,
+                    parent_module_for_signals,
+                    parent_prefix,
+                )
+            }
             _ => {
                 // For unsupported expressions, create a zero constant
                 self.create_constant_node(0, 1)
@@ -6785,20 +6808,40 @@ impl<'a> MirToSirConverter<'a> {
                 eprintln!("🔍🔍🔍   -> LValue::Signal({})", sig_id.0);
                 // LValue::Signal should only match signals, not ports
                 // (ports have their own LValue::Port variant)
-                child_module
-                    .signals
-                    .iter()
-                    .find(|s| s.id == *sig_id)
-                    .map(|signal| {
-                        // BUG FIX #113: Avoid double dots if inst_prefix ends with a dot
-                        if inst_prefix.is_empty() {
+                // First try child module
+                if let Some(signal) = child_module.signals.iter().find(|s| s.id == *sig_id) {
+                    // BUG FIX #113: Avoid double dots if inst_prefix ends with a dot
+                    let result = if inst_prefix.is_empty() {
+                        signal.name.clone()
+                    } else if inst_prefix.ends_with('.') {
+                        format!("{}{}", inst_prefix, signal.name)
+                    } else {
+                        format!("{}.{}", inst_prefix, signal.name)
+                    };
+                    eprintln!("🔍🔍🔍   -> Found in child module: '{}'", result);
+                    return Some(result);
+                }
+                // BUG #186 FIX: If not found in child module, try parent module
+                // This handles signals from parent scope referenced in FP specialization context
+                if let Some(parent_mod) = parent_module_for_signals {
+                    if let Some(signal) = parent_mod.signals.iter().find(|s| s.id == *sig_id) {
+                        // Use parent_prefix for parent module signals
+                        let result = if parent_prefix.is_empty() {
                             signal.name.clone()
-                        } else if inst_prefix.ends_with('.') {
-                            format!("{}{}", inst_prefix, signal.name)
+                        } else if parent_prefix.ends_with('.') {
+                            format!("{}{}", parent_prefix, signal.name)
                         } else {
-                            format!("{}.{}", inst_prefix, signal.name)
-                        }
-                    })
+                            format!("{}.{}", parent_prefix, signal.name)
+                        };
+                        eprintln!("🔍🔍🔍   -> Found in parent module: '{}'", result);
+                        return Some(result);
+                    }
+                }
+                eprintln!(
+                    "🔍🔍🔍   -> Signal {} NOT FOUND in child or parent module",
+                    sig_id.0
+                );
+                None
             }
             LValue::Port(port_id) => {
                 // Direct port reference - map to parent signal through port connections
