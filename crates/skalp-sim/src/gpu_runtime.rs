@@ -245,10 +245,10 @@ impl GpuRuntime {
     /// - uint4 (128-bit) -> 16-byte alignment
     fn get_metal_type_alignment(&self, width: usize) -> usize {
         match width {
-            1..=32 => 4,     // uint aligns to 4 bytes
-            33..=64 => 8,    // uint2 aligns to 8 bytes
-            65..=128 => 16,  // uint4 aligns to 16 bytes
-            _ => 4,          // Arrays of uint align to 4 bytes
+            1..=32 => 4,    // uint aligns to 4 bytes
+            33..=64 => 8,   // uint2 aligns to 8 bytes
+            65..=128 => 16, // uint4 aligns to 16 bytes
+            _ => 4,         // Arrays of uint align to 4 bytes
         }
     }
 
@@ -293,6 +293,17 @@ impl GpuRuntime {
             // Outputs are at the beginning of the signal buffer
             for output in &module.outputs {
                 let metal_size = self.get_metal_type_size(output.width);
+                let metal_align = self.get_metal_type_alignment(output.width);
+
+                // BUG #185 FIX: Apply same alignment to signal buffer reads
+                let sig_remainder = signal_offset % metal_align;
+                if sig_remainder != 0 {
+                    signal_offset += metal_align - sig_remainder;
+                }
+                let out_remainder = output_offset % metal_align;
+                if out_remainder != 0 {
+                    output_offset += metal_align - out_remainder;
+                }
 
                 unsafe {
                     // BUG #181 FIX: Apply bit width masking before copying

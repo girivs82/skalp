@@ -1012,7 +1012,14 @@ impl<'a> MetalShaderGenerator<'a> {
             if !is_array && !is_wide {
                 // Only scalar types (<=128 bits) can use direct initialization
                 // BUG #182 FIX: Read from current_registers (frozen pre-edge values)
-                let (base_type, _) = self.get_metal_type_for_wide_bits(state_elem.width);
+                // BUG #184 FIX: Use uint for <=32 bit signals to match Registers struct alignment
+                // The Registers struct uses force_4byte_align=true which maps all <=32-bit signals
+                // to uint. The old value capture must use the same type to avoid truncation.
+                let base_type = if state_elem.width <= 32 {
+                    "uint".to_string()
+                } else {
+                    self.get_metal_type_for_wide_bits(state_elem.width).0
+                };
                 self.write_indented(&format!(
                     "{} old_{} = current_registers->{};\n",
                     base_type, sanitized, sanitized
@@ -1893,9 +1900,11 @@ impl<'a> MetalShaderGenerator<'a> {
 
                 // Check for type mismatch where widths differ significantly
                 // BUG FIX #183: Also detect uint2 vs uint4 mismatch (both are vectors but different sizes)
-                let width_mismatch = (true_val_width <= 32 && false_val_width > 32)
-                    || (false_val_width <= 32 && true_val_width > 32)
-                    || (true_val_width > 32 && false_val_width > 32 && true_val_width != false_val_width);
+                // Mismatch when: scalar vs vector, OR both vectors but different sizes
+                let true_is_vector = true_val_width > 32;
+                let false_is_vector = false_val_width > 32;
+                let width_mismatch = true_is_vector != false_is_vector
+                    || (true_is_vector && false_is_vector && true_val_width != false_val_width);
                 let type_mismatch = true_is_float != false_is_float;
 
                 if width_mismatch || type_mismatch {
@@ -2095,8 +2104,8 @@ impl<'a> MetalShaderGenerator<'a> {
             let input = &node.inputs[0].signal_id;
             let output = &node.outputs[0].signal_id;
             println!(
-                "🔧 SLICE: input='{}', output='{}', node_id={}",
-                input, output, node.id
+                "🔧 SLICE: input='{}', output='{}', node_id={}, start={}, end={}",
+                input, output, node.id, start, end
             );
 
             // For HDL range [high:low], start=high, end=low
@@ -2108,6 +2117,18 @@ impl<'a> MetalShaderGenerator<'a> {
             };
             let width = high - low + 1;
             let shift = low;
+            println!(
+                "   🔍 SLICE params: high={}, low={}, width={}, shift={}, mask=0x{:X}",
+                high,
+                low,
+                width,
+                shift,
+                if width >= 64 {
+                    u64::MAX
+                } else {
+                    (1u64 << width) - 1
+                }
+            );
 
             // Get the input signal's type to determine if it's an array, vector, or bit vector
             let input_type = self.get_signal_sir_type(sir, input);
@@ -2653,6 +2674,13 @@ impl<'a> MetalShaderGenerator<'a> {
                 self.write_to_decomposed_array(output, 0, &scalar_result);
             } else {
                 // Output is scalar - direct assignment
+                println!(
+                    "   🎯 SCALAR SLICE: {} = ({} >> {}) & 0x{:X}",
+                    self.sanitize_name(output),
+                    input_ref,
+                    shift,
+                    mask
+                );
                 self.write_indented(&format!(
                     "signals->{} = ({} >> {}) & 0x{:X};\n",
                     self.sanitize_name(output),
@@ -2846,7 +2874,8 @@ impl<'a> MetalShaderGenerator<'a> {
                 // for array_width, because the Metal struct will have uint[N] type
                 let effective_array_width = array_width.max(output_width);
 
-                let (base_type, array_size) = self.get_metal_type_for_wide_bits(effective_array_width);
+                let (base_type, array_size) =
+                    self.get_metal_type_for_wide_bits(effective_array_width);
                 let array_type_name = if let Some(size) = array_size {
                     format!("{}[{}]", base_type, size)
                 } else {
@@ -2854,12 +2883,9 @@ impl<'a> MetalShaderGenerator<'a> {
                 };
 
                 // BUG #183 FIX: Determine how to access the value signal
-                // If value is an array (>128 bits), access first element
-                // If value is a vector (33-128 bits), access first component
+                // If value is an array (>128 bits) or vector (33-128 bits), access first element/component
                 // Otherwise use scalar access
-                let value_access = if value_width > 128 {
-                    format!("signals->{}[0]", self.sanitize_name(value_signal))
-                } else if value_width > 32 {
+                let value_access = if value_width > 32 {
                     format!("signals->{}[0]", self.sanitize_name(value_signal))
                 } else {
                     format!("signals->{}", self.sanitize_name(value_signal))
@@ -3630,10 +3656,21 @@ impl<'a> MetalShaderGenerator<'a> {
                     if signal.contains("sys_in")
                         || output.contains("node_8846")
                         || output.contains("node_3927")
+                        || signal.contains("config_active")
                     {
                         println!(
                             "🔍 SignalRef DEBUG: signal='{}' -> output='{}', is_input={}, node_id={}",
                             signal, output, is_input_signal, node.id
+                        );
+                    }
+
+                    // BUG #184 DEBUG: Trace config_active SignalRef processing
+                    if signal.contains("config_active") {
+                        let _is_state = sir.state_elements.contains_key(signal);
+                        let _output_is_state = sir.state_elements.contains_key(output);
+                        eprintln!(
+                            "🔍 BUG #184 EARLY: SignalRef signal='{}' -> output='{}', is_state={}, output_is_state={}",
+                            signal, output, _is_state, _output_is_state
                         );
                     }
 
@@ -3925,6 +3962,14 @@ impl<'a> MetalShaderGenerator<'a> {
                         } else {
                             format!("signals->{}", self.sanitize_name(signal))
                         };
+
+                        // BUG #184 DEBUG: Trace SignalRef for config_active
+                        if signal.contains("config_active") {
+                            eprintln!(
+                                "🔍 BUG #184 DEBUG: SignalRef for '{}' -> output='{}', is_state={}, source_location='{}', source_width={}, output_width={}",
+                                signal, output, is_state, source_location, source_width, output_width
+                            );
+                        }
 
                         // Check for vector-to-scalar conversion (uint2/uint4 -> uint)
                         if source_width > 32 && output_width <= 32 {
