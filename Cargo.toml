@@ -76,6 +76,7 @@ skalp-ml = { path = "crates/skalp-ml" }
 pretty_assertions = "1.4"
 insta = "1.34"  # Snapshot testing
 criterion = "0.5"  # Benchmarking
+half = "2.4"    # f16 support for L2 opcode tests
 
 [features]
 default = []

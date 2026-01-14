@@ -421,7 +421,12 @@ impl SynthEngine {
         let mut module_groups: std::collections::HashMap<String, Vec<String>> =
             std::collections::HashMap::new();
 
-        for (path, inst) in &hier.instances {
+        // Sort instance paths for deterministic iteration order (HashMap is non-deterministic)
+        let mut sorted_instance_paths: Vec<_> = hier.instances.keys().collect();
+        sorted_instance_paths.sort();
+
+        for path in sorted_instance_paths {
+            let inst = &hier.instances[path];
             // Create signature from module name + cell count + output count
             let signature = format!(
                 "{}_{}_{}",
@@ -449,7 +454,9 @@ impl SynthEngine {
         let cache: Mutex<std::collections::HashMap<String, SynthResult>> =
             Mutex::new(std::collections::HashMap::new());
 
-        let unique_sigs: Vec<_> = module_groups.keys().cloned().collect();
+        // Sort signature keys for deterministic processing order
+        let mut unique_sigs: Vec<_> = module_groups.keys().cloned().collect();
+        unique_sigs.sort();
 
         unique_sigs.par_iter().for_each(|signature| {
             let paths = &module_groups[signature];
@@ -484,7 +491,12 @@ impl SynthEngine {
         let mut optimized: std::collections::HashMap<String, SynthResult> =
             std::collections::HashMap::new();
 
-        for (signature, paths) in &module_groups {
+        // Sort signature keys for deterministic iteration
+        let mut sorted_sigs: Vec<_> = module_groups.keys().collect();
+        sorted_sigs.sort();
+
+        for signature in sorted_sigs {
+            let paths = &module_groups[signature];
             let result = &cached_results[signature];
             for path in paths {
                 optimized.insert(path.clone(), result.clone());
@@ -493,7 +505,13 @@ impl SynthEngine {
 
         // Build optimized hierarchical netlist
         let mut opt_hier = hier.clone();
-        for (path, result) in &optimized {
+
+        // Sort paths for deterministic iteration
+        let mut sorted_opt_paths: Vec<_> = optimized.keys().collect();
+        sorted_opt_paths.sort();
+
+        for path in sorted_opt_paths {
+            let result = &optimized[path];
             if let Some(inst) = opt_hier.instances.get_mut(path) {
                 inst.netlist = result.netlist.clone();
             }
