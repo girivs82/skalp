@@ -17,7 +17,8 @@
 
 use super::{Pass, PassResult};
 use crate::synth::{Aig, AigLit, AigNode, AigNodeId};
-use std::collections::{HashMap, HashSet};
+use indexmap::IndexMap;
+use std::collections::HashSet;
 
 /// Maximum cut size for DC2 optimization
 const MAX_CUT_SIZE: usize = 6;
@@ -70,8 +71,8 @@ impl Dc2 {
     }
 
     /// Compute fanout counts for all nodes
-    fn compute_fanout(&self, aig: &Aig) -> HashMap<AigNodeId, usize> {
-        let mut fanouts = HashMap::new();
+    fn compute_fanout(&self, aig: &Aig) -> IndexMap<AigNodeId, usize> {
+        let mut fanouts = IndexMap::new();
 
         for (_, node) in aig.iter_nodes() {
             for fanin in node.fanins() {
@@ -92,7 +93,7 @@ impl Dc2 {
         &self,
         aig: &Aig,
         root: AigNodeId,
-        fanouts: &HashMap<AigNodeId, usize>,
+        fanouts: &IndexMap<AigNodeId, usize>,
     ) -> Vec<AigNodeId> {
         let mut mffc = Vec::new();
         let mut visited = HashSet::new();
@@ -105,7 +106,7 @@ impl Dc2 {
         &self,
         aig: &Aig,
         node: AigNodeId,
-        fanouts: &HashMap<AigNodeId, usize>,
+        fanouts: &IndexMap<AigNodeId, usize>,
         mffc: &mut Vec<AigNodeId>,
         visited: &mut HashSet<AigNodeId>,
     ) {
@@ -181,7 +182,7 @@ impl Dc2 {
             return None;
         }
 
-        let leaf_map: HashMap<AigNodeId, usize> =
+        let leaf_map: IndexMap<AigNodeId, usize> =
             leaves.iter().enumerate().map(|(i, &n)| (n, i)).collect();
 
         let num_rows = 1usize << leaves.len();
@@ -201,7 +202,7 @@ impl Dc2 {
         aig: &Aig,
         node: AigNodeId,
         assignment: usize,
-        leaf_map: &HashMap<AigNodeId, usize>,
+        leaf_map: &IndexMap<AigNodeId, usize>,
     ) -> bool {
         match aig.get_node(node) {
             Some(AigNode::Input { .. }) | Some(AigNode::Latch { .. }) => {
@@ -226,7 +227,7 @@ impl Dc2 {
         aig: &Aig,
         lit: AigLit,
         assignment: usize,
-        leaf_map: &HashMap<AigNodeId, usize>,
+        leaf_map: &IndexMap<AigNodeId, usize>,
     ) -> bool {
         let val = self.evaluate(aig, lit.node, assignment, leaf_map);
         if lit.inverted {
@@ -456,7 +457,7 @@ impl Dc2 {
         &mut self,
         aig: &mut Aig,
         node: AigNodeId,
-        fanouts: &HashMap<AigNodeId, usize>,
+        fanouts: &IndexMap<AigNodeId, usize>,
     ) -> Option<AigLit> {
         // Get cut leaves
         let leaves = self.collect_cut_leaves(aig, node, self.max_cut);
@@ -551,7 +552,7 @@ impl Pass for Dc2 {
                 })
                 .collect();
 
-            let mut substitutions: HashMap<AigNodeId, AigLit> = HashMap::new();
+            let mut substitutions: IndexMap<AigNodeId, AigLit> = IndexMap::new();
             let before_count = self.optimized_count;
 
             for node in nodes {

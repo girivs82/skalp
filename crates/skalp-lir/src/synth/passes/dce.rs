@@ -11,7 +11,8 @@
 
 use super::{Pass, PassResult};
 use crate::synth::{Aig, AigLit, AigNode, AigNodeId, BarrierType};
-use std::collections::{HashMap, HashSet};
+use indexmap::IndexMap;
+use std::collections::HashSet;
 
 /// Dead code elimination pass
 pub struct Dce {
@@ -123,7 +124,7 @@ impl Pass for Dce {
         // Phase 1: Process inputs, pre-create latches/barriers, then process AND nodes
         // Phase 2: Update latch/barrier data with resolved values
         let mut new_aig = Aig::new(aig.name.clone());
-        let mut node_map: HashMap<AigNodeId, AigLit> = HashMap::new();
+        let mut node_map: IndexMap<AigNodeId, AigLit> = IndexMap::new();
 
         // Map constant
         node_map.insert(AigNodeId::FALSE, AigLit::false_lit());
@@ -268,7 +269,7 @@ impl Pass for Dce {
 }
 
 /// Resolve a literal through the node mapping
-fn resolve_lit(map: &HashMap<AigNodeId, AigLit>, lit: AigLit) -> AigLit {
+fn resolve_lit(map: &IndexMap<AigNodeId, AigLit>, lit: AigLit) -> AigLit {
     if lit.node == AigNodeId::FALSE {
         return lit;
     }

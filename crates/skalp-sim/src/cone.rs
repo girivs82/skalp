@@ -4,7 +4,8 @@
 //! on GPU compute shaders. This analysis is critical for GPU simulation performance.
 
 use crate::sir::{SirModule, CombinationalBlock, SirSignalId, CombBlockId};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
+use indexmap::IndexMap;
 use petgraph::Graph;
 
 /// A combinational cone - a group of logic blocks that can execute together
@@ -83,7 +84,7 @@ impl ConeExtractor {
     /// Build dependency graph between combinational blocks
     fn build_dependency_graph(&self, module: &SirModule) -> Graph<CombBlockId, ()> {
         let mut graph = Graph::new();
-        let mut block_nodes = HashMap::new();
+        let mut block_nodes = IndexMap::new();
 
         // Add all combinational blocks as nodes
         for block in &module.comb_blocks {
@@ -128,7 +129,7 @@ impl ConeExtractor {
         sccs: &[Vec<CombBlockId>],
     ) -> Vec<CombinationalCone> {
         let mut cones = Vec::new();
-        let block_map: HashMap<CombBlockId, &CombinationalBlock> =
+        let block_map: IndexMap<CombBlockId, &CombinationalBlock> =
             module.comb_blocks.iter().map(|b| (b.id, b)).collect();
 
         for scc in sccs {
@@ -203,7 +204,7 @@ impl ConeExtractor {
     fn calculate_cone_depth(
         &self,
         scc: &[CombBlockId],
-        block_map: &HashMap<CombBlockId, &CombinationalBlock>,
+        block_map: &IndexMap<CombBlockId, &CombinationalBlock>,
         graph: &Graph<CombBlockId, ()>,
     ) -> u32 {
         // For now, use a simple heuristic based on number of blocks
@@ -266,7 +267,7 @@ impl ConeExtractor {
     fn determine_execution_order(&self, cones: &[CombinationalCone]) -> Vec<ConeId> {
         // Build cone dependency graph
         let mut cone_graph = Graph::new();
-        let mut cone_nodes = HashMap::new();
+        let mut cone_nodes = IndexMap::new();
 
         // Add cone nodes
         for cone in cones {

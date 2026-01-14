@@ -23,7 +23,7 @@ use crate::gate_eval::evaluate_primitive;
 use crate::sir::{
     PrimitiveId, PrimitiveType, Sir, SirOperation, SirPortDirection, SirSignalId, SirSignalType,
 };
-use std::collections::HashMap;
+use indexmap::IndexMap;
 
 #[cfg(target_os = "macos")]
 use metal::{
@@ -40,11 +40,11 @@ pub struct GpuGateRuntime {
     /// The SIR being simulated
     sir: Sir,
     /// Signal name to ID mapping
-    signal_name_to_id: HashMap<String, SirSignalId>,
+    signal_name_to_id: IndexMap<String, SirSignalId>,
     /// Signal ID to name mapping
-    signal_id_to_name: HashMap<u32, String>,
+    signal_id_to_name: IndexMap<u32, String>,
     /// Signal widths
-    signal_widths: HashMap<u32, usize>,
+    signal_widths: IndexMap<u32, usize>,
     /// Input port IDs
     input_ports: Vec<SirSignalId>,
     /// Output port IDs
@@ -58,7 +58,7 @@ pub struct GpuGateRuntime {
     /// Current cycle
     current_cycle: u64,
     /// Previous clock values for edge detection
-    prev_clocks: HashMap<u32, bool>,
+    prev_clocks: IndexMap<u32, bool>,
 
     // GPU buffers
     /// Primitive definitions buffer
@@ -79,7 +79,7 @@ pub struct GpuGateRuntime {
     use_gpu: bool,
 
     /// CPU fallback state (signal values)
-    cpu_signals: HashMap<u32, Vec<bool>>,
+    cpu_signals: IndexMap<u32, Vec<bool>>,
 }
 
 /// Information about a primitive for GPU simulation
@@ -124,16 +124,16 @@ impl GpuGateRuntime {
             device,
             command_queue,
             sir: sir.clone(),
-            signal_name_to_id: HashMap::new(),
-            signal_id_to_name: HashMap::new(),
-            signal_widths: HashMap::new(),
+            signal_name_to_id: IndexMap::new(),
+            signal_id_to_name: IndexMap::new(),
+            signal_widths: IndexMap::new(),
             input_ports: Vec::new(),
             output_ports: Vec::new(),
             clock_signals: Vec::new(),
             primitives: Vec::new(),
             num_signals: 0,
             current_cycle: 0,
-            prev_clocks: HashMap::new(),
+            prev_clocks: IndexMap::new(),
             primitive_buffer: None,
             signal_buffer_a: None,
             signal_buffer_b: None,
@@ -141,7 +141,7 @@ impl GpuGateRuntime {
             comb_pipeline: None,
             seq_pipeline: None,
             use_gpu: true,
-            cpu_signals: HashMap::new(),
+            cpu_signals: IndexMap::new(),
         };
 
         runtime.initialize()?;

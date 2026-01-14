@@ -10,7 +10,7 @@ use crate::state::SimState;
 use crate::event::EventQueue;
 use crate::metal::MetalBackend;
 
-use std::collections::HashMap;
+use indexmap::IndexMap;
 use std::sync::Arc;
 use tokio::sync::{mpsc, RwLock, Semaphore};
 use tokio::time::{Duration, Instant};
@@ -65,7 +65,7 @@ pub struct GpuSimRuntime {
     /// Extracted combinational cones
     cones: Vec<CombinationalCone>,
     /// Generated GPU shaders
-    shaders: HashMap<ConeId, ShaderGenerationResult>,
+    shaders: IndexMap<ConeId, ShaderGenerationResult>,
     /// Metal GPU backend
     #[cfg(target_os = "macos")]
     metal_backend: Option<Arc<MetalBackend>>,
@@ -91,10 +91,10 @@ impl GpuSimRuntime {
 
         // Generate GPU shaders for each cone
         let mut shader_generator = MetalShaderGenerator::new();
-        let mut shaders = HashMap::new();
+        let mut shaders = IndexMap::new();
 
         // Create signal width map
-        let signal_widths: HashMap<SirSignalId, usize> = sir.top_module.signals
+        let signal_widths: IndexMap<SirSignalId, usize> = sir.top_module.signals
             .iter()
             .map(|s| (s.id, s.width))
             .collect();

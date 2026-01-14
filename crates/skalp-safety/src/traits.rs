@@ -18,7 +18,8 @@ use crate::hierarchy::{
     SafetyEntity, SafetyGoal, SafetyHierarchy, SafetyTrait, TraitExpansionError, TraitParameter,
     TraitUsage,
 };
-use std::collections::{HashMap, HashSet};
+use indexmap::IndexMap;
+use std::collections::HashSet;
 use std::time::Duration;
 
 // ============================================================================
@@ -28,14 +29,14 @@ use std::time::Duration;
 /// Engine for expanding trait usages into concrete safety members
 pub struct TraitExpander {
     /// Named parameter bindings during expansion
-    param_bindings: HashMap<String, ParamValue>,
+    param_bindings: IndexMap<String, ParamValue>,
 }
 
 impl TraitExpander {
     /// Create a new trait expander
     pub fn new() -> Self {
         Self {
-            param_bindings: HashMap::new(),
+            param_bindings: IndexMap::new(),
         }
     }
 
@@ -440,7 +441,7 @@ impl ConflictDetector {
 
     /// Check for PSM definition conflicts with different DC values
     pub fn check_psm_dc_conflicts(hsrs: &[HardwareSafetyRequirement]) -> Vec<(String, f64, f64)> {
-        let mut psm_dcs: HashMap<String, f64> = HashMap::new();
+        let mut psm_dcs: IndexMap<String, f64> = IndexMap::new();
         let mut conflicts = Vec::new();
 
         for hsr in hsrs {

@@ -1,18 +1,18 @@
 use crate::simulator::{SimulationError, SimulationResult, SimulationRuntime, SimulationState};
 use async_trait::async_trait;
+use indexmap::IndexMap;
 use skalp_sir::SirModule;
-use std::collections::HashMap;
 
 pub struct CpuRuntime {
     module: Option<SirModule>,
-    inputs: HashMap<String, Vec<u8>>, // Input port values (preserved across steps)
-    state: HashMap<String, Vec<u8>>,  // State elements (registers)
-    next_state: HashMap<String, Vec<u8>>, // Next state for double-buffering
-    outputs: HashMap<String, Vec<u8>>, // Output port values (from BEFORE sequential update)
-    current_outputs: HashMap<String, Vec<u8>>, // Temporary outputs during evaluation
-    signals: HashMap<String, Vec<u8>>, // Internal signal values
-    signal_widths: HashMap<String, usize>, // Width in bits for each signal
-    prev_clock_values: HashMap<String, u8>, // Previous clock values for edge detection
+    inputs: IndexMap<String, Vec<u8>>, // Input port values (preserved across steps)
+    state: IndexMap<String, Vec<u8>>,  // State elements (registers)
+    next_state: IndexMap<String, Vec<u8>>, // Next state for double-buffering
+    outputs: IndexMap<String, Vec<u8>>, // Output port values (from BEFORE sequential update)
+    current_outputs: IndexMap<String, Vec<u8>>, // Temporary outputs during evaluation
+    signals: IndexMap<String, Vec<u8>>, // Internal signal values
+    signal_widths: IndexMap<String, usize>, // Width in bits for each signal
+    prev_clock_values: IndexMap<String, u8>, // Previous clock values for edge detection
     current_cycle: u64,
 }
 
@@ -26,14 +26,14 @@ impl CpuRuntime {
     pub fn new() -> Self {
         CpuRuntime {
             module: None,
-            inputs: HashMap::new(),
-            state: HashMap::new(),
-            next_state: HashMap::new(),
-            outputs: HashMap::new(),
-            current_outputs: HashMap::new(),
-            signals: HashMap::new(),
-            signal_widths: HashMap::new(),
-            prev_clock_values: HashMap::new(),
+            inputs: IndexMap::new(),
+            state: IndexMap::new(),
+            next_state: IndexMap::new(),
+            outputs: IndexMap::new(),
+            current_outputs: IndexMap::new(),
+            signals: IndexMap::new(),
+            signal_widths: IndexMap::new(),
+            prev_clock_values: IndexMap::new(),
             current_cycle: 0,
         }
     }
@@ -81,7 +81,7 @@ impl CpuRuntime {
         };
 
         // Build a map from node_id to node for efficient lookup
-        let node_map: HashMap<usize, &skalp_sir::SirNode> =
+        let node_map: IndexMap<usize, &skalp_sir::SirNode> =
             nodes.iter().map(|n| (n.id, n)).collect();
 
         // Evaluate all combinational nodes in pre-computed topological order
@@ -739,7 +739,7 @@ impl CpuRuntime {
         };
 
         // Track clock values to update after processing all flip-flops
-        let mut clock_updates = HashMap::new();
+        let mut clock_updates = IndexMap::new();
 
         // Evaluate flip-flops: check for clock edges and update on edge
         for node in &seq_nodes {
@@ -824,8 +824,8 @@ impl CpuRuntime {
     }
 
     fn extract_state(&self) -> SimulationState {
-        let mut signals = HashMap::new();
-        let mut registers = HashMap::new();
+        let mut signals = IndexMap::new();
+        let mut registers = IndexMap::new();
 
         if let Some(module) = &self.module {
             // Build set of output names to avoid reading them twice (matching GPU behavior)

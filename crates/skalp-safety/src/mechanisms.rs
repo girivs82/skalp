@@ -5,9 +5,9 @@
 
 use crate::asil::AsilLevel;
 use chrono::{DateTime, Utc};
+use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use skalp_mir::mir::Expression;
-use std::collections::HashMap;
 
 /// Safety mechanism types according to ISO 26262
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -280,9 +280,9 @@ pub struct PowerConsumption {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SafetyMechanismManager {
     /// All safety mechanisms
-    mechanisms: HashMap<String, SafetyMechanism>,
+    mechanisms: IndexMap<String, SafetyMechanism>,
     /// Mechanism assignments to design elements
-    assignments: HashMap<String, Vec<String>>, // design_element -> mechanisms
+    assignments: IndexMap<String, Vec<String>>, // design_element -> mechanisms
     /// Fault coverage matrix
     fault_coverage: FaultCoverageMatrix,
 }
@@ -291,11 +291,11 @@ pub struct SafetyMechanismManager {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FaultCoverageMatrix {
     /// Fault modes covered by mechanisms
-    fault_to_mechanisms: HashMap<String, Vec<String>>,
+    fault_to_mechanisms: IndexMap<String, Vec<String>>,
     /// Mechanisms covering each fault
-    mechanism_to_faults: HashMap<String, Vec<String>>,
+    mechanism_to_faults: IndexMap<String, Vec<String>>,
     /// Coverage percentages
-    coverage_percentages: HashMap<String, f64>,
+    coverage_percentages: IndexMap<String, f64>,
 }
 
 impl SafetyMechanism {
@@ -469,12 +469,12 @@ impl SafetyMechanismManager {
     /// Create a new mechanism manager
     pub fn new() -> Self {
         Self {
-            mechanisms: HashMap::new(),
-            assignments: HashMap::new(),
+            mechanisms: IndexMap::new(),
+            assignments: IndexMap::new(),
             fault_coverage: FaultCoverageMatrix {
-                fault_to_mechanisms: HashMap::new(),
-                mechanism_to_faults: HashMap::new(),
-                coverage_percentages: HashMap::new(),
+                fault_to_mechanisms: IndexMap::new(),
+                mechanism_to_faults: IndexMap::new(),
+                coverage_percentages: IndexMap::new(),
             },
         }
     }
@@ -589,8 +589,8 @@ impl SafetyMechanismManager {
         let total_mechanisms = self.mechanisms.len();
         let verified_mechanisms = self.mechanisms.values().filter(|m| m.is_verified()).count();
 
-        let mut type_breakdown = HashMap::new();
-        let mut category_breakdown = HashMap::new();
+        let mut type_breakdown = IndexMap::new();
+        let mut category_breakdown = IndexMap::new();
 
         for mechanism in self.mechanisms.values() {
             *type_breakdown
@@ -670,9 +670,9 @@ pub struct MechanismReport {
     /// Verification percentage
     pub verification_percentage: f64,
     /// Breakdown by mechanism type
-    pub type_breakdown: HashMap<MechanismType, usize>,
+    pub type_breakdown: IndexMap<MechanismType, usize>,
     /// Breakdown by category
-    pub category_breakdown: HashMap<MechanismCategory, usize>,
+    pub category_breakdown: IndexMap<MechanismCategory, usize>,
     /// Average fault coverage
     pub avg_fault_coverage: f64,
     /// Average diagnostic coverage

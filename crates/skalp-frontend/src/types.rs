@@ -6,7 +6,7 @@
 //! - Type checking
 //! - Width inference and checking
 
-use std::collections::HashMap;
+use indexmap::IndexMap;
 use std::fmt;
 
 /// Core type representation in SKALP
@@ -211,10 +211,10 @@ pub struct TypeScheme {
 #[derive(Debug, Clone)]
 pub struct TypeEnv {
     /// Variable bindings
-    bindings: HashMap<String, TypeScheme>,
+    bindings: IndexMap<String, TypeScheme>,
 
     /// Type definitions
-    type_defs: HashMap<String, Type>,
+    type_defs: IndexMap<String, Type>,
 
     /// Parent environment (for nested scopes)
     parent: Option<Box<TypeEnv>>,
@@ -229,10 +229,10 @@ pub struct TypeInference {
     next_width_var: u32,
 
     /// Type substitutions
-    type_subst: HashMap<TypeVarId, Type>,
+    type_subst: IndexMap<TypeVarId, Type>,
 
     /// Width substitutions
-    width_subst: HashMap<WidthVar, Width>,
+    width_subst: IndexMap<WidthVar, Width>,
 
     /// Type constraints
     constraints: Vec<TypeConstraint>,
@@ -285,7 +285,7 @@ impl Type {
     }
 
     /// Apply type substitution
-    pub fn apply_subst(&self, subst: &HashMap<TypeVarId, Type>) -> Type {
+    pub fn apply_subst(&self, subst: &IndexMap<TypeVarId, Type>) -> Type {
         match self {
             Type::TypeVar(id) => subst.get(id).cloned().unwrap_or_else(|| self.clone()),
             Type::Array { element_type, size } => Type::Array {
@@ -350,7 +350,7 @@ impl Width {
     }
 
     /// Apply width substitution
-    pub fn apply_subst(&self, subst: &HashMap<WidthVar, Width>) -> Width {
+    pub fn apply_subst(&self, subst: &IndexMap<WidthVar, Width>) -> Width {
         match self {
             Width::Inferred(var) => subst.get(var).cloned().unwrap_or_else(|| self.clone()),
             _ => self.clone(),
@@ -362,8 +362,8 @@ impl TypeEnv {
     /// Create a new empty type environment
     pub fn new() -> Self {
         let mut env = Self {
-            bindings: HashMap::new(),
-            type_defs: HashMap::new(),
+            bindings: IndexMap::new(),
+            type_defs: IndexMap::new(),
             parent: None,
         };
 
@@ -375,8 +375,8 @@ impl TypeEnv {
     /// Create a child environment
     pub fn child(parent: TypeEnv) -> Self {
         Self {
-            bindings: HashMap::new(),
-            type_defs: HashMap::new(),
+            bindings: IndexMap::new(),
+            type_defs: IndexMap::new(),
             parent: Some(Box::new(parent)),
         }
     }
@@ -430,8 +430,8 @@ impl TypeInference {
         Self {
             next_type_var: 0,
             next_width_var: 0,
-            type_subst: HashMap::new(),
-            width_subst: HashMap::new(),
+            type_subst: IndexMap::new(),
+            width_subst: IndexMap::new(),
             constraints: Vec::new(),
         }
     }

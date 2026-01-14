@@ -19,7 +19,7 @@ use super::{Pass, PassResult};
 use crate::synth::cuts::{CutEnumeration, CutParams};
 use crate::synth::npn::NpnDatabase;
 use crate::synth::{Aig, AigLit, AigNode, AigNodeId, AigSafetyInfo, BarrierType};
-use std::collections::HashMap;
+use indexmap::IndexMap;
 
 /// AIG rewriting pass
 pub struct Rewrite {
@@ -89,7 +89,7 @@ impl Rewrite {
         aig: &Aig,
         node: AigNodeId,
         cut: &crate::synth::cuts::Cut,
-        fanout_counts: &HashMap<AigNodeId, usize>,
+        fanout_counts: &IndexMap<AigNodeId, usize>,
     ) -> Option<RewriteCandidate> {
         // Skip trivial cuts
         if cut.size() <= 1 {
@@ -271,7 +271,7 @@ fn count_cone_nodes(
     aig: &Aig,
     root: AigNodeId,
     leaves: &[AigNodeId],
-    fanout_counts: &HashMap<AigNodeId, usize>,
+    fanout_counts: &IndexMap<AigNodeId, usize>,
 ) -> usize {
     let mut count = 0;
     let mut visited = std::collections::HashSet::new();
@@ -387,14 +387,14 @@ fn rebuild_aig_topological(aig: &mut Aig) {
 
     // Build new AIG with reachable nodes using Kahn's algorithm (O(V+E))
     let mut new_aig = Aig::new(aig.name.clone());
-    let mut node_map: HashMap<AigNodeId, AigLit> = HashMap::new();
+    let mut node_map: IndexMap<AigNodeId, AigLit> = IndexMap::new();
     node_map.insert(AigNodeId::FALSE, AigLit::false_lit());
 
     // Compute in-degrees for reachable nodes (only count reachable fanins)
     // IMPORTANT: Latches break cycles in sequential circuits. Their outputs are
     // treated as having in_degree 0 (like primary inputs), and their data inputs
     // are resolved after all combinational logic is processed.
-    let mut in_degree: HashMap<AigNodeId, usize> = HashMap::new();
+    let mut in_degree: IndexMap<AigNodeId, usize> = IndexMap::new();
     for &id in &reachable {
         in_degree.insert(id, 0);
     }
@@ -543,7 +543,7 @@ fn rebuild_aig_topological(aig: &mut Aig) {
     }
 
     // Build fanout lists for efficient updates (sort for determinism)
-    let mut fanouts: HashMap<AigNodeId, Vec<AigNodeId>> = HashMap::new();
+    let mut fanouts: IndexMap<AigNodeId, Vec<AigNodeId>> = IndexMap::new();
     for &id in &reachable {
         if let Some(node) = aig.get_node(id) {
             for fanin in node.fanins() {
@@ -680,7 +680,7 @@ fn rebuild_aig_topological(aig: &mut Aig) {
 }
 
 /// Resolve a literal through the node mapping
-fn resolve_lit(map: &HashMap<AigNodeId, AigLit>, lit: AigLit) -> AigLit {
+fn resolve_lit(map: &IndexMap<AigNodeId, AigLit>, lit: AigLit) -> AigLit {
     if lit.node == AigNodeId::FALSE {
         // Constant false is always valid
         return lit;
@@ -703,8 +703,8 @@ fn resolve_lit(map: &HashMap<AigNodeId, AigLit>, lit: AigLit) -> AigLit {
 }
 
 /// Compute fanout counts for all nodes
-fn compute_fanout_counts(aig: &Aig) -> HashMap<AigNodeId, usize> {
-    let mut counts: HashMap<AigNodeId, usize> = HashMap::new();
+fn compute_fanout_counts(aig: &Aig) -> IndexMap<AigNodeId, usize> {
+    let mut counts: IndexMap<AigNodeId, usize> = IndexMap::new();
 
     for (_, node) in aig.iter_nodes() {
         for fanin in node.fanins() {
@@ -767,7 +767,7 @@ impl Pass for Rewrite {
             std::collections::HashSet::new();
 
         // Build substitution map: old_node -> new_lit
-        let mut subst_map: HashMap<AigNodeId, AigLit> = HashMap::new();
+        let mut subst_map: IndexMap<AigNodeId, AigLit> = IndexMap::new();
 
         // Apply rewrites greedily
         for candidate in &candidates {

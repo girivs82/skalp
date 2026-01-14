@@ -27,6 +27,7 @@ pub use adder_opt::{
 };
 
 use super::timing::TimePs;
+use indexmap::IndexMap;
 
 /// Datapath operation type
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -105,7 +106,7 @@ pub struct DatapathStats {
     /// Total delay improvement (ps)
     pub delay_improvement: TimePs,
     /// Architectures used
-    pub architectures_used: std::collections::HashMap<String, usize>,
+    pub architectures_used: IndexMap<String, usize>,
 }
 
 impl DatapathStats {

@@ -1,6 +1,6 @@
 use async_trait::async_trait;
+use indexmap::IndexMap;
 use skalp_sir::SirModule;
-use std::collections::HashMap;
 use std::sync::Arc;
 use thiserror::Error;
 use tokio::sync::{mpsc, RwLock};
@@ -47,8 +47,8 @@ impl Default for SimulationConfig {
 #[derive(Debug, Clone, PartialEq)]
 pub struct SimulationState {
     pub cycle: u64,
-    pub signals: HashMap<String, Vec<u8>>,
-    pub registers: HashMap<String, Vec<u8>>,
+    pub signals: IndexMap<String, Vec<u8>>,
+    pub registers: IndexMap<String, Vec<u8>>,
 }
 
 #[async_trait]

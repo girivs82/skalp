@@ -35,7 +35,8 @@
 //!
 //! For protected SMs: λSM_contribution = λSM × (1 - DC_protector)
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use indexmap::IndexMap;
+use std::collections::{HashSet, VecDeque};
 
 use serde::{Deserialize, Serialize};
 
@@ -50,11 +51,11 @@ use skalp_lir::{CellSafetyClassification, GateNetId, GateNetlist};
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SmCellMapping {
     /// Cell path -> mechanism name
-    pub cell_to_sm: HashMap<String, String>,
+    pub cell_to_sm: IndexMap<String, String>,
     /// Mechanism name -> list of cell paths
-    pub sm_to_cells: HashMap<String, Vec<String>>,
+    pub sm_to_cells: IndexMap<String, Vec<String>>,
     /// Mechanism name -> total FIT
-    pub sm_fit: HashMap<String, f64>,
+    pub sm_fit: IndexMap<String, f64>,
     /// Total number of SM cells
     pub total_sm_cells: usize,
     /// Total SM FIT
@@ -122,11 +123,11 @@ impl SmCellMapping {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SmCoverageMap {
     /// SM name -> list of protected functional cell paths
-    pub sm_to_protected: HashMap<String, Vec<String>>,
+    pub sm_to_protected: IndexMap<String, Vec<String>>,
     /// Functional cell path -> list of SM names that protect it
-    pub functional_cell_to_sms: HashMap<String, Vec<String>>,
+    pub functional_cell_to_sms: IndexMap<String, Vec<String>>,
     /// SM name -> FIT of protected functional cells
-    pub sm_protected_fit: HashMap<String, f64>,
+    pub sm_protected_fit: IndexMap<String, f64>,
     /// Functional cells protected by at least one SM
     pub protected_cells: Vec<String>,
     /// Total FIT of protected functional cells
@@ -225,11 +226,11 @@ pub struct SmCoverageEntry {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SmHierarchy {
     /// SM -> protected-by-SM relationships (which SM protects this SM)
-    pub protectors: HashMap<String, String>,
+    pub protectors: IndexMap<String, String>,
     /// SM -> protects-which-SMs relationships (which SMs does this SM protect)
-    pub protects: HashMap<String, Vec<String>>,
+    pub protects: IndexMap<String, Vec<String>>,
     /// SM -> DC provided by the protector
-    pub protector_dc: HashMap<String, f64>,
+    pub protector_dc: IndexMap<String, f64>,
 }
 
 impl SmHierarchy {
@@ -409,7 +410,7 @@ impl SmFailureAnalysis {
         analysis.cell_mapping = identify_sm_cells(netlist);
 
         // Step 2: Build SM results from cell mapping
-        let mut mechanism_results: HashMap<String, SmFailureResult> = HashMap::new();
+        let mut mechanism_results: IndexMap<String, SmFailureResult> = IndexMap::new();
 
         for cell in &netlist.cells {
             match &cell.safety_classification {
@@ -555,7 +556,7 @@ pub fn identify_sm_cells_from_annotations(
     let mut mapping = SmCellMapping::new();
 
     // Build annotation map: path -> (goal, mechanism)
-    let annotation_map: HashMap<String, (&str, &str)> = annotations
+    let annotation_map: IndexMap<String, (&str, &str)> = annotations
         .iter()
         .map(|a| {
             (
@@ -601,9 +602,9 @@ pub fn map_sm_coverage(netlist: &GateNetlist, sm_mapping: &SmCellMapping) -> SmC
 
     // Build connectivity maps
     // net_id -> cell index that drives this net
-    let mut net_to_driver: HashMap<GateNetId, usize> = HashMap::new();
+    let mut net_to_driver: IndexMap<GateNetId, usize> = IndexMap::new();
     // net_id -> cell indices that are driven by this net
-    let mut net_to_driven: HashMap<GateNetId, Vec<usize>> = HashMap::new();
+    let mut net_to_driven: IndexMap<GateNetId, Vec<usize>> = IndexMap::new();
 
     for (cell_idx, cell) in netlist.cells.iter().enumerate() {
         // This cell drives its output nets
@@ -617,7 +618,7 @@ pub fn map_sm_coverage(netlist: &GateNetlist, sm_mapping: &SmCellMapping) -> SmC
     }
 
     // Build cell path -> cell index map for quick lookup
-    let cell_path_to_idx: HashMap<&str, usize> = netlist
+    let cell_path_to_idx: IndexMap<&str, usize> = netlist
         .cells
         .iter()
         .enumerate()
@@ -625,7 +626,7 @@ pub fn map_sm_coverage(netlist: &GateNetlist, sm_mapping: &SmCellMapping) -> SmC
         .collect();
 
     // Collect all functional cell indices and their info
-    let mut functional_cells: HashMap<usize, (String, f64)> = HashMap::new();
+    let mut functional_cells: IndexMap<usize, (String, f64)> = IndexMap::new();
     for (idx, cell) in netlist.cells.iter().enumerate() {
         if matches!(
             cell.safety_classification,
@@ -639,7 +640,7 @@ pub fn map_sm_coverage(netlist: &GateNetlist, sm_mapping: &SmCellMapping) -> SmC
     coverage.total_functional_fit = functional_cells.values().map(|(_, fit)| fit).sum();
 
     // Track which functional cells are protected by which SMs
-    let mut cell_to_sms: HashMap<usize, HashSet<String>> = HashMap::new();
+    let mut cell_to_sms: IndexMap<usize, HashSet<String>> = IndexMap::new();
 
     // For each SM, trace its fanin cone
     for (sm_name, sm_cell_paths) in &sm_mapping.sm_to_cells {
@@ -763,7 +764,7 @@ pub fn trace_fanin_cone(
     max_depth: Option<usize>,
 ) -> Vec<String> {
     // Build connectivity map
-    let mut net_to_driver: HashMap<GateNetId, usize> = HashMap::new();
+    let mut net_to_driver: IndexMap<GateNetId, usize> = IndexMap::new();
     for (cell_idx, cell) in netlist.cells.iter().enumerate() {
         for output in &cell.outputs {
             net_to_driver.insert(*output, cell_idx);
@@ -816,7 +817,7 @@ pub fn trace_fanout_cone(
     max_depth: Option<usize>,
 ) -> Vec<String> {
     // Build connectivity map
-    let mut net_to_driven: HashMap<GateNetId, Vec<usize>> = HashMap::new();
+    let mut net_to_driven: IndexMap<GateNetId, Vec<usize>> = IndexMap::new();
     for (cell_idx, cell) in netlist.cells.iter().enumerate() {
         for input in &cell.inputs {
             net_to_driven.entry(*input).or_default().push(cell_idx);

@@ -35,8 +35,8 @@ pub use parser::Parser;
 pub use span::{LineIndex, SourceSpan};
 
 use anyhow::{Context, Result};
+use indexmap::IndexMap;
 use module_resolver::ModuleResolver;
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 /// Compilation context containing the main HIR and all loaded module HIRs
@@ -45,7 +45,7 @@ pub struct CompilationContext {
     /// The main/merged HIR for the top-level module
     pub main_hir: Hir,
     /// All loaded module HIRs (path -> HIR) for scope resolution
-    pub module_hirs: HashMap<PathBuf, Hir>,
+    pub module_hirs: IndexMap<PathBuf, Hir>,
 }
 
 /// Find the project root by searching for skalp.toml
@@ -146,7 +146,7 @@ pub fn parse_and_build_compilation_context(file_path: &Path) -> Result<Compilati
     let monomorphized_hir = engine.monomorphize(&hir);
 
     // Extract all loaded module HIRs from the resolver
-    let module_hirs: HashMap<PathBuf, Hir> = resolver
+    let module_hirs: IndexMap<PathBuf, Hir> = resolver
         .loaded_modules()
         .map(|(path, hir)| (path.clone(), hir.clone()))
         .collect();
@@ -497,7 +497,7 @@ fn merge_trait_implementations_for_existing_types(target: &mut Hir, source: &Hir
 /// This is needed when merging modules - port IDs get renumbered but impl expressions still reference old IDs
 fn remap_impl_ports(
     mut impl_block: hir::HirImplementation,
-    port_id_map: &std::collections::HashMap<hir::PortId, hir::PortId>,
+    port_id_map: &IndexMap<hir::PortId, hir::PortId>,
 ) -> hir::HirImplementation {
     // Remap ports in assignments
     for assignment in &mut impl_block.assignments {
@@ -550,7 +550,7 @@ fn remap_impl_ports(
 /// Remap port IDs in an LValue
 fn remap_lvalue_ports(
     lvalue: &hir::HirLValue,
-    port_id_map: &std::collections::HashMap<hir::PortId, hir::PortId>,
+    port_id_map: &IndexMap<hir::PortId, hir::PortId>,
 ) -> hir::HirLValue {
     match lvalue {
         hir::HirLValue::Port(old_id) => port_id_map
@@ -581,7 +581,7 @@ fn remap_lvalue_ports(
 /// Remap port IDs in an expression
 fn remap_expr_ports(
     expr: &hir::HirExpression,
-    port_id_map: &std::collections::HashMap<hir::PortId, hir::PortId>,
+    port_id_map: &IndexMap<hir::PortId, hir::PortId>,
 ) -> hir::HirExpression {
     match expr {
         hir::HirExpression::Port(old_id) => port_id_map
@@ -660,7 +660,7 @@ fn remap_expr_ports(
 /// Remap port IDs in a statement
 fn remap_statement_ports(
     stmt: &hir::HirStatement,
-    port_id_map: &std::collections::HashMap<hir::PortId, hir::PortId>,
+    port_id_map: &IndexMap<hir::PortId, hir::PortId>,
 ) -> hir::HirStatement {
     match stmt {
         hir::HirStatement::Assignment(assign) => {
@@ -748,7 +748,7 @@ fn merge_symbol(target: &mut Hir, source: &Hir, symbol_name: &str) -> Result<()>
         imported_entity.id = new_entity_id;
 
         // Renumber all ports and build port ID mapping
-        let mut port_id_map = std::collections::HashMap::new();
+        let mut port_id_map = IndexMap::new();
         for (i, port) in imported_entity.ports.iter_mut().enumerate() {
             let old_id = port.id;
             let new_id = hir::PortId(next_port_id + i as u32);
@@ -1041,7 +1041,7 @@ fn merge_symbol_with_rename(
         renamed_entity.name = alias.to_string();
 
         // Renumber all ports and build port ID mapping
-        let mut port_id_map = std::collections::HashMap::new();
+        let mut port_id_map = IndexMap::new();
         for (i, port) in renamed_entity.ports.iter_mut().enumerate() {
             let old_id = port.id;
             let new_id = hir::PortId(next_port_id + i as u32);
@@ -1297,13 +1297,10 @@ fn merge_all_symbols(target: &mut Hir, source: &Hir) -> Result<()> {
 
     // PASS 1: Merge all public entities (without implementations)
     // Build mapping from old entity ID to (new entity ID, port ID map)
-    let mut entity_id_map: std::collections::HashMap<
+    let mut entity_id_map: IndexMap<
         hir::EntityId,
-        (
-            hir::EntityId,
-            std::collections::HashMap<hir::PortId, hir::PortId>,
-        ),
-    > = std::collections::HashMap::new();
+        (hir::EntityId, IndexMap<hir::PortId, hir::PortId>),
+    > = IndexMap::new();
 
     for entity in &source.entities {
         eprintln!(
@@ -1331,7 +1328,7 @@ fn merge_all_symbols(target: &mut Hir, source: &Hir) -> Result<()> {
             imported_entity.id = new_entity_id;
 
             // Renumber all ports and build port ID mapping
-            let mut port_id_map = std::collections::HashMap::new();
+            let mut port_id_map = IndexMap::new();
             for (i, port) in imported_entity.ports.iter_mut().enumerate() {
                 let old_id = port.id;
                 let new_id = hir::PortId(next_port_id + i as u32);

@@ -31,8 +31,9 @@
 //! ```
 
 use crate::mir::Mir;
+use indexmap::IndexMap;
 use skalp_frontend::hir::{self, Hir, HirFunction, HirType};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 /// Concrete type for monomorphization
 ///
@@ -71,13 +72,13 @@ struct SpecializationRequest {
 /// Maps generic parameter names to concrete types and performs substitution.
 struct TypeSubstitution {
     /// Map from generic parameter name to concrete type
-    mappings: HashMap<String, ConcreteType>,
+    mappings: IndexMap<String, ConcreteType>,
 }
 
 impl TypeSubstitution {
     fn new() -> Self {
         Self {
-            mappings: HashMap::new(),
+            mappings: IndexMap::new(),
         }
     }
 
@@ -400,16 +401,16 @@ struct TraitMethodInfo {
 #[derive(Debug, Clone)]
 struct TypeContext {
     /// Map from variable name to type
-    variables: HashMap<String, HirType>,
+    variables: IndexMap<String, HirType>,
     /// Map from variable ID to type (for let bindings)
-    variable_ids: HashMap<hir::VariableId, HirType>,
+    variable_ids: IndexMap<hir::VariableId, HirType>,
 }
 
 impl TypeContext {
     fn new() -> Self {
         Self {
-            variables: HashMap::new(),
-            variable_ids: HashMap::new(),
+            variables: IndexMap::new(),
+            variable_ids: IndexMap::new(),
         }
     }
 
@@ -444,7 +445,7 @@ impl TypeContext {
 pub struct Monomorphizer {
     /// Map from specialization key to specialized function name
     /// Key format: "func_id:type_arg1:type_arg2:..."
-    specializations: HashMap<String, String>,
+    specializations: IndexMap<String, String>,
 
     /// Queue of pending specializations to generate
     pending: Vec<SpecializationRequest>,
@@ -453,26 +454,26 @@ pub struct Monomorphizer {
     specialized_functions: Vec<HirFunction>,
 
     /// Original generic functions (for reference during specialization)
-    generic_functions: HashMap<hir::FunctionId, HirFunction>,
+    generic_functions: IndexMap<hir::FunctionId, HirFunction>,
 
     /// Set of function IDs that are generic
     generic_function_ids: HashSet<hir::FunctionId>,
 
-    /// Trait method registry: (trait_name, type_key) -> HashMap<method_name -> TraitMethodInfo>
+    /// Trait method registry: (trait_name, type_key) -> IndexMap<method_name -> TraitMethodInfo>
     /// Maps (trait, type) pairs to their method implementations for method resolution
-    trait_methods: HashMap<(String, String), HashMap<String, TraitMethodInfo>>,
+    trait_methods: IndexMap<(String, String), IndexMap<String, TraitMethodInfo>>,
 }
 
 impl Monomorphizer {
     /// Create a new monomorphizer
     pub fn new() -> Self {
         Self {
-            specializations: HashMap::new(),
+            specializations: IndexMap::new(),
             pending: Vec::new(),
             specialized_functions: Vec::new(),
-            generic_functions: HashMap::new(),
+            generic_functions: IndexMap::new(),
             generic_function_ids: HashSet::new(),
-            trait_methods: HashMap::new(),
+            trait_methods: IndexMap::new(),
         }
     }
 
@@ -1538,7 +1539,7 @@ impl Monomorphizer {
                             return hir::HirExpression::Call(hir::HirCallExpr {
                                 function: specialized_name.clone(),
                                 type_args: Vec::new(), // No type args in specialized call
-                                named_type_args: std::collections::HashMap::new(), // No named type args in specialized call
+                                named_type_args: IndexMap::new(), // No named type args in specialized call
                                 args: call
                                     .args
                                     .iter()
@@ -1560,7 +1561,7 @@ impl Monomorphizer {
                     return hir::HirExpression::Call(hir::HirCallExpr {
                         function: specialized_name,
                         type_args: Vec::new(),
-                        named_type_args: std::collections::HashMap::new(),
+                        named_type_args: IndexMap::new(),
                         args: call
                             .args
                             .iter()

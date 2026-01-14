@@ -285,12 +285,12 @@ mod graphics_pipeline_tests {
 
     #[tokio::test]
     async fn test_graphics_pipeline_synthesis() {
+        use indexmap::IndexMap;
         use skalp_backends::{
             BackendFactory, FpgaTarget, OptimizationGoals, OptimizationTarget, PowerConstraints,
             SynthesisConfig, TargetPlatform, TimingConstraint,
         };
         use skalp_lir::lower_to_lir;
-        use std::collections::HashMap;
 
         println!("🎨 Graphics Pipeline Synthesis Test");
 
@@ -346,7 +346,7 @@ mod graphics_pipeline_tests {
                 operating_temperature: 85.0,
             }),
             output_dir: "/tmp/skalp_graphics_pipeline_synthesis".to_string(),
-            tool_options: HashMap::new(),
+            tool_options: IndexMap::new(),
         };
 
         println!("5️⃣ Running synthesis...");

@@ -4,6 +4,8 @@
 //! like NAND2, XOR2, DFF, etc.) to the AIG (And-Inverter Graph) representation.
 
 use crate::gate_netlist::{Cell, CellId, GateNet, GateNetId, GateNetlist};
+use indexmap::IndexMap;
+use std::collections::HashSet;
 
 /// Set to true to enable verbose AIG builder debug output
 const AIG_DEBUG: bool = false;
@@ -138,7 +140,7 @@ impl<'a> AigBuilder<'a> {
     fn process_cells(&mut self) {
         // Build a lookup map from CellId to Cell reference
         // since CellIds may not be contiguous indices
-        let cells_by_id: std::collections::HashMap<CellId, &Cell> =
+        let cells_by_id: IndexMap<CellId, &Cell> =
             self.netlist.cells.iter().map(|c| (c.id, c)).collect();
 
         // Topological sort cells by dependency
@@ -161,7 +163,7 @@ impl<'a> AigBuilder<'a> {
 
         // Build dependency map: cell -> cells it depends on
         // Use HashMap since CellIds may not be contiguous
-        let mut deps: HashMap<CellId, HashSet<CellId>> = HashMap::new();
+        let mut deps: IndexMap<CellId, HashSet<CellId>> = IndexMap::new();
 
         for cell in &self.netlist.cells {
             let cell_deps = deps.entry(cell.id).or_default();

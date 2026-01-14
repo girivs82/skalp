@@ -39,7 +39,7 @@ use crate::sir::{
     CombinationalBlock, EdgeType, FaultInjectionConfig, PrimitiveId, PrimitiveType, Sir,
     SirOperation, SirPortDirection, SirSignalId, SirSignalType,
 };
-use std::collections::HashMap;
+use indexmap::IndexMap;
 
 /// Gate-level simulation state
 #[derive(Debug, Clone)]
@@ -47,9 +47,9 @@ pub struct GateSimulationState {
     /// Current simulation cycle
     pub cycle: u64,
     /// Signal values (signal_id -> value as bool vector)
-    pub signals: HashMap<u32, Vec<bool>>,
+    pub signals: IndexMap<u32, Vec<bool>>,
     /// Previous clock values for edge detection
-    pub prev_clocks: HashMap<u32, bool>,
+    pub prev_clocks: IndexMap<u32, bool>,
 }
 
 impl GateSimulationState {
@@ -57,8 +57,8 @@ impl GateSimulationState {
     pub fn new() -> Self {
         Self {
             cycle: 0,
-            signals: HashMap::new(),
-            prev_clocks: HashMap::new(),
+            signals: IndexMap::new(),
+            prev_clocks: IndexMap::new(),
         }
     }
 }
@@ -77,7 +77,7 @@ pub struct FaultSimResult {
     /// Whether the fault was detected by safety mechanisms
     pub detected: bool,
     /// Output signal differences (signal_name -> (normal, faulty))
-    pub output_diffs: HashMap<String, (Vec<bool>, Vec<bool>)>,
+    pub output_diffs: IndexMap<String, (Vec<bool>, Vec<bool>)>,
     /// Cycle at which detection occurred (if detected)
     pub detection_cycle: Option<u64>,
     /// Detection mode of the signal that detected the fault (if detected)
@@ -248,11 +248,11 @@ pub struct GateLevelSimulator {
     /// Current simulation state
     state: GateSimulationState,
     /// Signal name to ID mapping
-    signal_name_to_id: HashMap<String, SirSignalId>,
+    signal_name_to_id: IndexMap<String, SirSignalId>,
     /// Signal ID to name mapping
-    signal_id_to_name: HashMap<u32, String>,
+    signal_id_to_name: IndexMap<u32, String>,
     /// Signal widths
-    signal_widths: HashMap<u32, usize>,
+    signal_widths: IndexMap<u32, usize>,
     /// Input port IDs
     input_ports: Vec<SirSignalId>,
     /// Output port IDs
@@ -273,9 +273,9 @@ impl GateLevelSimulator {
         let mut sim = Self {
             sir: sir.clone(),
             state: GateSimulationState::new(),
-            signal_name_to_id: HashMap::new(),
-            signal_id_to_name: HashMap::new(),
-            signal_widths: HashMap::new(),
+            signal_name_to_id: IndexMap::new(),
+            signal_id_to_name: IndexMap::new(),
+            signal_widths: IndexMap::new(),
             input_ports: Vec::new(),
             output_ports: Vec::new(),
             clock_signals: Vec::new(),
@@ -775,7 +775,7 @@ impl GateLevelSimulator {
     ) -> FaultSimResult {
         // First run normal simulation and capture golden outputs at each cycle
         self.reset();
-        let mut golden_outputs_per_cycle: Vec<HashMap<String, Vec<bool>>> =
+        let mut golden_outputs_per_cycle: Vec<IndexMap<String, Vec<bool>>> =
             Vec::with_capacity((cycles * 2) as usize);
 
         for cycle in 0..(cycles * 2) {
@@ -784,7 +784,7 @@ impl GateLevelSimulator {
             self.step();
 
             // Capture golden outputs at this cycle
-            let outputs: HashMap<String, Vec<bool>> = self
+            let outputs: IndexMap<String, Vec<bool>> = self
                 .output_ports
                 .iter()
                 .filter_map(|id| {
@@ -801,7 +801,7 @@ impl GateLevelSimulator {
         self.reset();
         self.inject_fault(fault.clone());
         let mut detection_cycle = None;
-        let mut output_diffs = HashMap::new();
+        let mut output_diffs = IndexMap::new();
         let mut first_corruption_cycle: Option<u64> = None;
 
         for cycle in 0..(cycles * 2) {
@@ -1234,8 +1234,8 @@ impl GateLevelSimulator {
     }
 
     /// Get primitive breakdown by type
-    pub fn primitive_breakdown(&self) -> HashMap<String, usize> {
-        let mut breakdown = HashMap::new();
+    pub fn primitive_breakdown(&self) -> IndexMap<String, usize> {
+        let mut breakdown = IndexMap::new();
         for block in &self.sir.top_module.comb_blocks {
             for op in &block.operations {
                 if let SirOperation::Primitive { ptype, .. } = op {

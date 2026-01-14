@@ -24,8 +24,8 @@
 //! ```
 
 use chrono::{DateTime, Utc};
+use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 
 use crate::asil::AsilLevel;
 use crate::fta::CutSetAnalysis;
@@ -238,7 +238,7 @@ pub struct GsnDiagram {
     /// Target ASIL level
     pub target_asil: AsilLevel,
     /// All GSN elements indexed by ID
-    pub elements: HashMap<GsnId, GsnElement>,
+    pub elements: IndexMap<GsnId, GsnElement>,
     /// Links between elements
     pub links: Vec<GsnLink>,
     /// Top-level goal ID
@@ -292,7 +292,7 @@ impl GsnDiagram {
             description: String::new(),
             system_name: system_name.to_string(),
             target_asil,
-            elements: HashMap::new(),
+            elements: IndexMap::new(),
             links: Vec::new(),
             top_goal: None,
             metadata: GsnMetadata::default(),

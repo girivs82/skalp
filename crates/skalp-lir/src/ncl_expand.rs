@@ -29,8 +29,8 @@
 //! | XOR(a,b)   | complex (see impl)  | complex (see impl)  |
 
 use crate::lir::{Lir, LirNode, LirNodeId, LirOp, LirSignal, LirSignalId};
+use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 
 /// Configuration for NCL expansion
 ///
@@ -84,7 +84,7 @@ pub struct NclExpandResult {
     /// The transformed NCL LIR
     pub lir: Lir,
     /// Mapping from original signals to their dual-rail pairs (t, f)
-    pub dual_rail_map: HashMap<LirSignalId, DualRailPair>,
+    pub dual_rail_map: IndexMap<LirSignalId, DualRailPair>,
     /// Completion signals for each barrier stage
     pub stage_completions: Vec<LirSignalId>,
 }
@@ -122,7 +122,7 @@ struct NclExpander {
     /// Next node ID
     next_node_id: u32,
     /// Mapping from original signal to dual-rail pair
-    dual_rail_map: HashMap<LirSignalId, DualRailPair>,
+    dual_rail_map: IndexMap<LirSignalId, DualRailPair>,
     /// Configuration
     config: NclConfig,
 }
@@ -133,7 +133,7 @@ impl NclExpander {
             lir: Lir::new(format!("{}_ncl", original_name)),
             next_signal_id: 0,
             next_node_id: 0,
-            dual_rail_map: HashMap::new(),
+            dual_rail_map: IndexMap::new(),
             config,
         }
     }
@@ -2672,9 +2672,9 @@ pub fn expand_to_ncl_boundary(lir: &Lir, config: &NclConfig) -> NclExpandResult 
     new_lir.is_ncl = true;
 
     // Mapping from original signal IDs to new signal IDs
-    let mut signal_map: HashMap<LirSignalId, LirSignalId> = HashMap::new();
+    let mut signal_map: IndexMap<LirSignalId, LirSignalId> = IndexMap::new();
     // Mapping from original signal IDs to their dual-rail pairs (for inputs/outputs)
-    let mut dual_rail_map: HashMap<LirSignalId, DualRailPair> = HashMap::new();
+    let mut dual_rail_map: IndexMap<LirSignalId, DualRailPair> = IndexMap::new();
 
     // Step 1: Process inputs - create dual-rail ports and decode nodes
     for &orig_input_id in &lir.inputs {
@@ -2841,8 +2841,7 @@ pub fn apply_boundary_ncl_to_hierarchy(
 
     // Build child -> parent reverse mapping
     // Sort keys for deterministic iteration order (HashMap order is non-deterministic)
-    let mut child_to_parent: std::collections::HashMap<&str, &str> =
-        std::collections::HashMap::new();
+    let mut child_to_parent: IndexMap<&str, &str> = IndexMap::new();
     let mut sorted_hierarchy_keys: Vec<_> = hier_lir.hierarchy.keys().collect();
     sorted_hierarchy_keys.sort();
     for parent in sorted_hierarchy_keys {
@@ -2862,7 +2861,7 @@ pub fn apply_boundary_ncl_to_hierarchy(
         false // No parent or parent not found → treat as sync parent
     };
 
-    let mut new_instances = std::collections::HashMap::new();
+    let mut new_instances = IndexMap::new();
 
     // Sort instance paths for deterministic iteration order
     let mut sorted_instance_paths: Vec<_> = hier_lir.instances.keys().collect();

@@ -17,8 +17,8 @@
 //! - Eager decomposition loses information needed for optimal mapping
 //! - Decomposition decisions are technology-dependent
 
+use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 
 // ============================================================================
 // IDs
@@ -564,7 +564,7 @@ pub struct HierarchyNode {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct FitOverrides {
     /// Override FIT for specific primitive types (e.g., "DFFP" => 0.8)
-    pub primitive_overrides: HashMap<String, f64>,
+    pub primitive_overrides: IndexMap<String, f64>,
     /// Global scaling factor (e.g., 0.7 for hardened process)
     pub global_scale: f64,
     /// Temperature derating factor
@@ -577,7 +577,7 @@ impl FitOverrides {
     /// Create default overrides (no modifications)
     pub fn none() -> Self {
         Self {
-            primitive_overrides: HashMap::new(),
+            primitive_overrides: IndexMap::new(),
             global_scale: 1.0,
             temperature_factor: 1.0,
             voltage_factor: 1.0,
@@ -1068,7 +1068,7 @@ pub struct Lir {
     #[serde(default)]
     pub is_ncl: bool,
     /// Signal name to ID mapping
-    signal_map: HashMap<String, LirSignalId>,
+    signal_map: IndexMap<String, LirSignalId>,
     /// Module-level safety information (from MIR SafetyContext)
     /// Propagated to all cells during technology mapping
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1088,7 +1088,7 @@ impl Lir {
             resets: Vec::new(),
             detection_signals: Vec::new(),
             is_ncl: false,
-            signal_map: HashMap::new(),
+            signal_map: IndexMap::new(),
             module_safety_info: None,
         }
     }

@@ -18,7 +18,8 @@
 
 use crate::gate_netlist::{Cell, CellId, GateNet, GateNetId, GateNetlist};
 use crate::lir::PrimitiveType;
-use std::collections::{HashMap, HashSet};
+use indexmap::IndexMap;
+use std::collections::HashSet;
 
 /// NCL optimization configuration
 #[derive(Debug, Clone)]
@@ -163,7 +164,7 @@ impl NclOptimizer {
     /// - NULL: t=0, f=0 (but constants are always DATA)
     fn propagate_constants(&mut self, netlist: &mut GateNetlist) {
         // Find constant nets (TIE_HIGH, TIE_LOW)
-        let mut constant_nets: HashMap<GateNetId, bool> = HashMap::new();
+        let mut constant_nets: IndexMap<GateNetId, bool> = IndexMap::new();
 
         for cell in &netlist.cells {
             match cell.cell_type.as_str() {
@@ -217,7 +218,7 @@ impl NclOptimizer {
         &self,
         cell_type: &str,
         inputs: &[GateNetId],
-        constants: &HashMap<GateNetId, bool>,
+        constants: &IndexMap<GateNetId, bool>,
     ) -> Option<bool> {
         // Parse THmn pattern
         if !cell_type.starts_with("TH") || cell_type.len() < 4 {
@@ -261,7 +262,7 @@ impl NclOptimizer {
     /// Collapse idempotent operations: TH12(a,a) = a, TH22(a,a) = a
     fn collapse_idempotent(&mut self, netlist: &mut GateNetlist) {
         let mut cells_to_remove: HashSet<CellId> = HashSet::new();
-        let mut net_redirects: HashMap<GateNetId, GateNetId> = HashMap::new();
+        let mut net_redirects: IndexMap<GateNetId, GateNetId> = IndexMap::new();
 
         for cell in &netlist.cells {
             // Check for TH12(a,a) or TH22(a,a) pattern
@@ -308,7 +309,7 @@ impl NclOptimizer {
     fn propagate_not(&mut self, netlist: &mut GateNetlist) {
         // Find NOT operations (inverters in NCL context)
         // In our tech mapping, NOT becomes rail swap - find these patterns
-        let mut inverted_nets: HashMap<GateNetId, GateNetId> = HashMap::new();
+        let mut inverted_nets: IndexMap<GateNetId, GateNetId> = IndexMap::new();
 
         // Look for direct connections where t->f, f->t (NOT pattern)
         // This is architecture-specific but common pattern is BUF with swapped rails
@@ -380,7 +381,7 @@ impl NclOptimizer {
     /// This works when all inputs are independent (no reconvergent fanout)
     fn merge_threshold_gates(&mut self, netlist: &mut GateNetlist) {
         // Build fanout map
-        let mut fanout: HashMap<GateNetId, Vec<CellId>> = HashMap::new();
+        let mut fanout: IndexMap<GateNetId, Vec<CellId>> = IndexMap::new();
         for cell in &netlist.cells {
             for &input in &cell.inputs {
                 fanout.entry(input).or_default().push(cell.id);
@@ -432,7 +433,7 @@ impl NclOptimizer {
         &self,
         netlist: &'a GateNetlist,
         net: GateNetId,
-        fanout: &HashMap<GateNetId, Vec<CellId>>,
+        fanout: &IndexMap<GateNetId, Vec<CellId>>,
     ) -> Option<&'a Cell> {
         // Check if net has single fanout
         if fanout.get(&net).map(|f| f.len()).unwrap_or(0) != 1 {
@@ -474,7 +475,7 @@ impl NclOptimizer {
             .collect();
 
         // Find cells with identical input sets
-        let mut input_sets: HashMap<Vec<GateNetId>, Vec<CellId>> = HashMap::new();
+        let mut input_sets: IndexMap<Vec<GateNetId>, Vec<CellId>> = IndexMap::new();
         for (id, inputs, _outputs) in &completion_cells {
             let mut sorted_inputs = inputs.clone();
             sorted_inputs.sort_by_key(|i| i.0);
@@ -483,7 +484,7 @@ impl NclOptimizer {
 
         // Merge duplicates
         let mut cells_to_remove: HashSet<CellId> = HashSet::new();
-        let mut output_redirects: HashMap<GateNetId, GateNetId> = HashMap::new();
+        let mut output_redirects: IndexMap<GateNetId, GateNetId> = IndexMap::new();
 
         for (_inputs, cell_ids) in input_sets {
             if cell_ids.len() > 1 {
@@ -606,7 +607,7 @@ mod tests {
     #[test]
     fn test_eval_threshold_constant_th22_both_high() {
         let opt = NclOptimizer::new();
-        let mut constants = HashMap::new();
+        let mut constants = IndexMap::new();
         constants.insert(GateNetId(0), true);
         constants.insert(GateNetId(1), true);
 
@@ -617,7 +618,7 @@ mod tests {
     #[test]
     fn test_eval_threshold_constant_th22_both_low() {
         let opt = NclOptimizer::new();
-        let mut constants = HashMap::new();
+        let mut constants = IndexMap::new();
         constants.insert(GateNetId(0), false);
         constants.insert(GateNetId(1), false);
 
@@ -628,7 +629,7 @@ mod tests {
     #[test]
     fn test_eval_threshold_constant_th12_one_high() {
         let opt = NclOptimizer::new();
-        let mut constants = HashMap::new();
+        let mut constants = IndexMap::new();
         constants.insert(GateNetId(0), true);
         constants.insert(GateNetId(1), false);
 

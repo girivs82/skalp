@@ -8,7 +8,8 @@ use crate::synth::cuts::{CutEnumeration, CutParams};
 use crate::synth::timing::{NetTiming, TimePs};
 use crate::synth::{Aig, AigLit, AigNode, AigNodeId, Cut};
 use crate::tech_library::TechLibrary;
-use std::collections::{HashMap, HashSet};
+use indexmap::IndexMap;
+use std::collections::HashSet;
 
 /// Configuration for delay-optimal mapping
 #[derive(Debug, Clone)]
@@ -118,10 +119,10 @@ impl DelayMapper {
     fn delay_optimal_mapping(
         &self,
         aig: &Aig,
-    ) -> (HashMap<AigNodeId, MappedNode>, HashMap<AigNodeId, TimePs>) {
-        let mut mapping: HashMap<AigNodeId, MappedNode> = HashMap::new();
-        let mut arrival: HashMap<AigNodeId, TimePs> = HashMap::new();
-        let mut best_cut: HashMap<AigNodeId, Option<Cut>> = HashMap::new();
+    ) -> (IndexMap<AigNodeId, MappedNode>, IndexMap<AigNodeId, TimePs>) {
+        let mut mapping: IndexMap<AigNodeId, MappedNode> = IndexMap::new();
+        let mut arrival: IndexMap<AigNodeId, TimePs> = IndexMap::new();
+        let mut best_cut: IndexMap<AigNodeId, Option<Cut>> = IndexMap::new();
 
         // Enumerate cuts
         let cut_params = CutParams {
@@ -239,7 +240,7 @@ impl DelayMapper {
         aig: &Aig,
         node_id: AigNodeId,
         cuts: &CutEnumeration,
-        arrival: &HashMap<AigNodeId, TimePs>,
+        arrival: &IndexMap<AigNodeId, TimePs>,
     ) -> (TimePs, Option<Cut>, Option<CutMatch>) {
         let Some(cut_set) = cuts.get_cuts(node_id) else {
             return (f64::MAX, None, None);
@@ -292,9 +293,9 @@ impl DelayMapper {
     fn area_recovery(
         &self,
         aig: &Aig,
-        mut mapping: HashMap<AigNodeId, MappedNode>,
-        arrival: &HashMap<AigNodeId, TimePs>,
-    ) -> HashMap<AigNodeId, MappedNode> {
+        mut mapping: IndexMap<AigNodeId, MappedNode>,
+        arrival: &IndexMap<AigNodeId, TimePs>,
+    ) -> IndexMap<AigNodeId, MappedNode> {
         // Compute required times
         let required = self.compute_required_times(aig, arrival);
 
@@ -379,9 +380,9 @@ impl DelayMapper {
     fn compute_required_times(
         &self,
         aig: &Aig,
-        arrival: &HashMap<AigNodeId, TimePs>,
-    ) -> HashMap<AigNodeId, TimePs> {
-        let mut required: HashMap<AigNodeId, TimePs> = HashMap::new();
+        arrival: &IndexMap<AigNodeId, TimePs>,
+    ) -> IndexMap<AigNodeId, TimePs> {
+        let mut required: IndexMap<AigNodeId, TimePs> = IndexMap::new();
 
         // Initialize outputs with target period
         for (_, lit) in aig.outputs() {
@@ -447,7 +448,7 @@ impl DelayMapper {
 #[derive(Debug, Clone)]
 pub struct DelayMappingResult {
     /// Mapped nodes
-    pub mapped_nodes: HashMap<AigNodeId, MappedNode>,
+    pub mapped_nodes: IndexMap<AigNodeId, MappedNode>,
     /// Mapping statistics
     pub stats: MappingStats,
     /// Whether timing was met
@@ -458,7 +459,7 @@ impl DelayMappingResult {
     /// Create new empty result
     pub fn new() -> Self {
         Self {
-            mapped_nodes: HashMap::new(),
+            mapped_nodes: IndexMap::new(),
             stats: MappingStats::new(),
             timing_met: false,
         }

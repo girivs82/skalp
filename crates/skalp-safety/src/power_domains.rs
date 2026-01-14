@@ -6,16 +6,16 @@
 use crate::asil::AsilLevel;
 use crate::common_cause::{CcfCause, CcfGroup};
 use chrono::{DateTime, Utc};
+use indexmap::IndexMap;
 use petgraph::graph::NodeIndex;
 use petgraph::Graph;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 
 /// Power domain management system
 #[derive(Debug, Clone)]
 pub struct PowerDomainManager {
     /// All power domains in the system
-    pub domains: HashMap<String, PowerDomain>,
+    pub domains: IndexMap<String, PowerDomain>,
     /// Domain hierarchy graph
     pub hierarchy: DomainHierarchy,
     /// Isolation barriers between domains
@@ -199,7 +199,7 @@ pub enum TestFrequency {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SignalConstraints {
     /// Maximum voltage levels
-    pub max_voltage_levels: HashMap<String, f64>,
+    pub max_voltage_levels: IndexMap<String, f64>,
     /// Signal rise/fall time limits
     pub timing_constraints: TimingConstraints,
     /// EMI/EMC requirements
@@ -227,9 +227,9 @@ pub struct TimingConstraints {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EmiRequirements {
     /// Maximum emission levels (dBµV/m)
-    pub max_emission_levels: HashMap<String, f64>, // Frequency -> Level
+    pub max_emission_levels: IndexMap<String, f64>, // Frequency -> Level
     /// Immunity requirements (V/m)
-    pub immunity_levels: HashMap<String, f64>, // Frequency -> Level
+    pub immunity_levels: IndexMap<String, f64>, // Frequency -> Level
     /// Filtering requirements
     pub filtering_required: bool,
     /// Shielding requirements
@@ -276,9 +276,9 @@ pub struct DomainHierarchy {
     /// Domain dependency graph
     pub dependency_graph: Graph<String, DependencyType>,
     /// Node indices for domains
-    pub domain_nodes: HashMap<String, NodeIndex>,
+    pub domain_nodes: IndexMap<String, NodeIndex>,
     /// Parent-child relationships
-    pub parent_child: HashMap<String, Vec<String>>,
+    pub parent_child: IndexMap<String, Vec<String>>,
     /// Root domains (no dependencies)
     pub root_domains: Vec<String>,
 }
@@ -378,7 +378,7 @@ pub struct IsolationTestResult {
     /// Test passed
     pub passed: bool,
     /// Measured values
-    pub measured_values: HashMap<String, f64>,
+    pub measured_values: IndexMap<String, f64>,
     /// Test notes
     pub notes: String,
 }
@@ -577,7 +577,7 @@ pub struct PolicyAction {
     /// New power state
     pub new_power_state: Option<PowerState>,
     /// Action parameters
-    pub parameters: HashMap<String, String>,
+    pub parameters: IndexMap<String, String>,
     /// Action timeout (seconds)
     pub timeout: Option<f64>,
 }
@@ -635,11 +635,11 @@ impl PowerDomainManager {
     /// Create a new power domain manager
     pub fn new() -> Self {
         Self {
-            domains: HashMap::new(),
+            domains: IndexMap::new(),
             hierarchy: DomainHierarchy {
                 dependency_graph: Graph::new(),
-                domain_nodes: HashMap::new(),
-                parent_child: HashMap::new(),
+                domain_nodes: IndexMap::new(),
+                parent_child: IndexMap::new(),
                 root_domains: vec![],
             },
             isolation_barriers: vec![],
@@ -881,8 +881,8 @@ impl PowerDomainManager {
     /// Get power consumption report
     pub fn get_power_consumption_report(&self) -> PowerConsumptionReport {
         let mut total_power = 0.0;
-        let mut power_by_domain = HashMap::new();
-        let mut power_by_state = HashMap::new();
+        let mut power_by_domain = IndexMap::new();
+        let mut power_by_state = IndexMap::new();
 
         for domain in self.domains.values() {
             // Simplified power calculation based on state
@@ -1021,9 +1021,9 @@ pub struct PowerConsumptionReport {
     /// Total system power consumption (W)
     pub total_power_consumption: f64,
     /// Power consumption by domain (W)
-    pub power_by_domain: HashMap<String, f64>,
+    pub power_by_domain: IndexMap<String, f64>,
     /// Power consumption by state (W)
-    pub power_by_state: HashMap<PowerState, f64>,
+    pub power_by_state: IndexMap<PowerState, f64>,
     /// Efficiency metrics
     pub efficiency_metrics: EfficiencyMetrics,
     /// Optimization recommendations
@@ -1067,7 +1067,7 @@ impl Default for PowerDomainManager {
 impl Default for SignalConstraints {
     fn default() -> Self {
         Self {
-            max_voltage_levels: HashMap::new(),
+            max_voltage_levels: IndexMap::new(),
             timing_constraints: TimingConstraints {
                 max_rise_time: 10.0,
                 max_fall_time: 10.0,
@@ -1076,8 +1076,8 @@ impl Default for SignalConstraints {
                 max_skew: 0.5,
             },
             emi_requirements: EmiRequirements {
-                max_emission_levels: HashMap::new(),
-                immunity_levels: HashMap::new(),
+                max_emission_levels: IndexMap::new(),
+                immunity_levels: IndexMap::new(),
                 filtering_required: false,
                 shielding_required: false,
             },
@@ -1226,7 +1226,7 @@ pub fn analyze_power_domains_from_paths(
     cell_paths: &[(String, f64)], // (path, fit)
     domain_patterns: &[PowerDomainPattern],
 ) -> PowerDomainAnalysis {
-    let mut domains: HashMap<String, PowerDomainInfo> = HashMap::new();
+    let mut domains: IndexMap<String, PowerDomainInfo> = IndexMap::new();
     let mut unassigned_cells = Vec::new();
 
     // Classify cells by domain based on path patterns
@@ -1716,7 +1716,7 @@ pub enum ComplianceStatus {
 /// isolation to prevent fault propagation between domains.
 pub fn verify_isolation_cells(
     domains: &[PowerDomainInfo],
-    connectivity: &HashMap<String, Vec<String>>,
+    connectivity: &IndexMap<String, Vec<String>>,
 ) -> IsolationCellVerification {
     let mut total_crossings = 0;
     let mut protected_crossings = 0;
@@ -1724,7 +1724,7 @@ pub fn verify_isolation_cells(
     let mut recommendations = Vec::new();
 
     // Build domain lookup
-    let domain_lookup: HashMap<&str, &PowerDomainInfo> = domains
+    let domain_lookup: IndexMap<&str, &PowerDomainInfo> = domains
         .iter()
         .flat_map(|d| d.cells.iter().map(move |c| (c.as_str(), d)))
         .collect();
@@ -1846,15 +1846,15 @@ fn assess_safety_impact(source: &PowerDomainInfo, target: &PowerDomainInfo) -> S
 /// different voltage levels to ensure proper signal integrity.
 pub fn verify_level_shifters(
     domains: &[PowerDomainInfo],
-    connectivity: &HashMap<String, Vec<String>>,
+    connectivity: &IndexMap<String, Vec<String>>,
 ) -> LevelShifterVerification {
     let mut total_voltage_crossings = 0;
     let mut shifters_present = 0;
     let mut missing_shifters = Vec::new();
-    let mut voltage_pairs: HashMap<(String, String), VoltageDomainPair> = HashMap::new();
+    let mut voltage_pairs: IndexMap<(String, String), VoltageDomainPair> = IndexMap::new();
 
     // Build domain lookup
-    let domain_lookup: HashMap<&str, &PowerDomainInfo> = domains
+    let domain_lookup: IndexMap<&str, &PowerDomainInfo> = domains
         .iter()
         .flat_map(|d| d.cells.iter().map(move |c| (c.as_str(), d)))
         .collect();
@@ -1955,7 +1955,7 @@ pub fn verify_level_shifters(
 /// Analyze all cross-domain signals comprehensively
 pub fn analyze_cross_domain_signals(
     domains: &[PowerDomainInfo],
-    connectivity: &HashMap<String, Vec<String>>,
+    connectivity: &IndexMap<String, Vec<String>>,
     safety_critical_paths: &[String],
 ) -> CrossDomainSignalAnalysis {
     let mut crossings = Vec::new();
@@ -1964,7 +1964,7 @@ pub fn analyze_cross_domain_signals(
     let mut properly_protected = 0;
 
     // Build domain lookup
-    let domain_lookup: HashMap<&str, &PowerDomainInfo> = domains
+    let domain_lookup: IndexMap<&str, &PowerDomainInfo> = domains
         .iter()
         .flat_map(|d| d.cells.iter().map(move |c| (c.as_str(), d)))
         .collect();
@@ -2254,7 +2254,7 @@ mod tests {
                 min_isolation_voltage: 2500.0,
                 isolation_tests: vec![],
                 signal_constraints: SignalConstraints {
-                    max_voltage_levels: HashMap::new(),
+                    max_voltage_levels: IndexMap::new(),
                     timing_constraints: TimingConstraints {
                         max_rise_time: 10.0,
                         max_fall_time: 10.0,
@@ -2263,8 +2263,8 @@ mod tests {
                         max_skew: 0.5,
                     },
                     emi_requirements: EmiRequirements {
-                        max_emission_levels: HashMap::new(),
-                        immunity_levels: HashMap::new(),
+                        max_emission_levels: IndexMap::new(),
+                        immunity_levels: IndexMap::new(),
                         filtering_required: false,
                         shielding_required: false,
                     },
@@ -2315,7 +2315,7 @@ mod tests {
                 min_isolation_voltage: 0.0,
                 isolation_tests: vec![],
                 signal_constraints: SignalConstraints {
-                    max_voltage_levels: HashMap::new(),
+                    max_voltage_levels: IndexMap::new(),
                     timing_constraints: TimingConstraints {
                         max_rise_time: 5.0,
                         max_fall_time: 5.0,
@@ -2324,8 +2324,8 @@ mod tests {
                         max_skew: 0.2,
                     },
                     emi_requirements: EmiRequirements {
-                        max_emission_levels: HashMap::new(),
-                        immunity_levels: HashMap::new(),
+                        max_emission_levels: IndexMap::new(),
+                        immunity_levels: IndexMap::new(),
                         filtering_required: false,
                         shielding_required: false,
                     },
@@ -2384,7 +2384,7 @@ mod tests {
                 min_isolation_voltage: 8000.0,
                 isolation_tests: vec![],
                 signal_constraints: SignalConstraints {
-                    max_voltage_levels: HashMap::new(),
+                    max_voltage_levels: IndexMap::new(),
                     timing_constraints: TimingConstraints {
                         max_rise_time: 2.0,
                         max_fall_time: 2.0,
@@ -2393,8 +2393,8 @@ mod tests {
                         max_skew: 0.1,
                     },
                     emi_requirements: EmiRequirements {
-                        max_emission_levels: HashMap::new(),
-                        immunity_levels: HashMap::new(),
+                        max_emission_levels: IndexMap::new(),
+                        immunity_levels: IndexMap::new(),
                         filtering_required: true,
                         shielding_required: true,
                     },
@@ -2452,7 +2452,7 @@ mod tests {
                 min_isolation_voltage: 6000.0,
                 isolation_tests: vec![],
                 signal_constraints: SignalConstraints {
-                    max_voltage_levels: HashMap::new(),
+                    max_voltage_levels: IndexMap::new(),
                     timing_constraints: TimingConstraints {
                         max_rise_time: 10.0,
                         max_fall_time: 10.0,
@@ -2461,8 +2461,8 @@ mod tests {
                         max_skew: 0.5,
                     },
                     emi_requirements: EmiRequirements {
-                        max_emission_levels: HashMap::new(),
-                        immunity_levels: HashMap::new(),
+                        max_emission_levels: IndexMap::new(),
+                        immunity_levels: IndexMap::new(),
                         filtering_required: false,
                         shielding_required: false,
                     },
@@ -2504,7 +2504,7 @@ mod tests {
                 min_isolation_voltage: 0.0,
                 isolation_tests: vec![],
                 signal_constraints: SignalConstraints {
-                    max_voltage_levels: HashMap::new(),
+                    max_voltage_levels: IndexMap::new(),
                     timing_constraints: TimingConstraints {
                         max_rise_time: 5.0,
                         max_fall_time: 5.0,
@@ -2513,8 +2513,8 @@ mod tests {
                         max_skew: 0.2,
                     },
                     emi_requirements: EmiRequirements {
-                        max_emission_levels: HashMap::new(),
-                        immunity_levels: HashMap::new(),
+                        max_emission_levels: IndexMap::new(),
+                        immunity_levels: IndexMap::new(),
                         filtering_required: false,
                         shielding_required: false,
                     },
@@ -2594,7 +2594,7 @@ mod tests {
                 min_isolation_voltage: 0.0,
                 isolation_tests: vec![],
                 signal_constraints: SignalConstraints {
-                    max_voltage_levels: HashMap::new(),
+                    max_voltage_levels: IndexMap::new(),
                     timing_constraints: TimingConstraints {
                         max_rise_time: 10.0,
                         max_fall_time: 10.0,
@@ -2603,8 +2603,8 @@ mod tests {
                         max_skew: 0.5,
                     },
                     emi_requirements: EmiRequirements {
-                        max_emission_levels: HashMap::new(),
-                        immunity_levels: HashMap::new(),
+                        max_emission_levels: IndexMap::new(),
+                        immunity_levels: IndexMap::new(),
                         filtering_required: false,
                         shielding_required: false,
                     },

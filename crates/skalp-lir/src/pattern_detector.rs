@@ -20,8 +20,9 @@
 //! ```
 
 use crate::gate_netlist::{Cell, CellId, GateNetId, GateNetlist};
+use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 // ============================================================================
 // Pattern Types
@@ -374,7 +375,7 @@ impl PatternDetector {
         let mut processed_groups: HashSet<String> = HashSet::new();
 
         // Group cells by base name (without replica suffix)
-        let mut name_groups: HashMap<String, Vec<&Cell>> = HashMap::new();
+        let mut name_groups: IndexMap<String, Vec<&Cell>> = IndexMap::new();
 
         for cell in &netlist.cells {
             // Extract base name by removing common replica suffixes
@@ -477,18 +478,18 @@ impl PatternDetector {
         }
 
         // Count cell types in each group
-        let types_a: HashMap<String, usize> = group_a
+        let types_a: IndexMap<String, usize> = group_a
             .iter()
             .filter_map(|id| netlist.get_cell(*id))
-            .fold(HashMap::new(), |mut acc, cell| {
+            .fold(IndexMap::new(), |mut acc, cell| {
                 *acc.entry(cell.cell_type.clone()).or_insert(0) += 1;
                 acc
             });
 
-        let types_b: HashMap<String, usize> = group_b
+        let types_b: IndexMap<String, usize> = group_b
             .iter()
             .filter_map(|id| netlist.get_cell(*id))
-            .fold(HashMap::new(), |mut acc, cell| {
+            .fold(IndexMap::new(), |mut acc, cell| {
                 *acc.entry(cell.cell_type.clone()).or_insert(0) += 1;
                 acc
             });

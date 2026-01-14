@@ -3,6 +3,7 @@
 //! This test verifies the full compilation pipeline works:
 //! HIR → MIR → Lir → TechMapper → GateNetlist → SIR
 
+use indexmap::IndexMap;
 use skalp_frontend::parse_and_build_hir;
 use skalp_lir::{get_stdlib_library, lower_mir_module_to_lir, tech_mapper::TechMapper};
 use skalp_mir::MirCompiler;
@@ -62,7 +63,7 @@ fn test_mcu_v11_full_flow() {
     assert!(netlist.total_fit() > 0.0, "Should have positive FIT");
 
     // Show cell type distribution
-    let mut cell_types: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    let mut cell_types: IndexMap<&str, usize> = IndexMap::new();
     for cell in &netlist.cells {
         *cell_types.entry(&cell.cell_type).or_insert(0) += 1;
     }

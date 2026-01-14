@@ -7,12 +7,12 @@
 #[cfg(test)]
 #[cfg(feature = "disabled_old_lir_api")]
 mod phase10_backend_tests {
+    use indexmap::IndexMap;
     use skalp_backends::{
         BackendFactory, FpgaTarget, OptimizationGoals, OptimizationTarget, SynthesisConfig,
         TargetPlatform, TimingConstraint,
     };
     use skalp_lir::{LirDesign, LirModule};
-    use std::collections::HashMap;
 
     #[test]
     fn test_phase10_comprehensive_backend_analysis() {

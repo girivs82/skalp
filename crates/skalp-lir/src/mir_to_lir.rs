@@ -16,12 +16,12 @@
 use crate::compiled_ip::CompiledIp;
 use crate::lir::{Lir, LirOp, LirSafetyInfo, LirSignalId, LirStats};
 use crate::ncl_expand::{expand_to_ncl, NclConfig};
+use indexmap::IndexMap;
 use skalp_mir::mir::{
     AssignmentKind, BinaryOp, Block, ContinuousAssign, DataType, EdgeType, Expression,
     ExpressionKind, LValue, Module, PortDirection, PortId, Process, ProcessKind, ReduceOp,
     SafetyContext, SensitivityList, SignalId, Statement, UnaryOp, Value, Variable, VariableId,
 };
-use std::collections::HashMap;
 
 /// Convert MIR SafetyContext to LIR LirSafetyInfo
 fn safety_context_to_lir_info(ctx: &SafetyContext) -> LirSafetyInfo {
@@ -58,7 +58,7 @@ pub struct BlackboxInfo {
     /// InOut port names (bidirectional)
     pub inouts: Vec<String>,
     /// Port widths (port_name -> width)
-    pub port_widths: HashMap<String, u32>,
+    pub port_widths: IndexMap<String, u32>,
     /// Additional parameters for the cell instance
     pub parameters: Vec<(String, String)>,
 }
@@ -90,20 +90,20 @@ pub struct MirToLirTransform {
     /// Output LIR being built
     lir: Lir,
     /// Mapping from PortId to signal ID
-    port_to_signal: HashMap<PortId, LirSignalId>,
+    port_to_signal: IndexMap<PortId, LirSignalId>,
     /// Mapping from SignalId to signal ID
-    signal_to_lir_signal: HashMap<SignalId, LirSignalId>,
+    signal_to_lir_signal: IndexMap<SignalId, LirSignalId>,
     /// Mapping from VariableId to signal ID (BUG #150 FIX)
-    variable_to_signal: HashMap<VariableId, LirSignalId>,
+    variable_to_signal: IndexMap<VariableId, LirSignalId>,
     /// Width of each variable (BUG #150 FIX)
-    variable_widths: HashMap<VariableId, u32>,
+    variable_widths: IndexMap<VariableId, u32>,
     /// Width of each port/signal
-    port_widths: HashMap<PortId, u32>,
-    signal_widths: HashMap<SignalId, u32>,
+    port_widths: IndexMap<PortId, u32>,
+    signal_widths: IndexMap<SignalId, u32>,
     /// Signedness of each port/signal/variable (for signed comparisons)
-    port_is_signed: HashMap<PortId, bool>,
-    signal_is_signed: HashMap<SignalId, bool>,
-    variable_is_signed: HashMap<VariableId, bool>,
+    port_is_signed: IndexMap<PortId, bool>,
+    signal_is_signed: IndexMap<SignalId, bool>,
+    variable_is_signed: IndexMap<VariableId, bool>,
     /// Current hierarchy path (for node naming)
     hierarchy_path: String,
     /// Warnings
@@ -123,15 +123,15 @@ impl MirToLirTransform {
     pub fn new(module_name: &str) -> Self {
         Self {
             lir: Lir::new(module_name.to_string()),
-            port_to_signal: HashMap::new(),
-            signal_to_lir_signal: HashMap::new(),
-            variable_to_signal: HashMap::new(),
-            variable_widths: HashMap::new(),
-            port_widths: HashMap::new(),
-            signal_widths: HashMap::new(),
-            port_is_signed: HashMap::new(),
-            signal_is_signed: HashMap::new(),
-            variable_is_signed: HashMap::new(),
+            port_to_signal: IndexMap::new(),
+            signal_to_lir_signal: IndexMap::new(),
+            variable_to_signal: IndexMap::new(),
+            variable_widths: IndexMap::new(),
+            port_widths: IndexMap::new(),
+            signal_widths: IndexMap::new(),
+            port_is_signed: IndexMap::new(),
+            signal_is_signed: IndexMap::new(),
+            variable_is_signed: IndexMap::new(),
             hierarchy_path: "top".to_string(),
             warnings: Vec::new(),
             clock_signals: Vec::new(),
@@ -1859,11 +1859,11 @@ use std::collections::HashSet;
 #[derive(Debug)]
 pub struct HierarchicalMirToLirResult {
     /// Map from instance path to its LIR result
-    pub instances: HashMap<String, InstanceLirResult>,
+    pub instances: IndexMap<String, InstanceLirResult>,
     /// Top module name
     pub top_module: String,
     /// Instance hierarchy (parent -> children)
-    pub hierarchy: HashMap<String, Vec<String>>,
+    pub hierarchy: IndexMap<String, Vec<String>>,
 }
 
 /// LIR result for a single instance
@@ -1874,7 +1874,7 @@ pub struct InstanceLirResult {
     /// The generated LIR
     pub lir_result: MirToLirResult,
     /// Port connections from parent
-    pub port_connections: HashMap<String, PortConnectionInfo>,
+    pub port_connections: IndexMap<String, PortConnectionInfo>,
     /// Child instance paths
     pub children: Vec<String>,
     /// Whether this module is async (needs NCL)
@@ -2045,7 +2045,7 @@ fn create_blackbox_lir_placeholder(
     let mut inputs = Vec::new();
     let mut outputs = Vec::new();
     let mut inouts = Vec::new();
-    let mut port_widths = HashMap::new();
+    let mut port_widths = IndexMap::new();
 
     // Add port signals
     for port in &module.ports {
@@ -2111,8 +2111,8 @@ fn create_blackbox_lir_placeholder(
 /// based on its context (constant inputs, unused outputs).
 pub fn lower_mir_hierarchical(mir: &Mir) -> HierarchicalMirToLirResult {
     // Build module lookup by ID and by name (for fallback)
-    let module_map: HashMap<ModuleId, &Module> = mir.modules.iter().map(|m| (m.id, m)).collect();
-    let module_by_name: HashMap<&str, &Module> =
+    let module_map: IndexMap<ModuleId, &Module> = mir.modules.iter().map(|m| (m.id, m)).collect();
+    let module_by_name: IndexMap<&str, &Module> =
         mir.modules.iter().map(|m| (m.name.as_str(), m)).collect();
 
     // DEBUG: Print module ID to name mapping
@@ -2265,9 +2265,9 @@ pub fn lower_mir_hierarchical(mir: &Mir) -> HierarchicalMirToLirResult {
     );
 
     let mut result = HierarchicalMirToLirResult {
-        instances: HashMap::new(),
+        instances: IndexMap::new(),
         top_module: top_module.name.clone(),
-        hierarchy: HashMap::new(),
+        hierarchy: IndexMap::new(),
     };
 
     // Recursively elaborate instances
@@ -2277,8 +2277,8 @@ pub fn lower_mir_hierarchical(mir: &Mir) -> HierarchicalMirToLirResult {
         &module_by_name,
         top_module,
         "top",
-        &HashMap::new(), // No constant inputs at top level
-        false,           // No inherited async context for top module
+        &IndexMap::new(), // No constant inputs at top level
+        false,            // No inherited async context for top module
         &mut result,
     );
 
@@ -2308,8 +2308,8 @@ pub fn lower_mir_hierarchical_for_optimize_first(mir: &Mir) -> (HierarchicalMirT
     }
 
     // Build module lookup by ID and by name
-    let module_map: HashMap<ModuleId, &Module> = mir.modules.iter().map(|m| (m.id, m)).collect();
-    let module_by_name: HashMap<&str, &Module> =
+    let module_map: IndexMap<ModuleId, &Module> = mir.modules.iter().map(|m| (m.id, m)).collect();
+    let module_by_name: IndexMap<&str, &Module> =
         mir.modules.iter().map(|m| (m.name.as_str(), m)).collect();
 
     // Find modules that are instantiated (have parents)
@@ -2445,9 +2445,9 @@ pub fn lower_mir_hierarchical_for_optimize_first(mir: &Mir) -> (HierarchicalMirT
     );
 
     let mut result = HierarchicalMirToLirResult {
-        instances: HashMap::new(),
+        instances: IndexMap::new(),
         top_module: top_module.name.clone(),
-        hierarchy: HashMap::new(),
+        hierarchy: IndexMap::new(),
     };
 
     // Elaborate instances with is_async_context = FALSE to skip NCL expansion
@@ -2457,7 +2457,7 @@ pub fn lower_mir_hierarchical_for_optimize_first(mir: &Mir) -> (HierarchicalMirT
         &module_by_name,
         top_module,
         "top",
-        &HashMap::new(),
+        &IndexMap::new(),
         &mut result,
     );
 
@@ -2470,11 +2470,11 @@ pub fn lower_mir_hierarchical_for_optimize_first(mir: &Mir) -> (HierarchicalMirT
 /// regardless of whether the module is async. The dual-rail conversion
 /// will be done later after optimization.
 fn elaborate_instance_for_optimize_first(
-    module_map: &HashMap<ModuleId, &Module>,
-    _module_by_name: &HashMap<&str, &Module>,
+    module_map: &IndexMap<ModuleId, &Module>,
+    _module_by_name: &IndexMap<&str, &Module>,
     module: &Module,
     instance_path: &str,
-    parent_connections: &HashMap<String, PortConnectionInfo>,
+    parent_connections: &IndexMap<String, PortConnectionInfo>,
     result: &mut HierarchicalMirToLirResult,
 ) {
     // Use skip_ncl to completely skip NCL expansion for optimize-first flow
@@ -2558,11 +2558,11 @@ fn elaborate_instance_for_optimize_first(
 /// instantiated within an async parent. If true, the module will be NCL-expanded
 /// even if it wasn't declared with `async entity`.
 fn elaborate_instance(
-    module_map: &HashMap<ModuleId, &Module>,
-    _module_by_name: &HashMap<&str, &Module>,
+    module_map: &IndexMap<ModuleId, &Module>,
+    _module_by_name: &IndexMap<&str, &Module>,
     module: &Module,
     instance_path: &str,
-    parent_connections: &HashMap<String, PortConnectionInfo>,
+    parent_connections: &IndexMap<String, PortConnectionInfo>,
     is_async_context: bool,
     result: &mut HierarchicalMirToLirResult,
 ) {
@@ -2665,10 +2665,10 @@ fn elaborate_instance(
 /// Uses the parent module to look up actual signal/port names by ID
 /// BUG #168 FIX: Also resolves variable references to their constant values when possible
 fn extract_connection_info(
-    connections: &HashMap<String, Expression>,
+    connections: &IndexMap<String, Expression>,
     parent_module: &Module,
-) -> HashMap<String, PortConnectionInfo> {
-    let mut result = HashMap::new();
+) -> IndexMap<String, PortConnectionInfo> {
+    let mut result = IndexMap::new();
 
     // Sort port names for deterministic iteration order (HashMap is non-deterministic)
     let mut sorted_port_names: Vec<_> = connections.keys().collect();

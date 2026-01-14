@@ -1,11 +1,11 @@
 // Test multiple SUB operations causing net name collision
 // Hypothesis: Two SUB ops with empty paths create identical cell names
 
+use indexmap::IndexMap;
 use skalp_frontend::parse_and_build_hir;
 use skalp_lir::{get_stdlib_library, lower_mir_hierarchical, map_hierarchical_to_gates};
 use skalp_mir::MirCompiler;
 use skalp_sim::{CircuitMode, HwAccel, SimLevel, UnifiedSimConfig, UnifiedSimulator};
-use std::collections::HashMap;
 
 // Two SUB operations with same width - should they collide?
 const TWO_SUB_SAME_WIDTH: &str = r#"
@@ -65,7 +65,7 @@ fn test_two_sub_same_width() {
     );
 
     // Check for duplicate cell names
-    let mut cell_names: HashMap<String, usize> = HashMap::new();
+    let mut cell_names: IndexMap<String, usize> = IndexMap::new();
     for cell in &netlist.cells {
         *cell_names.entry(cell.path.clone()).or_insert(0) += 1;
     }
@@ -87,7 +87,7 @@ fn test_two_sub_same_width() {
     println!("\nTotal SUB cells: {}", sub_cells.len());
 
     // Count unique SUB cell path prefixes
-    let mut sub_prefixes: HashMap<String, usize> = HashMap::new();
+    let mut sub_prefixes: IndexMap<String, usize> = IndexMap::new();
     for cell in &sub_cells {
         // Extract prefix before "sub_"
         if let Some(pos) = cell.path.find("sub_") {
@@ -162,7 +162,7 @@ fn test_two_sub_in_match() {
     );
 
     // Check for duplicate cell names
-    let mut cell_names: HashMap<String, usize> = HashMap::new();
+    let mut cell_names: IndexMap<String, usize> = IndexMap::new();
     for cell in &netlist.cells {
         *cell_names.entry(cell.path.clone()).or_insert(0) += 1;
     }

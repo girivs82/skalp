@@ -28,7 +28,8 @@
 
 use crate::gate_netlist::{Cell, CellId, GateNetId, GateNetlist};
 use crate::tech_library::{TechLibrary, TimingCorner};
-use std::collections::{HashMap, HashSet};
+use indexmap::IndexMap;
+use std::collections::HashSet;
 
 /// Configuration for async timing analysis
 #[derive(Debug, Clone)]
@@ -272,14 +273,14 @@ pub struct AsyncSta<'a> {
     netlist: &'a GateNetlist,
     library: Option<&'a TechLibrary>,
     /// Cached cell delays (base delay, not including oscillation)
-    cell_delays: HashMap<CellId, f64>,
+    cell_delays: IndexMap<CellId, f64>,
     /// Oscillation counts from simulation (how many times each cell's output changed)
     /// Used to calculate effective delay: base_delay * oscillation_count
-    oscillation_counts: HashMap<CellId, u32>,
+    oscillation_counts: IndexMap<CellId, u32>,
     /// Net oscillation counts from simulation (how many times each net's value changed)
     /// Used for fork analysis to calculate differential oscillation:
     /// differential_osc = cell_osc - fork_net_osc (common-mode cancellation)
-    net_oscillation_counts: HashMap<GateNetId, u32>,
+    net_oscillation_counts: IndexMap<GateNetId, u32>,
 }
 
 impl<'a> AsyncSta<'a> {
@@ -289,9 +290,9 @@ impl<'a> AsyncSta<'a> {
             config,
             netlist,
             library: None,
-            cell_delays: HashMap::new(),
-            oscillation_counts: HashMap::new(),
-            net_oscillation_counts: HashMap::new(),
+            cell_delays: IndexMap::new(),
+            oscillation_counts: IndexMap::new(),
+            net_oscillation_counts: IndexMap::new(),
         }
     }
 
@@ -309,7 +310,7 @@ impl<'a> AsyncSta<'a> {
     ///
     /// This accounts for async circuits with feedback that may oscillate multiple
     /// times before converging.
-    pub fn with_oscillation_counts(mut self, counts: HashMap<CellId, u32>) -> Self {
+    pub fn with_oscillation_counts(mut self, counts: IndexMap<CellId, u32>) -> Self {
         self.oscillation_counts = counts;
         self
     }
@@ -325,7 +326,7 @@ impl<'a> AsyncSta<'a> {
     /// The fork net's oscillation count represents "common mode" oscillation that
     /// affects all downstream branches equally, so it should be subtracted to get
     /// the true skew-affecting oscillation.
-    pub fn with_net_oscillation_counts(mut self, counts: HashMap<GateNetId, u32>) -> Self {
+    pub fn with_net_oscillation_counts(mut self, counts: IndexMap<GateNetId, u32>) -> Self {
         self.net_oscillation_counts = counts;
         self
     }
@@ -864,8 +865,8 @@ pub fn analyze_async_timing_with_oscillations(
     netlist: &GateNetlist,
     library: Option<&TechLibrary>,
     config: &AsyncStaConfig,
-    cell_oscillation_counts: HashMap<CellId, u32>,
-    net_oscillation_counts: HashMap<GateNetId, u32>,
+    cell_oscillation_counts: IndexMap<CellId, u32>,
+    net_oscillation_counts: IndexMap<GateNetId, u32>,
 ) -> AsyncStaResult {
     let mut sta = AsyncSta::new(netlist, config.clone());
     if let Some(lib) = library {
@@ -1205,7 +1206,7 @@ mod tests {
         let config = AsyncStaConfig::default();
 
         // Create oscillation counts: cell 0 (INV) oscillates 3 times, cell 1 (AND2) once
-        let mut osc_counts = HashMap::new();
+        let mut osc_counts = IndexMap::new();
         osc_counts.insert(CellId(0), 3); // INV oscillates 3x: 15ps * 3 = 45ps
         osc_counts.insert(CellId(1), 1); // AND2 stays stable: 25ps * 1 = 25ps
 
@@ -1238,11 +1239,11 @@ mod tests {
         let config = AsyncStaConfig::default();
 
         // High oscillation on the INV should increase its effective delay
-        let mut cell_osc_counts = HashMap::new();
+        let mut cell_osc_counts = IndexMap::new();
         cell_osc_counts.insert(CellId(0), 10); // INV oscillates heavily
 
         // Empty net oscillation counts (no common-mode oscillation)
-        let net_osc_counts = HashMap::new();
+        let net_osc_counts = IndexMap::new();
 
         let result = analyze_async_timing_with_oscillations(
             &netlist,
@@ -1265,11 +1266,11 @@ mod tests {
 
         // Cell oscillates 5 times, fork net oscillates 3 times
         // Differential = 5 - 3 + 1 = 3
-        let mut cell_osc = HashMap::new();
+        let mut cell_osc = IndexMap::new();
         cell_osc.insert(CellId(0), 5);
         cell_osc.insert(CellId(1), 5);
 
-        let mut net_osc = HashMap::new();
+        let mut net_osc = IndexMap::new();
         net_osc.insert(GateNetId(0), 3); // Fork net oscillates 3 times (common mode)
 
         let mut sta = AsyncSta::new(&netlist, config)
@@ -1341,11 +1342,11 @@ mod tests {
 
         // Both cells oscillate 10 times (due to fork oscillating 10 times)
         // This is common-mode - shouldn't affect skew!
-        let mut cell_osc = HashMap::new();
+        let mut cell_osc = IndexMap::new();
         cell_osc.insert(CellId(0), 10);
         cell_osc.insert(CellId(1), 10);
 
-        let mut net_osc = HashMap::new();
+        let mut net_osc = IndexMap::new();
         net_osc.insert(GateNetId(0), 10); // Fork net oscillates 10 times
 
         let config = AsyncStaConfig {

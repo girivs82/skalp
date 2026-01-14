@@ -8,11 +8,11 @@
 //! MIR is lower-level than HIR but still hardware-agnostic
 
 use crate::Type;
+use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use skalp_frontend::hir::DetectionConfig;
 use skalp_frontend::safety_attributes::ModuleSafetyDefinitions;
 use skalp_frontend::SourceSpan;
-use std::collections::HashMap;
 
 // ============================================================================
 // Safety Context Types (ISO 26262 Support)
@@ -996,9 +996,9 @@ pub struct ModuleInstance {
     /// Module to instantiate
     pub module: ModuleId,
     /// Port connections
-    pub connections: HashMap<String, Expression>,
+    pub connections: IndexMap<String, Expression>,
     /// Generic/parameter overrides
-    pub parameters: HashMap<String, Value>,
+    pub parameters: IndexMap<String, Value>,
     /// Source location for error reporting
     #[serde(skip_serializing_if = "Option::is_none")]
     pub span: Option<SourceSpan>,

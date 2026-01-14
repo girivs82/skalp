@@ -21,7 +21,7 @@ use crate::lir::{Lir, LirNode, LirOp, LirSafetyInfo, LirSignalId};
 use crate::tech_library::{
     CellFunction, DecompConnectivity, LibraryCell, LibraryFailureMode, TechLibrary,
 };
-use std::collections::HashMap;
+use indexmap::IndexMap;
 
 /// Information extracted from a library cell for tech mapping
 struct LibraryCellInfo {
@@ -87,7 +87,7 @@ pub struct TechMapper<'a> {
     /// Output netlist
     netlist: GateNetlist,
     /// Mapping from LirSignalId to GateNetId (for multi-bit, maps to first bit)
-    signal_to_net: HashMap<LirSignalId, Vec<GateNetId>>,
+    signal_to_net: IndexMap<LirSignalId, Vec<GateNetId>>,
     /// Statistics
     stats: TechMapStats,
     /// Warnings
@@ -107,7 +107,7 @@ impl<'a> TechMapper<'a> {
         Self {
             library,
             netlist: GateNetlist::new(String::new(), library.name.clone()),
-            signal_to_net: HashMap::new(),
+            signal_to_net: IndexMap::new(),
             stats: TechMapStats::default(),
             warnings: Vec::new(),
             next_cell_id: 0,

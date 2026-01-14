@@ -6,11 +6,11 @@
 use crate::mir::*;
 use crate::type_flattening::{FlattenedField as TypeFlattenedField, TypeFlattener};
 use crate::{ExpressionKind, Type};
+use indexmap::IndexMap;
 use skalp_frontend::const_eval::{ConstEvaluator, ConstValue};
 use skalp_frontend::hir::{self as hir, DetectionConfig, Hir};
 use skalp_frontend::span::SourceSpan;
 use skalp_frontend::types::Width;
-use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
@@ -88,56 +88,56 @@ pub struct HirToMir<'hir> {
     /// match expressions are inlined into the same entity
     next_match_id: u32,
     /// Entity to module ID mapping
-    entity_map: HashMap<hir::EntityId, ModuleId>,
+    entity_map: IndexMap<hir::EntityId, ModuleId>,
     /// Function to module ID mapping (for module instantiation instead of inlining)
     /// Maps function name -> ModuleId
-    function_map: HashMap<String, ModuleId>,
+    function_map: IndexMap<String, ModuleId>,
     /// Port ID mapping (HIR to MIR) - now 1-to-many for flattened structs
-    port_map: HashMap<hir::PortId, PortId>,
+    port_map: IndexMap<hir::PortId, PortId>,
     /// Flattened ports: HIR port ID -> list of flattened MIR ports
-    flattened_ports: HashMap<hir::PortId, Vec<FlattenedField>>,
+    flattened_ports: IndexMap<hir::PortId, Vec<FlattenedField>>,
     /// Reverse port lookup: MIR port ID -> (HIR port ID, field path)
     /// BUG #33 FIX: This allows finding the correct HIR port for a given MIR port
-    port_to_hir: HashMap<PortId, (hir::PortId, Vec<String>)>,
+    port_to_hir: IndexMap<PortId, (hir::PortId, Vec<String>)>,
     /// Signal ID mapping (HIR to MIR) - now 1-to-many for flattened structs
-    signal_map: HashMap<hir::SignalId, SignalId>,
+    signal_map: IndexMap<hir::SignalId, SignalId>,
     /// Flattened signals: HIR signal ID -> list of flattened MIR signals
-    flattened_signals: HashMap<hir::SignalId, Vec<FlattenedField>>,
+    flattened_signals: IndexMap<hir::SignalId, Vec<FlattenedField>>,
     /// Reverse signal lookup: MIR signal ID -> (HIR signal ID, field path)
     /// BUG #33 FIX: This allows finding the correct HIR signal for a given MIR signal
-    signal_to_hir: HashMap<SignalId, (hir::SignalId, Vec<String>)>,
+    signal_to_hir: IndexMap<SignalId, (hir::SignalId, Vec<String>)>,
     /// Variable ID mapping (HIR to MIR)
-    variable_map: HashMap<hir::VariableId, VariableId>,
+    variable_map: IndexMap<hir::VariableId, VariableId>,
     /// Context-aware variable mapping for match arm isolation
     /// Maps (match_arm_prefix, HIR VariableId) -> MIR VariableId
     /// This prevents HIR VariableId collisions across different match arms
-    context_variable_map: HashMap<(Option<String>, hir::VariableId), VariableId>,
+    context_variable_map: IndexMap<(Option<String>, hir::VariableId), VariableId>,
     /// MIR VariableId to name mapping for reverse lookups
     /// CRITICAL FIX #IMPORT_MATCH: This prevents name lookup errors when
     /// variable_map contains collisions (multiple HIR IDs mapping to same MIR ID)
-    mir_variable_names: HashMap<VariableId, String>,
+    mir_variable_names: IndexMap<VariableId, String>,
     /// MIR VariableId to HIR type mapping
     /// CRITICAL FIX #IMPORT_MATCH: This prevents type lookup errors when
     /// dynamic_variables contains collisions (same HIR ID for different variables)
-    mir_variable_types: HashMap<VariableId, hir::HirType>,
+    mir_variable_types: IndexMap<VariableId, hir::HirType>,
     /// Clock domain ID mapping (HIR to MIR)
-    clock_domain_map: HashMap<hir::ClockDomainId, ClockDomainId>,
+    clock_domain_map: IndexMap<hir::ClockDomainId, ClockDomainId>,
     /// Reference to HIR for type resolution
     hir: Option<&'hir Hir>,
     /// All loaded module HIRs for proper scope resolution (Bug #84 fix)
     /// This allows resolving function calls in their original module scope
-    module_hirs: HashMap<PathBuf, Hir>,
+    module_hirs: IndexMap<PathBuf, Hir>,
     /// Current entity being converted (for generic parameter resolution)
     current_entity_id: Option<hir::EntityId>,
     /// Const evaluator for evaluating const expressions (including user-defined const functions)
     const_evaluator: ConstEvaluator,
     /// Track dynamically created variables (from let bindings in event blocks)
     /// Maps HIR VariableId to (MIR VariableId, name, type)
-    dynamic_variables: HashMap<hir::VariableId, (VariableId, String, hir::HirType)>,
+    dynamic_variables: IndexMap<hir::VariableId, (VariableId, String, hir::HirType)>,
     /// Track RHS expressions for dynamic variables (for module instance argument expansion)
     /// Maps MIR VariableId to the converted RHS expression
     /// This allows expanding variable references to their actual values when used as module args
-    dynamic_variable_rhs: HashMap<VariableId, Expression>,
+    dynamic_variable_rhs: IndexMap<VariableId, Expression>,
     /// Type flattener for consistent struct/vector expansion
     type_flattener: TypeFlattener,
     /// Pending statements from block expressions
@@ -183,10 +183,10 @@ pub struct HirToMir<'hir> {
     /// Entity instance output signals for hierarchical elaboration (Bug #13-16, #21-23 fix)
     /// Maps HIR VariableId (from let binding) to a map of port name -> SignalId
     /// Example: let inner = Inner { data }; -> inner maps to {"result" -> SignalId(5)}
-    entity_instance_outputs: HashMap<hir::VariableId, HashMap<String, SignalId>>,
+    entity_instance_outputs: IndexMap<hir::VariableId, IndexMap<String, SignalId>>,
     /// Entity instance names for hierarchical elaboration
     /// Maps HIR VariableId to (instance_name, ModuleId)
-    entity_instance_info: HashMap<hir::VariableId, (String, ModuleId)>,
+    entity_instance_info: IndexMap<hir::VariableId, (String, ModuleId)>,
     /// Pending entity instances from let bindings (Bug #13-16, #21-23 fix)
     /// Format: (ModuleInstance, Vec<(SignalId, signal_name, DataType)>)
     /// Pending entity instances: (instance, Vec<(signal_id, name, type, detection_config)>)
@@ -197,12 +197,12 @@ pub struct HirToMir<'hir> {
     /// Instance output signals by name for hierarchical elaboration (Bug #13-16, #21-23 fix)
     /// Maps instance name (String) -> port name -> SignalId
     /// This is used when FieldAccess has GenericParam("instance_name") as base
-    instance_outputs_by_name: HashMap<String, HashMap<String, SignalId>>,
+    instance_outputs_by_name: IndexMap<String, IndexMap<String, SignalId>>,
     /// BUG FIX #125: Cache for Call expression results in module context
     /// This prevents creating duplicate module instances when multiple FieldAccess expressions
     /// reference the same Call result (e.g., for tuple destructuring like `let (a, b, c) = func()`)
     /// Maps a string key representing the Call (function_name + serialized_args) to the cached result Expression
-    module_call_cache: HashMap<String, Expression>,
+    module_call_cache: IndexMap<String, Expression>,
     /// Current pipeline style for flow block processing
     /// This is set from intent attributes and controls how |> operators insert registers
     current_pipeline_style: Option<hir::PipelineStyle>,
@@ -220,12 +220,12 @@ pub struct HirToMir<'hir> {
     /// Maps parameter name to pre-converted MIR expression
     /// This is set during inline_function_call_with_mir_args and checked during convert_expression
     /// for GenericParam handling
-    pending_mir_param_subs: HashMap<String, Expression>,
+    pending_mir_param_subs: IndexMap<String, Expression>,
 
     /// BUG #181 FIX: Maps parameter VariableId to parameter name
     /// This is set during inline_function_call_with_mir_args so that Variable references
     /// to parameters can be resolved via pending_mir_param_subs
-    pending_param_var_to_name: HashMap<hir::VariableId, String>,
+    pending_param_var_to_name: IndexMap<hir::VariableId, String>,
 
     /// BUG #167 FIX: Maps placeholder signal VariableIds to entity output SignalIds and their types
     /// During trait method inlining, when `let adder = FpAdd{result: result}` is processed
@@ -234,7 +234,7 @@ pub struct HirToMir<'hir> {
     /// Used to correctly wire up return expressions that reference these placeholder signals.
     /// BUG #201 FIX: Now includes Type so convert_expression uses the correct expression type
     /// instead of the passed-in type which may be wrong (e.g., Bit(Fixed(1)) instead of Float32).
-    placeholder_signal_to_entity_output: HashMap<hir::VariableId, (SignalId, Type)>,
+    placeholder_signal_to_entity_output: IndexMap<hir::VariableId, (SignalId, Type)>,
 
     /// BUG #190 FIX: Maps placeholder HIR SignalIds to entity output MIR SignalIds and their types
     /// Similar to placeholder_signal_to_entity_output, but for cases where the placeholder
@@ -242,20 +242,20 @@ pub struct HirToMir<'hir> {
     /// When `let adder = FpAdd{result: result as fp32}` and `result` is an HIR Signal,
     /// this maps the original HIR SignalId to (SignalId, Type) of the entity output.
     /// BUG #201 FIX: Now includes Type for correct type propagation.
-    placeholder_hir_signal_to_entity_output: HashMap<hir::SignalId, (SignalId, Type)>,
+    placeholder_hir_signal_to_entity_output: IndexMap<hir::SignalId, (SignalId, Type)>,
 
     /// BUG #200 FIX: Current module synthesis context's var_to_signal mapping
     /// This is set when synthesizing a function as a module and is used by convert_expression
     /// to resolve Variable references to Signal references for entity struct literal fields.
     /// Without this, entity connections reference Variables that don't exist in the module.
-    current_module_var_to_signal: Option<HashMap<hir::VariableId, SignalId>>,
+    current_module_var_to_signal: Option<IndexMap<hir::VariableId, SignalId>>,
 
     /// BUG #205 FIX: Current module synthesis context's param_to_port mapping
     /// This is set when synthesizing a function as a module and is used by convert_expression
     /// to resolve GenericParam references to Port references for entity struct literal fields.
     /// Without this, entity connections with GenericParam references resolve to 0 instead of
     /// the correct input port.
-    current_module_param_to_port: Option<HashMap<String, PortId>>,
+    current_module_param_to_port: Option<IndexMap<String, PortId>>,
 }
 
 /// Context for converting HIR expressions within a synthesized module
@@ -264,29 +264,29 @@ struct ModuleSynthesisContext {
     /// BUG #118 DEBUG: Track which function this context belongs to
     func_name: String,
     /// Maps parameter names to their input port IDs
-    param_to_port: HashMap<String, PortId>,
+    param_to_port: IndexMap<String, PortId>,
     /// BUG FIX #85: Maps HIR VariableId to signal ID (not by name, to avoid collisions)
     /// Different match arms can have variables with the same name but different IDs
-    var_to_signal: HashMap<hir::VariableId, SignalId>,
+    var_to_signal: IndexMap<hir::VariableId, SignalId>,
     /// Maps names to their types (for type inference)
-    name_to_type: HashMap<String, hir::HirType>,
+    name_to_type: IndexMap<String, hir::HirType>,
     /// Maps HIR VariableId to variable name (for resolving variable references)
-    var_id_to_name: HashMap<hir::VariableId, String>,
+    var_id_to_name: IndexMap<hir::VariableId, String>,
     /// BUG FIX #130: Maps tuple temp VariableIds to their converted MIR expressions (Concat)
     /// These are used for tuple destructuring: `let (a, b) = func()` creates
     /// `let _tuple_tmp_N = func()` and we store the Concat here so FieldAccess can extract elements
-    tuple_temp_to_mir: HashMap<hir::VariableId, Expression>,
+    tuple_temp_to_mir: IndexMap<hir::VariableId, Expression>,
 }
 
 impl ModuleSynthesisContext {
     fn new(func_name: &str) -> Self {
         Self {
             func_name: func_name.to_string(),
-            param_to_port: HashMap::new(),
-            var_to_signal: HashMap::new(),
-            name_to_type: HashMap::new(),
-            var_id_to_name: HashMap::new(),
-            tuple_temp_to_mir: HashMap::new(),
+            param_to_port: IndexMap::new(),
+            var_to_signal: IndexMap::new(),
+            name_to_type: IndexMap::new(),
+            var_id_to_name: IndexMap::new(),
+            tuple_temp_to_mir: IndexMap::new(),
         }
     }
 }
@@ -306,11 +306,11 @@ fn convert_safety_config(config: &hir::SafetyConfig) -> SafetyContext {
 impl<'hir> HirToMir<'hir> {
     /// Create a new transformer
     pub fn new() -> Self {
-        Self::new_with_modules(&HashMap::new())
+        Self::new_with_modules(&IndexMap::new())
     }
 
     /// Create a new transformer with module HIRs for proper scope resolution (Bug #84 fix)
-    pub fn new_with_modules(module_hirs: &HashMap<PathBuf, Hir>) -> Self {
+    pub fn new_with_modules(module_hirs: &IndexMap<PathBuf, Hir>) -> Self {
         Self {
             next_module_id: 0,
             next_port_id: 0,
@@ -319,25 +319,25 @@ impl<'hir> HirToMir<'hir> {
             next_process_id: 0,
             next_clock_domain_id: 0,
             next_match_id: 0, // BUG FIX #6
-            entity_map: HashMap::new(),
-            function_map: HashMap::new(),
-            port_map: HashMap::new(),
-            flattened_ports: HashMap::new(),
-            port_to_hir: HashMap::new(),
-            signal_map: HashMap::new(),
-            flattened_signals: HashMap::new(),
-            signal_to_hir: HashMap::new(),
-            variable_map: HashMap::new(),
-            context_variable_map: HashMap::new(),
-            mir_variable_names: HashMap::new(),
-            mir_variable_types: HashMap::new(),
-            clock_domain_map: HashMap::new(),
+            entity_map: IndexMap::new(),
+            function_map: IndexMap::new(),
+            port_map: IndexMap::new(),
+            flattened_ports: IndexMap::new(),
+            port_to_hir: IndexMap::new(),
+            signal_map: IndexMap::new(),
+            flattened_signals: IndexMap::new(),
+            signal_to_hir: IndexMap::new(),
+            variable_map: IndexMap::new(),
+            context_variable_map: IndexMap::new(),
+            mir_variable_names: IndexMap::new(),
+            mir_variable_types: IndexMap::new(),
+            clock_domain_map: IndexMap::new(),
             hir: None,
             module_hirs: module_hirs.clone(),
             current_entity_id: None,
             const_evaluator: ConstEvaluator::new(),
-            dynamic_variables: HashMap::new(),
-            dynamic_variable_rhs: HashMap::new(),
+            dynamic_variables: IndexMap::new(),
+            dynamic_variable_rhs: IndexMap::new(),
             type_flattener: TypeFlattener::new(0), // Will be re-initialized per use
             pending_statements: Vec::new(),
             match_arm_prefix: None,
@@ -348,19 +348,19 @@ impl<'hir> HirToMir<'hir> {
             inlining_return_type_stack: Vec::new(),
             synthesized_modules: Vec::new(),
             pending_module_instances: Vec::new(),
-            entity_instance_outputs: HashMap::new(),
-            entity_instance_info: HashMap::new(),
+            entity_instance_outputs: IndexMap::new(),
+            entity_instance_info: IndexMap::new(),
             pending_entity_instances: Vec::new(),
-            instance_outputs_by_name: HashMap::new(),
-            module_call_cache: HashMap::new(),
+            instance_outputs_by_name: IndexMap::new(),
+            module_call_cache: IndexMap::new(),
             current_pipeline_style: None,
             next_pipeline_reg_id: 0,
             unroll_substitution: None,
             next_generate_block_id: 0,
-            pending_mir_param_subs: HashMap::new(),
-            pending_param_var_to_name: HashMap::new(),
-            placeholder_signal_to_entity_output: HashMap::new(),
-            placeholder_hir_signal_to_entity_output: HashMap::new(),
+            pending_mir_param_subs: IndexMap::new(),
+            pending_param_var_to_name: IndexMap::new(),
+            placeholder_signal_to_entity_output: IndexMap::new(),
+            placeholder_hir_signal_to_entity_output: IndexMap::new(),
             current_module_var_to_signal: None, // BUG #200 FIX
             current_module_param_to_port: None, // BUG #205 FIX
         }
@@ -1055,7 +1055,7 @@ impl<'hir> HirToMir<'hir> {
                                 entity.name,
                                 entity.ports.len()
                             );
-                            let mut output_ports: HashMap<String, SignalId> = HashMap::new();
+                            let mut output_ports: IndexMap<String, SignalId> = IndexMap::new();
 
                             // Create signals for each output port
                             for port in &entity.ports {
@@ -1837,7 +1837,7 @@ impl<'hir> HirToMir<'hir> {
                                 // during field value conversion.
 
                                 // Create signals for output ports and track them
-                                let mut output_ports = HashMap::new();
+                                let mut output_ports = IndexMap::new();
                                 println!(
                                     "[HIER_PORTS] Entity '{}' has {} ports",
                                     entity.name,
@@ -1985,7 +1985,7 @@ impl<'hir> HirToMir<'hir> {
                                 // BUG #195 FIX: NOW convert connections from struct literal fields
                                 // This happens AFTER output port mappings are set up, so placeholder variables
                                 // like `result` will properly resolve to their entity output signals.
-                                let mut connections = std::collections::HashMap::new();
+                                let mut connections = IndexMap::new();
                                 println!(
                                     "[HIER_CONN] Converting {} fields for entity instantiation (AFTER output mapping)",
                                     struct_lit.fields.len()
@@ -2106,7 +2106,7 @@ impl<'hir> HirToMir<'hir> {
                                     name: instance_name.clone(),
                                     module: module_id,
                                     connections,
-                                    parameters: std::collections::HashMap::new(),
+                                    parameters: IndexMap::new(),
                                     span: None,
                                     safety_context: None,
                                 };
@@ -3432,8 +3432,7 @@ impl<'hir> HirToMir<'hir> {
 
         // Group flattened fields by array index
         // field_path will be like ["0", "x"], ["0", "y"], ["1", "x"], etc.
-        let mut array_indices: std::collections::HashMap<String, Vec<FlattenedField>> =
-            std::collections::HashMap::new();
+        let mut array_indices: IndexMap<String, Vec<FlattenedField>> = IndexMap::new();
 
         for field in base_fields {
             if let Some(first_component) = field.field_path.first() {
@@ -3585,8 +3584,7 @@ impl<'hir> HirToMir<'hir> {
         };
 
         // Group array fields by index
-        let mut array_by_index: std::collections::HashMap<String, Vec<FlattenedField>> =
-            std::collections::HashMap::new();
+        let mut array_by_index: IndexMap<String, Vec<FlattenedField>> = IndexMap::new();
 
         for field in array_fields {
             if let Some(first_component) = field.field_path.first() {
@@ -3885,7 +3883,7 @@ impl<'hir> HirToMir<'hir> {
                         };
 
                         // Convert connections from the struct literal fields
-                        let mut connections = std::collections::HashMap::new();
+                        let mut connections = IndexMap::new();
                         for field_init in &struct_lit.fields {
                             if let Some(expr) = self.convert_expression(&field_init.value, 0) {
                                 connections.insert(field_init.name.clone(), expr);
@@ -3893,7 +3891,7 @@ impl<'hir> HirToMir<'hir> {
                         }
 
                         // Create signals for output ports and track them
-                        let mut output_ports = HashMap::new();
+                        let mut output_ports = IndexMap::new();
                         let mut output_signals = Vec::new();
                         for port in &entity.ports {
                             if matches!(port.direction, hir::HirPortDirection::Output) {
@@ -3933,7 +3931,7 @@ impl<'hir> HirToMir<'hir> {
                             name: instance_name,
                             module: module_id,
                             connections,
-                            parameters: std::collections::HashMap::new(),
+                            parameters: IndexMap::new(),
                             span: None,
                             safety_context: None,
                         };
@@ -4323,7 +4321,7 @@ impl<'hir> HirToMir<'hir> {
 
         // Convert generic arguments to parameters
         // Map entity.generics (names) with instance.generic_args (values)
-        let mut parameters = std::collections::HashMap::new();
+        let mut parameters = IndexMap::new();
         for (generic, arg) in entity.generics.iter().zip(&instance.generic_args) {
             // Only handle const/width parameters - type parameters are handled by monomorphization
             match &generic.param_type {
@@ -4341,7 +4339,7 @@ impl<'hir> HirToMir<'hir> {
 
         // Convert connections
         // CRITICAL FIX for Bug #10: Expand struct/array connections into flattened field connections
-        let mut connections = std::collections::HashMap::new();
+        let mut connections = IndexMap::new();
 
         for conn in &instance.connections {
             // Check if this port is flattened (struct or array type)
@@ -6131,8 +6129,7 @@ impl<'hir> HirToMir<'hir> {
                     // For simple arrays: ["0"], ["1"], etc.
                     // For arrays of structs: ["0", "x"], ["0", "y"], ["1", "x"], ["1", "y"], etc.
                     use std::collections::HashMap as StdHashMap;
-                    let mut array_groups: StdHashMap<usize, Vec<FlattenedField>> =
-                        StdHashMap::new();
+                    let mut array_groups: IndexMap<usize, Vec<FlattenedField>> = IndexMap::new();
 
                     for field in &fields {
                         if let Some(first) = field.field_path.first() {
@@ -8706,7 +8703,7 @@ impl<'hir> HirToMir<'hir> {
         return_expr: &hir::HirExpression,
         let_bindings: &[hir::HirLetStatement],
     ) -> Option<hir::HirExpression> {
-        use std::collections::HashMap;
+        use indexmap::IndexMap;
 
         debug_println!("🔵🔵🔵 [BUG #86] try_convert_mutable_var_pattern: {} stmts before return, {} let bindings 🔵🔵🔵",
                  stmts_before_return.len(), let_bindings.len());
@@ -8738,7 +8735,7 @@ impl<'hir> HirToMir<'hir> {
         };
 
         // Build a map from VariableId to current expression for ALL mutable variables
-        let mut var_exprs: HashMap<hir::VariableId, hir::HirExpression> = HashMap::new();
+        let mut var_exprs: IndexMap<hir::VariableId, hir::HirExpression> = IndexMap::new();
 
         // Initialize with mutable bindings' initial values
         for let_stmt in let_bindings {
@@ -8926,7 +8923,7 @@ impl<'hir> HirToMir<'hir> {
     fn substitute_variables(
         &self,
         expr: &hir::HirExpression,
-        var_exprs: &std::collections::HashMap<hir::VariableId, hir::HirExpression>,
+        var_exprs: &IndexMap<hir::VariableId, hir::HirExpression>,
         _let_bindings: &[hir::HirLetStatement],
     ) -> hir::HirExpression {
         match expr {
@@ -9048,7 +9045,7 @@ impl<'hir> HirToMir<'hir> {
         statements: &[hir::HirStatement],
         result_expr: &hir::HirExpression,
     ) -> Option<hir::HirExpression> {
-        use std::collections::HashMap;
+        use indexmap::IndexMap;
 
         // BUG #145 DEBUG: Simple trace - using println! to stdout
         debug_println!("🔮🔮🔮 [BUG #145] ENTERING try_transform_block_mutable_vars 🔮🔮🔮");
@@ -9169,13 +9166,13 @@ impl<'hir> HirToMir<'hir> {
         );
 
         // Build a map from VariableId to current expression for ALL mutable variables
-        let mut var_exprs: HashMap<hir::VariableId, hir::HirExpression> = HashMap::new();
+        let mut var_exprs: IndexMap<hir::VariableId, hir::HirExpression> = IndexMap::new();
 
         // BUG #121 FIX: Also track immutable let bindings for substitution
         // When a mutable variable pattern block also references immutable variables
         // (e.g., discriminant in quadratic_solve), those immutable Variables must also
         // be substituted with their values, or they can't be looked up in the caller's ctx.
-        let mut immutable_vars: HashMap<hir::VariableId, hir::HirExpression> = HashMap::new();
+        let mut immutable_vars: IndexMap<hir::VariableId, hir::HirExpression> = IndexMap::new();
 
         // Initialize with all bindings' initial values (tracking mutable separately)
         for let_stmt in &let_bindings {
@@ -9605,7 +9602,7 @@ impl<'hir> HirToMir<'hir> {
     fn substitute_expression(
         &mut self,
         expr: &hir::HirExpression,
-        param_map: &HashMap<String, &hir::HirExpression>,
+        param_map: &IndexMap<String, &hir::HirExpression>,
     ) -> Option<hir::HirExpression> {
         match expr {
             // GenericParam - function parameters are parsed as generic params
@@ -9693,8 +9690,8 @@ impl<'hir> HirToMir<'hir> {
     fn substitute_expression_with_var_map(
         &mut self,
         expr: &hir::HirExpression,
-        param_map: &HashMap<String, &hir::HirExpression>,
-        var_id_to_name: &HashMap<hir::VariableId, String>,
+        param_map: &IndexMap<String, &hir::HirExpression>,
+        var_id_to_name: &IndexMap<hir::VariableId, String>,
     ) -> Option<hir::HirExpression> {
         match expr {
             // GenericParam - function parameters are parsed as generic params
@@ -9927,8 +9924,7 @@ impl<'hir> HirToMir<'hir> {
                 }
                 // BUG FIX #18: Use owned HashMap for local variables to allow incremental updates
                 // This allows each statement to reference previously defined local variables
-                let mut local_var_map: std::collections::HashMap<String, hir::HirExpression> =
-                    std::collections::HashMap::new();
+                let mut local_var_map: IndexMap<String, hir::HirExpression> = IndexMap::new();
 
                 // BUG FIX #86: Track mutable variable names to exclude from result_expr substitution
                 // Mutable variables should NOT be substituted in result_expr because they need
@@ -9946,10 +9942,8 @@ impl<'hir> HirToMir<'hir> {
                                 i, let_stmt.name
                             );
                             // Build a combined map with both params and local vars for substitution
-                            let mut combined_map: std::collections::HashMap<
-                                String,
-                                &hir::HirExpression,
-                            > = param_map.clone();
+                            let mut combined_map: IndexMap<String, &hir::HirExpression> =
+                                param_map.clone();
                             for (name, expr) in &local_var_map {
                                 combined_map.insert(name.clone(), expr);
                             }
@@ -10034,10 +10028,8 @@ impl<'hir> HirToMir<'hir> {
                                 "[BUG #86] substitute_expression_with_var_map: processing If statement in block"
                             );
                             // Build combined map for substitution
-                            let mut combined_map: std::collections::HashMap<
-                                String,
-                                &hir::HirExpression,
-                            > = param_map.clone();
+                            let mut combined_map: IndexMap<String, &hir::HirExpression> =
+                                param_map.clone();
                             for (name, expr) in &local_var_map {
                                 combined_map.insert(name.clone(), expr);
                             }
@@ -10092,10 +10084,8 @@ impl<'hir> HirToMir<'hir> {
                                 "[BUG #86] substitute_expression_with_var_map: processing Assignment statement in block"
                             );
                             // Build combined map for substitution
-                            let mut combined_map: std::collections::HashMap<
-                                String,
-                                &hir::HirExpression,
-                            > = param_map.clone();
+                            let mut combined_map: IndexMap<String, &hir::HirExpression> =
+                                param_map.clone();
                             for (name, expr) in &local_var_map {
                                 combined_map.insert(name.clone(), expr);
                             }
@@ -10180,7 +10170,7 @@ impl<'hir> HirToMir<'hir> {
                         should_include
                     })
                     .map(|(k, v)| (k.clone(), v))
-                    .collect::<HashMap<_, _>>();
+                    .collect::<IndexMap<_, _>>();
                 eprintln!(
                     "[BUG #91] filtered_local_map has {} entries (after filtering)",
                     filtered_local_map.len()
@@ -10565,7 +10555,7 @@ impl<'hir> HirToMir<'hir> {
     fn substitute_generic_params_only(
         &self,
         expr: &hir::HirExpression,
-        param_map: &HashMap<String, &hir::HirExpression>,
+        param_map: &IndexMap<String, &hir::HirExpression>,
     ) -> hir::HirExpression {
         match expr {
             // GenericParam - substitute with param_map value
@@ -11184,7 +11174,7 @@ impl<'hir> HirToMir<'hir> {
     fn collect_let_bindings(
         &self,
         stmts: &[hir::HirStatement],
-        map: &mut HashMap<hir::VariableId, String>,
+        map: &mut IndexMap<hir::VariableId, String>,
     ) {
         for stmt in stmts {
             match stmt {
@@ -11211,7 +11201,7 @@ impl<'hir> HirToMir<'hir> {
     fn collect_let_bindings_from_expr(
         &self,
         expr: &hir::HirExpression,
-        map: &mut HashMap<hir::VariableId, String>,
+        map: &mut IndexMap<hir::VariableId, String>,
     ) {
         match expr {
             hir::HirExpression::Block {
@@ -11277,13 +11267,13 @@ impl<'hir> HirToMir<'hir> {
         }
 
         // Build parameter substitution map
-        let mut substitution_map = HashMap::new();
+        let mut substitution_map = IndexMap::new();
         for (param, arg) in params.iter().zip(&call.args) {
             substitution_map.insert(param.name.clone(), arg.clone());
         }
 
         // Build var_id to name mapping
-        let mut var_id_to_name = HashMap::new();
+        let mut var_id_to_name = IndexMap::new();
         self.collect_let_bindings(&body, &mut var_id_to_name);
 
         // Convert body to expression
@@ -11325,12 +11315,12 @@ impl<'hir> HirToMir<'hir> {
         // Build a map from VariableId to variable name by walking through the function body
         // BUG FIX #123: Use actual VariableIds from HIR, not sequential assumptions!
         // The HIR builder assigns VariableIds which may not be sequential per function.
-        let mut var_id_to_name = HashMap::new();
+        let mut var_id_to_name = IndexMap::new();
 
         // Helper function to recursively collect let bindings using ACTUAL VariableIds
         fn collect_lets_recursive(
             stmts: &[hir::HirStatement],
-            var_id_to_name: &mut HashMap<hir::VariableId, String>,
+            var_id_to_name: &mut IndexMap<hir::VariableId, String>,
         ) {
             for stmt in stmts {
                 match stmt {
@@ -11397,7 +11387,7 @@ impl<'hir> HirToMir<'hir> {
         }
 
         // Build parameter substitution map
-        let mut substitution_map = HashMap::new();
+        let mut substitution_map = IndexMap::new();
         for (param, arg) in params.iter().zip(&call.args) {
             substitution_map.insert(param.name.clone(), arg.clone());
         }
@@ -11406,7 +11396,7 @@ impl<'hir> HirToMir<'hir> {
         // and collecting all let bindings with their RHS expressions
         // BUG #136 FIX: After transform_early_returns, let bindings may be nested inside if/else branches
         // We need to recursively collect let bindings from all branches
-        let mut let_bindings = HashMap::new();
+        let mut let_bindings = IndexMap::new();
 
         // Helper to recursively collect let statements with mutability info
         fn collect_let_stmts_recursive(
@@ -11538,9 +11528,9 @@ impl<'hir> HirToMir<'hir> {
     fn substitute_hir_expr_recursively(
         &self,
         expr: &hir::HirExpression,
-        params: &HashMap<String, hir::HirExpression>,
-        lets: &HashMap<String, hir::HirExpression>,
-        var_id_to_name: &HashMap<hir::VariableId, String>,
+        params: &IndexMap<String, hir::HirExpression>,
+        lets: &IndexMap<String, hir::HirExpression>,
+        var_id_to_name: &IndexMap<hir::VariableId, String>,
     ) -> Option<hir::HirExpression> {
         match expr {
             // If it's a variable reference, look it up in let bindings or parameters
@@ -12031,9 +12021,9 @@ impl<'hir> HirToMir<'hir> {
     fn substitute_statements_recursively(
         &self,
         statements: &[hir::HirStatement],
-        params: &HashMap<String, hir::HirExpression>,
-        lets: &HashMap<String, hir::HirExpression>,
-        var_id_to_name: &HashMap<hir::VariableId, String>,
+        params: &IndexMap<String, hir::HirExpression>,
+        lets: &IndexMap<String, hir::HirExpression>,
+        var_id_to_name: &IndexMap<hir::VariableId, String>,
     ) -> Option<Vec<hir::HirStatement>> {
         let mut result = Vec::new();
         let mut local_lets = lets.clone();
@@ -12116,7 +12106,7 @@ impl<'hir> HirToMir<'hir> {
     fn substitute_hir_expr_with_map(
         &self,
         expr: &hir::HirExpression,
-        name_map: &HashMap<String, hir::HirExpression>,
+        name_map: &IndexMap<String, hir::HirExpression>,
     ) -> hir::HirExpression {
         match expr {
             // GenericParam - used for function parameters and some variable references
@@ -12256,8 +12246,8 @@ impl<'hir> HirToMir<'hir> {
                 );
 
                 // Build a var_id-to-substituted_value map for let bindings in this Block
-                let mut var_id_to_value: HashMap<hir::VariableId, hir::HirExpression> =
-                    HashMap::new();
+                let mut var_id_to_value: IndexMap<hir::VariableId, hir::HirExpression> =
+                    IndexMap::new();
 
                 // Check if there are any non-Let statements (If, Assign, etc.)
                 let has_non_let_stmts = statements
@@ -12502,7 +12492,7 @@ impl<'hir> HirToMir<'hir> {
     fn substitute_var_ids_in_expr(
         &self,
         expr: &hir::HirExpression,
-        var_id_map: &HashMap<hir::VariableId, hir::HirExpression>,
+        var_id_map: &IndexMap<hir::VariableId, hir::HirExpression>,
     ) -> hir::HirExpression {
         match expr {
             hir::HirExpression::Variable(var_id) => {
@@ -12636,7 +12626,7 @@ impl<'hir> HirToMir<'hir> {
             } => {
                 // Build a local var_id_map from this Block's let statements
                 // Start with outer scope variables, then add local bindings (locals override)
-                let mut local_var_id_map: HashMap<hir::VariableId, hir::HirExpression> =
+                let mut local_var_id_map: IndexMap<hir::VariableId, hir::HirExpression> =
                     var_id_map.clone();
 
                 let mut substituted_stmts = Vec::new();
@@ -12723,7 +12713,7 @@ impl<'hir> HirToMir<'hir> {
     fn substitute_var_ids_until_fixed_point(
         &self,
         expr: &hir::HirExpression,
-        var_id_map: &HashMap<hir::VariableId, hir::HirExpression>,
+        var_id_map: &IndexMap<hir::VariableId, hir::HirExpression>,
     ) -> hir::HirExpression {
         if var_id_map.is_empty() {
             return expr.clone();
@@ -12859,7 +12849,7 @@ impl<'hir> HirToMir<'hir> {
     fn substitute_var_ids_in_expr_filtered(
         &self,
         expr: &hir::HirExpression,
-        var_id_map: &HashMap<hir::VariableId, hir::HirExpression>,
+        var_id_map: &IndexMap<hir::VariableId, hir::HirExpression>,
         local_var_ids: &std::collections::HashSet<hir::VariableId>,
     ) -> hir::HirExpression {
         match expr {
@@ -13081,8 +13071,8 @@ impl<'hir> HirToMir<'hir> {
     fn substitute_hir_stmt_with_maps(
         &self,
         stmt: &hir::HirStatement,
-        name_map: &HashMap<String, hir::HirExpression>,
-        var_id_map: &HashMap<hir::VariableId, hir::HirExpression>,
+        name_map: &IndexMap<String, hir::HirExpression>,
+        var_id_map: &IndexMap<hir::VariableId, hir::HirExpression>,
     ) -> hir::HirStatement {
         match stmt {
             hir::HirStatement::Let(let_stmt) => {
@@ -13139,8 +13129,8 @@ impl<'hir> HirToMir<'hir> {
     fn substitute_hir_stmt_in_block(
         &mut self,
         stmt: &hir::HirStatement,
-        param_map: &std::collections::HashMap<String, &hir::HirExpression>,
-        var_id_to_name: &HashMap<hir::VariableId, String>,
+        param_map: &IndexMap<String, &hir::HirExpression>,
+        var_id_to_name: &IndexMap<hir::VariableId, String>,
     ) -> Option<hir::HirStatement> {
         match stmt {
             hir::HirStatement::Let(let_stmt) => {
@@ -13332,7 +13322,7 @@ impl<'hir> HirToMir<'hir> {
         }
 
         // Step 3: Build initial parameter substitution map (function parameters -> arguments)
-        let mut substitution_map = HashMap::new();
+        let mut substitution_map = IndexMap::new();
         for (param, arg) in params.iter().zip(&call.args) {
             substitution_map.insert(param.name.clone(), arg.clone());
         }
@@ -13352,7 +13342,7 @@ impl<'hir> HirToMir<'hir> {
 
         // Step 4: Build var_id -> name mapping from ALL let statements (including nested ones)
         // This allows us to look up variable names during substitution
-        let mut var_id_to_name = HashMap::new();
+        let mut var_id_to_name = IndexMap::new();
         self.collect_let_bindings(&body, &mut var_id_to_name);
         eprintln!(
             "[DEBUG] inline_function_call: built var_id map with {} entries (recursive)",
@@ -13631,7 +13621,7 @@ impl<'hir> HirToMir<'hir> {
         }
 
         // Build param_name -> MIR expression map
-        let mut param_to_mir: HashMap<String, Expression> = HashMap::new();
+        let mut param_to_mir: IndexMap<String, Expression> = IndexMap::new();
         for (param, mir_expr) in params.iter().zip(mir_args.iter()) {
             param_to_mir.insert(param.name.clone(), mir_expr.clone());
         }
@@ -13640,7 +13630,7 @@ impl<'hir> HirToMir<'hir> {
         let body = self.transform_early_returns(body);
 
         // Build var_id -> name mapping for let bindings
-        let mut var_id_to_name: HashMap<hir::VariableId, String> = HashMap::new();
+        let mut var_id_to_name: IndexMap<hir::VariableId, String> = IndexMap::new();
         self.collect_let_bindings(&body, &mut var_id_to_name);
 
         // BUG #179 FIX: Also build param var_id -> name mapping
@@ -13661,11 +13651,11 @@ impl<'hir> HirToMir<'hir> {
         //   let prod_x = fp_mul(ax, bx);
         //   let result = fp_add(prod_x, prod_y);
         //   return result;  // result must be substituted with fp_add expression
-        let hir_param_subs: HashMap<String, hir::HirExpression> = HashMap::new();
+        let hir_param_subs: IndexMap<String, hir::HirExpression> = IndexMap::new();
         // NOTE: We no longer populate hir_param_subs with caller's HIR args.
         // Parameters are handled via pending_mir_param_subs during MIR conversion.
 
-        let mut let_bindings: HashMap<String, hir::HirExpression> = HashMap::new();
+        let mut let_bindings: IndexMap<String, hir::HirExpression> = IndexMap::new();
 
         // BUG #180 FIX: Track mutable variables separately - they need to be processed
         // through their full assignment chain for functions like bitreverse32:
@@ -13673,7 +13663,7 @@ impl<'hir> HirToMir<'hir> {
         //   x = f1(x);  // Assignment, not let
         //   x = f2(x);
         //   return x;
-        let mut mutable_vars: HashMap<String, hir::VariableId> = HashMap::new();
+        let mut mutable_vars: IndexMap<String, hir::VariableId> = IndexMap::new();
 
         // Enum to represent let or assignment statements in order
         #[derive(Debug)]
@@ -13800,7 +13790,7 @@ impl<'hir> HirToMir<'hir> {
         // BUG #181 FIX: Set pending_param_var_to_name so that Variable(param_id) can be
         // resolved to the parameter name, which is then looked up in pending_mir_param_subs.
         // Parameters are VariableId(0), (1), (2), ... matching their position in params list.
-        let mut param_var_to_name: HashMap<hir::VariableId, String> = HashMap::new();
+        let mut param_var_to_name: IndexMap<hir::VariableId, String> = IndexMap::new();
         for (i, param) in params.iter().enumerate() {
             param_var_to_name.insert(hir::VariableId(i as u32), param.name.clone());
         }
@@ -14337,7 +14327,7 @@ impl<'hir> HirToMir<'hir> {
 
         // Build parameter substitution map
         // For binary operators: param[0] = left, param[1] = right
-        let mut param_map: HashMap<String, &hir::HirExpression> = HashMap::new();
+        let mut param_map: IndexMap<String, &hir::HirExpression> = IndexMap::new();
         if !params.is_empty() {
             param_map.insert(params[0].name.clone(), left_expr);
             println!(
@@ -14356,7 +14346,7 @@ impl<'hir> HirToMir<'hir> {
         }
 
         // Build var_id -> name mapping for let bindings in the body
-        let mut var_id_to_name: HashMap<hir::VariableId, String> = HashMap::new();
+        let mut var_id_to_name: IndexMap<hir::VariableId, String> = IndexMap::new();
         self.collect_let_bindings(&body, &mut var_id_to_name);
 
         // Convert body to expression (like inline_function_call does)
@@ -14474,13 +14464,13 @@ impl<'hir> HirToMir<'hir> {
 
         // Build parameter substitution map
         // For unary methods: param[0] = arg
-        let mut param_map: HashMap<String, &hir::HirExpression> = HashMap::new();
+        let mut param_map: IndexMap<String, &hir::HirExpression> = IndexMap::new();
         if !params.is_empty() {
             param_map.insert(params[0].name.clone(), arg_expr);
         }
 
         // Build var_id -> name mapping for let bindings in the body
-        let mut var_id_to_name: HashMap<hir::VariableId, String> = HashMap::new();
+        let mut var_id_to_name: IndexMap<hir::VariableId, String> = IndexMap::new();
         self.collect_let_bindings(&body, &mut var_id_to_name);
 
         // Convert body to expression (like inline_function_call does)
@@ -17236,7 +17226,7 @@ impl<'hir> HirToMir<'hir> {
         &mut self,
         expr: &hir::HirExpression,
         ctx: &ModuleSynthesisContext,
-        mir_cache: &HashMap<hir::VariableId, Expression>,
+        mir_cache: &IndexMap<hir::VariableId, Expression>,
         depth: usize,
     ) -> Option<Expression> {
         if depth > 100 {
@@ -18189,12 +18179,12 @@ impl<'hir> HirToMir<'hir> {
                 //
                 // Build maps from both name and VariableId to substituted values (for simple cases)
                 // BUG FIX #92: Need both maps because Variables use var_id, not name
-                let mut let_substitutions: HashMap<String, hir::HirExpression> = HashMap::new();
-                let mut var_id_to_value: HashMap<hir::VariableId, hir::HirExpression> =
-                    HashMap::new();
+                let mut let_substitutions: IndexMap<String, hir::HirExpression> = IndexMap::new();
+                let mut var_id_to_value: IndexMap<hir::VariableId, hir::HirExpression> =
+                    IndexMap::new();
 
                 // BUG FIX #126: Also track converted MIR expressions by VariableId
-                let mut var_id_to_mir: HashMap<hir::VariableId, Expression> = HashMap::new();
+                let mut var_id_to_mir: IndexMap<hir::VariableId, Expression> = IndexMap::new();
 
                 for stmt in statements {
                     if let hir::HirStatement::Let(let_stmt) = stmt {
@@ -19728,7 +19718,7 @@ impl<'hir> HirToMir<'hir> {
             };
 
             let instance_name = format!("{}_inst_{}", function_name, first_signal_id.0);
-            let mut connections = HashMap::new();
+            let mut connections = IndexMap::new();
 
             // Connect arguments to input ports (param_0, param_1, ...)
             for (arg_idx, arg_expr) in arg_exprs.iter().enumerate() {
@@ -19870,7 +19860,7 @@ impl<'hir> HirToMir<'hir> {
                 name: instance_name.clone(),
                 module: module_id,
                 connections,
-                parameters: HashMap::new(),
+                parameters: IndexMap::new(),
                 span: None,
                 safety_context: None,
             };

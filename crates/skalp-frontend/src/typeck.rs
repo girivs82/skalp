@@ -7,7 +7,7 @@ use crate::types::{
     self, EnumType, EnumVariant, ResetPolarity, StructField, StructType, Type, TypeEnv, TypeError,
     TypeInference, TypeScheme, Width,
 };
-use std::collections::HashMap;
+use indexmap::IndexMap;
 
 /// Type checker for SKALP
 pub struct TypeChecker {
@@ -21,10 +21,10 @@ pub struct TypeChecker {
     errors: Vec<TypeCheckError>,
 
     /// Node type cache
-    node_types: HashMap<usize, Type>,
+    node_types: IndexMap<usize, Type>,
 
     /// Entity port definitions (entity name -> port environment)
-    entity_ports: HashMap<String, Vec<(String, Type)>>,
+    entity_ports: IndexMap<String, Vec<(String, Type)>>,
 }
 
 /// Type checking error with location information
@@ -54,8 +54,8 @@ impl TypeChecker {
             env: TypeEnv::new(),
             inference: TypeInference::new(),
             errors: Vec::new(),
-            node_types: HashMap::new(),
-            entity_ports: HashMap::new(),
+            node_types: IndexMap::new(),
+            entity_ports: IndexMap::new(),
         }
     }
 

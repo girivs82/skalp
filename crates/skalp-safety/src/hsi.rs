@@ -12,8 +12,8 @@
 //! - Resources consumed (timing, memory, etc.)
 //! - Interaction under nominal and error conditions
 
+use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 
 // Re-use ASIL level from the asil module
 use crate::asil::AsilLevel;
@@ -374,7 +374,7 @@ pub fn generate_hsi_fmea(hsi: &HardwareSoftwareInterface) -> Vec<HsiFmeaEntry> {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HsiPortMapping {
     /// Mapping from HSI signal name to matched RTL port names
-    pub signal_to_ports: HashMap<String, Vec<String>>,
+    pub signal_to_ports: IndexMap<String, Vec<String>>,
     /// Patterns that didn't match any ports
     pub unmatched_patterns: Vec<String>,
     /// Coverage percentage (matched signals / total signals)
@@ -397,7 +397,7 @@ impl HsiPortMapping {
 /// # Returns
 /// Mapping result with matched and unmatched patterns
 pub fn link_hsi_to_ports(hsi: &HardwareSoftwareInterface, port_names: &[String]) -> HsiPortMapping {
-    let mut signal_to_ports: HashMap<String, Vec<String>> = HashMap::new();
+    let mut signal_to_ports: IndexMap<String, Vec<String>> = IndexMap::new();
     let mut unmatched_patterns = Vec::new();
     let mut total_signals = 0;
     let mut matched_signals = 0;

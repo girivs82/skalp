@@ -7,7 +7,8 @@
 //! When resolving imports, `.sk` files take precedence over `.skh` files.
 
 use anyhow::{bail, Context, Result};
-use std::collections::{HashMap, HashSet};
+use indexmap::IndexMap;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use crate::hir::{Hir, HirImport, HirImportPath};
@@ -38,7 +39,7 @@ pub struct ModuleResolver {
     search_paths: Vec<PathBuf>,
 
     /// Cache of loaded modules (path -> HIR)
-    loaded_modules: HashMap<PathBuf, Hir>,
+    loaded_modules: IndexMap<PathBuf, Hir>,
 
     /// Set of modules currently being loaded (for cycle detection)
     loading: HashSet<PathBuf>,
@@ -195,7 +196,7 @@ impl ModuleResolver {
 
         Self {
             search_paths,
-            loaded_modules: HashMap::new(),
+            loaded_modules: IndexMap::new(),
             loading: HashSet::new(),
             root_dir,
         }
@@ -497,10 +498,8 @@ impl ModuleResolver {
         // get their entity IDs properly remapped.
 
         // Phase 1: Build entity ID mapping (source entity ID -> target entity ID)
-        let mut entity_id_map: std::collections::HashMap<
-            crate::hir::EntityId,
-            crate::hir::EntityId,
-        > = std::collections::HashMap::new();
+        let mut entity_id_map: IndexMap<crate::hir::EntityId, crate::hir::EntityId> =
+            IndexMap::new();
 
         // Track impl blocks to merge (source entity ID, impl block reference)
         let mut impl_blocks_to_merge: Vec<(crate::hir::EntityId, crate::hir::HirImplementation)> =

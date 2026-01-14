@@ -12,9 +12,9 @@
 
 use crate::asil::AsilLevel;
 use crate::mechanisms::SafetyMechanism;
+use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use skalp_lir::{Cell, CellSafetyClassification, GateNetlist, TechLibrary};
-use std::collections::HashMap;
 use std::io::{self, Write};
 use std::path::Path;
 
@@ -176,9 +176,9 @@ pub struct FmedaReport {
     /// Summary statistics
     pub summary: FmedaSummary,
     /// Metrics by cell type
-    pub by_cell_type: HashMap<String, CellTypeSummary>,
+    pub by_cell_type: IndexMap<String, CellTypeSummary>,
     /// Metrics by safety classification
-    pub by_safety_class: HashMap<String, ClassificationSummary>,
+    pub by_safety_class: IndexMap<String, ClassificationSummary>,
 }
 
 /// FMEDA report metadata
@@ -262,8 +262,8 @@ pub fn generate_fmeda(
     metadata: FmedaMetadata,
 ) -> FmedaReport {
     let mut entries = Vec::new();
-    let mut by_cell_type: HashMap<String, CellTypeSummary> = HashMap::new();
-    let mut by_safety_class: HashMap<String, ClassificationSummary> = HashMap::new();
+    let mut by_cell_type: IndexMap<String, CellTypeSummary> = IndexMap::new();
+    let mut by_safety_class: IndexMap<String, ClassificationSummary> = IndexMap::new();
 
     // Build mechanism lookup by protected cell paths
     let mechanism_lookup = build_mechanism_lookup(mechanisms);
@@ -353,8 +353,8 @@ pub fn generate_fmeda(
 }
 
 /// Build lookup table from mechanism name to cell paths
-fn build_mechanism_lookup(mechanisms: &[SafetyMechanism]) -> HashMap<String, (String, f64)> {
-    let mut lookup = HashMap::new();
+fn build_mechanism_lookup(mechanisms: &[SafetyMechanism]) -> IndexMap<String, (String, f64)> {
+    let mut lookup = IndexMap::new();
     for mech in mechanisms {
         let dc = mech.diagnostic_coverage;
         for cell_path in &mech.implementation_cells {
@@ -432,7 +432,7 @@ fn get_failure_distribution(cell_type: &str) -> FailureDistribution {
 /// Get diagnostic coverage and mechanism name for a cell
 fn get_diagnostic_coverage(
     cell: &Cell,
-    mechanism_lookup: &HashMap<String, (String, f64)>,
+    mechanism_lookup: &IndexMap<String, (String, f64)>,
 ) -> (f64, Option<String>) {
     // Check if cell path is in mechanism lookup
     if !cell.path.is_empty() {

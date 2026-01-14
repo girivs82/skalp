@@ -7,6 +7,7 @@
 #[cfg(test)]
 #[cfg(feature = "disabled_old_lir_api")]
 mod complete_hardware_flow_tests {
+    use indexmap::IndexMap;
     use skalp_backends::{
         constraints::{ConstraintFormat, ConstraintManager},
         AsicTarget, BackendFactory, FpgaTarget, OptimizationGoals, OptimizationTarget,
@@ -15,7 +16,6 @@ mod complete_hardware_flow_tests {
     use skalp_frontend::parse_and_build_hir;
     use skalp_lir::lower_to_lir;
     use skalp_mir::MirCompiler;
-    use std::collections::HashMap;
 
     #[tokio::test]
     async fn test_complete_skalp_to_ice40_flow() {

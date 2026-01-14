@@ -13,7 +13,8 @@ use super::{CellMatcher, CutMatch, MappedNode, MappingObjective, MappingStats};
 use crate::synth::cuts::{CutEnumeration, CutParams, CutPriority};
 use crate::synth::{Aig, AigLit, AigNode, AigNodeId, Cut};
 use crate::tech_library::TechLibrary;
-use std::collections::{HashMap, HashSet};
+use indexmap::IndexMap;
+use std::collections::HashSet;
 
 /// Configuration for the cut-based mapper
 #[derive(Debug, Clone)]
@@ -284,9 +285,9 @@ impl CutMapper {
         let mut result = MappingResult::new();
 
         // Step 2: Compute best match for each node
-        let mut best_match: HashMap<AigNodeId, Option<CutMatch>> = HashMap::new();
-        let mut node_delay: HashMap<AigNodeId, f64> = HashMap::new();
-        let mut node_area: HashMap<AigNodeId, f64> = HashMap::new();
+        let mut best_match: IndexMap<AigNodeId, Option<CutMatch>> = IndexMap::new();
+        let mut node_delay: IndexMap<AigNodeId, f64> = IndexMap::new();
+        let mut node_area: IndexMap<AigNodeId, f64> = IndexMap::new();
 
         // Process nodes in topological order
         let topo_order = self.topological_sort(aig);
@@ -430,8 +431,8 @@ impl CutMapper {
         aig: &Aig,
         node_id: AigNodeId,
         cuts: &CutEnumeration,
-        node_delay: &HashMap<AigNodeId, f64>,
-        node_area: &HashMap<AigNodeId, f64>,
+        node_delay: &IndexMap<AigNodeId, f64>,
+        node_area: &IndexMap<AigNodeId, f64>,
     ) -> Option<CutMatch> {
         let cut_set = cuts.get_cuts(node_id)?;
 
@@ -475,7 +476,7 @@ impl CutMapper {
     }
 
     /// Compute arrival time for a cut (max of leaf arrivals)
-    fn compute_arrival(&self, cut: &Cut, node_delay: &HashMap<AigNodeId, f64>) -> f64 {
+    fn compute_arrival(&self, cut: &Cut, node_delay: &IndexMap<AigNodeId, f64>) -> f64 {
         cut.leaves
             .iter()
             .filter_map(|&leaf| node_delay.get(&leaf).copied())
@@ -485,7 +486,7 @@ impl CutMapper {
     /// Compute area for a cut using area flow
     /// Area flow divides the cost of each leaf by its fanout count,
     /// giving a more accurate estimate of the marginal cost of using this cut
-    fn compute_cut_area(&self, cut: &Cut, node_area: &HashMap<AigNodeId, f64>) -> f64 {
+    fn compute_cut_area(&self, cut: &Cut, node_area: &IndexMap<AigNodeId, f64>) -> f64 {
         // Use the cut's pre-computed area_flow if available
         if cut.area_flow > 0.0 {
             return cut.area_flow as f64;
@@ -504,7 +505,7 @@ impl CutMapper {
         &self,
         aig: &Aig,
         result: &mut MappingResult,
-        node_delay: &HashMap<AigNodeId, f64>,
+        node_delay: &IndexMap<AigNodeId, f64>,
     ) {
         for (name, lit) in aig.outputs() {
             if lit.inverted {
@@ -556,7 +557,7 @@ impl CutMapper {
 #[derive(Debug, Clone)]
 pub struct MappingResult {
     /// Mapped nodes
-    pub mapped_nodes: HashMap<AigNodeId, MappedNode>,
+    pub mapped_nodes: IndexMap<AigNodeId, MappedNode>,
     /// Mapping statistics
     pub stats: MappingStats,
 }
@@ -565,7 +566,7 @@ impl MappingResult {
     /// Create new empty result
     pub fn new() -> Self {
         Self {
-            mapped_nodes: HashMap::new(),
+            mapped_nodes: IndexMap::new(),
             stats: MappingStats::new(),
         }
     }

@@ -5,6 +5,7 @@
 use crate::ast::SourceFile;
 use crate::safety_attributes::ModuleSafetyDefinitions;
 use crate::span::SourceSpan;
+use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 
 // ============================================================================
@@ -272,7 +273,7 @@ pub struct HirInstance {
     /// Named generic arguments (parameter_name -> expression)
     /// Supports syntax like `Entity<WIDTH: 32, DEPTH: 16>`
     #[serde(default)]
-    pub named_generic_args: std::collections::HashMap<String, HirExpression>,
+    pub named_generic_args: IndexMap<String, HirExpression>,
     /// Port connections
     pub connections: Vec<HirConnection>,
     /// Safety configuration (from #[implements(...)] attribute)
@@ -1737,7 +1738,7 @@ pub struct HirCallExpr {
     pub type_args: Vec<HirType>,
     /// Named type arguments for generic functions
     /// Example: func::<W: 32>(args) has named_type_args = {"W": Nat(32)}
-    pub named_type_args: std::collections::HashMap<String, HirType>,
+    pub named_type_args: IndexMap<String, HirType>,
     /// Arguments
     pub args: Vec<HirExpression>,
     /// Implementation style hint from `#[impl_style::parallel]` attribute

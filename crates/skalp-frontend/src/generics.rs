@@ -1,7 +1,7 @@
 //! Generic type system and polymorphic instantiation
 
 use crate::ast::{Generic, GenericKind, Type};
-use std::collections::HashMap;
+use indexmap::IndexMap;
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -20,11 +20,11 @@ pub enum GenericError {
 #[derive(Debug, Clone, Default)]
 pub struct TypeSubstitution {
     /// Maps type parameters to concrete types
-    types: HashMap<String, Type>,
+    types: IndexMap<String, Type>,
     /// Maps const parameters to values
-    consts: HashMap<String, i64>,
+    consts: IndexMap<String, i64>,
     /// Maps width parameters to values
-    widths: HashMap<String, usize>,
+    widths: IndexMap<String, usize>,
 }
 
 impl TypeSubstitution {

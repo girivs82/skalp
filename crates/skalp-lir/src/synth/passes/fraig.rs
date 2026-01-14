@@ -24,7 +24,8 @@
 use super::{Pass, PassResult};
 use crate::synth::sat::{Lit, SatResult, Solver};
 use crate::synth::{Aig, AigLit, AigNode, AigNodeId, BarrierType};
-use std::collections::{HashMap, HashSet};
+use indexmap::IndexMap;
+use std::collections::HashSet;
 
 /// FRAIG configuration
 #[derive(Debug, Clone)]
@@ -116,7 +117,7 @@ struct CnfGenerator<'a> {
     aig: &'a Aig,
     solver: Solver,
     /// Mapping from AIG node ID to SAT variable
-    node_to_var: HashMap<AigNodeId, u32>,
+    node_to_var: IndexMap<AigNodeId, u32>,
     /// Next available variable
     next_var: u32,
 }
@@ -128,7 +129,7 @@ impl<'a> CnfGenerator<'a> {
         Self {
             aig,
             solver: Solver::new(num_vars),
-            node_to_var: HashMap::new(),
+            node_to_var: IndexMap::new(),
             next_var: 0,
         }
     }
@@ -342,8 +343,8 @@ impl Fraig {
     }
 
     /// Simulate the AIG with random patterns
-    fn simulate(&self, aig: &Aig, seed: u64) -> HashMap<AigNodeId, SimSignature> {
-        let mut signatures: HashMap<AigNodeId, SimSignature> = HashMap::new();
+    fn simulate(&self, aig: &Aig, seed: u64) -> IndexMap<AigNodeId, SimSignature> {
+        let mut signatures: IndexMap<AigNodeId, SimSignature> = IndexMap::new();
         let num_patterns = self.config.sim_patterns.div_ceil(64); // Number of u64s needed
 
         // Constant node is always 0
@@ -391,7 +392,7 @@ impl Fraig {
     /// Get signature for a literal (handling inversion)
     fn get_lit_signature(
         &self,
-        signatures: &HashMap<AigNodeId, SimSignature>,
+        signatures: &IndexMap<AigNodeId, SimSignature>,
         lit: AigLit,
         num_patterns: usize,
     ) -> SimSignature {
@@ -410,10 +411,10 @@ impl Fraig {
     fn find_candidate_classes(
         &self,
         aig: &Aig,
-        signatures: &HashMap<AigNodeId, SimSignature>,
+        signatures: &IndexMap<AigNodeId, SimSignature>,
     ) -> Vec<Vec<(AigNodeId, bool)>> {
         // Group nodes by canonical signature
-        let mut sig_to_nodes: HashMap<SimSignature, Vec<(AigNodeId, bool)>> = HashMap::new();
+        let mut sig_to_nodes: IndexMap<SimSignature, Vec<(AigNodeId, bool)>> = IndexMap::new();
 
         for (id, node) in aig.iter_nodes() {
             // Skip constant, input, latch, and barrier nodes
@@ -448,8 +449,8 @@ impl Fraig {
         &mut self,
         aig: &Aig,
         candidates: Vec<Vec<(AigNodeId, bool)>>,
-    ) -> HashMap<AigNodeId, AigLit> {
-        let mut node_map: HashMap<AigNodeId, AigLit> = HashMap::new();
+    ) -> IndexMap<AigNodeId, AigLit> {
+        let mut node_map: IndexMap<AigNodeId, AigLit> = IndexMap::new();
 
         for class in candidates {
             if class.len() < 2 {
@@ -575,9 +576,9 @@ impl Fraig {
     }
 
     /// Rebuild the AIG with merged nodes
-    fn rebuild_aig(&self, aig: &Aig, node_map: &HashMap<AigNodeId, AigLit>) -> Aig {
+    fn rebuild_aig(&self, aig: &Aig, node_map: &IndexMap<AigNodeId, AigLit>) -> Aig {
         let mut new_aig = Aig::new(aig.name.clone());
-        let mut old_to_new: HashMap<AigNodeId, AigLit> = HashMap::new();
+        let mut old_to_new: IndexMap<AigNodeId, AigLit> = IndexMap::new();
 
         // Constant maps to itself
         old_to_new.insert(AigNodeId::FALSE, AigLit::false_lit());
@@ -669,7 +670,7 @@ impl Fraig {
     }
 
     /// Translate a literal using the old-to-new mapping
-    fn translate_lit(&self, old_to_new: &HashMap<AigNodeId, AigLit>, lit: AigLit) -> AigLit {
+    fn translate_lit(&self, old_to_new: &IndexMap<AigNodeId, AigLit>, lit: AigLit) -> AigLit {
         if let Some(&new_lit) = old_to_new.get(&lit.node) {
             if lit.inverted {
                 new_lit.invert()

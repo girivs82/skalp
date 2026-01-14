@@ -16,10 +16,10 @@
 //! ISO 26262-5 Section 8.4.6 requires confidence in FIT values and derived metrics.
 //! This module enables expressing uncertainty in calculated metrics.
 
+use indexmap::IndexMap;
 use rand::prelude::*;
 use rand_distr::{Distribution, Exp, LogNormal, Normal};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 
 /// Configuration for Monte Carlo uncertainty analysis
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -326,7 +326,7 @@ pub struct MonteCarloResults {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SensitivityAnalysis {
     /// Sensitivity of each parameter (partial derivative approximation)
-    pub parameter_sensitivities: HashMap<String, ParameterSensitivity>,
+    pub parameter_sensitivities: IndexMap<String, ParameterSensitivity>,
     /// Parameters ranked by importance
     pub critical_parameters: Vec<String>,
     /// Data for tornado chart visualization
@@ -374,8 +374,8 @@ pub struct TornadoEntry {
 
 /// Run Monte Carlo uncertainty analysis on safety metrics
 pub fn run_monte_carlo(
-    fit_distributions: &HashMap<String, UncertainFit>,
-    dc_values: &HashMap<String, f64>,
+    fit_distributions: &IndexMap<String, UncertainFit>,
+    dc_values: &IndexMap<String, f64>,
     config: &MonteCarloConfig,
 ) -> MonteCarloResults {
     let mut rng: Box<dyn RngCore> = if let Some(seed) = config.seed {
@@ -391,7 +391,7 @@ pub fn run_monte_carlo(
     // Run Monte Carlo iterations
     for _ in 0..config.iterations {
         // Sample FIT values
-        let sampled_fits: HashMap<String, f64> = fit_distributions
+        let sampled_fits: IndexMap<String, f64> = fit_distributions
             .iter()
             .map(|(name, dist)| (name.clone(), dist.sample(&mut rng)))
             .collect();
@@ -427,8 +427,8 @@ pub fn run_monte_carlo(
 
 /// Calculate metrics from a set of FIT values
 fn calculate_metrics_from_fits(
-    fits: &HashMap<String, f64>,
-    dc_values: &HashMap<String, f64>,
+    fits: &IndexMap<String, f64>,
+    dc_values: &IndexMap<String, f64>,
 ) -> (f64, f64, f64) {
     let total_fit: f64 = fits.values().sum();
 
@@ -474,17 +474,17 @@ fn calculate_metrics_from_fits(
 
 /// Run sensitivity analysis to identify critical parameters
 fn run_sensitivity_analysis(
-    fit_distributions: &HashMap<String, UncertainFit>,
-    dc_values: &HashMap<String, f64>,
+    fit_distributions: &IndexMap<String, UncertainFit>,
+    dc_values: &IndexMap<String, f64>,
 ) -> SensitivityAnalysis {
-    let nominal_fits: HashMap<String, f64> = fit_distributions
+    let nominal_fits: IndexMap<String, f64> = fit_distributions
         .iter()
         .map(|(name, dist)| (name.clone(), dist.nominal))
         .collect();
 
     let (baseline_pmhf, _, _) = calculate_metrics_from_fits(&nominal_fits, dc_values);
 
-    let mut sensitivities = HashMap::new();
+    let mut sensitivities = IndexMap::new();
     let mut tornado_entries = Vec::new();
 
     // Vary each parameter by ±20% and measure effect
@@ -732,11 +732,11 @@ mod tests {
 
     #[test]
     fn test_monte_carlo_basic() {
-        let mut fit_distributions = HashMap::new();
+        let mut fit_distributions = IndexMap::new();
         fit_distributions.insert("cell1".to_string(), UncertainFit::fixed(50.0, "cell1"));
         fit_distributions.insert("cell2".to_string(), UncertainFit::fixed(30.0, "cell2"));
 
-        let mut dc_values = HashMap::new();
+        let mut dc_values = IndexMap::new();
         dc_values.insert("cell1".to_string(), 0.9);
         dc_values.insert("cell2".to_string(), 0.0);
 
@@ -750,7 +750,7 @@ mod tests {
 
     #[test]
     fn test_monte_carlo_with_uncertainty() {
-        let mut fit_distributions = HashMap::new();
+        let mut fit_distributions = IndexMap::new();
         fit_distributions.insert(
             "cell1".to_string(),
             UncertainFit::log_normal(50.0, 2.0, "cell1"),
@@ -760,7 +760,7 @@ mod tests {
             UncertainFit::log_normal(30.0, 2.0, "cell2"),
         );
 
-        let dc_values = HashMap::new();
+        let dc_values = IndexMap::new();
 
         let config = MonteCarloConfig::default().with_seed(42);
         let results = run_monte_carlo(&fit_distributions, &dc_values, &config);
@@ -773,7 +773,7 @@ mod tests {
 
     #[test]
     fn test_sensitivity_analysis() {
-        let mut fit_distributions = HashMap::new();
+        let mut fit_distributions = IndexMap::new();
         fit_distributions.insert(
             "high_fit_cell".to_string(),
             UncertainFit::fixed(100.0, "high_fit_cell"),
@@ -783,7 +783,7 @@ mod tests {
             UncertainFit::fixed(10.0, "low_fit_cell"),
         );
 
-        let dc_values = HashMap::new();
+        let dc_values = IndexMap::new();
 
         let sensitivity = run_sensitivity_analysis(&fit_distributions, &dc_values);
 
@@ -812,10 +812,10 @@ mod tests {
 
     #[test]
     fn test_format_report() {
-        let mut fit_distributions = HashMap::new();
+        let mut fit_distributions = IndexMap::new();
         fit_distributions.insert("cell1".to_string(), UncertainFit::fixed(50.0, "cell1"));
 
-        let dc_values = HashMap::new();
+        let dc_values = IndexMap::new();
         let config = MonteCarloConfig::quick().with_seed(42);
         let results = run_monte_carlo(&fit_distributions, &dc_values, &config);
 

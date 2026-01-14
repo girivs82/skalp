@@ -1,7 +1,7 @@
 //! Macro system for SKALP metaprogramming
 
 use crate::ast::{Expression, Literal, Statement, Type};
-use std::collections::HashMap;
+use indexmap::IndexMap;
 use thiserror::Error;
 
 /// Token for macro system (different from lexer Token)
@@ -102,7 +102,7 @@ pub enum MacroArg {
 /// Macro expansion context
 pub struct MacroExpander {
     /// Defined macros
-    macros: HashMap<String, MacroDef>,
+    macros: IndexMap<String, MacroDef>,
     /// Recursion depth
     depth: usize,
     /// Maximum recursion depth
@@ -118,7 +118,7 @@ impl Default for MacroExpander {
 impl MacroExpander {
     pub fn new() -> Self {
         let mut expander = Self {
-            macros: HashMap::new(),
+            macros: IndexMap::new(),
             depth: 0,
             max_depth: 32,
         };
@@ -268,7 +268,7 @@ impl MacroExpander {
         }
 
         // Create substitution map
-        let mut substitutions = HashMap::new();
+        let mut substitutions = IndexMap::new();
         for (param, arg) in def.params.iter().zip(&invocation.args) {
             substitutions.insert(param.name.clone(), arg.clone());
         }

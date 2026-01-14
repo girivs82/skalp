@@ -27,6 +27,7 @@ use super::{Aig, AigBuilder, AigWriter};
 use crate::gate_netlist::GateNetlist;
 use crate::pipeline_annotations::{ModuleAnnotations, PipelineAnnotations};
 use crate::tech_library::TechLibrary;
+use indexmap::IndexMap;
 use rayon::prelude::*;
 use std::time::Instant;
 
@@ -418,8 +419,7 @@ impl SynthEngine {
 
         // Group instances by module signature (name + cell count + output count)
         // This allows caching optimization results for identical modules
-        let mut module_groups: std::collections::HashMap<String, Vec<String>> =
-            std::collections::HashMap::new();
+        let mut module_groups: IndexMap<String, Vec<String>> = IndexMap::new();
 
         // Sort instance paths for deterministic iteration order (HashMap is non-deterministic)
         let mut sorted_instance_paths: Vec<_> = hier.instances.keys().collect();
@@ -451,8 +451,7 @@ impl SynthEngine {
 
         // Optimize each unique module type in parallel
         // Use the first instance of each type as the representative
-        let cache: Mutex<std::collections::HashMap<String, SynthResult>> =
-            Mutex::new(std::collections::HashMap::new());
+        let cache: Mutex<IndexMap<String, SynthResult>> = Mutex::new(IndexMap::new());
 
         // Sort signature keys for deterministic processing order
         let mut unique_sigs: Vec<_> = module_groups.keys().cloned().collect();
@@ -488,8 +487,7 @@ impl SynthEngine {
         let cached_results = cache.into_inner().unwrap();
 
         // Build result map by applying cached results to all instances
-        let mut optimized: std::collections::HashMap<String, SynthResult> =
-            std::collections::HashMap::new();
+        let mut optimized: IndexMap<String, SynthResult> = IndexMap::new();
 
         // Sort signature keys for deterministic iteration
         let mut sorted_sigs: Vec<_> = module_groups.keys().collect();

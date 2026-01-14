@@ -16,7 +16,7 @@
 //! - Synopsys Liberty format specification
 //! - Static Timing Analysis for Nanometer Designs (Bhasker & Chadha)
 
-use std::collections::HashMap;
+use indexmap::IndexMap;
 
 /// Time unit in picoseconds
 pub type TimePs = f64;
@@ -354,7 +354,7 @@ pub struct CellTiming {
     /// Cell area (in library units)
     pub area: f64,
     /// Pin information
-    pub pins: HashMap<String, PinTiming>,
+    pub pins: IndexMap<String, PinTiming>,
     /// Timing arcs
     pub timing_arcs: Vec<TimingArc>,
     /// Is this a sequential cell?
@@ -369,7 +369,7 @@ impl CellTiming {
         Self {
             name: name.to_string(),
             area: 0.0,
-            pins: HashMap::new(),
+            pins: IndexMap::new(),
             timing_arcs: Vec::new(),
             is_sequential: false,
             leakage_power: None,
@@ -542,11 +542,11 @@ impl OperatingConditions {
 #[derive(Debug, Clone)]
 pub struct TimingConstraints {
     /// Clock definitions
-    pub clocks: HashMap<String, ClockDefinition>,
+    pub clocks: IndexMap<String, ClockDefinition>,
     /// Input delays
-    pub input_delays: HashMap<String, InputDelay>,
+    pub input_delays: IndexMap<String, InputDelay>,
     /// Output delays
-    pub output_delays: HashMap<String, OutputDelay>,
+    pub output_delays: IndexMap<String, OutputDelay>,
     /// False paths
     pub false_paths: Vec<FalsePath>,
     /// Multi-cycle paths
@@ -563,9 +563,9 @@ impl TimingConstraints {
     /// Create empty timing constraints
     pub fn new() -> Self {
         Self {
-            clocks: HashMap::new(),
-            input_delays: HashMap::new(),
-            output_delays: HashMap::new(),
+            clocks: IndexMap::new(),
+            input_delays: IndexMap::new(),
+            output_delays: IndexMap::new(),
             false_paths: Vec::new(),
             multicycle_paths: Vec::new(),
         }

@@ -5,7 +5,7 @@
 
 use crate::sir::{SirExpression, SirOperation, BinaryOp, UnaryOp, ReduceOp, CombinationalBlock, SirSignalId};
 use crate::cone::CombinationalCone;
-use std::collections::HashMap;
+use indexmap::IndexMap;
 use std::fmt::Write;
 
 /// Metal shader generation result
@@ -16,9 +16,9 @@ pub struct ShaderGenerationResult {
     /// Shader entry point function name
     pub entry_point: String,
     /// Input buffer layout (signal_id -> byte_offset)
-    pub input_layout: HashMap<SirSignalId, usize>,
+    pub input_layout: IndexMap<SirSignalId, usize>,
     /// Output buffer layout (signal_id -> byte_offset)
-    pub output_layout: HashMap<SirSignalId, usize>,
+    pub output_layout: IndexMap<SirSignalId, usize>,
     /// Total input buffer size in bytes
     pub input_buffer_size: usize,
     /// Total output buffer size in bytes
@@ -30,7 +30,7 @@ pub struct MetalShaderGenerator {
     /// Next temporary variable ID
     next_temp_id: u32,
     /// Signal width information (signal_id -> width_in_bits)
-    signal_widths: HashMap<SirSignalId, usize>,
+    signal_widths: IndexMap<SirSignalId, usize>,
 }
 
 impl MetalShaderGenerator {
@@ -38,7 +38,7 @@ impl MetalShaderGenerator {
     pub fn new() -> Self {
         Self {
             next_temp_id: 0,
-            signal_widths: HashMap::new(),
+            signal_widths: IndexMap::new(),
         }
     }
 
@@ -47,7 +47,7 @@ impl MetalShaderGenerator {
         &mut self,
         cone: &CombinationalCone,
         blocks: &[CombinationalBlock],
-        signal_widths: &HashMap<SirSignalId, usize>,
+        signal_widths: &IndexMap<SirSignalId, usize>,
     ) -> Result<ShaderGenerationResult, ShaderGenerationError> {
         self.signal_widths = signal_widths.clone();
         self.next_temp_id = 0;
@@ -91,9 +91,9 @@ impl MetalShaderGenerator {
         &self,
         source: &mut String,
         cone: &CombinationalCone,
-    ) -> Result<(HashMap<SirSignalId, usize>, HashMap<SirSignalId, usize>, usize, usize), ShaderGenerationError> {
-        let mut input_layout = HashMap::new();
-        let mut output_layout = HashMap::new();
+    ) -> Result<(IndexMap<SirSignalId, usize>, IndexMap<SirSignalId, usize>, usize, usize), ShaderGenerationError> {
+        let mut input_layout = IndexMap::new();
+        let mut output_layout = IndexMap::new();
         let mut input_offset = 0;
         let mut output_offset = 0;
 
@@ -154,7 +154,7 @@ impl MetalShaderGenerator {
         writeln!(source)?;
 
         // Generate logic for each block in the cone
-        let block_map: HashMap<_, _> = blocks.iter().map(|b| (b.id, b)).collect();
+        let block_map: IndexMap<_, _> = blocks.iter().map(|b| (b.id, b)).collect();
         for &block_id in &cone.blocks {
             if let Some(block) = block_map.get(&block_id) {
                 writeln!(source, "    // Block {}", block_id.0)?;
@@ -424,7 +424,7 @@ mod tests {
             workgroup_size_hint: Some(64),
         };
 
-        let mut signal_widths = HashMap::new();
+        let mut signal_widths = IndexMap::new();
         signal_widths.insert(SirSignalId(0), 8);
         signal_widths.insert(SirSignalId(1), 8);
         signal_widths.insert(SirSignalId(2), 9);

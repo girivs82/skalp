@@ -3,7 +3,7 @@
 //! Type checking, name resolution, and semantic validation
 
 use crate::ast::SourceFile;
-use std::collections::HashMap;
+use indexmap::IndexMap;
 
 /// Semantic analyzer
 pub struct SemanticAnalyzer {
@@ -19,7 +19,7 @@ pub struct SemanticAnalyzer {
 #[derive(Debug, Clone)]
 pub struct SymbolTable {
     /// Scopes stack
-    scopes: Vec<HashMap<String, Symbol>>,
+    scopes: Vec<IndexMap<String, Symbol>>,
 }
 
 /// Symbol information
@@ -51,7 +51,7 @@ pub enum SymbolType {
 #[derive(Debug, Clone)]
 pub struct TypeEnvironment {
     /// Type bindings
-    bindings: HashMap<String, Type>,
+    bindings: IndexMap<String, Type>,
 }
 
 /// Type representation for semantic analysis
@@ -159,13 +159,13 @@ impl SymbolTable {
     /// Create a new symbol table
     pub fn new() -> Self {
         Self {
-            scopes: vec![HashMap::new()], // Global scope
+            scopes: vec![IndexMap::new()], // Global scope
         }
     }
 
     /// Enter a new scope
     pub fn enter_scope(&mut self) {
-        self.scopes.push(HashMap::new());
+        self.scopes.push(IndexMap::new());
     }
 
     /// Exit current scope
@@ -204,7 +204,7 @@ impl SymbolTable {
 impl TypeEnvironment {
     /// Create a new type environment
     pub fn new() -> Self {
-        let mut bindings = HashMap::new();
+        let mut bindings = IndexMap::new();
 
         // Add built-in types
         bindings.insert("bit".to_string(), Type::Bit(None));

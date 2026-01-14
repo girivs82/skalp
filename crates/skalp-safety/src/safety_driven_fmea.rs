@@ -53,9 +53,10 @@ use crate::fault_simulation::{
     TemporalOperator,
 };
 use crate::hierarchy::{DesignRef, FailureClass, InstancePath, Severity};
+use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use skalp_frontend::hir::DetectionMode;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
 // ============================================================================
@@ -68,7 +69,7 @@ pub struct EffectMonitor {
     /// Effect definitions to monitor
     effects: Vec<FailureEffectDef>,
     /// Signal history for temporal operators (signal_name -> last N values)
-    signal_history: HashMap<String, Vec<u64>>,
+    signal_history: IndexMap<String, Vec<u64>>,
     /// History depth (cycles to keep)
     history_depth: usize,
     /// Current cycle
@@ -80,14 +81,14 @@ impl EffectMonitor {
     pub fn new(spec: &SafetyGoalSimSpec) -> Self {
         Self {
             effects: spec.failure_effects.clone(),
-            signal_history: HashMap::new(),
+            signal_history: IndexMap::new(),
             history_depth: 1000, // Keep 1000 cycles of history
             current_cycle: 0,
         }
     }
 
     /// Update signal values at current cycle
-    pub fn update_signals(&mut self, signals: &HashMap<String, u64>) {
+    pub fn update_signals(&mut self, signals: &IndexMap<String, u64>) {
         for (name, value) in signals {
             let history = self.signal_history.entry(name.clone()).or_default();
             history.push(*value);
@@ -100,7 +101,7 @@ impl EffectMonitor {
     }
 
     /// Check which effects are triggered by current signal state
-    pub fn check_effects(&self, signals: &HashMap<String, u64>) -> Vec<String> {
+    pub fn check_effects(&self, signals: &IndexMap<String, u64>) -> Vec<String> {
         let mut triggered = Vec::new();
         for effect in &self.effects {
             if self.evaluate_condition(&effect.condition, signals) {
@@ -114,7 +115,7 @@ impl EffectMonitor {
     fn evaluate_condition(
         &self,
         condition: &EffectCondition,
-        signals: &HashMap<String, u64>,
+        signals: &IndexMap<String, u64>,
     ) -> bool {
         match condition {
             EffectCondition::Term(term) => self.evaluate_term(term, signals),
@@ -145,7 +146,7 @@ impl EffectMonitor {
     }
 
     /// Evaluate a single condition term
-    fn evaluate_term(&self, term: &ConditionTerm, signals: &HashMap<String, u64>) -> bool {
+    fn evaluate_term(&self, term: &ConditionTerm, signals: &IndexMap<String, u64>) -> bool {
         let signal_name = term.signal.to_string();
         let actual = signals.get(&signal_name).copied().unwrap_or(0);
 
@@ -174,7 +175,7 @@ impl EffectMonitor {
     fn evaluate_temporal_operator(
         &self,
         op: &TemporalOperator,
-        signals: &HashMap<String, u64>,
+        signals: &IndexMap<String, u64>,
     ) -> bool {
         match op {
             TemporalOperator::Rose(sig) => {
@@ -242,7 +243,7 @@ impl EffectMonitor {
     fn evaluate_temporal_operator_value(
         &self,
         op: &TemporalOperator,
-        signals: &HashMap<String, u64>,
+        signals: &IndexMap<String, u64>,
     ) -> u64 {
         match op {
             TemporalOperator::AbsDiff(a, b) => {
@@ -386,7 +387,7 @@ pub struct FiDrivenFmeaResult {
     /// Total fault injections performed
     pub total_injections: usize,
     /// Per-effect analysis with measured DC
-    pub effect_analyses: HashMap<String, EffectAnalysis>,
+    pub effect_analyses: IndexMap<String, EffectAnalysis>,
     /// All individual fault results
     pub fault_results: Vec<FaultEffectResult>,
     /// Generated FMEA
@@ -539,7 +540,7 @@ impl SafetyDrivenFmeaGenerator {
         let start = Instant::now();
 
         // Initialize effect analyses from spec
-        let mut effect_analyses: HashMap<String, EffectAnalysis> = HashMap::new();
+        let mut effect_analyses: IndexMap<String, EffectAnalysis> = IndexMap::new();
         for effect in &self.spec.failure_effects {
             effect_analyses.insert(
                 effect.name.clone(),
@@ -558,7 +559,7 @@ impl SafetyDrivenFmeaGenerator {
         );
 
         // Process each fault result
-        let mut detection_by_mechanism: HashMap<String, usize> = HashMap::new();
+        let mut detection_by_mechanism: IndexMap<String, usize> = IndexMap::new();
 
         for result in results {
             if result.triggered_effects.is_empty() {
@@ -711,7 +712,7 @@ impl SafetyDrivenFmeaGenerator {
     /// - PMHF = Σ(λ × (1 - DC))
     fn calculate_metrics(
         &self,
-        analyses: &HashMap<String, EffectAnalysis>,
+        analyses: &IndexMap<String, EffectAnalysis>,
         results: &[FaultEffectResult],
         total_injections: usize,
         total_fit: f64,
@@ -840,9 +841,9 @@ impl SafetyDrivenFmeaGenerator {
     /// Generate AutoFmeda from analyses
     fn generate_auto_fmea(
         &self,
-        analyses: &HashMap<String, EffectAnalysis>,
+        analyses: &IndexMap<String, EffectAnalysis>,
         results: &[FaultEffectResult],
-        detection_by_mechanism: &HashMap<String, usize>,
+        detection_by_mechanism: &IndexMap<String, usize>,
         design_name: &str,
         faults_injected: usize,
         total_fit: f64,
@@ -976,10 +977,10 @@ impl SafetyDrivenFmeaGenerator {
 #[cfg(feature = "sim-integration")]
 pub fn convert_campaign_to_effect_results(
     campaign: &skalp_sim::FaultCampaignResults,
-    primitive_paths: &HashMap<skalp_lir::lir::PrimitiveId, String>,
+    primitive_paths: &IndexMap<skalp_lir::lir::PrimitiveId, String>,
     monitor: &EffectMonitor,
-    output_signals: &HashMap<String, u64>,
-    golden_outputs: &HashMap<String, u64>,
+    output_signals: &IndexMap<String, u64>,
+    golden_outputs: &IndexMap<String, u64>,
 ) -> Vec<FaultEffectResult> {
     let mut results = Vec::new();
 
@@ -1077,7 +1078,7 @@ mod tests {
         let spec = SafetyGoalSimSpec::new("TestGoal", AsilLevel::D);
         let monitor = EffectMonitor::new(&spec);
 
-        let mut signals = HashMap::new();
+        let mut signals = IndexMap::new();
         signals.insert("motor_enable".to_string(), 1u64);
         signals.insert("safe_mode".to_string(), 0u64);
 
@@ -1103,7 +1104,7 @@ mod tests {
 
         let monitor = EffectMonitor::new(&spec);
 
-        let mut signals = HashMap::new();
+        let mut signals = IndexMap::new();
         signals.insert("motor_enable".to_string(), 1u64);
 
         let effects = monitor.check_effects(&signals);
@@ -1140,7 +1141,7 @@ mod tests {
         let monitor = EffectMonitor::new(&spec);
 
         // Both conditions true
-        let mut signals = HashMap::new();
+        let mut signals = IndexMap::new();
         signals.insert("motor_enable".to_string(), 1u64);
         signals.insert("safe_mode".to_string(), 0u64);
         let effects = monitor.check_effects(&signals);

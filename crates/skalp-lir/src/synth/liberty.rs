@@ -24,7 +24,7 @@ use super::timing::{
     CapacitanceFf, CellTiming, NldmTable, PinDirection, PinTiming, TimePs, TimingArc, TimingSense,
     TimingType,
 };
-use std::collections::HashMap;
+use indexmap::IndexMap;
 use std::str::FromStr;
 
 /// Liberty library
@@ -37,7 +37,7 @@ pub struct LibertyLibrary {
     /// Capacitance unit (e.g., "1fF", "1pF")
     pub capacitance_unit: String,
     /// Cells in the library
-    pub cells: HashMap<String, CellTiming>,
+    pub cells: IndexMap<String, CellTiming>,
     /// Default operating conditions
     pub nom_voltage: f64,
     pub nom_temperature: f64,
@@ -57,7 +57,7 @@ impl LibertyLibrary {
             name: name.to_string(),
             time_unit: "1ps".to_string(),
             capacitance_unit: "1fF".to_string(),
-            cells: HashMap::new(),
+            cells: IndexMap::new(),
             nom_voltage: 1.0,
             nom_temperature: 25.0,
             nom_process: 1.0,

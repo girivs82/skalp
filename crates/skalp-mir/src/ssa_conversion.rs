@@ -20,7 +20,7 @@
 //! ```
 
 use crate::mir::*;
-use std::collections::HashMap;
+use indexmap::IndexMap;
 
 /// SSA conversion context
 pub struct SsaConverter {
@@ -28,20 +28,20 @@ pub struct SsaConverter {
     next_var_id: u32,
     /// Maps original VariableId -> current SSA version ID
     /// Updated each time a variable is assigned
-    current_version: HashMap<VariableId, VariableId>,
+    current_version: IndexMap<VariableId, VariableId>,
     /// New variables created during SSA conversion
     new_variables: Vec<Variable>,
     /// Track which variables have been reassigned (need SSA)
-    reassignment_count: HashMap<VariableId, u32>,
+    reassignment_count: IndexMap<VariableId, u32>,
 }
 
 impl SsaConverter {
     pub fn new(starting_var_id: u32) -> Self {
         Self {
             next_var_id: starting_var_id,
-            current_version: HashMap::new(),
+            current_version: IndexMap::new(),
             new_variables: Vec::new(),
-            reassignment_count: HashMap::new(),
+            reassignment_count: IndexMap::new(),
         }
     }
 
@@ -125,7 +125,7 @@ impl SsaConverter {
         variables: &[Variable],
     ) {
         // Track first assignment to each variable (first assignment keeps original name)
-        let mut first_assignment: HashMap<VariableId, bool> = HashMap::new();
+        let mut first_assignment: IndexMap<VariableId, bool> = IndexMap::new();
 
         for assign in assignments.iter_mut() {
             // First update RHS references to use current versions

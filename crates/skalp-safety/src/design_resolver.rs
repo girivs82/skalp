@@ -7,8 +7,8 @@
 //! to auto-discover #[implements(...)] annotations from design files.
 
 use crate::hierarchy::{DesignPattern, DesignRef, InstancePath};
+use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 
 // ============================================================================
 // Design Index - Built from HIR
@@ -18,13 +18,13 @@ use std::collections::HashMap;
 #[derive(Debug, Clone, Default)]
 pub struct DesignIndex {
     /// All instances in design hierarchy
-    instances: HashMap<String, DesignInstance>,
+    instances: IndexMap<String, DesignInstance>,
     /// All signals in design hierarchy (fully qualified: "top.brake_main::pressure_a")
-    signals: HashMap<String, DesignSignal>,
+    signals: IndexMap<String, DesignSignal>,
     /// Top-level module name
     top_module: Option<String>,
     /// Instance hierarchy (parent -> children)
-    hierarchy: HashMap<String, Vec<String>>,
+    hierarchy: IndexMap<String, Vec<String>>,
     /// Safety annotations found in design (#[implements(...)])
     annotations: Vec<SafetyAnnotation>,
 }

@@ -23,14 +23,15 @@ use super::timing::{
     PinDirection, TimePs, TimingConstraints,
 };
 use super::{Aig, AigLit, AigNode, AigNodeId};
-use std::collections::{HashMap, HashSet, VecDeque};
+use indexmap::IndexMap;
+use std::collections::{HashSet, VecDeque};
 
 /// Static Timing Analyzer
 pub struct Sta {
     /// Timing information per node
-    node_timing: HashMap<AigNodeId, NetTiming>,
+    node_timing: IndexMap<AigNodeId, NetTiming>,
     /// Cell library with timing models
-    cell_library: HashMap<String, CellTiming>,
+    cell_library: IndexMap<String, CellTiming>,
     /// Timing constraints
     constraints: TimingConstraints,
     /// Operating conditions
@@ -53,8 +54,8 @@ impl Sta {
     /// Create a new STA engine with default settings
     pub fn new() -> Self {
         Self {
-            node_timing: HashMap::new(),
-            cell_library: HashMap::new(),
+            node_timing: IndexMap::new(),
+            cell_library: IndexMap::new(),
             constraints: TimingConstraints::new(),
             conditions: OperatingConditions::typical(),
             wire_delay_per_fanout: 10.0, // 10ps per fanout
@@ -100,8 +101,8 @@ impl Sta {
     }
 
     /// Compute fanout counts for each node
-    fn compute_fanout_counts(&self, aig: &Aig) -> HashMap<AigNodeId, usize> {
-        let mut counts: HashMap<AigNodeId, usize> = HashMap::new();
+    fn compute_fanout_counts(&self, aig: &Aig) -> IndexMap<AigNodeId, usize> {
+        let mut counts: IndexMap<AigNodeId, usize> = IndexMap::new();
 
         for (_, node) in aig.iter_nodes() {
             for fanin in node.fanins() {
@@ -163,7 +164,7 @@ impl Sta {
         &mut self,
         aig: &Aig,
         topo_order: &[AigNodeId],
-        fanout_counts: &HashMap<AigNodeId, usize>,
+        fanout_counts: &IndexMap<AigNodeId, usize>,
     ) {
         for &node_id in topo_order {
             let Some(node) = aig.get_node(node_id) else {
@@ -498,7 +499,7 @@ pub struct StaResult {
     /// Worst timing path
     pub worst_path: Option<TimingPath>,
     /// Per-node timing information
-    pub node_timing: HashMap<AigNodeId, NetTiming>,
+    pub node_timing: IndexMap<AigNodeId, NetTiming>,
 }
 
 impl StaResult {
@@ -510,7 +511,7 @@ impl StaResult {
             failing_endpoints: 0,
             total_endpoints: 0,
             worst_path: None,
-            node_timing: HashMap::new(),
+            node_timing: IndexMap::new(),
         }
     }
 
@@ -771,7 +772,7 @@ mod tests {
             failing_endpoints: 3,
             total_endpoints: 10,
             worst_path: None,
-            node_timing: HashMap::new(),
+            node_timing: IndexMap::new(),
         };
 
         let summary = result.summary();

@@ -25,7 +25,8 @@
 //! ```
 
 use crate::gate_netlist::{Cell, CellId, GateNet, GateNetId, GateNetlist};
-use std::collections::{HashMap, HashSet};
+use indexmap::IndexMap;
+use std::collections::HashSet;
 
 // ============================================================================
 // Optimization Statistics
@@ -80,11 +81,11 @@ pub struct GateOptimizer {
     /// Enable buffer removal
     pub enable_buffer_removal: bool,
     /// Known constant net values
-    constants: HashMap<GateNetId, bool>,
+    constants: IndexMap<GateNetId, bool>,
     /// Cells to remove
     cells_to_remove: HashSet<CellId>,
     /// Net replacements (old_net -> new_net)
-    net_replacements: HashMap<GateNetId, GateNetId>,
+    net_replacements: IndexMap<GateNetId, GateNetId>,
 }
 
 impl Default for GateOptimizer {
@@ -102,9 +103,9 @@ impl GateOptimizer {
             enable_boolean_simp: true,
             enable_mux_opt: true,
             enable_buffer_removal: true,
-            constants: HashMap::new(),
+            constants: IndexMap::new(),
             cells_to_remove: HashSet::new(),
-            net_replacements: HashMap::new(),
+            net_replacements: IndexMap::new(),
         }
     }
 
@@ -282,7 +283,7 @@ impl GateOptimizer {
                 if let Some(result) = self.evaluate_cell(cell) {
                     // Cell can be folded to constant
                     if let Some(&out) = cell.outputs.first() {
-                        use std::collections::hash_map::Entry;
+                        use indexmap::map::Entry;
                         if let Entry::Vacant(e) = self.constants.entry(out) {
                             e.insert(result);
                             self.cells_to_remove.insert(cell.id);
@@ -485,7 +486,7 @@ impl GateOptimizer {
         let mut removed = 0;
 
         // Build driver map: net_id -> cell_id that drives it
-        let mut driver_map: HashMap<GateNetId, CellId> = HashMap::new();
+        let mut driver_map: IndexMap<GateNetId, CellId> = IndexMap::new();
         for cell in &netlist.cells {
             for &out in &cell.outputs {
                 driver_map.insert(out, cell.id);
@@ -493,7 +494,7 @@ impl GateOptimizer {
         }
 
         // Find cell by ID
-        let cell_by_id: HashMap<CellId, &Cell> = netlist.cells.iter().map(|c| (c.id, c)).collect();
+        let cell_by_id: IndexMap<CellId, &Cell> = netlist.cells.iter().map(|c| (c.id, c)).collect();
 
         for cell in &netlist.cells {
             if self.cells_to_remove.contains(&cell.id) {
@@ -901,7 +902,7 @@ impl GateOptimizer {
 
         // Build driver map from ALL cells, including those marked for removal
         // We need to trace through the full driver chain to find live cells
-        let mut driver_map: HashMap<GateNetId, CellId> = HashMap::new();
+        let mut driver_map: IndexMap<GateNetId, CellId> = IndexMap::new();
         for cell in &netlist.cells {
             for &out in &cell.outputs {
                 driver_map.insert(out, cell.id);
@@ -924,7 +925,7 @@ impl GateOptimizer {
         }
 
         // Build cell by id map
-        let cell_by_id: HashMap<CellId, &Cell> = netlist.cells.iter().map(|c| (c.id, c)).collect();
+        let cell_by_id: IndexMap<CellId, &Cell> = netlist.cells.iter().map(|c| (c.id, c)).collect();
 
         // Propagate liveness backwards
         let mut worklist: Vec<GateNetId> = live_nets.iter().copied().collect();
@@ -1117,7 +1118,7 @@ impl GateOptimizer {
 
         // Remove all output nets from net_replacements - we never replace output port IDs
         for &output_net in &output_nets {
-            self.net_replacements.remove(&output_net);
+            self.net_replacements.shift_remove(&output_net);
         }
 
         // Note: We do NOT modify netlist.outputs at all. Output port IDs are fixed.

@@ -3,6 +3,7 @@
 //! This test creates a circuit similar to the CLE (function selection + routing)
 //! but at a smaller scale to debug convergence issues.
 
+use indexmap::IndexMap;
 use skalp_frontend::parse_and_build_hir;
 use skalp_lir::{get_stdlib_library, lower_mir_hierarchical, map_hierarchical_to_gates};
 use skalp_mir::MirCompiler;
@@ -3408,7 +3409,7 @@ fn test_mul_mux_cpu_vs_gpu() {
 
     // Count cells by type to verify we're using decomposed C-elements
     println!("\n=== Cell type counts ===");
-    let mut cell_counts: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
+    let mut cell_counts: IndexMap<String, u32> = IndexMap::new();
     for name in &all_nets {
         if name.contains("c_elem") && name.contains(".and") {
             *cell_counts.entry("C-elem AND".to_string()).or_insert(0) += 1;
@@ -4426,7 +4427,7 @@ fn test_mul_in_match_9way() {
     );
 
     // Count cell types to see if TH22/TH12 are being used
-    let mut cell_type_counts = std::collections::HashMap::new();
+    let mut cell_type_counts = IndexMap::new();
     for cell in &netlist.cells {
         *cell_type_counts.entry(cell.cell_type.clone()).or_insert(0) += 1;
     }
@@ -4537,7 +4538,7 @@ fn test_nested_if_in_match() {
     );
 
     // Count cell types
-    let mut cell_type_counts = std::collections::HashMap::new();
+    let mut cell_type_counts = IndexMap::new();
     for cell in &netlist.cells {
         *cell_type_counts.entry(cell.cell_type.clone()).or_insert(0) += 1;
     }

@@ -10,6 +10,7 @@
 //! This example shows how technology mapping provides accurate FIT rates
 //! for realistic safety analysis rather than generic estimates.
 
+use indexmap::IndexMap;
 use skalp_frontend::parse_and_build_hir;
 use skalp_lir::{
     gate_netlist::GateNetlist, get_stdlib_library, lower_mir_module_to_word_lir,
@@ -25,7 +26,6 @@ use skalp_safety::{
     hierarchy::{DesignRef, InstancePath, Severity},
 };
 use skalp_sim::convert_gate_netlist_to_sir;
-use std::collections::HashMap;
 
 // ============================================================================
 // Test Infrastructure
@@ -314,7 +314,7 @@ fn test_motor_controller_tech_mapping() {
     println!("Reset nets: {}", netlist.resets.len());
 
     // Count cell types
-    let mut cell_counts: HashMap<String, usize> = HashMap::new();
+    let mut cell_counts: IndexMap<String, usize> = IndexMap::new();
     for cell in &netlist.cells {
         *cell_counts.entry(cell.cell_type.clone()).or_insert(0) += 1;
     }

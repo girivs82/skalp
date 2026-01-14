@@ -5,7 +5,7 @@
 use crate::const_eval::{ConstEvaluator, ConstValue};
 use crate::hir::{Hir, HirEntity, HirExpression, HirImplementation, HirType};
 use crate::monomorphization::collector::{Instantiation, IntentValue};
-use std::collections::HashMap;
+use indexmap::IndexMap;
 
 /// Monomorphization engine
 pub struct MonomorphizationEngine<'hir> {
@@ -52,8 +52,8 @@ impl<'hir> MonomorphizationEngine<'hir> {
         let mut all_instantiations = std::collections::HashSet::new();
 
         // Build initial entity and implementation maps
-        let mut entity_map = HashMap::new();
-        let mut impl_map = HashMap::new();
+        let mut entity_map = IndexMap::new();
+        let mut impl_map = IndexMap::new();
 
         for entity in &hir.entities {
             entity_map.insert(entity.id, entity.clone());
@@ -90,7 +90,7 @@ impl<'hir> MonomorphizationEngine<'hir> {
         // Accumulators for all specialized entities and implementations
         let mut all_specialized_entities = Vec::new();
         let mut all_specialized_implementations = Vec::new();
-        let mut specialization_map = HashMap::new(); // Instantiation -> specialized entity ID
+        let mut specialization_map = IndexMap::new(); // Instantiation -> specialized entity ID
 
         // ITERATIVE MONOMORPHIZATION: Repeat until no new instantiations found
         // This handles nested generics where specializing one entity reveals new instantiations
@@ -215,7 +215,7 @@ impl<'hir> MonomorphizationEngine<'hir> {
                         //
                         // Create mapping: impl port index (0, 1, ...) -> specialized port ID
                         // by matching port positions
-                        let mut impl_to_specialized_map = HashMap::new();
+                        let mut impl_to_specialized_map = IndexMap::new();
                         // BUG #178 FIX: The impl_block does NOT necessarily use sequential port IDs
                         // starting from 0. When modules are merged, the impl block retains its
                         // original port IDs from parsing. We need to find the actual port IDs
@@ -268,7 +268,7 @@ impl<'hir> MonomorphizationEngine<'hir> {
                         // For any impl port IDs that weren't matched by direct ID, try positional matching
                         // This handles cases where the impl block uses sequential IDs (0, 1, 2, ...)
                         for &impl_port_id in &impl_port_ids_used {
-                            if let std::collections::hash_map::Entry::Vacant(e) =
+                            if let indexmap::map::Entry::Vacant(e) =
                                 impl_to_specialized_map.entry(impl_port_id)
                             {
                                 // Use the impl port ID as a position index
@@ -425,13 +425,13 @@ impl<'hir> MonomorphizationEngine<'hir> {
         instantiation: &Instantiation,
         specialized_id: crate::hir::EntityId,
         next_port_id: &mut u32,
-    ) -> (HirEntity, HashMap<crate::hir::PortId, crate::hir::PortId>) {
+    ) -> (HirEntity, IndexMap<crate::hir::PortId, crate::hir::PortId>) {
         // Create new evaluator with const bindings
         let mut evaluator = ConstEvaluator::new();
         evaluator.bind_all(instantiation.const_args.clone());
 
         // Create mapping from old port IDs to new port IDs
-        let mut port_id_map = HashMap::new();
+        let mut port_id_map = IndexMap::new();
 
         // Substitute types in ports and assign new IDs
         let specialized_ports = entity
@@ -488,7 +488,7 @@ impl<'hir> MonomorphizationEngine<'hir> {
         impl_block: &HirImplementation,
         specialized_entity: &HirEntity,
         instantiation: &Instantiation,
-        port_id_map: &HashMap<crate::hir::PortId, crate::hir::PortId>,
+        port_id_map: &IndexMap<crate::hir::PortId, crate::hir::PortId>,
     ) -> HirImplementation {
         use crate::hir::{HirAssignment, HirConstant, HirSignal, HirVariable};
 
@@ -676,8 +676,8 @@ impl<'hir> MonomorphizationEngine<'hir> {
     fn substitute_statement_with_ports(
         &self,
         stmt: &crate::hir::HirStatement,
-        const_args: &HashMap<String, ConstValue>,
-        port_id_map: &HashMap<crate::hir::PortId, crate::hir::PortId>,
+        const_args: &IndexMap<String, ConstValue>,
+        port_id_map: &IndexMap<crate::hir::PortId, crate::hir::PortId>,
     ) -> crate::hir::HirStatement {
         use crate::hir::HirStatement;
 
@@ -743,9 +743,9 @@ impl<'hir> MonomorphizationEngine<'hir> {
                     &Instantiation {
                         entity_name: String::new(),
                         entity_id: crate::hir::EntityId(0),
-                        type_args: HashMap::new(),
+                        type_args: IndexMap::new(),
                         const_args: const_args.clone(),
-                        intent_args: HashMap::new(),
+                        intent_args: IndexMap::new(),
                     },
                 );
                 HirStatement::Let(new_let)
@@ -1141,7 +1141,7 @@ impl<'hir> MonomorphizationEngine<'hir> {
     fn substitute_expr(
         &self,
         expr: &HirExpression,
-        const_args: &HashMap<String, ConstValue>,
+        const_args: &IndexMap<String, ConstValue>,
     ) -> HirExpression {
         match expr {
             // Generic parameter reference - substitute with value
@@ -1508,7 +1508,7 @@ impl<'hir> MonomorphizationEngine<'hir> {
         instantiations: &'a [Instantiation],
     ) -> Option<&'a Instantiation> {
         // Evaluate instance's generic arguments
-        let mut const_args = HashMap::new();
+        let mut const_args = IndexMap::new();
         // Use helper to create evaluator with constants AND enums registered
         // BUG #168 FIX: Previously only enums were registered, causing FloatFormat
         // constants like IEEE754_32 to not be found during evaluation
@@ -1537,7 +1537,7 @@ impl<'hir> MonomorphizationEngine<'hir> {
     fn remap_event_trigger_ports(
         &self,
         trigger: &crate::hir::HirEventTrigger,
-        port_id_map: &HashMap<crate::hir::PortId, crate::hir::PortId>,
+        port_id_map: &IndexMap<crate::hir::PortId, crate::hir::PortId>,
     ) -> crate::hir::HirEventTrigger {
         use crate::hir::{HirEventSignal, HirEventTrigger};
 
@@ -1569,7 +1569,7 @@ impl<'hir> MonomorphizationEngine<'hir> {
     fn substitute_lvalue(
         &self,
         lvalue: &crate::hir::HirLValue,
-        const_args: &HashMap<String, ConstValue>,
+        const_args: &IndexMap<String, ConstValue>,
     ) -> crate::hir::HirLValue {
         use crate::hir::HirLValue;
 
@@ -1601,7 +1601,7 @@ impl<'hir> MonomorphizationEngine<'hir> {
     fn remap_lvalue_ports(
         &self,
         lvalue: &crate::hir::HirLValue,
-        port_id_map: &HashMap<crate::hir::PortId, crate::hir::PortId>,
+        port_id_map: &IndexMap<crate::hir::PortId, crate::hir::PortId>,
     ) -> crate::hir::HirLValue {
         use crate::hir::HirLValue;
 
@@ -1640,7 +1640,7 @@ impl<'hir> MonomorphizationEngine<'hir> {
     fn remap_expr_ports(
         &self,
         expr: &HirExpression,
-        port_id_map: &HashMap<crate::hir::PortId, crate::hir::PortId>,
+        port_id_map: &IndexMap<crate::hir::PortId, crate::hir::PortId>,
     ) -> HirExpression {
         match expr {
             HirExpression::Port(old_id) => {
@@ -1849,9 +1849,9 @@ mod tests {
         let mut inst = Instantiation {
             entity_name: "Test".to_string(),
             entity_id: EntityId(0),
-            type_args: HashMap::new(),
-            const_args: HashMap::new(),
-            intent_args: HashMap::new(),
+            type_args: IndexMap::new(),
+            const_args: IndexMap::new(),
+            intent_args: IndexMap::new(),
         };
 
         // Type parameter substitution

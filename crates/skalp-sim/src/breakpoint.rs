@@ -7,8 +7,8 @@
 //! - Specific cycle numbers
 //! - Named breakpoints with custom messages
 
+use indexmap::IndexMap;
 use skalp_frontend::hir::BreakpointConfig;
-use std::collections::HashMap;
 
 /// Action to take when a breakpoint triggers
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -188,9 +188,9 @@ impl BreakpointCondition {
 #[derive(Debug, Default)]
 pub struct BreakpointManager {
     /// Registered breakpoints, keyed by signal name
-    breakpoints: HashMap<String, Vec<SimBreakpoint>>,
+    breakpoints: IndexMap<String, Vec<SimBreakpoint>>,
     /// Previous values for edge detection
-    previous_values: HashMap<String, Vec<u8>>,
+    previous_values: IndexMap<String, Vec<u8>>,
     /// Next breakpoint ID
     next_id: u32,
     /// Whether breakpoint checking is enabled
@@ -203,8 +203,8 @@ impl BreakpointManager {
     /// Create a new breakpoint manager
     pub fn new() -> Self {
         Self {
-            breakpoints: HashMap::new(),
-            previous_values: HashMap::new(),
+            breakpoints: IndexMap::new(),
+            previous_values: IndexMap::new(),
             next_id: 0,
             enabled: true,
             pending_hits: Vec::new(),
@@ -302,7 +302,7 @@ impl BreakpointManager {
     pub fn check_cycle(
         &mut self,
         cycle: u64,
-        signals: &HashMap<String, Vec<u8>>,
+        signals: &IndexMap<String, Vec<u8>>,
     ) -> Vec<BreakpointHit> {
         if !self.enabled {
             return Vec::new();
@@ -471,7 +471,7 @@ mod tests {
         assert_eq!(manager.count(), 1);
 
         // Check with signal = 0 (should not trigger)
-        let mut signals = HashMap::new();
+        let mut signals = IndexMap::new();
         signals.insert("error_flag".to_string(), vec![0]);
         let hits = manager.check_cycle(0, &signals);
         assert!(hits.is_empty());

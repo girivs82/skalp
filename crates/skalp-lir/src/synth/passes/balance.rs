@@ -16,7 +16,8 @@
 
 use super::{Pass, PassResult};
 use crate::synth::{Aig, AigLit, AigNode, AigNodeId, AigSafetyInfo, BarrierType};
-use std::collections::{HashMap, HashSet};
+use indexmap::IndexMap;
+use std::collections::HashSet;
 
 /// Tree balancing pass
 pub struct Balance {
@@ -34,7 +35,7 @@ pub struct Balance {
 fn collect_leaves(
     aig: &Aig,
     lit: AigLit,
-    fanout_counts: &HashMap<AigNodeId, usize>,
+    fanout_counts: &IndexMap<AigNodeId, usize>,
     leaves: &mut Vec<AigLit>,
     visited: &mut HashSet<AigNodeId>,
 ) {
@@ -114,8 +115,8 @@ impl Balance {
     }
 
     /// Compute fanout counts for all nodes
-    fn compute_fanout_counts(&self, aig: &Aig) -> HashMap<AigNodeId, usize> {
-        let mut counts: HashMap<AigNodeId, usize> = HashMap::new();
+    fn compute_fanout_counts(&self, aig: &Aig) -> IndexMap<AigNodeId, usize> {
+        let mut counts: IndexMap<AigNodeId, usize> = IndexMap::new();
 
         for (_, node) in aig.iter_nodes() {
             for fanin in node.fanins() {
@@ -157,7 +158,7 @@ impl Pass for Balance {
         // Phase 1: Process inputs, pre-create latches/barriers, then process AND nodes
         // Phase 2: Update latch/barrier data with resolved values
         let mut new_aig = Aig::new(aig.name.clone());
-        let mut node_map: HashMap<AigNodeId, AigLit> = HashMap::new();
+        let mut node_map: IndexMap<AigNodeId, AigLit> = IndexMap::new();
 
         // Map constant
         node_map.insert(AigNodeId::FALSE, AigLit::false_lit());
@@ -323,7 +324,7 @@ impl Pass for Balance {
 }
 
 /// Resolve a literal through the node mapping
-fn resolve_lit(map: &HashMap<AigNodeId, AigLit>, lit: AigLit) -> AigLit {
+fn resolve_lit(map: &IndexMap<AigNodeId, AigLit>, lit: AigLit) -> AigLit {
     if lit.node == AigNodeId::FALSE {
         // Constant false is always valid
         return lit;

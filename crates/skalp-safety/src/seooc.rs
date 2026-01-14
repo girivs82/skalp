@@ -10,8 +10,8 @@
 //! - Generate derived safety requirements for system integrator
 
 use crate::asil::AsilLevel;
+use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 
 /// Result of SEooC analysis
 #[derive(Debug, Clone, Serialize, Deserialize)]

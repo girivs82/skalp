@@ -1,15 +1,15 @@
 use crate::clock_manager::ClockManager;
 use crate::simulator::{SimulationConfig, SimulationError, SimulationResult, Simulator};
+use indexmap::IndexMap;
 use skalp_sir::SirModule;
-use std::collections::HashMap;
 use std::time::Duration;
 use tokio::time::timeout;
 
 #[derive(Debug, Clone)]
 pub struct TestVector {
     pub cycle: u64,
-    pub inputs: HashMap<String, Vec<u8>>,
-    pub expected_outputs: Option<HashMap<String, Vec<u8>>>,
+    pub inputs: IndexMap<String, Vec<u8>>,
+    pub expected_outputs: Option<IndexMap<String, Vec<u8>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -237,15 +237,15 @@ impl Testbench {
 // Builder pattern for creating test vectors
 pub struct TestVectorBuilder {
     cycle: u64,
-    inputs: HashMap<String, Vec<u8>>,
-    expected_outputs: Option<HashMap<String, Vec<u8>>>,
+    inputs: IndexMap<String, Vec<u8>>,
+    expected_outputs: Option<IndexMap<String, Vec<u8>>>,
 }
 
 impl TestVectorBuilder {
     pub fn new(cycle: u64) -> Self {
         TestVectorBuilder {
             cycle,
-            inputs: HashMap::new(),
+            inputs: IndexMap::new(),
             expected_outputs: None,
         }
     }
@@ -263,7 +263,7 @@ impl TestVectorBuilder {
 
     pub fn with_expected_output(mut self, name: &str, value: Vec<u8>) -> Self {
         if self.expected_outputs.is_none() {
-            self.expected_outputs = Some(HashMap::new());
+            self.expected_outputs = Some(IndexMap::new());
         }
         if let Some(outputs) = &mut self.expected_outputs {
             outputs.insert(name.to_string(), value);
@@ -273,7 +273,7 @@ impl TestVectorBuilder {
 
     pub fn with_expected_output_u32(mut self, name: &str, value: u32) -> Self {
         if self.expected_outputs.is_none() {
-            self.expected_outputs = Some(HashMap::new());
+            self.expected_outputs = Some(IndexMap::new());
         }
         if let Some(outputs) = &mut self.expected_outputs {
             outputs.insert(name.to_string(), value.to_le_bytes().to_vec());

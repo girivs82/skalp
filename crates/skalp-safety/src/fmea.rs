@@ -5,10 +5,10 @@
 
 use crate::asil::AsilLevel;
 use chrono::{DateTime, Utc};
+use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use skalp_frontend::hir::{HirEntity as Entity, HirIntent as Intent};
 use skalp_mir::mir::Module;
-use std::collections::HashMap;
 use uuid::Uuid;
 
 /// FMEA analysis for a design
@@ -139,7 +139,7 @@ pub struct FunctionalAnalysis {
     /// System functions
     pub functions: Vec<SystemFunction>,
     /// Function dependencies
-    pub dependencies: HashMap<String, Vec<String>>,
+    pub dependencies: IndexMap<String, Vec<String>>,
     /// Critical paths
     pub critical_paths: Vec<CriticalPath>,
 }
@@ -508,11 +508,11 @@ pub struct FmeaSummary {
     /// Total number of entries
     pub total_entries: usize,
     /// Entries by criticality level
-    pub criticality_breakdown: HashMap<CriticalityLevel, usize>,
+    pub criticality_breakdown: IndexMap<CriticalityLevel, usize>,
     /// Entries by ASIL level
-    pub asil_breakdown: HashMap<AsilLevel, usize>,
+    pub asil_breakdown: IndexMap<AsilLevel, usize>,
     /// Entries by failure class
-    pub failure_class_breakdown: HashMap<FailureClass, usize>,
+    pub failure_class_breakdown: IndexMap<FailureClass, usize>,
     /// Average RPN
     pub average_rpn: Option<f64>,
     /// Highest risk entries
@@ -562,11 +562,11 @@ pub enum AnalysisDepth {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FailureModeDatabase {
     /// Failure modes by component type
-    pub component_failures: HashMap<ComponentType, Vec<FailureMode>>,
+    pub component_failures: IndexMap<ComponentType, Vec<FailureMode>>,
     /// Generic failure modes
     pub generic_failures: Vec<FailureMode>,
     /// Failure rate data
-    pub failure_rates: HashMap<String, f64>,
+    pub failure_rates: IndexMap<String, f64>,
 }
 
 impl FmeaGenerator {
@@ -671,7 +671,7 @@ impl FmeaGenerator {
         intents: &[Intent],
     ) -> Result<FunctionalAnalysis, FmeaError> {
         let mut functions = vec![];
-        let dependencies = HashMap::new();
+        let dependencies = IndexMap::new();
 
         // Create functions from intents
         for intent in intents {
@@ -893,9 +893,9 @@ impl FmeaGenerator {
     /// Calculate summary statistics
     fn calculate_summary(&self, entries: &[FmeaEntry]) -> FmeaSummary {
         let total_entries = entries.len();
-        let mut criticality_breakdown = HashMap::new();
-        let mut asil_breakdown = HashMap::new();
-        let mut failure_class_breakdown = HashMap::new();
+        let mut criticality_breakdown = IndexMap::new();
+        let mut asil_breakdown = IndexMap::new();
+        let mut failure_class_breakdown = IndexMap::new();
         let mut rpn_sum = 0.0;
         let mut rpn_count = 0;
         let mut open_actions = 0;
@@ -1001,9 +1001,9 @@ pub enum FmeaError {
 impl Default for FailureModeDatabase {
     fn default() -> Self {
         let mut db = Self {
-            component_failures: HashMap::new(),
+            component_failures: IndexMap::new(),
             generic_failures: vec![],
-            failure_rates: HashMap::new(),
+            failure_rates: IndexMap::new(),
         };
 
         // Add common failure modes for processors

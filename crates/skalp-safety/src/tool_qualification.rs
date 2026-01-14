@@ -21,8 +21,8 @@
 //! | TI2 | TD2 | TCL2 |
 //! | TI2 | TD3 | TCL3 |
 
+use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 
 // ============================================================================
 // Tool Confidence Level Assessment
@@ -357,7 +357,7 @@ pub struct TestInput {
     /// Input file paths
     pub files: Vec<String>,
     /// Input parameters
-    pub parameters: HashMap<String, String>,
+    pub parameters: IndexMap<String, String>,
     /// Preconditions
     pub preconditions: Vec<String>,
 }
@@ -370,7 +370,7 @@ pub struct ExpectedOutput {
     /// Expected output files
     pub files: Vec<String>,
     /// Expected values/results
-    pub values: HashMap<String, String>,
+    pub values: IndexMap<String, String>,
     /// Acceptance criteria
     pub acceptance_criteria: Vec<String>,
 }
@@ -383,7 +383,7 @@ pub struct TestCoverage {
     /// Achieved coverage percentage
     pub achieved_percentage: f64,
     /// Coverage by test type
-    pub by_type: HashMap<String, CoverageEntry>,
+    pub by_type: IndexMap<String, CoverageEntry>,
     /// Uncovered areas
     pub uncovered: Vec<String>,
 }
@@ -906,7 +906,7 @@ pub fn skalp_validation_test_suite() -> ValidationTestSuite {
     suite.coverage = TestCoverage {
         required_percentage: 90.0,
         achieved_percentage: 0.0, // Calculated after running tests
-        by_type: HashMap::new(),
+        by_type: IndexMap::new(),
         uncovered: Vec::new(),
     };
 

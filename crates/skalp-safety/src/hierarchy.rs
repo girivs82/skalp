@@ -9,10 +9,10 @@
 //! The parent-child relationship automatically provides full traceability.
 
 use crate::asil::AsilLevel;
+use indexmap::IndexMap;
 use petgraph::graph::NodeIndex;
 use petgraph::Graph;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::fmt;
 use std::time::Duration;
 
@@ -547,9 +547,9 @@ pub struct FmeaComponent {
     pub part: String,
 
     /// Failure modes grouped by detecting PSM (psm_name -> modes)
-    pub psm_detected: HashMap<String, Vec<FailureMode>>,
+    pub psm_detected: IndexMap<String, Vec<FailureMode>>,
     /// Failure modes grouped by detecting LSM (lsm_name -> modes)
-    pub lsm_detected: HashMap<String, Vec<FailureMode>>,
+    pub lsm_detected: IndexMap<String, Vec<FailureMode>>,
     /// Safe failure modes (no detection needed)
     pub safe_modes: Vec<FailureMode>,
 }
@@ -561,8 +561,8 @@ impl FmeaComponent {
             design_ref,
             library,
             part,
-            psm_detected: HashMap::new(),
-            lsm_detected: HashMap::new(),
+            psm_detected: IndexMap::new(),
+            lsm_detected: IndexMap::new(),
             safe_modes: Vec::new(),
         }
     }
@@ -1035,7 +1035,7 @@ pub struct HardwareSoftwareInterface {
     /// Timing constraints
     pub timing: HsiTiming,
     /// Signal-specific ASIL overrides
-    pub asil_overrides: HashMap<String, AsilLevel>,
+    pub asil_overrides: IndexMap<String, AsilLevel>,
 }
 
 impl HardwareSoftwareInterface {
@@ -1073,7 +1073,7 @@ pub struct HsiTiming {
     /// Global FTTI
     pub ftti: Option<Duration>,
     /// Signal-specific latency constraints
-    pub signal_latencies: HashMap<String, Duration>,
+    pub signal_latencies: IndexMap<String, Duration>,
 }
 
 // ============================================================================
@@ -1097,9 +1097,9 @@ pub struct SafetyEntity {
     pub covers: Vec<DesignPattern>,
 
     /// PSM DC overrides (measured values)
-    pub psm_overrides: HashMap<String, f64>,
+    pub psm_overrides: IndexMap<String, f64>,
     /// LSM LC overrides (measured values)
-    pub lsm_overrides: HashMap<String, f64>,
+    pub lsm_overrides: IndexMap<String, f64>,
 
     /// Hardware-Software Interface
     pub hsi: HardwareSoftwareInterface,
@@ -1124,8 +1124,8 @@ impl SafetyEntity {
             name,
             implements,
             covers: Vec::new(),
-            psm_overrides: HashMap::new(),
-            lsm_overrides: HashMap::new(),
+            psm_overrides: IndexMap::new(),
+            lsm_overrides: IndexMap::new(),
             hsi: HardwareSoftwareInterface::default(),
             fmea: Vec::new(),
             instances: Vec::new(),
@@ -1356,32 +1356,32 @@ pub enum SafetyRelationType {
 #[derive(Debug, Clone)]
 pub struct SafetyHierarchy {
     /// Safety goals by name
-    pub goals: HashMap<String, SafetyGoal>,
+    pub goals: IndexMap<String, SafetyGoal>,
     /// Safety entities by name
-    pub entities: HashMap<String, SafetyEntity>,
+    pub entities: IndexMap<String, SafetyEntity>,
     /// Safety traits by name
-    pub traits: HashMap<String, SafetyTrait>,
+    pub traits: IndexMap<String, SafetyTrait>,
     /// FMEA traits by name
-    pub fmea_traits: HashMap<String, FmeaTrait>,
+    pub fmea_traits: IndexMap<String, FmeaTrait>,
     /// HSI traits by name
-    pub hsi_traits: HashMap<String, HsiTrait>,
+    pub hsi_traits: IndexMap<String, HsiTrait>,
     /// Relationship graph
     pub relationship_graph: Graph<String, SafetyRelationType>,
     /// Node indices for graph
-    pub node_indices: HashMap<String, NodeIndex>,
+    pub node_indices: IndexMap<String, NodeIndex>,
 }
 
 impl SafetyHierarchy {
     /// Create a new empty hierarchy
     pub fn new() -> Self {
         Self {
-            goals: HashMap::new(),
-            entities: HashMap::new(),
-            traits: HashMap::new(),
-            fmea_traits: HashMap::new(),
-            hsi_traits: HashMap::new(),
+            goals: IndexMap::new(),
+            entities: IndexMap::new(),
+            traits: IndexMap::new(),
+            fmea_traits: IndexMap::new(),
+            hsi_traits: IndexMap::new(),
             relationship_graph: Graph::new(),
-            node_indices: HashMap::new(),
+            node_indices: IndexMap::new(),
         }
     }
 

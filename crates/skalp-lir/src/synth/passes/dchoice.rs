@@ -17,7 +17,8 @@
 
 use super::{Pass, PassResult};
 use crate::synth::{Aig, AigLit, AigNode, AigNodeId};
-use std::collections::{HashMap, HashSet};
+use indexmap::IndexMap;
+use std::collections::HashSet;
 
 /// Maximum choices per node
 const MAX_CHOICES: usize = 4;
@@ -58,8 +59,8 @@ impl Dchoice {
         &self,
         aig: &mut Aig,
         passes: &[&str],
-    ) -> HashMap<AigNodeId, Vec<AigNodeId>> {
-        let mut choices: HashMap<AigNodeId, Vec<AigNodeId>> = HashMap::new();
+    ) -> IndexMap<AigNodeId, Vec<AigNodeId>> {
+        let mut choices: IndexMap<AigNodeId, Vec<AigNodeId>> = IndexMap::new();
 
         // Record original nodes before synthesis
         let original_nodes: Vec<AigNodeId> = aig
@@ -190,7 +191,7 @@ impl Dchoice {
             return None;
         }
 
-        let leaf_map: HashMap<AigNodeId, usize> =
+        let leaf_map: IndexMap<AigNodeId, usize> =
             leaves.iter().enumerate().map(|(i, &n)| (n, i)).collect();
 
         let num_rows = 1usize << leaves.len();
@@ -210,7 +211,7 @@ impl Dchoice {
         aig: &Aig,
         node: AigNodeId,
         assignment: usize,
-        leaf_map: &HashMap<AigNodeId, usize>,
+        leaf_map: &IndexMap<AigNodeId, usize>,
     ) -> bool {
         match aig.get_node(node) {
             Some(AigNode::Input { .. }) | Some(AigNode::Latch { .. }) => {
@@ -235,7 +236,7 @@ impl Dchoice {
         aig: &Aig,
         lit: AigLit,
         assignment: usize,
-        leaf_map: &HashMap<AigNodeId, usize>,
+        leaf_map: &IndexMap<AigNodeId, usize>,
     ) -> bool {
         let val = self.evaluate(aig, lit.node, assignment, leaf_map);
         if lit.inverted {
@@ -267,7 +268,7 @@ impl Pass for Dchoice {
             vec!["refactor", "balance", "rewrite"],
         ];
 
-        let mut all_choices: HashMap<AigNodeId, Vec<AigNodeId>> = HashMap::new();
+        let mut all_choices: IndexMap<AigNodeId, Vec<AigNodeId>> = IndexMap::new();
 
         // Run each flow and collect choices
         for flow in &flows {

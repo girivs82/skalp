@@ -6,7 +6,7 @@ use crate::hir::{
     ConstantId, HirBinaryOp, HirEnumType, HirExpression, HirFunction, HirLiteral, HirStatement,
     HirType, HirUnaryOp,
 };
-use std::collections::HashMap;
+use indexmap::IndexMap;
 
 /// Const expression evaluation result
 #[derive(Debug, Clone)]
@@ -24,7 +24,7 @@ pub enum ConstValue {
     /// Float format descriptor
     FloatFormat(FloatFormatValue),
     /// Struct value (field name -> value)
-    Struct(HashMap<String, ConstValue>),
+    Struct(IndexMap<String, ConstValue>),
 }
 
 /// Float format constant value
@@ -111,18 +111,18 @@ type BuiltinConstFn = fn(&[ConstValue]) -> Result<ConstValue, EvalError>;
 /// Const expression evaluator
 pub struct ConstEvaluator {
     /// Symbol table for const bindings (parameter name -> value)
-    const_bindings: HashMap<String, ConstValue>,
+    const_bindings: IndexMap<String, ConstValue>,
     /// Built-in const functions
-    builtin_fns: HashMap<String, BuiltinConstFn>,
+    builtin_fns: IndexMap<String, BuiltinConstFn>,
     /// User-defined const functions
-    user_fns: HashMap<String, HirFunction>,
+    user_fns: IndexMap<String, HirFunction>,
     /// Constant definitions (ID -> value expression)
-    constants: HashMap<ConstantId, HirExpression>,
+    constants: IndexMap<ConstantId, HirExpression>,
     /// Named constant definitions (name -> value expression)
     /// Used for resolving const identifiers in generic arguments
-    named_constants: HashMap<String, HirExpression>,
+    named_constants: IndexMap<String, HirExpression>,
     /// Enum definitions (enum name -> enum type with variants)
-    enums: HashMap<String, HirEnumType>,
+    enums: IndexMap<String, HirEnumType>,
     /// Recursion depth (for preventing infinite recursion)
     recursion_depth: usize,
 }
@@ -155,7 +155,7 @@ pub enum EvalError {
 impl ConstEvaluator {
     /// Create a new const evaluator
     pub fn new() -> Self {
-        let mut builtin_fns: HashMap<String, BuiltinConstFn> = HashMap::new();
+        let mut builtin_fns: IndexMap<String, BuiltinConstFn> = IndexMap::new();
 
         // Register built-in functions
         // Logarithmic & Exponential
@@ -194,12 +194,12 @@ impl ConstEvaluator {
         );
 
         Self {
-            const_bindings: HashMap::new(),
+            const_bindings: IndexMap::new(),
             builtin_fns,
-            user_fns: HashMap::new(),
-            constants: HashMap::new(),
-            named_constants: HashMap::new(),
-            enums: HashMap::new(),
+            user_fns: IndexMap::new(),
+            constants: IndexMap::new(),
+            named_constants: IndexMap::new(),
+            enums: IndexMap::new(),
             recursion_depth: 0,
         }
     }
@@ -210,13 +210,13 @@ impl ConstEvaluator {
     }
 
     /// Bind multiple const parameters
-    pub fn bind_all(&mut self, bindings: HashMap<String, ConstValue>) {
+    pub fn bind_all(&mut self, bindings: IndexMap<String, ConstValue>) {
         self.const_bindings.extend(bindings);
     }
 
     /// Unbind a const parameter
     pub fn unbind(&mut self, name: &str) {
-        self.const_bindings.remove(name);
+        self.const_bindings.shift_remove(name);
     }
 
     /// Register a user-defined const function
@@ -425,7 +425,7 @@ impl ConstEvaluator {
             // Special handling for FloatFormatImpl -> convert to FloatFormat
             HirExpression::StructLiteral(struct_lit) => {
                 // Evaluate all field values
-                let mut fields = HashMap::new();
+                let mut fields = IndexMap::new();
                 for field_init in &struct_lit.fields {
                     let value = self.eval(&field_init.value)?;
                     fields.insert(field_init.name.clone(), value);
@@ -1297,7 +1297,7 @@ mod tests {
         let expr = HirExpression::Call(crate::hir::HirCallExpr {
             function: "clog2".to_string(),
             type_args: vec![],
-            named_type_args: std::collections::HashMap::new(),
+            named_type_args: IndexMap::new(),
             args: vec![HirExpression::Literal(HirLiteral::Integer(1024))],
             impl_style: crate::hir::ImplStyle::default(),
         });
@@ -1307,7 +1307,7 @@ mod tests {
         let expr = HirExpression::Call(crate::hir::HirCallExpr {
             function: "clog2".to_string(),
             type_args: vec![],
-            named_type_args: std::collections::HashMap::new(),
+            named_type_args: IndexMap::new(),
             args: vec![HirExpression::Literal(HirLiteral::Integer(1))],
             impl_style: crate::hir::ImplStyle::default(),
         });

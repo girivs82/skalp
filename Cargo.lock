@@ -2962,6 +2962,7 @@ dependencies = [
  "cocoa",
  "colored",
  "criterion",
+ "half",
  "indexmap",
  "indoc",
  "insta",
@@ -3070,6 +3071,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "codespan-reporting",
+ "indexmap",
  "logos",
  "rowan",
  "serde",
@@ -3279,6 +3281,7 @@ dependencies = [
  "cocoa-foundation",
  "core-graphics-types",
  "futures",
+ "indexmap",
  "metal",
  "objc",
  "petgraph",

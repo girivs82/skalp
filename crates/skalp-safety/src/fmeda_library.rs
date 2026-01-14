@@ -6,8 +6,8 @@
 
 use crate::asil::AsilLevel;
 use crate::hierarchy::{DesignRef, FailureClass, FailureMode, MechanismType, Severity};
+use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::path::Path;
 
 // ============================================================================
@@ -26,7 +26,7 @@ pub struct FmedaLibrary {
     /// Library source (manufacturer, standard, etc.)
     pub source: String,
     /// Components in library
-    pub components: HashMap<String, LibraryComponent>,
+    pub components: IndexMap<String, LibraryComponent>,
     /// Default temperature for FIT rates (°C)
     pub reference_temperature: f64,
     /// Library metadata
@@ -41,7 +41,7 @@ impl FmedaLibrary {
             version: "1.0.0".to_string(),
             description: String::new(),
             source: String::new(),
-            components: HashMap::new(),
+            components: IndexMap::new(),
             reference_temperature: 55.0, // Default junction temp
             metadata: LibraryMetadata::default(),
         }
@@ -100,7 +100,7 @@ pub struct LibraryComponent {
     /// Failure mode distribution
     pub failure_modes: Vec<LibraryFailureMode>,
     /// Default diagnostic coverages for various mechanisms
-    pub mechanism_coverages: HashMap<MechanismType, f64>,
+    pub mechanism_coverages: IndexMap<MechanismType, f64>,
     /// Component quality level
     pub quality_level: QualityLevel,
     /// Reliability data source
@@ -117,7 +117,7 @@ impl LibraryComponent {
             base_fit,
             derating_factor: None,
             failure_modes: Vec::new(),
-            mechanism_coverages: HashMap::new(),
+            mechanism_coverages: IndexMap::new(),
             quality_level: QualityLevel::Commercial,
             data_source: String::new(),
         }
@@ -311,7 +311,7 @@ impl FitBreakdown {
 #[derive(Debug, Clone, Default)]
 pub struct FmedaLibraryManager {
     /// Loaded libraries by name
-    libraries: HashMap<String, FmedaLibrary>,
+    libraries: IndexMap<String, FmedaLibrary>,
     /// Search paths for library files
     search_paths: Vec<String>,
 }
@@ -320,7 +320,7 @@ impl FmedaLibraryManager {
     /// Create a new library manager
     pub fn new() -> Self {
         Self {
-            libraries: HashMap::new(),
+            libraries: IndexMap::new(),
             search_paths: Vec::new(),
         }
     }
@@ -373,7 +373,7 @@ pub struct TechLibrary {
     /// Library version
     pub version: String,
     /// Primitives in this library
-    pub primitives: HashMap<String, TechPrimitive>,
+    pub primitives: IndexMap<String, TechPrimitive>,
     /// Default temperature (°C)
     pub reference_temperature: f64,
     /// Voltage reference (V)
@@ -387,7 +387,7 @@ impl TechLibrary {
             name,
             process_node,
             version: "1.0.0".to_string(),
-            primitives: HashMap::new(),
+            primitives: IndexMap::new(),
             reference_temperature: 85.0, // Junction temp
             reference_voltage: 0.75,
         }
@@ -544,7 +544,7 @@ pub struct PrimitiveBinding {
     /// Mechanisms covering this primitive
     pub mechanisms: Vec<MechanismType>,
     /// DC overrides per mechanism
-    pub dc_overrides: HashMap<MechanismType, f64>,
+    pub dc_overrides: IndexMap<MechanismType, f64>,
 }
 
 // ============================================================================
@@ -827,9 +827,9 @@ pub struct FmedaOverrides {
     /// Override base FIT
     pub base_fit: Option<f64>,
     /// Override DC for specific mechanisms
-    pub mechanism_dc_overrides: HashMap<MechanismType, f64>,
+    pub mechanism_dc_overrides: IndexMap<MechanismType, f64>,
     /// Override failure mode distributions
-    pub mode_overrides: HashMap<String, FailureModeOverride>,
+    pub mode_overrides: IndexMap<String, FailureModeOverride>,
 }
 
 /// Override for a specific failure mode
@@ -1797,7 +1797,7 @@ pub fn derate_tech_library(
     library: &TechLibrary,
     operating_temp_c: f64,
     operating_voltage: f64,
-) -> HashMap<String, FitBounds> {
+) -> IndexMap<String, FitBounds> {
     let conditions = OperatingConditions {
         temperature_c: operating_temp_c,
         voltage: operating_voltage,
@@ -1825,7 +1825,7 @@ pub fn derate_tech_library(
 pub fn derate_component_library(
     library: &FmedaLibrary,
     operating_temp_c: f64,
-) -> HashMap<String, FitBounds> {
+) -> IndexMap<String, FitBounds> {
     let conditions = OperatingConditions {
         temperature_c: operating_temp_c,
         voltage: 1.0, // Assume nominal
@@ -2115,7 +2115,7 @@ mod tests {
             primitive_name: "DFF".to_string(),
             instance_count: 1,
             mechanisms: vec![MechanismType::Tmr],
-            dc_overrides: HashMap::new(),
+            dc_overrides: IndexMap::new(),
         };
 
         assert_eq!(binding.instance_count, 1);
@@ -2194,7 +2194,7 @@ mod tests {
             primitive_name: "DFF".to_string(),
             instance_count: 1,
             mechanisms: vec![],
-            dc_overrides: HashMap::new(),
+            dc_overrides: IndexMap::new(),
         });
 
         fmeda.add_primitive_binding(PrimitiveBinding {
@@ -2203,7 +2203,7 @@ mod tests {
             primitive_name: "DFF".to_string(),
             instance_count: 1,
             mechanisms: vec![],
-            dc_overrides: HashMap::new(),
+            dc_overrides: IndexMap::new(),
         });
 
         // Add multi-contributor mode (timing path spanning both flops)

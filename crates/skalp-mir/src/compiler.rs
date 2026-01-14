@@ -8,8 +8,8 @@ use crate::mir::Mir;
 use crate::optimize::{ConstantFolding, DeadCodeElimination, OptimizationPass};
 use crate::ssa_conversion::apply_ssa_conversion;
 use anyhow::Result;
+use indexmap::IndexMap;
 use skalp_frontend::hir::Hir;
-use std::collections::HashMap;
 use std::path::PathBuf;
 
 /// Optimization level
@@ -57,7 +57,7 @@ impl MirCompiler {
     /// If module_hirs is provided, the compiler can properly resolve function calls
     /// in their original module scope, enabling proper transitive imports.
     pub fn compile_to_mir(&self, hir: &Hir) -> Result<Mir, String> {
-        self.compile_to_mir_with_modules(hir, &HashMap::new())
+        self.compile_to_mir_with_modules(hir, &IndexMap::new())
     }
 
     /// Compile HIR to MIR with CDC analysis and module scope resolution
@@ -68,7 +68,7 @@ impl MirCompiler {
     pub fn compile_to_mir_with_modules(
         &self,
         hir: &Hir,
-        module_hirs: &HashMap<PathBuf, Hir>,
+        module_hirs: &IndexMap<PathBuf, Hir>,
     ) -> Result<Mir, String> {
         // Step 1: Transform HIR to MIR
         if self.verbose {

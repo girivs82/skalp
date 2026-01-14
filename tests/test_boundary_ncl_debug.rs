@@ -1,6 +1,7 @@
 // Debug test for boundary-only NCL expansion
 // This test isolates the boundary-only NCL logic to find the issue
 
+use indexmap::IndexMap;
 use skalp_frontend::parse_and_build_hir;
 use skalp_lir::{
     expand_to_ncl, get_stdlib_library, lower_mir_module_to_lir_skip_ncl, map_lir_to_gates,
@@ -163,7 +164,7 @@ fn test_boundary_ncl_gate_level() {
     );
 
     // Print cell types
-    let mut cell_types: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut cell_types: IndexMap<String, usize> = IndexMap::new();
     for cell in &netlist.cells {
         *cell_types.entry(cell.cell_type.clone()).or_insert(0) += 1;
     }

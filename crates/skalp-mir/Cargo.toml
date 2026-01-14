@@ -6,7 +6,7 @@ edition = "2021"
 [dependencies]
 skalp-frontend = { path = "../skalp-frontend" }
 petgraph = "0.6"
-indexmap = "2.0"
+indexmap = { version = "2.0", features = ["serde"] }
 thiserror = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 anyhow = "1.0.100"

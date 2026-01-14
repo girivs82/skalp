@@ -11,8 +11,9 @@
 
 use crate::asil::AsilLevel;
 use crate::hierarchy::SafetyGoal;
+use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 /// Unique identifier for fault tree nodes
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -220,7 +221,7 @@ pub struct FaultTree {
     pub nodes: Vec<FtaNode>,
     /// Node lookup by ID for efficient access
     #[serde(skip)]
-    node_index: HashMap<FtaNodeId, usize>,
+    node_index: IndexMap<FtaNodeId, usize>,
 }
 
 impl FaultTree {
@@ -231,7 +232,7 @@ impl FaultTree {
             safety_goal: safety_goal.to_string(),
             top_event: FtaNodeId(0),
             nodes: Vec::new(),
-            node_index: HashMap::new(),
+            node_index: IndexMap::new(),
         }
     }
 
@@ -482,9 +483,9 @@ pub struct CutSetAnalysis {
     /// Top event probability
     pub top_event_probability: f64,
     /// Number of cut sets by order
-    pub cut_sets_by_order: HashMap<usize, usize>,
+    pub cut_sets_by_order: IndexMap<usize, usize>,
     /// Importance measures for each basic event
-    pub importance_measures: HashMap<FtaNodeId, ImportanceMeasures>,
+    pub importance_measures: IndexMap<FtaNodeId, ImportanceMeasures>,
     /// Single point failures (order-1 cut sets)
     pub single_point_failures: Vec<MinimalCutSet>,
     /// Dominant cut sets (contributing > 1% to top event)
@@ -497,8 +498,8 @@ impl CutSetAnalysis {
         Self {
             cut_sets: Vec::new(),
             top_event_probability: 0.0,
-            cut_sets_by_order: HashMap::new(),
-            importance_measures: HashMap::new(),
+            cut_sets_by_order: IndexMap::new(),
+            importance_measures: IndexMap::new(),
             single_point_failures: Vec::new(),
             dominant_cut_sets: Vec::new(),
         }
@@ -565,17 +566,17 @@ pub struct Bdd {
     /// Variable ordering (maps variable index to FtaNodeId)
     var_order: Vec<FtaNodeId>,
     /// Reverse mapping: FtaNodeId -> variable index
-    var_index: HashMap<FtaNodeId, usize>,
+    var_index: IndexMap<FtaNodeId, usize>,
     /// Computed table for memoization
-    computed: HashMap<(BddNodeId, BddNodeId, char), BddNodeId>,
+    computed: IndexMap<(BddNodeId, BddNodeId, char), BddNodeId>,
     /// Unique table for hash-consing
-    unique: HashMap<(usize, BddNodeId, BddNodeId), BddNodeId>,
+    unique: IndexMap<(usize, BddNodeId, BddNodeId), BddNodeId>,
 }
 
 impl Bdd {
     /// Create a new BDD with the given variable ordering
     pub fn new(var_order: Vec<FtaNodeId>) -> Self {
-        let mut var_index = HashMap::new();
+        let mut var_index = IndexMap::new();
         for (idx, &id) in var_order.iter().enumerate() {
             var_index.insert(id, idx);
         }
@@ -584,8 +585,8 @@ impl Bdd {
             nodes: vec![None, None], // Reserve 0 and 1 for terminals
             var_order,
             var_index,
-            computed: HashMap::new(),
-            unique: HashMap::new(),
+            computed: IndexMap::new(),
+            unique: IndexMap::new(),
         };
 
         // Initialize terminal nodes
@@ -1123,8 +1124,8 @@ fn calculate_importance_measures(
     cut_sets: &[MinimalCutSet],
     top_probability: f64,
     tree: &FaultTree,
-) -> HashMap<FtaNodeId, ImportanceMeasures> {
-    let mut measures = HashMap::new();
+) -> IndexMap<FtaNodeId, ImportanceMeasures> {
+    let mut measures = IndexMap::new();
 
     for node in tree.basic_events() {
         let event_id = node.id;

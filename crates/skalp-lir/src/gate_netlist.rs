@@ -15,9 +15,9 @@
 //! cells with known FIT rates and failure modes from the technology library.
 
 use crate::lir::LirSafetyInfo;
+use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use skalp_frontend::hir::DetectionConfig;
-use std::collections::HashMap;
 
 // ============================================================================
 // Cell Types
@@ -486,7 +486,7 @@ pub struct GateNetlist {
     pub is_ncl: bool,
     /// Net name to ID mapping (skipped during serialization - rebuilt from nets)
     #[serde(skip, default)]
-    net_map: HashMap<String, GateNetId>,
+    net_map: IndexMap<String, GateNetId>,
     /// Statistics (skipped during serialization - rebuilt from cells/nets)
     #[serde(skip, default)]
     pub stats: GateNetlistStats,
@@ -505,7 +505,7 @@ impl GateNetlist {
             clocks: Vec::new(),
             resets: Vec::new(),
             is_ncl: false,
-            net_map: HashMap::new(),
+            net_map: IndexMap::new(),
             stats: GateNetlistStats::default(),
         }
     }
@@ -720,7 +720,7 @@ impl GateNetlist {
         self.cells.retain(|cell| !dead_cells.contains(&cell.id));
 
         // Re-assign cell IDs and update net references
-        let mut old_to_new: HashMap<CellId, CellId> = HashMap::new();
+        let mut old_to_new: IndexMap<CellId, CellId> = IndexMap::new();
         for (new_idx, cell) in self.cells.iter_mut().enumerate() {
             old_to_new.insert(cell.id, CellId(new_idx as u32));
             cell.id = CellId(new_idx as u32);
@@ -1155,7 +1155,7 @@ impl GateNetlist {
     /// Propagate constants through the netlist (lightweight optimization)
     pub fn propagate_constants(&mut self) {
         // Find tie cells and their driven nets
-        let mut constant_nets: HashMap<GateNetId, bool> = HashMap::new();
+        let mut constant_nets: IndexMap<GateNetId, bool> = IndexMap::new();
 
         for cell in &self.cells {
             if cell.cell_type.starts_with("TIE0") {
@@ -1332,9 +1332,9 @@ pub struct GateNetlistStats {
     /// Combinational cells
     pub combinational_cells: usize,
     /// Cell type distribution
-    pub cell_types: HashMap<String, usize>,
+    pub cell_types: IndexMap<String, usize>,
     /// Library distribution
-    pub libraries: HashMap<String, usize>,
+    pub libraries: IndexMap<String, usize>,
     // ===== Safety Mechanism Statistics (ISO 26262) =====
     /// Number of cells classified as safety mechanisms
     pub sm_cell_count: usize,
@@ -1345,9 +1345,9 @@ pub struct GateNetlistStats {
     /// Total FIT for functional cells (contributes to λSPF or λRF)
     pub functional_fit: f64,
     /// Breakdown of SM cells by mechanism name
-    pub sm_by_mechanism: HashMap<String, usize>,
+    pub sm_by_mechanism: IndexMap<String, usize>,
     /// FIT breakdown by mechanism name
-    pub sm_fit_by_mechanism: HashMap<String, f64>,
+    pub sm_fit_by_mechanism: IndexMap<String, f64>,
 }
 
 impl GateNetlistStats {

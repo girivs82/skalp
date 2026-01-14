@@ -19,7 +19,8 @@
 
 use super::{Pass, PassResult};
 use crate::synth::{Aig, AigLit, AigNode, AigNodeId};
-use std::collections::{HashMap, HashSet};
+use indexmap::IndexMap;
+use std::collections::HashSet;
 
 /// Maximum depth for cone collection
 const MAX_CONE_DEPTH: usize = 10;
@@ -84,7 +85,7 @@ impl Refactor {
         &self,
         aig: &Aig,
         root: AigNodeId,
-        fanout_counts: &HashMap<AigNodeId, usize>,
+        fanout_counts: &IndexMap<AigNodeId, usize>,
     ) -> ConeInfo {
         let mut leaves = Vec::new();
         let mut internal = HashSet::new();
@@ -160,7 +161,7 @@ impl Refactor {
         let num_rows = 1usize << num_inputs;
 
         // Create leaf to input index mapping
-        let leaf_to_idx: HashMap<AigNodeId, usize> = cone
+        let leaf_to_idx: IndexMap<AigNodeId, usize> = cone
             .leaves
             .iter()
             .enumerate()
@@ -187,7 +188,7 @@ impl Refactor {
         aig: &Aig,
         node: AigNodeId,
         input_assignment: usize,
-        leaf_to_idx: &HashMap<AigNodeId, usize>,
+        leaf_to_idx: &IndexMap<AigNodeId, usize>,
         internal: &HashSet<AigNodeId>,
     ) -> bool {
         self.evaluate_lit(
@@ -196,7 +197,7 @@ impl Refactor {
             input_assignment,
             leaf_to_idx,
             internal,
-            &mut HashMap::new(),
+            &mut IndexMap::new(),
         )
     }
 
@@ -207,9 +208,9 @@ impl Refactor {
         aig: &Aig,
         lit: AigLit,
         input_assignment: usize,
-        leaf_to_idx: &HashMap<AigNodeId, usize>,
+        leaf_to_idx: &IndexMap<AigNodeId, usize>,
         internal: &HashSet<AigNodeId>,
-        cache: &mut HashMap<AigNodeId, bool>,
+        cache: &mut IndexMap<AigNodeId, bool>,
     ) -> bool {
         // Check if it's a leaf (input)
         if let Some(&idx) = leaf_to_idx.get(&lit.node) {
@@ -828,8 +829,8 @@ struct FactoredForm {
 }
 
 /// Compute fanout counts for all nodes
-fn compute_fanout_counts(aig: &Aig) -> HashMap<AigNodeId, usize> {
-    let mut counts: HashMap<AigNodeId, usize> = HashMap::new();
+fn compute_fanout_counts(aig: &Aig) -> IndexMap<AigNodeId, usize> {
+    let mut counts: IndexMap<AigNodeId, usize> = IndexMap::new();
 
     for (_, node) in aig.iter_nodes() {
         for fanin in node.fanins() {
@@ -944,7 +945,7 @@ impl Pass for Refactor {
             .collect();
 
         // Find refactoring opportunities
-        let mut substitutions: HashMap<AigNodeId, AigLit> = HashMap::new();
+        let mut substitutions: IndexMap<AigNodeId, AigLit> = IndexMap::new();
 
         for node_id in nodes {
             // Skip if already substituted

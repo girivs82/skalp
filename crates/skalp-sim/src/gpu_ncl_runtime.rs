@@ -26,8 +26,8 @@
 //! let result = runtime.get_dual_rail_output("y", 8);
 //! ```
 
+use indexmap::IndexMap;
 use skalp_lir::gate_netlist::{CellId, GateNetId, GateNetlist};
-use std::collections::HashMap;
 
 #[cfg(target_os = "macos")]
 use metal::{
@@ -44,11 +44,11 @@ pub struct GpuNclRuntime {
     /// The GateNetlist being simulated
     netlist: GateNetlist,
     /// Signal name to net IDs mapping (base name -> [net_id...])
-    signal_name_to_nets: HashMap<String, Vec<GateNetId>>,
+    signal_name_to_nets: IndexMap<String, Vec<GateNetId>>,
     /// Net ID to value index mapping
-    net_to_index: HashMap<u32, usize>,
+    net_to_index: IndexMap<u32, usize>,
     /// Cell ID to state index mapping (for THmn gates)
-    cell_to_state_index: HashMap<u32, usize>,
+    cell_to_state_index: IndexMap<u32, usize>,
     /// Number of nets
     num_nets: usize,
     /// Number of THmn gates (gates needing state)
@@ -193,9 +193,9 @@ impl GpuNclRuntime {
             device,
             command_queue,
             netlist,
-            signal_name_to_nets: HashMap::new(),
-            net_to_index: HashMap::new(),
-            cell_to_state_index: HashMap::new(),
+            signal_name_to_nets: IndexMap::new(),
+            net_to_index: IndexMap::new(),
+            cell_to_state_index: IndexMap::new(),
             num_nets,
             num_stateful_gates: 0,
             cells: Vec::new(),
@@ -243,7 +243,7 @@ impl GpuNclRuntime {
         }
 
         // Build a lookup map for net names (do this once, not per signal group)
-        let net_names: HashMap<u32, &str> = self
+        let net_names: IndexMap<u32, &str> = self
             .netlist
             .nets
             .iter()
@@ -321,8 +321,7 @@ impl GpuNclRuntime {
             println!("[GPU_NCL] Found {} FP32 cells", fp32_cell_count);
         } else {
             // Show first few cell types for debugging
-            let mut type_counts: std::collections::HashMap<String, usize> =
-                std::collections::HashMap::new();
+            let mut type_counts: IndexMap<String, usize> = IndexMap::new();
             for cell in &self.netlist.cells {
                 *type_counts.entry(cell.cell_type.clone()).or_default() += 1;
             }
@@ -1697,7 +1696,7 @@ kernel void eval_ncl(
     ///
     /// Cells that never changed have count = 0 (or 1 for initial evaluation).
     /// Cells in feedback loops will have higher counts.
-    pub fn get_oscillation_counts(&self) -> std::collections::HashMap<CellId, u32> {
+    pub fn get_oscillation_counts(&self) -> IndexMap<CellId, u32> {
         self.cells
             .iter()
             .enumerate()
@@ -1733,7 +1732,7 @@ kernel void eval_ncl(
     /// - Differential oscillation = cell_osc - fork_net_osc
     ///
     /// Nets that never changed have count = 0 (returned as 1 for calculation purposes).
-    pub fn get_net_oscillation_counts(&self) -> std::collections::HashMap<GateNetId, u32> {
+    pub fn get_net_oscillation_counts(&self) -> IndexMap<GateNetId, u32> {
         self.netlist
             .nets
             .iter()
@@ -2009,7 +2008,7 @@ fn strip_bit_suffix(name: &str) -> String {
 ///
 /// This ensures that `set_dual_rail_value` and `get_dual_rail_value` can correctly
 /// map bit positions to the right rails.
-fn sort_dual_rail_nets(nets: &mut [GateNetId], net_names: &HashMap<u32, &str>) {
+fn sort_dual_rail_nets(nets: &mut [GateNetId], net_names: &IndexMap<u32, &str>) {
     // Parse each net to extract (is_false_rail, bit_index)
     // Returns (false, bit_index) for true rail, (true, bit_index) for false rail
     // This way sorting naturally groups t rails first, then f rails, each sorted by bit index

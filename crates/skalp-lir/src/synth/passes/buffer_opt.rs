@@ -16,7 +16,7 @@
 
 use super::{Pass, PassResult};
 use crate::synth::{Aig, AigLit, AigNode, AigNodeId};
-use std::collections::HashMap;
+use indexmap::IndexMap;
 
 /// Buffer insertion configuration
 #[derive(Debug, Clone)]
@@ -137,8 +137,8 @@ impl BufferInsertion {
     }
 
     /// Compute fanout for each node in the AIG
-    fn compute_fanout(&self, aig: &Aig) -> HashMap<AigNodeId, usize> {
-        let mut fanout: HashMap<AigNodeId, usize> = HashMap::new();
+    fn compute_fanout(&self, aig: &Aig) -> IndexMap<AigNodeId, usize> {
+        let mut fanout: IndexMap<AigNodeId, usize> = IndexMap::new();
 
         // Initialize all nodes with zero fanout
         for id in 0..aig.node_count() {
@@ -165,7 +165,7 @@ impl BufferInsertion {
     /// Find nodes with fanout exceeding the threshold
     fn find_high_fanout_nodes(
         &self,
-        fanout: &HashMap<AigNodeId, usize>,
+        fanout: &IndexMap<AigNodeId, usize>,
     ) -> Vec<(AigNodeId, usize)> {
         let mut high_fanout: Vec<_> = fanout
             .iter()
@@ -374,7 +374,7 @@ impl Pass for BufferInsertion {
 
 /// Analyze fanout distribution without modifying the AIG
 pub fn analyze_fanout(aig: &Aig) -> FanoutAnalysis {
-    let mut fanout: HashMap<AigNodeId, usize> = HashMap::new();
+    let mut fanout: IndexMap<AigNodeId, usize> = IndexMap::new();
 
     // Count references from AND nodes
     for id in 0..aig.node_count() {
@@ -391,7 +391,7 @@ pub fn analyze_fanout(aig: &Aig) -> FanoutAnalysis {
     }
 
     // Compute histogram
-    let mut histogram: HashMap<usize, usize> = HashMap::new();
+    let mut histogram: IndexMap<usize, usize> = IndexMap::new();
     for &fo in fanout.values() {
         *histogram.entry(fo).or_insert(0) += 1;
     }
@@ -419,7 +419,7 @@ pub struct FanoutAnalysis {
     /// Average fanout
     pub avg_fanout: f64,
     /// Histogram of fanout values (fanout -> count)
-    pub histogram: HashMap<usize, usize>,
+    pub histogram: IndexMap<usize, usize>,
     /// Total nodes analyzed
     pub total_nodes: usize,
 }

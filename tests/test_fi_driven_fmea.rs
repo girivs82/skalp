@@ -6,6 +6,7 @@
 
 #[cfg(test)]
 mod fi_driven_fmea_tests {
+    use indexmap::IndexMap;
     use skalp_safety::{
         asil::AsilLevel,
         fault_simulation::{
@@ -17,7 +18,6 @@ mod fi_driven_fmea_tests {
             EffectMonitor, FaultEffectResult, FiDrivenConfig, SafetyDrivenFmeaGenerator,
         },
     };
-    use std::collections::HashMap;
 
     /// Test that the effect monitor correctly evaluates simple conditions
     #[test]
@@ -51,7 +51,7 @@ mod fi_driven_fmea_tests {
         let monitor = EffectMonitor::new(&spec);
 
         // Test case 1: Safe state (motor off, safe_mode on)
-        let mut signals = HashMap::new();
+        let mut signals = IndexMap::new();
         signals.insert("motor_enable".to_string(), 0u64);
         signals.insert("safe_mode".to_string(), 1u64);
         let effects = monitor.check_effects(&signals);
@@ -147,7 +147,7 @@ mod fi_driven_fmea_tests {
         let monitor = EffectMonitor::new(&spec);
 
         // Simulate a fault scenario: TMR disagreement detected properly
-        let mut signals = HashMap::new();
+        let mut signals = IndexMap::new();
         signals.insert("motor_enable".to_string(), 0u64);
         signals.insert("safe_mode".to_string(), 0u64);
         signals.insert("tmr_disagreement".to_string(), 1u64);

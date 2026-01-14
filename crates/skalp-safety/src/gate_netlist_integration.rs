@@ -33,11 +33,12 @@ use crate::hierarchy::{
     MechanismType, Severity,
 };
 use crate::sm_failure_analysis::{SmCellMapping, SmFailureAnalysis};
+use indexmap::IndexMap;
 use skalp_frontend::hir::DetectionMode;
 use skalp_lir::{
     Cell, CellFailureMode, CellSafetyClassification, FaultType, GateNetId, GateNetlist,
 };
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 /// Configuration for gate netlist to FMEA conversion
 #[derive(Debug, Clone)]
@@ -86,7 +87,7 @@ pub struct SmFmeaData {
     /// Total FIT of all SM cells
     pub total_sm_fit: f64,
     /// Failure modes by mechanism name
-    pub by_mechanism: HashMap<String, Vec<FailureMode>>,
+    pub by_mechanism: IndexMap<String, Vec<FailureMode>>,
 }
 
 /// Summary of safety mechanism coverage
@@ -97,7 +98,7 @@ pub struct CoverageSummary {
     /// Cells covered by annotated safety mechanisms
     pub covered_cells: usize,
     /// Coverage by mechanism
-    pub by_mechanism: HashMap<String, MechanismCoverageSummary>,
+    pub by_mechanism: IndexMap<String, MechanismCoverageSummary>,
     /// Total FIT before safety mechanisms
     pub total_fit_raw: f64,
     /// FIT after accounting for measured DC
@@ -393,8 +394,8 @@ pub fn gate_netlist_to_fmea(
 }
 
 /// Build a map from path prefixes to annotations
-fn build_annotation_map(annotations: &[SafetyAnnotation]) -> HashMap<String, &SafetyAnnotation> {
-    let mut map = HashMap::new();
+fn build_annotation_map(annotations: &[SafetyAnnotation]) -> IndexMap<String, &SafetyAnnotation> {
+    let mut map = IndexMap::new();
     for annotation in annotations {
         let path = annotation.design_ref.instance.to_string();
         map.insert(path, annotation);
@@ -407,8 +408,8 @@ fn build_annotation_map(annotations: &[SafetyAnnotation]) -> HashMap<String, &Sa
 /// Maps mechanism name -> measured DC from fault injection (as percentage 0-100)
 fn build_dc_map_from_simulation(
     sim_results: Option<&SimulationCampaignResults>,
-) -> HashMap<String, f64> {
-    let mut dc_map = HashMap::new();
+) -> IndexMap<String, f64> {
+    let mut dc_map = IndexMap::new();
 
     if let Some(results) = sim_results {
         for (effect_name, analysis) in &results.effect_analyses {
@@ -451,7 +452,7 @@ pub struct DetectionCoverageInfo {
     /// Cells covered by periodic detection → contributes to LFM with timing factor
     pub periodic_covered_cells: HashSet<String>,
     /// Map of net ID to detection mode
-    pub net_detection_modes: HashMap<u32, DetectionMode>,
+    pub net_detection_modes: IndexMap<u32, DetectionMode>,
     /// Runtime DC (continuous detection only) - for SPFM calculation
     pub runtime_dc: f64,
     /// Boot DC (boot-time detection) - for LFM calculation
@@ -651,8 +652,8 @@ fn trace_detection_cone(
 /// 3. None (no coverage)
 fn find_coverage_for_cell(
     cell_path: &str,
-    annotation_map: &HashMap<String, &SafetyAnnotation>,
-    dc_map: &HashMap<String, f64>,
+    annotation_map: &IndexMap<String, &SafetyAnnotation>,
+    dc_map: &IndexMap<String, f64>,
     detection_coverage: &DetectionCoverageInfo,
 ) -> Option<CellSafetyCoverage> {
     // Exact match first
@@ -697,7 +698,7 @@ fn find_coverage_for_cell(
 /// Convert a SafetyAnnotation to CellSafetyCoverage with measured DC
 fn annotation_to_coverage(
     annotation: &SafetyAnnotation,
-    dc_map: &HashMap<String, f64>,
+    dc_map: &IndexMap<String, f64>,
 ) -> CellSafetyCoverage {
     // Look up measured DC by mechanism name or goal::mechanism
     let full_name = format!("{}::{}", annotation.goal_name, annotation.mechanism_name);

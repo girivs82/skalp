@@ -20,7 +20,8 @@
 
 use super::{Pass, PassResult};
 use crate::synth::{Aig, AigLit, AigNode, AigNodeId};
-use std::collections::{HashMap, HashSet};
+use indexmap::IndexMap;
+use std::collections::HashSet;
 
 /// Maximum number of divisors to consider
 const MAX_DIVISORS: usize = 150;
@@ -85,7 +86,7 @@ impl Resub {
         &self,
         aig: &Aig,
         target: AigNodeId,
-        fanout_counts: &HashMap<AigNodeId, usize>,
+        fanout_counts: &IndexMap<AigNodeId, usize>,
     ) -> Vec<AigNodeId> {
         let mut divisors = Vec::new();
         let mut visited = HashSet::new();
@@ -162,11 +163,11 @@ impl Resub {
         }
 
         let num_rows = 1usize << leaves.len();
-        let leaf_to_idx: HashMap<AigNodeId, usize> =
+        let leaf_to_idx: IndexMap<AigNodeId, usize> =
             leaves.iter().enumerate().map(|(i, &n)| (n, i)).collect();
 
         let mut tt = 0u64;
-        let mut cache = HashMap::new();
+        let mut cache = IndexMap::new();
 
         for row in 0..num_rows {
             if self.evaluate_node(aig, node, row, &leaf_to_idx, &mut cache) {
@@ -184,8 +185,8 @@ impl Resub {
         aig: &Aig,
         node: AigNodeId,
         assignment: usize,
-        leaf_to_idx: &HashMap<AigNodeId, usize>,
-        cache: &mut HashMap<AigNodeId, bool>,
+        leaf_to_idx: &IndexMap<AigNodeId, usize>,
+        cache: &mut IndexMap<AigNodeId, bool>,
     ) -> bool {
         if let Some(&cached) = cache.get(&node) {
             return cached;
@@ -218,8 +219,8 @@ impl Resub {
         aig: &Aig,
         lit: AigLit,
         assignment: usize,
-        leaf_to_idx: &HashMap<AigNodeId, usize>,
-        cache: &mut HashMap<AigNodeId, bool>,
+        leaf_to_idx: &IndexMap<AigNodeId, usize>,
+        cache: &mut IndexMap<AigNodeId, bool>,
     ) -> bool {
         let val = self.evaluate_node(aig, lit.node, assignment, leaf_to_idx, cache);
         if lit.inverted {
@@ -495,8 +496,8 @@ enum ResubKind {
 }
 
 /// Compute fanout counts
-fn compute_fanout_counts(aig: &Aig) -> HashMap<AigNodeId, usize> {
-    let mut counts = HashMap::new();
+fn compute_fanout_counts(aig: &Aig) -> IndexMap<AigNodeId, usize> {
+    let mut counts = IndexMap::new();
 
     for (_, node) in aig.iter_nodes() {
         for fanin in node.fanins() {
@@ -547,7 +548,7 @@ impl Pass for Resub {
             })
             .collect();
 
-        let mut substitutions: HashMap<AigNodeId, AigLit> = HashMap::new();
+        let mut substitutions: IndexMap<AigNodeId, AigLit> = IndexMap::new();
 
         for target in nodes {
             // Skip if already substituted

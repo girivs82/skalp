@@ -21,7 +21,7 @@
 //! | 9+     | X8 or buffer tree |
 
 use crate::gate_netlist::{Cell, CellId, GateNetId, GateNetlist};
-use std::collections::HashMap;
+use indexmap::IndexMap;
 
 /// Cell sizing configuration
 #[derive(Debug, Clone)]
@@ -168,7 +168,7 @@ pub struct CellSizingStats {
     /// Area change (positive = increase)
     pub area_change: f64,
     /// Distribution of final drive strengths
-    pub drive_distribution: HashMap<DriveStrength, usize>,
+    pub drive_distribution: IndexMap<DriveStrength, usize>,
 }
 
 impl CellSizingStats {
@@ -299,8 +299,8 @@ impl CellSizer {
     }
 
     /// Compute fanout for each net
-    fn compute_fanout(&self, netlist: &GateNetlist) -> HashMap<GateNetId, usize> {
-        let mut fanout: HashMap<GateNetId, usize> = HashMap::new();
+    fn compute_fanout(&self, netlist: &GateNetlist) -> IndexMap<GateNetId, usize> {
+        let mut fanout: IndexMap<GateNetId, usize> = IndexMap::new();
 
         // Count cell input connections
         for cell in &netlist.cells {

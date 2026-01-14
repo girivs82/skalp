@@ -17,7 +17,8 @@
 
 use super::{Pass, PassResult};
 use crate::synth::{Aig, AigLit, AigNode, AigNodeId};
-use std::collections::{HashMap, HashSet};
+use indexmap::IndexMap;
+use std::collections::HashSet;
 
 /// Number of random simulation patterns
 const NUM_SIM_PATTERNS: usize = 64;
@@ -75,11 +76,11 @@ impl Scorr {
     }
 
     /// Simulate the circuit and compute signatures for all nodes
-    fn simulate(&self, aig: &Aig) -> HashMap<AigNodeId, u64> {
-        let mut signatures = HashMap::new();
+    fn simulate(&self, aig: &Aig) -> IndexMap<AigNodeId, u64> {
+        let mut signatures = IndexMap::new();
 
         // Initialize inputs with random values for each pattern
-        let mut input_values: HashMap<AigNodeId, u64> = HashMap::new();
+        let mut input_values: IndexMap<AigNodeId, u64> = IndexMap::new();
         let mut rng_state = 0x12345678u64;
 
         for (id, node) in aig.iter_nodes() {
@@ -140,7 +141,7 @@ impl Scorr {
     }
 
     /// Get signature for a literal (with possible inversion)
-    fn get_lit_signature(&self, lit: AigLit, signatures: &HashMap<AigNodeId, u64>) -> u64 {
+    fn get_lit_signature(&self, lit: AigLit, signatures: &IndexMap<AigNodeId, u64>) -> u64 {
         let sig = *signatures.get(&lit.node).unwrap_or(&0);
         if lit.inverted {
             !sig
@@ -153,10 +154,10 @@ impl Scorr {
     fn build_equivalence_classes(
         &self,
         aig: &Aig,
-        signatures: &HashMap<AigNodeId, u64>,
+        signatures: &IndexMap<AigNodeId, u64>,
     ) -> Vec<Vec<(AigNodeId, bool)>> {
         // Group nodes by their signature (considering inversion)
-        let mut classes: HashMap<u64, Vec<(AigNodeId, bool)>> = HashMap::new();
+        let mut classes: IndexMap<u64, Vec<(AigNodeId, bool)>> = IndexMap::new();
 
         for (id, node) in aig.iter_nodes() {
             // Only consider AND nodes (inputs/latches shouldn't be merged)
@@ -270,7 +271,7 @@ impl Scorr {
             return None;
         }
 
-        let leaf_map: HashMap<AigNodeId, usize> =
+        let leaf_map: IndexMap<AigNodeId, usize> =
             leaves.iter().enumerate().map(|(i, &n)| (n, i)).collect();
 
         let num_rows = 1usize << leaves.len();
@@ -290,7 +291,7 @@ impl Scorr {
         aig: &Aig,
         node: AigNodeId,
         assignment: usize,
-        leaf_map: &HashMap<AigNodeId, usize>,
+        leaf_map: &IndexMap<AigNodeId, usize>,
     ) -> bool {
         match aig.get_node(node) {
             Some(AigNode::Input { .. }) | Some(AigNode::Latch { .. }) => {
@@ -315,7 +316,7 @@ impl Scorr {
         aig: &Aig,
         lit: AigLit,
         assignment: usize,
-        leaf_map: &HashMap<AigNodeId, usize>,
+        leaf_map: &IndexMap<AigNodeId, usize>,
     ) -> bool {
         let val = self.evaluate(aig, lit.node, assignment, leaf_map);
         if lit.inverted {
@@ -349,7 +350,7 @@ impl Pass for Scorr {
         }
 
         // Step 3: Prove/disprove equivalences and collect substitutions
-        let mut substitutions: HashMap<AigNodeId, AigLit> = HashMap::new();
+        let mut substitutions: IndexMap<AigNodeId, AigLit> = IndexMap::new();
 
         for class in classes {
             if class.len() < 2 {

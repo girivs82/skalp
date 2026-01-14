@@ -11,7 +11,8 @@ use crate::tech_library::{CellFunction, TechLibrary};
 use super::aig::{Aig, AigLit, AigNode, AigNodeId, BarrierType};
 use super::mapping::{MappedNode, MappingResult};
 
-use std::collections::{HashMap, HashSet};
+use indexmap::IndexMap;
+use std::collections::HashSet;
 
 /// Writer for converting AIG to GateNetlist
 pub struct AigWriter<'a> {
@@ -47,8 +48,8 @@ impl<'a> AigWriter<'a> {
             library: self.library,
             mapping_result: self.mapping_result,
             netlist: GateNetlist::new(aig.name.clone(), self.library.name.clone()),
-            node_to_net: HashMap::new(),
-            lit_to_net: HashMap::new(),
+            node_to_net: IndexMap::new(),
+            lit_to_net: IndexMap::new(),
             next_cell_id: 0,
             sdffe_consumed_nodes: HashSet::new(),
         };
@@ -94,10 +95,10 @@ struct AigWriterState<'a> {
     netlist: GateNetlist,
 
     /// Mapping from AIG node to output net ID
-    node_to_net: HashMap<AigNodeId, GateNetId>,
+    node_to_net: IndexMap<AigNodeId, GateNetId>,
 
     /// Mapping from (node, inverted) to net ID
-    lit_to_net: HashMap<(AigNodeId, bool), GateNetId>,
+    lit_to_net: IndexMap<(AigNodeId, bool), GateNetId>,
 
     /// Next cell ID
     next_cell_id: u32,
@@ -339,7 +340,7 @@ impl AigWriterState<'_> {
             }
             // Still need to create a net for this node in case it's referenced elsewhere
             // (shouldn't happen for properly detected patterns, but be safe)
-            if let std::collections::hash_map::Entry::Vacant(e) = self.node_to_net.entry(id) {
+            if let indexmap::map::Entry::Vacant(e) = self.node_to_net.entry(id) {
                 let output_net = self
                     .netlist
                     .add_net(GateNet::new(GateNetId(0), format!("n{}", id.0)));

@@ -10,7 +10,7 @@ use crate::safety_attributes::{
 use crate::span::{LineIndex, SourceSpan};
 use crate::syntax::{SyntaxKind, SyntaxNode, SyntaxNodeExt};
 use crate::typeck::TypeChecker;
-use std::collections::HashMap;
+use indexmap::IndexMap;
 use std::path::PathBuf;
 
 /// Maximum recursion depth to prevent stack overflow
@@ -90,14 +90,14 @@ pub struct HirBuilderContext {
     errors: Vec<HirError>,
 
     /// Built entities (for accessing ports during impl building)
-    built_entities: HashMap<String, HirEntity>,
+    built_entities: IndexMap<String, HirEntity>,
 
     /// Recursion depth counter to prevent infinite loops
     recursion_depth: usize,
 
     /// Intent definitions: maps intent name to its MuxStyle constraint
     /// Built from `intent parallel = mux_style::parallel;` declarations
-    intent_mux_styles: HashMap<String, MuxStyle>,
+    intent_mux_styles: IndexMap<String, MuxStyle>,
 
     /// Pending MuxStyle hint from most recent attribute
     /// Set when we see `#[parallel]` before a statement
@@ -105,7 +105,7 @@ pub struct HirBuilderContext {
 
     /// Intent definitions: maps intent name to its PipelineStyle constraint
     /// Built from `intent pipelined = pipeline_style::manual;` declarations
-    intent_pipeline_styles: HashMap<String, PipelineStyle>,
+    intent_pipeline_styles: IndexMap<String, PipelineStyle>,
 
     /// Pending PipelineStyle hint from most recent attribute
     /// Set when we see `#[pipelined]` before a flow block
@@ -117,7 +117,7 @@ pub struct HirBuilderContext {
 
     /// Intent definitions: maps intent name to its ImplStyle constraint
     /// Built from `intent fast = impl_style::parallel;` declarations
-    intent_impl_styles: HashMap<String, ImplStyle>,
+    intent_impl_styles: IndexMap<String, ImplStyle>,
 
     /// Pending ImplStyle hint from most recent attribute
     /// Set when we see `#[impl_style::parallel]` before a let statement with function call
@@ -204,36 +204,36 @@ pub struct HirBuilderContext {
 #[derive(Debug, Clone)]
 struct SymbolTable {
     /// Maps names to their HIR IDs
-    entities: HashMap<String, EntityId>,
-    ports: HashMap<String, PortId>,
-    signals: HashMap<String, SignalId>,
-    variables: HashMap<String, VariableId>,
-    constants: HashMap<String, ConstantId>,
-    clock_domains: HashMap<String, ClockDomainId>,
-    power_domains: HashMap<String, PowerDomainId>,
+    entities: IndexMap<String, EntityId>,
+    ports: IndexMap<String, PortId>,
+    signals: IndexMap<String, SignalId>,
+    variables: IndexMap<String, VariableId>,
+    constants: IndexMap<String, ConstantId>,
+    clock_domains: IndexMap<String, ClockDomainId>,
+    power_domains: IndexMap<String, PowerDomainId>,
 
     /// User-defined types (struct, enum, union)
-    user_types: HashMap<String, HirType>,
+    user_types: IndexMap<String, HirType>,
 
     /// Types of let-bound variables (for type inference in tuple destructuring)
-    variable_types: HashMap<VariableId, HirType>,
+    variable_types: IndexMap<VariableId, HirType>,
 
     /// BUG FIX #5: Signal types for type inference
-    signal_types: HashMap<SignalId, HirType>,
+    signal_types: IndexMap<SignalId, HirType>,
 
     /// BUG FIX #5: Port types for type inference
-    port_types: HashMap<PortId, HirType>,
+    port_types: IndexMap<PortId, HirType>,
 
     /// Function return types (for type inference of function call expressions)
     /// BUG FIX #67: Track function return types to properly infer tuple types
-    function_return_types: HashMap<String, HirType>,
+    function_return_types: IndexMap<String, HirType>,
 
     /// BUG FIX #166: Track generic parameter types (function parameters)
     /// Maps parameter names to their types for proper type inference in match/if expressions
-    generic_param_types: HashMap<String, HirType>,
+    generic_param_types: IndexMap<String, HirType>,
 
     /// Current scope for nested lookups
-    scopes: Vec<HashMap<String, SymbolId>>,
+    scopes: Vec<IndexMap<String, SymbolId>>,
 }
 
 /// Generic symbol ID
@@ -295,11 +295,11 @@ impl HirBuilderContext {
             symbols: SymbolTable::new(),
             type_checker: TypeChecker::new(),
             errors: Vec::new(),
-            built_entities: HashMap::new(),
+            built_entities: IndexMap::new(),
             recursion_depth: 0,
-            intent_mux_styles: HashMap::new(),
+            intent_mux_styles: IndexMap::new(),
             pending_mux_style: None,
-            intent_pipeline_styles: HashMap::new(),
+            intent_pipeline_styles: IndexMap::new(),
             pending_pipeline_style: None,
             pending_unroll_config: None,
             pending_pipeline_config: None,
@@ -317,7 +317,7 @@ impl HirBuilderContext {
             pending_seooc_config: None,
             pending_assumed_mechanisms: Vec::new(),
             current_default_power_domain: None,
-            intent_impl_styles: HashMap::new(),
+            intent_impl_styles: IndexMap::new(),
             pending_impl_style: None,
             pending_preserve_generate: None,
             line_index: None,
@@ -831,7 +831,7 @@ impl HirBuilderContext {
                                     HirExpression::Call(HirCallExpr {
                                         function: name,
                                         type_args: vec![],
-                                        named_type_args: std::collections::HashMap::new(),
+                                        named_type_args: IndexMap::new(),
                                         args,
                                         impl_style: ImplStyle::default(),
                                     })
@@ -1395,7 +1395,7 @@ impl HirBuilderContext {
 
         // Extract generic arguments if present
         let mut generic_args = Vec::new();
-        let mut named_generic_args = std::collections::HashMap::new();
+        let mut named_generic_args = IndexMap::new();
         if let Some(arg_list) = node.first_child_of_kind(SyntaxKind::ArgList) {
             let mut arg_index = 0;
             for arg_node in arg_list.children() {
@@ -1992,7 +1992,7 @@ impl HirBuilderContext {
 
         // BUG FIX #166: Clean up parameter types to avoid leaking into outer scope
         for param in &params {
-            self.symbols.generic_param_types.remove(&param.name);
+            self.symbols.generic_param_types.shift_remove(&param.name);
         }
 
         // Register function in symbol table
@@ -2622,7 +2622,7 @@ impl HirBuilderContext {
                                             let nested_call = HirExpression::Call(HirCallExpr {
                                                 function: nested_func_name,
                                                 type_args: Vec::new(), // TODO Phase 1: Parse from AST
-                                                named_type_args: std::collections::HashMap::new(),
+                                                named_type_args: IndexMap::new(),
                                                 args: nested_args,
                                                 impl_style: ImplStyle::default(),
                                             });
@@ -2646,7 +2646,7 @@ impl HirBuilderContext {
                             let call_expr = HirExpression::Call(HirCallExpr {
                                 function: func_name,
                                 type_args: Vec::new(), // TODO Phase 1: Parse from AST
-                                named_type_args: std::collections::HashMap::new(),
+                                named_type_args: IndexMap::new(),
                                 args,
                                 impl_style: ImplStyle::default(),
                             });
@@ -3134,7 +3134,7 @@ impl HirBuilderContext {
                         result = HirExpression::Call(HirCallExpr {
                             function: method_name,
                             type_args: Vec::new(), // TODO Phase 1: Parse from AST
-                            named_type_args: std::collections::HashMap::new(),
+                            named_type_args: IndexMap::new(),
                             args,
                             impl_style: ImplStyle::default(),
                         });
@@ -5662,7 +5662,7 @@ impl HirBuilderContext {
                         return Some(HirExpression::Call(HirCallExpr {
                             function: method_name,
                             type_args: Vec::new(), // TODO Phase 1: Parse from AST
-                            named_type_args: std::collections::HashMap::new(),
+                            named_type_args: IndexMap::new(),
                             args,
                             impl_style: ImplStyle::default(),
                         }));
@@ -5723,7 +5723,7 @@ impl HirBuilderContext {
         // Extract type arguments (Phase 1: Generic function calls like func::<T>(args))
         // Also handles named generic arguments like func::<W: 32>(args)
         let mut type_args = Vec::new();
-        let mut named_type_args = std::collections::HashMap::new();
+        let mut named_type_args = IndexMap::new();
         if let Some(arg_list) = node.first_child_of_kind(SyntaxKind::ArgList) {
             eprintln!(
                 "[HIR_TYPE_ARGS] Found ArgList with {} children",
@@ -11497,7 +11497,7 @@ impl HirBuilderContext {
                         let call_expr = HirExpression::Call(HirCallExpr {
                             function: func_name,
                             type_args: Vec::new(), // TODO Phase 1: Parse from AST
-                            named_type_args: std::collections::HashMap::new(),
+                            named_type_args: IndexMap::new(),
                             args,
                             impl_style: ImplStyle::default(),
                         });
@@ -11809,7 +11809,7 @@ impl HirBuilderContext {
                 function: func_name,
                 args,
                 type_args: Vec::new(),
-                named_type_args: std::collections::HashMap::new(),
+                named_type_args: IndexMap::new(),
                 impl_style: ImplStyle::Auto,
             }));
         }
@@ -12204,25 +12204,25 @@ impl HirBuilderContext {
 impl SymbolTable {
     fn new() -> Self {
         Self {
-            entities: HashMap::new(),
-            ports: HashMap::new(),
-            signals: HashMap::new(),
-            variables: HashMap::new(),
-            constants: HashMap::new(),
-            clock_domains: HashMap::new(),
-            power_domains: HashMap::new(),
-            user_types: HashMap::new(),
-            variable_types: HashMap::new(),
-            signal_types: HashMap::new(),          // BUG FIX #5
-            port_types: HashMap::new(),            // BUG FIX #5
-            function_return_types: HashMap::new(), // BUG FIX #67
-            generic_param_types: HashMap::new(),   // BUG FIX #166
-            scopes: vec![HashMap::new()],          // Start with global scope
+            entities: IndexMap::new(),
+            ports: IndexMap::new(),
+            signals: IndexMap::new(),
+            variables: IndexMap::new(),
+            constants: IndexMap::new(),
+            clock_domains: IndexMap::new(),
+            power_domains: IndexMap::new(),
+            user_types: IndexMap::new(),
+            variable_types: IndexMap::new(),
+            signal_types: IndexMap::new(),          // BUG FIX #5
+            port_types: IndexMap::new(),            // BUG FIX #5
+            function_return_types: IndexMap::new(), // BUG FIX #67
+            generic_param_types: IndexMap::new(),   // BUG FIX #166
+            scopes: vec![IndexMap::new()],          // Start with global scope
         }
     }
 
     fn enter_scope(&mut self) {
-        self.scopes.push(HashMap::new());
+        self.scopes.push(IndexMap::new());
     }
 
     fn exit_scope(&mut self) {
@@ -12746,8 +12746,7 @@ impl HirBuilderContext {
     /// Infer clock domains for signals based on event block assignments
     fn infer_clock_domains(&mut self, implementation: &mut HirImplementation) {
         // Create a map to track which signals are assigned in which clock domains
-        let mut signal_domains: std::collections::HashMap<SignalId, ClockDomainId> =
-            std::collections::HashMap::new();
+        let mut signal_domains: IndexMap<SignalId, ClockDomainId> = IndexMap::new();
 
         // Go through each event block and track assignments
         for event_block in &implementation.event_blocks {

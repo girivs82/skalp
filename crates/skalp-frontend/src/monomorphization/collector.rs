@@ -7,7 +7,8 @@ use crate::hir::{
     EntityId, Hir, HirEntity, HirExpression, HirGeneric, HirGenericType, HirImplementation,
     HirInstance, HirPort, HirType,
 };
-use std::collections::{HashMap, HashSet};
+use indexmap::IndexMap;
+use std::collections::HashSet;
 
 /// A specific instantiation of a generic entity
 #[derive(Debug, Clone)]
@@ -17,11 +18,11 @@ pub struct Instantiation {
     /// Entity ID
     pub entity_id: EntityId,
     /// Type arguments (parameter name -> concrete type)
-    pub type_args: HashMap<String, HirType>,
+    pub type_args: IndexMap<String, HirType>,
     /// Const arguments (parameter name -> evaluated value)
-    pub const_args: HashMap<String, ConstValue>,
+    pub const_args: IndexMap<String, ConstValue>,
     /// Intent arguments (parameter name -> intent value)
-    pub intent_args: HashMap<String, IntentValue>,
+    pub intent_args: IndexMap<String, IntentValue>,
 }
 
 // Manual PartialEq implementation
@@ -49,7 +50,7 @@ pub struct IntentValue {
     /// Intent name (e.g., "FAST_INTENT", "SMALL_INTENT")
     pub name: String,
     /// Intent fields (for compile-time evaluation)
-    pub fields: HashMap<String, ConstValue>,
+    pub fields: IndexMap<String, ConstValue>,
 }
 
 impl PartialEq for IntentValue {
@@ -158,7 +159,7 @@ pub struct InstantiationCollector<'hir> {
     /// Const evaluator for parameter values
     evaluator: ConstEvaluator,
     /// Map from entity ID to entity
-    entities: HashMap<EntityId, HirEntity>,
+    entities: IndexMap<EntityId, HirEntity>,
     /// Reference to HIR for type lookups
     hir: &'hir Hir,
     /// Current implementation context (for looking up signals/variables)
@@ -168,7 +169,7 @@ pub struct InstantiationCollector<'hir> {
 impl<'hir> InstantiationCollector<'hir> {
     /// Create a new instantiation collector
     pub fn new(hir: &'hir Hir) -> Self {
-        let mut entities = HashMap::new();
+        let mut entities = IndexMap::new();
         for entity in &hir.entities {
             entities.insert(entity.id, entity.clone());
         }
@@ -461,9 +462,9 @@ impl<'hir> InstantiationCollector<'hir> {
         }
 
         // Build instantiation record
-        let mut type_args = HashMap::new();
-        let mut const_args = HashMap::new();
-        let mut intent_args = HashMap::new();
+        let mut type_args = IndexMap::new();
+        let mut const_args = IndexMap::new();
+        let mut intent_args = IndexMap::new();
 
         // Extract generic arguments from the struct literal
         for (i, arg) in struct_lit.generic_args.iter().enumerate() {
@@ -492,7 +493,7 @@ impl<'hir> InstantiationCollector<'hir> {
                     let intent_name = self.extract_intent_name(arg);
                     let intent_value = IntentValue {
                         name: intent_name,
-                        fields: HashMap::new(),
+                        fields: IndexMap::new(),
                     };
                     intent_args.insert(generic.name.clone(), intent_value);
                 }
@@ -518,7 +519,7 @@ impl<'hir> InstantiationCollector<'hir> {
                             let intent_name = self.extract_intent_name(default);
                             let intent_value = IntentValue {
                                 name: intent_name,
-                                fields: HashMap::new(),
+                                fields: IndexMap::new(),
                             };
                             intent_args
                                 .entry(generic.name.clone())
@@ -563,9 +564,9 @@ impl<'hir> InstantiationCollector<'hir> {
         }
 
         // Build instantiation record
-        let mut type_args = HashMap::new();
-        let mut const_args = HashMap::new();
-        let mut intent_args = HashMap::new();
+        let mut type_args = IndexMap::new();
+        let mut const_args = IndexMap::new();
+        let mut intent_args = IndexMap::new();
 
         // Extract generic arguments from instance
         // Match provided arguments with entity's generic parameters
@@ -594,7 +595,7 @@ impl<'hir> InstantiationCollector<'hir> {
                     let intent_name = self.extract_intent_name(arg);
                     let intent_value = IntentValue {
                         name: intent_name.clone(),
-                        fields: HashMap::new(), // Would be populated from intent definition
+                        fields: IndexMap::new(), // Would be populated from intent definition
                     };
                     intent_args.insert(generic.name.clone(), intent_value);
                 }
@@ -621,7 +622,7 @@ impl<'hir> InstantiationCollector<'hir> {
                         let intent_name = self.extract_intent_name(arg);
                         let intent_value = IntentValue {
                             name: intent_name.clone(),
-                            fields: HashMap::new(),
+                            fields: IndexMap::new(),
                         };
                         intent_args.insert(param_name.clone(), intent_value);
                     }
@@ -650,7 +651,7 @@ impl<'hir> InstantiationCollector<'hir> {
                             let intent_name = self.extract_intent_name(default);
                             let intent_value = IntentValue {
                                 name: intent_name,
-                                fields: HashMap::new(),
+                                fields: IndexMap::new(),
                             };
                             intent_args
                                 .entry(generic.name.clone())
@@ -707,8 +708,8 @@ impl<'hir> InstantiationCollector<'hir> {
         &self,
         entity: &HirEntity,
         instance: &HirInstance,
-    ) -> HashMap<String, HirType> {
-        let mut inferred_types = HashMap::new();
+    ) -> IndexMap<String, HirType> {
+        let mut inferred_types = IndexMap::new();
 
         // Build map of generic type parameter names
         let mut type_param_names = HashSet::new();
@@ -864,9 +865,9 @@ mod tests {
         let mut inst = Instantiation {
             entity_name: "FpAdd".to_string(),
             entity_id: EntityId(0),
-            type_args: HashMap::new(),
-            const_args: HashMap::new(),
-            intent_args: HashMap::new(),
+            type_args: IndexMap::new(),
+            const_args: IndexMap::new(),
+            intent_args: IndexMap::new(),
         };
 
         // Just entity name

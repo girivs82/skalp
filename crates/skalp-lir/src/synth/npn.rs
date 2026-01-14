@@ -18,7 +18,7 @@
 //!
 //! - Debnath, D., & Sasao, T. (2004). Efficient computation of canonical form for Boolean matching in large libraries.
 
-use std::collections::HashMap;
+use indexmap::IndexMap;
 
 /// Maximum number of inputs for NPN canonicalization (limited by u64 truth table)
 pub const MAX_NPN_INPUTS: usize = 6;
@@ -164,7 +164,7 @@ fn generate_permutations(n: usize) -> Vec<[usize; MAX_NPN_INPUTS]> {
 #[derive(Debug, Clone)]
 pub struct NpnDatabase {
     /// Map from canonical truth table to optimal implementation
-    implementations: HashMap<u64, NpnImplementation>,
+    implementations: IndexMap<u64, NpnImplementation>,
 }
 
 /// Optimal AIG implementation for an NPN class
@@ -490,7 +490,7 @@ impl NpnDatabase {
     /// Uses dynamic enumeration to find all classes and synthesizes optimal implementations
     pub fn new_complete() -> Self {
         let mut db = Self {
-            implementations: HashMap::new(),
+            implementations: IndexMap::new(),
         };
 
         for (canonical_tt, _representative) in Self::enumerate_all_classes() {

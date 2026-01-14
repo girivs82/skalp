@@ -5,7 +5,7 @@
 //! structural hashing and cut-based rewriting.
 
 use crate::gate_netlist::{CellId, CellSafetyClassification, GateNetId};
-use std::collections::HashMap;
+use indexmap::IndexMap;
 
 /// Type of optimization barrier (power domain boundary cells)
 ///
@@ -298,10 +298,10 @@ pub struct Aig {
     safety_info: Vec<AigSafetyInfo>,
 
     /// Mapping from gate net IDs to AIG literals (for building)
-    net_to_lit: HashMap<GateNetId, AigLit>,
+    net_to_lit: IndexMap<GateNetId, AigLit>,
 
     /// Structural hash for AND nodes: (left, right) -> node_id
-    strash_map: HashMap<(AigLit, AigLit), AigNodeId>,
+    strash_map: IndexMap<(AigLit, AigLit), AigNodeId>,
 
     /// Choice nodes: representative node -> list of equivalent alternatives
     ///
@@ -310,7 +310,7 @@ pub struct Aig {
     /// mapper can then explore all alternatives to find the best implementation.
     ///
     /// Each alternative is stored as an AigLit to handle potential inversions.
-    choices: HashMap<AigNodeId, Vec<AigLit>>,
+    choices: IndexMap<AigNodeId, Vec<AigLit>>,
 }
 
 impl Aig {
@@ -321,9 +321,9 @@ impl Aig {
             nodes: Vec::new(),
             outputs: Vec::new(),
             safety_info: Vec::new(),
-            net_to_lit: HashMap::new(),
-            strash_map: HashMap::new(),
-            choices: HashMap::new(),
+            net_to_lit: IndexMap::new(),
+            strash_map: IndexMap::new(),
+            choices: IndexMap::new(),
         };
 
         // Node 0 is always constant false
@@ -781,7 +781,7 @@ impl Aig {
         self.add_choice(rep, other_lit);
 
         // Move choices from other to rep
-        if let Some(other_choices) = self.choices.remove(&other) {
+        if let Some(other_choices) = self.choices.shift_remove(&other) {
             for choice in other_choices {
                 let adjusted = if inverted { choice.invert() } else { choice };
                 self.add_choice(rep, adjusted);
@@ -895,7 +895,7 @@ impl Aig {
     ///
     /// For each entry (old_node, new_lit) in the map, replaces all references
     /// to old_node with new_lit (applying the correct inversion).
-    pub fn apply_substitutions(&mut self, subst_map: &HashMap<AigNodeId, AigLit>) {
+    pub fn apply_substitutions(&mut self, subst_map: &IndexMap<AigNodeId, AigLit>) {
         if subst_map.is_empty() {
             return;
         }

@@ -1,9 +1,9 @@
 use crate::clock_manager::ClockManager;
 use crate::simulator::{SimulationError, SimulationResult, SimulationRuntime, SimulationState};
 use async_trait::async_trait;
+use indexmap::IndexMap;
 use metal::{Buffer, CommandQueue, ComputePipelineState, Device, MTLResourceOptions};
 use skalp_sir::{generate_metal_shader, SirModule};
-use std::collections::HashMap;
 use std::fs;
 
 pub struct GpuDevice {
@@ -28,7 +28,7 @@ impl GpuDevice {
 pub struct GpuRuntime {
     device: GpuDevice,
     module: Option<SirModule>,
-    pipelines: HashMap<String, ComputePipelineState>,
+    pipelines: IndexMap<String, ComputePipelineState>,
     input_buffer: Option<Buffer>,
     register_buffer: Option<Buffer>,
     // BUG #182 FIX: Shadow register buffer for double-buffered sequential updates
@@ -48,7 +48,7 @@ impl GpuRuntime {
         Ok(GpuRuntime {
             device,
             module: None,
-            pipelines: HashMap::new(),
+            pipelines: IndexMap::new(),
             input_buffer: None,
             register_buffer: None,
             shadow_register_buffer: None,
@@ -609,8 +609,8 @@ impl GpuRuntime {
     }
 
     fn extract_state(&self) -> SimulationState {
-        let mut signals = HashMap::new();
-        let mut registers = HashMap::new();
+        let mut signals = IndexMap::new();
+        let mut registers = IndexMap::new();
 
         // Read data from GPU buffers
         if let Some(module) = &self.module {

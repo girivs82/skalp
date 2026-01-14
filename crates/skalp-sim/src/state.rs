@@ -3,7 +3,8 @@
 //! Manages signal values and state during GPU simulation
 
 use bitvec::prelude::*;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
+use indexmap::IndexMap;
 use crate::sir::SirSignalId;
 use crate::event::SimulationEvent;
 
@@ -11,9 +12,9 @@ use crate::event::SimulationEvent;
 #[derive(Debug, Clone)]
 pub struct SimulationState {
     /// Current signal values
-    signal_values: HashMap<SirSignalId, BitVec>,
+    signal_values: IndexMap<SirSignalId, BitVec>,
     /// Previous signal values (for edge detection)
-    prev_signal_values: HashMap<SirSignalId, BitVec>,
+    prev_signal_values: IndexMap<SirSignalId, BitVec>,
     /// Signals that changed in the last cycle
     changed_signals: HashSet<SirSignalId>,
     /// Current simulation time in picoseconds
@@ -28,8 +29,8 @@ impl SimulationState {
     /// Create a new simulation state
     pub fn new(num_signals: usize) -> Self {
         Self {
-            signal_values: HashMap::with_capacity(num_signals),
-            prev_signal_values: HashMap::with_capacity(num_signals),
+            signal_values: IndexMap::with_capacity(num_signals),
+            prev_signal_values: IndexMap::with_capacity(num_signals),
             changed_signals: HashSet::new(),
             current_time: 0,
             current_cycle: 0,
@@ -180,7 +181,7 @@ impl Default for SimulationState {
 #[derive(Debug, Clone)]
 pub struct StateSnapshot {
     /// Signal values at snapshot time
-    pub signal_values: HashMap<SirSignalId, BitVec>,
+    pub signal_values: IndexMap<SirSignalId, BitVec>,
     /// Simulation time at snapshot
     pub time: u64,
     /// Simulation cycle at snapshot

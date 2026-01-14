@@ -7,8 +7,9 @@
 use crate::mir::{
     ClockDomainId, Expression, ExpressionKind, LValue, Module, Process, Signal, Statement,
 };
+use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 /// CDC violation severity levels
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -54,17 +55,17 @@ pub struct CdcViolation {
 /// CDC Analyzer for detecting clock domain crossing violations
 pub struct CdcAnalyzer {
     /// Clock domain assignments for each signal
-    signal_domains: HashMap<crate::mir::SignalId, ClockDomainId>,
+    signal_domains: IndexMap<crate::mir::SignalId, ClockDomainId>,
     /// Clock domain assignments for each port
-    port_domains: HashMap<crate::mir::PortId, ClockDomainId>,
+    port_domains: IndexMap<crate::mir::PortId, ClockDomainId>,
 }
 
 impl CdcAnalyzer {
     /// Create a new CDC analyzer
     pub fn new() -> Self {
         Self {
-            signal_domains: HashMap::new(),
-            port_domains: HashMap::new(),
+            signal_domains: IndexMap::new(),
+            port_domains: IndexMap::new(),
         }
     }
 

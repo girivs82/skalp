@@ -1,10 +1,10 @@
 // MWE for L0/L1 match structure with SUB operations
 
+use indexmap::IndexMap;
 use skalp_frontend::parse_and_build_hir;
 use skalp_lir::{get_stdlib_library, lower_mir_hierarchical, map_hierarchical_to_gates};
 use skalp_mir::MirCompiler;
 use skalp_sim::{CircuitMode, HwAccel, SimLevel, UnifiedSimConfig, UnifiedSimulator};
-use std::collections::HashMap;
 
 // Minimal L0/L1-like structure with ADD and SUB
 const L0L1_MATCH: &str = r#"
@@ -60,7 +60,7 @@ fn test_l0l1_match_structure() {
     );
 
     // Count cell types
-    let mut cell_types: HashMap<String, usize> = HashMap::new();
+    let mut cell_types: IndexMap<String, usize> = IndexMap::new();
     for cell in &netlist.cells {
         *cell_types.entry(cell.cell_type.clone()).or_insert(0) += 1;
     }

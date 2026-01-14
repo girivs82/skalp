@@ -5,8 +5,8 @@
 
 use crate::asil::{AsilLevel, VerificationMethod};
 use chrono::{DateTime, Utc};
+use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 
 /// Safety requirement with ISO 26262 compliance information
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -81,7 +81,7 @@ pub enum RequirementStatus {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SafetyRequirementManager {
     /// All safety requirements
-    requirements: HashMap<String, SafetyRequirement>,
+    requirements: IndexMap<String, SafetyRequirement>,
     /// Requirement hierarchy graph
     hierarchy: RequirementHierarchy,
     /// Traceability matrix
@@ -94,18 +94,18 @@ pub struct RequirementHierarchy {
     /// Root requirements (no parents)
     roots: Vec<String>,
     /// Parent-child relationships
-    relationships: HashMap<String, Vec<String>>,
+    relationships: IndexMap<String, Vec<String>>,
 }
 
 /// Traceability matrix for requirements
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TraceabilityMatrix {
     /// Requirements to design elements
-    req_to_design: HashMap<String, Vec<String>>,
+    req_to_design: IndexMap<String, Vec<String>>,
     /// Requirements to verification activities
-    req_to_verification: HashMap<String, Vec<String>>,
+    req_to_verification: IndexMap<String, Vec<String>>,
     /// Requirements to safety mechanisms
-    req_to_mechanisms: HashMap<String, Vec<String>>,
+    req_to_mechanisms: IndexMap<String, Vec<String>>,
 }
 
 impl SafetyRequirement {
@@ -191,15 +191,15 @@ impl SafetyRequirementManager {
     /// Create a new requirement manager
     pub fn new() -> Self {
         Self {
-            requirements: HashMap::new(),
+            requirements: IndexMap::new(),
             hierarchy: RequirementHierarchy {
                 roots: vec![],
-                relationships: HashMap::new(),
+                relationships: IndexMap::new(),
             },
             traceability: TraceabilityMatrix {
-                req_to_design: HashMap::new(),
-                req_to_verification: HashMap::new(),
-                req_to_mechanisms: HashMap::new(),
+                req_to_design: IndexMap::new(),
+                req_to_verification: IndexMap::new(),
+                req_to_mechanisms: IndexMap::new(),
             },
         }
     }
@@ -310,7 +310,7 @@ impl SafetyRequirementManager {
             .count();
 
         let asil_breakdown = {
-            let mut breakdown = HashMap::new();
+            let mut breakdown = IndexMap::new();
             for req in self.requirements.values() {
                 let entry = breakdown.entry(req.asil).or_insert((0, 0));
                 entry.0 += 1;
@@ -408,7 +408,7 @@ pub struct CoverageReport {
     /// Coverage percentage
     pub coverage_percentage: f64,
     /// Breakdown by ASIL level (total, verified)
-    pub asil_breakdown: HashMap<AsilLevel, (usize, usize)>,
+    pub asil_breakdown: IndexMap<AsilLevel, (usize, usize)>,
 }
 
 /// Validation errors for requirement hierarchy

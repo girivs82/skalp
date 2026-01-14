@@ -8,7 +8,8 @@
 //! This module identifies potential CCF groups and applies beta factors
 //! to split FIT rates into independent and common cause portions.
 
-use std::collections::{HashMap, HashSet};
+use indexmap::IndexMap;
+use std::collections::HashSet;
 
 use serde::{Deserialize, Serialize};
 
@@ -193,7 +194,7 @@ impl CcfAnalysisResults {
     }
 
     /// Calculate totals from all groups
-    pub fn calculate_totals(&mut self, cell_fits: &HashMap<String, f64>) {
+    pub fn calculate_totals(&mut self, cell_fits: &IndexMap<String, f64>) {
         let mut assigned_cells: HashSet<String> = HashSet::new();
 
         for group in &self.groups {
@@ -248,9 +249,9 @@ impl CcfAnalysisResults {
 /// # Returns
 /// A vector of identified CCF groups
 pub fn identify_ccf_groups(
-    clock_domains: &HashMap<String, Vec<String>>,
-    reset_signals: &HashMap<String, Vec<String>>,
-    cell_types: &HashMap<String, String>,
+    clock_domains: &IndexMap<String, Vec<String>>,
+    reset_signals: &IndexMap<String, Vec<String>>,
+    cell_types: &IndexMap<String, String>,
 ) -> Vec<CcfGroup> {
     let mut groups = Vec::new();
 
@@ -287,7 +288,7 @@ pub fn identify_ccf_groups(
     }
 
     // Create CCF groups for same cell types (systematic errors)
-    let mut type_groups: HashMap<String, Vec<String>> = HashMap::new();
+    let mut type_groups: IndexMap<String, Vec<String>> = IndexMap::new();
     for (cell_path, cell_type) in cell_types {
         type_groups
             .entry(cell_type.clone())
@@ -326,7 +327,7 @@ pub fn identify_ccf_groups(
 ///
 /// # Returns
 /// A vector of CCF groups where each group represents an SM and its protected cells
-pub fn create_sm_ccf_groups(sm_to_protected: &HashMap<String, Vec<String>>) -> Vec<CcfGroup> {
+pub fn create_sm_ccf_groups(sm_to_protected: &IndexMap<String, Vec<String>>) -> Vec<CcfGroup> {
     let mut groups = Vec::new();
 
     for (sm_name, protected_cells) in sm_to_protected {
@@ -444,7 +445,7 @@ mod tests {
 
     #[test]
     fn test_identify_ccf_groups() {
-        let mut clock_domains: HashMap<String, Vec<String>> = HashMap::new();
+        let mut clock_domains: IndexMap<String, Vec<String>> = IndexMap::new();
         clock_domains.insert(
             "clk_main".to_string(),
             vec![
@@ -455,13 +456,13 @@ mod tests {
         );
         clock_domains.insert("clk_fast".to_string(), vec!["cell_d".to_string()]);
 
-        let mut reset_signals: HashMap<String, Vec<String>> = HashMap::new();
+        let mut reset_signals: IndexMap<String, Vec<String>> = IndexMap::new();
         reset_signals.insert(
             "rst_n".to_string(),
             vec!["cell_a".to_string(), "cell_b".to_string()],
         );
 
-        let mut cell_types: HashMap<String, String> = HashMap::new();
+        let mut cell_types: IndexMap<String, String> = IndexMap::new();
         cell_types.insert("cell_a".to_string(), "DFF".to_string());
         cell_types.insert("cell_b".to_string(), "DFF".to_string());
         cell_types.insert("cell_c".to_string(), "DFF".to_string());
@@ -488,7 +489,7 @@ mod tests {
         group.add_member("cell_b".to_string());
         results.add_group(group);
 
-        let mut cell_fits: HashMap<String, f64> = HashMap::new();
+        let mut cell_fits: IndexMap<String, f64> = IndexMap::new();
         cell_fits.insert("cell_a".to_string(), 100.0);
         cell_fits.insert("cell_b".to_string(), 100.0);
         cell_fits.insert("cell_c".to_string(), 50.0); // Unassigned

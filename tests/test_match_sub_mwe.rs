@@ -1,11 +1,11 @@
 // Minimal MWE for match SUB oscillation
 // This tests if SUB inside a match statement causes oscillation
 
+use indexmap::IndexMap;
 use skalp_frontend::parse_and_build_hir;
 use skalp_lir::{get_stdlib_library, lower_mir_hierarchical, map_hierarchical_to_gates};
 use skalp_mir::MirCompiler;
 use skalp_sim::{CircuitMode, HwAccel, SimLevel, UnifiedSimConfig, UnifiedSimulator};
-use std::collections::HashMap;
 
 // Simplest case: just ADD and SUB in match
 const MATCH_ADD_SUB: &str = r#"
@@ -91,7 +91,7 @@ fn run_test(name: &str, source: &str, test_inputs: Vec<(&str, u64, usize)>) -> b
     );
 
     // Count cell types
-    let mut cell_types: HashMap<String, usize> = HashMap::new();
+    let mut cell_types: IndexMap<String, usize> = IndexMap::new();
     for cell in &netlist.cells {
         *cell_types.entry(cell.cell_type.clone()).or_insert(0) += 1;
     }

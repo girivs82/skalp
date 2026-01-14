@@ -46,9 +46,9 @@
 //! }
 //! ```
 
+use indexmap::IndexMap;
 use skalp_lir::gate_netlist::{CellId, GateNetId, GateNetlist};
 use skalp_lir::PrimitiveType;
-use std::collections::HashMap;
 
 /// NCL signal phase
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -142,13 +142,13 @@ impl Default for NclSimConfig {
 pub struct NclGateState {
     /// Current output state for each THmn cell
     /// Key is CellId, value is output state
-    th_states: HashMap<CellId, bool>,
+    th_states: IndexMap<CellId, bool>,
 }
 
 impl NclGateState {
     pub fn new() -> Self {
         Self {
-            th_states: HashMap::new(),
+            th_states: IndexMap::new(),
         }
     }
 
@@ -203,9 +203,9 @@ pub struct NclSimulator {
     /// Simulation statistics
     stats: NclSimStats,
     /// Input net IDs (for setting inputs)
-    input_nets: HashMap<String, Vec<GateNetId>>,
+    input_nets: IndexMap<String, Vec<GateNetId>>,
     /// Output net IDs (for reading outputs)
-    output_nets: HashMap<String, Vec<GateNetId>>,
+    output_nets: IndexMap<String, Vec<GateNetId>>,
 }
 
 impl NclSimulator {
@@ -214,8 +214,8 @@ impl NclSimulator {
         let net_count = netlist.nets.len();
 
         // Collect input and output nets by name
-        let mut input_nets: HashMap<String, Vec<GateNetId>> = HashMap::new();
-        let mut output_nets: HashMap<String, Vec<GateNetId>> = HashMap::new();
+        let mut input_nets: IndexMap<String, Vec<GateNetId>> = IndexMap::new();
+        let mut output_nets: IndexMap<String, Vec<GateNetId>> = IndexMap::new();
 
         for net in &netlist.nets {
             if net.is_input {
@@ -230,7 +230,7 @@ impl NclSimulator {
         }
 
         // Build a lookup map for net names (do this once, not per signal group)
-        let net_names: std::collections::HashMap<u32, &str> = netlist
+        let net_names: IndexMap<u32, &str> = netlist
             .nets
             .iter()
             .map(|n| (n.id.0, n.name.as_str()))
@@ -918,7 +918,7 @@ fn strip_bit_suffix(name: &str) -> String {
 ///
 /// This ensures that `set_dual_rail_value` and `get_dual_rail_value` can correctly
 /// map bit positions to the right rails.
-fn sort_dual_rail_nets(nets: &mut [GateNetId], net_names: &std::collections::HashMap<u32, &str>) {
+fn sort_dual_rail_nets(nets: &mut [GateNetId], net_names: &IndexMap<u32, &str>) {
     // Parse each net to extract (is_false_rail, bit_index)
     // Returns (false, bit_index) for true rail, (true, bit_index) for false rail
     // This way sorting naturally groups t rails first, then f rails, each sorted by bit index

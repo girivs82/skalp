@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use indexmap::IndexMap;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ClockEdge {
@@ -47,7 +47,7 @@ impl ClockInfo {
 }
 
 pub struct ClockManager {
-    pub clocks: HashMap<String, ClockInfo>,
+    pub clocks: IndexMap<String, ClockInfo>,
     current_time_ps: u64,
     auto_toggle: bool,
 }
@@ -61,7 +61,7 @@ impl Default for ClockManager {
 impl ClockManager {
     pub fn new() -> Self {
         ClockManager {
-            clocks: HashMap::new(),
+            clocks: IndexMap::new(),
             current_time_ps: 0,
             auto_toggle: false,
         }
@@ -120,7 +120,7 @@ impl ClockManager {
         }
     }
 
-    pub fn get_all_edges(&self) -> HashMap<String, ClockEdge> {
+    pub fn get_all_edges(&self) -> IndexMap<String, ClockEdge> {
         self.clocks
             .iter()
             .map(|(name, clock)| (name.clone(), clock.detect_edge()))

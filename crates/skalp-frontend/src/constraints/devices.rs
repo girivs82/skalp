@@ -1,6 +1,6 @@
 //! Device database for FPGA pin and I/O standard definitions
 
-use std::collections::HashMap;
+use indexmap::IndexMap;
 
 /// FPGA device family
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -263,13 +263,13 @@ impl Device {
 
 /// Device database for looking up FPGA devices
 pub struct DeviceDatabase {
-    devices: HashMap<String, Device>,
+    devices: IndexMap<String, Device>,
 }
 
 impl DeviceDatabase {
     /// Create a new device database with built-in devices
     pub fn new() -> Self {
-        let mut devices = HashMap::new();
+        let mut devices = IndexMap::new();
 
         // Add iCE40 devices
         let hx1k = Device::ice40_hx1k();

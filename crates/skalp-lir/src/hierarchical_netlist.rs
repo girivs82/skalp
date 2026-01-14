@@ -5,8 +5,9 @@
 //! context-aware specialization.
 
 use crate::gate_netlist::{Cell, CellId, GateNet, GateNetId, GateNetlist};
+use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 /// Path identifying a unique instance in the hierarchy (e.g., "top.cpu.alu")
 pub type InstancePath = String;
@@ -17,7 +18,7 @@ pub struct HierarchicalNetlist {
     /// Name of the top module
     pub top_module: String,
     /// Each instance gets its own specialized netlist
-    pub instances: HashMap<InstancePath, InstanceNetlist>,
+    pub instances: IndexMap<InstancePath, InstanceNetlist>,
     /// Technology library name
     pub library: String,
 }
@@ -30,11 +31,11 @@ pub struct InstanceNetlist {
     /// The gate netlist for this instance
     pub netlist: GateNetlist,
     /// Port connections to parent instance
-    pub port_connections: HashMap<String, PortConnection>,
+    pub port_connections: IndexMap<String, PortConnection>,
     /// Which outputs are unused (for optimization)
     pub unused_outputs: HashSet<String>,
     /// Constant inputs that were propagated (for documentation)
-    pub constant_inputs: HashMap<String, u64>,
+    pub constant_inputs: IndexMap<String, u64>,
     /// Child instances within this instance
     pub children: Vec<String>,
 }
@@ -60,7 +61,7 @@ pub struct HierarchicalSynthResult {
     /// The optimized hierarchical netlist
     pub netlist: HierarchicalNetlist,
     /// Per-instance synthesis results
-    pub instance_results: HashMap<InstancePath, crate::synth::SynthResult>,
+    pub instance_results: IndexMap<InstancePath, crate::synth::SynthResult>,
     /// Total synthesis time in milliseconds
     pub total_time_ms: u64,
 }
@@ -70,7 +71,7 @@ impl HierarchicalNetlist {
     pub fn new(top_module: String, library: String) -> Self {
         Self {
             top_module,
-            instances: HashMap::new(),
+            instances: IndexMap::new(),
             library,
         }
     }
@@ -114,7 +115,8 @@ impl HierarchicalNetlist {
         }
 
         // Track net ID remapping for each instance
-        let mut net_id_maps: HashMap<&InstancePath, HashMap<GateNetId, GateNetId>> = HashMap::new();
+        let mut net_id_maps: IndexMap<&InstancePath, IndexMap<GateNetId, GateNetId>> =
+            IndexMap::new();
 
         // Phase 1: Add all cells from all instances with hierarchical path prefix
         // IMPORTANT: Sort instance paths to ensure deterministic ordering.
@@ -125,7 +127,7 @@ impl HierarchicalNetlist {
 
         for path in sorted_paths {
             let inst = self.instances.get(path).unwrap();
-            let mut net_map = HashMap::new();
+            let mut net_map = IndexMap::new();
 
             // First, create remapped nets for this instance
             for (idx, net) in inst.netlist.nets.iter().enumerate() {
@@ -262,7 +264,7 @@ impl HierarchicalNetlist {
     fn stitch_all_ports(
         &self,
         result: &mut GateNetlist,
-        _net_maps: &HashMap<&InstancePath, HashMap<GateNetId, GateNetId>>,
+        _net_maps: &IndexMap<&InstancePath, IndexMap<GateNetId, GateNetId>>,
     ) {
         eprintln!(
             "[STITCH] Starting port stitching for {} instances",
@@ -641,9 +643,9 @@ impl InstanceNetlist {
         Self {
             module_name,
             netlist,
-            port_connections: HashMap::new(),
+            port_connections: IndexMap::new(),
             unused_outputs: HashSet::new(),
-            constant_inputs: HashMap::new(),
+            constant_inputs: IndexMap::new(),
             children: Vec::new(),
         }
     }

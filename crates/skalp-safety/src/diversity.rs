@@ -15,8 +15,9 @@
 //! - **Single Point of Failure (SPF)**: A failure that directly violates a safety goal
 //! - **Common Cause Failure (CCF)**: A failure affecting multiple elements due to shared cause
 
+use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 use crate::design_rules::DiversityAspect;
 
@@ -478,7 +479,7 @@ pub struct SpfSummary {
 /// # Returns
 /// Complete diversity analysis
 pub fn analyze_diversity(
-    channel_definitions: &HashMap<String, Vec<String>>,
+    channel_definitions: &IndexMap<String, Vec<String>>,
     diversity_requirements: &[DiversityAspect],
 ) -> DiversityAnalysis {
     let mut analysis = DiversityAnalysis::new();
@@ -677,15 +678,15 @@ fn generate_diversity_recommendations(analysis: &DiversityAnalysis) -> Vec<Strin
 /// # Returns
 /// Single point of failure analysis
 pub fn detect_single_points(
-    cells: &HashMap<String, (f64, bool)>,
+    cells: &IndexMap<String, (f64, bool)>,
     safety_outputs: &[String],
-    connectivity: &HashMap<String, Vec<String>>,
+    connectivity: &IndexMap<String, Vec<String>>,
 ) -> SinglePointAnalysis {
     let mut analysis = SinglePointAnalysis::new();
     let mut total_fit = 0.0;
 
     // Build reverse connectivity (what drives each cell)
-    let mut reverse_connectivity: HashMap<String, Vec<String>> = HashMap::new();
+    let mut reverse_connectivity: IndexMap<String, Vec<String>> = IndexMap::new();
     for (driver, fanouts) in connectivity {
         for fanout in fanouts {
             reverse_connectivity
@@ -806,7 +807,7 @@ mod tests {
 
     #[test]
     fn test_diversity_analysis_empty() {
-        let channels: HashMap<String, Vec<String>> = HashMap::new();
+        let channels: IndexMap<String, Vec<String>> = IndexMap::new();
         let requirements = vec![];
         let analysis = analyze_diversity(&channels, &requirements);
 
@@ -816,7 +817,7 @@ mod tests {
 
     #[test]
     fn test_diversity_analysis_two_channels() {
-        let mut channels = HashMap::new();
+        let mut channels = IndexMap::new();
         channels.insert(
             "channel_a".to_string(),
             vec!["cell1".to_string(), "cell2".to_string()],
@@ -835,7 +836,7 @@ mod tests {
 
     #[test]
     fn test_diversity_analysis_shared_components() {
-        let mut channels = HashMap::new();
+        let mut channels = IndexMap::new();
         channels.insert(
             "channel_a".to_string(),
             vec!["shared_clk".to_string(), "cell1".to_string()],
@@ -858,14 +859,14 @@ mod tests {
 
     #[test]
     fn test_spf_detection_basic() {
-        let mut cells = HashMap::new();
+        let mut cells = IndexMap::new();
         cells.insert("cell1".to_string(), (10.0, false));
         cells.insert("cell2".to_string(), (10.0, false));
         cells.insert("output".to_string(), (5.0, false));
 
         let safety_outputs = vec!["output".to_string()];
 
-        let mut connectivity = HashMap::new();
+        let mut connectivity = IndexMap::new();
         connectivity.insert("cell1".to_string(), vec!["cell2".to_string()]);
         connectivity.insert("cell2".to_string(), vec!["output".to_string()]);
 
@@ -877,14 +878,14 @@ mod tests {
 
     #[test]
     fn test_spf_with_safety_mechanism() {
-        let mut cells = HashMap::new();
+        let mut cells = IndexMap::new();
         cells.insert("func_cell".to_string(), (10.0, false));
         cells.insert("sm_checker".to_string(), (5.0, true)); // Safety mechanism
         cells.insert("output".to_string(), (5.0, false));
 
         let safety_outputs = vec!["output".to_string()];
 
-        let mut connectivity = HashMap::new();
+        let mut connectivity = IndexMap::new();
         connectivity.insert(
             "func_cell".to_string(),
             vec!["output".to_string(), "sm_checker".to_string()],

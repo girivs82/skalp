@@ -20,10 +20,11 @@ use crate::sir::{
     SirDetectionMode, SirModule, SirOperation, SirPortDirection, SirSignal, SirSignalId,
     SirSignalType, StructuralBlockInfo,
 };
+use indexmap::IndexMap;
 use skalp_frontend::hir::DetectionMode;
 use skalp_lir::gate_netlist::{Cell, CellId, GateNet, GateNetId, GateNetlist};
 use skalp_lir::lir::{PrimitiveId, PrimitiveType};
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
 
 // ============================================================================
 // Converter
@@ -32,9 +33,9 @@ use std::collections::{HashMap, VecDeque};
 /// Converts GateNetlist to SIR for simulation
 pub struct GateNetlistToSirConverter {
     /// Mapping from GateNetId to SirSignalId
-    net_to_signal: HashMap<GateNetId, SirSignalId>,
+    net_to_signal: IndexMap<GateNetId, SirSignalId>,
     /// Mapping from CellId to PrimitiveId
-    cell_to_primitive: HashMap<CellId, PrimitiveId>,
+    cell_to_primitive: IndexMap<CellId, PrimitiveId>,
     /// Next signal ID
     next_signal_id: u32,
     /// Next primitive ID
@@ -47,8 +48,8 @@ impl GateNetlistToSirConverter {
     /// Create a new converter
     pub fn new() -> Self {
         Self {
-            net_to_signal: HashMap::new(),
-            cell_to_primitive: HashMap::new(),
+            net_to_signal: IndexMap::new(),
+            cell_to_primitive: IndexMap::new(),
             next_signal_id: 0,
             next_primitive_id: 0,
             total_fit: 0.0,
@@ -444,7 +445,7 @@ impl GateNetlistToSirConverter {
 
         // Build dependency graph
         // signal_producers: signal_id -> operation index that produces it
-        let mut signal_producers: HashMap<u32, usize> = HashMap::new();
+        let mut signal_producers: IndexMap<u32, usize> = IndexMap::new();
 
         // For each operation, record which signals it produces
         for (idx, op) in ops.iter().enumerate() {

@@ -32,7 +32,8 @@
 use super::{Pass, PassResult};
 use crate::pipeline_annotations::{ModuleAnnotations, PipelineAnnotations, PipelineStage};
 use crate::synth::{Aig, AigLit, AigNode, AigNodeId};
-use std::collections::{HashMap, HashSet};
+use indexmap::IndexMap;
+use std::collections::HashSet;
 
 /// Retiming configuration
 #[derive(Debug, Clone)]
@@ -195,8 +196,8 @@ impl Retiming {
     }
 
     /// Compute timing for all nodes
-    fn compute_timing(&self, aig: &Aig) -> HashMap<AigNodeId, NodeTiming> {
-        let mut timing: HashMap<AigNodeId, NodeTiming> = HashMap::new();
+    fn compute_timing(&self, aig: &Aig) -> IndexMap<AigNodeId, NodeTiming> {
+        let mut timing: IndexMap<AigNodeId, NodeTiming> = IndexMap::new();
 
         // Initialize constant and input nodes
         timing.insert(
@@ -311,7 +312,7 @@ impl Retiming {
     }
 
     /// Get the critical path delay
-    fn get_critical_delay(&self, aig: &Aig, timing: &HashMap<AigNodeId, NodeTiming>) -> f64 {
+    fn get_critical_delay(&self, aig: &Aig, timing: &IndexMap<AigNodeId, NodeTiming>) -> f64 {
         let mut max_delay = 0.0f64;
 
         // Check outputs
@@ -337,7 +338,7 @@ impl Retiming {
     fn find_forward_candidates(
         &self,
         aig: &Aig,
-        timing: &HashMap<AigNodeId, NodeTiming>,
+        timing: &IndexMap<AigNodeId, NodeTiming>,
     ) -> Vec<AigNodeId> {
         let mut candidates = Vec::new();
 
@@ -368,7 +369,7 @@ impl Retiming {
     fn find_backward_candidates(
         &self,
         aig: &Aig,
-        timing: &HashMap<AigNodeId, NodeTiming>,
+        timing: &IndexMap<AigNodeId, NodeTiming>,
     ) -> Vec<AigNodeId> {
         if !self.config.allow_backward {
             return Vec::new();
@@ -416,7 +417,7 @@ impl Retiming {
         &mut self,
         aig: &mut Aig,
         latch_id: AigNodeId,
-        timing: &HashMap<AigNodeId, NodeTiming>,
+        timing: &IndexMap<AigNodeId, NodeTiming>,
     ) -> bool {
         // Get latch info
         let latch_node = match aig.get_node(latch_id) {
@@ -475,7 +476,7 @@ impl Retiming {
         &mut self,
         aig: &mut Aig,
         latch_id: AigNodeId,
-        timing: &HashMap<AigNodeId, NodeTiming>,
+        timing: &IndexMap<AigNodeId, NodeTiming>,
     ) -> bool {
         // Record the pipeline stage annotation
         let arrival = timing.get(&latch_id).map(|t| t.arrival).unwrap_or(0.0);

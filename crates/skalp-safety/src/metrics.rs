@@ -8,8 +8,8 @@ use crate::common_cause::CcfAnalysisResults;
 use crate::fmea::{DetectionClass, FailureClass, FmeaAnalysis};
 use crate::mechanisms::{MechanismType, SafetyMechanism};
 use chrono::{DateTime, Utc};
+use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 
 /// Comprehensive safety metrics for a design
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -79,13 +79,13 @@ pub struct HardwareArchitecturalMetrics {
     /// Multiple point failure rate (FIT)
     pub multiple_point_failure_rate: f64,
     /// Detailed breakdown by component
-    pub component_breakdown: HashMap<String, ComponentMetrics>,
+    pub component_breakdown: IndexMap<String, ComponentMetrics>,
     // ===== SM Failure Analysis (ISO 26262) =====
     /// Safety mechanism failure rate contribution to PMHF (λSM)
     /// This is the effective SM FIT after accounting for SM-of-SM protection
     pub sm_failure_rate: f64,
     /// Per-mechanism breakdown of SM failures
-    pub sm_breakdown: HashMap<String, SmMetrics>,
+    pub sm_breakdown: IndexMap<String, SmMetrics>,
     // ===== Latent Fault Analysis (ISO 26262) =====
     /// Detailed breakdown of latent (multiple-point) faults
     pub latent_fault_breakdown: LatentFaultBreakdown,
@@ -93,7 +93,7 @@ pub struct HardwareArchitecturalMetrics {
     /// Common cause failure contribution to PMHF (λDPF_CCF)
     pub dpf_ccf_rate: f64,
     /// Per-group breakdown of CCF contributions
-    pub ccf_breakdown: HashMap<String, f64>,
+    pub ccf_breakdown: IndexMap<String, f64>,
 }
 
 /// Metrics for a single safety mechanism's failure contribution
@@ -356,7 +356,7 @@ pub struct MechanismEffectivenessMetrics {
     /// Overall mechanism effectiveness
     pub overall_effectiveness: f64,
     /// Effectiveness by mechanism type
-    pub effectiveness_by_type: HashMap<MechanismType, f64>,
+    pub effectiveness_by_type: IndexMap<MechanismType, f64>,
     /// Mechanism coverage analysis
     pub coverage_analysis: CoverageAnalysis,
     /// Redundancy analysis
@@ -373,7 +373,7 @@ pub struct CoverageAnalysis {
     /// Coverage gaps
     pub coverage_gaps: Vec<CoverageGap>,
     /// Coverage by failure mode
-    pub coverage_by_failure_mode: HashMap<String, f64>,
+    pub coverage_by_failure_mode: IndexMap<String, f64>,
 }
 
 /// Coverage gap identification
@@ -421,7 +421,7 @@ pub enum ImpactSeverity {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RedundancyAnalysis {
     /// Redundancy level by component
-    pub redundancy_levels: HashMap<String, u32>,
+    pub redundancy_levels: IndexMap<String, u32>,
     /// Common mode failures analysis
     pub common_mode_failures: CommonModeFailureAnalysis,
     /// Diversity factors
@@ -587,7 +587,7 @@ pub enum GapSeverity {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MarginAnalysis {
     /// Safety margins by metric
-    pub safety_margins: HashMap<String, f64>,
+    pub safety_margins: IndexMap<String, f64>,
     /// Sensitivity analysis
     pub sensitivity_analysis: SensitivityAnalysis,
     /// Robustness assessment
@@ -598,7 +598,7 @@ pub struct MarginAnalysis {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SensitivityAnalysis {
     /// Parameter sensitivities
-    pub parameter_sensitivities: HashMap<String, f64>,
+    pub parameter_sensitivities: IndexMap<String, f64>,
     /// Critical parameters
     pub critical_parameters: Vec<String>,
     /// Sensitivity threshold
@@ -609,7 +609,7 @@ pub struct SensitivityAnalysis {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RobustnessAssessment {
     /// Monte Carlo confidence intervals
-    pub confidence_intervals: HashMap<String, ConfidenceInterval>,
+    pub confidence_intervals: IndexMap<String, ConfidenceInterval>,
     /// Worst-case analysis
     pub worst_case_analysis: WorstCaseAnalysis,
     /// Robustness score
@@ -646,7 +646,7 @@ pub struct DiagnosticCoverageMetrics {
     /// Overall diagnostic coverage
     pub overall_coverage: f64,
     /// Coverage by diagnostic type
-    pub coverage_by_type: HashMap<DiagnosticType, f64>,
+    pub coverage_by_type: IndexMap<DiagnosticType, f64>,
     /// Diagnostic effectiveness
     pub diagnostic_effectiveness: f64,
     /// Diagnostic latency metrics
@@ -832,7 +832,7 @@ impl SafetyMetricsCalculator {
         let mut total_failure_rate = 0.0;
         let mut safe_failure_rate = 0.0;
         let mut single_point_failure_rate = 0.0;
-        let mut component_breakdown = HashMap::new();
+        let mut component_breakdown = IndexMap::new();
 
         // Calculate failure rates from FMEA entries
         for entry in &fmea.fmea_entries {
@@ -886,7 +886,7 @@ impl SafetyMetricsCalculator {
         // Calculate λSM (Safety Mechanism failure rate) from SM analysis
         let (sm_failure_rate, sm_breakdown) = if let Some(sm) = sm_analysis {
             let sm_fit = sm.calculate_sm_pmhf_contribution();
-            let breakdown: HashMap<String, SmMetrics> = sm
+            let breakdown: IndexMap<String, SmMetrics> = sm
                 .mechanisms
                 .iter()
                 .map(|m| {
@@ -910,7 +910,7 @@ impl SafetyMetricsCalculator {
                 .iter()
                 .map(|m| m.calculate_pmhf_contribution())
                 .sum();
-            (sm_fit, HashMap::new())
+            (sm_fit, IndexMap::new())
         };
 
         // Calculate λDPF_CCF (Dependent failures from Common Cause Failures)
@@ -920,7 +920,7 @@ impl SafetyMetricsCalculator {
             // Note: We use the group's beta factor as an indicator of CCF contribution
             // The actual per-group FIT requires cell-level FIT mapping which is
             // computed during CCF analysis via calculate_totals()
-            let breakdown: HashMap<String, f64> = ccf
+            let breakdown: IndexMap<String, f64> = ccf
                 .groups
                 .iter()
                 .map(|g| {
@@ -942,7 +942,7 @@ impl SafetyMetricsCalculator {
                 .collect();
             (ccf.total_common_cause_fit, breakdown)
         } else {
-            (0.0, HashMap::new())
+            (0.0, IndexMap::new())
         };
 
         // Calculate PMHF (ISO 26262-5 + ISO 26262-9 compliant)
@@ -1057,8 +1057,8 @@ impl SafetyMetricsCalculator {
     ) -> Result<MechanismEffectivenessMetrics, MetricsError> {
         let overall_effectiveness = self.calculate_overall_mechanism_effectiveness(mechanisms)?;
 
-        let mut effectiveness_by_type = HashMap::new();
-        let mut type_counts = HashMap::new();
+        let mut effectiveness_by_type = IndexMap::new();
+        let mut type_counts = IndexMap::new();
 
         for mechanism in mechanisms {
             let effectiveness = mechanism.calculate_effectiveness();
@@ -1081,11 +1081,11 @@ impl SafetyMetricsCalculator {
             fault_coverage: overall_effectiveness * 100.0,
             diagnostic_coverage: overall_effectiveness * 100.0,
             coverage_gaps: vec![], // Would be populated from detailed analysis
-            coverage_by_failure_mode: HashMap::new(),
+            coverage_by_failure_mode: IndexMap::new(),
         };
 
         let redundancy_analysis = RedundancyAnalysis {
-            redundancy_levels: HashMap::new(),
+            redundancy_levels: IndexMap::new(),
             common_mode_failures: CommonModeFailureAnalysis {
                 cmf_rate: 10.0, // Example value
                 beta_factor: 0.1,
@@ -1196,14 +1196,14 @@ impl SafetyMetricsCalculator {
             },
             compliance_gaps: vec![], // Would be populated from detailed analysis
             margin_analysis: MarginAnalysis {
-                safety_margins: HashMap::new(),
+                safety_margins: IndexMap::new(),
                 sensitivity_analysis: SensitivityAnalysis {
-                    parameter_sensitivities: HashMap::new(),
+                    parameter_sensitivities: IndexMap::new(),
                     critical_parameters: vec![],
                     sensitivity_threshold: 0.1,
                 },
                 robustness_assessment: RobustnessAssessment {
-                    confidence_intervals: HashMap::new(),
+                    confidence_intervals: IndexMap::new(),
                     worst_case_analysis: WorstCaseAnalysis {
                         worst_case_spfm: metrics.spfm * 0.9, // 10% degradation
                         worst_case_lf: metrics.lf * 0.9,
@@ -1227,7 +1227,7 @@ impl SafetyMetricsCalculator {
             .sum::<f64>()
             / mechanisms.len().max(1) as f64;
 
-        let mut coverage_by_type = HashMap::new();
+        let mut coverage_by_type = IndexMap::new();
         coverage_by_type.insert(DiagnosticType::Online, overall_coverage);
         coverage_by_type.insert(DiagnosticType::BuiltInSelfTest, overall_coverage * 0.8);
 
@@ -1335,7 +1335,7 @@ mod tests {
             },
             functional_analysis: FunctionalAnalysis {
                 functions: vec![],
-                dependencies: HashMap::new(),
+                dependencies: IndexMap::new(),
                 critical_paths: vec![],
             },
             fmea_entries: vec![],
@@ -1375,9 +1375,9 @@ mod tests {
             single_point_failure_rate: 100.0,
             residual_failure_rate: 50.0,
             multiple_point_failure_rate: 50.0,
-            component_breakdown: HashMap::new(),
+            component_breakdown: IndexMap::new(),
             sm_failure_rate: 0.0,
-            sm_breakdown: HashMap::new(),
+            sm_breakdown: IndexMap::new(),
             latent_fault_breakdown: LatentFaultBreakdown {
                 total_mpf_fit: 50.0,
                 detected_mpf_fit: 42.5,
@@ -1386,7 +1386,7 @@ mod tests {
                 mpf_entry_count: 5,
             },
             dpf_ccf_rate: 0.0,
-            ccf_breakdown: HashMap::new(),
+            ccf_breakdown: IndexMap::new(),
         };
 
         let compliance = calculator
@@ -1479,7 +1479,7 @@ mod tests {
             },
             functional_analysis: FunctionalAnalysis {
                 functions: vec![],
-                dependencies: HashMap::new(),
+                dependencies: IndexMap::new(),
                 critical_paths: vec![],
             },
             fmea_entries: vec![],
@@ -1528,7 +1528,7 @@ mod tests {
             },
             functional_analysis: FunctionalAnalysis {
                 functions: vec![],
-                dependencies: HashMap::new(),
+                dependencies: IndexMap::new(),
                 critical_paths: vec![],
             },
             fmea_entries: vec![],

@@ -26,8 +26,8 @@
 //! outputs = ["y"]
 //! ```
 
+use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 
@@ -118,10 +118,10 @@ pub struct LibraryCell {
 pub struct CellTiming {
     /// Timing arcs: maps "input_pin->output_pin" to timing arc (typical/default corner)
     #[serde(default)]
-    pub arcs: HashMap<String, TimingArc>,
+    pub arcs: IndexMap<String, TimingArc>,
     /// Corner-specific timing overrides
     #[serde(default)]
-    pub corners: HashMap<TimingCorner, CornerTiming>,
+    pub corners: IndexMap<TimingCorner, CornerTiming>,
 }
 
 /// Corner-specific timing data
@@ -132,7 +132,7 @@ pub struct CornerTiming {
     pub conditions: Option<CornerConditions>,
     /// Timing arcs for this corner (overrides default arcs)
     #[serde(default)]
-    pub arcs: HashMap<String, TimingArc>,
+    pub arcs: IndexMap<String, TimingArc>,
     /// Setup time override (for sequential cells)
     #[serde(default)]
     pub setup_ps: Option<u32>,
@@ -322,7 +322,7 @@ impl CellTiming {
     }
 
     /// Get all timing arcs for a specific corner
-    pub fn get_arcs(&self, corner: Option<TimingCorner>) -> &HashMap<String, TimingArc> {
+    pub fn get_arcs(&self, corner: Option<TimingCorner>) -> &IndexMap<String, TimingArc> {
         if let Some(c) = corner {
             if let Some(corner_timing) = self.corners.get(&c) {
                 if !corner_timing.arcs.is_empty() {
@@ -1288,9 +1288,9 @@ pub struct TechLibrary {
     /// Reference voltage in volts
     pub reference_voltage: Option<f64>,
     /// All library cells indexed by name
-    cells: HashMap<String, LibraryCell>,
+    cells: IndexMap<String, LibraryCell>,
     /// Cells indexed by function
-    cells_by_function: HashMap<CellFunction, Vec<String>>,
+    cells_by_function: IndexMap<CellFunction, Vec<String>>,
     /// Decomposition rules
     pub decomposition_rules: Vec<DecompositionRule>,
 }
@@ -1304,8 +1304,8 @@ impl TechLibrary {
             version: None,
             reference_temperature: None,
             reference_voltage: None,
-            cells: HashMap::new(),
-            cells_by_function: HashMap::new(),
+            cells: IndexMap::new(),
+            cells_by_function: IndexMap::new(),
             decomposition_rules: Vec::new(),
         }
     }
@@ -1508,9 +1508,9 @@ pub struct LibrarySet {
     /// Base library (contains all cells, with default/typical timing)
     base_library: TechLibrary,
     /// Corner-specific libraries (may be loaded from separate files)
-    corner_libraries: HashMap<TimingCorner, TechLibrary>,
+    corner_libraries: IndexMap<TimingCorner, TechLibrary>,
     /// Corner operating conditions
-    corner_conditions: HashMap<TimingCorner, CornerConditions>,
+    corner_conditions: IndexMap<TimingCorner, CornerConditions>,
 }
 
 impl LibrarySet {
@@ -1520,8 +1520,8 @@ impl LibrarySet {
             name: base.name.clone(),
             process: None,
             base_library: base,
-            corner_libraries: HashMap::new(),
-            corner_conditions: HashMap::new(),
+            corner_libraries: IndexMap::new(),
+            corner_conditions: IndexMap::new(),
         }
     }
 
@@ -1782,7 +1782,7 @@ impl MultiCornerDelay {
 struct TomlLibrarySetManifest {
     library_set: TomlLibrarySetMeta,
     #[serde(default)]
-    corners: HashMap<String, TomlCornerDef>,
+    corners: IndexMap<String, TomlCornerDef>,
 }
 
 /// Library set metadata
@@ -2023,7 +2023,7 @@ struct TomlCellTiming {
     arcs: Vec<TomlTimingArc>,
     /// Corner-specific timing overrides
     #[serde(default)]
-    corners: HashMap<String, TomlCornerTiming>,
+    corners: IndexMap<String, TomlCornerTiming>,
 }
 
 /// Corner-specific timing in TOML format
@@ -2142,7 +2142,7 @@ impl TomlCell {
         // Parse timing arcs
         let timing = self.timing.map(|t| {
             // Parse default/typical arcs
-            let mut arcs = HashMap::new();
+            let mut arcs = IndexMap::new();
             for arc in t.arcs {
                 arcs.insert(
                     arc.arc,
@@ -2156,10 +2156,10 @@ impl TomlCell {
             }
 
             // Parse corner-specific timing
-            let mut corners = HashMap::new();
+            let mut corners = IndexMap::new();
             for (corner_name, corner_data) in t.corners {
                 if let Ok(corner) = corner_name.parse::<TimingCorner>() {
-                    let mut corner_arcs = HashMap::new();
+                    let mut corner_arcs = IndexMap::new();
                     for arc in corner_data.arcs {
                         corner_arcs.insert(
                             arc.arc,
@@ -2262,7 +2262,7 @@ impl TomlCell {
                 .collect();
 
             // Convert corner-specific timing
-            let corners: HashMap<String, TomlCornerTiming> = t
+            let corners: IndexMap<String, TomlCornerTiming> = t
                 .corners
                 .iter()
                 .map(|(corner, ct)| {

@@ -29,7 +29,7 @@ pub use delay_mapper::{DelayMapper, DelayMappingConfig};
 use super::timing::CellTiming;
 use super::{Aig, AigNodeId, Cut};
 use crate::tech_library::{CellFunction, TechLibrary};
-use std::collections::HashMap;
+use indexmap::IndexMap;
 
 /// Mapping objective
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -74,7 +74,7 @@ pub struct MappingStats {
     /// Number of buffers
     pub buffer_count: usize,
     /// Cells by type
-    pub cells_by_type: HashMap<String, usize>,
+    pub cells_by_type: IndexMap<String, usize>,
 }
 
 impl MappingStats {
@@ -133,9 +133,9 @@ pub struct CutMatch {
 #[derive(Debug)]
 pub struct CellMatcher {
     /// Cell library
-    cells: HashMap<String, CellTiming>,
+    cells: IndexMap<String, CellTiming>,
     /// Truth table to cell mapping
-    tt_to_cell: HashMap<u64, Vec<CellMatch>>,
+    tt_to_cell: IndexMap<u64, Vec<CellMatch>>,
 }
 
 #[derive(Debug, Clone)]
@@ -155,8 +155,8 @@ impl CellMatcher {
     #[cfg(test)]
     pub fn new() -> Self {
         let mut matcher = Self {
-            cells: HashMap::new(),
-            tt_to_cell: HashMap::new(),
+            cells: IndexMap::new(),
+            tt_to_cell: IndexMap::new(),
         };
         matcher.init_basic_cells();
         matcher
@@ -170,8 +170,8 @@ impl CellMatcher {
     /// when attempting to use unavailable cells.
     pub fn from_library(library: &TechLibrary) -> Self {
         let mut matcher = Self {
-            cells: HashMap::new(),
-            tt_to_cell: HashMap::new(),
+            cells: IndexMap::new(),
+            tt_to_cell: IndexMap::new(),
         };
 
         // Add cells from the library based on their function

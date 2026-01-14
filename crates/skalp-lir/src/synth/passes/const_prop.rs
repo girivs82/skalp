@@ -12,12 +12,12 @@
 
 use super::{Pass, PassResult};
 use crate::synth::{Aig, AigLit, AigNode, AigNodeId, AigSafetyInfo, BarrierType};
-use std::collections::HashMap;
+use indexmap::IndexMap;
 
 /// Constant propagation pass
 pub struct ConstProp {
     /// Mapping from old node to new literal
-    replacements: HashMap<AigNodeId, AigLit>,
+    replacements: IndexMap<AigNodeId, AigLit>,
     /// Number of nodes simplified
     simplified_count: usize,
 }
@@ -26,7 +26,7 @@ impl ConstProp {
     /// Create a new constant propagation pass
     pub fn new() -> Self {
         Self {
-            replacements: HashMap::new(),
+            replacements: IndexMap::new(),
             simplified_count: 0,
         }
     }

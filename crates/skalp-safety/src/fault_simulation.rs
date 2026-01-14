@@ -16,8 +16,9 @@
 use crate::asil::AsilLevel;
 use crate::fmeda_library::TechLibrary;
 use crate::hierarchy::{DesignRef, FailureClass, InstancePath, Severity};
+use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::time::Duration;
 
 // ============================================================================
@@ -748,7 +749,7 @@ impl MonitorSpec {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct GoldenSpec {
     /// Golden values as signal -> expression mapping
-    pub values: HashMap<String, String>,
+    pub values: IndexMap<String, String>,
     /// External golden model reference (e.g., C model path)
     pub external_model: Option<String>,
 }
@@ -774,7 +775,7 @@ pub enum TestVectorSource {
     /// Path to test vector file
     File(String),
     /// Inline test vectors (name -> values per cycle)
-    Inline(HashMap<String, Vec<Vec<u8>>>),
+    Inline(IndexMap<String, Vec<Vec<u8>>>),
     /// Randomly generated vectors
     Random { seed: u64, count: u64 },
     /// Reference to testbench entity
@@ -801,12 +802,12 @@ pub struct SafetyGoalSimSpec {
     pub test_scenarios: Vec<TestScenario>,
 
     /// ASIL-derived DC targets per severity
-    pub dc_targets: HashMap<Severity, f64>,
+    pub dc_targets: IndexMap<Severity, f64>,
 }
 
 impl SafetyGoalSimSpec {
     pub fn new(goal_name: &str, asil: AsilLevel) -> Self {
-        let mut dc_targets = HashMap::new();
+        let mut dc_targets = IndexMap::new();
         // ASIL-derived targets per ISO 26262
         match asil {
             AsilLevel::D => {
@@ -918,11 +919,11 @@ pub struct EffectAnalysis {
     /// Does measured DC meet target?
     pub meets_target: bool,
     /// Primitives contributing to this effect (path -> count)
-    pub contributors: HashMap<String, u64>,
+    pub contributors: IndexMap<String, u64>,
     /// Undetected fault sites (for gap analysis)
     pub undetected_sites: Vec<FaultSite>,
     /// Detection breakdown by mechanism
-    pub detection_by_mechanism: HashMap<String, u64>,
+    pub detection_by_mechanism: IndexMap<String, u64>,
 }
 
 impl EffectAnalysis {
@@ -935,9 +936,9 @@ impl EffectAnalysis {
             measured_dc: 0.0,
             target_dc,
             meets_target: false,
-            contributors: HashMap::new(),
+            contributors: IndexMap::new(),
             undetected_sites: Vec::new(),
-            detection_by_mechanism: HashMap::new(),
+            detection_by_mechanism: IndexMap::new(),
         }
     }
 
@@ -987,7 +988,7 @@ pub struct SimulationCampaignResults {
     /// Wall clock time for simulation
     pub wall_time: Duration,
     /// Per-effect analysis results
-    pub effect_analyses: HashMap<String, EffectAnalysis>,
+    pub effect_analyses: IndexMap<String, EffectAnalysis>,
     /// Overall SPFM
     pub spfm: f64,
     /// Overall LFM
@@ -1010,7 +1011,7 @@ impl SimulationCampaignResults {
             faults_simulated: 0,
             total_cycles: 0,
             wall_time: Duration::ZERO,
-            effect_analyses: HashMap::new(),
+            effect_analyses: IndexMap::new(),
             spfm: 0.0,
             lfm: 0.0,
             pmhf: None,
@@ -1407,7 +1408,7 @@ impl SafetyAnalysisError {
 #[cfg(feature = "sim-integration")]
 pub fn fault_campaign_to_safety_results(
     campaign: &skalp_sim::FaultCampaignResults,
-    primitive_to_path: &std::collections::HashMap<skalp_lir::lir::PrimitiveId, String>,
+    primitive_to_path: &IndexMap<skalp_lir::lir::PrimitiveId, String>,
     annotations: &[crate::design_resolver::SafetyAnnotation],
     goal_name: &str,
     design_name: &str,
@@ -1428,8 +1429,7 @@ pub fn fault_campaign_to_safety_results(
     );
 
     // Build a map from path prefix to mechanism name for quick lookup
-    let mut path_to_mechanism: std::collections::HashMap<String, String> =
-        std::collections::HashMap::new();
+    let mut path_to_mechanism: IndexMap<String, String> = IndexMap::new();
     for annotation in annotations {
         if annotation.goal_name == goal_name {
             path_to_mechanism.insert(
@@ -1499,7 +1499,7 @@ pub fn fault_campaign_to_safety_results(
 #[cfg(feature = "sim-integration")]
 fn find_covering_mechanism(
     cell_path: &str,
-    path_to_mechanism: &std::collections::HashMap<String, String>,
+    path_to_mechanism: &IndexMap<String, String>,
 ) -> Option<String> {
     // Check for exact match first
     if let Some(mechanism) = path_to_mechanism.get(cell_path) {
@@ -1563,7 +1563,7 @@ fn convert_sim_fault_type(sim_fault: skalp_sim::sir::FaultType) -> FaultType {
 #[cfg(feature = "sim-integration")]
 pub fn fault_campaign_with_effects(
     campaign: &skalp_sim::FaultCampaignResults,
-    primitive_to_path: &std::collections::HashMap<skalp_lir::lir::PrimitiveId, String>,
+    primitive_to_path: &IndexMap<skalp_lir::lir::PrimitiveId, String>,
     spec: &SafetyGoalSimSpec,
     annotations: &[crate::design_resolver::SafetyAnnotation],
 ) -> SimulationCampaignResults {
@@ -1588,8 +1588,7 @@ pub fn fault_campaign_with_effects(
     );
 
     // Build mechanism lookup from annotations
-    let mut path_to_mechanism: std::collections::HashMap<String, String> =
-        std::collections::HashMap::new();
+    let mut path_to_mechanism: IndexMap<String, String> = IndexMap::new();
     for annotation in annotations {
         if annotation.goal_name == spec.goal_name {
             path_to_mechanism.insert(
@@ -1708,9 +1707,9 @@ pub fn fault_campaign_with_effects(
 /// Extract signal values from output differences for effect condition evaluation
 #[cfg(feature = "sim-integration")]
 fn extract_signal_values_from_diffs(
-    output_diffs: &std::collections::HashMap<String, (Vec<bool>, Vec<bool>)>,
-) -> std::collections::HashMap<String, u64> {
-    let mut values = std::collections::HashMap::new();
+    output_diffs: &IndexMap<String, (Vec<bool>, Vec<bool>)>,
+) -> IndexMap<String, u64> {
+    let mut values = IndexMap::new();
 
     for (signal_name, (_normal, faulty)) in output_diffs {
         // Convert boolean vector to u64 value (faulty value)
@@ -1746,8 +1745,8 @@ fn extract_signal_values_from_diffs(
 pub fn build_primitive_path_map(
     netlist: &skalp_lir::GateNetlist,
     converter: &skalp_sim::GateNetlistToSirConverter,
-) -> std::collections::HashMap<skalp_lir::lir::PrimitiveId, String> {
-    let mut map = std::collections::HashMap::new();
+) -> IndexMap<skalp_lir::lir::PrimitiveId, String> {
+    let mut map = IndexMap::new();
 
     for cell in &netlist.cells {
         if let Some(primitive_id) = converter.get_primitive_id(cell.id) {

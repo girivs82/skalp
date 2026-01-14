@@ -11,7 +11,7 @@ use skalp_mir::{Mir, Module, DataType, Process, Statement, Expression, LValue, V
 use skalp_mir::{SensitivityList, EdgeType as MirEdgeType, BinaryOp as MirBinaryOp};
 use skalp_mir::{UnaryOp as MirUnaryOp, ReduceOp as MirReduceOp, Block};
 use skalp_mir::type_width; // Use shared type width calculations
-use std::collections::HashMap;
+use indexmap::IndexMap;
 use bitvec::prelude::*;
 
 /// Maximum recursion depth for expression conversion (SIR)
@@ -29,9 +29,9 @@ pub struct MirToSir {
     /// Current instance ID counter
     next_instance_id: u32,
     /// Mapping from MIR signal IDs to SIR signal IDs
-    signal_map: HashMap<skalp_mir::SignalId, SirSignalId>,
+    signal_map: IndexMap<skalp_mir::SignalId, SirSignalId>,
     /// Mapping from MIR port IDs to SIR signal IDs
-    port_map: HashMap<skalp_mir::PortId, SirSignalId>,
+    port_map: IndexMap<skalp_mir::PortId, SirSignalId>,
 }
 
 impl MirToSir {
@@ -42,8 +42,8 @@ impl MirToSir {
             next_comb_block_id: 0,
             next_seq_block_id: 0,
             next_instance_id: 0,
-            signal_map: HashMap::new(),
-            port_map: HashMap::new(),
+            signal_map: IndexMap::new(),
+            port_map: IndexMap::new(),
         }
     }
 

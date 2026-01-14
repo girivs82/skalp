@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use indexmap::IndexMap;
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::Path;
@@ -16,7 +16,7 @@ pub struct Signal {
 
 #[derive(Debug)]
 pub struct Waveform {
-    pub signals: HashMap<String, Signal>,
+    pub signals: IndexMap<String, Signal>,
     pub max_cycle: u64,
 }
 
@@ -29,7 +29,7 @@ impl Default for Waveform {
 impl Waveform {
     pub fn new() -> Self {
         Waveform {
-            signals: HashMap::new(),
+            signals: IndexMap::new(),
             max_cycle: 0,
         }
     }
@@ -112,10 +112,10 @@ impl Waveform {
 
         // Variable definitions - organized by trace groups
         let mut identifier = 33u8; // Start with '!'
-        let mut signal_map = HashMap::new();
+        let mut signal_map = IndexMap::new();
 
         // Collect signals by group
-        let mut groups: HashMap<Option<String>, Vec<(&String, &Signal)>> = HashMap::new();
+        let mut groups: IndexMap<Option<String>, Vec<(&String, &Signal)>> = IndexMap::new();
         for (name, signal) in &self.signals {
             let group = signal.trace_config.as_ref().and_then(|tc| tc.group.clone());
             groups.entry(group).or_default().push((name, signal));

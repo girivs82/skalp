@@ -72,9 +72,10 @@
 //! ```
 
 use crate::ncl_sim::{NclSimConfig, NclSimStats, NclSimulator};
+use indexmap::IndexMap;
 use skalp_lir::gate_netlist::GateNetlist;
 use skalp_lir::synth::PipelineAnnotations;
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
 use std::path::Path;
 
 /// Simulation abstraction level
@@ -149,7 +150,7 @@ pub struct SimulationSnapshot {
     /// Cycle number
     pub cycle: u64,
     /// Signal values (name -> value as u64)
-    pub signals: HashMap<String, u64>,
+    pub signals: IndexMap<String, u64>,
 }
 
 /// Result from unified simulation
@@ -162,7 +163,7 @@ pub struct UnifiedSimResult {
     /// Number of wavefronts completed (NCL mode)
     pub wavefronts: u64,
     /// Final output values
-    pub outputs: HashMap<String, u64>,
+    pub outputs: IndexMap<String, u64>,
     /// Waveform snapshots (if capture_waveforms was enabled)
     pub waveforms: Vec<SimulationSnapshot>,
     /// Whether GPU was used
@@ -179,7 +180,7 @@ impl Default for UnifiedSimResult {
             cycles: 0,
             iterations: 0,
             wavefronts: 0,
-            outputs: HashMap::new(),
+            outputs: IndexMap::new(),
             waveforms: Vec::new(),
             used_gpu: false,
             is_stable: true,
@@ -202,9 +203,9 @@ pub struct UnifiedSimulator {
     pipeline_annotations: Option<PipelineAnnotations>,
     /// Output delay buffers for latency adjustment
     /// Each output has a VecDeque that acts as a delay line
-    output_delay_buffers: HashMap<String, VecDeque<u64>>,
+    output_delay_buffers: IndexMap<String, VecDeque<u64>>,
     /// Latency adjustment per output (in cycles)
-    latency_adjustments: HashMap<String, u32>,
+    latency_adjustments: IndexMap<String, u32>,
 }
 
 /// Internal backend enum to hold the actual simulator
@@ -234,8 +235,8 @@ impl UnifiedSimulator {
             total_iterations: 0,
             total_wavefronts: 0,
             pipeline_annotations: None,
-            output_delay_buffers: HashMap::new(),
-            latency_adjustments: HashMap::new(),
+            output_delay_buffers: IndexMap::new(),
+            latency_adjustments: IndexMap::new(),
         })
     }
 
@@ -306,8 +307,8 @@ impl UnifiedSimulator {
             self.output_delay_buffers
                 .insert(output_name.to_string(), buffer);
         } else {
-            self.latency_adjustments.remove(output_name);
-            self.output_delay_buffers.remove(output_name);
+            self.latency_adjustments.shift_remove(output_name);
+            self.output_delay_buffers.shift_remove(output_name);
         }
     }
 
@@ -741,8 +742,8 @@ impl UnifiedSimulator {
     }
 
     /// Get all output values
-    pub fn get_all_outputs(&self) -> HashMap<String, u64> {
-        let mut outputs = HashMap::new();
+    pub fn get_all_outputs(&self) -> IndexMap<String, u64> {
+        let mut outputs = IndexMap::new();
 
         let output_names: Vec<String> = match &self.backend {
             SimulatorBackend::Uninitialized => vec![],

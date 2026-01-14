@@ -33,10 +33,10 @@ use crate::sir::{
     FaultInjectionConfig, FaultType, PrimitiveId, PrimitiveType, Sir, SirDetectionMode,
     SirOperation, SirPortDirection, SirSignalId, SirSignalType,
 };
+use indexmap::IndexMap;
 use metal::{
     Buffer, CommandQueue, CompileOptions, ComputePipelineState, Device, MTLResourceOptions, MTLSize,
 };
-use std::collections::HashMap;
 
 /// GPU-accelerated fault simulator
 #[cfg(target_os = "macos")]
@@ -48,11 +48,11 @@ pub struct GpuFaultSimulator {
     /// The SIR being simulated
     sir: Sir,
     /// Signal name to ID mapping
-    signal_name_to_id: HashMap<String, SirSignalId>,
+    signal_name_to_id: IndexMap<String, SirSignalId>,
     /// Signal ID to name mapping
-    signal_id_to_name: HashMap<u32, String>,
+    signal_id_to_name: IndexMap<u32, String>,
     /// Signal widths
-    signal_widths: HashMap<u32, usize>,
+    signal_widths: IndexMap<u32, usize>,
     /// Input port IDs
     input_ports: Vec<SirSignalId>,
     /// Output port IDs
@@ -173,9 +173,9 @@ impl GpuFaultSimulator {
             device,
             command_queue,
             sir: sir.clone(),
-            signal_name_to_id: HashMap::new(),
-            signal_id_to_name: HashMap::new(),
-            signal_widths: HashMap::new(),
+            signal_name_to_id: IndexMap::new(),
+            signal_id_to_name: IndexMap::new(),
+            signal_widths: IndexMap::new(),
             input_ports: Vec::new(),
             output_ports: Vec::new(),
             detection_signals: Vec::new(),
@@ -791,11 +791,11 @@ kernel void fault_sim_kernel(
                     fault: fault.clone(),
                     detected: gpu_result.detected != 0,
                     output_diffs: if gpu_result.caused_corruption != 0 {
-                        let mut diffs = HashMap::new();
+                        let mut diffs = IndexMap::new();
                         diffs.insert("output".to_string(), (vec![false], vec![true]));
                         diffs
                     } else {
-                        HashMap::new()
+                        IndexMap::new()
                     },
                     detection_cycle: if gpu_result.detected != 0 {
                         Some(gpu_result.detection_cycle as u64)
@@ -1082,7 +1082,7 @@ kernel void fault_sim_kernel(
 
     /// Simulate a single fault (CPU)
     fn simulate_single_fault(&self, fault: &FaultInjectionConfig, cycles: u64) -> FaultSimResult {
-        let mut state: HashMap<u32, Vec<bool>> = HashMap::new();
+        let mut state: IndexMap<u32, Vec<bool>> = IndexMap::new();
 
         // Initialize all signals to 0
         for signal in &self.sir.top_module.signals {
@@ -1090,7 +1090,7 @@ kernel void fault_sim_kernel(
         }
 
         // Run golden simulation first
-        let mut golden_outputs: HashMap<String, Vec<bool>> = HashMap::new();
+        let mut golden_outputs: IndexMap<String, Vec<bool>> = IndexMap::new();
         for _ in 0..cycles {
             self.evaluate_cycle(&mut state, None);
         }
@@ -1129,7 +1129,7 @@ kernel void fault_sim_kernel(
         }
 
         // Compare outputs
-        let mut output_diffs = HashMap::new();
+        let mut output_diffs = IndexMap::new();
         for out_id in &self.output_ports {
             if let Some(name) = self.signal_id_to_name.get(&out_id.0) {
                 if let Some(faulty) = state.get(&out_id.0) {
@@ -1154,7 +1154,7 @@ kernel void fault_sim_kernel(
     /// Evaluate one cycle
     fn evaluate_cycle(
         &self,
-        state: &mut HashMap<u32, Vec<bool>>,
+        state: &mut IndexMap<u32, Vec<bool>>,
         fault: Option<(&FaultInjectionConfig, u64)>,
     ) {
         for prim in &self.primitives {

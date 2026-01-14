@@ -17,7 +17,7 @@
 //! - Mishchenko, A., Chatterjee, S., & Brayton, R. (2006). DAG-aware AIG rewriting: A fresh look at combinational logic synthesis.
 
 use crate::synth::{Aig, AigLit, AigNode, AigNodeId};
-use std::collections::HashMap;
+use indexmap::IndexMap;
 
 /// Maximum cut size (K in K-feasible cuts)
 pub const DEFAULT_CUT_SIZE: usize = 4;
@@ -297,8 +297,7 @@ impl CutSet {
             } else {
                 // This is a NEW size not yet represented - ensure we keep it
                 // Find the size with the most cuts and replace one of those
-                let mut size_counts: std::collections::HashMap<usize, usize> =
-                    std::collections::HashMap::new();
+                let mut size_counts: IndexMap<usize, usize> = IndexMap::new();
                 for c in &self.cuts {
                     *size_counts.entry(c.size()).or_insert(0) += 1;
                 }
@@ -371,8 +370,7 @@ impl CutSet {
             } else {
                 // This is a NEW size not yet represented - ensure we keep it
                 // Find the size with the most cuts and replace the worst of those
-                let mut size_counts: std::collections::HashMap<usize, usize> =
-                    std::collections::HashMap::new();
+                let mut size_counts: IndexMap<usize, usize> = IndexMap::new();
                 for c in &self.cuts {
                     *size_counts.entry(c.size()).or_insert(0) += 1;
                 }
@@ -443,7 +441,7 @@ impl CutSet {
 /// Result of cut enumeration for an entire AIG
 pub struct CutEnumeration {
     /// Cuts for each node
-    pub node_cuts: HashMap<AigNodeId, CutSet>,
+    pub node_cuts: IndexMap<AigNodeId, CutSet>,
     /// Parameters used
     pub params: CutParams,
 }
@@ -451,7 +449,7 @@ pub struct CutEnumeration {
 impl CutEnumeration {
     /// Enumerate cuts for the given AIG
     pub fn enumerate(aig: &Aig, params: CutParams) -> Self {
-        let mut node_cuts: HashMap<AigNodeId, CutSet> = HashMap::new();
+        let mut node_cuts: IndexMap<AigNodeId, CutSet> = IndexMap::new();
 
         // Process nodes in topological order
         for (id, node) in aig.iter_nodes() {
@@ -543,7 +541,7 @@ impl CutEnumeration {
     /// This variant uses the priority mode specified in params to decide
     /// which cuts to keep when the cut set is full.
     pub fn enumerate_with_priority(aig: &Aig, params: CutParams) -> Self {
-        let mut node_cuts: HashMap<AigNodeId, CutSet> = HashMap::new();
+        let mut node_cuts: IndexMap<AigNodeId, CutSet> = IndexMap::new();
         let priority = params.priority;
         let delay_bound = params.delay_bound;
 
@@ -614,7 +612,7 @@ impl CutEnumeration {
     /// When `use_choices` is enabled in params, this method will also consider
     /// alternative implementations stored in the AIG's choice nodes.
     pub fn enumerate_with_choices(aig: &Aig, params: CutParams) -> Self {
-        let mut node_cuts: HashMap<AigNodeId, CutSet> = HashMap::new();
+        let mut node_cuts: IndexMap<AigNodeId, CutSet> = IndexMap::new();
         let priority = params.priority;
         let delay_bound = params.delay_bound;
 
@@ -723,7 +721,7 @@ fn compute_and_truth_table(
     leaves: &[AigNodeId],
     left: &AigLit,
     right: &AigLit,
-    node_cuts: &HashMap<AigNodeId, CutSet>,
+    node_cuts: &IndexMap<AigNodeId, CutSet>,
 ) -> u64 {
     if leaves.len() > 6 {
         return 0; // Can't fit in 64 bits
@@ -734,7 +732,7 @@ fn compute_and_truth_table(
     let mut truth_table = 0u64;
 
     // Create a mapping from leaf to input index
-    let leaf_to_idx: HashMap<AigNodeId, usize> =
+    let leaf_to_idx: IndexMap<AigNodeId, usize> =
         leaves.iter().enumerate().map(|(i, &n)| (n, i)).collect();
 
     // Evaluate for each input combination
@@ -755,8 +753,8 @@ fn evaluate_node(
     left: &AigLit,
     right: &AigLit,
     input_assignment: usize,
-    leaf_to_idx: &HashMap<AigNodeId, usize>,
-    node_cuts: &HashMap<AigNodeId, CutSet>,
+    leaf_to_idx: &IndexMap<AigNodeId, usize>,
+    node_cuts: &IndexMap<AigNodeId, CutSet>,
 ) -> bool {
     let left_val = evaluate_lit(aig, left, input_assignment, leaf_to_idx, node_cuts);
     let right_val = evaluate_lit(aig, right, input_assignment, leaf_to_idx, node_cuts);
@@ -768,8 +766,8 @@ fn evaluate_lit(
     aig: &Aig,
     lit: &AigLit,
     input_assignment: usize,
-    leaf_to_idx: &HashMap<AigNodeId, usize>,
-    node_cuts: &HashMap<AigNodeId, CutSet>,
+    leaf_to_idx: &IndexMap<AigNodeId, usize>,
+    node_cuts: &IndexMap<AigNodeId, CutSet>,
 ) -> bool {
     let base_val = if let Some(&idx) = leaf_to_idx.get(&lit.node) {
         // This is a leaf - get value from input assignment

@@ -12,8 +12,8 @@
 //! - Single simulator infrastructure for both modes
 
 use bitvec::prelude::*;
+use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 
 // Re-export primitive types from LIR for gate-level simulation
 pub use skalp_lir::lir::{NetId, PrimitiveId, PrimitiveType};
@@ -30,7 +30,7 @@ pub struct Sir {
     /// Top-level module
     pub top_module: SirModule,
     /// All modules in the design
-    pub modules: HashMap<String, SirModule>,
+    pub modules: IndexMap<String, SirModule>,
 }
 
 /// Module in SIR format optimized for GPU simulation
@@ -362,7 +362,7 @@ impl Sir {
         Self {
             name: name.clone(),
             top_module: SirModule::new(name),
-            modules: HashMap::new(),
+            modules: IndexMap::new(),
         }
     }
 
@@ -372,7 +372,7 @@ impl Sir {
         use petgraph::Graph;
 
         let mut graph = Graph::new();
-        let mut block_nodes = HashMap::new();
+        let mut block_nodes = IndexMap::new();
 
         // Add all combinational blocks as nodes
         for block in &self.top_module.comb_blocks {
