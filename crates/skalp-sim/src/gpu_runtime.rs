@@ -939,20 +939,25 @@ impl SimulationRuntime for GpuRuntime {
 
                     let bytes_needed = input.width.div_ceil(8);
                     if input.name == name {
-                        if value.len() != bytes_needed {
-                            return Err(SimulationError::GpuError(format!(
-                                "Input {} expects {} bytes, got {}",
-                                name,
-                                bytes_needed,
-                                value.len()
-                            )));
-                        }
+                        // Auto-truncate or pad value to match expected size
+                        // This allows users to pass u64 for smaller signals without explicit casting
+                        let effective_value: Vec<u8> = if value.len() > bytes_needed {
+                            // Truncate to needed bytes (take LSBs for little-endian)
+                            value[..bytes_needed].to_vec()
+                        } else if value.len() < bytes_needed {
+                            // Pad with zeros
+                            let mut padded = value.to_vec();
+                            padded.resize(bytes_needed, 0);
+                            padded
+                        } else {
+                            value.to_vec()
+                        };
                         unsafe {
                             // Clear the Metal-sized buffer first
                             std::ptr::write_bytes(input_ptr.add(offset), 0, metal_size);
                             // Then copy our data
                             std::ptr::copy_nonoverlapping(
-                                value.as_ptr(),
+                                effective_value.as_ptr(),
                                 input_ptr.add(offset),
                                 bytes_needed.min(metal_size),
                             );

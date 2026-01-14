@@ -1892,8 +1892,10 @@ impl<'a> MetalShaderGenerator<'a> {
                 let false_is_float = false_type.as_ref().is_some_and(|t| t.is_float());
 
                 // Check for type mismatch where widths differ significantly
+                // BUG FIX #183: Also detect uint2 vs uint4 mismatch (both are vectors but different sizes)
                 let width_mismatch = (true_val_width <= 32 && false_val_width > 32)
-                    || (false_val_width <= 32 && true_val_width > 32);
+                    || (false_val_width <= 32 && true_val_width > 32)
+                    || (true_val_width > 32 && false_val_width > 32 && true_val_width != false_val_width);
                 let type_mismatch = true_is_float != false_is_float;
 
                 if width_mismatch || type_mismatch {
@@ -2836,19 +2838,38 @@ impl<'a> MetalShaderGenerator<'a> {
                 // Fallback for packed bit vectors (legacy)
                 let elem_width = 8;
                 let array_width = self.get_signal_width_from_sir(sir, old_array_name);
-                let (base_type, array_size) = self.get_metal_type_for_wide_bits(array_width);
+                let output_width = self.get_signal_width_from_sir(sir, output);
+                let value_width = self.get_signal_width_from_sir(sir, value_signal);
+
+                // BUG #183 FIX: If output or old_array is wide (>128 bits), we have arrays
+                // In this case, use the multi-word path regardless of what get_signal_width_from_sir returns
+                // for array_width, because the Metal struct will have uint[N] type
+                let effective_array_width = array_width.max(output_width);
+
+                let (base_type, array_size) = self.get_metal_type_for_wide_bits(effective_array_width);
                 let array_type_name = if let Some(size) = array_size {
                     format!("{}[{}]", base_type, size)
                 } else {
                     base_type
                 };
 
-                if array_width > 32 {
+                // BUG #183 FIX: Determine how to access the value signal
+                // If value is an array (>128 bits), access first element
+                // If value is a vector (33-128 bits), access first component
+                // Otherwise use scalar access
+                let value_access = if value_width > 128 {
+                    format!("signals->{}[0]", self.sanitize_name(value_signal))
+                } else if value_width > 32 {
+                    format!("signals->{}[0]", self.sanitize_name(value_signal))
+                } else {
+                    format!("signals->{}", self.sanitize_name(value_signal))
+                };
+
+                if effective_array_width > 32 {
                     // Multi-word packed array
                     let san_output = self.sanitize_name(output);
                     let san_old_array = self.sanitize_name(old_array_name);
                     let san_index = self.sanitize_name(index_signal);
-                    let san_value = self.sanitize_name(value_signal);
                     self.write_indented(&format!(
                         "{} new_array_{} = signals->{};\n",
                         array_type_name, san_output, san_old_array
@@ -2874,8 +2895,8 @@ impl<'a> MetalShaderGenerator<'a> {
                         san_output, san_output
                     ));
                     self.write_indented(&format!(
-                        "new_array_{}[word_idx_{}] = (new_array_{}[word_idx_{}] & mask_{}) | ((signals->{} & 0xFF) << shift_{});\n",
-                        san_output, san_output, san_output, san_output, san_output, san_value, san_output
+                        "new_array_{}[word_idx_{}] = (new_array_{}[word_idx_{}] & mask_{}) | (({} & 0xFF) << shift_{});\n",
+                        san_output, san_output, san_output, san_output, san_output, value_access, san_output
                     ));
                     self.write_indented(&format!(
                         "signals->{} = new_array_{};\n",
@@ -2886,7 +2907,6 @@ impl<'a> MetalShaderGenerator<'a> {
                     let san_output = self.sanitize_name(output);
                     let san_index = self.sanitize_name(index_signal);
                     let san_old_array = self.sanitize_name(old_array_name);
-                    let san_value = self.sanitize_name(value_signal);
                     self.write_indented(&format!(
                         "uint32_t shift_{} = signals->{} * {};\n",
                         san_output, san_index, elem_width
@@ -2896,8 +2916,8 @@ impl<'a> MetalShaderGenerator<'a> {
                         san_output, san_output
                     ));
                     self.write_indented(&format!(
-                        "signals->{} = (signals->{} & mask_{}) | ((signals->{} & 0xFF) << shift_{});\n",
-                        san_output, san_old_array, san_output, san_value, san_output
+                        "signals->{} = (signals->{} & mask_{}) | (({} & 0xFF) << shift_{});\n",
+                        san_output, san_old_array, san_output, value_access, san_output
                     ));
                 }
             }
@@ -3515,21 +3535,53 @@ impl<'a> MetalShaderGenerator<'a> {
                 // Same fix as BUG #115 for Slice nodes
                 if node.outputs.len() > 1 && !node.outputs.is_empty() {
                     let primary_output = &node.outputs[0].signal_id;
-                    let output_width = self.get_signal_width_from_sir(sir, primary_output);
+                    let src_width = self.get_signal_width_from_sir(sir, primary_output);
                     for additional_output in node.outputs.iter().skip(1) {
                         let add_name = &additional_output.signal_id;
+                        let dst_width = self.get_signal_width_from_sir(sir, add_name);
                         println!(
-                            ">>> BUG #117q FIX: Copying {} -> {} (width={})",
-                            primary_output, add_name, output_width
+                            ">>> BUG #117q FIX: Copying {} -> {} (src_width={}, dst_width={})",
+                            primary_output, add_name, src_width, dst_width
                         );
-                        if output_width > 128 {
+                        if src_width > 128 || dst_width > 128 {
                             // Wide bit type - element-wise copy
-                            let array_size = output_width.div_ceil(32);
+                            let src_array_size = src_width.div_ceil(32);
+                            let dst_array_size = dst_width.div_ceil(32);
+                            let min_size = src_array_size.min(dst_array_size);
                             self.write_indented(&format!(
                                 "for (uint i = 0; i < {}; i++) {{ signals->{}[i] = signals->{}[i]; }} // BUG #117q FIX\n",
-                                array_size,
+                                min_size,
                                 self.sanitize_name(add_name),
                                 self.sanitize_name(primary_output)
+                            ));
+                        } else if src_width != dst_width && src_width > 32 && dst_width > 32 {
+                            // BUG #183 FIX: Both are vectors but different sizes (uint2 vs uint4)
+                            // Use element-wise copy with min elements
+                            let src_elements = src_width.div_ceil(32);
+                            let dst_elements = dst_width.div_ceil(32);
+                            let min_elements = src_elements.min(dst_elements);
+                            self.write_indented(&format!(
+                                "for (uint i = 0; i < {}; i++) {{ signals->{}[i] = signals->{}[i]; }} // BUG #183 FIX\n",
+                                min_elements,
+                                self.sanitize_name(add_name),
+                                self.sanitize_name(primary_output)
+                            ));
+                        } else if src_width > 32 && dst_width <= 32 {
+                            // Source is vector, dest is scalar - extract first element
+                            self.write_indented(&format!(
+                                "signals->{} = signals->{}[0]; // BUG #183 FIX: vector->scalar\n",
+                                self.sanitize_name(add_name),
+                                self.sanitize_name(primary_output)
+                            ));
+                        } else if src_width <= 32 && dst_width > 32 {
+                            // Source is scalar, dest is vector - zero-extend
+                            let dst_elements = dst_width.div_ceil(32);
+                            self.write_indented(&format!(
+                                "signals->{}[0] = signals->{}; for (uint i = 1; i < {}; i++) signals->{}[i] = 0; // BUG #183 FIX\n",
+                                self.sanitize_name(add_name),
+                                self.sanitize_name(primary_output),
+                                dst_elements,
+                                self.sanitize_name(add_name)
                             ));
                         } else {
                             self.write_indented(&format!(
@@ -4981,39 +5033,70 @@ impl<'a> MetalShaderGenerator<'a> {
                         } else {
                             // Register is narrow (≤128 bits)
                             // BUG #182 FIX: Write to next_registers
-                            // Extract LSBs if data is wide, otherwise use scalar assignment with mask
+                            // BUG #183 FIX: Handle vector-to-vector mismatch (uint4 -> uint2)
                             let width = state_elem.width;
-                            // BUG FIX: Prevent shift overflow
-                            let mask = if width >= 64 {
-                                "0xFFFFFFFFFFFFFFFF".to_string()
-                            } else if width >= 32 {
-                                "0xFFFFFFFF".to_string()
-                            } else {
-                                format!("0x{:X}", (1u64 << width) - 1)
-                            };
+                            let reg_is_vector = width > 32 && width <= 128;
+                            let data_is_vector = data_signal_width > 32 && data_signal_width <= 128;
 
-                            let data_expr = if data_is_wide {
-                                // Extract element[0] from wide data signal
-                                format!("signals->{}[0]", self.sanitize_name(data_signal))
+                            if reg_is_vector && data_is_vector && data_signal_width != width {
+                                // Both are vectors but different sizes - use element-wise copy
+                                let reg_elements = width.div_ceil(32);
+                                let data_elements = data_signal_width.div_ceil(32);
+                                let copy_elements = reg_elements.min(data_elements);
+                                self.write_indented(&format!(
+                                    "// BUG #183 FIX: Copy {} elements from {}-bit to {}-bit\n",
+                                    copy_elements, data_signal_width, width
+                                ));
+                                for i in 0..copy_elements {
+                                    self.write_indented(&format!(
+                                        "next_registers->{}[{}] = signals->{}[{}];\n",
+                                        self.sanitize_name(&output.signal_id),
+                                        i,
+                                        self.sanitize_name(data_signal),
+                                        i
+                                    ));
+                                }
+                                // Zero remaining elements if register is wider
+                                for i in copy_elements..reg_elements {
+                                    self.write_indented(&format!(
+                                        "next_registers->{}[{}] = 0;\n",
+                                        self.sanitize_name(&output.signal_id),
+                                        i
+                                    ));
+                                }
+                            } else if data_is_vector && !reg_is_vector {
+                                // Data is vector, register is scalar - extract first element
+                                self.write_indented(&format!(
+                                    "next_registers->{} = signals->{}[0]; // BUG #183 FIX: vector->scalar\n",
+                                    self.sanitize_name(&output.signal_id),
+                                    self.sanitize_name(data_signal)
+                                ));
                             } else {
-                                // Scalar data signal
-                                format!("signals->{}", self.sanitize_name(data_signal))
-                            };
+                                // Original path - use mask for scalar assignment
+                                // BUG FIX: Prevent shift overflow
+                                let mask = if width >= 64 {
+                                    "0xFFFFFFFFFFFFFFFF".to_string()
+                                } else if width >= 32 {
+                                    "0xFFFFFFFF".to_string()
+                                } else {
+                                    format!("0x{:X}", (1u64 << width) - 1)
+                                };
 
-                            let assignment = format!(
-                                "next_registers->{} = {} & {};\n",
-                                self.sanitize_name(&output.signal_id),
-                                data_expr,
-                                mask
-                            );
-                            eprintln!(
-                                "DEBUG Metal gen: About to write: {} (width={}, mask={})",
-                                assignment.trim(),
-                                width,
-                                mask
-                            );
-                            self.write_indented(&assignment);
-                            eprintln!("DEBUG Metal gen: Wrote to output buffer");
+                                let data_expr = if data_is_wide {
+                                    // Extract element[0] from wide data signal
+                                    format!("signals->{}[0]", self.sanitize_name(data_signal))
+                                } else {
+                                    // Scalar data signal
+                                    format!("signals->{}", self.sanitize_name(data_signal))
+                                };
+
+                                self.write_indented(&format!(
+                                    "next_registers->{} = {} & {};\n",
+                                    self.sanitize_name(&output.signal_id),
+                                    data_expr,
+                                    mask
+                                ));
+                            }
                         }
                     }
                 }
