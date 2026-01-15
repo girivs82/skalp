@@ -1201,6 +1201,77 @@ impl UnifiedSimulator {
         }
     }
 
+    /// Set an input value as raw bytes (for behavioral simulation)
+    ///
+    /// This is useful for behavioral simulation where inputs may be wider than 64 bits.
+    /// For gate-level simulation, the bytes are converted to u64 (truncated to 8 bytes).
+    ///
+    /// # Arguments
+    /// * `name` - The input port name
+    /// * `value` - The value as a byte slice (little-endian)
+    ///
+    /// # Example
+    /// ```ignore
+    /// // Set a 128-bit input
+    /// let wide_value: [u8; 16] = [0x01, 0x02, ...];
+    /// sim.set_input_bytes("wide_data", &wide_value).await;
+    /// ```
+    pub async fn set_input_bytes(&mut self, name: &str, value: &[u8]) {
+        match &mut self.backend {
+            SimulatorBackend::Uninitialized => {
+                eprintln!("Warning: set_input_bytes called before loading design");
+            }
+            SimulatorBackend::BehavioralCpu(runtime) => {
+                let _ = runtime.set_input(name, value).await;
+            }
+            #[cfg(target_os = "macos")]
+            SimulatorBackend::BehavioralGpu(runtime) => {
+                let _ = runtime.set_input(name, value).await;
+            }
+            // For non-behavioral backends, convert bytes to u64 and use set_input
+            _ => {
+                // Convert bytes to u64 (little-endian, truncate to 8 bytes)
+                let mut u64_value = 0u64;
+                for (i, &byte) in value.iter().take(8).enumerate() {
+                    u64_value |= (byte as u64) << (i * 8);
+                }
+                self.set_input(name, u64_value).await;
+            }
+        }
+    }
+
+    /// Get an output value as raw bytes (for behavioral simulation)
+    ///
+    /// This is useful for behavioral simulation where outputs may be wider than 64 bits.
+    /// For gate-level simulation, the u64 value is converted to 8 bytes (little-endian).
+    ///
+    /// # Arguments
+    /// * `name` - The output port name
+    ///
+    /// # Returns
+    /// The output value as bytes (little-endian), or None if the output doesn't exist
+    ///
+    /// # Example
+    /// ```ignore
+    /// // Get a wide output
+    /// if let Some(bytes) = sim.get_output_bytes("wide_result").await {
+    ///     // bytes contains the raw output value
+    /// }
+    /// ```
+    pub async fn get_output_bytes(&self, name: &str) -> Option<Vec<u8>> {
+        match &self.backend {
+            SimulatorBackend::Uninitialized => None,
+            SimulatorBackend::BehavioralCpu(runtime) => runtime.get_output(name).await.ok(),
+            #[cfg(target_os = "macos")]
+            SimulatorBackend::BehavioralGpu(runtime) => runtime.get_output(name).await.ok(),
+            // For non-behavioral backends, get u64 and convert to bytes
+            _ => self
+                .get_output_raw(name)
+                .await
+                .map(|v| v.to_le_bytes().to_vec()),
+        }
+    }
+
     /// Get output port names
     pub fn get_output_names(&self) -> Vec<String> {
         match &self.backend {
