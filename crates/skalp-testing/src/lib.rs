@@ -14,6 +14,8 @@ pub mod testbench;
 // Re-export common types for ergonomic use
 pub use cache::CompilationCache;
 pub use golden::GoldenTest;
-pub use testbench::{
-    FromSignalValue, GateLevelTestbench, IntoSignalValue, TestSequence, Testbench,
-};
+pub use testbench::{FromSignalValue, IntoSignalValue, Testbench, TestbenchMode};
+
+// Deprecated re-export for backwards compatibility
+#[allow(deprecated)]
+pub use testbench::GateLevelTestbench;

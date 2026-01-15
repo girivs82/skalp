@@ -14,7 +14,7 @@ use skalp_frontend::parse_and_build_compilation_context;
 use skalp_lir::gate_netlist::GateNetlist;
 use skalp_lir::{get_stdlib_library, lower_mir_hierarchical, map_hierarchical_to_gates};
 use skalp_mir::MirCompiler;
-use skalp_sim::{CircuitMode, HwAccel, SimLevel, UnifiedSimConfig, UnifiedSimulator};
+use skalp_testing::Testbench;
 use std::path::Path;
 use std::sync::OnceLock;
 
@@ -71,7 +71,7 @@ fn compile_karythra_async_cle() -> &'static GateNetlist {
     })
 }
 
-/// Test NCL simulation with expected outputs using UnifiedSimulator (GPU-accelerated)
+/// Test NCL simulation with expected outputs using Testbench (GPU-accelerated)
 async fn test_async_cle_operation(
     netlist: &skalp_lir::gate_netlist::GateNetlist,
     opcode: u64,
@@ -80,22 +80,12 @@ async fn test_async_cle_operation(
     expected_result: u64,
     description: &str,
 ) -> bool {
-    let config = UnifiedSimConfig {
-        level: SimLevel::GateLevel,
-        circuit_mode: CircuitMode::Ncl,
-        hw_accel: HwAccel::Auto, // Use GPU if available
-        max_iterations: 100000,
-        ncl_debug: false,
-        ..Default::default()
-    };
-
-    let mut sim = UnifiedSimulator::new(config).expect("Failed to create simulator");
-    sim.load_ncl_gate_level(netlist.clone())
-        .expect("Failed to load NCL netlist");
+    let mut tb =
+        Testbench::from_netlist_ncl(netlist.clone()).expect("Failed to create NCL testbench");
 
     println!(
         "  Using: {} ({} cells, {} nets)",
-        sim.device_info(),
+        tb.device_info(),
         netlist.cells.len(),
         netlist.nets.len()
     );
@@ -103,7 +93,7 @@ async fn test_async_cle_operation(
     // Debug: Check what signals are available (first test only)
     static DEBUG_PRINTED: std::sync::Once = std::sync::Once::new();
     DEBUG_PRINTED.call_once(|| {
-        let signals = sim.ncl_signal_names();
+        let signals = tb.ncl_signal_names();
         let top_signals: Vec<_> = signals
             .iter()
             .filter(|s| s.starts_with("top."))
@@ -119,34 +109,34 @@ async fn test_async_cle_operation(
         println!("  [DEBUG] Sample top signals: {:?}", top_signals);
         println!(
             "  [DEBUG] Has top.function_sel: {}",
-            sim.has_ncl_signal("top.function_sel")
+            tb.has_ncl_signal("top.function_sel")
         );
         println!(
             "  [DEBUG] Has top.data1: {}",
-            sim.has_ncl_signal("top.data1")
+            tb.has_ncl_signal("top.data1")
         );
         println!(
             "  [DEBUG] Has top.result: {}",
-            sim.has_ncl_signal("top.result")
+            tb.has_ncl_signal("top.result")
         );
     });
 
     // Set function_sel (6 bits) - use full hierarchical path
-    sim.set_ncl_input("top.function_sel", opcode, 6);
+    tb.set_ncl_input("top.function_sel", opcode, 6);
 
     // Set route_sel (3 bits) - use register writeback mode
-    sim.set_ncl_input("top.route_sel", 0, 3);
+    tb.set_ncl_input("top.route_sel", 0, 3);
 
     // Set data1 (64-bit datapath)
-    sim.set_ncl_input("top.data1", data1, 64);
+    tb.set_ncl_input("top.data1", data1, 64);
 
     // Set data2 (64-bit datapath)
-    sim.set_ncl_input("top.data2", data2, 64);
+    tb.set_ncl_input("top.data2", data2, 64);
 
     println!("  [op={}] Running NCL simulation...", opcode);
 
     // Run until stable
-    let result = sim.run_until_stable().await;
+    let result = tb.run_until_stable().await;
 
     if !result.is_stable {
         println!(
@@ -162,7 +152,7 @@ async fn test_async_cle_operation(
     );
 
     // Get result (lower 32 bits) - use full hierarchical path
-    match sim.get_ncl_output("top.result", 32) {
+    match tb.get_ncl_output("top.result", 32) {
         Some(actual) => {
             let pass = (actual & 0xFFFFFFFF) == (expected_result & 0xFFFFFFFF);
             if pass {
@@ -182,7 +172,7 @@ async fn test_async_cle_operation(
     }
 }
 
-/// Test L2 FP32 operation using UnifiedSimulator
+/// Test L2 FP32 operation using Testbench
 /// Returns (pass, Option<result_bits>)
 async fn test_l2_fp32_operation(
     netlist: &GateNetlist,
@@ -190,58 +180,48 @@ async fn test_l2_fp32_operation(
     a_bits: u64,
     b_bits: u64,
 ) -> Option<u64> {
-    let config = UnifiedSimConfig {
-        level: SimLevel::GateLevel,
-        circuit_mode: CircuitMode::Ncl,
-        hw_accel: HwAccel::Auto,
-        max_iterations: 100000,
-        ncl_debug: false,
-        ..Default::default()
-    };
-
-    let mut sim = UnifiedSimulator::new(config).expect("Failed to create simulator");
-    sim.load_ncl_gate_level(netlist.clone())
-        .expect("Failed to load NCL netlist");
+    let mut tb =
+        Testbench::from_netlist_ncl(netlist.clone()).expect("Failed to create NCL testbench");
 
     // Set inputs with "top." prefix
-    sim.set_ncl_input("top.function_sel", opcode, 6);
-    sim.set_ncl_input("top.route_sel", 0, 3);
+    tb.set_ncl_input("top.function_sel", opcode, 6);
+    tb.set_ncl_input("top.route_sel", 0, 3);
     // data1[31:0] = a, data1[63:32] = b
     let data1 = a_bits | (b_bits << 32);
     println!(
         "  DEBUG: Setting function_sel={}, data1=0x{:016X} (a=0x{:08X}, b=0x{:08X})",
         opcode, data1, a_bits, b_bits
     );
-    sim.set_ncl_input("top.data1", data1, 64);
-    sim.set_ncl_input("top.data2", 0, 64);
+    tb.set_ncl_input("top.data1", data1, 64);
+    tb.set_ncl_input("top.data2", 0, 64);
 
-    let result = sim.run_until_stable().await;
+    let result = tb.run_until_stable().await;
     if !result.is_stable {
         println!("  Did not converge after {} iterations", result.iterations);
         return None;
     }
 
     // DEBUG: Read back inputs to verify they were set correctly
-    if let Some(func_sel) = sim.get_ncl_output("top.function_sel", 6) {
+    if let Some(func_sel) = tb.get_ncl_output("top.function_sel", 6) {
         println!("  DEBUG: function_sel (readback) = {}", func_sel);
     }
-    if let Some(d1) = sim.get_ncl_output("top.data1", 64) {
+    if let Some(d1) = tb.get_ncl_output("top.data1", 64) {
         println!("  DEBUG: data1 (readback) = 0x{:016X}", d1);
     }
 
     // DEBUG: Read both result and debug_l2 to diagnose routing
-    if let Some(debug_l2) = sim.get_ncl_output("top.debug_l2", 32) {
+    if let Some(debug_l2) = tb.get_ncl_output("top.debug_l2", 32) {
         println!("  DEBUG: debug_l2 (direct L2 output) = 0x{:08X}", debug_l2);
     }
-    if let Some(debug_l0) = sim.get_ncl_output("top.debug_l0_l1", 32) {
+    if let Some(debug_l0) = tb.get_ncl_output("top.debug_l0_l1", 32) {
         println!("  DEBUG: debug_l0_l1 = 0x{:08X}", debug_l0);
     }
 
     // Read from result (lower 32 bits) - with correct opcode, fu_result selects l2_result
-    sim.get_ncl_output("top.result", 32)
+    tb.get_ncl_output("top.result", 32)
 }
 
-/// Test L3 Vec3 operation using UnifiedSimulator
+/// Test L3 Vec3 operation using Testbench
 /// Uses u128 for data1/data2 to support 96-bit vector values (3 x 32-bit floats)
 async fn test_l3_vec3_operation(
     netlist: &GateNetlist,
@@ -249,63 +229,43 @@ async fn test_l3_vec3_operation(
     data1: u128,
     data2: u128,
 ) -> Option<u64> {
-    let config = UnifiedSimConfig {
-        level: SimLevel::GateLevel,
-        circuit_mode: CircuitMode::Ncl,
-        hw_accel: HwAccel::Auto,
-        max_iterations: 100000,
-        ncl_debug: false,
-        ..Default::default()
-    };
+    let mut tb =
+        Testbench::from_netlist_ncl(netlist.clone()).expect("Failed to create NCL testbench");
 
-    let mut sim = UnifiedSimulator::new(config).expect("Failed to create simulator");
-    sim.load_ncl_gate_level(netlist.clone())
-        .expect("Failed to load NCL netlist");
-
-    sim.set_ncl_input("top.function_sel", opcode, 6);
-    sim.set_ncl_input("top.route_sel", 0, 3);
+    tb.set_ncl_input("top.function_sel", opcode, 6);
+    tb.set_ncl_input("top.route_sel", 0, 3);
     // 64-bit datapath: only use lower 64 bits
-    sim.set_ncl_input("top.data1", data1 as u64, 64);
-    sim.set_ncl_input("top.data2", data2 as u64, 64);
+    tb.set_ncl_input("top.data1", data1 as u64, 64);
+    tb.set_ncl_input("top.data2", data2 as u64, 64);
 
-    let result = sim.run_until_stable().await;
+    let result = tb.run_until_stable().await;
     if !result.is_stable {
         println!("  Did not converge after {} iterations", result.iterations);
         return None;
     }
 
     // Read from result (lower 32 bits) - with correct opcode, fu_result selects l3_result
-    sim.get_ncl_output("top.result", 32)
+    tb.get_ncl_output("top.result", 32)
 }
 
-/// Test L5 bit operation using UnifiedSimulator
+/// Test L5 bit operation using Testbench
 async fn test_l5_bit_operation(netlist: &GateNetlist, opcode: u64, data1: u64) -> Option<u64> {
-    let config = UnifiedSimConfig {
-        level: SimLevel::GateLevel,
-        circuit_mode: CircuitMode::Ncl,
-        hw_accel: HwAccel::Auto,
-        max_iterations: 100000,
-        ncl_debug: false,
-        ..Default::default()
-    };
+    let mut tb =
+        Testbench::from_netlist_ncl(netlist.clone()).expect("Failed to create NCL testbench");
 
-    let mut sim = UnifiedSimulator::new(config).expect("Failed to create simulator");
-    sim.load_ncl_gate_level(netlist.clone())
-        .expect("Failed to load NCL netlist");
+    tb.set_ncl_input("top.function_sel", opcode, 6);
+    tb.set_ncl_input("top.route_sel", 0, 3);
+    tb.set_ncl_input("top.data1", data1, 64);
+    tb.set_ncl_input("top.data2", 0, 64);
 
-    sim.set_ncl_input("top.function_sel", opcode, 6);
-    sim.set_ncl_input("top.route_sel", 0, 3);
-    sim.set_ncl_input("top.data1", data1, 64);
-    sim.set_ncl_input("top.data2", 0, 64);
-
-    let result = sim.run_until_stable().await;
+    let result = tb.run_until_stable().await;
     if !result.is_stable {
         println!("  Did not converge after {} iterations", result.iterations);
         return None;
     }
 
     // Read from result (lower 32 bits) - with correct opcode, fu_result selects l4_l5_result
-    sim.get_ncl_output("top.result", 32)
+    tb.get_ncl_output("top.result", 32)
 }
 
 // =============================================================================
@@ -317,22 +277,9 @@ async fn test_signal_check() {
     println!("\n=== Signal Check Test ===");
     let netlist = compile_karythra_async_cle();
 
-    let config = UnifiedSimConfig {
-        level: SimLevel::GateLevel,
-        circuit_mode: CircuitMode::Ncl,
-        hw_accel: HwAccel::Auto,
-        max_iterations: 10, // Very short - just checking signals exist
-        ncl_debug: false,
-        ..Default::default()
-    };
+    let tb = Testbench::from_netlist_ncl(netlist.clone()).expect("Failed to create NCL testbench");
 
-    let sim = UnifiedSimulator::new(config).expect("Failed to create simulator");
-    // Note: Don't load netlist yet, we want to load it first
-    let mut sim = sim;
-    sim.load_ncl_gate_level(netlist.clone())
-        .expect("Failed to load NCL netlist");
-
-    println!("Total signals: {}", sim.ncl_signal_names().len());
+    println!("Total signals: {}", tb.ncl_signal_names().len());
 
     // Check key signals
     let key_signals = [
@@ -344,7 +291,7 @@ async fn test_signal_check() {
     ];
 
     for signal in key_signals {
-        let exists = sim.has_ncl_signal(signal);
+        let exists = tb.has_ncl_signal(signal);
         println!(
             "  {}: {}",
             signal,
@@ -353,15 +300,15 @@ async fn test_signal_check() {
     }
 
     // Print some matching signals
-    let signals = sim.ncl_signal_names();
+    let signals = tb.ncl_signal_names();
     println!("\nSample signals starting with 'top.':");
     for sig in signals.iter().filter(|s| s.starts_with("top.")).take(10) {
         println!("  {}", sig);
     }
 
     // Check if we have the expected top-level signals
-    assert!(sim.has_ncl_signal("top.data1"), "top.data1 should exist");
-    assert!(sim.has_ncl_signal("top.data2"), "top.data2 should exist");
+    assert!(tb.has_ncl_signal("top.data1"), "top.data1 should exist");
+    assert!(tb.has_ncl_signal("top.data2"), "top.data2 should exist");
     println!("\nSignal check passed!");
 }
 
@@ -776,7 +723,7 @@ async fn test_async_cle_l3_vec3_dot() {
 // L4 Tests (Algorithm Operations - Quadratic, Bezier, Ray-AABB)
 // =============================================================================
 
-/// Test L4 algorithm operation using UnifiedSimulator
+/// Test L4 algorithm operation using Testbench
 /// Returns the debug_l4_l5 output (lower 32 bits of result)
 /// data1 and data2 are passed as (low_128bits, high_128bits) tuples
 async fn test_l4_algorithm_operation(
@@ -785,33 +732,23 @@ async fn test_l4_algorithm_operation(
     data1: (u128, u128),
     data2: (u128, u128),
 ) -> Option<u64> {
-    let config = UnifiedSimConfig {
-        level: SimLevel::GateLevel,
-        circuit_mode: CircuitMode::Ncl,
-        hw_accel: HwAccel::Auto,
-        max_iterations: 100000,
-        ncl_debug: false,
-        ..Default::default()
-    };
+    let mut tb =
+        Testbench::from_netlist_ncl(netlist.clone()).expect("Failed to create NCL testbench");
 
-    let mut sim = UnifiedSimulator::new(config).expect("Failed to create simulator");
-    sim.load_ncl_gate_level(netlist.clone())
-        .expect("Failed to load NCL netlist");
-
-    sim.set_ncl_input("top.function_sel", opcode, 6);
-    sim.set_ncl_input("top.route_sel", 0, 3);
+    tb.set_ncl_input("top.function_sel", opcode, 6);
+    tb.set_ncl_input("top.route_sel", 0, 3);
     // 64-bit datapath: use only lower 64 bits
-    sim.set_ncl_input("top.data1", data1.0 as u64, 64);
-    sim.set_ncl_input("top.data2", data2.0 as u64, 64);
+    tb.set_ncl_input("top.data1", data1.0 as u64, 64);
+    tb.set_ncl_input("top.data2", data2.0 as u64, 64);
 
-    let result = sim.run_until_stable().await;
+    let result = tb.run_until_stable().await;
     if !result.is_stable {
         println!("  Did not converge after {} iterations", result.iterations);
         return None;
     }
 
     // Read from result (lower 32 bits) - with correct opcode, fu_result selects l4_l5_result
-    sim.get_ncl_output("top.result", 32)
+    tb.get_ncl_output("top.result", 32)
 }
 
 #[tokio::test]

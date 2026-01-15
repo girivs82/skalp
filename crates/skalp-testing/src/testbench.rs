@@ -3,6 +3,11 @@
 //! This module provides a high-level, declarative API for writing testbenches
 //! that is much more concise than manually calling set_input/step/get_output.
 //!
+//! The `Testbench` struct uses `UnifiedSimulator` as its backend and supports:
+//! - Behavioral simulation (fast functional verification)
+//! - Gate-level synchronous simulation (accurate timing)
+//! - NCL asynchronous simulation (dual-rail encoded circuits)
+//!
 //! # Example
 //! ```rust,no_run
 //! use skalp_testing::testbench::*;
@@ -25,19 +30,34 @@
 
 use crate::cache::{collect_dependencies, CompilationCache};
 use anyhow::Result;
+use skalp_lir::gate_netlist::GateNetlist;
 use skalp_mir::MirCompiler;
 use skalp_sim::{
-    convert_gate_netlist_to_sir, HwAccel, SimLevel, SimulationConfig, Simulator, UnifiedSimConfig,
-    UnifiedSimulator,
+    convert_gate_netlist_to_sir, CircuitMode, HwAccel, SimLevel, UnifiedSimConfig,
+    UnifiedSimResult, UnifiedSimulator,
 };
 use skalp_sir::convert_mir_to_sir_with_hierarchy;
 use std::collections::HashMap;
 use std::path::Path;
 
+/// Simulation mode for the testbench
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TestbenchMode {
+    /// Behavioral simulation - fast functional verification
+    Behavioral,
+    /// Gate-level synchronous simulation - accurate timing with clock
+    GateLevel,
+    /// NCL asynchronous simulation - dual-rail encoded, clockless
+    Ncl,
+}
+
 /// High-level testbench builder for ergonomic verification
+///
+/// Uses `UnifiedSimulator` as the backend to support all simulation modes.
 pub struct Testbench {
-    sim: Simulator,
-    pending_inputs: HashMap<String, Vec<u8>>,
+    sim: UnifiedSimulator,
+    mode: TestbenchMode,
+    pending_inputs: HashMap<String, u64>,
     cycle_count: u64,
     /// Available input port names
     input_names: Vec<String>,
@@ -46,124 +66,235 @@ pub struct Testbench {
 }
 
 impl Testbench {
-    /// Create a new testbench from a SKALP source file
-    pub async fn new(source_path: &str) -> Result<Self> {
-        // Check SKALP_SIM_MODE environment variable - "cpu" disables GPU
-        let use_gpu = std::env::var("SKALP_SIM_MODE")
-            .map(|v| v.to_lowercase() != "cpu")
-            .unwrap_or(true); // Default to GPU if not set
+    // ========================================================================
+    // Constructors
+    // ========================================================================
 
-        let config = SimulationConfig {
-            // SSA conversion is now implemented in skalp-mir to eliminate combinational cycles
-            // from mutable variable reassignment (x = f(x) -> x_0 = value, x_1 = f(x_0), etc.)
-            use_gpu,
-            max_cycles: 1_000_000,
-            timeout_ms: 60_000,
-            capture_waveforms: true,
-            parallel_threads: 4,
-        };
-        eprintln!(
-            "🚨 DEBUG: use_gpu = {} (SKALP_SIM_MODE={:?})",
-            config.use_gpu,
-            std::env::var("SKALP_SIM_MODE").ok()
-        );
-        Self::with_config(source_path, config).await
-    }
-
-    /// Create a new testbench with custom simulation config
-    pub async fn with_config(source_path: &str, config: SimulationConfig) -> Result<Self> {
-        Self::with_config_and_top_module(source_path, config, None).await
-    }
-
-    /// Create a new testbench with an explicit top module name
+    /// Create a new behavioral testbench from a SKALP source file
     ///
-    /// Use this when the source file name doesn't match the entity name.
-    /// For example, if `main.sk` contains `entity MyDesign`, use:
-    /// ```rust,ignore
-    /// let tb = Testbench::with_top_module("main.sk", "MyDesign").await.unwrap();
-    /// ```
-    pub async fn with_top_module(source_path: &str, top_module: &str) -> Result<Self> {
+    /// This is the default mode for fast functional verification.
+    pub async fn new(source_path: &str) -> Result<Self> {
+        Self::behavioral(source_path).await
+    }
+
+    /// Create a behavioral simulation testbench
+    ///
+    /// Behavioral simulation is the fastest mode, using high-level
+    /// constructs without gate-level detail.
+    pub async fn behavioral(source_path: &str) -> Result<Self> {
         let use_gpu = std::env::var("SKALP_SIM_MODE")
             .map(|v| v.to_lowercase() != "cpu")
             .unwrap_or(true);
 
-        let config = SimulationConfig {
-            use_gpu,
+        let config = UnifiedSimConfig {
+            level: SimLevel::Behavioral,
+            circuit_mode: CircuitMode::Sync,
+            hw_accel: if use_gpu { HwAccel::Auto } else { HwAccel::Cpu },
             max_cycles: 1_000_000,
-            timeout_ms: 60_000,
             capture_waveforms: true,
-            parallel_threads: 4,
+            ..Default::default()
         };
 
-        Self::with_config_and_top_module(source_path, config, Some(top_module.to_string())).await
+        Self::from_source_behavioral(source_path, config).await
     }
 
-    /// Create a new testbench with custom config and explicit top module name
-    pub async fn with_config_and_top_module(
+    /// Create a gate-level synchronous testbench
+    ///
+    /// Gate-level simulation provides accurate timing using primitive gates.
+    pub async fn gate_level(source_path: &str) -> Result<Self> {
+        let use_gpu = std::env::var("SKALP_SIM_MODE")
+            .map(|v| v.to_lowercase() != "cpu")
+            .unwrap_or(true);
+
+        let config = UnifiedSimConfig {
+            level: SimLevel::GateLevel,
+            circuit_mode: CircuitMode::Sync,
+            hw_accel: if use_gpu { HwAccel::Auto } else { HwAccel::Cpu },
+            max_cycles: 1_000_000,
+            capture_waveforms: true,
+            ..Default::default()
+        };
+
+        Self::from_source_gate_level(source_path, config).await
+    }
+
+    /// Create an NCL (asynchronous) testbench from source
+    ///
+    /// NCL simulation uses dual-rail encoding and wavefront propagation
+    /// instead of clocks.
+    pub async fn ncl(source_path: &str) -> Result<Self> {
+        let use_gpu = std::env::var("SKALP_SIM_MODE")
+            .map(|v| v.to_lowercase() != "cpu")
+            .unwrap_or(true);
+
+        let config = UnifiedSimConfig {
+            level: SimLevel::GateLevel,
+            circuit_mode: CircuitMode::Ncl,
+            hw_accel: if use_gpu { HwAccel::Auto } else { HwAccel::Cpu },
+            max_iterations: 100000,
+            ncl_debug: false,
+            ..Default::default()
+        };
+
+        Self::from_source_ncl(source_path, config).await
+    }
+
+    /// Create an NCL testbench from a pre-compiled GateNetlist
+    ///
+    /// This is useful when you want to compile once and run multiple tests.
+    ///
+    /// # Example
+    /// ```rust,no_run
+    /// use skalp_testing::testbench::*;
+    /// use skalp_lir::gate_netlist::GateNetlist;
+    /// use std::sync::OnceLock;
+    ///
+    /// static NETLIST: OnceLock<GateNetlist> = OnceLock::new();
+    ///
+    /// #[tokio::test]
+    /// async fn test_op1() {
+    ///     let netlist = NETLIST.get_or_init(|| compile_design());
+    ///     let mut tb = Testbench::from_netlist_ncl(netlist.clone()).unwrap();
+    ///     // ... test code
+    /// }
+    /// ```
+    pub fn from_netlist_ncl(netlist: GateNetlist) -> Result<Self> {
+        let use_gpu = std::env::var("SKALP_SIM_MODE")
+            .map(|v| v.to_lowercase() != "cpu")
+            .unwrap_or(true);
+
+        let config = UnifiedSimConfig {
+            level: SimLevel::GateLevel,
+            circuit_mode: CircuitMode::Ncl,
+            hw_accel: if use_gpu { HwAccel::Auto } else { HwAccel::Cpu },
+            max_iterations: 100000,
+            ncl_debug: false,
+            ..Default::default()
+        };
+
+        Self::from_netlist_ncl_with_config(netlist, config)
+    }
+
+    /// Create an NCL testbench from netlist with custom config
+    pub fn from_netlist_ncl_with_config(
+        netlist: GateNetlist,
+        config: UnifiedSimConfig,
+    ) -> Result<Self> {
+        use std::time::Instant;
+        let start = Instant::now();
+
+        let mut sim = UnifiedSimulator::new(config)
+            .map_err(|e| anyhow::anyhow!("Failed to create NCL simulator: {}", e))?;
+
+        sim.load_ncl_gate_level(netlist)
+            .map_err(|e| anyhow::anyhow!("Failed to load NCL netlist: {}", e))?;
+
+        eprintln!(
+            "⏱️  [TESTBENCH] NCL testbench created in {:?} (device: {})",
+            start.elapsed(),
+            sim.device_info()
+        );
+
+        Ok(Self {
+            sim,
+            mode: TestbenchMode::Ncl,
+            pending_inputs: HashMap::new(),
+            cycle_count: 0,
+            input_names: vec![],
+            output_names: vec![],
+        })
+    }
+
+    /// Create a testbench with explicit top module name
+    pub async fn with_top_module(source_path: &str, top_module: &str) -> Result<Self> {
+        Self::behavioral_with_top(source_path, top_module).await
+    }
+
+    /// Create a behavioral testbench with explicit top module
+    pub async fn behavioral_with_top(source_path: &str, top_module: &str) -> Result<Self> {
+        let use_gpu = std::env::var("SKALP_SIM_MODE")
+            .map(|v| v.to_lowercase() != "cpu")
+            .unwrap_or(true);
+
+        let config = UnifiedSimConfig {
+            level: SimLevel::Behavioral,
+            circuit_mode: CircuitMode::Sync,
+            hw_accel: if use_gpu { HwAccel::Auto } else { HwAccel::Cpu },
+            max_cycles: 1_000_000,
+            capture_waveforms: true,
+            ..Default::default()
+        };
+
+        Self::from_source_behavioral_with_top(source_path, config, Some(top_module)).await
+    }
+
+    // ========================================================================
+    // Internal constructors
+    // ========================================================================
+
+    async fn from_source_behavioral(source_path: &str, config: UnifiedSimConfig) -> Result<Self> {
+        Self::from_source_behavioral_with_top(source_path, config, None).await
+    }
+
+    async fn from_source_behavioral_with_top(
         source_path: &str,
-        config: SimulationConfig,
-        top_module_name: Option<String>,
+        config: UnifiedSimConfig,
+        top_module: Option<&str>,
     ) -> Result<Self> {
         use std::time::Instant;
         let start_total = Instant::now();
-        eprintln!("⏱️  [TESTBENCH] Starting compilation of '{}'", source_path);
-        if let Some(ref name) = top_module_name {
-            eprintln!("⏱️  [TESTBENCH] Using explicit top module: '{}'", name);
-        }
+        eprintln!(
+            "⏱️  [TESTBENCH] Starting behavioral compilation of '{}'",
+            source_path
+        );
 
         let path = Path::new(source_path);
 
-        // Initialize cache (defaults to target/skalp-cache/, override with SKALP_CACHE_DIR)
+        // Initialize cache
         let cache = CompilationCache::new();
         let dependencies = collect_dependencies(path).unwrap_or_default();
         let cache_key = cache.compute_cache_key(path, &dependencies).ok();
 
-        // Try to load from cache (but skip cache if explicit top module specified)
-        let sir = if top_module_name.is_some() {
-            // Always recompile when explicit top module is specified
-            // because the cache key doesn't include the top module name
-            Self::compile_to_sir_with_top(
-                path,
-                &cache,
-                cache_key.as_ref(),
-                top_module_name.as_deref(),
-            )?
+        // Compile to SIR
+        let sir = if top_module.is_some() {
+            Self::compile_to_sir_with_top(path, &cache, cache_key.as_ref(), top_module)?
         } else if let Some(ref key) = cache_key {
             if let Ok(Some(cached_sir)) = cache.load(key) {
-                eprintln!("⏱️  [TESTBENCH] Using cached SIR (skipped HIR→MIR→SIR)");
+                eprintln!("⏱️  [TESTBENCH] Using cached SIR");
                 cached_sir
             } else {
-                // Cache miss - compile from source
                 Self::compile_to_sir_with_top(path, &cache, Some(key), None)?
             }
         } else {
-            // No cache key - compile without caching
             Self::compile_to_sir_with_top(path, &cache, None, None)?
         };
 
-        // Extract input/output names from SIR module before passing to simulator
+        // Extract port names
         let input_names: Vec<String> = sir.inputs.iter().map(|i| i.name.clone()).collect();
         let output_names: Vec<String> = sir.outputs.iter().map(|o| o.name.clone()).collect();
 
-        // Create simulator and load design
+        // Create simulator
         let start_sim = Instant::now();
-        eprintln!("⏱️  [TESTBENCH] Creating simulator and loading design...");
-        eprintln!("⏱️  [TESTBENCH] Available inputs: {:?}", input_names);
-        eprintln!("⏱️  [TESTBENCH] Available outputs: {:?}", output_names);
-        let mut sim = Simulator::new(config).await?;
-        sim.load_module(&sir).await?;
-        eprintln!(
-            "⏱️  [TESTBENCH] Simulator initialization completed in {:?}",
-            start_sim.elapsed()
-        );
+        let mut sim = UnifiedSimulator::new(config)
+            .map_err(|e| anyhow::anyhow!("Failed to create simulator: {}", e))?;
+
+        sim.load_behavioral(&sir)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to load behavioral design: {}", e))?;
 
         eprintln!(
-            "⏱️  [TESTBENCH] ✅ Total testbench creation time: {:?}",
+            "⏱️  [TESTBENCH] Simulator initialized in {:?} (device: {})",
+            start_sim.elapsed(),
+            sim.device_info()
+        );
+        eprintln!(
+            "⏱️  [TESTBENCH] ✅ Total creation time: {:?}",
             start_total.elapsed()
         );
 
         Ok(Self {
             sim,
+            mode: TestbenchMode::Behavioral,
             pending_inputs: HashMap::new(),
             cycle_count: 0,
             input_names,
@@ -171,7 +302,146 @@ impl Testbench {
         })
     }
 
-    /// Compile source to SIR (HIR → MIR → SIR), optionally caching the result
+    async fn from_source_gate_level(source_path: &str, config: UnifiedSimConfig) -> Result<Self> {
+        use skalp_frontend::parse_and_build_hir_from_file;
+        use skalp_lir::{
+            get_stdlib_library, lower_mir_hierarchical, lower_mir_module_to_lir,
+            map_hierarchical_to_gates, map_lir_to_gates_optimized,
+        };
+        use std::time::Instant;
+
+        let start_total = Instant::now();
+        eprintln!(
+            "⏱️  [TESTBENCH] Starting gate-level compilation of '{}'",
+            source_path
+        );
+
+        let path = Path::new(source_path);
+
+        // Parse HIR
+        let hir = parse_and_build_hir_from_file(path)?;
+
+        // Compile to MIR
+        let compiler = MirCompiler::new();
+        let mir = compiler
+            .compile_to_mir(&hir)
+            .map_err(|e| anyhow::anyhow!("MIR compilation failed: {}", e))?;
+
+        // Load technology library
+        let library = get_stdlib_library("generic_asic")
+            .map_err(|e| anyhow::anyhow!("Failed to load technology library: {:?}", e))?;
+
+        // Lower to GateNetlist
+        let has_hierarchy =
+            mir.modules.len() > 1 || mir.modules.iter().any(|m| !m.instances.is_empty());
+
+        let netlist = if has_hierarchy {
+            let hier_lir = lower_mir_hierarchical(&mir);
+            let hier_netlist = map_hierarchical_to_gates(&hier_lir, &library);
+            hier_netlist.flatten()
+        } else {
+            let top_module = mir
+                .modules
+                .first()
+                .ok_or_else(|| anyhow::anyhow!("No modules found"))?;
+            let lir_result = lower_mir_module_to_lir(top_module);
+            let tech_result = map_lir_to_gates_optimized(&lir_result.lir, &library);
+            tech_result.netlist
+        };
+
+        eprintln!(
+            "⏱️  [TESTBENCH] Gate netlist: {} cells, {} nets",
+            netlist.cells.len(),
+            netlist.nets.len()
+        );
+
+        // Convert to SIR and load
+        let sir_result = convert_gate_netlist_to_sir(&netlist);
+
+        let mut sim = UnifiedSimulator::new(config)
+            .map_err(|e| anyhow::anyhow!("Failed to create simulator: {}", e))?;
+
+        sim.load_gate_level(&sir_result.sir)
+            .map_err(|e| anyhow::anyhow!("Failed to load design: {}", e))?;
+
+        // Extract port names before moving sim
+        let input_names = sim.get_input_names();
+        let output_names = sim.get_output_names();
+
+        eprintln!(
+            "⏱️  [TESTBENCH] ✅ Gate-level testbench created in {:?}",
+            start_total.elapsed()
+        );
+
+        Ok(Self {
+            sim,
+            mode: TestbenchMode::GateLevel,
+            pending_inputs: HashMap::new(),
+            cycle_count: 0,
+            input_names,
+            output_names,
+        })
+    }
+
+    async fn from_source_ncl(source_path: &str, config: UnifiedSimConfig) -> Result<Self> {
+        use skalp_frontend::parse_and_build_hir_from_file;
+        use skalp_lir::{get_stdlib_library, lower_mir_hierarchical, map_hierarchical_to_gates};
+        use std::time::Instant;
+
+        let start_total = Instant::now();
+        eprintln!(
+            "⏱️  [TESTBENCH] Starting NCL compilation of '{}'",
+            source_path
+        );
+
+        let path = Path::new(source_path);
+
+        // Parse HIR
+        let hir = parse_and_build_hir_from_file(path)?;
+
+        // Compile to MIR
+        let compiler = MirCompiler::new();
+        let mir = compiler
+            .compile_to_mir(&hir)
+            .map_err(|e| anyhow::anyhow!("MIR compilation failed: {}", e))?;
+
+        // Load technology library and synthesize
+        let library = get_stdlib_library("generic_asic")
+            .map_err(|e| anyhow::anyhow!("Failed to load technology library: {:?}", e))?;
+
+        let hier_lir = lower_mir_hierarchical(&mir);
+        let hier_netlist = map_hierarchical_to_gates(&hier_lir, &library);
+        let netlist = hier_netlist.flatten();
+
+        eprintln!(
+            "⏱️  [TESTBENCH] NCL netlist: {} cells, {} nets",
+            netlist.cells.len(),
+            netlist.nets.len()
+        );
+
+        // Load as NCL
+        let mut sim = UnifiedSimulator::new(config)
+            .map_err(|e| anyhow::anyhow!("Failed to create NCL simulator: {}", e))?;
+
+        sim.load_ncl_gate_level(netlist)
+            .map_err(|e| anyhow::anyhow!("Failed to load NCL netlist: {}", e))?;
+
+        eprintln!(
+            "⏱️  [TESTBENCH] ✅ NCL testbench created in {:?}",
+            start_total.elapsed()
+        );
+
+        Ok(Self {
+            sim,
+            mode: TestbenchMode::Ncl,
+            pending_inputs: HashMap::new(),
+            cycle_count: 0,
+            input_names: vec![],
+            output_names: vec![],
+        })
+    }
+
+    /// Compile source to SIR (HIR → MIR → SIR)
     fn compile_to_sir_with_top(
         path: &Path,
         cache: &CompilationCache,
@@ -180,8 +450,6 @@ impl Testbench {
     ) -> Result<skalp_sir::SirModule> {
         use std::time::Instant;
 
-        // Parse and build HIR with full module resolution support (Bug #84 fix)
-        // This handles imports like "mod async_fifo; use async_fifo::AsyncFifo"
         let start_hir = Instant::now();
         let context = skalp_frontend::parse_and_build_compilation_context(path)?;
         eprintln!(
@@ -189,9 +457,6 @@ impl Testbench {
             start_hir.elapsed()
         );
 
-        // Compile to MIR with optimizations and module scope resolution
-        // The proper HIR→MIR fix ensures array assignments are expanded correctly
-        // Bug #84 fix: Pass module HIRs for proper transitive import support
         let start_mir = Instant::now();
         let compiler = MirCompiler::new();
         let mir = compiler
@@ -202,88 +467,40 @@ impl Testbench {
             start_mir.elapsed()
         );
 
-        // Convert to SIR with hierarchical elaboration
         let start_sir = Instant::now();
         if mir.modules.is_empty() {
             anyhow::bail!("No modules found in design");
         }
 
-        // Find the top-level module: the module that is NOT instantiated by any other module
-        // Collect all module IDs that are instantiated
-        for module in &mir.modules {
-            eprintln!(
-                "  - Module '{}' (ID={:?}): {} ports, {} instances",
-                module.name,
-                module.id,
-                module.ports.len(),
-                module.instances.len()
-            );
-        }
-
+        // Find top module
         let mut instantiated_modules = std::collections::HashSet::new();
         for module in &mir.modules {
             for instance in &module.instances {
                 instantiated_modules.insert(instance.module);
-                eprintln!(
-                    "  - Module '{}' instantiates module ID {:?}",
-                    module.name, instance.module
-                );
             }
         }
 
-        // Find the module that is not instantiated (the top-level)
-        // IMPORTANT: When multiple modules are uninstantiated (e.g., generic templates
-        // and their specializations), prefer the module that HAS instances (is a parent),
-        // since that's more likely to be the actual top-level testbench/design.
         let uninstantiated: Vec<_> = mir
             .modules
             .iter()
-            .filter(|m| {
-                let is_uninstantiated = !instantiated_modules.contains(&m.id);
-                eprintln!(
-                    "  - Module '{}' (ID={:?}): is_uninstantiated={}, has_instances={}",
-                    m.name,
-                    m.id,
-                    is_uninstantiated,
-                    !m.instances.is_empty()
-                );
-                is_uninstantiated
-            })
+            .filter(|m| !instantiated_modules.contains(&m.id))
             .collect();
 
         if uninstantiated.is_empty() {
-            anyhow::bail!(
-                "Could not find top-level module (no module is uninstantiated). \
-                 This might indicate a circular dependency or all modules are instantiated."
-            );
+            anyhow::bail!("Could not find top-level module");
         }
 
-        // Get the source file basename for matching
         let source_basename = path
             .file_stem()
             .and_then(|s| s.to_str())
             .map(|s| s.to_string());
 
-        // BUG #180 FIX: Improved top module selection
-        // Priority order:
-        // 0. Explicit top module name (if provided via with_top_module)
-        // 1. Module whose name matches the source file basename (search ALL modules first!)
-        // 2. Among uninstantiated modules: Module that is NOT a trait specialization
-        // 3. Among uninstantiated modules: Module with the most instances (original logic)
         let top_module = if let Some(explicit_name) = explicit_top {
-            // User specified an explicit top module name
-            if let Some(m) = mir.modules.iter().find(|m| m.name == explicit_name) {
-                eprintln!("  ✓ Using explicit top module: '{}'", m.name);
-                m
-            } else {
-                anyhow::bail!(
-                    "Explicit top module '{}' not found. Available modules: {:?}",
-                    explicit_name,
-                    mir.modules.iter().map(|m| &m.name).collect::<Vec<_>>()
-                );
-            }
+            mir.modules
+                .iter()
+                .find(|m| m.name == explicit_name)
+                .ok_or_else(|| anyhow::anyhow!("Top module '{}' not found", explicit_name))?
         } else if let Some(ref basename) = source_basename {
-            // Convert basename to PascalCase for matching (e.g., "fp_sqrt_simple" -> "FpSqrtSimple")
             let pascal_basename: String = basename
                 .split('_')
                 .map(|s| {
@@ -295,57 +512,22 @@ impl Testbench {
                 })
                 .collect();
 
-            // BUG #183 FIX: First search ALL modules for exact match, not just uninstantiated
-            // This handles cases where a module may be incorrectly marked as instantiated
-            // due to module ID assignment issues during monomorphization
             if let Some(m) = mir.modules.iter().find(|m| m.name == pascal_basename) {
-                eprintln!(
-                    "  ✓ Found module matching source file name: '{}' (searching all modules)",
-                    m.name
-                );
                 m
-            } else if let Some(m) = uninstantiated.iter().find(|m| m.name == pascal_basename) {
-                eprintln!("  ✓ Found module matching source file name: '{}'", m.name);
-                *m
             } else {
-                // Filter out trait specializations (modules with _fp32, _fp64, _fp16 suffixes)
-                let non_specialized: Vec<_> = uninstantiated
+                *uninstantiated
                     .iter()
-                    .filter(|m| {
-                        !m.name.ends_with("_fp32")
-                            && !m.name.ends_with("_fp64")
-                            && !m.name.ends_with("_fp16")
-                    })
-                    .collect();
-
-                if !non_specialized.is_empty() {
-                    // Prefer non-specialized modules with the most instances
-                    non_specialized
-                        .iter()
-                        .max_by_key(|m| m.instances.len())
-                        .map(|m| **m)
-                        .unwrap()
-                } else {
-                    // Fallback to original logic
-                    *uninstantiated
-                        .iter()
-                        .max_by_key(|m| m.instances.len())
-                        .unwrap()
-                }
+                    .max_by_key(|m| m.instances.len())
+                    .unwrap()
             }
         } else {
-            // No source basename - use original logic
             *uninstantiated
                 .iter()
                 .max_by_key(|m| m.instances.len())
                 .unwrap()
         };
 
-        eprintln!(
-            "✅ Selected top module: '{}' ({} instances)",
-            top_module.name,
-            top_module.instances.len()
-        );
+        eprintln!("✅ Selected top module: '{}'", top_module.name);
 
         let sir = convert_mir_to_sir_with_hierarchy(&mir, top_module);
         eprintln!(
@@ -353,253 +535,197 @@ impl Testbench {
             start_sir.elapsed()
         );
 
-        // Store in cache if we have a key
         if let Some(key) = cache_key {
-            if let Err(e) = cache.store(key, &sir) {
-                eprintln!("⚠️  [CACHE] Failed to store in cache: {}", e);
-            }
+            let _ = cache.store(key, &sir);
         }
 
         Ok(sir)
     }
 
+    // ========================================================================
+    // Common methods (work for all modes)
+    // ========================================================================
+
     /// Set an input signal value (chainable)
     pub fn set(&mut self, signal: &str, value: impl IntoSignalValue) -> &mut Self {
-        self.pending_inputs
-            .insert(signal.to_string(), value.into_bytes());
+        let bytes = value.into_bytes();
+        let val = bytes_to_u64(&bytes);
+        self.pending_inputs.insert(signal.to_string(), val);
         self
     }
 
-    /// Apply pending inputs and run for N clock cycles (uses default clock "clk")
-    ///
-    /// # Parameters
-    /// - `cycles`: Number of clock cycles to run (NOT a signal value)
+    /// Apply pending inputs and run for N clock cycles
     pub async fn clock(&mut self, cycles: usize) -> &mut Self {
         self.clock_signal("clk", cycles).await
     }
 
     /// Apply pending inputs and run for N cycles on a specific clock signal
-    ///
-    /// # Parameters
-    /// - `clock_name`: Name of the clock signal (e.g., "clk", "wr_clk", "rd_clk")
-    /// - `cycles`: Number of clock cycles to run (NOT a signal value)
-    ///
-    /// # Example
-    /// ```rust,ignore
-    /// // Run 3 cycles on the write clock
-    /// tb.clock_signal("wr_clk", 3).await;
-    /// ```
     pub async fn clock_signal(&mut self, clock_name: &str, cycles: usize) -> &mut Self {
         // Apply all pending inputs
         for (signal, value) in self.pending_inputs.drain() {
-            self.sim.set_input(&signal, value).await.unwrap();
+            self.sim.set_input(&signal, value).await;
         }
 
         // Run clock cycles
         for _ in 0..cycles {
-            self.sim.set_input(clock_name, vec![0]).await.unwrap();
-            self.sim.step_simulation().await.unwrap();
-            self.sim.set_input(clock_name, vec![1]).await.unwrap();
-            self.sim.step_simulation().await.unwrap();
+            self.sim.set_input(clock_name, 0).await;
+            self.sim.step().await;
+            self.sim.set_input(clock_name, 1).await;
+            self.sim.step().await;
             self.cycle_count += 1;
         }
 
         self
     }
 
-    /// Toggle multiple clocks independently - useful for CDC testing
+    /// Apply pending inputs and run multiple clock signals for different cycle counts
     ///
-    /// # Parameters
-    /// - `clocks`: Array of (clock_name, num_cycles) tuples
-    ///   - Each tuple specifies a clock and how many cycles to run it
-    ///   - The numbers are cycle counts, NOT signal values
+    /// This is useful for multi-clock domain designs where different clocks
+    /// need to run for different numbers of cycles.
     ///
     /// # Example
     /// ```rust,ignore
-    /// // Run 1 cycle on wr_clk AND 2 cycles on rd_clk simultaneously
-    /// // This simulates rd_clk being 2x faster than wr_clk
-    /// tb.clock_multi(&[("wr_clk", 1), ("rd_clk", 2)]).await;
-    /// //                           ^               ^
-    /// //                    1 = num cycles   2 = num cycles
+    /// // Run wr_clk for 2 cycles and rd_clk for 4 cycles
+    /// tb.clock_multi(&[("wr_clk", 2), ("rd_clk", 4)]).await;
     /// ```
     pub async fn clock_multi(&mut self, clocks: &[(&str, usize)]) -> &mut Self {
-        // Apply all pending inputs first
+        // Apply all pending inputs
         for (signal, value) in self.pending_inputs.drain() {
-            self.sim.set_input(&signal, value).await.unwrap();
+            self.sim.set_input(&signal, value).await;
         }
 
-        // Find the maximum number of cycles across all clocks
-        let max_cycles = clocks.iter().map(|(_, c)| c).max().copied().unwrap_or(0);
+        // Find the maximum number of cycles needed
+        let max_cycles = clocks.iter().map(|(_, c)| *c).max().unwrap_or(0);
 
+        // Run cycles, toggling each clock appropriately
         for cycle in 0..max_cycles {
-            // For each clock, toggle if we're within its cycle count
-            for (clock_name, clock_cycles) in clocks {
-                if cycle < *clock_cycles {
-                    // Low phase
-                    self.sim.set_input(clock_name, vec![0]).await.unwrap();
+            // Clock low phase
+            for (clock_name, num_cycles) in clocks {
+                if cycle < *num_cycles {
+                    self.sim.set_input(clock_name, 0).await;
                 }
             }
-            self.sim.step_simulation().await.unwrap();
+            self.sim.step().await;
 
-            for (clock_name, clock_cycles) in clocks {
-                if cycle < *clock_cycles {
-                    // High phase
-                    self.sim.set_input(clock_name, vec![1]).await.unwrap();
+            // Clock high phase
+            for (clock_name, num_cycles) in clocks {
+                if cycle < *num_cycles {
+                    self.sim.set_input(clock_name, 1).await;
                 }
             }
-            self.sim.step_simulation().await.unwrap();
+            self.sim.step().await;
             self.cycle_count += 1;
         }
 
         self
+    }
+
+    /// Apply pending inputs and step the simulation once
+    pub async fn step(&mut self) -> &mut Self {
+        for (signal, value) in self.pending_inputs.drain() {
+            self.sim.set_input(&signal, value).await;
+        }
+        self.sim.step().await;
+        self
+    }
+
+    /// Get an output value as u32
+    pub async fn get_u32(&mut self, signal: &str) -> u32 {
+        if !self.pending_inputs.is_empty() {
+            self.step().await;
+        }
+
+        if let Some(val) = self.sim.get_output(signal).await {
+            return val as u32;
+        }
+
+        self.get_bitblasted_value(signal, 32).await as u32
+    }
+
+    /// Get an output value as u64
+    pub async fn get_u64(&mut self, signal: &str) -> u64 {
+        if !self.pending_inputs.is_empty() {
+            self.step().await;
+        }
+
+        if let Some(val) = self.sim.get_output(signal).await {
+            return val;
+        }
+
+        self.get_bitblasted_value(signal, 64).await
+    }
+
+    /// Get an output value as a specific type
+    ///
+    /// This is a convenience method that converts the output value to the requested type.
+    /// For behavioral simulation, it uses byte-based I/O for larger types.
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// let result: u32 = tb.get_as("output").await;
+    /// let data: Vec<u8> = tb.get_as("large_output").await;
+    /// ```
+    pub async fn get_as<T: FromSignalValue>(&mut self, signal: &str) -> T {
+        if !self.pending_inputs.is_empty() {
+            self.step().await;
+        }
+
+        // Try byte-based output first (works for behavioral with large types)
+        if let Some(bytes) = self.sim.get_output_bytes(signal).await {
+            return T::from_bytes(&bytes);
+        }
+
+        // Fall back to u64-based output
+        if let Some(val) = self.sim.get_output(signal).await {
+            let bytes = val.to_le_bytes().to_vec();
+            return T::from_bytes(&bytes);
+        }
+
+        // Try bit-blasted value
+        let val = self.get_bitblasted_value(signal, 64).await;
+        let bytes = val.to_le_bytes().to_vec();
+        T::from_bytes(&bytes)
+    }
+
+    /// Get a bit-blasted signal value
+    async fn get_bitblasted_value(&self, signal: &str, max_bits: usize) -> u64 {
+        let mut result = 0u64;
+
+        for bit in 0..max_bits {
+            let bit_signal = format!("{}[{}]", signal, bit);
+            if let Some(val) = self.sim.get_output(&bit_signal).await {
+                if val != 0 {
+                    result |= 1u64 << bit;
+                }
+            } else if bit > 0 {
+                break;
+            }
+        }
+
+        result
     }
 
     /// Expect an output signal to have a specific value
     pub async fn expect(&mut self, signal: &str, expected: impl IntoSignalValue) -> &mut Self {
-        let actual = self.sim.get_output(signal).await.unwrap();
         let expected_bytes = expected.into_bytes();
+        let expected_u64 = bytes_to_u64(&expected_bytes);
+        let actual = self.sim.get_output(signal).await.unwrap_or(0);
 
         assert_eq!(
-            actual, expected_bytes,
-            "Signal '{}' mismatch at cycle {}: expected {:?}, got {:?}",
-            signal, self.cycle_count, expected_bytes, actual
+            actual, expected_u64,
+            "Signal '{}' mismatch at cycle {}: expected 0x{:x}, got 0x{:x}",
+            signal, self.cycle_count, expected_u64, actual
         );
 
         self
     }
 
-    /// Apply pending inputs and step the simulation once (for combinational logic)
-    ///
-    /// This is useful for purely combinational designs or when you need to
-    /// evaluate combinational logic without clock edges.
-    ///
-    /// # Example
-    /// ```rust,ignore
-    /// tb.set("a", 5u32).set("b", 3u32);
-    /// tb.step().await;
-    /// let result: u32 = tb.get_as("sum").await;
-    /// ```
-    pub async fn step(&mut self) -> &mut Self {
-        // Apply all pending inputs
-        for (signal, value) in self.pending_inputs.drain() {
-            self.sim.set_input(&signal, value).await.unwrap();
-        }
-
-        // Step the simulation once
-        self.sim.step_simulation().await.unwrap();
-
-        self
-    }
-
-    /// Get the current value of an output signal
-    ///
-    /// NOTE: This automatically applies pending inputs and steps the simulation
-    /// if there are any pending inputs. This ensures combinational logic is
-    /// evaluated correctly.
-    pub async fn get(&mut self, signal: &str) -> Vec<u8> {
-        // If there are pending inputs, apply them and step
-        if !self.pending_inputs.is_empty() {
-            self.step().await;
-        }
-
-        self.sim.get_output(signal).await.unwrap()
-    }
-
-    /// Get the current value as a specific type
-    ///
-    /// NOTE: This automatically applies pending inputs and steps the simulation
-    /// if there are any pending inputs. This ensures combinational logic is
-    /// evaluated correctly.
-    pub async fn get_as<T: FromSignalValue>(&mut self, signal: &str) -> T {
-        let bytes = self.get(signal).await;
-        T::from_bytes(&bytes)
-    }
-
-    /// Apply reset for N cycles
-    pub async fn reset(&mut self, cycles: usize) -> &mut Self {
-        self.set("rst", 1u8);
-        self.clock(cycles).await;
-        self.set("rst", 0u8);
-        self.clock(1).await;
-        self
-    }
-
-    /// Run simulation until a condition is met (with timeout)
-    pub async fn wait_until<F>(&mut self, mut condition: F, max_cycles: usize) -> Result<&mut Self>
-    where
-        F: FnMut(&[u8]) -> bool,
-    {
-        for _ in 0..max_cycles {
-            self.clock(1).await;
-            let value = self.get("valid").await; // TODO: Make signal name configurable
-            if condition(&value) {
-                return Ok(self);
-            }
-        }
-
-        anyhow::bail!("Timeout waiting for condition after {} cycles", max_cycles)
-    }
-
-    /// Get the current cycle count
-    pub fn cycles(&self) -> u64 {
-        self.cycle_count
-    }
-
-    /// Check multiple signals at once
-    /// Note: Use tuples with concrete types rather than trait objects
-    /// Example: tb.expect_many(&[("a", 5u32), ("b", 3u32)]).await;
-    pub async fn expect_many<T: IntoSignalValue + Clone>(
-        &mut self,
-        expectations: &[(&str, T)],
-    ) -> &mut Self {
-        for (signal, expected) in expectations {
-            let actual = self.sim.get_output(signal).await.unwrap();
-            let expected_bytes = expected.clone().into_bytes();
-
-            assert_eq!(
-                actual, expected_bytes,
-                "Signal '{}' mismatch at cycle {}: expected {:?}, got {:?}",
-                signal, self.cycle_count, expected_bytes, actual
-            );
-        }
-
-        self
-    }
-
-    /// Expect an fp32 (float) output signal with a tolerance for comparison
-    ///
-    /// This method is useful for floating-point signals where exact bit-level
-    /// comparison may fail due to rounding differences.
-    ///
-    /// # Parameters
-    /// - `signal`: Name of the output signal
-    /// - `expected`: Expected fp32 value
-    /// - `tolerance`: Maximum allowed difference between expected and actual
-    ///
-    /// # Example
-    /// ```rust,ignore
-    /// tb.expect_fp32("result", 3.14159, 0.001).await;
-    /// ```
+    /// Expect an fp32 output with tolerance
     pub async fn expect_fp32(&mut self, signal: &str, expected: f32, tolerance: f32) -> &mut Self {
-        let actual_bytes = self.sim.get_output(signal).await.unwrap();
-
-        // Convert bytes to f32 (assuming little-endian IEEE 754)
-        let actual = if actual_bytes.len() >= 4 {
-            f32::from_le_bytes([
-                actual_bytes[0],
-                actual_bytes[1],
-                actual_bytes[2],
-                actual_bytes[3],
-            ])
-        } else {
-            panic!(
-                "Signal '{}' has {} bytes, expected at least 4 for fp32",
-                signal,
-                actual_bytes.len()
-            );
-        };
-
+        let actual_bits = self.sim.get_output(signal).await.unwrap_or(0) as u32;
+        let actual = f32::from_bits(actual_bits);
         let diff = (actual - expected).abs();
+
         assert!(
             diff <= tolerance,
             "Signal '{}' fp32 mismatch at cycle {}: expected {}, got {} (diff: {}, tolerance: {})",
@@ -614,42 +740,111 @@ impl Testbench {
         self
     }
 
-    /// Get the list of available input port names
-    ///
-    /// This is useful for debugging when you're not sure what inputs are available.
-    ///
-    /// # Example
-    /// ```rust,ignore
-    /// let tb = Testbench::new("design.sk").await.unwrap();
-    /// println!("Inputs: {:?}", tb.get_input_names());
-    /// ```
-    pub fn get_input_names(&self) -> &[String] {
-        &self.input_names
+    /// Apply reset for N cycles
+    pub async fn reset(&mut self, cycles: usize) -> &mut Self {
+        self.set("rst", 1u8);
+        self.clock(cycles).await;
+        self.set("rst", 0u8);
+        self.clock(1).await;
+        self
     }
 
-    /// Get the list of available output port names
-    ///
-    /// This is useful for debugging when you're not sure what outputs are available.
-    ///
-    /// # Example
-    /// ```rust,ignore
-    /// let tb = Testbench::new("design.sk").await.unwrap();
-    /// println!("Outputs: {:?}", tb.get_output_names());
-    /// ```
-    pub fn get_output_names(&self) -> &[String] {
-        &self.output_names
+    /// Get the current cycle count
+    pub fn cycles(&self) -> u64 {
+        self.cycle_count
     }
 
-    /// Check if an input port exists
-    pub fn has_input(&self, name: &str) -> bool {
-        self.input_names.iter().any(|n| n == name)
+    /// Get device info (CPU or GPU)
+    pub fn device_info(&self) -> String {
+        self.sim.device_info()
     }
 
-    /// Check if an output port exists
-    pub fn has_output(&self, name: &str) -> bool {
-        self.output_names.iter().any(|n| n == name)
+    /// Get the simulation mode
+    pub fn mode(&self) -> TestbenchMode {
+        self.mode
+    }
+
+    /// Get input port names
+    pub fn get_input_names(&self) -> Vec<String> {
+        if self.input_names.is_empty() {
+            self.sim.get_input_names()
+        } else {
+            self.input_names.clone()
+        }
+    }
+
+    /// Get output port names
+    pub fn get_output_names(&self) -> Vec<String> {
+        if self.output_names.is_empty() {
+            self.sim.get_output_names()
+        } else {
+            self.output_names.clone()
+        }
+    }
+
+    // ========================================================================
+    // NCL-specific methods
+    // ========================================================================
+
+    /// Set an NCL dual-rail input with explicit width
+    ///
+    /// For NCL circuits, inputs are encoded as dual-rail signals.
+    pub fn set_ncl_input(&mut self, name: &str, value: u64, width: usize) -> &mut Self {
+        self.sim.set_ncl_input(name, value, width);
+        self
+    }
+
+    /// Set NCL input from u128 (for signals up to 128 bits)
+    pub fn set_ncl_input_u128(&mut self, name: &str, value: u128, width: usize) -> &mut Self {
+        self.sim.set_ncl_input_u128(name, value, width);
+        self
+    }
+
+    /// Set all NCL inputs to NULL (spacer phase)
+    pub fn set_ncl_null(&mut self, name: &str, width: usize) -> &mut Self {
+        self.sim.set_ncl_null(name, width);
+        self
+    }
+
+    /// Run NCL simulation until stable (no signal changes)
+    pub async fn run_until_stable(&mut self) -> UnifiedSimResult {
+        self.sim.run_until_stable().await
+    }
+
+    /// Get an NCL dual-rail output value
+    pub fn get_ncl_output(&self, name: &str, width: usize) -> Option<u64> {
+        self.sim.get_ncl_output(name, width)
+    }
+
+    /// Check if NCL simulation is complete
+    pub fn is_ncl_complete(&self) -> bool {
+        self.sim.is_ncl_complete()
+    }
+
+    /// Check if NCL outputs are all NULL
+    pub fn is_ncl_null(&self) -> bool {
+        self.sim.is_ncl_null()
+    }
+
+    /// Get NCL signal names (for debugging)
+    pub fn ncl_signal_names(&self) -> Vec<String> {
+        self.sim.ncl_signal_names()
+    }
+
+    /// Check if an NCL signal exists
+    pub fn has_ncl_signal(&self, name: &str) -> bool {
+        self.sim.has_ncl_signal(name)
+    }
+
+    /// Reset NCL simulation state
+    pub fn reset_ncl(&mut self) {
+        self.sim.reset();
     }
 }
+
+// ============================================================================
+// Signal value conversion traits
+// ============================================================================
 
 /// Trait for converting Rust types to signal byte values
 pub trait IntoSignalValue {
@@ -711,27 +906,37 @@ pub trait FromSignalValue {
 
 impl FromSignalValue for u8 {
     fn from_bytes(bytes: &[u8]) -> Self {
-        bytes[0]
+        bytes.first().copied().unwrap_or(0)
     }
 }
 
 impl FromSignalValue for u16 {
     fn from_bytes(bytes: &[u8]) -> Self {
-        u16::from_le_bytes([bytes[0], bytes[1]])
+        let mut arr = [0u8; 2];
+        for (i, &b) in bytes.iter().take(2).enumerate() {
+            arr[i] = b;
+        }
+        u16::from_le_bytes(arr)
     }
 }
 
 impl FromSignalValue for u32 {
     fn from_bytes(bytes: &[u8]) -> Self {
-        u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])
+        let mut arr = [0u8; 4];
+        for (i, &b) in bytes.iter().take(4).enumerate() {
+            arr[i] = b;
+        }
+        u32::from_le_bytes(arr)
     }
 }
 
 impl FromSignalValue for u64 {
     fn from_bytes(bytes: &[u8]) -> Self {
-        u64::from_le_bytes([
-            bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
-        ])
+        let mut arr = [0u8; 8];
+        for (i, &b) in bytes.iter().take(8).enumerate() {
+            arr[i] = b;
+        }
+        u64::from_le_bytes(arr)
     }
 }
 
@@ -743,435 +948,29 @@ impl FromSignalValue for Vec<u8> {
 
 impl FromSignalValue for f32 {
     fn from_bytes(bytes: &[u8]) -> Self {
-        f32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])
+        let mut arr = [0u8; 4];
+        for (i, &b) in bytes.iter().take(4).enumerate() {
+            arr[i] = b;
+        }
+        f32::from_le_bytes(arr)
     }
 }
 
 impl FromSignalValue for f64 {
     fn from_bytes(bytes: &[u8]) -> Self {
-        f64::from_le_bytes([
-            bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
-        ])
-    }
-}
-
-/// Builder for creating testbench sequences
-pub struct TestSequence {
-    steps: Vec<TestStep>,
-}
-
-#[derive(Clone)]
-enum TestStep {
-    SetInput(String, Vec<u8>),
-    Clock(usize),
-    ExpectOutput(String, Vec<u8>),
-    Reset(usize),
-}
-
-impl TestSequence {
-    pub fn new() -> Self {
-        Self { steps: Vec::new() }
-    }
-
-    pub fn set(mut self, signal: &str, value: impl IntoSignalValue) -> Self {
-        self.steps
-            .push(TestStep::SetInput(signal.to_string(), value.into_bytes()));
-        self
-    }
-
-    pub fn clock(mut self, cycles: usize) -> Self {
-        self.steps.push(TestStep::Clock(cycles));
-        self
-    }
-
-    pub fn expect(mut self, signal: &str, value: impl IntoSignalValue) -> Self {
-        self.steps.push(TestStep::ExpectOutput(
-            signal.to_string(),
-            value.into_bytes(),
-        ));
-        self
-    }
-
-    pub fn reset(mut self, cycles: usize) -> Self {
-        self.steps.push(TestStep::Reset(cycles));
-        self
-    }
-
-    pub async fn run(self, tb: &mut Testbench) {
-        for step in self.steps {
-            match step {
-                TestStep::SetInput(signal, value) => {
-                    tb.set(&signal, value);
-                }
-                TestStep::Clock(cycles) => {
-                    tb.clock(cycles).await;
-                }
-                TestStep::ExpectOutput(signal, value) => {
-                    tb.expect(&signal, value).await;
-                }
-                TestStep::Reset(cycles) => {
-                    tb.reset(cycles).await;
-                }
-            }
+        let mut arr = [0u8; 8];
+        for (i, &b) in bytes.iter().take(8).enumerate() {
+            arr[i] = b;
         }
+        f64::from_le_bytes(arr)
     }
-}
-
-impl Default for TestSequence {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-/// Macro for creating test vectors (stimulus/response pairs)
-#[macro_export]
-macro_rules! test_vector {
-    (
-        inputs: { $($in_name:ident: $in_val:expr),* $(,)? },
-        outputs: { $($out_name:ident: $out_val:expr),* $(,)? }
-    ) => {
-        {
-            let mut inputs = std::collections::HashMap::new();
-            $(
-                inputs.insert(stringify!($in_name).to_string(), $in_val);
-            )*
-            let mut outputs = std::collections::HashMap::new();
-            $(
-                outputs.insert(stringify!($out_name).to_string(), $out_val);
-            )*
-            (inputs, outputs)
-        }
-    };
 }
 
 // ============================================================================
-// Gate-Level Testbench
+// Helper functions
 // ============================================================================
 
-/// Gate-level testbench for technology-mapped verification
-///
-/// This testbench compiles designs through the full synthesis flow:
-/// HIR → MIR → LIR → GateNetlist → SIR
-///
-/// The simulation uses primitive gates (AND, OR, NOT, DFF, etc.) instead of
-/// behavioral constructs, providing more accurate timing and area verification.
-///
-/// # Example
-/// ```rust,no_run
-/// use skalp_testing::testbench::*;
-///
-/// #[test]
-/// fn test_counter_gates() {
-///     let mut tb = GateLevelTestbench::new("examples/counter.sk").unwrap();
-///
-///     // Reset
-///     tb.set("rst", 1u8);
-///     tb.clock(2);
-///     tb.set("rst", 0u8);
-///
-///     // Count up
-///     tb.clock(5);
-///     assert_eq!(tb.get_u32("count"), 5);
-/// }
-/// ```
-pub struct GateLevelTestbench {
-    sim: UnifiedSimulator,
-    pending_inputs: HashMap<String, u64>,
-    cycle_count: u64,
-}
-
-impl GateLevelTestbench {
-    /// Create a new gate-level testbench from a SKALP source file
-    pub fn new(source_path: &str) -> Result<Self> {
-        let use_gpu = std::env::var("SKALP_SIM_MODE")
-            .map(|v| v.to_lowercase() != "cpu")
-            .unwrap_or(true);
-
-        let config = UnifiedSimConfig {
-            level: SimLevel::GateLevel,
-            hw_accel: if use_gpu { HwAccel::Auto } else { HwAccel::Cpu },
-            max_cycles: 1_000_000,
-            capture_waveforms: true,
-            ..Default::default()
-        };
-
-        Self::with_config(source_path, config)
-    }
-
-    /// Create a new gate-level testbench with custom config
-    pub fn with_config(source_path: &str, config: UnifiedSimConfig) -> Result<Self> {
-        use skalp_frontend::parse_and_build_hir_from_file;
-        use skalp_lir::{
-            get_stdlib_library, lower_mir_hierarchical, lower_mir_module_to_lir,
-            map_hierarchical_to_gates, map_lir_to_gates_optimized,
-        };
-        use std::time::Instant;
-
-        let start_total = Instant::now();
-        eprintln!(
-            "⏱️  [GATE-LEVEL TB] Starting gate-level compilation of '{}'",
-            source_path
-        );
-
-        let path = Path::new(source_path);
-
-        // Parse and build HIR
-        let start_hir = Instant::now();
-        let hir = parse_and_build_hir_from_file(path)?;
-        eprintln!(
-            "⏱️  [GATE-LEVEL TB] HIR parsing completed in {:?}",
-            start_hir.elapsed()
-        );
-
-        // Compile to MIR
-        let start_mir = Instant::now();
-        let compiler = MirCompiler::new();
-        let mir = compiler
-            .compile_to_mir(&hir)
-            .map_err(|e| anyhow::anyhow!("MIR compilation failed: {}", e))?;
-        eprintln!(
-            "⏱️  [GATE-LEVEL TB] MIR compilation completed in {:?}",
-            start_mir.elapsed()
-        );
-
-        // Load technology library
-        let library = get_stdlib_library("generic_asic")
-            .map_err(|e| anyhow::anyhow!("Failed to load technology library: {:?}", e))?;
-
-        // Check if design has hierarchy
-        let has_hierarchy =
-            mir.modules.len() > 1 || mir.modules.iter().any(|m| !m.instances.is_empty());
-
-        // Lower to LIR and tech-map to GateNetlist
-        let start_lir = Instant::now();
-        let netlist = if has_hierarchy {
-            eprintln!(
-                "⏱️  [GATE-LEVEL TB] Using hierarchical synthesis ({} modules)",
-                mir.modules.len()
-            );
-
-            let hier_lir = lower_mir_hierarchical(&mir);
-            let hier_netlist = map_hierarchical_to_gates(&hier_lir, &library);
-            hier_netlist.flatten()
-        } else {
-            eprintln!("⏱️  [GATE-LEVEL TB] Using flat synthesis (single module)");
-
-            let top_module = mir
-                .modules
-                .first()
-                .ok_or_else(|| anyhow::anyhow!("No modules found in design"))?;
-
-            let lir_result = lower_mir_module_to_lir(top_module);
-            let tech_result = map_lir_to_gates_optimized(&lir_result.lir, &library);
-            tech_result.netlist
-        };
-        eprintln!(
-            "⏱️  [GATE-LEVEL TB] Gate netlist completed in {:?} ({} cells, {} nets)",
-            start_lir.elapsed(),
-            netlist.cells.len(),
-            netlist.nets.len()
-        );
-
-        // Convert GateNetlist to SIR for simulation
-        let start_sir = Instant::now();
-        let sir_result = convert_gate_netlist_to_sir(&netlist);
-        eprintln!(
-            "⏱️  [GATE-LEVEL TB] SIR conversion completed in {:?} ({} primitives)",
-            start_sir.elapsed(),
-            sir_result.stats.primitives_created
-        );
-
-        // Create and initialize unified simulator
-        let start_sim = Instant::now();
-        let mut sim = UnifiedSimulator::new(config)
-            .map_err(|e| anyhow::anyhow!("Failed to create simulator: {}", e))?;
-
-        sim.load_gate_level(&sir_result.sir)
-            .map_err(|e| anyhow::anyhow!("Failed to load design: {}", e))?;
-
-        eprintln!(
-            "⏱️  [GATE-LEVEL TB] Simulator initialized in {:?} (device: {})",
-            start_sim.elapsed(),
-            sim.device_info()
-        );
-        eprintln!(
-            "⏱️  [GATE-LEVEL TB] ✅ Total gate-level testbench creation time: {:?}",
-            start_total.elapsed()
-        );
-
-        Ok(Self {
-            sim,
-            pending_inputs: HashMap::new(),
-            cycle_count: 0,
-        })
-    }
-
-    /// Set an input signal value (chainable)
-    pub fn set(&mut self, signal: &str, value: impl IntoSignalValue) -> &mut Self {
-        let bytes = value.into_bytes();
-        // Convert bytes to u64
-        let val = bytes_to_u64(&bytes);
-        self.pending_inputs.insert(signal.to_string(), val);
-        self
-    }
-
-    /// Apply pending inputs and run for N clock cycles (uses default clock "clk")
-    pub async fn clock(&mut self, cycles: usize) -> &mut Self {
-        self.clock_signal("clk", cycles).await
-    }
-
-    /// Apply pending inputs and run for N cycles on a specific clock signal
-    pub async fn clock_signal(&mut self, clock_name: &str, cycles: usize) -> &mut Self {
-        // Apply all pending inputs
-        for (signal, value) in self.pending_inputs.drain() {
-            self.sim.set_input(&signal, value).await;
-        }
-
-        // Run clock cycles
-        for _ in 0..cycles {
-            self.sim.set_input(clock_name, 0).await;
-            self.sim.step().await;
-            self.sim.set_input(clock_name, 1).await;
-            self.sim.step().await;
-            self.cycle_count += 1;
-        }
-
-        self
-    }
-
-    /// Apply pending inputs and step the simulation once
-    pub async fn step(&mut self) -> &mut Self {
-        for (signal, value) in self.pending_inputs.drain() {
-            self.sim.set_input(&signal, value).await;
-        }
-        self.sim.step().await;
-        self
-    }
-
-    /// Get an output value as u32
-    ///
-    /// Handles both packed signals (e.g., "result") and bit-blasted signals
-    /// (e.g., "result[0]", "result[1]", ..., "result[31]").
-    pub async fn get_u32(&mut self, signal: &str) -> u32 {
-        // If there are pending inputs, apply them and step
-        if !self.pending_inputs.is_empty() {
-            self.step().await;
-        }
-
-        // Try direct lookup first
-        if let Some(val) = self.sim.get_output(signal).await {
-            return val as u32;
-        }
-
-        // Try bit-blasted signals
-        self.get_bitblasted_value(signal, 32).await as u32
-    }
-
-    /// Get an output value as u64
-    ///
-    /// Handles both packed signals and bit-blasted signals.
-    pub async fn get_u64(&mut self, signal: &str) -> u64 {
-        if !self.pending_inputs.is_empty() {
-            self.step().await;
-        }
-
-        // Try direct lookup first
-        if let Some(val) = self.sim.get_output(signal).await {
-            return val;
-        }
-
-        // Try bit-blasted signals
-        self.get_bitblasted_value(signal, 64).await
-    }
-
-    /// Get a bit-blasted signal value (e.g., "signal[0]", "signal[1]", ...)
-    async fn get_bitblasted_value(&self, signal: &str, max_bits: usize) -> u64 {
-        let mut result = 0u64;
-
-        for bit in 0..max_bits {
-            let bit_signal = format!("{}[{}]", signal, bit);
-            if let Some(val) = self.sim.get_output(&bit_signal).await {
-                if val != 0 {
-                    result |= 1u64 << bit;
-                }
-            } else {
-                // If we can't find this bit, stop looking for more
-                // (handles signals that are less than max_bits wide)
-                if bit > 0 {
-                    break;
-                }
-            }
-        }
-
-        result
-    }
-
-    /// Expect an output signal to have a specific value
-    pub async fn expect(&mut self, signal: &str, expected: impl IntoSignalValue) -> &mut Self {
-        let expected_bytes = expected.into_bytes();
-        let expected_u64 = bytes_to_u64(&expected_bytes);
-        let actual = self.sim.get_output(signal).await.unwrap_or(0);
-
-        assert_eq!(
-            actual, expected_u64,
-            "Signal '{}' mismatch at cycle {}: expected 0x{:x}, got 0x{:x}",
-            signal, self.cycle_count, expected_u64, actual
-        );
-
-        self
-    }
-
-    /// Expect a fp32 output with tolerance
-    pub async fn expect_fp32(&mut self, signal: &str, expected: f32, tolerance: f32) -> &mut Self {
-        let actual_bits = self.sim.get_output(signal).await.unwrap_or(0) as u32;
-        let actual = f32::from_bits(actual_bits);
-        let diff = (actual - expected).abs();
-
-        assert!(
-            diff <= tolerance,
-            "Signal '{}' fp32 mismatch at cycle {}: expected {}, got {} (diff: {}, tolerance: {})",
-            signal,
-            self.cycle_count,
-            expected,
-            actual,
-            diff,
-            tolerance
-        );
-
-        self
-    }
-
-    /// Apply reset for N cycles
-    pub async fn reset(&mut self, cycles: usize) -> &mut Self {
-        self.set("rst", 1u8);
-        self.clock(cycles).await;
-        self.set("rst", 0u8);
-        self.clock(1).await;
-        self
-    }
-
-    /// Get the current cycle count
-    pub fn cycles(&self) -> u64 {
-        self.cycle_count
-    }
-
-    /// Get device info (CPU or GPU)
-    pub fn device_info(&self) -> String {
-        self.sim.device_info()
-    }
-
-    /// Get input port names
-    pub fn get_input_names(&self) -> Vec<String> {
-        self.sim.get_input_names()
-    }
-
-    /// Get output port names
-    pub fn get_output_names(&self) -> Vec<String> {
-        self.sim.get_output_names()
-    }
-}
-
-/// Helper function to convert bytes to u64 (little-endian)
+/// Convert bytes to u64 (little-endian)
 fn bytes_to_u64(bytes: &[u8]) -> u64 {
     let mut result = 0u64;
     for (i, &byte) in bytes.iter().take(8).enumerate() {
@@ -1179,3 +978,16 @@ fn bytes_to_u64(bytes: &[u8]) -> u64 {
     }
     result
 }
+
+// ============================================================================
+// Deprecated: GateLevelTestbench (use Testbench::gate_level() instead)
+// ============================================================================
+
+/// **DEPRECATED**: Use `Testbench::gate_level()` or `Testbench::ncl()` instead.
+///
+/// This type alias is kept for backwards compatibility.
+#[deprecated(
+    since = "0.2.0",
+    note = "Use Testbench::gate_level() or Testbench::ncl() instead"
+)]
+pub type GateLevelTestbench = Testbench;
