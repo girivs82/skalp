@@ -4643,6 +4643,7 @@ impl<'a> ParseState<'a> {
     /// Cast has higher precedence than binary operators but lower than postfix operations
     fn parse_cast_expr(&mut self) {
         let checkpoint = self.builder.checkpoint();
+
         self.parse_primary_expression();
 
         // Check for 'as' keyword to create a cast expression

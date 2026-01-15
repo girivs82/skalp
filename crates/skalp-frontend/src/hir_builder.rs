@@ -2321,14 +2321,8 @@ impl HirBuilderContext {
                     }
                 }
                 SyntaxKind::IfStmt => {
-                    println!("[HIR_COLLECT] 🔍 Found IfStmt, calling build_if_statement");
                     if let Some(if_stmt) = self.build_if_statement(&child) {
-                        println!(
-                            "[HIR_COLLECT] ✓ build_if_statement succeeded, added to statements"
-                        );
                         statements.push(HirStatement::If(if_stmt));
-                    } else {
-                        println!("[HIR_COLLECT] ❌ build_if_statement returned None - IF DROPPED!");
                     }
                 }
                 SyntaxKind::ForStmt => {
@@ -2420,6 +2414,30 @@ impl HirBuilderContext {
                 SyntaxKind::Attribute => {
                     // Process attribute and set pending_mux_style for next statement
                     self.process_attribute(&child);
+                }
+                // BUG #212 FIX: Handle expression children in blocks
+                // These are the final result expressions in block statements
+                // e.g., `{ let x = 1; x + 1 }` - the `x + 1` is a CastExpr/BinaryExpr/etc.
+                SyntaxKind::LiteralExpr
+                | SyntaxKind::IdentExpr
+                | SyntaxKind::BinaryExpr
+                | SyntaxKind::UnaryExpr
+                | SyntaxKind::CallExpr
+                | SyntaxKind::FieldExpr
+                | SyntaxKind::IndexExpr
+                | SyntaxKind::PathExpr
+                | SyntaxKind::ParenExpr
+                | SyntaxKind::IfExpr
+                | SyntaxKind::MatchExpr
+                | SyntaxKind::CastExpr
+                | SyntaxKind::TupleExpr
+                | SyntaxKind::StructLiteral
+                | SyntaxKind::ArrayLiteral
+                | SyntaxKind::ConcatExpr
+                | SyntaxKind::TernaryExpr => {
+                    if let Some(expr) = self.build_expression(&child) {
+                        statements.push(HirStatement::Expression(expr));
+                    }
                 }
                 _ => {}
             }
@@ -2677,6 +2695,10 @@ impl HirBuilderContext {
                                 | SyntaxKind::LiteralExpr
                                 | SyntaxKind::IdentExpr
                                 | SyntaxKind::TupleExpr // Bug #85 fix: Support tuple expressions for implicit returns
+                                | SyntaxKind::CastExpr // BUG #212 fix: Support cast expressions
+                                | SyntaxKind::ConcatExpr // BUG #212 fix: Support concat expressions
+                                | SyntaxKind::TernaryExpr // BUG #212 fix: Support ternary expressions
+                                | SyntaxKind::StructLiteral // BUG #212 fix: Support struct literals
                         )
                     })
                     .and_then(|n| self.build_expression(&n))?;
@@ -7521,14 +7543,8 @@ impl HirBuilderContext {
                     statements.extend(let_stmts);
                 }
                 SyntaxKind::IfStmt => {
-                    println!("[HIR_COLLECT] 🔍 Found IfStmt, calling build_if_statement");
                     if let Some(if_stmt) = self.build_if_statement(&child) {
-                        println!(
-                            "[HIR_COLLECT] ✓ build_if_statement succeeded, added to statements"
-                        );
                         statements.push(HirStatement::If(if_stmt));
-                    } else {
-                        println!("[HIR_COLLECT] ❌ build_if_statement returned None - IF DROPPED!");
                     }
                 }
                 SyntaxKind::ForStmt => {
@@ -7609,7 +7625,9 @@ impl HirBuilderContext {
         }
 
         // If there's no explicit result expression, use a unit/void value (literal 0)
-        let final_expr = result_expr.unwrap_or(HirExpression::Literal(HirLiteral::Integer(0)));
+        let final_expr = result_expr.unwrap_or_else(|| {
+            HirExpression::Literal(HirLiteral::Integer(0))
+        });
 
         Some(HirExpression::Block {
             statements,
@@ -7726,6 +7744,8 @@ impl HirBuilderContext {
                             | SyntaxKind::IfExpr
                             | SyntaxKind::MatchExpr
                             | SyntaxKind::CastExpr // BUG #95: Support nested casts
+                            | SyntaxKind::ConcatExpr // BUG #212: Support concat in cast
+                            | SyntaxKind::BlockExpr  // BUG #212: Support block in cast
                     )
                 })
                 .last()

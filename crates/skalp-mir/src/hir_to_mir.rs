@@ -2298,10 +2298,6 @@ impl<'hir> HirToMir<'hir> {
                     || (is_tuple_element_extraction && !in_match_context)
                     || (is_cast_expression && !in_match_context);
 
-                if is_simple_function_call && in_match_context {
-                    println!("🟢🟢🟢 BUG FIX ACTIVE: Function call in match arm, WILL convert: {} 🟢🟢🟢", let_stmt.name);
-                }
-
                 if let_stmt.name == "rw" && let_stmt.id == hir::VariableId(70) {
                     debug_println!("[DEBUG] Let 'rw' (70): is_tuple_element_extraction={}, in_match_context={}, should_convert_first={}",
                         is_tuple_element_extraction, in_match_context, should_convert_first);
@@ -7339,41 +7335,16 @@ impl<'hir> HirToMir<'hir> {
     /// Tuples are lowered to anonymous structs with fields named _0, _1, _2, etc.
     /// The tuple elements are concatenated together into a single packed bit vector.
     fn convert_tuple_literal(&mut self, elements: &[hir::HirExpression]) -> Option<Expression> {
-        println!(
-            "🔵🔵🔵 [BUG #187] convert_tuple_literal called with {} elements 🔵🔵🔵",
-            elements.len()
-        );
-        println!(
-            "🔵🔵🔵 [BUG #187] inlining_return_type_stack.len() = {} 🔵🔵🔵",
-            self.inlining_return_type_stack.len()
-        );
-        if let Some(last) = self.inlining_return_type_stack.last() {
-            println!("🔵🔵🔵 [BUG #187] Stack top: {:?} 🔵🔵🔵", last);
-        }
         // BUG #187 FIX: Check if we're inside function inlining with a Tuple return type
         // If so, use the element types to annotate each converted element with the correct width
-        println!("🔵🔵🔵 [BUG #187] About to check return type stack for Tuple 🔵🔵🔵");
         let element_types: Option<Vec<hir::HirType>> = if let Some(Some(hir::HirType::Tuple(
             types,
         ))) =
             self.inlining_return_type_stack.last()
         {
-            println!(
-                "🔵🔵🔵 [BUG #187] MATCHED Tuple with {} types! 🔵🔵🔵",
-                types.len()
-            );
             if types.len() == elements.len() {
-                eprintln!(
-                    "[BUG #187 FIX] TupleLiteral: Using {} element types from return type stack",
-                    types.len()
-                );
                 Some(types.clone())
             } else {
-                eprintln!(
-                    "[BUG #187] TupleLiteral: Return type has {} elements but literal has {}",
-                    types.len(),
-                    elements.len()
-                );
                 None
             }
         } else {
@@ -8108,6 +8079,18 @@ impl<'hir> HirToMir<'hir> {
             self.match_arm_prefix = None;
             self.entity_instance_prefix = None;
 
+            // DEBUG: Print arm_expr to trace what's being used as then_expr
+            println!("🎨🎨🎨 ARM {} then_expr: kind={:?}", arm_idx, std::mem::discriminant(&arm_expr.kind));
+            if let ExpressionKind::Ref(ref lval) = arm_expr.kind {
+                println!("🎨🎨🎨   -> Ref: {:?}", lval);
+            }
+            if let ExpressionKind::Cast { expr: inner, target_type } = &arm_expr.kind {
+                println!("🎨🎨🎨   -> Cast to {:?}, inner kind={:?}", target_type, std::mem::discriminant(&inner.kind));
+                if let ExpressionKind::Ref(ref lval) = inner.kind {
+                    println!("🎨🎨🎨       -> Inner Ref: {:?}", lval);
+                }
+            }
+
             result = Expression::with_unknown_type(ExpressionKind::Conditional {
                 cond: Box::new(final_condition),
                 then_expr: Box::new(arm_expr),
@@ -8204,7 +8187,6 @@ impl<'hir> HirToMir<'hir> {
 
     /// Find a function by name in the current implementation or top-level functions
     fn find_function(&self, function_name: &str) -> Option<&hir::HirFunction> {
-        println!("🚨🚨🚨 FIND_FUNCTION: {} 🚨🚨🚨", function_name);
         let hir = self.hir?;
 
         // BUG #21 FIX: Handle module-qualified function names (e.g., "imported_funcs::process_data")
@@ -8607,31 +8589,8 @@ impl<'hir> HirToMir<'hir> {
             // Multiple statements - need to convert to block expression
             // This happens when function has statements followed by return
             stmts if stmts.len() > 1 => {
-                println!("🟢🟢🟢 [MULTI_STMT] {} stmts, {} let bindings, trying mutable var pattern 🟢🟢🟢", stmts.len(), let_bindings.len());
-                // BUG #135 DEBUG: Print first statement to understand why let extraction stopped
-                if let_bindings.len() == 1 && !stmts.is_empty() {
-                    println!(
-                        "[BUG #135] First stmt after 1 let: {:?}",
-                        std::mem::discriminant(&stmts[0])
-                    );
-                    match &stmts[0] {
-                        hir::HirStatement::Let(ls) => println!(
-                            "[BUG #135]   -> Let '{}' - why wasn't it extracted?",
-                            ls.name
-                        ),
-                        hir::HirStatement::If(_) => debug_println!("[BUG #135]   -> If statement"),
-                        hir::HirStatement::Assignment(a) => {
-                            debug_println!("[BUG #135]   -> Assignment to {:?}", a.lhs)
-                        }
-                        _ => debug_println!("[BUG #135]   -> Other"),
-                    }
-                }
                 // Check if last statement is a return
                 if let Some(hir::HirStatement::Return(Some(return_expr))) = stmts.last() {
-                    println!(
-                        "🟢🟢🟢 [MULTI_STMT] Last is Return, return_expr type: {:?} 🟢🟢🟢",
-                        std::mem::discriminant(return_expr)
-                    );
                     // BUG #86 FIX: Handle mutable variable pattern
                     // Pattern: if (cond) { var = new_value; } return var
                     // Transform to: if cond { new_value } else { initial_value }
@@ -8640,11 +8599,9 @@ impl<'hir> HirToMir<'hir> {
                         return_expr,
                         &let_bindings,
                     ) {
-                        println!("🟢🟢🟢 [MULTI_STMT] SUCCESS! Converted mutable variable pattern 🟢🟢🟢");
                         return Some(mutable_var_expr);
                     }
 
-                    println!("🟢🟢🟢 [MULTI_STMT] FALLBACK! Creating Block expression 🟢🟢🟢");
                     // Build block with all statements except the last, then use return expr as result
                     let block_stmts: Vec<_> = stmts[..stmts.len() - 1].to_vec();
                     Some(hir::HirExpression::Block {
@@ -8687,6 +8644,14 @@ impl<'hir> HirToMir<'hir> {
 
             // Single expression statement (implicit return)
             [hir::HirStatement::Expression(expr)] => Some(expr.clone()),
+
+            // BUG #212 FIX: Single Block statement - recursively process the block's statements
+            // This handles match arm blocks like: `{ let x = 1; let y = 2; x + y }`
+            // The Block contains Let statements and a final Expression
+            [hir::HirStatement::Block(block_stmts)] => {
+                debug_println!("[DEBUG] convert_body_to_expression: processing Block with {} statements", block_stmts.len());
+                self.convert_body_to_expression(block_stmts)
+            }
 
             // Other cases not yet supported
             _ => {
@@ -11346,12 +11311,28 @@ impl<'hir> HirToMir<'hir> {
             call.function
         );
 
-        // Find the function
-        let func = self.find_function(&call.function)?;
+        // Find the function - try regular functions first, then trait methods
+        let (params, body) = if let Some(func) = self.find_function(&call.function) {
+            // Found as regular function
+            (func.params.clone(), func.body.clone())
+        } else if let Some((trait_params, trait_body)) = self.try_find_trait_method_for_call(call) {
+            // BUG #211 FIX: Found as trait method (e.g., sqrt -> impl Sqrt for fp32)
+            // This enables trait-based function resolution for unary operations like sqrt, abs
+            eprintln!(
+                "[BUG #211 FIX] Function '{}' resolved via trait method",
+                call.function
+            );
+            (trait_params, trait_body)
+        } else {
+            // Not found anywhere
+            eprintln!(
+                "[BUG #211] Function '{}' not found as regular function or trait method",
+                call.function
+            );
+            return None;
+        };
 
-        // Clone the data we need
-        let params = func.params.clone();
-        let body = func.body.clone();
+        // The params and body are now available from either source
 
         // Build a map from VariableId to variable name by walking through the function body
         // BUG FIX #123: Use actual VariableIds from HIR, not sequential assumptions!
@@ -13235,42 +13216,28 @@ impl<'hir> HirToMir<'hir> {
     }
 
     fn inline_function_call(&mut self, call: &hir::HirCallExpr) -> Option<Expression> {
-        println!("🚨🚨🚨 INLINE_FUNCTION_CALL: {} 🚨🚨🚨", call.function);
-        println!(
-            "[DEBUG] inline_function_call: {} with {} args",
-            call.function,
-            call.args.len()
-        );
-
         // Step 1: Find the function and clone its body to avoid borrow checker issues
-        let func = match self.find_function(&call.function) {
-            Some(f) => {
-                debug_println!("[DEBUG] ✓ Found function '{}'", call.function);
-                f
+        // BUG #211 FIX: Also try trait methods if regular function lookup fails
+        let (params, body, return_type) = if let Some(func) = self.find_function(&call.function) {
+            debug_println!("[DEBUG] ✓ Found function '{}'", call.function);
+            (func.params.clone(), func.body.clone(), func.return_type.clone())
+        } else if let Some((trait_params, trait_body)) = self.try_find_trait_method_for_call(call) {
+            // BUG #211 FIX: Found as trait method (e.g., sqrt -> impl Sqrt for fp32)
+            // Trait methods return type is typically Self, which we'll infer from the argument type
+            let arg_type = self.infer_hir_type(&call.args[0]);
+            (trait_params, trait_body, arg_type)
+        } else {
+            eprintln!(
+                "❌❌❌ ERROR: Function '{}' NOT FOUND during inlining! ❌❌❌",
+                call.function
+            );
+            debug_println!("[DEBUG] Available functions in HIR:");
+            let hir = self.hir?;
+            for (idx, f) in hir.functions.iter().enumerate() {
+                eprintln!("  {}. {}", idx + 1, f.name);
             }
-            None => {
-                eprintln!(
-                    "❌❌❌ ERROR: Function '{}' NOT FOUND during inlining! ❌❌❌",
-                    call.function
-                );
-                debug_println!("[DEBUG] Available functions in HIR:");
-                let hir = self.hir?;
-                for (idx, f) in hir.functions.iter().enumerate() {
-                    eprintln!("  {}. {}", idx + 1, f.name);
-                }
-                return None;
-            }
+            return None;
         };
-        eprintln!(
-            "[DEBUG] inline_function_call: found function {}, body has {} stmts",
-            call.function,
-            func.body.len()
-        );
-
-        // Clone the data we need before doing mutable operations
-        let params = func.params.clone();
-        let body = func.body.clone();
-        let return_type = func.return_type.clone(); // BUG #76 FIX: Clone return type for later annotation
 
         // ARCHITECTURAL FIX: Push a new inlining context to prevent variable ID collisions
         // This ensures variables from different functions don't collide even if they have the same HIR VariableId
@@ -13443,101 +13410,11 @@ impl<'hir> HirToMir<'hir> {
             return None;
         }
         let substituted_expr = substituted_expr?;
-        println!(
-            "🌟🌟🌟 [INLINE] Step 6 DONE: substituted_expr type: {:?} 🌟🌟🌟",
-            std::mem::discriminant(&substituted_expr)
-        );
-        println!("🟢🟢🟢 [BUG #187 DEBUG] AFTER Step 6 DONE, before expr_type_name 🟢🟢🟢");
 
         // Step 7: Convert the substituted HIR expression to MIR
-        let expr_type_name = match &substituted_expr {
-            hir::HirExpression::Literal(_) => "Literal",
-            hir::HirExpression::Variable(_) => "Variable",
-            hir::HirExpression::Binary(_) => "Binary",
-            hir::HirExpression::Unary(_) => "Unary",
-            hir::HirExpression::Call(_) => "Call",
-            hir::HirExpression::Signal(_) => "Signal",
-            hir::HirExpression::Port(_) => "Port",
-            hir::HirExpression::Index(_, _) => "Index",
-            hir::HirExpression::Concat(_) => "Concat",
-            hir::HirExpression::Range(_, _, _) => "Range",
-            hir::HirExpression::If(_) => "If",
-            hir::HirExpression::Match(_) => "Match",
-            hir::HirExpression::Cast(_) => "Cast",
-            hir::HirExpression::Block { .. } => "Block",
-            hir::HirExpression::FieldAccess { .. } => "FieldAccess",
-            hir::HirExpression::ArrayLiteral { .. } => "ArrayLiteral",
-            _ => "Other",
-        };
-        eprintln!(
-            "[DEBUG] inline_function_call: '{}' substituted expression type: {}",
-            call.function, expr_type_name
-        );
-        eprintln!(
-            "[BUG #IMPORT_MATCH] inline_function_call '{}': Before convert_expression, match_arm_prefix={:?}",
-            call.function, self.match_arm_prefix
-        );
-        // DEBUG: Check if substituted_expr still contains GenericParam
-        fn check_for_generic_param(expr: &hir::HirExpression, path: &str) {
-            match expr {
-                hir::HirExpression::GenericParam(name) => {
-                    println!("🚨 FOUND GenericParam('{}') at {}", name, path);
-                }
-                hir::HirExpression::Range(base, high, low) => {
-                    check_for_generic_param(base, &format!("{}.Range.base", path));
-                    check_for_generic_param(high, &format!("{}.Range.high", path));
-                    check_for_generic_param(low, &format!("{}.Range.low", path));
-                }
-                hir::HirExpression::Block {
-                    statements,
-                    result_expr,
-                } => {
-                    for (i, stmt) in statements.iter().enumerate() {
-                        if let hir::HirStatement::Let(let_stmt) = stmt {
-                            check_for_generic_param(
-                                &let_stmt.value,
-                                &format!("{}.Block.let[{}]", path, i),
-                            );
-                        }
-                    }
-                    check_for_generic_param(result_expr, &format!("{}.Block.result", path));
-                }
-                hir::HirExpression::Match(m) => {
-                    check_for_generic_param(&m.expr, &format!("{}.Match.expr", path));
-                    for (i, arm) in m.arms.iter().enumerate() {
-                        check_for_generic_param(&arm.expr, &format!("{}.Match.arm[{}]", path, i));
-                    }
-                }
-                hir::HirExpression::If(if_expr) => {
-                    check_for_generic_param(&if_expr.condition, &format!("{}.If.cond", path));
-                    check_for_generic_param(&if_expr.then_expr, &format!("{}.If.then", path));
-                    check_for_generic_param(&if_expr.else_expr, &format!("{}.If.else", path));
-                }
-                hir::HirExpression::Binary(bin) => {
-                    check_for_generic_param(&bin.left, &format!("{}.Binary.left", path));
-                    check_for_generic_param(&bin.right, &format!("{}.Binary.right", path));
-                }
-                hir::HirExpression::Cast(cast) => {
-                    check_for_generic_param(&cast.expr, &format!("{}.Cast.expr", path));
-                }
-                _ => {}
-            }
-        }
-        debug_println!("🔍 Checking substituted_expr for remaining GenericParams...");
-        check_for_generic_param(&substituted_expr, "root");
-
         // BUG #160 FIX: Push return type before converting so concat can infer widths
-        println!(
-            "🟢🟢🟢 [BUG #187 DEBUG] About to push return_type={:?} 🟢🟢🟢",
-            return_type
-        );
         self.inlining_return_type_stack.push(return_type.clone());
-        println!("🟢🟢🟢 [BUG #187 DEBUG] About to call convert_expression 🟢🟢🟢");
         let result = self.convert_expression(&substituted_expr, 0);
-        println!(
-            "🟢🟢🟢 [BUG #187 DEBUG] convert_expression returned is_some={} 🟢🟢🟢",
-            result.is_some()
-        );
         self.inlining_return_type_stack.pop();
 
         // BUG #76 FIX: Annotate the result expression with the function's return type
@@ -13545,39 +13422,11 @@ impl<'hir> HirToMir<'hir> {
         let result = result.map(|expr| {
             if let Some(ref ret_ty) = return_type {
                 let return_type_ty = self.hir_type_to_type(ret_ty);
-                eprintln!(
-                    "[BUG #76] inline_function_call '{}': Annotating result with return type: {:?}",
-                    call.function, return_type_ty
-                );
                 self.annotate_expression_with_type(expr, return_type_ty, 0)
             } else {
                 expr
             }
         });
-
-        eprintln!(
-            "[BUG #IMPORT_MATCH] inline_function_call '{}': After convert_expression, match_arm_prefix={:?}, result is_some={}",
-            call.function, self.match_arm_prefix, result.is_some()
-        );
-        if result.is_none() {
-            eprintln!(
-                "[DEBUG] inline_function_call: '{}' FAILED to convert substituted expression to MIR (type: {})",
-                call.function,
-                expr_type_name
-            );
-        } else {
-            eprintln!(
-                "[DEBUG] inline_function_call: '{}' successfully converted to MIR",
-                call.function
-            );
-            if let Some(ref expr) = result {
-                eprintln!(
-                    "[BUG #IMPORT_MATCH] inline_function_call '{}': Result expression type: {:?}",
-                    call.function,
-                    std::mem::discriminant(&expr.kind)
-                );
-            }
-        }
 
         // Step 8: Clean up function-local variables from variable_map to prevent scope leakage
         // Function-local variables should not persist across different function inlining contexts.
@@ -13645,10 +13494,25 @@ impl<'hir> HirToMir<'hir> {
         mir_args: &[Expression],
     ) -> Option<Expression> {
         // Step 1: Find the function
-        let func = self.find_function(&call.function)?;
-        let params = func.params.clone();
-        let body = func.body.clone();
-        let return_type = func.return_type.clone();
+        // BUG #211 FIX: Also try trait methods if regular function lookup fails
+        let (params, body, return_type) = if let Some(func) = self.find_function(&call.function) {
+            (func.params.clone(), func.body.clone(), func.return_type.clone())
+        } else if let Some((trait_params, trait_body)) = self.try_find_trait_method_for_call(call) {
+            // BUG #211 FIX: Found as trait method (e.g., sqrt -> impl Sqrt for fp32)
+            eprintln!(
+                "[BUG #211 FIX] inline_function_call_with_mir_args: '{}' resolved via trait method",
+                call.function
+            );
+            // Trait methods return type is typically Self, infer from HIR argument type
+            let arg_type = self.infer_hir_type(&call.args[0]);
+            (trait_params, trait_body, arg_type)
+        } else {
+            eprintln!(
+                "[BUG #211] inline_function_call_with_mir_args: '{}' NOT FOUND",
+                call.function
+            );
+            return None;
+        };
 
         // Check arity
         if params.len() != mir_args.len() {
@@ -14721,6 +14585,83 @@ impl<'hir> HirToMir<'hir> {
             hir::HirBinaryOp::LogicalAnd => "and",
             hir::HirBinaryOp::LogicalOr => "or",
         }
+    }
+
+    /// Map unary function names to their trait names
+    ///
+    /// This enables trait-based resolution for function calls like `sqrt(x)`.
+    /// When `sqrt(x)` is called and x has type `fp32`, we look for `impl Sqrt for fp32`.
+    fn function_name_to_trait_name(func_name: &str) -> Option<&'static str> {
+        match func_name {
+            "sqrt" => Some("Sqrt"),
+            "abs" => Some("Abs"),
+            "neg" => Some("Neg"),
+            _ => None,
+        }
+    }
+
+    /// Try to find a trait method for a function call
+    ///
+    /// When `sqrt(x)` is called where x has type `fp32`:
+    /// 1. Map function name "sqrt" to trait name "Sqrt"
+    /// 2. Look for `impl Sqrt for fp32`
+    /// 3. Get parameters from trait definition, body from implementation
+    ///
+    /// Returns Some((params, body)) if trait method is found, None otherwise.
+    fn try_find_trait_method_for_call(
+        &self,
+        call: &hir::HirCallExpr,
+    ) -> Option<(Vec<hir::HirParameter>, Vec<hir::HirStatement>)> {
+        // Only handle single-argument calls (unary trait methods)
+        if call.args.len() != 1 {
+            return None;
+        }
+
+        // Map function name to trait name
+        let trait_name = Self::function_name_to_trait_name(&call.function)?;
+
+        eprintln!(
+            "[TRAIT_FUNC_RESOLVE] Trying to resolve '{}' as trait method {}::{}",
+            call.function, trait_name, call.function
+        );
+
+        // Infer the type of the argument
+        let arg_type = self.infer_hir_type(&call.args[0])?;
+
+        // Get type name for trait lookup
+        let type_name = match &arg_type {
+            hir::HirType::Custom(name) => name.clone(),
+            hir::HirType::Float32 => "fp32".to_string(),
+            hir::HirType::Float64 => "fp64".to_string(),
+            hir::HirType::Float16 => "fp16".to_string(),
+            _ => return None,
+        };
+
+        eprintln!(
+            "[TRAIT_FUNC_RESOLVE] Argument type is '{}', looking for impl {} for {}",
+            type_name, trait_name, type_name
+        );
+
+        // Get parameters from trait definition
+        let method_def = self.find_trait_method_definition(trait_name, &call.function)?;
+        let params = method_def.parameters.clone();
+
+        // Find the trait implementation for the body
+        let trait_impl = self.find_trait_impl(&type_name, trait_name)?;
+
+        // Find the method implementation (body)
+        let method_impl = trait_impl
+            .method_implementations
+            .iter()
+            .find(|m| m.name == call.function)?;
+
+        eprintln!(
+            "[TRAIT_FUNC_RESOLVE] ✅ Found impl {} for {}, method '{}' has {} params and {} body stmts",
+            trait_name, type_name, call.function,
+            params.len(), method_impl.body.len()
+        );
+
+        Some((params, method_impl.body.clone()))
     }
 
     /// Try to resolve a binary operator through trait implementations
@@ -18269,15 +18210,12 @@ impl<'hir> HirToMir<'hir> {
                 statements,
                 result_expr,
             } => {
-                println!("🧱🧱🧱 MODULE_BLOCK: Converting Block with {} statements in module context 🧱🧱🧱", statements.len());
-
                 // BUG FIX #86: First try the mutable variable pattern transformation
                 // This handles blocks like:
                 //   { let mut count = 0; let mut temp = value;
                 //     if (cond) { count = count + 16; temp = temp << 16; }
                 //     count }
                 // Transform to conditional expressions BEFORE processing.
-                println!("🟢🟢🟢 CALLSITE2: About to call try_transform from convert_hir_expr_for_module Block 🟢🟢🟢");
                 if let Some(transformed_expr) =
                     self.try_transform_block_mutable_vars(statements, result_expr)
                 {
@@ -18301,11 +18239,6 @@ impl<'hir> HirToMir<'hir> {
 
                 for stmt in statements {
                     if let hir::HirStatement::Let(let_stmt) = stmt {
-                        println!(
-                            "🧱🧱🧱 MODULE_BLOCK: Processing let '{}' (id={}) 🧱🧱🧱",
-                            let_stmt.name, let_stmt.id.0
-                        );
-
                         // BUG #200 FIX: Check if this is an entity struct literal BEFORE substitution
                         // Entity struct literal fields should NOT be further substituted by VariableId,
                         // as this causes over-expansion: Variable(a_fp32) -> (a_fp16 as fp32) -> (a[15:0] as fp16 as fp32)
@@ -18332,11 +18265,6 @@ impl<'hir> HirToMir<'hir> {
                         if !is_entity_struct {
                             substituted_value = self
                                 .substitute_var_ids_in_expr(&substituted_value, &var_id_to_value);
-                        } else {
-                            println!(
-                                "🔶🔶🔶 BUG #200 FIX: Skipping var_id substitution for entity struct literal '{}' 🔶🔶🔶",
-                                let_stmt.name
-                            );
                         }
 
                         // BUG #191 FIX: Handle entity instantiation via StructLiteral in module context
@@ -18345,19 +18273,11 @@ impl<'hir> HirToMir<'hir> {
                         // and set up the placeholder signal to entity output mappings.
                         // This is critical for FP trait implementations that create entity instances.
                         if let hir::HirExpression::StructLiteral(struct_lit) = &substituted_value {
-                            println!(
-                                "🔶🔶🔶 BUG #191: MODULE_BLOCK found StructLiteral '{}', checking for entity 🔶🔶🔶",
-                                struct_lit.type_name
-                            );
                             // Check if this struct literal is an entity instantiation
                             let is_entity = self.hir.as_ref().is_some_and(|hir| {
                                 hir.entities.iter().any(|e| e.name == struct_lit.type_name)
                             });
                             if is_entity {
-                                println!(
-                                    "🔶🔶🔶 BUG #191: StructLiteral '{}' IS an entity, delegating to convert_statement 🔶🔶🔶",
-                                    struct_lit.type_name
-                                );
                                 // Delegate to convert_statement which properly handles entity instantiation
                                 // This will create the entity instance and set up placeholder mappings
                                 let temp_let = hir::HirLetStatement {
@@ -18386,15 +18306,11 @@ impl<'hir> HirToMir<'hir> {
                             &var_id_to_mir,
                             depth + 1,
                         ) {
-                            println!("🧱🧱🧱 BUG #126 FIX: Converted let '{}' (id={}) to MIR expr 🧱🧱🧱",
-                                     let_stmt.name, let_stmt.id.0);
                             var_id_to_mir.insert(let_stmt.id, mir_expr);
                         }
 
                         let_substitutions.insert(let_stmt.name.clone(), substituted_value.clone());
                         var_id_to_value.insert(let_stmt.id, substituted_value);
-                        println!("🧱🧱🧱 MODULE_BLOCK: Added '{}' (id={}) to both substitution maps 🧱🧱🧱",
-                                 let_stmt.name, let_stmt.id.0);
                     }
                 }
 
@@ -18403,50 +18319,20 @@ impl<'hir> HirToMir<'hir> {
                 //
                 // For Variables that have MIR expressions in var_id_to_mir, use them directly.
                 // For other expressions, fall back to normal conversion (which will use the cached Calls).
-                println!(
-                    "🧱🧱🧱 MODULE_BLOCK: result_expr type: {:?} 🧱🧱🧱",
-                    std::mem::discriminant(&**result_expr)
-                );
-                println!(
-                    "🧱🧱🧱 BUG #126 FIX: var_id_to_mir has {} entries 🧱🧱🧱",
-                    var_id_to_mir.len()
-                );
-                for vid in var_id_to_mir.keys() {
-                    let name = ctx
-                        .var_id_to_name
-                        .get(vid)
-                        .map(|s| s.as_str())
-                        .unwrap_or("?");
-                    println!(
-                        "🧱🧱🧱 BUG #126 FIX: var_id_to_mir[{}] = '{}' 🧱🧱🧱",
-                        vid.0, name
-                    );
-                }
 
                 // Convert result_expr, using var_id_to_mir for Variables when available
-                let result = self.convert_hir_expr_with_mir_cache(
+                self.convert_hir_expr_with_mir_cache(
                     result_expr,
                     ctx,
                     &var_id_to_mir,
                     depth + 1,
-                );
-                println!(
-                    "🧱🧱🧱 MODULE_BLOCK: conversion complete, result is {} 🧱🧱🧱",
-                    if result.is_some() { "Some" } else { "NONE" }
-                );
-                result
+                )
             }
 
             // BUG FIX #85: Handle FieldAccess for tuple destructuring in module context
             // This is critical for `let (valid, x1, x2) = quadratic_solve(a, b, c);`
             // Each let binding becomes FieldAccess { base: Call, field: "0"/"1"/"2" }
             hir::HirExpression::FieldAccess { base, field } => {
-                println!(
-                    "📎📎📎 MODULE_FIELD_ACCESS: field='{}' on base {:?} 📎📎📎",
-                    field,
-                    std::mem::discriminant(&**base)
-                );
-
                 // BUG FIX #125: Cache Call results to prevent duplicate module instances
                 // When processing `let (a, b, c) = func();`, each variable (a, b, c) becomes
                 // FieldAccess { base: Call(func), field: "0"/"1"/"2" }. Without caching,
@@ -18458,17 +18344,9 @@ impl<'hir> HirToMir<'hir> {
                     let cache_key = format!("{}@{:?}", call.function, call.args);
 
                     if let Some(cached) = self.module_call_cache.get(&cache_key) {
-                        println!(
-                            "📎📎📎 BUG #125 FIX: Using CACHED result for '{}' 📎📎📎",
-                            call.function
-                        );
                         cached.clone()
                     } else {
                         // First time seeing this Call - process and cache
-                        println!(
-                            "📎📎📎 BUG #125 FIX: First time processing '{}', will cache 📎📎📎",
-                            call.function
-                        );
                         let result = self.convert_hir_expr_for_module(base, ctx, depth + 1)?;
                         self.module_call_cache.insert(cache_key, result.clone());
                         result
@@ -18480,10 +18358,6 @@ impl<'hir> HirToMir<'hir> {
 
                 // For numeric fields (tuple element access), extract the element
                 if let Ok(index) = field.parse::<usize>() {
-                    println!(
-                        "📎📎📎 MODULE_FIELD_ACCESS: Tuple element {} extraction 📎📎📎",
-                        index
-                    );
 
                     // BUG FIX #125: If base_converted is already a Concat, extract element directly
                     // This happens when we cache a Call result that returns a tuple (Concat of signals)
@@ -18501,12 +18375,8 @@ impl<'hir> HirToMir<'hir> {
                     if let ExpressionKind::Concat(elements) = &base_converted.kind {
                         if index < elements.len() {
                             let adjusted_index = elements.len() - 1 - index;
-                            println!("📎📎📎 BUG #126 FIX: Direct Concat extraction: logical index {} -> adjusted {} of {} 📎📎📎",
-                                     index, adjusted_index, elements.len());
                             return Some(elements[adjusted_index].clone());
                         } else {
-                            eprintln!("📎📎📎 BUG #125 ERROR: Index {} out of bounds for Concat with {} elements 📎📎📎",
-                                     index, elements.len());
                             return None;
                         }
                     }
@@ -18528,27 +18398,14 @@ impl<'hir> HirToMir<'hir> {
                 if let hir::HirExpression::Variable(var_id) = &**base {
                     if let Some(output_ports) = self.entity_instance_outputs.get(var_id) {
                         if let Some(&signal_id) = output_ports.get(field) {
-                            println!(
-                                "[MODULE_FIELD_ACCESS] BUG #190 FIX: Entity instance var {:?} field '{}' -> signal {:?}",
-                                var_id, field, signal_id
-                            );
                             return Some(Expression::with_unknown_type(ExpressionKind::Ref(
                                 LValue::Signal(signal_id),
                             )));
-                        } else {
-                            eprintln!(
-                                "[MODULE_FIELD_ACCESS] Entity instance var {:?} field '{}' not found. Available: {:?}",
-                                var_id, field, output_ports.keys().collect::<Vec<_>>()
-                            );
                         }
                     }
                 }
 
                 // Fall back to creating a FieldAccess node for non-entity struct access
-                eprintln!(
-                    "    📎 FieldAccess on non-tuple field '{}' - creating FieldAccess expression",
-                    field
-                );
                 Some(Expression::with_unknown_type(ExpressionKind::FieldAccess {
                     base: Box::new(base_converted),
                     field: field.clone(),
@@ -18557,11 +18414,6 @@ impl<'hir> HirToMir<'hir> {
 
             // BUG FIX #85: Handle Index (single bit select) in module context
             hir::HirExpression::Index(base, index) => {
-                println!(
-                    "📐📐📐 MODULE_INDEX: bit select on base {:?} 📐📐📐",
-                    std::mem::discriminant(&**base)
-                );
-
                 // Convert base expression (e.g., data1) in module context
                 let base_converted = self.convert_hir_expr_for_module(base, ctx, depth + 1)?;
 
@@ -18570,7 +18422,6 @@ impl<'hir> HirToMir<'hir> {
                     hir::HirExpression::Literal(hir::HirLiteral::Integer(n)) => *n as i64,
                     _ => 0,
                 };
-                println!("📐📐📐 MODULE_INDEX: Bit select [{}] 📐📐📐", bit_idx);
 
                 if let ExpressionKind::Ref(base_lval) = base_converted.kind {
                     Some(Expression::with_unknown_type(ExpressionKind::Ref(
@@ -19155,50 +19006,17 @@ impl<'hir> HirToMir<'hir> {
                 hir::HirStatement::If(if_stmt) => {
                     // Check if this is an early return pattern (if condition { return ... })
                     if_return_statements.push(if_stmt);
-                    println!("    • 🚨 Found if statement (may contain early return)");
-                    // Check if then branch has a return
-                    let has_return = if_stmt
-                        .then_statements
-                        .iter()
-                        .any(|s| matches!(s, hir::HirStatement::Return(_)));
-                    println!("      -> Then branch has return: {}", has_return);
                 }
-                _ => {
-                    println!(
-                        "    ⚠️  Skipping unsupported statement type: {:?}",
-                        std::mem::discriminant(stmt)
-                    );
-                }
+                _ => {}
             }
         }
-        println!(
-            "🔍🔍🔍 FIRST PASS DONE: {} let bindings, {} if statements, return_expr={} 🔍🔍🔍",
-            let_bindings.len(),
-            if_return_statements.len(),
-            return_expr.is_some()
-        );
 
         // BUG FIX #85: If return expression is a Match, extract let bindings from match arms
         // This handles functions like exec_l4_l5 that have: return match opcode { ... }
         // where the let bindings are inside the match arms
         if let Some(ref ret_expr) = return_expr {
-            println!(
-                "🔍🔍🔍 CHECKING return expression for let bindings: {:?}",
-                std::mem::discriminant(ret_expr)
-            );
             let extracted = Self::extract_let_bindings_from_expression(ret_expr);
-            println!(
-                "🔍🔍🔍 EXTRACTED {} let bindings from expression",
-                extracted.len()
-            );
             if !extracted.is_empty() {
-                println!(
-                    "    📦 Extracted {} let bindings from return expression (match arms)",
-                    extracted.len()
-                );
-                for let_stmt in &extracted {
-                    println!("      • {} (VariableId={})", let_stmt.name, let_stmt.id.0);
-                }
                 let_bindings.extend(extracted);
             }
         }
