@@ -234,7 +234,10 @@ pub struct HirToMir<'hir> {
     /// Used to correctly wire up return expressions that reference these placeholder signals.
     /// BUG #201 FIX: Now includes Type so convert_expression uses the correct expression type
     /// instead of the passed-in type which may be wrong (e.g., Bit(Fixed(1)) instead of Float32).
-    placeholder_signal_to_entity_output: IndexMap<hir::VariableId, (SignalId, Type)>,
+    /// BUG #209 FIX: Key changed from VariableId to (String, VariableId) where String is the
+    /// match_arm_prefix. This ensures each inlined trait method instance gets its own placeholder
+    /// mapping, preventing collisions when multiple FP operations use the same VariableId(16).
+    placeholder_signal_to_entity_output: IndexMap<(String, hir::VariableId), (SignalId, Type)>,
 
     /// BUG #190 FIX: Maps placeholder HIR SignalIds to entity output MIR SignalIds and their types
     /// Similar to placeholder_signal_to_entity_output, but for cases where the placeholder
@@ -1917,13 +1920,16 @@ impl<'hir> HirToMir<'hir> {
                                                 // BUG #201 FIX: Convert HIR type to frontend Type for correct expression typing
                                                 let expr_type =
                                                     self.hir_type_to_type(&port.port_type);
+                                                // BUG #209 FIX: Include match_arm_prefix in key to prevent collisions
+                                                let prefix = self.match_arm_prefix.clone().unwrap_or_default();
                                                 println!(
-                                                    "[BUG #167] Mapping placeholder variable {:?} -> entity output signal '{}' (type {:?})",
-                                                    var_id, signal_name, expr_type
+                                                    "[BUG #167] Mapping placeholder variable {:?} (prefix='{}') -> entity output signal '{}' (type {:?})",
+                                                    var_id, prefix, signal_name, expr_type
                                                 );
                                                 // BUG #201 FIX: Store Type along with signal_id for correct type propagation
+                                                // BUG #209 FIX: Use (prefix, var_id) as key for uniqueness per context
                                                 self.placeholder_signal_to_entity_output
-                                                    .insert(var_id, (signal_id, expr_type));
+                                                    .insert((prefix, var_id), (signal_id, expr_type));
                                             }
 
                                             // BUG #190 FIX: Also handle Signal and Cast(Signal)
@@ -5053,24 +5059,29 @@ impl<'hir> HirToMir<'hir> {
             hir::HirExpression::Variable(id) => {
                 // BUG #167 FIX: Check if this variable is a placeholder connected to an entity output
                 // If so, return a reference to the entity output wire instead
+                // BUG #209 FIX: Use (prefix, id) as key for context-aware lookup
+                let prefix = self.match_arm_prefix.clone().unwrap_or_default();
+                let key = (prefix.clone(), *id);
                 // DEBUG: Always trace Variable(16) lookups
                 if id.0 == 16 {
-                    let contains = self.placeholder_signal_to_entity_output.contains_key(id);
-                    let get_result = self.placeholder_signal_to_entity_output.get(id);
+                    let contains = self.placeholder_signal_to_entity_output.contains_key(&key);
+                    let get_result = self.placeholder_signal_to_entity_output.get(&key);
                     println!(
-                        "[BUG #193 DEBUG] convert_expression Variable(16): contains={}, get={:?}, map_keys={:?}",
+                        "[BUG #193 DEBUG] convert_expression Variable(16): prefix='{}', contains={}, get={:?}, map_keys={:?}",
+                        prefix,
                         contains,
                         get_result,
-                        self.placeholder_signal_to_entity_output.keys().map(|k| k.0).collect::<Vec<_>>()
+                        self.placeholder_signal_to_entity_output.keys().map(|(p, k)| (p.clone(), k.0)).collect::<Vec<_>>()
                     );
                 }
                 // BUG #201 FIX: Use stored signal type instead of passed-in ty
+                // BUG #209 FIX: Use (prefix, id) key for lookup
                 if let Some((output_signal_id, signal_type)) =
-                    self.placeholder_signal_to_entity_output.get(id)
+                    self.placeholder_signal_to_entity_output.get(&key)
                 {
                     println!(
-                        "[BUG #167 FIX] Variable {:?} is placeholder -> returning entity output signal {:?} (type {:?})",
-                        id, output_signal_id, signal_type
+                        "[BUG #167 FIX] Variable {:?} (prefix='{}') is placeholder -> returning entity output signal {:?} (type {:?})",
+                        id, prefix, output_signal_id, signal_type
                     );
                     return Some(Expression::new(
                         ExpressionKind::Ref(LValue::Signal(*output_signal_id)),
@@ -7974,6 +7985,11 @@ impl<'hir> HirToMir<'hir> {
             arms.len()
         );
 
+        // BUG #209 FIX: Get unique match ID for arm prefix generation
+        // This ensures entity instances created in match arms have unique names
+        let match_id = self.next_match_id;
+        self.next_match_id += 1;
+
         // Convert the match value expression in module context
         let match_value_expr = self.convert_hir_expr_for_module(match_value, ctx, depth)?;
 
@@ -7981,7 +7997,18 @@ impl<'hir> HirToMir<'hir> {
         // Start with the last arm as the default (usually wildcard)
         let last_arm = arms.last()?;
         println!("🎯 MODULE_MATCH: Converting last arm (default) body");
+
+        // BUG #209 FIX: Set match_arm_prefix for the last (default) arm
+        let last_arm_idx = arms.len() - 1;
+        let last_arm_prefix = format!("match_{}_{}", match_id, last_arm_idx);
+        self.match_arm_prefix = Some(last_arm_prefix.clone());
+        self.entity_instance_prefix = Some(last_arm_prefix);
+
         let mut result = self.convert_hir_expr_for_module(&last_arm.expr, ctx, depth)?;
+
+        // BUG #209 FIX: Clear prefix after converting last arm
+        self.match_arm_prefix = None;
+        self.entity_instance_prefix = None;
 
         // Work backwards through the arms (excluding the last one which is the default)
         for (arm_idx, arm) in arms[..arms.len() - 1].iter().enumerate().rev() {
@@ -8058,13 +8085,28 @@ impl<'hir> HirToMir<'hir> {
                 "🎯 MODULE_MATCH: Converting arm {} body in module context",
                 arm_idx
             );
+
+            // BUG #209 FIX: Set match_arm_prefix before converting arm body
+            let arm_prefix = format!("match_{}_{}", match_id, arm_idx);
+            self.match_arm_prefix = Some(arm_prefix.clone());
+            self.entity_instance_prefix = Some(arm_prefix);
+
             // BUG FIX #189: If arm body conversion fails, skip this arm and continue
             // This allows processing of remaining arms even if some fail (e.g., due to
             // unresolved function calls like sqrt)
             let arm_expr = match self.convert_hir_expr_for_module(&arm.expr, ctx, depth) {
                 Some(expr) => expr,
-                None => continue, // Skip failed arm, continue with remaining arms
+                None => {
+                    // BUG #209 FIX: Clear prefix even on failure
+                    self.match_arm_prefix = None;
+                    self.entity_instance_prefix = None;
+                    continue; // Skip failed arm, continue with remaining arms
+                }
             };
+
+            // BUG #209 FIX: Clear prefix after converting arm body
+            self.match_arm_prefix = None;
+            self.entity_instance_prefix = None;
 
             result = Expression::with_unknown_type(ExpressionKind::Conditional {
                 cond: Box::new(final_condition),
@@ -14264,6 +14306,11 @@ impl<'hir> HirToMir<'hir> {
     /// 4. Converts the substituted body to MIR
     ///
     /// Returns the MIR expression representing the inlined method, or None if inlining fails.
+    /// BUG #209 FIX: Add optional module context parameter.
+    /// When ctx is Some, we use convert_hir_expr_for_module instead of convert_expression.
+    /// This is critical for FP trait inlining from within module context (e.g., match arms).
+    /// Without this, entity instances (FpAdd, FpMul) are created but their outputs don't
+    /// properly connect back to the match arm results.
     fn inline_trait_method(
         &mut self,
         type_name: &str,
@@ -14271,6 +14318,24 @@ impl<'hir> HirToMir<'hir> {
         method_name: &str,
         left_expr: &hir::HirExpression,
         right_expr: &hir::HirExpression,
+    ) -> Option<Expression> {
+        // No module context - use regular convert_expression
+        self.inline_trait_method_with_ctx(type_name, trait_name, method_name, left_expr, right_expr, None, 0)
+    }
+
+    /// Inline a binary trait method with optional module context.
+    /// BUG #209 FIX: When called from convert_hir_expr_for_module, we need to preserve
+    /// the module context so that entity instances (FpAdd, FpMul, FpDiv) are properly
+    /// connected to their outputs.
+    fn inline_trait_method_with_ctx(
+        &mut self,
+        type_name: &str,
+        trait_name: &str,
+        method_name: &str,
+        left_expr: &hir::HirExpression,
+        right_expr: &hir::HirExpression,
+        module_ctx: Option<&ModuleSynthesisContext>,
+        depth: usize,
     ) -> Option<Expression> {
         println!(
             "[TRAIT_INLINE] Inlining {}::{} for type '{}'",
@@ -14388,9 +14453,21 @@ impl<'hir> HirToMir<'hir> {
             trait_name, method_name, self.match_arm_prefix
         );
 
-        // Convert the substituted expression to MIR
-        // The Block expression handler will process let statements and entity instantiations
-        let result = self.convert_expression(&substituted, 0);
+        // BUG #209 FIX: Use convert_hir_expr_for_module when module context is available.
+        // This ensures entity instances (FpAdd, FpMul, FpDiv) are properly connected
+        // to their outputs when inlined from within module context (e.g., match arms).
+        // Without this, entity instances are created but their outputs are constant 0.
+        let result = if let Some(ctx) = module_ctx {
+            println!(
+                "[BUG #209 FIX] Using convert_hir_expr_for_module for trait inline '{}::{}'",
+                trait_name, method_name
+            );
+            self.convert_hir_expr_for_module(&substituted, ctx, depth + 1)
+        } else {
+            // No module context - use regular convert_expression
+            // The Block expression handler will process let statements and entity instantiations
+            self.convert_expression(&substituted, 0)
+        };
 
         if result.is_none() {
             println!("[TRAIT_INLINE] FAILED: convert_expression returned None");
@@ -17236,12 +17313,16 @@ impl<'hir> HirToMir<'hir> {
         match expr {
             // For Variables, first check if we have a pre-converted MIR expression
             hir::HirExpression::Variable(var_id) => {
+                // BUG #209 FIX: Use (prefix, var_id) as key for context-aware lookup
+                let prefix = self.match_arm_prefix.clone().unwrap_or_default();
+                let key = (prefix.clone(), *var_id);
                 // BUG #193 DEBUG: Trace Variable(16) specifically in convert_hir_expr_with_mir_cache
                 if var_id.0 == 16 {
                     println!(
-                        "[BUG #193 DEBUG] convert_hir_expr_with_mir_cache: Variable(16), placeholder_map size={}, contains_16={}",
+                        "[BUG #193 DEBUG] convert_hir_expr_with_mir_cache: Variable(16), prefix='{}', placeholder_map size={}, contains={}",
+                        prefix,
                         self.placeholder_signal_to_entity_output.len(),
-                        self.placeholder_signal_to_entity_output.contains_key(var_id)
+                        self.placeholder_signal_to_entity_output.contains_key(&key)
                     );
                 }
 
@@ -17250,12 +17331,13 @@ impl<'hir> HirToMir<'hir> {
                 // an entity (like FpAdd) and later returned. The cached MIR might just be
                 // the placeholder signal (Literal(0)), but we need the entity output wire.
                 // BUG #201 FIX: Use stored signal type instead of unknown
+                // BUG #209 FIX: Use (prefix, var_id) key for lookup
                 if let Some((output_signal_id, signal_type)) =
-                    self.placeholder_signal_to_entity_output.get(var_id)
+                    self.placeholder_signal_to_entity_output.get(&key)
                 {
                     println!(
-                        "[BUG #192 FIX] Variable {:?} is placeholder -> returning entity output signal {:?} (type {:?})",
-                        var_id, output_signal_id, signal_type
+                        "[BUG #192 FIX] Variable {:?} (prefix='{}') is placeholder -> returning entity output signal {:?} (type {:?})",
+                        var_id, prefix, output_signal_id, signal_type
                     );
                     return Some(Expression::new(
                         ExpressionKind::Ref(LValue::Signal(*output_signal_id)),
@@ -17299,6 +17381,29 @@ impl<'hir> HirToMir<'hir> {
                     "🔄🔄🔄 BUG #128 FIX: FieldAccess '{}' in mir_cache conversion 🔄🔄🔄",
                     field
                 );
+
+                // BUG #209 FIX: Check entity_instance_outputs FIRST for entity output access
+                // This is critical for expressions like `__adder_result.result` where
+                // `__adder_result` is an entity instance and `result` is an output port.
+                // Without this, entity outputs in module context return constant 0.
+                if let hir::HirExpression::Variable(var_id) = &**base {
+                    if let Some(output_ports) = self.entity_instance_outputs.get(var_id) {
+                        if let Some(&signal_id) = output_ports.get(field) {
+                            println!(
+                                "[BUG #209 FIX] Entity instance var {:?} field '{}' -> signal {:?} (in mir_cache conversion)",
+                                var_id, field, signal_id
+                            );
+                            return Some(Expression::with_unknown_type(ExpressionKind::Ref(
+                                LValue::Signal(signal_id),
+                            )));
+                        } else {
+                            eprintln!(
+                                "[BUG #209] Entity instance var {:?} field '{}' not found. Available: {:?}",
+                                var_id, field, output_ports.keys().collect::<Vec<_>>()
+                            );
+                        }
+                    }
+                }
 
                 // Convert the base using mir_cache (this is the key fix!)
                 let base_converted =
@@ -17550,12 +17655,16 @@ impl<'hir> HirToMir<'hir> {
             // Variable reference - lookup in context (params or let bindings)
             // This is the key case we need to handle specially for module synthesis
             hir::HirExpression::Variable(var) => {
+                // BUG #209 FIX: Use (prefix, var_id) as key for context-aware lookup
+                let prefix = self.match_arm_prefix.clone().unwrap_or_default();
+                let key = (prefix.clone(), *var);
                 // DEBUG: Trace Variable(16) lookups
                 if var.0 == 16 {
                     println!(
-                        "[BUG #192 DEBUG] convert_hir_expr_for_module Variable(16), placeholder_map size={}, contains_16={}",
+                        "[BUG #192 DEBUG] convert_hir_expr_for_module Variable(16), prefix='{}', placeholder_map size={}, contains={}",
+                        prefix,
                         self.placeholder_signal_to_entity_output.len(),
-                        self.placeholder_signal_to_entity_output.contains_key(var)
+                        self.placeholder_signal_to_entity_output.contains_key(&key)
                     );
                 }
                 // BUG #190 FIX: Check if this variable is a placeholder connected to an entity output
@@ -17563,12 +17672,13 @@ impl<'hir> HirToMir<'hir> {
                 // an entity (like FpAdd) and later returned. The placeholder signal maps to
                 // the entity's output wire.
                 // BUG #201 FIX: Use stored signal type instead of unknown
+                // BUG #209 FIX: Use (prefix, var_id) key for lookup
                 if let Some((output_signal_id, signal_type)) =
-                    self.placeholder_signal_to_entity_output.get(var)
+                    self.placeholder_signal_to_entity_output.get(&key)
                 {
                     println!(
-                        "[BUG #190 FIX] Variable {:?} is placeholder -> returning entity output signal {:?} (type {:?})",
-                        var, output_signal_id, signal_type
+                        "[BUG #190 FIX] Variable {:?} (prefix='{}') is placeholder -> returning entity output signal {:?} (type {:?})",
+                        var, prefix, output_signal_id, signal_type
                     );
                     return Some(Expression::new(
                         ExpressionKind::Ref(LValue::Signal(*output_signal_id)),
@@ -17986,16 +18096,20 @@ impl<'hir> HirToMir<'hir> {
                         trait_name, method_name, type_name, bin_expr.op
                     );
 
-                    // Try to inline the trait method body
-                    if let Some(result) = self.inline_trait_method(
+                    // BUG #209 FIX: Use inline_trait_method_with_ctx to preserve module context.
+                    // This ensures entity instances (FpAdd, FpMul, FpDiv) created by trait
+                    // implementations are properly connected when inlined in match arms.
+                    if let Some(result) = self.inline_trait_method_with_ctx(
                         &type_name,
                         trait_name,
                         method_name,
                         &bin_expr.left,
                         &bin_expr.right,
+                        Some(ctx),
+                        depth,
                     ) {
                         println!(
-                            "[MODULE_TRAIT_OP] Successfully inlined {}::{} for type '{}'",
+                            "[MODULE_TRAIT_OP] Successfully inlined {}::{} for type '{}' (with module ctx)",
                             trait_name, method_name, type_name
                         );
                         return Some(result);

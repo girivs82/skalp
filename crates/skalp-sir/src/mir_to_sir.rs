@@ -2406,23 +2406,31 @@ impl<'a> MirToSirConverter<'a> {
                 .map(|p| p.name.clone())
                 .unwrap_or_else(|| format!("port_{}", port_id.0)),
             LValue::Signal(sig_id) => {
-                let result = self
-                    .mir
-                    .signals
-                    .iter()
-                    .find(|s| s.id == *sig_id)
-                    .map(|s| s.name.clone())
-                    .unwrap_or_else(|| {
-                        eprintln!(
-                            "⚠️  Signal ID {} not found in MIR signals! Available signals:",
-                            sig_id.0
-                        );
-                        for _sig in &self.mir.signals {
-                            eprintln!("     - Signal {}: {}", _sig.id.0, _sig.name);
+                // First try current module
+                if let Some(signal) = self.mir.signals.iter().find(|s| s.id == *sig_id) {
+                    return signal.name.clone();
+                }
+
+                // BUG #209 FIX: Search child modules for the signal
+                for child_module in &self.mir_design.modules {
+                    if let Some(signal) = child_module.signals.iter().find(|s| s.id == *sig_id) {
+                        // Find instance of this module in current module
+                        for instance in &self.mir.instances {
+                            if instance.module == child_module.id {
+                                return format!("{}.{}", instance.name, signal.name);
+                            }
                         }
-                        format!("signal_{}", sig_id.0)
-                    });
-                result
+                        // No instance found, return signal name directly
+                        return signal.name.clone();
+                    }
+                }
+
+                // Not found anywhere - use fallback
+                eprintln!(
+                    "⚠️  Signal ID {} not found in any module! Using fallback name",
+                    sig_id.0
+                );
+                format!("signal_{}", sig_id.0)
             }
             LValue::Variable(var_id) => self
                 .mir
@@ -2760,13 +2768,43 @@ impl<'a> MirToSirConverter<'a> {
     fn create_lvalue_ref_node(&mut self, lvalue: &LValue) -> usize {
         match lvalue {
             LValue::Signal(sig_id) => {
-                let signal_name = self
-                    .mir
-                    .signals
-                    .iter()
-                    .find(|s| s.id == *sig_id)
-                    .map(|s| s.name.clone())
-                    .unwrap_or_else(|| format!("signal_{}", sig_id.0));
+                // First try to find signal in current (top-level) module
+                if let Some(signal) = self.mir.signals.iter().find(|s| s.id == *sig_id) {
+                    return self.get_or_create_signal_driver(&signal.name);
+                }
+
+                // BUG #209 FIX: Signal not found in top-level module - search in child modules
+                // This happens when trait method inlining creates entity instances that are
+                // drained into child modules (e.g., func_exec_l2), but the expressions
+                // referencing their outputs remain in the top-level module.
+                //
+                // For each child module, find:
+                // 1. The signal by ID
+                // 2. Which instance(s) of that module exist in the current module
+                // 3. Construct the prefixed signal name (e.g., "exec_l2_inst.signal_name")
+                for child_module in &self.mir_design.modules {
+                    if let Some(signal) = child_module.signals.iter().find(|s| s.id == *sig_id) {
+                        // Found the signal in a child module
+                        // Now find which instance(s) of this module exist in self.mir
+                        for instance in &self.mir.instances {
+                            if instance.module == child_module.id {
+                                // Found an instance of the child module
+                                let prefixed_name = format!("{}.{}", instance.name, signal.name);
+                                return self.get_or_create_signal_driver(&prefixed_name);
+                            }
+                        }
+                        // Signal found in child module but no matching instance in current module
+                        // This could happen with deeply nested modules - use the signal name directly
+                        return self.get_or_create_signal_driver(&signal.name);
+                    }
+                }
+
+                // Still not found - generate a warning and use fallback name
+                eprintln!(
+                    "⚠️ WARNING: Signal {:?} not found in any module! Using fallback name",
+                    sig_id
+                );
+                let signal_name = format!("signal_{}", sig_id.0);
                 self.get_or_create_signal_driver(&signal_name)
             }
             LValue::Port(port_id) => {
