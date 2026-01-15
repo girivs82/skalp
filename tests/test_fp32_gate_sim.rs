@@ -48,7 +48,7 @@ fn compile_fp32_test(source_path: &Path) -> skalp_lir::GateNetlist {
 }
 
 /// Run gate-level simulation for FP32 add
-fn simulate_fp32_add(netlist: &skalp_lir::GateNetlist, a: f32, b: f32) -> Option<f32> {
+async fn simulate_fp32_add(netlist: &skalp_lir::GateNetlist, a: f32, b: f32) -> Option<f32> {
     let config = UnifiedSimConfig {
         level: SimLevel::GateLevel,
         circuit_mode: CircuitMode::Ncl,
@@ -74,7 +74,7 @@ fn simulate_fp32_add(netlist: &skalp_lir::GateNetlist, a: f32, b: f32) -> Option
     sim.set_ncl_input("top.b", b_bits, 32);
 
     // Run simulation
-    let result = sim.run_until_stable();
+    let result = sim.run_until_stable().await;
     println!(
         "  Converged after {} iterations, stable={}",
         result.iterations, result.is_stable
@@ -121,8 +121,8 @@ fn simulate_fp32_add(netlist: &skalp_lir::GateNetlist, a: f32, b: f32) -> Option
     None
 }
 
-#[test]
-fn test_fp32_add_simple() {
+#[tokio::test]
+async fn test_fp32_add_simple() {
     let source_path = Path::new("/tmp/test_fpadd_sim.sk");
 
     if !source_path.exists() {
@@ -152,7 +152,7 @@ fn test_fp32_add_simple() {
     for (a, b, expected) in test_cases {
         print!("  {:.2} + {:.2} = ", a, b);
 
-        match simulate_fp32_add(&netlist, a, b) {
+        match simulate_fp32_add(&netlist, a, b).await {
             Some(result) => {
                 let error = (result - expected).abs();
                 let relative_error = if expected != 0.0 {
@@ -183,8 +183,8 @@ fn test_fp32_add_simple() {
     assert_eq!(failed, 0, "Some FP32 add tests failed");
 }
 
-#[test]
-fn test_fp32_add_edge_cases() {
+#[tokio::test]
+async fn test_fp32_add_edge_cases() {
     let source_path = Path::new("/tmp/test_fpadd_sim.sk");
 
     if !source_path.exists() {
@@ -213,7 +213,7 @@ fn test_fp32_add_edge_cases() {
     for (a, b, expected, desc) in test_cases {
         print!("  {}: ", desc);
 
-        match simulate_fp32_add(&netlist, a, b) {
+        match simulate_fp32_add(&netlist, a, b).await {
             Some(result) => {
                 let error = (result - expected).abs();
                 // Allow for FP rounding errors

@@ -52,8 +52,8 @@ impl SraInMatch {
 }
 "#;
 
-#[test]
-fn test_sra_full_alone() {
+#[tokio::test]
+async fn test_sra_full_alone() {
     println!("\n=== SRA Full (standalone) ===\n");
 
     let hir = parse_and_build_hir(SRA_FULL).expect("Failed to parse");
@@ -92,7 +92,7 @@ fn test_sra_full_alone() {
     sim.set_ncl_input("top.a", 0xFFFFFFFF, 32);
     sim.set_ncl_input("top.b", 4, 32);
 
-    let result = sim.run_until_stable();
+    let result = sim.run_until_stable().await;
     println!(
         "Iterations: {}, Stable: {}",
         result.iterations, result.is_stable
@@ -116,8 +116,8 @@ fn test_sra_full_alone() {
     assert!(result.is_stable, "SRA alone should converge");
 }
 
-#[test]
-fn test_sra_in_match() {
+#[tokio::test]
+async fn test_sra_in_match() {
     println!("\n=== SRA in Match ===\n");
 
     let hir = parse_and_build_hir(SRA_IN_MATCH).expect("Failed to parse");
@@ -169,7 +169,7 @@ fn test_sra_in_match() {
     sim.set_ncl_input("top.a", 10, 32);
     sim.set_ncl_input("top.b", 5, 32);
 
-    let result = sim.run_until_stable();
+    let result = sim.run_until_stable().await;
     println!(
         "Iterations: {}, Stable: {}",
         result.iterations, result.is_stable

@@ -38,8 +38,8 @@ impl L0L1Match {
 }
 "#;
 
-#[test]
-fn test_l0l1_match_structure() {
+#[tokio::test]
+async fn test_l0l1_match_structure() {
     println!("\n=== L0/L1 Match Structure MWE ===\n");
 
     let hir = parse_and_build_hir(L0L1_MATCH).expect("Failed to parse");
@@ -103,7 +103,7 @@ fn test_l0l1_match_structure() {
     sim.set_ncl_input("top.a", 10, 32);
     sim.set_ncl_input("top.b", 5, 32);
 
-    let result = sim.run_until_stable();
+    let result = sim.run_until_stable().await;
     println!(
         "Iterations: {}, Stable: {}",
         result.iterations, result.is_stable
@@ -122,7 +122,7 @@ fn test_l0l1_match_structure() {
     println!("\n--- Test 2: SUB (opcode=1), 10 - 5 = 5 ---");
     sim.set_ncl_input("top.opcode", 1, 4);
 
-    let result2 = sim.run_until_stable();
+    let result2 = sim.run_until_stable().await;
     println!(
         "Iterations: {}, Stable: {}",
         result2.iterations, result2.is_stable
@@ -143,7 +143,7 @@ fn test_l0l1_match_structure() {
     sim.set_ncl_input("top.a", 0xFFFFFFFF, 32); // -1
     sim.set_ncl_input("top.b", 4, 32); // shift by 4
 
-    let result3 = sim.run_until_stable();
+    let result3 = sim.run_until_stable().await;
     println!(
         "Iterations: {}, Stable: {}",
         result3.iterations, result3.is_stable

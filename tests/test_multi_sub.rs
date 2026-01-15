@@ -43,8 +43,8 @@ impl TwoSubInMatch {
 }
 "#;
 
-#[test]
-fn test_two_sub_same_width() {
+#[tokio::test]
+async fn test_two_sub_same_width() {
     println!("\n=== Two SUB Same Width ===\n");
 
     let hir = parse_and_build_hir(TWO_SUB_SAME_WIDTH).expect("Failed to parse");
@@ -118,7 +118,7 @@ fn test_two_sub_same_width() {
     sim.set_ncl_input("top.b", 3, 8);
     sim.set_ncl_input("top.c", 2, 8);
 
-    let result = sim.run_until_stable();
+    let result = sim.run_until_stable().await;
     println!(
         "\nIterations: {}, Stable: {}",
         result.iterations, result.is_stable
@@ -140,8 +140,8 @@ fn test_two_sub_same_width() {
     }
 }
 
-#[test]
-fn test_two_sub_in_match() {
+#[tokio::test]
+async fn test_two_sub_in_match() {
     println!("\n=== Two SUB in Match ===\n");
 
     let hir = parse_and_build_hir(TWO_SUB_IN_MATCH).expect("Failed to parse");
@@ -210,7 +210,7 @@ fn test_two_sub_in_match() {
     sim.set_ncl_input("top.b", 3, 32);
     sim.set_ncl_input("top.c", 2, 8);
 
-    let result = sim.run_until_stable();
+    let result = sim.run_until_stable().await;
     println!(
         "Iterations: {}, Stable: {}",
         result.iterations, result.is_stable

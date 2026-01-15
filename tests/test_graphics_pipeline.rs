@@ -12,7 +12,7 @@ mod graphics_pipeline_tests {
     use std::path::Path;
 
     #[test]
-    fn test_graphics_pipeline_compilation() {
+    async fn test_graphics_pipeline_compilation() {
         println!("🎨 Graphics Pipeline Compilation Test");
 
         // Parse and build HIR from the graphics pipeline source
@@ -127,7 +127,7 @@ mod graphics_pipeline_tests {
     }
 
     #[test]
-    fn test_graphics_pipeline_types() {
+    async fn test_graphics_pipeline_types() {
         println!("🎨 Graphics Pipeline Type Definitions Test");
 
         let graphics_pipeline_path = Path::new("examples/graphics_pipeline/src/main.sk");
@@ -174,7 +174,7 @@ mod graphics_pipeline_tests {
     }
 
     #[test]
-    fn test_graphics_pipeline_axi_interface() {
+    async fn test_graphics_pipeline_axi_interface() {
         println!("🎨 Graphics Pipeline AXI Interface Test");
 
         let graphics_pipeline_path = Path::new("examples/graphics_pipeline/src/main.sk");
@@ -235,7 +235,7 @@ mod graphics_pipeline_tests {
     }
 
     #[test]
-    fn test_graphics_pipeline_video_outputs() {
+    async fn test_graphics_pipeline_video_outputs() {
         println!("🎨 Graphics Pipeline Video Output Test");
 
         let graphics_pipeline_path = Path::new("examples/graphics_pipeline/src/main.sk");

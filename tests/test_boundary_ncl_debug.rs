@@ -21,8 +21,8 @@ impl SimplePass {
 }
 "#;
 
-#[test]
-fn test_boundary_ncl_lir_expansion() {
+#[tokio::test]
+async fn test_boundary_ncl_lir_expansion() {
     println!("\n=== Test Boundary-Only NCL LIR Expansion ===\n");
 
     let hir = parse_and_build_hir(SIMPLE_PASSTHROUGH).expect("Failed to parse");
@@ -120,8 +120,8 @@ fn test_boundary_ncl_lir_expansion() {
     println!("\n=== Test Passed ===");
 }
 
-#[test]
-fn test_boundary_ncl_gate_level() {
+#[tokio::test]
+async fn test_boundary_ncl_gate_level() {
     println!("\n=== Test Boundary-Only NCL Gate-Level Simulation ===\n");
 
     let hir = parse_and_build_hir(SIMPLE_PASSTHROUGH).expect("Failed to parse");
@@ -226,11 +226,11 @@ fn test_boundary_ncl_gate_level() {
 
     // Debug: check a single iteration to see what happens
     eprintln!("  [TEST] Running single step...");
-    sim.step();
+    sim.step().await;
     eprintln!("  [TEST] Step complete");
 
     println!("  Running simulation...");
-    let result = sim.run_until_stable();
+    let result = sim.run_until_stable().await;
     println!(
         "  Iterations: {}, Stable: {}",
         result.iterations, result.is_stable

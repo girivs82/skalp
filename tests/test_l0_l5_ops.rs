@@ -55,7 +55,7 @@ fn compile_to_gates(source: &str) -> GateNetlist {
 }
 
 /// Run NCL simulation and get output
-fn simulate_32bit(netlist: &GateNetlist, a: u64, b: u64) -> Option<u64> {
+async fn simulate_32bit(netlist: &GateNetlist, a: u64, b: u64) -> Option<u64> {
     let config = UnifiedSimConfig {
         level: SimLevel::GateLevel,
         circuit_mode: CircuitMode::Ncl,
@@ -72,7 +72,7 @@ fn simulate_32bit(netlist: &GateNetlist, a: u64, b: u64) -> Option<u64> {
     sim.set_ncl_input("top.a", a, 32);
     sim.set_ncl_input("top.b", b, 32);
 
-    let result = sim.run_until_stable();
+    let result = sim.run_until_stable().await;
     if !result.is_stable {
         return None;
     }
@@ -81,7 +81,7 @@ fn simulate_32bit(netlist: &GateNetlist, a: u64, b: u64) -> Option<u64> {
 }
 
 /// Run NCL simulation for 8-bit operations
-fn simulate_8bit(netlist: &GateNetlist, a: u64, b: u64) -> Option<u64> {
+async fn simulate_8bit(netlist: &GateNetlist, a: u64, b: u64) -> Option<u64> {
     let config = UnifiedSimConfig {
         level: SimLevel::GateLevel,
         circuit_mode: CircuitMode::Ncl,
@@ -98,7 +98,7 @@ fn simulate_8bit(netlist: &GateNetlist, a: u64, b: u64) -> Option<u64> {
     sim.set_ncl_input("top.a", a, 8);
     sim.set_ncl_input("top.b", b, 8);
 
-    let result = sim.run_until_stable();
+    let result = sim.run_until_stable().await;
     if !result.is_stable {
         return None;
     }
@@ -110,8 +110,8 @@ fn simulate_8bit(netlist: &GateNetlist, a: u64, b: u64) -> Option<u64> {
 // L0: Basic Integer Operations (8-bit)
 // ============================================================================
 
-#[test]
-fn test_l0_add_8bit() {
+#[tokio::test]
+async fn test_l0_add_8bit() {
     let source = r#"
         async entity Add8 {
             in a: bit[8]
@@ -137,7 +137,7 @@ fn test_l0_add_8bit() {
 
     let mut passed = 0;
     for (a, b, expected) in test_cases {
-        let result = simulate_8bit(&netlist, a, b);
+        let result = simulate_8bit(&netlist, a, b).await;
         match result {
             Some(r) if r == expected => {
                 println!("  {} + {} = {} ✓", a, b, r);
@@ -150,8 +150,8 @@ fn test_l0_add_8bit() {
     assert_eq!(passed, 5, "Some L0 add tests failed");
 }
 
-#[test]
-fn test_l0_sub_8bit() {
+#[tokio::test]
+async fn test_l0_sub_8bit() {
     let source = r#"
         async entity Sub8 {
             in a: bit[8]
@@ -177,7 +177,7 @@ fn test_l0_sub_8bit() {
 
     let mut passed = 0;
     for (a, b, expected) in test_cases {
-        let result = simulate_8bit(&netlist, a, b);
+        let result = simulate_8bit(&netlist, a, b).await;
         match result {
             Some(r) if r == expected => {
                 println!("  {} - {} = {} ✓", a, b, r);
@@ -190,8 +190,8 @@ fn test_l0_sub_8bit() {
     assert_eq!(passed, 5, "Some L0 sub tests failed");
 }
 
-#[test]
-fn test_l0_and_8bit() {
+#[tokio::test]
+async fn test_l0_and_8bit() {
     let source = r#"
         async entity And8 {
             in a: bit[8]
@@ -217,7 +217,7 @@ fn test_l0_and_8bit() {
 
     let mut passed = 0;
     for (a, b, expected) in test_cases {
-        let result = simulate_8bit(&netlist, a, b);
+        let result = simulate_8bit(&netlist, a, b).await;
         match result {
             Some(r) if r == expected => {
                 println!("  0x{:02X} & 0x{:02X} = 0x{:02X} ✓", a, b, r);
@@ -233,8 +233,8 @@ fn test_l0_and_8bit() {
     assert_eq!(passed, 5, "Some L0 and tests failed");
 }
 
-#[test]
-fn test_l0_or_8bit() {
+#[tokio::test]
+async fn test_l0_or_8bit() {
     let source = r#"
         async entity Or8 {
             in a: bit[8]
@@ -260,7 +260,7 @@ fn test_l0_or_8bit() {
 
     let mut passed = 0;
     for (a, b, expected) in test_cases {
-        let result = simulate_8bit(&netlist, a, b);
+        let result = simulate_8bit(&netlist, a, b).await;
         match result {
             Some(r) if r == expected => {
                 println!("  0x{:02X} | 0x{:02X} = 0x{:02X} ✓", a, b, r);
@@ -276,8 +276,8 @@ fn test_l0_or_8bit() {
     assert_eq!(passed, 5, "Some L0 or tests failed");
 }
 
-#[test]
-fn test_l0_xor_8bit() {
+#[tokio::test]
+async fn test_l0_xor_8bit() {
     let source = r#"
         async entity Xor8 {
             in a: bit[8]
@@ -303,7 +303,7 @@ fn test_l0_xor_8bit() {
 
     let mut passed = 0;
     for (a, b, expected) in test_cases {
-        let result = simulate_8bit(&netlist, a, b);
+        let result = simulate_8bit(&netlist, a, b).await;
         match result {
             Some(r) if r == expected => {
                 println!("  0x{:02X} ^ 0x{:02X} = 0x{:02X} ✓", a, b, r);
@@ -319,8 +319,8 @@ fn test_l0_xor_8bit() {
     assert_eq!(passed, 5, "Some L0 xor tests failed");
 }
 
-#[test]
-fn test_l0_shl_8bit() {
+#[tokio::test]
+async fn test_l0_shl_8bit() {
     let source = r#"
         async entity Shl8 {
             in a: bit[8]
@@ -346,7 +346,7 @@ fn test_l0_shl_8bit() {
 
     let mut passed = 0;
     for (a, b, expected) in test_cases {
-        let result = simulate_8bit(&netlist, a, b);
+        let result = simulate_8bit(&netlist, a, b).await;
         match result {
             Some(r) if r == expected => {
                 println!("  0x{:02X} << {} = 0x{:02X} ✓", a, b, r);
@@ -362,8 +362,8 @@ fn test_l0_shl_8bit() {
     assert_eq!(passed, 5, "Some L0 shl tests failed");
 }
 
-#[test]
-fn test_l0_shr_8bit() {
+#[tokio::test]
+async fn test_l0_shr_8bit() {
     let source = r#"
         async entity Shr8 {
             in a: bit[8]
@@ -389,7 +389,7 @@ fn test_l0_shr_8bit() {
 
     let mut passed = 0;
     for (a, b, expected) in test_cases {
-        let result = simulate_8bit(&netlist, a, b);
+        let result = simulate_8bit(&netlist, a, b).await;
         match result {
             Some(r) if r == expected => {
                 println!("  0x{:02X} >> {} = 0x{:02X} ✓", a, b, r);
@@ -409,8 +409,8 @@ fn test_l0_shr_8bit() {
 // L0: Comparisons
 // ============================================================================
 
-#[test]
-fn test_l0_eq_8bit() {
+#[tokio::test]
+async fn test_l0_eq_8bit() {
     let source = r#"
         async entity Eq8 {
             in a: bit[8]
@@ -431,7 +431,7 @@ fn test_l0_eq_8bit() {
 
     let mut passed = 0;
     for (a, b, expected) in test_cases {
-        let result = simulate_8bit(&netlist, a, b);
+        let result = simulate_8bit(&netlist, a, b).await;
         match result {
             Some(r) if r == expected => {
                 println!("  {} == {} ? {} ✓", a, b, r);
@@ -444,8 +444,8 @@ fn test_l0_eq_8bit() {
     assert_eq!(passed, 5, "Some L0 eq tests failed");
 }
 
-#[test]
-fn test_l0_lt_8bit() {
+#[tokio::test]
+async fn test_l0_lt_8bit() {
     let source = r#"
         async entity Lt8 {
             in a: bit[8]
@@ -466,7 +466,7 @@ fn test_l0_lt_8bit() {
 
     let mut passed = 0;
     for (a, b, expected) in test_cases {
-        let result = simulate_8bit(&netlist, a, b);
+        let result = simulate_8bit(&netlist, a, b).await;
         match result {
             Some(r) if r == expected => {
                 println!("  {} < {} ? {} ✓", a, b, r);
@@ -483,8 +483,8 @@ fn test_l0_lt_8bit() {
 // L2: FP32 Operations
 // ============================================================================
 
-#[test]
-fn test_l2_fp32_mul() {
+#[tokio::test]
+async fn test_l2_fp32_mul() {
     let source = r#"
         use skalp::numeric::fp::*;
 
@@ -517,7 +517,7 @@ fn test_l2_fp32_mul() {
     for (a, b, expected) in test_cases {
         let a_bits = a.to_bits() as u64;
         let b_bits = b.to_bits() as u64;
-        let result = simulate_32bit(&netlist, a_bits, b_bits);
+        let result = simulate_32bit(&netlist, a_bits, b_bits).await;
         match result {
             Some(r) => {
                 let r_f32 = f32::from_bits(r as u32);
@@ -540,8 +540,8 @@ fn test_l2_fp32_mul() {
 // L3: Vector Operations
 // ============================================================================
 
-#[test]
-fn test_l3_vec3_add() {
+#[tokio::test]
+async fn test_l3_vec3_add() {
     // Vec3 add: component-wise addition of 3 FP32 values
     // Pack as: a = {a.z, a.y, a.x} (96 bits, but we use 32-bit per component)
     let source = r#"
@@ -596,7 +596,7 @@ fn test_l3_vec3_add() {
     sim.set_ncl_input("top.by", 5.0f32.to_bits() as u64, 32);
     sim.set_ncl_input("top.bz", 6.0f32.to_bits() as u64, 32);
 
-    let result = sim.run_until_stable();
+    let result = sim.run_until_stable().await;
     println!("Converged in {} iterations", result.iterations);
 
     let rx = sim
@@ -617,8 +617,8 @@ fn test_l3_vec3_add() {
     println!("✓ Vec3 add passed");
 }
 
-#[test]
-fn test_l3_vec3_dot() {
+#[tokio::test]
+async fn test_l3_vec3_dot() {
     // Vec3 dot product: a.x*b.x + a.y*b.y + a.z*b.z
     let source = r#"
         use skalp::numeric::fp::*;
@@ -673,7 +673,7 @@ fn test_l3_vec3_dot() {
     sim.set_ncl_input("top.by", 5.0f32.to_bits() as u64, 32);
     sim.set_ncl_input("top.bz", 6.0f32.to_bits() as u64, 32);
 
-    let result = sim.run_until_stable();
+    let result = sim.run_until_stable().await;
     println!("Converged in {} iterations", result.iterations);
 
     let dot = sim
@@ -689,8 +689,8 @@ fn test_l3_vec3_dot() {
 // L5: Bit Manipulation Operations
 // ============================================================================
 
-#[test]
-fn test_l5_popcount_8bit() {
+#[tokio::test]
+async fn test_l5_popcount_8bit() {
     // Simple 4-bit popcount test (8-bit is too complex for quick simulation)
     let source = r#"
         async entity TestPopcount4 {
@@ -722,7 +722,7 @@ fn test_l5_popcount_8bit() {
 
     let mut passed = 0;
     for (a, expected) in test_cases {
-        let result = simulate_8bit(&netlist, a, 0);
+        let result = simulate_8bit(&netlist, a, 0).await;
         match result {
             Some(r) if r == expected => {
                 println!("  popcount4(0x{:02X}) = {} ✓", a, r);
@@ -735,8 +735,8 @@ fn test_l5_popcount_8bit() {
     assert_eq!(passed, 5, "Some L5 popcount tests failed");
 }
 
-#[test]
-fn test_l5_parity_8bit() {
+#[tokio::test]
+async fn test_l5_parity_8bit() {
     // Simple 4-bit parity test
     let source = r#"
         async entity TestParity4 {
@@ -766,7 +766,7 @@ fn test_l5_parity_8bit() {
 
     let mut passed = 0;
     for (a, expected) in test_cases {
-        let result = simulate_8bit(&netlist, a, 0);
+        let result = simulate_8bit(&netlist, a, 0).await;
         match result {
             Some(r) if r == expected => {
                 println!("  parity(0x{:02X}) = {} ✓", a, r);
@@ -779,8 +779,8 @@ fn test_l5_parity_8bit() {
     assert_eq!(passed, 5, "Some L5 parity tests failed");
 }
 
-#[test]
-fn test_l5_bitreverse_8bit() {
+#[tokio::test]
+async fn test_l5_bitreverse_8bit() {
     // Simple 4-bit reverse test (more reliable for simulation)
     let source = r#"
         async entity TestBitreverse4 {
@@ -812,7 +812,7 @@ fn test_l5_bitreverse_8bit() {
 
     let mut passed = 0;
     for (a, expected) in test_cases {
-        let result = simulate_8bit(&netlist, a, 0);
+        let result = simulate_8bit(&netlist, a, 0).await;
         match result {
             Some(r) if r == expected => {
                 println!("  bitreverse(0x{:02X}) = 0x{:02X} ✓", a, r);
@@ -828,8 +828,8 @@ fn test_l5_bitreverse_8bit() {
     assert_eq!(passed, 5, "Some L5 bitreverse tests failed");
 }
 
-#[test]
-fn test_simple_fp32_add() {
+#[tokio::test]
+async fn test_simple_fp32_add() {
     let source = r#"
         use skalp::numeric::fp::*;
 
@@ -854,7 +854,7 @@ fn test_simple_fp32_add() {
     let a = 2.0f32.to_bits() as u64;
     let b = 3.0f32.to_bits() as u64;
 
-    let result = simulate_32bit(&netlist, a, b);
+    let result = simulate_32bit(&netlist, a, b).await;
     match result {
         Some(r) => {
             let r_f32 = f32::from_bits(r as u32);
@@ -872,8 +872,8 @@ fn test_simple_fp32_add() {
 // in the compilation pipeline. See BUG #187 for details.
 // ============================================================================
 
-#[test]
-fn test_l3_vec3_sub() {
+#[tokio::test]
+async fn test_l3_vec3_sub() {
     // Vec3 subtract: component-wise subtraction of 3 FP32 values
     let source = r#"
         use skalp::numeric::fp::*;
@@ -927,7 +927,7 @@ fn test_l3_vec3_sub() {
     sim.set_ncl_input("top.by", 2.0f32.to_bits() as u64, 32);
     sim.set_ncl_input("top.bz", 3.0f32.to_bits() as u64, 32);
 
-    let result = sim.run_until_stable();
+    let result = sim.run_until_stable().await;
     println!("Converged in {} iterations", result.iterations);
 
     let rx = sim
@@ -948,8 +948,8 @@ fn test_l3_vec3_sub() {
     println!("✓ Vec3 sub passed");
 }
 
-#[test]
-fn test_l3_vec3_scale() {
+#[tokio::test]
+async fn test_l3_vec3_scale() {
     // Vec3 scalar multiply: multiply each component by a scalar
     let source = r#"
         use skalp::numeric::fp::*;
@@ -997,7 +997,7 @@ fn test_l3_vec3_scale() {
     sim.set_ncl_input("top.vz", 3.0f32.to_bits() as u64, 32);
     sim.set_ncl_input("top.s", 2.0f32.to_bits() as u64, 32);
 
-    let result = sim.run_until_stable();
+    let result = sim.run_until_stable().await;
     println!("Converged in {} iterations", result.iterations);
 
     let rx = sim
@@ -1018,8 +1018,8 @@ fn test_l3_vec3_scale() {
     println!("✓ Vec3 scale passed");
 }
 
-#[test]
-fn test_l3_vec2_length_squared() {
+#[tokio::test]
+async fn test_l3_vec2_length_squared() {
     // Vec2 length squared: x*x + y*y (avoids sqrt for simpler test)
     let source = r#"
         use skalp::numeric::fp::*;
@@ -1060,7 +1060,7 @@ fn test_l3_vec2_length_squared() {
     sim.set_ncl_input("top.vx", 3.0f32.to_bits() as u64, 32);
     sim.set_ncl_input("top.vy", 4.0f32.to_bits() as u64, 32);
 
-    let result = sim.run_until_stable();
+    let result = sim.run_until_stable().await;
     println!("Converged in {} iterations", result.iterations);
 
     let len_sq = sim
@@ -1078,8 +1078,8 @@ fn test_l3_vec2_length_squared() {
 // in the compilation pipeline. See BUG #187 for details.
 // ============================================================================
 
-#[test]
-fn test_l4_mat2x2_add() {
+#[tokio::test]
+async fn test_l4_mat2x2_add() {
     // 2x2 Matrix addition: component-wise addition
     // [ a00 a01 ]   [ b00 b01 ]   [ c00 c01 ]
     // [ a10 a11 ] + [ b10 b11 ] = [ c10 c11 ]
@@ -1145,7 +1145,7 @@ fn test_l4_mat2x2_add() {
     sim.set_ncl_input("top.b10", 0.0f32.to_bits() as u64, 32);
     sim.set_ncl_input("top.b11", 1.0f32.to_bits() as u64, 32);
 
-    let result = sim.run_until_stable();
+    let result = sim.run_until_stable().await;
     println!("Converged in {} iterations", result.iterations);
 
     let c00 = sim
@@ -1171,8 +1171,8 @@ fn test_l4_mat2x2_add() {
     println!("✓ Mat2x2 add passed");
 }
 
-#[test]
-fn test_l4_mat2x2_scalar_mul() {
+#[tokio::test]
+async fn test_l4_mat2x2_scalar_mul() {
     // 2x2 Matrix scalar multiply: multiply each element by a scalar
     let source = r#"
         use skalp::numeric::fp::*;
@@ -1226,7 +1226,7 @@ fn test_l4_mat2x2_scalar_mul() {
     sim.set_ncl_input("top.a11", 4.0f32.to_bits() as u64, 32);
     sim.set_ncl_input("top.s", 3.0f32.to_bits() as u64, 32);
 
-    let result = sim.run_until_stable();
+    let result = sim.run_until_stable().await;
     println!("Converged in {} iterations", result.iterations);
 
     let c00 = sim

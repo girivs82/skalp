@@ -1016,23 +1016,23 @@ impl GateLevelTestbench {
     }
 
     /// Apply pending inputs and run for N clock cycles (uses default clock "clk")
-    pub fn clock(&mut self, cycles: usize) -> &mut Self {
-        self.clock_signal("clk", cycles)
+    pub async fn clock(&mut self, cycles: usize) -> &mut Self {
+        self.clock_signal("clk", cycles).await
     }
 
     /// Apply pending inputs and run for N cycles on a specific clock signal
-    pub fn clock_signal(&mut self, clock_name: &str, cycles: usize) -> &mut Self {
+    pub async fn clock_signal(&mut self, clock_name: &str, cycles: usize) -> &mut Self {
         // Apply all pending inputs
         for (signal, value) in self.pending_inputs.drain() {
-            self.sim.set_input(&signal, value);
+            self.sim.set_input(&signal, value).await;
         }
 
         // Run clock cycles
         for _ in 0..cycles {
-            self.sim.set_input(clock_name, 0);
-            self.sim.step();
-            self.sim.set_input(clock_name, 1);
-            self.sim.step();
+            self.sim.set_input(clock_name, 0).await;
+            self.sim.step().await;
+            self.sim.set_input(clock_name, 1).await;
+            self.sim.step().await;
             self.cycle_count += 1;
         }
 
@@ -1040,11 +1040,11 @@ impl GateLevelTestbench {
     }
 
     /// Apply pending inputs and step the simulation once
-    pub fn step(&mut self) -> &mut Self {
+    pub async fn step(&mut self) -> &mut Self {
         for (signal, value) in self.pending_inputs.drain() {
-            self.sim.set_input(&signal, value);
+            self.sim.set_input(&signal, value).await;
         }
-        self.sim.step();
+        self.sim.step().await;
         self
     }
 
@@ -1052,45 +1052,45 @@ impl GateLevelTestbench {
     ///
     /// Handles both packed signals (e.g., "result") and bit-blasted signals
     /// (e.g., "result[0]", "result[1]", ..., "result[31]").
-    pub fn get_u32(&mut self, signal: &str) -> u32 {
+    pub async fn get_u32(&mut self, signal: &str) -> u32 {
         // If there are pending inputs, apply them and step
         if !self.pending_inputs.is_empty() {
-            self.step();
+            self.step().await;
         }
 
         // Try direct lookup first
-        if let Some(val) = self.sim.get_output(signal) {
+        if let Some(val) = self.sim.get_output(signal).await {
             return val as u32;
         }
 
         // Try bit-blasted signals
-        self.get_bitblasted_value(signal, 32) as u32
+        self.get_bitblasted_value(signal, 32).await as u32
     }
 
     /// Get an output value as u64
     ///
     /// Handles both packed signals and bit-blasted signals.
-    pub fn get_u64(&mut self, signal: &str) -> u64 {
+    pub async fn get_u64(&mut self, signal: &str) -> u64 {
         if !self.pending_inputs.is_empty() {
-            self.step();
+            self.step().await;
         }
 
         // Try direct lookup first
-        if let Some(val) = self.sim.get_output(signal) {
+        if let Some(val) = self.sim.get_output(signal).await {
             return val;
         }
 
         // Try bit-blasted signals
-        self.get_bitblasted_value(signal, 64)
+        self.get_bitblasted_value(signal, 64).await
     }
 
     /// Get a bit-blasted signal value (e.g., "signal[0]", "signal[1]", ...)
-    fn get_bitblasted_value(&self, signal: &str, max_bits: usize) -> u64 {
+    async fn get_bitblasted_value(&self, signal: &str, max_bits: usize) -> u64 {
         let mut result = 0u64;
 
         for bit in 0..max_bits {
             let bit_signal = format!("{}[{}]", signal, bit);
-            if let Some(val) = self.sim.get_output(&bit_signal) {
+            if let Some(val) = self.sim.get_output(&bit_signal).await {
                 if val != 0 {
                     result |= 1u64 << bit;
                 }
@@ -1107,10 +1107,10 @@ impl GateLevelTestbench {
     }
 
     /// Expect an output signal to have a specific value
-    pub fn expect(&mut self, signal: &str, expected: impl IntoSignalValue) -> &mut Self {
+    pub async fn expect(&mut self, signal: &str, expected: impl IntoSignalValue) -> &mut Self {
         let expected_bytes = expected.into_bytes();
         let expected_u64 = bytes_to_u64(&expected_bytes);
-        let actual = self.sim.get_output(signal).unwrap_or(0);
+        let actual = self.sim.get_output(signal).await.unwrap_or(0);
 
         assert_eq!(
             actual, expected_u64,
@@ -1122,8 +1122,8 @@ impl GateLevelTestbench {
     }
 
     /// Expect a fp32 output with tolerance
-    pub fn expect_fp32(&mut self, signal: &str, expected: f32, tolerance: f32) -> &mut Self {
-        let actual_bits = self.sim.get_output(signal).unwrap_or(0) as u32;
+    pub async fn expect_fp32(&mut self, signal: &str, expected: f32, tolerance: f32) -> &mut Self {
+        let actual_bits = self.sim.get_output(signal).await.unwrap_or(0) as u32;
         let actual = f32::from_bits(actual_bits);
         let diff = (actual - expected).abs();
 
@@ -1142,11 +1142,11 @@ impl GateLevelTestbench {
     }
 
     /// Apply reset for N cycles
-    pub fn reset(&mut self, cycles: usize) -> &mut Self {
+    pub async fn reset(&mut self, cycles: usize) -> &mut Self {
         self.set("rst", 1u8);
-        self.clock(cycles);
+        self.clock(cycles).await;
         self.set("rst", 0u8);
-        self.clock(1);
+        self.clock(1).await;
         self
     }
 

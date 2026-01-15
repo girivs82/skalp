@@ -34,7 +34,7 @@ fn compile_async_to_netlist(source: &str) -> skalp_lir::gate_netlist::GateNetlis
 }
 
 /// Test NCL simulation with CPU backend
-fn test_ncl_cpu(
+async fn test_ncl_cpu(
     netlist: skalp_lir::gate_netlist::GateNetlist,
     inputs: &[(&str, u64, usize)],
     expected_outputs: &[(&str, u64, usize)],
@@ -100,7 +100,7 @@ fn test_ncl_cpu(
 }
 
 /// Test NCL simulation with unified runtime (supports both CPU and GPU)
-fn test_ncl_unified(
+async fn test_ncl_unified(
     netlist: skalp_lir::gate_netlist::GateNetlist,
     inputs: &[(&str, u64, usize)],
     expected_outputs: &[(&str, u64, usize)],
@@ -129,7 +129,7 @@ fn test_ncl_unified(
     }
 
     // Run until stable
-    let result = sim.run_until_stable();
+    let result = sim.run_until_stable().await;
     println!(
         "  Iterations: {}, Stable: {}",
         result.iterations, result.is_stable
@@ -162,8 +162,8 @@ fn test_ncl_unified(
 // Logical Operation Tests
 // =============================================================================
 
-#[test]
-fn test_ncl_inverter() {
+#[tokio::test]
+async fn test_ncl_inverter() {
     println!("\n=== NCL Inverter Test ===");
 
     let source = r#"
@@ -198,17 +198,17 @@ fn test_ncl_inverter() {
 
     // Test case 1: a=0 -> y=1
     println!("\nTest: ~0 = 1");
-    let pass1 = test_ncl_cpu(netlist.clone(), &[("a", 0, 1)], &[("y", 1, 1)]);
+    let pass1 = test_ncl_cpu(netlist.clone(), &[("a", 0, 1)], &[("y", 1, 1)]).await;
 
     // Test case 2: a=1 -> y=0
     println!("\nTest: ~1 = 0");
-    let pass2 = test_ncl_cpu(netlist.clone(), &[("a", 1, 1)], &[("y", 0, 1)]);
+    let pass2 = test_ncl_cpu(netlist.clone(), &[("a", 1, 1)], &[("y", 0, 1)]).await;
 
     assert!(pass1 && pass2, "NCL inverter tests failed");
 }
 
-#[test]
-fn test_ncl_and_gate() {
+#[tokio::test]
+async fn test_ncl_and_gate() {
     println!("\n=== NCL AND Gate Test ===");
 
     let source = r#"
@@ -254,15 +254,16 @@ fn test_ncl_and_gate() {
             netlist.clone(),
             &[("a", a, 1), ("b", b, 1)],
             &[("y", expected, 1)],
-        );
+        )
+        .await;
         all_pass = all_pass && pass;
     }
 
     assert!(all_pass, "NCL AND gate tests failed");
 }
 
-#[test]
-fn test_ncl_or_gate() {
+#[tokio::test]
+async fn test_ncl_or_gate() {
     println!("\n=== NCL OR Gate Test ===");
 
     let source = r#"
@@ -292,15 +293,16 @@ fn test_ncl_or_gate() {
             netlist.clone(),
             &[("a", a, 1), ("b", b, 1)],
             &[("y", expected, 1)],
-        );
+        )
+        .await;
         all_pass = all_pass && pass;
     }
 
     assert!(all_pass, "NCL OR gate tests failed");
 }
 
-#[test]
-fn test_ncl_xor_gate() {
+#[tokio::test]
+async fn test_ncl_xor_gate() {
     println!("\n=== NCL XOR Gate Test ===");
 
     let source = r#"
@@ -330,7 +332,8 @@ fn test_ncl_xor_gate() {
             netlist.clone(),
             &[("a", a, 1), ("b", b, 1)],
             &[("y", expected, 1)],
-        );
+        )
+        .await;
         all_pass = all_pass && pass;
     }
 
@@ -341,8 +344,8 @@ fn test_ncl_xor_gate() {
 // Multi-bit Logical Operation Tests
 // =============================================================================
 
-#[test]
-fn test_ncl_and_8bit() {
+#[tokio::test]
+async fn test_ncl_and_8bit() {
     println!("\n=== NCL 8-bit AND Test ===");
 
     let source = r#"
@@ -377,15 +380,16 @@ fn test_ncl_and_8bit() {
             netlist.clone(),
             &[("a", a, 8), ("b", b, 8)],
             &[("y", expected, 8)],
-        );
+        )
+        .await;
         all_pass = all_pass && pass;
     }
 
     assert!(all_pass, "NCL 8-bit AND tests failed");
 }
 
-#[test]
-fn test_ncl_or_8bit() {
+#[tokio::test]
+async fn test_ncl_or_8bit() {
     println!("\n=== NCL 8-bit OR Test ===");
 
     let source = r#"
@@ -420,15 +424,16 @@ fn test_ncl_or_8bit() {
             netlist.clone(),
             &[("a", a, 8), ("b", b, 8)],
             &[("y", expected, 8)],
-        );
+        )
+        .await;
         all_pass = all_pass && pass;
     }
 
     assert!(all_pass, "NCL 8-bit OR tests failed");
 }
 
-#[test]
-fn test_ncl_xor_8bit() {
+#[tokio::test]
+async fn test_ncl_xor_8bit() {
     println!("\n=== NCL 8-bit XOR Test ===");
 
     let source = r#"
@@ -463,15 +468,16 @@ fn test_ncl_xor_8bit() {
             netlist.clone(),
             &[("a", a, 8), ("b", b, 8)],
             &[("y", expected, 8)],
-        );
+        )
+        .await;
         all_pass = all_pass && pass;
     }
 
     assert!(all_pass, "NCL 8-bit XOR tests failed");
 }
 
-#[test]
-fn test_ncl_not_8bit() {
+#[tokio::test]
+async fn test_ncl_not_8bit() {
     println!("\n=== NCL 8-bit NOT Test ===");
 
     let source = r#"
@@ -496,7 +502,7 @@ fn test_ncl_not_8bit() {
     let mut all_pass = true;
     for (a, expected) in test_cases {
         println!("\nTest: ~0x{:02X} = 0x{:02X}", a, expected);
-        let pass = test_ncl_cpu(netlist.clone(), &[("a", a, 8)], &[("y", expected, 8)]);
+        let pass = test_ncl_cpu(netlist.clone(), &[("a", a, 8)], &[("y", expected, 8)]).await;
         all_pass = all_pass && pass;
     }
 
@@ -507,8 +513,8 @@ fn test_ncl_not_8bit() {
 // Arithmetic Operation Tests
 // =============================================================================
 
-#[test]
-fn test_ncl_add_8bit() {
+#[tokio::test]
+async fn test_ncl_add_8bit() {
     println!("\n=== NCL 8-bit ADD Test ===");
 
     let source = r#"
@@ -545,15 +551,16 @@ fn test_ncl_add_8bit() {
             netlist.clone(),
             &[("a", a, 8), ("b", b, 8)],
             &[("sum", expected, 8)],
-        );
+        )
+        .await;
         all_pass = all_pass && pass;
     }
 
     assert!(all_pass, "NCL 8-bit ADD tests failed");
 }
 
-#[test]
-fn test_ncl_sub_8bit() {
+#[tokio::test]
+async fn test_ncl_sub_8bit() {
     println!("\n=== NCL 8-bit SUB Test ===");
 
     let source = r#"
@@ -589,15 +596,16 @@ fn test_ncl_sub_8bit() {
             netlist.clone(),
             &[("a", a, 8), ("b", b, 8)],
             &[("diff", expected, 8)],
-        );
+        )
+        .await;
         all_pass = all_pass && pass;
     }
 
     assert!(all_pass, "NCL 8-bit SUB tests failed");
 }
 
-#[test]
-fn test_ncl_mul_4bit() {
+#[tokio::test]
+async fn test_ncl_mul_4bit() {
     println!("\n=== NCL 4-bit MUL Test ===");
 
     // Use 4-bit to keep gate count manageable
@@ -635,7 +643,8 @@ fn test_ncl_mul_4bit() {
             netlist.clone(),
             &[("a", a, 4), ("b", b, 4)],
             &[("prod", expected, 8)],
-        );
+        )
+        .await;
         all_pass = all_pass && pass;
     }
 
@@ -646,8 +655,8 @@ fn test_ncl_mul_4bit() {
 // Comparison Tests
 // =============================================================================
 
-#[test]
-fn test_ncl_eq_8bit() {
+#[tokio::test]
+async fn test_ncl_eq_8bit() {
     println!("\n=== NCL 8-bit EQ Test ===");
 
     let source = r#"
@@ -683,15 +692,16 @@ fn test_ncl_eq_8bit() {
             netlist.clone(),
             &[("a", a, 8), ("b", b, 8)],
             &[("eq", expected, 1)],
-        );
+        )
+        .await;
         all_pass = all_pass && pass;
     }
 
     assert!(all_pass, "NCL 8-bit EQ tests failed");
 }
 
-#[test]
-fn test_ncl_lt_8bit() {
+#[tokio::test]
+async fn test_ncl_lt_8bit() {
     println!("\n=== NCL 8-bit LT Test ===");
 
     let source = r#"
@@ -728,7 +738,8 @@ fn test_ncl_lt_8bit() {
             netlist.clone(),
             &[("a", a, 8), ("b", b, 8)],
             &[("lt", expected, 1)],
-        );
+        )
+        .await;
         all_pass = all_pass && pass;
     }
 
@@ -739,9 +750,9 @@ fn test_ncl_lt_8bit() {
 // GPU Backend Tests
 // =============================================================================
 
-#[test]
+#[tokio::test]
 #[cfg(target_os = "macos")]
-fn test_ncl_gpu_inverter() {
+async fn test_ncl_gpu_inverter() {
     println!("\n=== NCL GPU Inverter Test ===");
 
     let source = r#"
@@ -768,17 +779,18 @@ fn test_ncl_gpu_inverter() {
         &[("a", 0, 1)],
         &[("y", 1, 1)],
         true, // use GPU
-    );
+    )
+    .await;
 
     println!("\nTest: ~1 = 0 (GPU)");
-    let pass2 = test_ncl_unified(netlist.clone(), &[("a", 1, 1)], &[("y", 0, 1)], true);
+    let pass2 = test_ncl_unified(netlist.clone(), &[("a", 1, 1)], &[("y", 0, 1)], true).await;
 
     assert!(pass1 && pass2, "NCL GPU inverter tests failed");
 }
 
-#[test]
+#[tokio::test]
 #[cfg(target_os = "macos")]
-fn test_ncl_gpu_and_8bit() {
+async fn test_ncl_gpu_and_8bit() {
     println!("\n=== NCL GPU 8-bit AND Test ===");
 
     let source = r#"
@@ -817,16 +829,17 @@ fn test_ncl_gpu_and_8bit() {
             &[("a", a, 8), ("b", b, 8)],
             &[("y", expected, 8)],
             true,
-        );
+        )
+        .await;
         all_pass = all_pass && pass;
     }
 
     assert!(all_pass, "NCL GPU 8-bit AND tests failed");
 }
 
-#[test]
+#[tokio::test]
 #[cfg(target_os = "macos")]
-fn test_ncl_gpu_add_8bit() {
+async fn test_ncl_gpu_add_8bit() {
     println!("\n=== NCL GPU 8-bit ADD Test ===");
 
     let source = r#"
@@ -863,16 +876,17 @@ fn test_ncl_gpu_add_8bit() {
             &[("a", a, 8), ("b", b, 8)],
             &[("sum", expected, 8)],
             true,
-        );
+        )
+        .await;
         all_pass = all_pass && pass;
     }
 
     assert!(all_pass, "NCL GPU 8-bit ADD tests failed");
 }
 
-#[test]
+#[tokio::test]
 #[cfg(target_os = "macos")]
-fn test_ncl_gpu_vs_cpu_consistency() {
+async fn test_ncl_gpu_vs_cpu_consistency() {
     println!("\n=== NCL GPU vs CPU Consistency Test ===");
 
     let source = r#"
@@ -928,7 +942,8 @@ fn test_ncl_gpu_vs_cpu_consistency() {
                 ("sum", expected_sum, 8),
             ],
             false,
-        );
+        )
+        .await;
 
         // GPU test
         println!("  GPU:");
@@ -942,7 +957,8 @@ fn test_ncl_gpu_vs_cpu_consistency() {
                 ("sum", expected_sum, 8),
             ],
             true,
-        );
+        )
+        .await;
 
         if cpu_pass && gpu_pass {
             println!("  ✓ CPU and GPU results match");
@@ -959,8 +975,8 @@ fn test_ncl_gpu_vs_cpu_consistency() {
 // Complex Operation Tests
 // =============================================================================
 
-#[test]
-fn test_ncl_mux() {
+#[tokio::test]
+async fn test_ncl_mux() {
     println!("\n=== NCL MUX Test ===");
 
     let source = r#"
@@ -988,7 +1004,8 @@ fn test_ncl_mux() {
         netlist.clone(),
         &[("sel", 0, 1), ("a", 42, 8), ("b", 100, 8)],
         &[("y", 42, 8)],
-    );
+    )
+    .await;
 
     // sel=1: output b
     println!("\nTest: sel=1, a=42, b=100 -> 100");
@@ -996,13 +1013,14 @@ fn test_ncl_mux() {
         netlist.clone(),
         &[("sel", 1, 1), ("a", 42, 8), ("b", 100, 8)],
         &[("y", 100, 8)],
-    );
+    )
+    .await;
 
     assert!(pass1 && pass2, "NCL MUX tests failed");
 }
 
-#[test]
-fn test_ncl_combined_logic() {
+#[tokio::test]
+async fn test_ncl_combined_logic() {
     println!("\n=== NCL Combined Logic Test ===");
 
     let source = r#"
@@ -1038,15 +1056,16 @@ fn test_ncl_combined_logic() {
             netlist.clone(),
             &[("a", a, 8), ("b", b, 8)],
             &[("y", expected, 8)],
-        );
+        )
+        .await;
         all_pass = all_pass && pass;
     }
 
     assert!(all_pass, "NCL combined logic tests failed");
 }
 
-#[test]
-fn test_ncl_shift_left() {
+#[tokio::test]
+async fn test_ncl_shift_left() {
     println!("\n=== NCL Shift Left Test ===");
 
     let source = r#"
@@ -1071,15 +1090,15 @@ fn test_ncl_shift_left() {
     let mut all_pass = true;
     for (a, expected) in test_cases {
         println!("\nTest: 0x{:02X} << 1 = 0x{:02X}", a, expected);
-        let pass = test_ncl_cpu(netlist.clone(), &[("a", a, 8)], &[("y", expected, 8)]);
+        let pass = test_ncl_cpu(netlist.clone(), &[("a", a, 8)], &[("y", expected, 8)]).await;
         all_pass = all_pass && pass;
     }
 
     assert!(all_pass, "NCL shift left tests failed");
 }
 
-#[test]
-fn test_ncl_shift_right() {
+#[tokio::test]
+async fn test_ncl_shift_right() {
     println!("\n=== NCL Shift Right Test ===");
 
     let source = r#"
@@ -1104,7 +1123,7 @@ fn test_ncl_shift_right() {
     let mut all_pass = true;
     for (a, expected) in test_cases {
         println!("\nTest: 0x{:02X} >> 1 = 0x{:02X}", a, expected);
-        let pass = test_ncl_cpu(netlist.clone(), &[("a", a, 8)], &[("y", expected, 8)]);
+        let pass = test_ncl_cpu(netlist.clone(), &[("a", a, 8)], &[("y", expected, 8)]).await;
         all_pass = all_pass && pass;
     }
 

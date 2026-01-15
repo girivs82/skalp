@@ -47,8 +47,8 @@ impl HierarchicalAsync {
 }
 "#;
 
-#[test]
-fn test_hierarchical_ncl_async() {
+#[tokio::test]
+async fn test_hierarchical_ncl_async() {
     let hir = parse_and_build_hir(HIERARCHICAL_ASYNC_SOURCE).expect("Failed to parse");
     let mir_compiler = MirCompiler::new();
     let mir = mir_compiler
@@ -90,7 +90,7 @@ fn test_hierarchical_ncl_async() {
     sim.set_ncl_input("top.data1", 10, 8);
     sim.set_ncl_input("top.data2", 20, 8);
     sim.set_ncl_input("top.sel", 0, 1);
-    let result = sim.run_until_stable();
+    let result = sim.run_until_stable().await;
     println!("Test 1 (add): iterations={}", result.iterations);
 
     match sim.get_ncl_output("top.result", 8) {
@@ -109,8 +109,8 @@ fn test_hierarchical_ncl_async() {
 
 /// Test the same circuit using direct (non-hierarchical) compilation
 /// This helps verify whether the issue is with hierarchical flattening
-#[test]
-fn test_direct_ncl_async() {
+#[tokio::test]
+async fn test_direct_ncl_async() {
     let hir = parse_and_build_hir(HIERARCHICAL_ASYNC_SOURCE).expect("Failed to parse");
     let mir_compiler = MirCompiler::new();
     let mir = mir_compiler
@@ -151,7 +151,7 @@ fn test_direct_ncl_async() {
     sim.set_ncl_input("data1", 10, 8);
     sim.set_ncl_input("data2", 20, 8);
     sim.set_ncl_input("sel", 0, 1);
-    let result = sim.run_until_stable();
+    let result = sim.run_until_stable().await;
     println!("Direct Test 1 (add): iterations={}", result.iterations);
 
     match sim.get_ncl_output("result", 8) {

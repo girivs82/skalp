@@ -89,9 +89,9 @@ impl FpMinMaxTest {{
     hier_result.flatten()
 }
 
-#[test]
+#[tokio::test]
 #[ignore = "BUG #191: FP comparison with negative numbers not yet fixed in NCL"]
-fn test_fp_min_negative_vs_positive() {
+async fn test_fp_min_negative_vs_positive() {
     let netlist = compile_fp_minmax_test();
 
     println!(
@@ -196,7 +196,7 @@ fn test_fp_min_negative_vs_positive() {
     let mut iterations = 0;
     let mut last_output: Option<u64> = None;
     while !sim.is_ncl_complete() && iterations < 500 {
-        sim.step();
+        sim.step().await;
         iterations += 1;
 
         // Print first few iterations and changes
@@ -241,9 +241,9 @@ fn test_fp_min_negative_vs_positive() {
     }
 }
 
-#[test]
+#[tokio::test]
 #[ignore = "BUG #191: FP comparison with negative numbers not yet fixed in NCL"]
-fn test_fp_max_negative_vs_positive() {
+async fn test_fp_max_negative_vs_positive() {
     let netlist = compile_fp_minmax_test();
 
     let config = UnifiedSimConfig {
@@ -268,7 +268,7 @@ fn test_fp_max_negative_vs_positive() {
 
     let mut iterations = 0;
     while !sim.is_ncl_complete() && iterations < 100000 {
-        sim.step();
+        sim.step().await;
         iterations += 1;
     }
     println!("  Converged after {} iterations", iterations);

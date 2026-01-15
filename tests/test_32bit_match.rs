@@ -27,8 +27,8 @@ impl Match32Bit {
 }
 "#;
 
-#[test]
-fn test_32bit_match() {
+#[tokio::test]
+async fn test_32bit_match() {
     println!("\n=== 32-bit Match Structure ===\n");
 
     let hir = parse_and_build_hir(MATCH_32BIT).expect("Failed to parse");
@@ -68,7 +68,7 @@ fn test_32bit_match() {
     sim.set_ncl_input("top.a", 100, 32);
     sim.set_ncl_input("top.b", 50, 32);
 
-    let result = sim.run_until_stable();
+    let result = sim.run_until_stable().await;
     println!(
         "Iterations: {}, Stable: {}",
         result.iterations, result.is_stable

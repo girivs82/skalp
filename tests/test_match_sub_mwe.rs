@@ -70,7 +70,7 @@ impl SubAlone {
 }
 "#;
 
-fn run_test(name: &str, source: &str, test_inputs: Vec<(&str, u64, usize)>) -> bool {
+async fn run_test(name: &str, source: &str, test_inputs: Vec<(&str, u64, usize)>) -> bool {
     println!("\n=== {} ===", name);
 
     let hir = parse_and_build_hir(source).expect("Failed to parse");
@@ -126,7 +126,7 @@ fn run_test(name: &str, source: &str, test_inputs: Vec<(&str, u64, usize)>) -> b
         sim.set_ncl_input(&format!("top.{}", name), *value, *width);
     }
 
-    let result = sim.run_until_stable();
+    let result = sim.run_until_stable().await;
     println!(
         "Iterations: {}, Stable: {}",
         result.iterations, result.is_stable
@@ -150,51 +150,55 @@ fn run_test(name: &str, source: &str, test_inputs: Vec<(&str, u64, usize)>) -> b
     true
 }
 
-#[test]
-fn test_sub_alone() {
+#[tokio::test]
+async fn test_sub_alone() {
     // SUB without match should work
     let pass = run_test(
         "SUB alone (no match)",
         SUB_ALONE,
         vec![("a", 10, 8), ("b", 3, 8)],
-    );
+    )
+    .await;
     assert!(pass, "SUB alone should converge");
 }
 
-#[test]
-fn test_match_sub_only() {
+#[tokio::test]
+async fn test_match_sub_only() {
     // SUB in match - does this oscillate?
     let pass = run_test(
         "MATCH with SUB only",
         MATCH_SUB_ONLY,
         vec![("sel", 0, 1), ("a", 10, 8), ("b", 3, 8)],
-    );
+    )
+    .await;
     // Note: if this oscillates, the bug is in the combination of match + SUB
     if !pass {
         println!("BUG: SUB in match causes oscillation!");
     }
 }
 
-#[test]
-fn test_match_add_sub() {
+#[tokio::test]
+async fn test_match_add_sub() {
     // ADD and SUB in match - the key test
     let pass = run_test(
         "MATCH ADD+SUB (sel=0, ADD)",
         MATCH_ADD_SUB,
         vec![("sel", 0, 1), ("a", 10, 8), ("b", 3, 8)],
-    );
+    )
+    .await;
     if !pass {
         println!("BUG: ADD+SUB match causes oscillation even when selecting ADD!");
     }
 }
 
-#[test]
-fn test_ifelse_add_sub() {
+#[tokio::test]
+async fn test_ifelse_add_sub() {
     // Same as match but with if-else - for comparison
     let pass = run_test(
         "IF-ELSE ADD+SUB (sel=0, ADD)",
         IFELSE_ADD_SUB,
         vec![("sel", 0, 1), ("a", 10, 8), ("b", 3, 8)],
-    );
+    )
+    .await;
     assert!(pass, "IF-ELSE should converge");
 }

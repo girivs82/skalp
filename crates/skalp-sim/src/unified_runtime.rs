@@ -71,12 +71,18 @@
 //! let result = sim.get_ncl_output("y", 8);
 //! ```
 
+use crate::cpu_runtime::CpuRuntime;
 use crate::ncl_sim::{NclSimConfig, NclSimStats, NclSimulator};
+use crate::simulator::SimulationRuntime;
 use indexmap::IndexMap;
 use skalp_lir::gate_netlist::GateNetlist;
 use skalp_lir::synth::PipelineAnnotations;
+use skalp_sir::SirModule;
 use std::collections::VecDeque;
 use std::path::Path;
+
+#[cfg(target_os = "macos")]
+use crate::gpu_runtime::GpuRuntime;
 
 /// Simulation abstraction level
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -206,12 +212,21 @@ pub struct UnifiedSimulator {
     output_delay_buffers: IndexMap<String, VecDeque<u64>>,
     /// Latency adjustment per output (in cycles)
     latency_adjustments: IndexMap<String, u32>,
+    /// Behavioral input port names (stored when loading behavioral module)
+    behavioral_input_names: Vec<String>,
+    /// Behavioral output port names (stored when loading behavioral module)
+    behavioral_output_names: Vec<String>,
 }
 
 /// Internal backend enum to hold the actual simulator
 enum SimulatorBackend {
     /// Not yet loaded
     Uninitialized,
+    /// Behavioral CPU simulation (uses SirModule)
+    BehavioralCpu(CpuRuntime),
+    /// Behavioral GPU simulation (macOS only, uses SirModule with Metal)
+    #[cfg(target_os = "macos")]
+    BehavioralGpu(GpuRuntime),
     /// Gate-level CPU simulation (synchronous)
     GateLevelCpu(crate::gate_simulator::GateLevelSimulator),
     /// Gate-level GPU simulation (macOS only, synchronous)
@@ -237,6 +252,8 @@ impl UnifiedSimulator {
             pipeline_annotations: None,
             output_delay_buffers: IndexMap::new(),
             latency_adjustments: IndexMap::new(),
+            behavioral_input_names: Vec::new(),
+            behavioral_output_names: Vec::new(),
         })
     }
 
@@ -415,11 +432,77 @@ impl UnifiedSimulator {
         Ok(())
     }
 
+    /// Load a behavioral SirModule for simulation
+    ///
+    /// This is the high-level simulation mode using the original SIR representation
+    /// before technology mapping. It's faster but less accurate than gate-level.
+    ///
+    /// # Arguments
+    /// * `module` - The SirModule from MIR compilation
+    ///
+    /// # Example
+    /// ```ignore
+    /// let sir_module = compile_to_sir(&source)?;
+    /// sim.load_behavioral(&sir_module).await?;
+    /// ```
+    pub async fn load_behavioral(&mut self, module: &SirModule) -> Result<(), String> {
+        if self.config.level != SimLevel::Behavioral {
+            return Err(
+                "Config level is not Behavioral. Set level to SimLevel::Behavioral.".into(),
+            );
+        }
+
+        // Store port names from the SirModule for later introspection
+        self.behavioral_input_names = module.inputs.iter().map(|p| p.name.clone()).collect();
+        self.behavioral_output_names = module.outputs.iter().map(|p| p.name.clone()).collect();
+
+        let use_gpu = match self.config.hw_accel {
+            HwAccel::Cpu => false,
+            HwAccel::Gpu => true,
+            HwAccel::Auto => cfg!(target_os = "macos"),
+        };
+
+        if use_gpu {
+            #[cfg(target_os = "macos")]
+            {
+                match GpuRuntime::new().await {
+                    Ok(mut runtime) => {
+                        if let Err(e) = runtime.initialize(module).await {
+                            eprintln!("GPU behavioral init failed, falling back to CPU: {}", e);
+                            // Fall through to CPU
+                        } else {
+                            self.backend = SimulatorBackend::BehavioralGpu(runtime);
+                            return Ok(());
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("GPU runtime creation failed, falling back to CPU: {}", e);
+                        // Fall through to CPU
+                    }
+                }
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                eprintln!("GPU requested but not available on this platform, using CPU");
+            }
+        }
+
+        // CPU fallback
+        let mut runtime = CpuRuntime::new();
+        runtime
+            .initialize(module)
+            .await
+            .map_err(|e| format!("CPU behavioral init failed: {}", e))?;
+        self.backend = SimulatorBackend::BehavioralCpu(runtime);
+        Ok(())
+    }
+
     /// Check if GPU is being used
     pub fn is_using_gpu(&self) -> bool {
         #[cfg(target_os = "macos")]
         {
             match &self.backend {
+                SimulatorBackend::BehavioralGpu(_) => true,
                 SimulatorBackend::GateLevelGpu(_) => true,
                 SimulatorBackend::NclGpu(runtime) => runtime.is_using_gpu(),
                 _ => false,
@@ -435,9 +518,14 @@ impl UnifiedSimulator {
     pub fn device_info(&self) -> String {
         match &self.backend {
             SimulatorBackend::Uninitialized => "Not initialized".to_string(),
-            SimulatorBackend::GateLevelCpu(_) => "CPU (Sync)".to_string(),
+            SimulatorBackend::BehavioralCpu(_) => "CPU (Behavioral)".to_string(),
             #[cfg(target_os = "macos")]
-            SimulatorBackend::GateLevelGpu(gpu) => format!("GPU (Metal): {}", gpu.device_name()),
+            SimulatorBackend::BehavioralGpu(_) => "GPU (Metal, Behavioral)".to_string(),
+            SimulatorBackend::GateLevelCpu(_) => "CPU (Gate-level, Sync)".to_string(),
+            #[cfg(target_os = "macos")]
+            SimulatorBackend::GateLevelGpu(gpu) => {
+                format!("GPU (Metal, Gate-level): {}", gpu.device_name())
+            }
             SimulatorBackend::NclCpu(_) => "CPU (NCL/Async)".to_string(),
             #[cfg(target_os = "macos")]
             SimulatorBackend::NclGpu(gpu) => {
@@ -449,10 +537,21 @@ impl UnifiedSimulator {
     /// Set an input value (as u64)
     ///
     /// For NCL mode, this sets the dual-rail encoded value (use set_ncl_input for more control)
-    pub fn set_input(&mut self, name: &str, value: u64) {
+    pub async fn set_input(&mut self, name: &str, value: u64) {
         match &mut self.backend {
             SimulatorBackend::Uninitialized => {
                 eprintln!("Warning: set_input called before loading design");
+            }
+            SimulatorBackend::BehavioralCpu(runtime) => {
+                // Convert u64 to bytes (little-endian)
+                let bytes = value.to_le_bytes().to_vec();
+                let _ = runtime.set_input(name, &bytes).await;
+            }
+            #[cfg(target_os = "macos")]
+            SimulatorBackend::BehavioralGpu(runtime) => {
+                // Convert u64 to bytes (little-endian)
+                let bytes = value.to_le_bytes().to_vec();
+                let _ = runtime.set_input(name, &bytes).await;
             }
             SimulatorBackend::GateLevelCpu(sim) => {
                 // Convert u64 to bool vector
@@ -688,7 +787,7 @@ impl UnifiedSimulator {
     /// If pipeline annotations have been loaded and this output has a
     /// latency adjustment, the delayed value is returned. Otherwise,
     /// returns the current (raw) value.
-    pub fn get_output(&self, name: &str) -> Option<u64> {
+    pub async fn get_output(&self, name: &str) -> Option<u64> {
         // Check if this output has a delay buffer with values
         if let Some(buffer) = self.output_delay_buffers.get(name) {
             // Return the oldest value in the buffer (front)
@@ -696,7 +795,7 @@ impl UnifiedSimulator {
         }
 
         // No latency adjustment, return raw value
-        self.get_output_raw(name)
+        self.get_output_raw(name).await
     }
 
     /// Get the raw (non-delayed) output value
@@ -706,9 +805,30 @@ impl UnifiedSimulator {
     ///
     /// For NCL mode, this returns the value if all bits are valid DATA,
     /// otherwise returns None.
-    pub fn get_output_raw(&self, name: &str) -> Option<u64> {
+    pub async fn get_output_raw(&self, name: &str) -> Option<u64> {
         match &self.backend {
             SimulatorBackend::Uninitialized => None,
+            SimulatorBackend::BehavioralCpu(runtime) => {
+                // Get bytes from behavioral runtime and convert to u64
+                runtime.get_output(name).await.ok().map(|bytes| {
+                    let mut value = 0u64;
+                    for (i, &byte) in bytes.iter().take(8).enumerate() {
+                        value |= (byte as u64) << (i * 8);
+                    }
+                    value
+                })
+            }
+            #[cfg(target_os = "macos")]
+            SimulatorBackend::BehavioralGpu(runtime) => {
+                // Get bytes from behavioral runtime and convert to u64
+                runtime.get_output(name).await.ok().map(|bytes| {
+                    let mut value = 0u64;
+                    for (i, &byte) in bytes.iter().take(8).enumerate() {
+                        value |= (byte as u64) << (i * 8);
+                    }
+                    value
+                })
+            }
             SimulatorBackend::GateLevelCpu(sim) => sim.get_output(name).map(|bits| {
                 bits.iter()
                     .enumerate()
@@ -742,11 +862,20 @@ impl UnifiedSimulator {
     }
 
     /// Get all output values
-    pub fn get_all_outputs(&self) -> IndexMap<String, u64> {
+    pub async fn get_all_outputs(&self) -> IndexMap<String, u64> {
         let mut outputs = IndexMap::new();
 
         let output_names: Vec<String> = match &self.backend {
             SimulatorBackend::Uninitialized => vec![],
+            SimulatorBackend::BehavioralCpu(_) => {
+                // Behavioral outputs - return empty for now, users should query specific outputs
+                vec![]
+            }
+            #[cfg(target_os = "macos")]
+            SimulatorBackend::BehavioralGpu(_) => {
+                // Behavioral outputs - return empty for now, users should query specific outputs
+                vec![]
+            }
             SimulatorBackend::GateLevelCpu(sim) => sim.get_output_names(),
             #[cfg(target_os = "macos")]
             SimulatorBackend::GateLevelGpu(runtime) => runtime.get_output_names(),
@@ -764,7 +893,7 @@ impl UnifiedSimulator {
         };
 
         for name in output_names {
-            if let Some(value) = self.get_output(&name) {
+            if let Some(value) = self.get_output(&name).await {
                 outputs.insert(name, value);
             }
         }
@@ -776,10 +905,17 @@ impl UnifiedSimulator {
     ///
     /// For NCL mode, this runs a single combinational propagation iteration.
     /// Use `run_until_stable()` for full wavefront propagation.
-    pub fn step(&mut self) {
+    pub async fn step(&mut self) {
         match &mut self.backend {
             SimulatorBackend::Uninitialized => {
                 eprintln!("Warning: step called before loading design");
+            }
+            SimulatorBackend::BehavioralCpu(runtime) => {
+                let _ = runtime.step().await;
+            }
+            #[cfg(target_os = "macos")]
+            SimulatorBackend::BehavioralGpu(runtime) => {
+                let _ = runtime.step().await;
             }
             SimulatorBackend::GateLevelCpu(sim) => {
                 sim.step();
@@ -804,7 +940,7 @@ impl UnifiedSimulator {
         // Update delay buffers for latency adjustment
         // Push current raw values, pop oldest values
         for (output_name, delay) in &self.latency_adjustments {
-            if let Some(raw_value) = self.get_output_raw(output_name) {
+            if let Some(raw_value) = self.get_output_raw(output_name).await {
                 let buffer = self
                     .output_delay_buffers
                     .entry(output_name.clone())
@@ -831,41 +967,41 @@ impl UnifiedSimulator {
         if self.config.capture_waveforms {
             let snapshot = SimulationSnapshot {
                 cycle: self.current_cycle,
-                signals: self.get_all_outputs(),
+                signals: self.get_all_outputs().await,
             };
             self.waveforms.push(snapshot);
         }
     }
 
     /// Run simulation with clock toggling for a given number of cycles (sync mode only)
-    pub fn run_clocked(&mut self, cycles: u64, clock_name: &str) -> UnifiedSimResult {
+    pub async fn run_clocked(&mut self, cycles: u64, clock_name: &str) -> UnifiedSimResult {
         if self.is_ncl_mode() {
             eprintln!("Warning: run_clocked called in NCL mode. NCL circuits don't use clocks.");
-            return self.build_result();
+            return self.build_result().await;
         }
 
         for _ in 0..cycles {
             // Low phase
-            self.set_input(clock_name, 0);
-            self.step();
+            self.set_input(clock_name, 0).await;
+            self.step().await;
             // High phase
-            self.set_input(clock_name, 1);
-            self.step();
+            self.set_input(clock_name, 1).await;
+            self.step().await;
         }
 
-        self.build_result()
+        self.build_result().await
     }
 
     /// Run simulation for a given number of steps (without clock toggling)
     ///
     /// For NCL mode, this runs a fixed number of iterations (not wavefronts).
     /// Use `run_until_stable()` for proper NCL wavefront propagation.
-    pub fn run(&mut self, steps: u64) -> UnifiedSimResult {
+    pub async fn run(&mut self, steps: u64) -> UnifiedSimResult {
         for _ in 0..steps {
-            self.step();
+            self.step().await;
         }
 
-        self.build_result()
+        self.build_result().await
     }
 
     /// Run NCL simulation until stable (no signal changes)
@@ -874,7 +1010,7 @@ impl UnifiedSimulator {
     /// It iterates until the circuit reaches a stable state (either all DATA or all NULL).
     ///
     /// Returns the result including number of iterations taken.
-    pub fn run_until_stable(&mut self) -> UnifiedSimResult {
+    pub async fn run_until_stable(&mut self) -> UnifiedSimResult {
         match &mut self.backend {
             SimulatorBackend::NclCpu(ncl_sim) => {
                 let iterations = ncl_sim.run_until_stable(self.config.max_iterations);
@@ -885,18 +1021,18 @@ impl UnifiedSimulator {
                     self.total_wavefronts += 1;
                 }
 
-                self.build_result()
+                self.build_result().await
             }
             #[cfg(target_os = "macos")]
             SimulatorBackend::NclGpu(runtime) => {
                 let iterations = runtime.run_until_stable(self.config.max_iterations);
                 self.total_iterations += iterations as u64;
                 self.total_wavefronts += 1;
-                self.build_result()
+                self.build_result().await
             }
             _ => {
                 eprintln!("Warning: run_until_stable called but not in NCL mode");
-                self.build_result()
+                self.build_result().await
             }
         }
     }
@@ -961,7 +1097,7 @@ impl UnifiedSimulator {
     }
 
     /// Build the result struct
-    fn build_result(&self) -> UnifiedSimResult {
+    async fn build_result(&self) -> UnifiedSimResult {
         let is_stable = match &self.backend {
             SimulatorBackend::NclCpu(ncl_sim) => ncl_sim.stats().is_stable,
             #[cfg(target_os = "macos")]
@@ -973,7 +1109,7 @@ impl UnifiedSimulator {
             cycles: self.current_cycle,
             iterations: self.total_iterations,
             wavefronts: self.total_wavefronts,
-            outputs: self.get_all_outputs(),
+            outputs: self.get_all_outputs().await,
             waveforms: self.waveforms.clone(),
             used_gpu: self.is_using_gpu(),
             is_stable,
@@ -985,6 +1121,15 @@ impl UnifiedSimulator {
     pub fn reset(&mut self) {
         match &mut self.backend {
             SimulatorBackend::Uninitialized => {}
+            SimulatorBackend::BehavioralCpu(_) => {
+                // Behavioral CPU runtime state is managed externally
+                // No direct reset needed - state resets when inputs change
+            }
+            #[cfg(target_os = "macos")]
+            SimulatorBackend::BehavioralGpu(_) => {
+                // Behavioral GPU runtime state is managed externally
+                // No direct reset needed - state resets when inputs change
+            }
             SimulatorBackend::GateLevelCpu(sim) => {
                 sim.reset();
             }
@@ -1042,6 +1187,9 @@ impl UnifiedSimulator {
     pub fn get_input_names(&self) -> Vec<String> {
         match &self.backend {
             SimulatorBackend::Uninitialized => vec![],
+            SimulatorBackend::BehavioralCpu(_) => self.behavioral_input_names.clone(),
+            #[cfg(target_os = "macos")]
+            SimulatorBackend::BehavioralGpu(_) => self.behavioral_input_names.clone(),
             SimulatorBackend::GateLevelCpu(sim) => sim.get_input_names(),
             #[cfg(target_os = "macos")]
             SimulatorBackend::GateLevelGpu(runtime) => runtime.get_input_names(),
@@ -1057,6 +1205,9 @@ impl UnifiedSimulator {
     pub fn get_output_names(&self) -> Vec<String> {
         match &self.backend {
             SimulatorBackend::Uninitialized => vec![],
+            SimulatorBackend::BehavioralCpu(_) => self.behavioral_output_names.clone(),
+            #[cfg(target_os = "macos")]
+            SimulatorBackend::BehavioralGpu(_) => self.behavioral_output_names.clone(),
             SimulatorBackend::GateLevelCpu(sim) => sim.get_output_names(),
             SimulatorBackend::NclCpu(ncl_sim) => {
                 ncl_sim.output_names().into_iter().cloned().collect()

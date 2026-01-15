@@ -92,7 +92,7 @@ impl Passthrough {
 }
 "#;
 
-fn compile_and_test(source: &str, name: &str, input: u64, expected: u64) {
+async fn compile_and_test(source: &str, name: &str, input: u64, expected: u64) {
     println!("\n=== Testing {} ===", name);
 
     let hir = parse_and_build_hir(source).expect("Failed to parse");
@@ -127,7 +127,7 @@ fn compile_and_test(source: &str, name: &str, input: u64, expected: u64) {
 
     sim.set_ncl_input("top.data", input, 32);
 
-    let result = sim.run_until_stable();
+    let result = sim.run_until_stable().await;
     println!(
         "Iterations: {}, Stable: {}",
         result.iterations, result.is_stable
@@ -150,28 +150,28 @@ fn compile_and_test(source: &str, name: &str, input: u64, expected: u64) {
     }
 }
 
-#[test]
-fn test_passthrough() {
-    compile_and_test(PASSTHROUGH, "Passthrough", 0x12345678, 0x12345678);
+#[tokio::test]
+async fn test_passthrough() {
+    compile_and_test(PASSTHROUGH, "Passthrough", 0x12345678, 0x12345678).await;
 }
 
-#[test]
-fn test_one_step() {
+#[tokio::test]
+async fn test_one_step() {
     // First step of bitreverse: swap consecutive pairs
     // 0x00000001 -> pairs swapped: 0x00000002
-    compile_and_test(ONE_STEP, "OneStep", 0x00000001, 0x00000002);
+    compile_and_test(ONE_STEP, "OneStep", 0x00000001, 0x00000002).await;
 }
 
-#[test]
-fn test_two_steps() {
+#[tokio::test]
+async fn test_two_steps() {
     // First two steps of bitreverse
     // 0x00000001 -> step1: 0x00000002 -> step2: 0x00000008
-    compile_and_test(TWO_STEPS, "TwoSteps", 0x00000001, 0x00000008);
+    compile_and_test(TWO_STEPS, "TwoSteps", 0x00000001, 0x00000008).await;
 }
 
-#[test]
-fn test_bitreverse_mwe() {
-    compile_and_test(BITREVERSE_MWE, "BitreverseMWE", 0x00000001, 0x80000000);
+#[tokio::test]
+async fn test_bitreverse_mwe() {
+    compile_and_test(BITREVERSE_MWE, "BitreverseMWE", 0x00000001, 0x80000000).await;
 }
 
 // Test bitreverse as function call inside match expression
@@ -207,8 +207,8 @@ impl FuncInMatch {
 }
 "#;
 
-#[test]
-fn test_func_in_match() {
+#[tokio::test]
+async fn test_func_in_match() {
     println!("\n=== Testing FuncInMatch ===");
 
     let hir = parse_and_build_hir(FUNC_IN_MATCH).expect("Failed to parse");
@@ -244,7 +244,7 @@ fn test_func_in_match() {
     sim.set_ncl_input("top.opcode", 58, 6);
     sim.set_ncl_input("top.data", 0x00000001, 256);
 
-    let result = sim.run_until_stable();
+    let result = sim.run_until_stable().await;
     println!(
         "Iterations: {}, Stable: {}",
         result.iterations, result.is_stable
@@ -325,8 +325,8 @@ impl CleLikeBitreverse {
 }
 "#;
 
-#[test]
-fn test_cle_like_popcount() {
+#[tokio::test]
+async fn test_cle_like_popcount() {
     println!("\n=== Testing CLE-like POPCOUNT ===");
 
     let hir = parse_and_build_hir(CLE_LIKE).expect("Failed to parse");
@@ -362,7 +362,7 @@ fn test_cle_like_popcount() {
     sim.set_ncl_input("top.function_sel", 57, 6); // POPCOUNT
     sim.set_ncl_input("top.data1", 1, 256); // Try with just 1 bit set for simpler test
 
-    let result = sim.run_until_stable();
+    let result = sim.run_until_stable().await;
     println!(
         "Iterations: {}, Stable: {}",
         result.iterations, result.is_stable
@@ -398,8 +398,8 @@ fn test_cle_like_popcount() {
     }
 }
 
-#[test]
-fn test_cle_like_bitreverse() {
+#[tokio::test]
+async fn test_cle_like_bitreverse() {
     println!("\n=== Testing CLE-like BITREVERSE ===");
 
     let hir = parse_and_build_hir(CLE_LIKE).expect("Failed to parse");
@@ -435,7 +435,7 @@ fn test_cle_like_bitreverse() {
     sim.set_ncl_input("top.function_sel", 58, 6); // BITREVERSE
     sim.set_ncl_input("top.data1", 0x00000001, 256);
 
-    let result = sim.run_until_stable();
+    let result = sim.run_until_stable().await;
     println!(
         "Iterations: {}, Stable: {}",
         result.iterations, result.is_stable
@@ -460,8 +460,8 @@ fn test_cle_like_bitreverse() {
     }
 }
 
-#[test]
-fn test_cle_like_signals_debug() {
+#[tokio::test]
+async fn test_cle_like_signals_debug() {
     println!("\n=== Testing CLE-like signals debug ===");
 
     let hir = parse_and_build_hir(CLE_LIKE).expect("Failed to parse");
@@ -507,7 +507,7 @@ fn test_cle_like_signals_debug() {
     println!("\n--- POPCOUNT test ---");
     sim.set_ncl_input("top.function_sel", 57, 6);
     sim.set_ncl_input("top.data1", 0xFFFFFFFF, 256);
-    let result = sim.run_until_stable();
+    let result = sim.run_until_stable().await;
     println!(
         "Iterations: {}, Stable: {}",
         result.iterations, result.is_stable
@@ -521,7 +521,7 @@ fn test_cle_like_signals_debug() {
     sim.reset();
     sim.set_ncl_input("top.function_sel", 58, 6);
     sim.set_ncl_input("top.data1", 0x00000001, 256);
-    let result = sim.run_until_stable();
+    let result = sim.run_until_stable().await;
     println!(
         "Iterations: {}, Stable: {}",
         result.iterations, result.is_stable
@@ -589,8 +589,8 @@ impl CleLikeSwapped {
 }
 "#;
 
-#[test]
-fn test_cle_like_swapped() {
+#[tokio::test]
+async fn test_cle_like_swapped() {
     println!("\n=== Testing CLE-like SWAPPED order ===");
 
     let hir = parse_and_build_hir(CLE_LIKE_SWAPPED).expect("Failed to parse");
@@ -627,7 +627,7 @@ fn test_cle_like_swapped() {
     println!("\n--- POPCOUNT test (now second arm) ---");
     sim.set_ncl_input("top.function_sel", 57, 6);
     sim.set_ncl_input("top.data1", 0xFFFFFFFF, 256);
-    let result = sim.run_until_stable();
+    let result = sim.run_until_stable().await;
     println!(
         "Iterations: {}, Stable: {}",
         result.iterations, result.is_stable
@@ -642,7 +642,7 @@ fn test_cle_like_swapped() {
     sim.reset();
     sim.set_ncl_input("top.function_sel", 58, 6);
     sim.set_ncl_input("top.data1", 0x00000001, 256);
-    let result = sim.run_until_stable();
+    let result = sim.run_until_stable().await;
     println!(
         "Iterations: {}, Stable: {}",
         result.iterations, result.is_stable
@@ -675,8 +675,8 @@ impl PopcountDirect {
 }
 "#;
 
-#[test]
-fn test_popcount_direct() {
+#[tokio::test]
+async fn test_popcount_direct() {
     println!("\n=== Testing popcount_direct (returns bit[32]) ===");
 
     let hir = parse_and_build_hir(POPCOUNT_DIRECT).expect("Failed to parse");
@@ -710,7 +710,7 @@ fn test_popcount_direct() {
         .expect("Failed to load NCL netlist");
 
     sim.set_ncl_input("top.data", 0xFFFFFFFF, 32);
-    let result = sim.run_until_stable();
+    let result = sim.run_until_stable().await;
     println!(
         "Iterations: {}, Stable: {}",
         result.iterations, result.is_stable
@@ -745,8 +745,8 @@ impl PopcountNat {
 }
 "#;
 
-#[test]
-fn test_popcount_nat() {
+#[tokio::test]
+async fn test_popcount_nat() {
     println!("\n=== Testing popcount_nat (returns nat[6]) ===");
 
     let hir = parse_and_build_hir(POPCOUNT_NAT).expect("Failed to parse");
@@ -780,7 +780,7 @@ fn test_popcount_nat() {
         .expect("Failed to load NCL netlist");
 
     sim.set_ncl_input("top.data", 0xFFFFFFFF, 32);
-    let result = sim.run_until_stable();
+    let result = sim.run_until_stable().await;
     println!(
         "Iterations: {}, Stable: {}",
         result.iterations, result.is_stable
@@ -836,8 +836,8 @@ impl DebugInputCheck {
 }
 "#;
 
-#[test]
-fn test_debug_input_check() {
+#[tokio::test]
+async fn test_debug_input_check() {
     println!("\n=== Debug Input Check ===");
 
     let hir = parse_and_build_hir(DEBUG_INPUT_CHECK).expect("Failed to parse");
@@ -874,7 +874,7 @@ fn test_debug_input_check() {
     sim.set_ncl_input("top.opcode", 58, 6);
     sim.set_ncl_input("top.data", 0x00000001, 256);
 
-    let result = sim.run_until_stable();
+    let result = sim.run_until_stable().await;
     println!(
         "Iterations: {}, Stable: {}",
         result.iterations, result.is_stable
@@ -933,8 +933,8 @@ impl ConcatOnly {
 }
 "#;
 
-#[test]
-fn test_concat_only() {
+#[tokio::test]
+async fn test_concat_only() {
     println!("\n=== Test Concat Only ===");
 
     let hir = parse_and_build_hir(CONCAT_ONLY).expect("Failed to parse");
@@ -969,7 +969,7 @@ fn test_concat_only() {
 
     sim.set_ncl_input("top.data", 0x00000001, 256);
 
-    let result = sim.run_until_stable();
+    let result = sim.run_until_stable().await;
     println!(
         "Iterations: {}, Stable: {}",
         result.iterations, result.is_stable
@@ -1011,8 +1011,8 @@ impl ConstantConcat {
 }
 "#;
 
-#[test]
-fn test_constant_256() {
+#[tokio::test]
+async fn test_constant_256() {
     println!("\n=== Test 256-bit Constant ===");
 
     let hir = parse_and_build_hir(CONSTANT_256).expect("Failed to parse");
@@ -1045,7 +1045,7 @@ fn test_constant_256() {
     sim.load_ncl_gate_level(netlist)
         .expect("Failed to load NCL netlist");
 
-    let result = sim.run_until_stable();
+    let result = sim.run_until_stable().await;
     println!(
         "Iterations: {}, Stable: {}",
         result.iterations, result.is_stable
@@ -1057,8 +1057,8 @@ fn test_constant_256() {
     }
 }
 
-#[test]
-fn test_constant_concat_64() {
+#[tokio::test]
+async fn test_constant_concat_64() {
     println!("\n=== Test 64-bit Concat ===");
 
     let hir = parse_and_build_hir(CONSTANT_CONCAT).expect("Failed to parse");
@@ -1093,7 +1093,7 @@ fn test_constant_concat_64() {
 
     sim.set_ncl_input("top.data", 0xABCD1234, 32);
 
-    let result = sim.run_until_stable();
+    let result = sim.run_until_stable().await;
     println!(
         "Iterations: {}, Stable: {}",
         result.iterations, result.is_stable
@@ -1157,8 +1157,8 @@ impl ParallelMux {
 }
 "#;
 
-#[test]
-fn test_parallel_mux_popcount() {
+#[tokio::test]
+async fn test_parallel_mux_popcount() {
     println!("\n=== Test Parallel Mux POPCOUNT ===");
 
     let hir = parse_and_build_hir(PARALLEL_MUX).expect("Failed to parse");
@@ -1194,7 +1194,7 @@ fn test_parallel_mux_popcount() {
     sim.set_ncl_input("top.function_sel", 57, 6);
     sim.set_ncl_input("top.data1", 0xFFFFFFFF, 32);
 
-    let result = sim.run_until_stable();
+    let result = sim.run_until_stable().await;
     println!(
         "Iterations: {}, Stable: {}",
         result.iterations, result.is_stable
@@ -1206,8 +1206,8 @@ fn test_parallel_mux_popcount() {
     }
 }
 
-#[test]
-fn test_parallel_mux_bitreverse() {
+#[tokio::test]
+async fn test_parallel_mux_bitreverse() {
     println!("\n=== Test Parallel Mux BITREVERSE ===");
 
     let hir = parse_and_build_hir(PARALLEL_MUX).expect("Failed to parse");
@@ -1243,7 +1243,7 @@ fn test_parallel_mux_bitreverse() {
     sim.set_ncl_input("top.function_sel", 58, 6);
     sim.set_ncl_input("top.data1", 0x00000001, 32);
 
-    let result = sim.run_until_stable();
+    let result = sim.run_until_stable().await;
     println!(
         "Iterations: {}, Stable: {}",
         result.iterations, result.is_stable

@@ -8,9 +8,9 @@ use skalp_mir::MirCompiler;
 use skalp_sim::{CircuitMode, HwAccel, SimLevel, UnifiedSimConfig, UnifiedSimulator};
 use std::path::Path;
 
-#[test]
+#[tokio::test]
 #[ignore = "requires karythra CLE with FP trait imports (use skalp::numeric::fp::*)"]
-fn test_identify_oscillating_cells() {
+async fn test_identify_oscillating_cells() {
     println!("\n=== CLE Oscillation Diagnostic ===");
 
     // Set up module search path
@@ -63,7 +63,7 @@ fn test_identify_oscillating_cells() {
     sim.set_ncl_input("top.data2", 3, 256);
 
     println!("\nRunning 20 iterations to identify oscillation pattern...");
-    let result = sim.run_until_stable();
+    let result = sim.run_until_stable().await;
 
     println!(
         "\nResult: iterations={}, stable={}",

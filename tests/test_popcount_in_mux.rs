@@ -171,7 +171,7 @@ impl TestDirect {
 }
 "#;
 
-fn compile_and_simulate_src(source: &str, inputs: &[(&str, u64, usize)]) -> Option<u64> {
+async fn compile_and_simulate_src(source: &str, inputs: &[(&str, u64, usize)]) -> Option<u64> {
     let hir = parse_and_build_hir(source).expect("parse");
     let mir_compiler = MirCompiler::new();
     let mir = mir_compiler.compile(&hir).expect("mir");
@@ -202,7 +202,7 @@ fn compile_and_simulate_src(source: &str, inputs: &[(&str, u64, usize)]) -> Opti
     for (name, value, width) in inputs {
         sim.set_ncl_input(name, *value, *width);
     }
-    let result = sim.run_until_stable();
+    let result = sim.run_until_stable().await;
     println!(
         "Iterations: {}, Stable: {}",
         result.iterations, result.is_stable
@@ -211,7 +211,7 @@ fn compile_and_simulate_src(source: &str, inputs: &[(&str, u64, usize)]) -> Opti
     sim.get_ncl_output("top.result", 32)
 }
 
-fn compile_and_simulate_any_output(
+async fn compile_and_simulate_any_output(
     source: &str,
     inputs: &[(&str, u64, usize)],
     output_name: &str,
@@ -247,7 +247,7 @@ fn compile_and_simulate_any_output(
     for (name, value, width) in inputs {
         sim.set_ncl_input(name, *value, *width);
     }
-    let result = sim.run_until_stable();
+    let result = sim.run_until_stable().await;
     println!(
         "Iterations: {}, Stable: {}",
         result.iterations, result.is_stable
@@ -256,15 +256,16 @@ fn compile_and_simulate_any_output(
     sim.get_ncl_output(output_name, output_width)
 }
 
-#[test]
-fn test_full_popcount_bit32() {
+#[tokio::test]
+async fn test_full_popcount_bit32() {
     println!("\n=== Testing full popcount returning bit[32] ===");
     let result = compile_and_simulate_any_output(
         FULL_POPCOUNT_BIT32,
         &[("top.data", 0xFFFFFFFF, 32)], // All 32 bits set
         "top.result",
         32,
-    );
+    )
+    .await;
     match result {
         Some(v) => {
             println!("Result: {} (expected 32)", v);
@@ -274,8 +275,8 @@ fn test_full_popcount_bit32() {
     }
 }
 
-#[test]
-fn test_full_popcount_extract6() {
+#[tokio::test]
+async fn test_full_popcount_extract6() {
     println!("\n=== Testing full popcount with [5:0] extraction - multiple tests ===");
 
     // Test with 1 bit set
@@ -284,7 +285,8 @@ fn test_full_popcount_extract6() {
         &[("top.data", 1, 32)],
         "top.result",
         6,
-    );
+    )
+    .await;
     assert_eq!(result, Some(1), "popcount(1) should be 1");
 
     // Test with 5 bits set
@@ -293,7 +295,8 @@ fn test_full_popcount_extract6() {
         &[("top.data", 0x1F, 32)], // 5 bits set
         "top.result",
         6,
-    );
+    )
+    .await;
     assert_eq!(result, Some(5), "popcount(0x1F) should be 5");
 
     // Test with 31 bits set (should not overflow 6 bits)
@@ -302,7 +305,8 @@ fn test_full_popcount_extract6() {
         &[("top.data", 0x7FFFFFFF, 32)], // 31 bits set
         "top.result",
         6,
-    );
+    )
+    .await;
     println!("popcount(0x7FFFFFFF) result: {:?}", result);
     assert_eq!(result, Some(31), "popcount(0x7FFFFFFF) should be 31");
 
@@ -312,21 +316,23 @@ fn test_full_popcount_extract6() {
         &[("top.data", 0xFFFFFFFF, 32)], // 32 bits set
         "top.result",
         6,
-    );
+    )
+    .await;
     println!("popcount(0xFFFFFFFF) result: {:?}", result);
     // 32 = 0b100000, so x[5:0] = 32
     assert_eq!(result, Some(32), "popcount(0xFFFFFFFF) should be 32");
 }
 
-#[test]
-fn test_popcount_step1() {
+#[tokio::test]
+async fn test_popcount_step1() {
     println!("\n=== Testing popcount step 1 only ===");
     let result = compile_and_simulate_any_output(
         SIMPLE_POPCOUNT_STEP1,
         &[("top.data", 0xF, 32)], // 4 bits set (0b1111)
         "top.result",
         32,
-    );
+    )
+    .await;
     match result {
         Some(v) => {
             // Step 1: count pairs - 0xF = 0b1111 -> each pair 01 + 01 = 10, so 0b1010
@@ -338,15 +344,16 @@ fn test_popcount_step1() {
     }
 }
 
-#[test]
-fn test_zero_extend() {
+#[tokio::test]
+async fn test_zero_extend() {
     println!("\n=== Testing zero extension 6-bit to 32-bit ===");
     let result = compile_and_simulate_any_output(
         ZERO_EXTEND,
         &[("top.data", 32, 6)], // 32 = 0b100000
         "top.result",
         32,
-    );
+    )
+    .await;
     match result {
         Some(v) => {
             println!("Result: {} (expected 32)", v);
@@ -356,15 +363,16 @@ fn test_zero_extend() {
     }
 }
 
-#[test]
-fn test_simple_extract() {
+#[tokio::test]
+async fn test_simple_extract() {
     println!("\n=== Testing simple [5:0] extraction ===");
     let result = compile_and_simulate_any_output(
         SIMPLE_EXTRACT,
         &[("top.data", 0xFF, 32)], // All 1s in low 8 bits
         "top.result",
         6,
-    );
+    )
+    .await;
     match result {
         Some(v) => {
             println!("Result: {} (expected 63)", v);
@@ -374,10 +382,10 @@ fn test_simple_extract() {
     }
 }
 
-#[test]
-fn test_direct_cast_works() {
+#[tokio::test]
+async fn test_direct_cast_works() {
     println!("\n=== Testing direct cast (no match) ===");
-    let result = compile_and_simulate_src(DIRECT_CAST, &[("top.data", 1, 32)]);
+    let result = compile_and_simulate_src(DIRECT_CAST, &[("top.data", 1, 32)]).await;
     match result {
         Some(v) => {
             println!("Result: {} (expected 1)", v);
@@ -387,13 +395,14 @@ fn test_direct_cast_works() {
     }
 }
 
-#[test]
-fn test_popcount_bit32_in_mux() {
+#[tokio::test]
+async fn test_popcount_bit32_in_mux() {
     println!("\n=== Testing POPCOUNT (bit[32]) with input=1 ===");
     let result = compile_and_simulate_src(
         SIMPLE_MUX_BIT32,
         &[("top.opcode", 57, 6), ("top.data", 1, 32)],
-    );
+    )
+    .await;
     match result {
         Some(v) => {
             println!("Result: {} (expected 1)", v);
@@ -403,13 +412,14 @@ fn test_popcount_bit32_in_mux() {
     }
 }
 
-#[test]
-fn test_popcount_nat6_in_mux() {
+#[tokio::test]
+async fn test_popcount_nat6_in_mux() {
     println!("\n=== Testing POPCOUNT (nat[6]) with input=1 ===");
     let result = compile_and_simulate_src(
         SIMPLE_MUX_NAT6,
         &[("top.opcode", 57, 6), ("top.data", 1, 32)],
-    );
+    )
+    .await;
     match result {
         Some(v) => {
             println!("Result: {} (expected 1)", v);

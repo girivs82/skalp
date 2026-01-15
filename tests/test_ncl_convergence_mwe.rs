@@ -63,8 +63,8 @@ impl CleMwe {
 }
 "#;
 
-#[test]
-fn test_ncl_convergence_mwe() {
+#[tokio::test]
+async fn test_ncl_convergence_mwe() {
     println!("\n=== NCL Convergence MWE Test ===\n");
 
     let hir = parse_and_build_hir(CLE_MWE_SOURCE).expect("Failed to parse");
@@ -106,7 +106,7 @@ fn test_ncl_convergence_mwe() {
     sim.set_ncl_input("top.function_sel", 0, 1);
     sim.set_ncl_input("top.op_sel", 0, 2);
 
-    let result = sim.run_until_stable();
+    let result = sim.run_until_stable().await;
     println!(
         "Iterations: {}, Stable: {}",
         result.iterations, result.is_stable
@@ -130,7 +130,7 @@ fn test_ncl_convergence_mwe() {
     sim.set_ncl_input("top.function_sel", 0, 1);
     sim.set_ncl_input("top.op_sel", 1, 2);
 
-    let result = sim.run_until_stable();
+    let result = sim.run_until_stable().await;
     println!(
         "Iterations: {}, Stable: {}",
         result.iterations, result.is_stable
@@ -153,7 +153,7 @@ fn test_ncl_convergence_mwe() {
     sim.set_ncl_input("top.function_sel", 1, 1);
     sim.set_ncl_input("top.op_sel", 0, 2);
 
-    let result = sim.run_until_stable();
+    let result = sim.run_until_stable().await;
     println!(
         "Iterations: {}, Stable: {}",
         result.iterations, result.is_stable
@@ -190,8 +190,8 @@ impl SimpleMux {
 }
 "#;
 
-#[test]
-fn test_simple_ncl_mux() {
+#[tokio::test]
+async fn test_simple_ncl_mux() {
     println!("\n=== Simple NCL Mux Test ===\n");
 
     let hir = parse_and_build_hir(SIMPLE_MUX_SOURCE).expect("Failed to parse");
@@ -229,7 +229,7 @@ fn test_simple_ncl_mux() {
     sim.set_ncl_input("top.b", 20, 8);
     sim.set_ncl_input("top.sel", 0, 1);
 
-    let result = sim.run_until_stable();
+    let result = sim.run_until_stable().await;
     println!(
         "Test (sel=0): iterations={}, stable={}",
         result.iterations, result.is_stable
@@ -249,7 +249,7 @@ fn test_simple_ncl_mux() {
     sim.set_ncl_input("top.a", 10, 8);
     sim.set_ncl_input("top.b", 20, 8);
     sim.set_ncl_input("top.sel", 1, 1);
-    let result = sim.run_until_stable();
+    let result = sim.run_until_stable().await;
     println!(
         "Test (sel=1): iterations={}, stable={}",
         result.iterations, result.is_stable
@@ -279,8 +279,8 @@ impl SimpleLt {
 }
 "#;
 
-#[test]
-fn test_simple_ncl_lt() {
+#[tokio::test]
+async fn test_simple_ncl_lt() {
     println!("\n=== Simple NCL Less-Than Test ===\n");
 
     let hir = parse_and_build_hir(SIMPLE_LT_SOURCE).expect("Failed to parse");
@@ -317,7 +317,7 @@ fn test_simple_ncl_lt() {
     sim.set_ncl_input("top.a", 10, 8);
     sim.set_ncl_input("top.b", 20, 8);
 
-    let result = sim.run_until_stable();
+    let result = sim.run_until_stable().await;
     println!(
         "Test (10 < 20): iterations={}, stable={}",
         result.iterations, result.is_stable
@@ -335,7 +335,7 @@ fn test_simple_ncl_lt() {
     sim.reset();
     sim.set_ncl_input("top.a", 30, 8);
     sim.set_ncl_input("top.b", 20, 8);
-    let result = sim.run_until_stable();
+    let result = sim.run_until_stable().await;
     println!(
         "Test (30 < 20): iterations={}, stable={}",
         result.iterations, result.is_stable
@@ -365,8 +365,8 @@ impl SimpleEq {
 }
 "#;
 
-#[test]
-fn test_simple_eq() {
+#[tokio::test]
+async fn test_simple_eq() {
     println!("\n=== Simple Eq Test ===\n");
 
     let hir = parse_and_build_hir(SIMPLE_EQ_SOURCE).expect("Failed to parse");
@@ -403,7 +403,7 @@ fn test_simple_eq() {
     sim.set_ncl_input("top.a", 2, 2);
     sim.set_ncl_input("top.b", 2, 2);
 
-    let result = sim.run_until_stable();
+    let result = sim.run_until_stable().await;
     println!(
         "Test (2 == 2): iterations={}, stable={}",
         result.iterations, result.is_stable
@@ -422,7 +422,7 @@ fn test_simple_eq() {
     sim.set_ncl_input("top.a", 1, 2);
     sim.set_ncl_input("top.b", 2, 2);
 
-    let result = sim.run_until_stable();
+    let result = sim.run_until_stable().await;
     println!(
         "Test (1 == 2): iterations={}, stable={}",
         result.iterations, result.is_stable
@@ -459,8 +459,8 @@ impl SimpleIfElse {
 }
 "#;
 
-#[test]
-fn test_simple_if_else() {
+#[tokio::test]
+async fn test_simple_if_else() {
     println!("\n=== Simple If/Else Test ===\n");
 
     let hir = parse_and_build_hir(SIMPLE_IF_ELSE_SOURCE).expect("Failed to parse");
@@ -498,7 +498,7 @@ fn test_simple_if_else() {
     sim.set_ncl_input("top.b", 20, 8);
     sim.set_ncl_input("top.op", 0, 2);
 
-    let result = sim.run_until_stable();
+    let result = sim.run_until_stable().await;
     println!(
         "Test (op=0, add): iterations={}, stable={}",
         result.iterations, result.is_stable
@@ -518,7 +518,7 @@ fn test_simple_if_else() {
     sim.set_ncl_input("top.b", 10, 8);
     sim.set_ncl_input("top.op", 1, 2);
 
-    let result = sim.run_until_stable();
+    let result = sim.run_until_stable().await;
     println!(
         "Test (op=1, sub): iterations={}, stable={}",
         result.iterations, result.is_stable
@@ -555,8 +555,8 @@ impl LtGtOnly {
 }
 "#;
 
-#[test]
-fn test_lt_gt_only() {
+#[tokio::test]
+async fn test_lt_gt_only() {
     println!("\n=== Lt + Gt Only Test (without Eq) ===\n");
 
     let hir = parse_and_build_hir(LT_GT_ONLY_SOURCE).expect("Failed to parse");
@@ -594,7 +594,7 @@ fn test_lt_gt_only() {
     sim.set_ncl_input("top.b", 20, 8);
     sim.set_ncl_input("top.sel", 0, 1);
 
-    let result = sim.run_until_stable();
+    let result = sim.run_until_stable().await;
     println!(
         "Test LT (10 < 20, sel=0): iterations={}, stable={}",
         result.iterations, result.is_stable
@@ -611,7 +611,7 @@ fn test_lt_gt_only() {
     sim.set_ncl_input("top.b", 20, 8);
     sim.set_ncl_input("top.sel", 1, 1);
 
-    let result = sim.run_until_stable();
+    let result = sim.run_until_stable().await;
     println!(
         "Test GT (30 > 20, sel=1): iterations={}, stable={}",
         result.iterations, result.is_stable
@@ -628,7 +628,7 @@ fn test_lt_gt_only() {
     sim.set_ncl_input("top.b", 20, 8);
     sim.set_ncl_input("top.sel", 0, 1);
 
-    let result = sim.run_until_stable();
+    let result = sim.run_until_stable().await;
     println!(
         "Test LT (20 < 20, sel=0): iterations={}, stable={}",
         result.iterations, result.is_stable
@@ -670,8 +670,8 @@ impl CombinedCmp {
 }
 "#;
 
-#[test]
-fn test_combined_cmp() {
+#[tokio::test]
+async fn test_combined_cmp() {
     println!("\n=== Combined Cmp (Lt, Eq, Gt) Test ===\n");
 
     let hir = parse_and_build_hir(COMBINED_CMP_SOURCE).expect("Failed to parse");
@@ -709,7 +709,7 @@ fn test_combined_cmp() {
     sim.set_ncl_input("top.b", 20, 8);
     sim.set_ncl_input("top.op", 0, 2);
 
-    let result = sim.run_until_stable();
+    let result = sim.run_until_stable().await;
     println!(
         "Test LT (10 < 20): iterations={}, stable={}",
         result.iterations, result.is_stable
@@ -729,7 +729,7 @@ fn test_combined_cmp() {
     sim.set_ncl_input("top.b", 20, 8);
     sim.set_ncl_input("top.op", 1, 2);
 
-    let result = sim.run_until_stable();
+    let result = sim.run_until_stable().await;
     println!(
         "Test EQ (20 == 20): iterations={}, stable={}",
         result.iterations, result.is_stable
@@ -749,7 +749,7 @@ fn test_combined_cmp() {
     sim.set_ncl_input("top.b", 20, 8);
     sim.set_ncl_input("top.op", 2, 2);
 
-    let result = sim.run_until_stable();
+    let result = sim.run_until_stable().await;
     println!(
         "Test GT (30 > 20): iterations={}, stable={}",
         result.iterations, result.is_stable
@@ -779,8 +779,8 @@ impl SimpleGt {
 }
 "#;
 
-#[test]
-fn test_simple_ncl_gt() {
+#[tokio::test]
+async fn test_simple_ncl_gt() {
     println!("\n=== Simple NCL Greater-Than Test ===\n");
 
     let hir = parse_and_build_hir(SIMPLE_GT_SOURCE).expect("Failed to parse");
@@ -817,7 +817,7 @@ fn test_simple_ncl_gt() {
     sim.set_ncl_input("top.a", 30, 8);
     sim.set_ncl_input("top.b", 20, 8);
 
-    let result = sim.run_until_stable();
+    let result = sim.run_until_stable().await;
     println!(
         "Test (30 > 20): iterations={}, stable={}",
         result.iterations, result.is_stable
@@ -835,7 +835,7 @@ fn test_simple_ncl_gt() {
     sim.reset();
     sim.set_ncl_input("top.a", 10, 8);
     sim.set_ncl_input("top.b", 20, 8);
-    let result = sim.run_until_stable();
+    let result = sim.run_until_stable().await;
     println!(
         "Test (10 > 20): iterations={}, stable={}",
         result.iterations, result.is_stable
@@ -865,8 +865,8 @@ impl SimpleAdd {
 }
 "#;
 
-#[test]
-fn test_simple_ncl_add() {
+#[tokio::test]
+async fn test_simple_ncl_add() {
     println!("\n=== Simple NCL Add Test ===\n");
 
     let hir = parse_and_build_hir(SIMPLE_ADD_SOURCE).expect("Failed to parse");
@@ -902,7 +902,7 @@ fn test_simple_ncl_add() {
     sim.set_ncl_input("top.a", 10, 8);
     sim.set_ncl_input("top.b", 20, 8);
 
-    let result = sim.run_until_stable();
+    let result = sim.run_until_stable().await;
     println!(
         "Iterations: {}, Stable: {}",
         result.iterations, result.is_stable
@@ -936,9 +936,9 @@ impl SimpleMul {
 }
 "#;
 
-#[test]
+#[tokio::test]
 #[ignore = "Pre-existing bug: NCL multiplication produces incorrect results for some inputs"]
-fn test_simple_ncl_mul() {
+async fn test_simple_ncl_mul() {
     println!("\n=== Simple NCL Multiply Test ===\n");
 
     let hir = parse_and_build_hir(SIMPLE_MUL_SOURCE).expect("Failed to parse");
@@ -974,7 +974,7 @@ fn test_simple_ncl_mul() {
     sim.set_ncl_input("top.a", 5, 8);
     sim.set_ncl_input("top.b", 7, 8);
 
-    let result = sim.run_until_stable();
+    let result = sim.run_until_stable().await;
     println!(
         "Iterations: {}, Stable: {}",
         result.iterations, result.is_stable
@@ -1004,8 +1004,8 @@ impl SimpleShl {
 }
 "#;
 
-#[test]
-fn test_simple_ncl_shl() {
+#[tokio::test]
+async fn test_simple_ncl_shl() {
     println!("\n=== Simple NCL Shift Left Test ===\n");
 
     let hir = parse_and_build_hir(SIMPLE_SHL_SOURCE).expect("Failed to parse");
@@ -1054,7 +1054,7 @@ fn test_simple_ncl_shl() {
     sim.set_ncl_input("top.a", 0x01, 8);
     sim.set_ncl_input("top.b", 2, 3);
 
-    let result = sim.run_until_stable();
+    let result = sim.run_until_stable().await;
     println!(
         "Iterations: {}, Stable: {}",
         result.iterations, result.is_stable
@@ -1084,8 +1084,8 @@ impl SimpleShr {
 }
 "#;
 
-#[test]
-fn test_simple_ncl_shr() {
+#[tokio::test]
+async fn test_simple_ncl_shr() {
     println!("\n=== Simple NCL Shift Right Test ===\n");
 
     let hir = parse_and_build_hir(SIMPLE_SHR_SOURCE).expect("Failed to parse");
@@ -1122,7 +1122,7 @@ fn test_simple_ncl_shr() {
     sim.set_ncl_input("top.a", 0x80, 8);
     sim.set_ncl_input("top.b", 3, 3);
 
-    let result = sim.run_until_stable();
+    let result = sim.run_until_stable().await;
     println!(
         "Iterations: {}, Stable: {}",
         result.iterations, result.is_stable
@@ -1175,8 +1175,8 @@ impl NestedFunc {
 }
 "#;
 
-#[test]
-fn test_nested_func_ncl() {
+#[tokio::test]
+async fn test_nested_func_ncl() {
     println!("\n=== Nested Function NCL Test ===\n");
 
     let hir = parse_and_build_hir(NESTED_FUNC_SOURCE).expect("Failed to parse");
@@ -1214,7 +1214,7 @@ fn test_nested_func_ncl() {
     sim.set_ncl_input("top.y", 25, 8);
     sim.set_ncl_input("top.sel", 0, 1);
 
-    let result = sim.run_until_stable();
+    let result = sim.run_until_stable().await;
     println!(
         "Test add (sel=0): iterations={}, stable={}",
         result.iterations, result.is_stable
@@ -1234,7 +1234,7 @@ fn test_nested_func_ncl() {
     sim.set_ncl_input("top.y", 20, 8);
     sim.set_ncl_input("top.sel", 1, 1);
 
-    let result = sim.run_until_stable();
+    let result = sim.run_until_stable().await;
     println!(
         "Test sub (sel=1): iterations={}, stable={}",
         result.iterations, result.is_stable
@@ -1273,8 +1273,8 @@ impl WideOps {
 }
 "#;
 
-#[test]
-fn test_wide_ops_ncl() {
+#[tokio::test]
+async fn test_wide_ops_ncl() {
     println!("\n=== 32-bit Wide Ops NCL Test ===\n");
 
     let hir = parse_and_build_hir(WIDE_OPS_SOURCE).expect("Failed to parse");
@@ -1312,7 +1312,7 @@ fn test_wide_ops_ncl() {
     sim.set_ncl_input("top.b", 0x00000001, 32);
     sim.set_ncl_input("top.op", 0, 2);
 
-    let result = sim.run_until_stable();
+    let result = sim.run_until_stable().await;
     println!(
         "Test 32-bit add: iterations={}, stable={}",
         result.iterations, result.is_stable
@@ -1364,8 +1364,8 @@ impl MultiCmp {
 }
 "#;
 
-#[test]
-fn test_multi_cmp_ncl() {
+#[tokio::test]
+async fn test_multi_cmp_ncl() {
     println!("\n=== Multi Comparison NCL Test ===\n");
 
     let hir = parse_and_build_hir(MULTI_CMP_SOURCE).expect("Failed to parse");
@@ -1403,7 +1403,7 @@ fn test_multi_cmp_ncl() {
     sim.set_ncl_input("top.b", 20, 32);
     sim.set_ncl_input("top.sel", 0, 2);
 
-    let result = sim.run_until_stable();
+    let result = sim.run_until_stable().await;
     println!(
         "Test LT (10 < 20, sel=0): iterations={}, stable={}",
         result.iterations, result.is_stable
@@ -1423,7 +1423,7 @@ fn test_multi_cmp_ncl() {
     sim.set_ncl_input("top.b", 42, 32);
     sim.set_ncl_input("top.sel", 1, 2);
 
-    let result = sim.run_until_stable();
+    let result = sim.run_until_stable().await;
     println!(
         "Test EQ (42 == 42, sel=1): iterations={}, stable={}",
         result.iterations, result.is_stable
@@ -1443,7 +1443,7 @@ fn test_multi_cmp_ncl() {
     sim.set_ncl_input("top.b", 50, 32);
     sim.set_ncl_input("top.sel", 2, 2);
 
-    let result = sim.run_until_stable();
+    let result = sim.run_until_stable().await;
     println!(
         "Test GT (100 > 50, sel=2): iterations={}, stable={}",
         result.iterations, result.is_stable
@@ -1482,8 +1482,8 @@ impl BitwiseOps {
 }
 "#;
 
-#[test]
-fn test_bitwise_ops_ncl() {
+#[tokio::test]
+async fn test_bitwise_ops_ncl() {
     println!("\n=== Bitwise Ops NCL Test ===\n");
 
     let hir = parse_and_build_hir(BITWISE_OPS_SOURCE).expect("Failed to parse");
@@ -1521,7 +1521,7 @@ fn test_bitwise_ops_ncl() {
     sim.set_ncl_input("top.b", 0x55, 8);
     sim.set_ncl_input("top.op", 0, 2);
 
-    let result = sim.run_until_stable();
+    let result = sim.run_until_stable().await;
     println!(
         "Test XOR: iterations={}, stable={}",
         result.iterations, result.is_stable
@@ -1541,7 +1541,7 @@ fn test_bitwise_ops_ncl() {
     sim.set_ncl_input("top.b", 0x00, 8);
     sim.set_ncl_input("top.op", 1, 2);
 
-    let result = sim.run_until_stable();
+    let result = sim.run_until_stable().await;
     println!(
         "Test NOT: iterations={}, stable={}",
         result.iterations, result.is_stable
@@ -1588,8 +1588,8 @@ impl MatchOpcode {
 }
 "#;
 
-#[test]
-fn test_match_opcode_ncl() {
+#[tokio::test]
+async fn test_match_opcode_ncl() {
     println!("\n=== Match Opcode NCL Test ===\n");
 
     let hir = parse_and_build_hir(MATCH_OPCODE_SOURCE).expect("Failed to parse");
@@ -1627,7 +1627,7 @@ fn test_match_opcode_ncl() {
     sim.set_ncl_input("top.b", 20, 8);
     sim.set_ncl_input("top.opcode", 0, 4);
 
-    let result = sim.run_until_stable();
+    let result = sim.run_until_stable().await;
     println!(
         "ADD: iterations={}, stable={}",
         result.iterations, result.is_stable
@@ -1646,7 +1646,7 @@ fn test_match_opcode_ncl() {
     sim.set_ncl_input("top.b", 20, 8);
     sim.set_ncl_input("top.opcode", 1, 4);
 
-    let result = sim.run_until_stable();
+    let result = sim.run_until_stable().await;
     println!(
         "SUB: iterations={}, stable={}",
         result.iterations, result.is_stable
@@ -1665,7 +1665,7 @@ fn test_match_opcode_ncl() {
     sim.set_ncl_input("top.b", 6, 8);
     sim.set_ncl_input("top.opcode", 2, 4);
 
-    let result = sim.run_until_stable();
+    let result = sim.run_until_stable().await;
     println!(
         "MUL: iterations={}, stable={}",
         result.iterations, result.is_stable
@@ -1684,7 +1684,7 @@ fn test_match_opcode_ncl() {
     sim.set_ncl_input("top.b", 4, 8);
     sim.set_ncl_input("top.opcode", 7, 4);
 
-    let result = sim.run_until_stable();
+    let result = sim.run_until_stable().await;
     println!(
         "SHL: iterations={}, stable={}",
         result.iterations, result.is_stable
@@ -1725,8 +1725,8 @@ impl SraTest {
 }
 "#;
 
-#[test]
-fn test_sra_ncl() {
+#[tokio::test]
+async fn test_sra_ncl() {
     println!("\n=== Arithmetic Right Shift (SRA) NCL Test ===\n");
 
     let hir = parse_and_build_hir(SRA_SOURCE).expect("Failed to parse");
@@ -1763,7 +1763,7 @@ fn test_sra_ncl() {
     sim.set_ncl_input("top.a", 0x40, 8);
     sim.set_ncl_input("top.shift", 2, 3);
 
-    let result = sim.run_until_stable();
+    let result = sim.run_until_stable().await;
     println!(
         "SHR: iterations={}, stable={}",
         result.iterations, result.is_stable
@@ -1781,7 +1781,7 @@ fn test_sra_ncl() {
     sim.set_ncl_input("top.a", 0x80, 8);
     sim.set_ncl_input("top.shift", 2, 3);
 
-    let result = sim.run_until_stable();
+    let result = sim.run_until_stable().await;
     println!(
         "SHR: iterations={}, stable={}",
         result.iterations, result.is_stable
@@ -1816,8 +1816,8 @@ impl MinMax {
 }
 "#;
 
-#[test]
-fn test_min_max_ncl() {
+#[tokio::test]
+async fn test_min_max_ncl() {
     println!("\n=== MIN/MAX NCL Test ===\n");
 
     let hir = parse_and_build_hir(MIN_MAX_SOURCE).expect("Failed to parse");
@@ -1855,7 +1855,7 @@ fn test_min_max_ncl() {
     sim.set_ncl_input("top.b", 10, 8);
     sim.set_ncl_input("top.sel", 0, 1);
 
-    let result = sim.run_until_stable();
+    let result = sim.run_until_stable().await;
     println!(
         "MIN: iterations={}, stable={}",
         result.iterations, result.is_stable
@@ -1874,7 +1874,7 @@ fn test_min_max_ncl() {
     sim.set_ncl_input("top.b", 10, 8);
     sim.set_ncl_input("top.sel", 1, 1);
 
-    let result = sim.run_until_stable();
+    let result = sim.run_until_stable().await;
     println!(
         "MAX: iterations={}, stable={}",
         result.iterations, result.is_stable
@@ -1909,8 +1909,8 @@ impl GeNe {
 }
 "#;
 
-#[test]
-fn test_ge_ne_ncl() {
+#[tokio::test]
+async fn test_ge_ne_ncl() {
     println!("\n=== GE/NE Comparison NCL Test ===\n");
 
     let hir = parse_and_build_hir(GE_NE_SOURCE).expect("Failed to parse");
@@ -1948,7 +1948,7 @@ fn test_ge_ne_ncl() {
     sim.set_ncl_input("top.b", 10, 8);
     sim.set_ncl_input("top.sel", 0, 1);
 
-    let result = sim.run_until_stable();
+    let result = sim.run_until_stable().await;
     println!(
         "GE(20,10): iterations={}, stable={}",
         result.iterations, result.is_stable
@@ -1967,7 +1967,7 @@ fn test_ge_ne_ncl() {
     sim.set_ncl_input("top.b", 10, 8);
     sim.set_ncl_input("top.sel", 0, 1);
 
-    let result = sim.run_until_stable();
+    let result = sim.run_until_stable().await;
     println!(
         "GE(10,10): iterations={}, stable={}",
         result.iterations, result.is_stable
@@ -1986,7 +1986,7 @@ fn test_ge_ne_ncl() {
     sim.set_ncl_input("top.b", 10, 8);
     sim.set_ncl_input("top.sel", 0, 1);
 
-    let result = sim.run_until_stable();
+    let result = sim.run_until_stable().await;
     println!(
         "GE(5,10): iterations={}, stable={}",
         result.iterations, result.is_stable
@@ -2005,7 +2005,7 @@ fn test_ge_ne_ncl() {
     sim.set_ncl_input("top.b", 10, 8);
     sim.set_ncl_input("top.sel", 1, 1);
 
-    let result = sim.run_until_stable();
+    let result = sim.run_until_stable().await;
     println!(
         "NE(20,10): iterations={}, stable={}",
         result.iterations, result.is_stable
@@ -2024,7 +2024,7 @@ fn test_ge_ne_ncl() {
     sim.set_ncl_input("top.b", 10, 8);
     sim.set_ncl_input("top.sel", 1, 1);
 
-    let result = sim.run_until_stable();
+    let result = sim.run_until_stable().await;
     println!(
         "NE(10,10): iterations={}, stable={}",
         result.iterations, result.is_stable
@@ -2097,8 +2097,8 @@ impl MultiLevel {
 }
 "#;
 
-#[test]
-fn test_multi_level_ncl() {
+#[tokio::test]
+async fn test_multi_level_ncl() {
     println!("\n=== Multi-Level Function Selection NCL Test ===\n");
 
     let hir = parse_and_build_hir(MULTI_LEVEL_SOURCE).expect("Failed to parse");
@@ -2137,7 +2137,7 @@ fn test_multi_level_ncl() {
     sim.set_ncl_input("top.level", 0, 1);
     sim.set_ncl_input("top.op", 0, 2);
 
-    let result = sim.run_until_stable();
+    let result = sim.run_until_stable().await;
     println!(
         "L0 ADD: iterations={}, stable={}",
         result.iterations, result.is_stable
@@ -2157,7 +2157,7 @@ fn test_multi_level_ncl() {
     sim.set_ncl_input("top.level", 0, 1);
     sim.set_ncl_input("top.op", 1, 2);
 
-    let result = sim.run_until_stable();
+    let result = sim.run_until_stable().await;
     println!(
         "L0 SUB: iterations={}, stable={}",
         result.iterations, result.is_stable
@@ -2177,7 +2177,7 @@ fn test_multi_level_ncl() {
     sim.set_ncl_input("top.level", 1, 1);
     sim.set_ncl_input("top.op", 0, 2);
 
-    let result = sim.run_until_stable();
+    let result = sim.run_until_stable().await;
     println!(
         "L1 MUL: iterations={}, stable={}",
         result.iterations, result.is_stable
@@ -2215,7 +2215,7 @@ fn test_multi_level_ncl() {
     sim.set_ncl_input("top.level", 1, 1);
     sim.set_ncl_input("top.op", 1, 2);
 
-    let result = sim.run_until_stable();
+    let result = sim.run_until_stable().await;
     println!(
         "L1 XOR: iterations={}, stable={}",
         result.iterations, result.is_stable
@@ -2252,8 +2252,8 @@ impl MulOnly {
 }
 "#;
 
-#[test]
-fn test_mul_via_function() {
+#[tokio::test]
+async fn test_mul_via_function() {
     println!("\n=== MUL via Function NCL Test ===\n");
 
     let hir = parse_and_build_hir(MUL_ONLY_SOURCE).expect("Failed to parse");
@@ -2290,7 +2290,7 @@ fn test_mul_via_function() {
     sim.set_ncl_input("top.a", 5, 8);
     sim.set_ncl_input("top.b", 6, 8);
 
-    let result = sim.run_until_stable();
+    let result = sim.run_until_stable().await;
     println!(
         "MUL via function: iterations={}, stable={}",
         result.iterations, result.is_stable
@@ -2318,8 +2318,8 @@ fn test_mul_via_function() {
 }
 
 /// Test L1 MUL first (without any L0 tests before) using same multi-level structure
-#[test]
-fn test_multi_level_l1_first() {
+#[tokio::test]
+async fn test_multi_level_l1_first() {
     println!("\n=== Multi-Level L1 First NCL Test ===\n");
 
     let hir = parse_and_build_hir(MULTI_LEVEL_SOURCE).expect("Failed to parse");
@@ -2358,7 +2358,7 @@ fn test_multi_level_l1_first() {
     sim.set_ncl_input("top.level", 1, 1);
     sim.set_ncl_input("top.op", 0, 2);
 
-    let result = sim.run_until_stable();
+    let result = sim.run_until_stable().await;
     println!(
         "L1 MUL (first): iterations={}, stable={}",
         result.iterations, result.is_stable
@@ -2420,8 +2420,8 @@ impl MultiLevelSwapped {
 }
 "#;
 
-#[test]
-fn test_mul_in_else_branch() {
+#[tokio::test]
+async fn test_mul_in_else_branch() {
     println!("\n=== MUL in Else Branch NCL Test ===\n");
 
     let hir = parse_and_build_hir(MULTI_LEVEL_SWAPPED_SOURCE).expect("Failed to parse");
@@ -2459,7 +2459,7 @@ fn test_mul_in_else_branch() {
     sim.set_ncl_input("top.b", 6, 8);
     sim.set_ncl_input("top.op", 1, 2);
 
-    let result = sim.run_until_stable();
+    let result = sim.run_until_stable().await;
     println!(
         "MUL (else branch, op=1): iterations={}, stable={}",
         result.iterations, result.is_stable
@@ -2482,7 +2482,7 @@ fn test_mul_in_else_branch() {
     sim.set_ncl_input("top.b", 0x55, 8);
     sim.set_ncl_input("top.op", 0, 2);
 
-    let result = sim.run_until_stable();
+    let result = sim.run_until_stable().await;
     println!(
         "XOR (if branch, op=0): iterations={}, stable={}",
         result.iterations, result.is_stable
@@ -2523,8 +2523,8 @@ impl DirectMulXorMux {
 }
 "#;
 
-#[test]
-fn test_direct_mul_xor_mux() {
+#[tokio::test]
+async fn test_direct_mul_xor_mux() {
     println!("\n=== Direct MUL + XOR with MUX (no functions) ===");
 
     let hir = parse_and_build_hir(DIRECT_MUL_XOR_MUX_SOURCE).expect("Failed to parse");
@@ -2562,7 +2562,7 @@ fn test_direct_mul_xor_mux() {
     sim.set_ncl_input("top.b", 6, 8);
     sim.set_ncl_input("top.sel", 0, 1);
 
-    let result = sim.run_until_stable();
+    let result = sim.run_until_stable().await;
     println!(
         "MUL (sel=0): iterations={}, stable={}",
         result.iterations, result.is_stable
@@ -2585,7 +2585,7 @@ fn test_direct_mul_xor_mux() {
     sim.set_ncl_input("top.b", 0x55, 8);
     sim.set_ncl_input("top.sel", 1, 1);
 
-    let result = sim.run_until_stable();
+    let result = sim.run_until_stable().await;
     println!(
         "XOR (sel=1): iterations={}, stable={}",
         result.iterations, result.is_stable
@@ -2623,8 +2623,8 @@ impl MulWithMuxOnly {
 }
 "#;
 
-#[test]
-fn test_mul_with_mux_only() {
+#[tokio::test]
+async fn test_mul_with_mux_only() {
     println!("\n=== MUL with MUX but no shared inputs ===");
 
     let hir = parse_and_build_hir(MUL_WITH_MUX_ONLY_SOURCE).expect("Failed to parse");
@@ -2662,7 +2662,7 @@ fn test_mul_with_mux_only() {
     sim.set_ncl_input("top.b", 6, 8);
     sim.set_ncl_input("top.sel", 0, 1);
 
-    let result = sim.run_until_stable();
+    let result = sim.run_until_stable().await;
     println!(
         "MUL (sel=0): iterations={}, stable={}",
         result.iterations, result.is_stable
@@ -2685,7 +2685,7 @@ fn test_mul_with_mux_only() {
     sim.set_ncl_input("top.b", 6, 8);
     sim.set_ncl_input("top.sel", 1, 1);
 
-    let result = sim.run_until_stable();
+    let result = sim.run_until_stable().await;
     println!(
         "Fallback (sel=1): iterations={}, stable={}",
         result.iterations, result.is_stable
@@ -2723,8 +2723,8 @@ impl AddWithMux {
 }
 "#;
 
-#[test]
-fn test_add_with_mux() {
+#[tokio::test]
+async fn test_add_with_mux() {
     println!("\n=== ADD with MUX test ===");
 
     let hir = parse_and_build_hir(ADD_WITH_MUX_SOURCE).expect("Failed to parse");
@@ -2762,7 +2762,7 @@ fn test_add_with_mux() {
     sim.set_ncl_input("top.b", 6, 8);
     sim.set_ncl_input("top.sel", 0, 1);
 
-    let result = sim.run_until_stable();
+    let result = sim.run_until_stable().await;
     println!(
         "ADD (sel=0): iterations={}, stable={}",
         result.iterations, result.is_stable
@@ -2804,8 +2804,8 @@ impl MulMuxDebug {
 }
 "#;
 
-#[test]
-fn test_mul_mux_debug() {
+#[tokio::test]
+async fn test_mul_mux_debug() {
     println!("\n=== MUL + MUX Debug Test ===");
 
     let hir = parse_and_build_hir(MUL_MUX_DEBUG_SOURCE).expect("Failed to parse");
@@ -2843,7 +2843,7 @@ fn test_mul_mux_debug() {
     sim.set_ncl_input("top.b", 6, 8);
     sim.set_ncl_input("top.sel", 0, 1);
 
-    let result = sim.run_until_stable();
+    let result = sim.run_until_stable().await;
     println!(
         "MUL+MUX (sel=0): iterations={}, stable={}",
         result.iterations, result.is_stable
@@ -2867,7 +2867,7 @@ fn test_mul_mux_debug() {
     sim.set_ncl_input("top.b", 0x55, 8);
     sim.set_ncl_input("top.sel", 1, 1);
 
-    let result = sim.run_until_stable();
+    let result = sim.run_until_stable().await;
     println!(
         "XOR (sel=1): iterations={}, stable={}",
         result.iterations, result.is_stable
@@ -2894,7 +2894,7 @@ fn test_mul_mux_debug() {
     sim.set_ncl_input("top.a", 5, 8);
     sim.set_ncl_input("top.b", 6, 8);
     sim.set_ncl_input("top.sel", 0, 1);
-    sim.run_until_stable();
+    sim.run_until_stable().await;
 
     // Check the mul_result intermediate signal
     match sim.get_ncl_output("top.mul_result", 8) {
@@ -3148,8 +3148,8 @@ fn test_mul_mux_debug() {
     }
 }
 
-#[test]
-fn test_mul_mux_cpu_vs_gpu() {
+#[tokio::test]
+async fn test_mul_mux_cpu_vs_gpu() {
     println!("\n=== MUL + MUX CPU vs GPU Comparison ===");
 
     let hir = parse_and_build_hir(MUL_MUX_DEBUG_SOURCE).expect("Failed to parse");
@@ -3189,7 +3189,7 @@ fn test_mul_mux_cpu_vs_gpu() {
     cpu_sim.set_ncl_input("top.b", 6, 8);
     cpu_sim.set_ncl_input("top.sel", 0, 1);
 
-    let cpu_result = cpu_sim.run_until_stable();
+    let cpu_result = cpu_sim.run_until_stable().await;
     println!(
         "CPU: iterations={}, stable={}",
         cpu_result.iterations, cpu_result.is_stable
@@ -3246,7 +3246,7 @@ fn test_mul_mux_cpu_vs_gpu() {
     gpu_sim.set_ncl_input("top.b", 6, 8);
     gpu_sim.set_ncl_input("top.sel", 0, 1);
 
-    let gpu_result = gpu_sim.run_until_stable();
+    let gpu_result = gpu_sim.run_until_stable().await;
     println!(
         "GPU: iterations={}, stable={}",
         gpu_result.iterations, gpu_result.is_stable
@@ -3499,8 +3499,8 @@ fn test_mul_mux_cpu_vs_gpu() {
 }
 
 /// Dump netlist structure to understand C-element wiring
-#[test]
-fn test_dump_c_element_netlist() {
+#[tokio::test]
+async fn test_dump_c_element_netlist() {
     println!("\n=== C-element Netlist Dump ===");
 
     let hir = parse_and_build_hir(MUL_MUX_DEBUG_SOURCE).expect("Failed to parse");
@@ -3714,8 +3714,8 @@ fn test_dump_c_element_netlist() {
 }
 
 /// Trace C-element behavior iteration by iteration
-#[test]
-fn test_c_element_iteration_trace() {
+#[tokio::test]
+async fn test_c_element_iteration_trace() {
     println!("\n=== C-element Iteration Trace ===");
 
     let hir = parse_and_build_hir(MUL_MUX_DEBUG_SOURCE).expect("Failed to parse");
@@ -3811,7 +3811,7 @@ fn test_c_element_iteration_trace() {
     sim_gpu.set_ncl_input("top.sel", 0, 1);
 
     // Run simulation to stability and print final state
-    let result = sim_gpu.run_until_stable();
+    let result = sim_gpu.run_until_stable().await;
     println!(
         "\n=== After {} iterations (stable={}) ===",
         result.iterations, result.is_stable
@@ -3883,8 +3883,8 @@ impl MulInMatchSimple {
 }
 "#;
 
-#[test]
-fn test_mul_in_match_oscillation() {
+#[tokio::test]
+async fn test_mul_in_match_oscillation() {
     println!("\n=== MUL-in-Match Oscillation MWE ===\n");
 
     let hir = parse_and_build_hir(MUL_IN_MATCH_SIMPLE).expect("Failed to parse");
@@ -3922,7 +3922,7 @@ fn test_mul_in_match_oscillation() {
     sim.set_ncl_input("top.b", 6, 8);
     sim.set_ncl_input("top.sel", 0, 1);
 
-    let result = sim.run_until_stable();
+    let result = sim.run_until_stable().await;
     println!(
         "MUL case (sel=0): iterations={}, stable={}",
         result.iterations, result.is_stable
@@ -3960,7 +3960,7 @@ fn test_mul_in_match_oscillation() {
     sim.set_ncl_input("top.b", 6, 8);
     sim.set_ncl_input("top.sel", 1, 1);
 
-    let result = sim.run_until_stable();
+    let result = sim.run_until_stable().await;
     println!(
         "ADD case (sel=1): iterations={}, stable={}",
         result.iterations, result.is_stable
@@ -4001,8 +4001,8 @@ impl MulInMatch4Way {
 }
 "#;
 
-#[test]
-fn test_mul_in_match_4way() {
+#[tokio::test]
+async fn test_mul_in_match_4way() {
     println!("\n=== MUL-in-Match 4-way Test ===\n");
 
     let hir = parse_and_build_hir(MUL_IN_MATCH_4WAY).expect("Failed to parse");
@@ -4040,7 +4040,7 @@ fn test_mul_in_match_4way() {
     sim.set_ncl_input("top.b", 6, 8);
     sim.set_ncl_input("top.sel", 2, 2);
 
-    let result = sim.run_until_stable();
+    let result = sim.run_until_stable().await;
     println!(
         "MUL case (sel=2): iterations={}, stable={}",
         result.iterations, result.is_stable
@@ -4065,7 +4065,7 @@ fn test_mul_in_match_4way() {
     sim.set_ncl_input("top.b", 6, 8);
     sim.set_ncl_input("top.sel", 0, 2);
 
-    let result = sim.run_until_stable();
+    let result = sim.run_until_stable().await;
     println!(
         "ADD case (sel=0): iterations={}, stable={}",
         result.iterations, result.is_stable
@@ -4105,8 +4105,8 @@ impl MulInMatch8Way {
 }
 "#;
 
-#[test]
-fn test_mul_in_match_8way() {
+#[tokio::test]
+async fn test_mul_in_match_8way() {
     println!("\n=== MUL-in-Match 8-way Test ===\n");
 
     let hir = parse_and_build_hir(MUL_IN_MATCH_8WAY).expect("Failed to parse");
@@ -4144,7 +4144,7 @@ fn test_mul_in_match_8way() {
     sim.set_ncl_input("top.b", 6, 8);
     sim.set_ncl_input("top.sel", 2, 3);
 
-    let result = sim.run_until_stable();
+    let result = sim.run_until_stable().await;
     println!(
         "MUL case (sel=2): iterations={}, stable={}",
         result.iterations, result.is_stable
@@ -4167,7 +4167,7 @@ fn test_mul_in_match_8way() {
     sim.set_ncl_input("top.b", 6, 8);
     sim.set_ncl_input("top.sel", 0, 3);
 
-    let result = sim.run_until_stable();
+    let result = sim.run_until_stable().await;
     println!(
         "ADD case (sel=0): iterations={}, stable={}",
         result.iterations, result.is_stable
@@ -4209,8 +4209,8 @@ impl MulInMatch10Way {
 }
 "#;
 
-#[test]
-fn test_mul_in_match_10way() {
+#[tokio::test]
+async fn test_mul_in_match_10way() {
     println!("\n=== MUL-in-Match 10-way (4-bit opcode) Test ===\n");
 
     let hir = parse_and_build_hir(MUL_IN_MATCH_10WAY).expect("Failed to parse");
@@ -4248,7 +4248,7 @@ fn test_mul_in_match_10way() {
     sim.set_ncl_input("top.b", 6, 8);
     sim.set_ncl_input("top.opcode", 2, 4);
 
-    let result = sim.run_until_stable();
+    let result = sim.run_until_stable().await;
     println!(
         "MUL case (opcode=2): iterations={}, stable={}",
         result.iterations, result.is_stable
@@ -4274,7 +4274,7 @@ fn test_mul_in_match_10way() {
     sim.set_ncl_input("top.b", 6, 8);
     sim.set_ncl_input("top.opcode", 0, 4);
 
-    let result = sim.run_until_stable();
+    let result = sim.run_until_stable().await;
     println!(
         "ADD case (opcode=0): iterations={}, stable={}",
         result.iterations, result.is_stable
@@ -4317,8 +4317,8 @@ impl MulInMatch8Way4Bit {
 }
 "#;
 
-#[test]
-fn test_mul_in_match_8way_4bit() {
+#[tokio::test]
+async fn test_mul_in_match_8way_4bit() {
     println!("\n=== MUL-in-Match 8-way with 4-bit opcode Test ===\n");
 
     let hir = parse_and_build_hir(MUL_IN_MATCH_8WAY_4BIT).expect("Failed to parse");
@@ -4356,7 +4356,7 @@ fn test_mul_in_match_8way_4bit() {
     sim.set_ncl_input("top.b", 6, 8);
     sim.set_ncl_input("top.opcode", 2, 4);
 
-    let result = sim.run_until_stable();
+    let result = sim.run_until_stable().await;
     println!(
         "MUL case (opcode=2): iterations={}, stable={}",
         result.iterations, result.is_stable
@@ -4405,8 +4405,8 @@ impl MulInMatch9Way {
 }
 "#;
 
-#[test]
-fn test_mul_in_match_9way() {
+#[tokio::test]
+async fn test_mul_in_match_9way() {
     println!("\n=== MUL-in-Match 9-way Test (boundary) ===\n");
 
     let hir = parse_and_build_hir(MUL_IN_MATCH_9WAY).expect("Failed to parse");
@@ -4456,7 +4456,7 @@ fn test_mul_in_match_9way() {
     sim.set_ncl_input("top.b", 6, 8);
     sim.set_ncl_input("top.opcode", 2, 4);
 
-    let result = sim.run_until_stable();
+    let result = sim.run_until_stable().await;
     println!(
         "MUL case (opcode=2): iterations={}, stable={}",
         result.iterations, result.is_stable
@@ -4516,8 +4516,8 @@ impl NestedIfInMatch {
 }
 "#;
 
-#[test]
-fn test_nested_if_in_match() {
+#[tokio::test]
+async fn test_nested_if_in_match() {
     println!("\n=== Nested If-in-Match Test (SRA-like pattern) ===\n");
 
     let hir = parse_and_build_hir(NESTED_IF_IN_MATCH).expect("Failed to parse");
@@ -4576,7 +4576,7 @@ fn test_nested_if_in_match() {
     sim.set_ncl_input("top.b", 5, 8);
     sim.set_ncl_input("top.opcode", 0, 4);
 
-    let result = sim.run_until_stable();
+    let result = sim.run_until_stable().await;
     println!(
         "ADD case (opcode=0): iterations={}, stable={}",
         result.iterations, result.is_stable
@@ -4596,7 +4596,7 @@ fn test_nested_if_in_match() {
     sim.set_ncl_input("top.b", 2, 8); // shift by 2
     sim.set_ncl_input("top.opcode", 3, 4);
 
-    let result = sim.run_until_stable();
+    let result = sim.run_until_stable().await;
     println!(
         "SRA case (opcode=3): iterations={}, stable={}",
         result.iterations, result.is_stable
@@ -4635,8 +4635,8 @@ impl SubWidthMismatch {
 }
 "#;
 
-#[test]
-fn test_sub_width_mismatch() {
+#[tokio::test]
+async fn test_sub_width_mismatch() {
     println!("\n=== SUB Width Mismatch Test ===\n");
 
     let hir = parse_and_build_hir(SUB_WIDTH_MISMATCH).expect("Failed to parse");
@@ -4673,7 +4673,7 @@ fn test_sub_width_mismatch() {
     sim.set_ncl_input("top.a", 8, 8);
     sim.set_ncl_input("top.b", 2, 3);
 
-    let result = sim.run_until_stable();
+    let result = sim.run_until_stable().await;
     println!(
         "8 - 2: iterations={}, stable={}",
         result.iterations, result.is_stable

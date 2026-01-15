@@ -90,8 +90,8 @@ fn compile_and_simulate(source: &str, name: &str) -> Option<skalp_lir::GateNetli
     Some(netlist)
 }
 
-#[test]
-fn test_passthrough() {
+#[tokio::test]
+async fn test_passthrough() {
     let netlist = compile_and_simulate(PASSTHROUGH, "Passthrough").unwrap();
 
     let config = UnifiedSimConfig {
@@ -110,7 +110,7 @@ fn test_passthrough() {
     // Test: input = 0x12345678, expect same output
     sim.set_ncl_input("top.a", 0x12345678, 32);
 
-    let result = sim.run_until_stable();
+    let result = sim.run_until_stable().await;
     println!(
         "Iterations: {}, Stable: {}",
         result.iterations, result.is_stable
@@ -128,8 +128,8 @@ fn test_passthrough() {
     }
 }
 
-#[test]
-fn test_int_add_gate_level() {
+#[tokio::test]
+async fn test_int_add_gate_level() {
     let netlist = compile_and_simulate(INT_ADD, "IntAdd").unwrap();
 
     let config = UnifiedSimConfig {
@@ -149,7 +149,7 @@ fn test_int_add_gate_level() {
     sim.set_ncl_input("top.a", 10, 32);
     sim.set_ncl_input("top.b", 5, 32);
 
-    let result = sim.run_until_stable();
+    let result = sim.run_until_stable().await;
     println!(
         "Iterations: {}, Stable: {}",
         result.iterations, result.is_stable
@@ -167,8 +167,8 @@ fn test_int_add_gate_level() {
     }
 }
 
-#[test]
-fn test_fp32_add_gate_level() {
+#[tokio::test]
+async fn test_fp32_add_gate_level() {
     let netlist = compile_and_simulate(FP32_ADD_MWE, "FP32AddMWE").unwrap();
 
     let config = UnifiedSimConfig {
@@ -196,7 +196,7 @@ fn test_fp32_add_gate_level() {
     sim.set_ncl_input("top.a", a_bits, 32);
     sim.set_ncl_input("top.b", b_bits, 32);
 
-    let result = sim.run_until_stable();
+    let result = sim.run_until_stable().await;
     println!(
         "Iterations: {}, Stable: {}",
         result.iterations, result.is_stable

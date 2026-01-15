@@ -72,7 +72,7 @@ fn compile_karythra_async_cle() -> &'static GateNetlist {
 }
 
 /// Test NCL simulation with expected outputs using UnifiedSimulator (GPU-accelerated)
-fn test_async_cle_operation(
+async fn test_async_cle_operation(
     netlist: &skalp_lir::gate_netlist::GateNetlist,
     opcode: u64,
     data1: u64,
@@ -146,7 +146,7 @@ fn test_async_cle_operation(
     println!("  [op={}] Running NCL simulation...", opcode);
 
     // Run until stable
-    let result = sim.run_until_stable();
+    let result = sim.run_until_stable().await;
 
     if !result.is_stable {
         println!(
@@ -184,7 +184,7 @@ fn test_async_cle_operation(
 
 /// Test L2 FP32 operation using UnifiedSimulator
 /// Returns (pass, Option<result_bits>)
-fn test_l2_fp32_operation(
+async fn test_l2_fp32_operation(
     netlist: &GateNetlist,
     opcode: u64,
     a_bits: u64,
@@ -215,7 +215,7 @@ fn test_l2_fp32_operation(
     sim.set_ncl_input("top.data1", data1, 64);
     sim.set_ncl_input("top.data2", 0, 64);
 
-    let result = sim.run_until_stable();
+    let result = sim.run_until_stable().await;
     if !result.is_stable {
         println!("  Did not converge after {} iterations", result.iterations);
         return None;
@@ -243,7 +243,7 @@ fn test_l2_fp32_operation(
 
 /// Test L3 Vec3 operation using UnifiedSimulator
 /// Uses u128 for data1/data2 to support 96-bit vector values (3 x 32-bit floats)
-fn test_l3_vec3_operation(
+async fn test_l3_vec3_operation(
     netlist: &GateNetlist,
     opcode: u64,
     data1: u128,
@@ -268,7 +268,7 @@ fn test_l3_vec3_operation(
     sim.set_ncl_input("top.data1", data1 as u64, 64);
     sim.set_ncl_input("top.data2", data2 as u64, 64);
 
-    let result = sim.run_until_stable();
+    let result = sim.run_until_stable().await;
     if !result.is_stable {
         println!("  Did not converge after {} iterations", result.iterations);
         return None;
@@ -279,7 +279,7 @@ fn test_l3_vec3_operation(
 }
 
 /// Test L5 bit operation using UnifiedSimulator
-fn test_l5_bit_operation(netlist: &GateNetlist, opcode: u64, data1: u64) -> Option<u64> {
+async fn test_l5_bit_operation(netlist: &GateNetlist, opcode: u64, data1: u64) -> Option<u64> {
     let config = UnifiedSimConfig {
         level: SimLevel::GateLevel,
         circuit_mode: CircuitMode::Ncl,
@@ -298,7 +298,7 @@ fn test_l5_bit_operation(netlist: &GateNetlist, opcode: u64, data1: u64) -> Opti
     sim.set_ncl_input("top.data1", data1, 64);
     sim.set_ncl_input("top.data2", 0, 64);
 
-    let result = sim.run_until_stable();
+    let result = sim.run_until_stable().await;
     if !result.is_stable {
         println!("  Did not converge after {} iterations", result.iterations);
         return None;
@@ -312,8 +312,8 @@ fn test_l5_bit_operation(netlist: &GateNetlist, opcode: u64, data1: u64) -> Opti
 // Debug: Signal check test
 // =============================================================================
 
-#[test]
-fn test_signal_check() {
+#[tokio::test]
+async fn test_signal_check() {
     println!("\n=== Signal Check Test ===");
     let netlist = compile_karythra_async_cle();
 
@@ -369,8 +369,8 @@ fn test_signal_check() {
 // L0-L1 Tests (Basic 8-bit Operations)
 // =============================================================================
 
-#[test]
-fn test_async_cle_l0_add() {
+#[tokio::test]
+async fn test_async_cle_l0_add() {
     println!("\n=== Async CLE L0 ADD Test ===");
     let netlist = compile_karythra_async_cle();
     println!(
@@ -385,15 +385,15 @@ fn test_async_cle_l0_add() {
     let mut all_pass = true;
     for (a, b, expected) in test_cases {
         let desc = format!("{} + {} = {}", a, b, expected);
-        let pass = test_async_cle_operation(netlist, 0, a, b, expected, &desc);
+        let pass = test_async_cle_operation(netlist, 0, a, b, expected, &desc).await;
         all_pass = all_pass && pass;
     }
 
     assert!(all_pass, "Async CLE L0 ADD tests failed");
 }
 
-#[test]
-fn test_async_cle_l0_sub() {
+#[tokio::test]
+async fn test_async_cle_l0_sub() {
     println!("\n=== Async CLE L0 SUB Test ===");
     let netlist = compile_karythra_async_cle();
     println!(
@@ -408,15 +408,15 @@ fn test_async_cle_l0_sub() {
     let mut all_pass = true;
     for (a, b, expected) in test_cases {
         let desc = format!("{} - {} = {}", a, b, expected);
-        let pass = test_async_cle_operation(netlist, 1, a, b, expected, &desc);
+        let pass = test_async_cle_operation(netlist, 1, a, b, expected, &desc).await;
         all_pass = all_pass && pass;
     }
 
     assert!(all_pass, "Async CLE L0 SUB tests failed");
 }
 
-#[test]
-fn test_async_cle_l0_and() {
+#[tokio::test]
+async fn test_async_cle_l0_and() {
     println!("\n=== Async CLE L0 AND Test ===");
     let netlist = compile_karythra_async_cle();
     println!(
@@ -436,15 +436,15 @@ fn test_async_cle_l0_and() {
     let mut all_pass = true;
     for (a, b, expected) in test_cases {
         let desc = format!("0x{:02X} & 0x{:02X} = 0x{:02X}", a, b, expected);
-        let pass = test_async_cle_operation(netlist, 3, a, b, expected, &desc);
+        let pass = test_async_cle_operation(netlist, 3, a, b, expected, &desc).await;
         all_pass = all_pass && pass;
     }
 
     assert!(all_pass, "Async CLE L0 AND tests failed");
 }
 
-#[test]
-fn test_async_cle_l0_or() {
+#[tokio::test]
+async fn test_async_cle_l0_or() {
     println!("\n=== Async CLE L0 OR Test ===");
     let netlist = compile_karythra_async_cle();
     println!(
@@ -464,15 +464,15 @@ fn test_async_cle_l0_or() {
     let mut all_pass = true;
     for (a, b, expected) in test_cases {
         let desc = format!("0x{:02X} | 0x{:02X} = 0x{:02X}", a, b, expected);
-        let pass = test_async_cle_operation(netlist, 4, a, b, expected, &desc);
+        let pass = test_async_cle_operation(netlist, 4, a, b, expected, &desc).await;
         all_pass = all_pass && pass;
     }
 
     assert!(all_pass, "Async CLE L0 OR tests failed");
 }
 
-#[test]
-fn test_async_cle_l0_xor() {
+#[tokio::test]
+async fn test_async_cle_l0_xor() {
     println!("\n=== Async CLE L0 XOR Test ===");
     let netlist = compile_karythra_async_cle();
     println!(
@@ -492,15 +492,15 @@ fn test_async_cle_l0_xor() {
     let mut all_pass = true;
     for (a, b, expected) in test_cases {
         let desc = format!("0x{:02X} ^ 0x{:02X} = 0x{:02X}", a, b, expected);
-        let pass = test_async_cle_operation(netlist, 5, a, b, expected, &desc);
+        let pass = test_async_cle_operation(netlist, 5, a, b, expected, &desc).await;
         all_pass = all_pass && pass;
     }
 
     assert!(all_pass, "Async CLE L0 XOR tests failed");
 }
 
-#[test]
-fn test_async_cle_l0_comparisons() {
+#[tokio::test]
+async fn test_async_cle_l0_comparisons() {
     println!("\n=== Async CLE L0 Comparison Tests ===");
     let netlist = compile_karythra_async_cle();
     println!(
@@ -513,20 +513,20 @@ fn test_async_cle_l0_comparisons() {
 
     // L0L1Opcode::EQ_8 = 10
     println!("\nEQ tests:");
-    all_pass = all_pass && test_async_cle_operation(netlist, 10, 42, 42, 1, "42 == 42");
-    all_pass = all_pass && test_async_cle_operation(netlist, 10, 42, 43, 0, "42 == 43");
+    all_pass = all_pass && test_async_cle_operation(netlist, 10, 42, 42, 1, "42 == 42").await;
+    all_pass = all_pass && test_async_cle_operation(netlist, 10, 42, 43, 0, "42 == 43").await;
 
     // L0L1Opcode::LT_8 = 12
     println!("\nLT tests:");
-    all_pass = all_pass && test_async_cle_operation(netlist, 12, 10, 20, 1, "10 < 20");
-    all_pass = all_pass && test_async_cle_operation(netlist, 12, 20, 10, 0, "20 < 10");
-    all_pass = all_pass && test_async_cle_operation(netlist, 12, 10, 10, 0, "10 < 10");
+    all_pass = all_pass && test_async_cle_operation(netlist, 12, 10, 20, 1, "10 < 20").await;
+    all_pass = all_pass && test_async_cle_operation(netlist, 12, 20, 10, 0, "20 < 10").await;
+    all_pass = all_pass && test_async_cle_operation(netlist, 12, 10, 10, 0, "10 < 10").await;
 
     assert!(all_pass, "Async CLE L0 comparison tests failed");
 }
 
-#[test]
-fn test_async_cle_l0_shifts() {
+#[tokio::test]
+async fn test_async_cle_l0_shifts() {
     println!("\n=== Async CLE L0 Shift Tests ===");
     let netlist = compile_karythra_async_cle();
     println!(
@@ -539,13 +539,13 @@ fn test_async_cle_l0_shifts() {
 
     // L0L1Opcode::SLL_8 = 7 (shift left logical)
     println!("\nSLL tests:");
-    all_pass = all_pass && test_async_cle_operation(netlist, 7, 0x01, 1, 0x02, "0x01 << 1");
-    all_pass = all_pass && test_async_cle_operation(netlist, 7, 0x01, 4, 0x10, "0x01 << 4");
+    all_pass = all_pass && test_async_cle_operation(netlist, 7, 0x01, 1, 0x02, "0x01 << 1").await;
+    all_pass = all_pass && test_async_cle_operation(netlist, 7, 0x01, 4, 0x10, "0x01 << 4").await;
 
     // L0L1Opcode::SRL_8 = 8 (shift right logical)
     println!("\nSRL tests:");
-    all_pass = all_pass && test_async_cle_operation(netlist, 8, 0x80, 1, 0x40, "0x80 >> 1");
-    all_pass = all_pass && test_async_cle_operation(netlist, 8, 0xF0, 4, 0x0F, "0xF0 >> 4");
+    all_pass = all_pass && test_async_cle_operation(netlist, 8, 0x80, 1, 0x40, "0x80 >> 1").await;
+    all_pass = all_pass && test_async_cle_operation(netlist, 8, 0xF0, 4, 0x0F, "0xF0 >> 4").await;
 
     assert!(all_pass, "Async CLE L0 shift tests failed");
 }
@@ -569,8 +569,8 @@ fn f32_approx_eq(a: f32, b: f32, tolerance: f32) -> bool {
     (a - b).abs() < tolerance
 }
 
-#[test]
-fn test_async_cle_l2_fp32_add() {
+#[tokio::test]
+async fn test_async_cle_l2_fp32_add() {
     println!("\n=== Async CLE L2 FP32 ADD Test ===");
     let netlist = compile_karythra_async_cle();
     println!(
@@ -586,7 +586,7 @@ fn test_async_cle_l2_fp32_add() {
     {
         let a = f32_to_bits(2.0);
         let b = f32_to_bits(3.0);
-        if let Some(result_bits) = test_l2_fp32_operation(netlist, 23, a, b) {
+        if let Some(result_bits) = test_l2_fp32_operation(netlist, 23, a, b).await {
             let result = bits_to_f32(result_bits);
             let pass = f32_approx_eq(result, 5.0, 0.001);
             println!(
@@ -605,7 +605,7 @@ fn test_async_cle_l2_fp32_add() {
     {
         let a = f32_to_bits(-1.5);
         let b = f32_to_bits(2.5);
-        if let Some(result_bits) = test_l2_fp32_operation(netlist, 23, a, b) {
+        if let Some(result_bits) = test_l2_fp32_operation(netlist, 23, a, b).await {
             let result = bits_to_f32(result_bits);
             let pass = f32_approx_eq(result, 1.0, 0.001);
             println!(
@@ -623,8 +623,8 @@ fn test_async_cle_l2_fp32_add() {
     assert!(all_pass, "Async CLE L2 FP32 ADD tests failed");
 }
 
-#[test]
-fn test_async_cle_l2_fp32_mul() {
+#[tokio::test]
+async fn test_async_cle_l2_fp32_mul() {
     println!("\n=== Async CLE L2 FP32 MUL Test ===");
     let netlist = compile_karythra_async_cle();
     println!(
@@ -640,7 +640,7 @@ fn test_async_cle_l2_fp32_mul() {
     {
         let a = f32_to_bits(3.0);
         let b = f32_to_bits(4.0);
-        if let Some(result_bits) = test_l2_fp32_operation(netlist, 24, a, b) {
+        if let Some(result_bits) = test_l2_fp32_operation(netlist, 24, a, b).await {
             let result = bits_to_f32(result_bits);
             let pass = f32_approx_eq(result, 12.0, 0.001);
             println!(
@@ -659,7 +659,7 @@ fn test_async_cle_l2_fp32_mul() {
     {
         let a = f32_to_bits(2.5);
         let b = f32_to_bits(-2.0);
-        if let Some(result_bits) = test_l2_fp32_operation(netlist, 24, a, b) {
+        if let Some(result_bits) = test_l2_fp32_operation(netlist, 24, a, b).await {
             let result = bits_to_f32(result_bits);
             let pass = f32_approx_eq(result, -5.0, 0.001);
             println!(
@@ -681,8 +681,8 @@ fn test_async_cle_l2_fp32_mul() {
 // L3 Tests (Vector Operations)
 // =============================================================================
 
-#[test]
-fn test_async_cle_l3_vec3_add() {
+#[tokio::test]
+async fn test_async_cle_l3_vec3_add() {
     println!("\n=== Async CLE L3 VEC3 ADD Test ===");
     let netlist = compile_karythra_async_cle();
     println!(
@@ -709,7 +709,7 @@ fn test_async_cle_l3_vec3_add() {
         let data2 = bx | (by << 32) | (bz << 64);
 
         // Check debug_l3 (lower 32 bits = rx)
-        if let Some(result_bits) = test_l3_vec3_operation(netlist, 32, data1, data2) {
+        if let Some(result_bits) = test_l3_vec3_operation(netlist, 32, data1, data2).await {
             let rx = bits_to_f32(result_bits);
             let pass = f32_approx_eq(rx, 5.0, 0.01);
             println!(
@@ -727,8 +727,8 @@ fn test_async_cle_l3_vec3_add() {
     assert!(all_pass, "Async CLE L3 VEC3 ADD tests failed");
 }
 
-#[test]
-fn test_async_cle_l3_vec3_dot() {
+#[tokio::test]
+async fn test_async_cle_l3_vec3_dot() {
     println!("\n=== Async CLE L3 VEC3 DOT Test ===");
     let netlist = compile_karythra_async_cle();
     println!(
@@ -754,7 +754,7 @@ fn test_async_cle_l3_vec3_dot() {
         let bz = f32_to_bits(6.0) as u128;
         let data2 = bx | (by << 32) | (bz << 64);
 
-        if let Some(result_bits) = test_l3_vec3_operation(netlist, 35, data1, data2) {
+        if let Some(result_bits) = test_l3_vec3_operation(netlist, 35, data1, data2).await {
             let dot = bits_to_f32(result_bits);
             let pass = f32_approx_eq(dot, 32.0, 0.1);
             println!(
@@ -779,7 +779,7 @@ fn test_async_cle_l3_vec3_dot() {
 /// Test L4 algorithm operation using UnifiedSimulator
 /// Returns the debug_l4_l5 output (lower 32 bits of result)
 /// data1 and data2 are passed as (low_128bits, high_128bits) tuples
-fn test_l4_algorithm_operation(
+async fn test_l4_algorithm_operation(
     netlist: &GateNetlist,
     opcode: u64,
     data1: (u128, u128),
@@ -804,7 +804,7 @@ fn test_l4_algorithm_operation(
     sim.set_ncl_input("top.data1", data1.0 as u64, 64);
     sim.set_ncl_input("top.data2", data2.0 as u64, 64);
 
-    let result = sim.run_until_stable();
+    let result = sim.run_until_stable().await;
     if !result.is_stable {
         println!("  Did not converge after {} iterations", result.iterations);
         return None;
@@ -814,8 +814,8 @@ fn test_l4_algorithm_operation(
     sim.get_ncl_output("top.result", 32)
 }
 
-#[test]
-fn test_async_cle_l4_quadratic() {
+#[tokio::test]
+async fn test_async_cle_l4_quadratic() {
     println!("\n=== Async CLE L4 QUADRATIC Test ===");
     let netlist = compile_karythra_async_cle();
     println!(
@@ -838,7 +838,8 @@ fn test_async_cle_l4_quadratic() {
 
         // Result format from quadratic_solve: (valid, x1, x2) where x1=2.0, x2=3.0
         // debug_l4_l5 captures lower 32 bits which should be x1
-        if let Some(result_bits) = test_l4_algorithm_operation(&netlist, 45, (data1_low, 0), (0, 0))
+        if let Some(result_bits) =
+            test_l4_algorithm_operation(&netlist, 45, (data1_low, 0), (0, 0)).await
         {
             let x1 = bits_to_f32(result_bits);
             // x1 should be 2.0 (the smaller root: (-b - sqrt(disc))/2a)
@@ -858,8 +859,8 @@ fn test_async_cle_l4_quadratic() {
     assert!(all_pass, "Async CLE L4 QUADRATIC tests failed");
 }
 
-#[test]
-fn test_async_cle_l4_bezier() {
+#[tokio::test]
+async fn test_async_cle_l4_bezier() {
     println!("\n=== Async CLE L4 BEZIER Test ===");
     let netlist = compile_karythra_async_cle();
     println!(
@@ -886,7 +887,7 @@ fn test_async_cle_l4_bezier() {
         let data1_high = t; // t goes in bits [159:128], which is bits [31:0] of the high word
 
         if let Some(result_bits) =
-            test_l4_algorithm_operation(&netlist, 46, (data1_low, data1_high), (0, 0))
+            test_l4_algorithm_operation(&netlist, 46, (data1_low, data1_high), (0, 0)).await
         {
             let result = bits_to_f32(result_bits);
             // At t=0.5: (1-0.5)³×0 + 3×(1-0.5)²×0.5×1 + 3×(1-0.5)×0.5²×2 + 0.5³×3
@@ -916,7 +917,7 @@ fn test_async_cle_l4_bezier() {
         let data1_high = t;
 
         if let Some(result_bits) =
-            test_l4_algorithm_operation(&netlist, 46, (data1_low, data1_high), (0, 0))
+            test_l4_algorithm_operation(&netlist, 46, (data1_low, data1_high), (0, 0)).await
         {
             let result = bits_to_f32(result_bits);
             let pass = f32_approx_eq(result, 5.0, 0.01);
@@ -943,7 +944,7 @@ fn test_async_cle_l4_bezier() {
         let data1_high = t;
 
         if let Some(result_bits) =
-            test_l4_algorithm_operation(&netlist, 46, (data1_low, data1_high), (0, 0))
+            test_l4_algorithm_operation(&netlist, 46, (data1_low, data1_high), (0, 0)).await
         {
             let result = bits_to_f32(result_bits);
             let pass = f32_approx_eq(result, 20.0, 0.01);
@@ -962,8 +963,8 @@ fn test_async_cle_l4_bezier() {
     assert!(all_pass, "Async CLE L4 BEZIER tests failed");
 }
 
-#[test]
-fn test_async_cle_l4_ray_aabb() {
+#[tokio::test]
+async fn test_async_cle_l4_ray_aabb() {
     println!("\n=== Async CLE L4 RAY_AABB Test ===");
     let netlist = compile_karythra_async_cle();
     println!(
@@ -1017,7 +1018,9 @@ fn test_async_cle_l4_ray_aabb() {
             47,
             (data1_low, data1_high),
             (data2_low, data2_high),
-        ) {
+        )
+        .await
+        {
             let t_near = bits_to_f32(result_bits);
             // t_near should be 1.0
             let pass = f32_approx_eq(t_near, 1.0, 0.1);
@@ -1040,8 +1043,8 @@ fn test_async_cle_l4_ray_aabb() {
 // L5 Tests (Bitops Operations)
 // =============================================================================
 
-#[test]
-fn test_async_cle_l5_clz() {
+#[tokio::test]
+async fn test_async_cle_l5_clz() {
     println!("\n=== Async CLE L5 CLZ Test ===");
     let netlist = compile_karythra_async_cle();
     println!(
@@ -1062,7 +1065,7 @@ fn test_async_cle_l5_clz() {
     ];
 
     for (input, expected, desc) in test_cases {
-        if let Some(result) = test_l5_bit_operation(netlist, 55, input) {
+        if let Some(result) = test_l5_bit_operation(netlist, 55, input).await {
             let pass = result == expected;
             println!(
                 "CLZ {}: got {} [{}]",
@@ -1080,8 +1083,8 @@ fn test_async_cle_l5_clz() {
     assert!(all_pass, "Async CLE L5 CLZ tests failed");
 }
 
-#[test]
-fn test_async_cle_l5_popcount() {
+#[tokio::test]
+async fn test_async_cle_l5_popcount() {
     println!("\n=== Async CLE L5 POPCOUNT Test ===");
     let netlist = compile_karythra_async_cle();
     println!(
@@ -1102,7 +1105,7 @@ fn test_async_cle_l5_popcount() {
     ];
 
     for (input, expected, desc) in test_cases {
-        if let Some(result) = test_l5_bit_operation(netlist, 57, input) {
+        if let Some(result) = test_l5_bit_operation(netlist, 57, input).await {
             let pass = result == expected;
             println!(
                 "POPCOUNT {}: got {} [{}]",
@@ -1120,8 +1123,8 @@ fn test_async_cle_l5_popcount() {
     assert!(all_pass, "Async CLE L5 POPCOUNT tests failed");
 }
 
-#[test]
-fn test_async_cle_l5_bitreverse() {
+#[tokio::test]
+async fn test_async_cle_l5_bitreverse() {
     println!("\n=== Async CLE L5 BITREVERSE Test ===");
     let netlist = compile_karythra_async_cle();
     println!(
@@ -1140,7 +1143,7 @@ fn test_async_cle_l5_bitreverse() {
     ];
 
     for (input, expected, desc) in test_cases {
-        if let Some(result) = test_l5_bit_operation(netlist, 58, input) {
+        if let Some(result) = test_l5_bit_operation(netlist, 58, input).await {
             let pass = result == expected;
             println!(
                 "BITREVERSE {}: got 0x{:08X} (expected 0x{:08X}) [{}]",
@@ -1159,8 +1162,8 @@ fn test_async_cle_l5_bitreverse() {
     assert!(all_pass, "Async CLE L5 BITREVERSE tests failed");
 }
 
-#[test]
-fn test_async_cle_l5_parity() {
+#[tokio::test]
+async fn test_async_cle_l5_parity() {
     println!("\n=== Async CLE L5 PARITY Test ===");
     let netlist = compile_karythra_async_cle();
     println!(
@@ -1181,7 +1184,7 @@ fn test_async_cle_l5_parity() {
     ];
 
     for (input, expected, desc) in test_cases {
-        if let Some(result) = test_l5_bit_operation(netlist, 62, input) {
+        if let Some(result) = test_l5_bit_operation(netlist, 62, input).await {
             let pass = result == expected;
             println!(
                 "PARITY {}: got {} [{}]",
@@ -1203,8 +1206,8 @@ fn test_async_cle_l5_parity() {
 // Quick smoke test for compilation
 // =============================================================================
 
-#[test]
-fn test_async_cle_compiles() {
+#[tokio::test]
+async fn test_async_cle_compiles() {
     println!("\n=== Async CLE Compilation Test ===");
     let netlist = compile_karythra_async_cle();
     println!(

@@ -1903,14 +1903,17 @@ fn simulate_gate_level(
         .find(|n| n.contains("clk") || n.contains("clock"))
         .cloned();
 
-    // Run simulation
-    let result = if let Some(clk) = clock_name {
-        println!("   Clock: {} (toggling)", clk);
-        simulator.run_clocked(cycles, &clk)
-    } else {
-        println!("   No clock detected, running {} steps", cycles);
-        simulator.run(cycles)
-    };
+    // Run simulation (async methods require a runtime)
+    let runtime = tokio::runtime::Runtime::new()?;
+    let result = runtime.block_on(async {
+        if let Some(clk) = clock_name {
+            println!("   Clock: {} (toggling)", clk);
+            simulator.run_clocked(cycles, &clk).await
+        } else {
+            println!("   No clock detected, running {} steps", cycles);
+            simulator.run(cycles).await
+        }
+    });
 
     println!("\n📊 Simulation Results:");
     println!("   Cycles: {}", result.cycles);
@@ -2021,7 +2024,8 @@ fn simulate_ncl(
         max_iterations
     );
 
-    let result = simulator.run_until_stable();
+    let runtime = tokio::runtime::Runtime::new()?;
+    let result = runtime.block_on(async { simulator.run_until_stable().await });
 
     println!("\n📊 NCL Simulation Results:");
     println!("   Iterations: {}", result.iterations);
