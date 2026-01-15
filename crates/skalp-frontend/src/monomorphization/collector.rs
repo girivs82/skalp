@@ -7,8 +7,7 @@ use crate::hir::{
     EntityId, Hir, HirEntity, HirExpression, HirGeneric, HirGenericType, HirImplementation,
     HirInstance, HirPort, HirType,
 };
-use indexmap::IndexMap;
-use std::collections::HashSet;
+use indexmap::{IndexMap, IndexSet};
 
 /// A specific instantiation of a generic entity
 #[derive(Debug, Clone)]
@@ -155,7 +154,7 @@ fn mangle_type(ty: &HirType) -> String {
 /// Collects all generic instantiations from HIR
 pub struct InstantiationCollector<'hir> {
     /// All discovered instantiations
-    instantiations: HashSet<Instantiation>,
+    instantiations: IndexSet<Instantiation>,
     /// Const evaluator for parameter values
     evaluator: ConstEvaluator,
     /// Map from entity ID to entity
@@ -196,7 +195,7 @@ impl<'hir> InstantiationCollector<'hir> {
         }
 
         Self {
-            instantiations: HashSet::new(),
+            instantiations: IndexSet::new(),
             evaluator,
             entities,
             hir,
@@ -205,7 +204,7 @@ impl<'hir> InstantiationCollector<'hir> {
     }
 
     /// Collect all instantiations from the HIR
-    pub fn collect(mut self, hir: &'hir Hir) -> HashSet<Instantiation> {
+    pub fn collect(mut self, hir: &'hir Hir) -> IndexSet<Instantiation> {
         // Start from all implementations
         for implementation in &hir.implementations {
             self.collect_from_implementation(implementation);
@@ -712,7 +711,7 @@ impl<'hir> InstantiationCollector<'hir> {
         let mut inferred_types = IndexMap::new();
 
         // Build map of generic type parameter names
-        let mut type_param_names = HashSet::new();
+        let mut type_param_names = IndexSet::new();
         for generic in &entity.generics {
             if matches!(generic.param_type, HirGenericType::Type) {
                 type_param_names.insert(generic.name.clone());

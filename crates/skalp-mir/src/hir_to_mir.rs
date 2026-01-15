@@ -6128,7 +6128,6 @@ impl<'hir> HirToMir<'hir> {
                     // Group fields by array index (first component of path)
                     // For simple arrays: ["0"], ["1"], etc.
                     // For arrays of structs: ["0", "x"], ["0", "y"], ["1", "x"], ["1", "y"], etc.
-                    use std::collections::HashMap as StdHashMap;
                     let mut array_groups: IndexMap<usize, Vec<FlattenedField>> = IndexMap::new();
 
                     for field in &fields {

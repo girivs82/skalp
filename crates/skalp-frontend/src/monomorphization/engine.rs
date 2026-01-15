@@ -49,7 +49,7 @@ impl<'hir> MonomorphizationEngine<'hir> {
         use crate::monomorphization::InstantiationCollector;
 
         // Track all instantiations across all iterations
-        let mut all_instantiations = std::collections::HashSet::new();
+        let mut all_instantiations = indexmap::IndexSet::new();
 
         // Build initial entity and implementation maps
         let mut entity_map = IndexMap::new();
@@ -149,10 +149,14 @@ impl<'hir> MonomorphizationEngine<'hir> {
             }
 
             // Find truly new instantiations (not seen before)
-            let new_instantiations: Vec<Instantiation> = new_instantiations_set
+            // Sort by mangled name to ensure deterministic processing order
+            // (even though IndexSet preserves insertion order, the order of discovery
+            // during collection may not be deterministic)
+            let mut new_instantiations: Vec<Instantiation> = new_instantiations_set
                 .into_iter()
                 .filter(|inst| !all_instantiations.contains(inst))
                 .collect();
+            new_instantiations.sort_by_key(|inst| inst.mangled_name());
 
             // If no new instantiations, we've reached a fixed point
             if new_instantiations.is_empty() {
@@ -240,6 +244,25 @@ impl<'hir> MonomorphizationEngine<'hir> {
                                     init_expr,
                                     &mut impl_port_ids_used,
                                 );
+                            }
+                        }
+                        // BUG FIX: Also collect port IDs from instance connections
+                        // Instance connections like `a: a` where the right-side `a` is a port
+                        // need to be tracked for port ID remapping
+                        for instance in &impl_block.instances {
+                            for connection in &instance.connections {
+                                Self::collect_port_ids_from_expr(
+                                    &connection.expr,
+                                    &mut impl_port_ids_used,
+                                );
+                            }
+                            // Also check named generic args
+                            for arg in instance.named_generic_args.values() {
+                                Self::collect_port_ids_from_expr(arg, &mut impl_port_ids_used);
+                            }
+                            // And regular generic args
+                            for arg in &instance.generic_args {
+                                Self::collect_port_ids_from_expr(arg, &mut impl_port_ids_used);
                             }
                         }
                         impl_port_ids_used.sort_by_key(|id| id.0);
@@ -637,7 +660,7 @@ impl<'hir> MonomorphizationEngine<'hir> {
             })
             .collect();
 
-        // Specialize instances - substitute generic arguments
+        // Specialize instances - substitute generic arguments AND remap port IDs
         let specialized_instances: Vec<_> = impl_block
             .instances
             .iter()
@@ -649,6 +672,16 @@ impl<'hir> MonomorphizationEngine<'hir> {
                     .iter()
                     .map(|arg| self.substitute_expr(arg, &instantiation.const_args))
                     .collect();
+                // BUG FIX: Remap port IDs in connection expressions
+                // Instance connections like `a: a` where the right-side `a` is a Port expression
+                // need to be remapped to the specialized entity's port IDs
+                for connection in &mut new_instance.connections {
+                    connection.expr = self.remap_expr_ports(&connection.expr, port_id_map);
+                }
+                // Also remap port IDs in named generic args (they may reference ports)
+                for arg in new_instance.named_generic_args.values_mut() {
+                    *arg = self.remap_expr_ports(arg, port_id_map);
+                }
                 new_instance
             })
             .collect();

@@ -155,7 +155,7 @@ impl<'a> AigBuilder<'a> {
 
     /// Get cells in topological order
     fn topological_order(&self) -> Vec<CellId> {
-        use std::collections::{HashMap, HashSet, VecDeque};
+        use std::collections::{HashSet, VecDeque};
 
         let mut result = Vec::with_capacity(self.netlist.cells.len());
         let mut ready: VecDeque<CellId> = VecDeque::new();
