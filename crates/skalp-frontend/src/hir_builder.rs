@@ -7625,9 +7625,8 @@ impl HirBuilderContext {
         }
 
         // If there's no explicit result expression, use a unit/void value (literal 0)
-        let final_expr = result_expr.unwrap_or_else(|| {
-            HirExpression::Literal(HirLiteral::Integer(0))
-        });
+        let final_expr =
+            result_expr.unwrap_or_else(|| HirExpression::Literal(HirLiteral::Integer(0)));
 
         Some(HirExpression::Block {
             statements,
@@ -7745,7 +7744,7 @@ impl HirBuilderContext {
                             | SyntaxKind::MatchExpr
                             | SyntaxKind::CastExpr // BUG #95: Support nested casts
                             | SyntaxKind::ConcatExpr // BUG #212: Support concat in cast
-                            | SyntaxKind::BlockExpr  // BUG #212: Support block in cast
+                            | SyntaxKind::BlockExpr // BUG #212: Support block in cast
                     )
                 })
                 .last()
