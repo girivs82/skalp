@@ -1921,15 +1921,20 @@ impl<'hir> HirToMir<'hir> {
                                                 let expr_type =
                                                     self.hir_type_to_type(&port.port_type);
                                                 // BUG #209 FIX: Include match_arm_prefix in key to prevent collisions
-                                                let prefix = self.match_arm_prefix.clone().unwrap_or_default();
+                                                let prefix = self
+                                                    .match_arm_prefix
+                                                    .clone()
+                                                    .unwrap_or_default();
                                                 println!(
                                                     "[BUG #167] Mapping placeholder variable {:?} (prefix='{}') -> entity output signal '{}' (type {:?})",
                                                     var_id, prefix, signal_name, expr_type
                                                 );
                                                 // BUG #201 FIX: Store Type along with signal_id for correct type propagation
                                                 // BUG #209 FIX: Use (prefix, var_id) as key for uniqueness per context
-                                                self.placeholder_signal_to_entity_output
-                                                    .insert((prefix, var_id), (signal_id, expr_type));
+                                                self.placeholder_signal_to_entity_output.insert(
+                                                    (prefix, var_id),
+                                                    (signal_id, expr_type),
+                                                );
                                             }
 
                                             // BUG #190 FIX: Also handle Signal and Cast(Signal)
@@ -8080,12 +8085,24 @@ impl<'hir> HirToMir<'hir> {
             self.entity_instance_prefix = None;
 
             // DEBUG: Print arm_expr to trace what's being used as then_expr
-            println!("🎨🎨🎨 ARM {} then_expr: kind={:?}", arm_idx, std::mem::discriminant(&arm_expr.kind));
+            println!(
+                "🎨🎨🎨 ARM {} then_expr: kind={:?}",
+                arm_idx,
+                std::mem::discriminant(&arm_expr.kind)
+            );
             if let ExpressionKind::Ref(ref lval) = arm_expr.kind {
                 println!("🎨🎨🎨   -> Ref: {:?}", lval);
             }
-            if let ExpressionKind::Cast { expr: inner, target_type } = &arm_expr.kind {
-                println!("🎨🎨🎨   -> Cast to {:?}, inner kind={:?}", target_type, std::mem::discriminant(&inner.kind));
+            if let ExpressionKind::Cast {
+                expr: inner,
+                target_type,
+            } = &arm_expr.kind
+            {
+                println!(
+                    "🎨🎨🎨   -> Cast to {:?}, inner kind={:?}",
+                    target_type,
+                    std::mem::discriminant(&inner.kind)
+                );
                 if let ExpressionKind::Ref(ref lval) = inner.kind {
                     println!("🎨🎨🎨       -> Inner Ref: {:?}", lval);
                 }
@@ -8649,7 +8666,10 @@ impl<'hir> HirToMir<'hir> {
             // This handles match arm blocks like: `{ let x = 1; let y = 2; x + y }`
             // The Block contains Let statements and a final Expression
             [hir::HirStatement::Block(block_stmts)] => {
-                debug_println!("[DEBUG] convert_body_to_expression: processing Block with {} statements", block_stmts.len());
+                debug_println!(
+                    "[DEBUG] convert_body_to_expression: processing Block with {} statements",
+                    block_stmts.len()
+                );
                 self.convert_body_to_expression(block_stmts)
             }
 
@@ -13220,7 +13240,11 @@ impl<'hir> HirToMir<'hir> {
         // BUG #211 FIX: Also try trait methods if regular function lookup fails
         let (params, body, return_type) = if let Some(func) = self.find_function(&call.function) {
             debug_println!("[DEBUG] ✓ Found function '{}'", call.function);
-            (func.params.clone(), func.body.clone(), func.return_type.clone())
+            (
+                func.params.clone(),
+                func.body.clone(),
+                func.return_type.clone(),
+            )
         } else if let Some((trait_params, trait_body)) = self.try_find_trait_method_for_call(call) {
             // BUG #211 FIX: Found as trait method (e.g., sqrt -> impl Sqrt for fp32)
             // Trait methods return type is typically Self, which we'll infer from the argument type
@@ -13496,7 +13520,11 @@ impl<'hir> HirToMir<'hir> {
         // Step 1: Find the function
         // BUG #211 FIX: Also try trait methods if regular function lookup fails
         let (params, body, return_type) = if let Some(func) = self.find_function(&call.function) {
-            (func.params.clone(), func.body.clone(), func.return_type.clone())
+            (
+                func.params.clone(),
+                func.body.clone(),
+                func.return_type.clone(),
+            )
         } else if let Some((trait_params, trait_body)) = self.try_find_trait_method_for_call(call) {
             // BUG #211 FIX: Found as trait method (e.g., sqrt -> impl Sqrt for fp32)
             eprintln!(
@@ -14184,13 +14212,22 @@ impl<'hir> HirToMir<'hir> {
         right_expr: &hir::HirExpression,
     ) -> Option<Expression> {
         // No module context - use regular convert_expression
-        self.inline_trait_method_with_ctx(type_name, trait_name, method_name, left_expr, right_expr, None, 0)
+        self.inline_trait_method_with_ctx(
+            type_name,
+            trait_name,
+            method_name,
+            left_expr,
+            right_expr,
+            None,
+            0,
+        )
     }
 
     /// Inline a binary trait method with optional module context.
     /// BUG #209 FIX: When called from convert_hir_expr_for_module, we need to preserve
     /// the module context so that entity instances (FpAdd, FpMul, FpDiv) are properly
     /// connected to their outputs.
+    #[allow(clippy::too_many_arguments)]
     fn inline_trait_method_with_ctx(
         &mut self,
         type_name: &str,
@@ -18321,12 +18358,7 @@ impl<'hir> HirToMir<'hir> {
                 // For other expressions, fall back to normal conversion (which will use the cached Calls).
 
                 // Convert result_expr, using var_id_to_mir for Variables when available
-                self.convert_hir_expr_with_mir_cache(
-                    result_expr,
-                    ctx,
-                    &var_id_to_mir,
-                    depth + 1,
-                )
+                self.convert_hir_expr_with_mir_cache(result_expr, ctx, &var_id_to_mir, depth + 1)
             }
 
             // BUG FIX #85: Handle FieldAccess for tuple destructuring in module context
@@ -18358,7 +18390,6 @@ impl<'hir> HirToMir<'hir> {
 
                 // For numeric fields (tuple element access), extract the element
                 if let Ok(index) = field.parse::<usize>() {
-
                     // BUG FIX #125: If base_converted is already a Concat, extract element directly
                     // This happens when we cache a Call result that returns a tuple (Concat of signals)
                     // Instead of creating TupleFieldAccess { base: Concat([...]), index } which
@@ -18943,66 +18974,65 @@ impl<'hir> HirToMir<'hir> {
                     );
                     let_bindings.push(let_stmt.clone());
                 }
-                hir::HirStatement::Return(value) => {
-                    if let Some(val) = value {
-                        return_expr = Some(val.clone());
-                        println!(
-                            "    • Found return expression: {:?}",
-                            std::mem::discriminant(val)
-                        );
-                        // Check if the return is a ternary/if expression (early return transformed)
-                        match val {
-                            hir::HirExpression::Ternary {
-                                condition,
-                                true_expr,
-                                false_expr,
-                            } => {
-                                println!("      🎯 Return is a Ternary (conditional)!");
-                                println!(
-                                    "         condition: {:?}",
-                                    std::mem::discriminant(condition.as_ref())
-                                );
-                                println!(
-                                    "         true: {:?}",
-                                    std::mem::discriminant(true_expr.as_ref())
-                                );
-                                println!(
-                                    "         false: {:?}",
-                                    std::mem::discriminant(false_expr.as_ref())
-                                );
-                            }
-                            hir::HirExpression::If(if_expr) => {
-                                println!("      🎯 Return is an If expression!");
-                            }
-                            hir::HirExpression::TupleLiteral(elements) => {
-                                println!(
-                                    "      🎯 Return is a TupleLiteral with {} elements:",
-                                    elements.len()
-                                );
-                                for (i, elem) in elements.iter().enumerate() {
-                                    println!("         [{i}] {:?}", std::mem::discriminant(elem));
-                                    // Check if element is conditional
-                                    match elem {
-                                        hir::HirExpression::Ternary { .. } => {
-                                            println!("             -> Is Ternary!")
-                                        }
-                                        hir::HirExpression::If(_) => {
-                                            println!("             -> Is If expression!")
-                                        }
-                                        hir::HirExpression::Variable(v) => {
-                                            println!("             -> Variable({:?})", v)
-                                        }
-                                        hir::HirExpression::Literal(_) => {
-                                            println!("             -> Literal")
-                                        }
-                                        _ => {}
+                hir::HirStatement::Return(Some(val)) => {
+                    return_expr = Some(val.clone());
+                    println!(
+                        "    • Found return expression: {:?}",
+                        std::mem::discriminant(val)
+                    );
+                    // Check if the return is a ternary/if expression (early return transformed)
+                    match val {
+                        hir::HirExpression::Ternary {
+                            condition,
+                            true_expr,
+                            false_expr,
+                        } => {
+                            println!("      🎯 Return is a Ternary (conditional)!");
+                            println!(
+                                "         condition: {:?}",
+                                std::mem::discriminant(condition.as_ref())
+                            );
+                            println!(
+                                "         true: {:?}",
+                                std::mem::discriminant(true_expr.as_ref())
+                            );
+                            println!(
+                                "         false: {:?}",
+                                std::mem::discriminant(false_expr.as_ref())
+                            );
+                        }
+                        hir::HirExpression::If(_if_expr) => {
+                            println!("      🎯 Return is an If expression!");
+                        }
+                        hir::HirExpression::TupleLiteral(elements) => {
+                            println!(
+                                "      🎯 Return is a TupleLiteral with {} elements:",
+                                elements.len()
+                            );
+                            for (i, elem) in elements.iter().enumerate() {
+                                println!("         [{i}] {:?}", std::mem::discriminant(elem));
+                                // Check if element is conditional
+                                match elem {
+                                    hir::HirExpression::Ternary { .. } => {
+                                        println!("             -> Is Ternary!")
                                     }
+                                    hir::HirExpression::If(_) => {
+                                        println!("             -> Is If expression!")
+                                    }
+                                    hir::HirExpression::Variable(v) => {
+                                        println!("             -> Variable({:?})", v)
+                                    }
+                                    hir::HirExpression::Literal(_) => {
+                                        println!("             -> Literal")
+                                    }
+                                    _ => {}
                                 }
                             }
-                            _ => {}
                         }
+                        _ => {}
                     }
                 }
+                hir::HirStatement::Return(None) => {}
                 hir::HirStatement::If(if_stmt) => {
                     // Check if this is an early return pattern (if condition { return ... })
                     if_return_statements.push(if_stmt);

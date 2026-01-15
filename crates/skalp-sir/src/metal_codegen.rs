@@ -3302,10 +3302,19 @@ impl<'a> MetalShaderGenerator<'a> {
             // so we iterate in reverse to place the last input (low bits) at bit_offset=0
             for (input_name, width) in input_widths.iter().rev() {
                 let input_expr = self.format_signal_for_bitwise_op(sir, input_name);
+                // BUG FIX: Don't blindly cast to (uint) - wide signals (uint2/uint4) can't be cast to uint
+                // We'll handle component extraction properly in the building phase
                 let input_expr = if input_expr == "0u" || input_expr.contains("as_type") {
                     input_expr
-                } else {
+                } else if input_expr.contains(".x") || input_expr.contains("[0]") {
+                    // Already has component extraction - cast to uint
                     format!("(uint)({})", input_expr)
+                } else if *width <= 32 {
+                    // 32-bit or smaller - safe to cast to uint
+                    format!("(uint)({})", input_expr)
+                } else {
+                    // Wide signal (uint2/uint4) - don't cast, we'll extract components later
+                    input_expr
                 };
 
                 // An input may span multiple 32-bit components
@@ -3339,7 +3348,7 @@ impl<'a> MetalShaderGenerator<'a> {
 
             // Build each component expression by OR'ing shifted contributions
             let mut components = vec![];
-            for contribs in component_contributions.iter().take(4) {
+            for (_component_idx, contribs) in component_contributions.iter().enumerate().take(4) {
                 if contribs.is_empty() {
                     components.push("0u".to_string());
                 } else if contribs.len() == 1
@@ -3348,7 +3357,47 @@ impl<'a> MetalShaderGenerator<'a> {
                     && contribs[0].start_bit_in_input == 0
                 {
                     // Simple case: full 32-bit value aligned at start
-                    components.push(contribs[0].input_expr.clone());
+                    // BUG FIX: If input is a wide signal (uint2/uint4), extract the appropriate component
+                    let is_wide_signal = contribs[0].input_width > 32
+                        && !contribs[0].input_expr.starts_with("(uint)")
+                        && !contribs[0].input_expr.contains(".x")
+                        && !contribs[0].input_expr.contains(".y")
+                        && !contribs[0].input_expr.contains("[");
+                    if is_wide_signal {
+                        // Extract .x component from wide signal (bits 0-31)
+                        components.push(format!("{}.x", contribs[0].input_expr));
+                    } else {
+                        components.push(contribs[0].input_expr.clone());
+                    }
+                } else if contribs.len() == 1
+                    && contribs[0].start_bit_in_component == 0
+                    && contribs[0].bits_in_this_component == 32
+                {
+                    // Full 32-bit value but not from input start - may need .y/.z/.w extraction
+                    let is_wide_signal = contribs[0].input_width > 32
+                        && !contribs[0].input_expr.starts_with("(uint)")
+                        && !contribs[0].input_expr.contains(".x")
+                        && !contribs[0].input_expr.contains(".y")
+                        && !contribs[0].input_expr.contains("[");
+                    if is_wide_signal {
+                        let input_component_idx = contribs[0].start_bit_in_input / 32;
+                        let component_char = match input_component_idx {
+                            0 => 'x',
+                            1 => 'y',
+                            2 => 'z',
+                            3 => 'w',
+                            _ => 'x',
+                        };
+                        components.push(format!("{}.{}", contribs[0].input_expr, component_char));
+                    } else if contribs[0].start_bit_in_input > 0 {
+                        // Narrow signal, extract high bits with shift
+                        components.push(format!(
+                            "({} >> {})",
+                            contribs[0].input_expr, contribs[0].start_bit_in_input
+                        ));
+                    } else {
+                        components.push(contribs[0].input_expr.clone());
+                    }
                 } else {
                     // Need bit manipulation
                     let mut parts = vec![];
@@ -3359,13 +3408,64 @@ impl<'a> MetalShaderGenerator<'a> {
                             (1u64 << contrib.bits_in_this_component) - 1
                         };
 
-                        let value_expr = if contrib.start_bit_in_input == 0
+                        // BUG FIX: For wide signals (uint2/uint4), use component accessors instead of bit shifts
+                        // Bit shifts don't work on Metal vector types the way they do in HDL
+                        let is_wide_signal = contrib.input_width > 32
+                            && !contrib.input_expr.starts_with("(uint)")
+                            && !contrib.input_expr.contains(".x")
+                            && !contrib.input_expr.contains(".y")
+                            && !contrib.input_expr.contains("[");
+
+                        let value_expr = if is_wide_signal && contrib.start_bit_in_input >= 32 {
+                            // Extract component from uint2/uint4 using .x/.y/.z/.w
+                            let component_idx = contrib.start_bit_in_input / 32;
+                            let component_char = match component_idx {
+                                0 => 'x',
+                                1 => 'y',
+                                2 => 'z',
+                                3 => 'w',
+                                _ => 'x',
+                            };
+                            let bit_within_component = contrib.start_bit_in_input % 32;
+                            if bit_within_component == 0 && contrib.bits_in_this_component == 32 {
+                                // Full 32-bit component extraction
+                                format!("{}.{}", contrib.input_expr, component_char)
+                            } else {
+                                // Partial extraction from component
+                                let extract_mask = if contrib.bits_in_this_component >= 32 {
+                                    0xFFFFFFFFu64
+                                } else {
+                                    (1u64 << contrib.bits_in_this_component) - 1
+                                };
+                                if bit_within_component > 0 {
+                                    format!(
+                                        "(({}.{} >> {}) & 0x{:X})",
+                                        contrib.input_expr,
+                                        component_char,
+                                        bit_within_component,
+                                        extract_mask
+                                    )
+                                } else {
+                                    format!(
+                                        "({}.{} & 0x{:X})",
+                                        contrib.input_expr, component_char, extract_mask
+                                    )
+                                }
+                            }
+                        } else if is_wide_signal && contrib.start_bit_in_input == 0 {
+                            // Extract from .x component of wide signal
+                            if contrib.bits_in_this_component == 32 {
+                                format!("{}.x", contrib.input_expr)
+                            } else {
+                                format!("({}.x & 0x{:X})", contrib.input_expr, mask)
+                            }
+                        } else if contrib.start_bit_in_input == 0
                             && contrib.bits_in_this_component < contrib.input_width
                         {
-                            // Extract low bits
+                            // Extract low bits from narrow signal
                             format!("({} & 0x{:X})", contrib.input_expr, mask)
                         } else if contrib.start_bit_in_input > 0 {
-                            // Extract high bits
+                            // Extract high bits from narrow signal using shift
                             let extract_mask = if contrib.bits_in_this_component >= 32 {
                                 0xFFFFFFFFu64
                             } else {
