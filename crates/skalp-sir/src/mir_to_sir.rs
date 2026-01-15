@@ -4173,8 +4173,17 @@ impl<'a> MirToSirConverter<'a> {
         child_module: &Module,
         inst_prefix: &str,
     ) {
-        // Call with no parent context (for top-level instances)
-        self.elaborate_instance_with_context(instance, child_module, inst_prefix, None, "");
+        // BUG #208 FIX: Pass self.mir as parent context for top-level instances
+        // The instance.connections contain SignalIds that belong to self.mir, not child_module.
+        // Previously we passed None, which caused FP specialization to fail to resolve signals.
+        let parent_mir = self.mir.clone();
+        self.elaborate_instance_with_context(
+            instance,
+            child_module,
+            inst_prefix,
+            Some(&parent_mir),
+            "",
+        );
     }
 
     /// GPU OPTIMIZATION: Try to specialize FP module instances to native operations
