@@ -4395,11 +4395,20 @@ impl<'a> MirToSirConverter<'a> {
         };
 
         let node_id = self.next_node_id();
+
+        // BUG #210 FIX: Also include node_N_out as an output so that when mux nodes
+        // reference this node via node_to_signal_ref, they get a valid connection.
+        // Without this, node_to_signal_ref creates a new unconnected node_N_out signal.
+        let node_out_signal = SignalRef {
+            signal_id: format!("node_{}_out", node_id),
+            bit_range: None,
+        };
+
         let node = SirNode {
             id: node_id,
             kind: SirNodeKind::BinaryOp(fp_op.clone()),
             inputs: vec![a_signal, b_signal],
-            outputs: vec![output_signal],
+            outputs: vec![output_signal, node_out_signal],
             clock_domain: None,
             impl_style_hint: ImplStyleHint::default(),
             span: None,
@@ -4407,6 +4416,8 @@ impl<'a> MirToSirConverter<'a> {
 
         self.sir.combinational_nodes.push(node);
         self.update_signal_driver(&output_signal_name, node_id);
+        // BUG #210 FIX: Also update driver for node_N_out
+        self.update_signal_driver(&format!("node_{}_out", node_id), node_id);
 
         println!(
             "      ✅ [FP_SPECIALIZE] Created native {:?} operation (node_id={}) -> {}",
@@ -4474,11 +4485,18 @@ impl<'a> MirToSirConverter<'a> {
         };
 
         let node_id = self.next_node_id();
+
+        // BUG #210 FIX: Also include node_N_out as an output for mux connections
+        let node_out_signal = SignalRef {
+            signal_id: format!("node_{}_out", node_id),
+            bit_range: None,
+        };
+
         let node = SirNode {
             id: node_id,
             kind: SirNodeKind::UnaryOp(UnaryOperation::FSqrt),
             inputs: vec![x_signal],
-            outputs: vec![output_signal],
+            outputs: vec![output_signal, node_out_signal],
             clock_domain: None,
             impl_style_hint: ImplStyleHint::default(),
             span: None,
@@ -4486,6 +4504,8 @@ impl<'a> MirToSirConverter<'a> {
 
         self.sir.combinational_nodes.push(node);
         self.update_signal_driver(&output_signal_name, node_id);
+        // BUG #210 FIX: Also update driver for node_N_out
+        self.update_signal_driver(&format!("node_{}_out", node_id), node_id);
 
         println!(
             "      ✅ [FP_SPECIALIZE] Created native FSqrt operation (node_id={}) -> {}",
@@ -4559,17 +4579,23 @@ impl<'a> MirToSirConverter<'a> {
                     bit_range: None,
                 };
                 let node_id = self.next_node_id();
+                // BUG #210 FIX: Also include node_N_out for mux connections
+                let node_out_signal = SignalRef {
+                    signal_id: format!("node_{}_out", node_id),
+                    bit_range: None,
+                };
                 let node = SirNode {
                     id: node_id,
                     kind: SirNodeKind::BinaryOp(BinaryOperation::FLt),
                     inputs: vec![a_signal.clone(), b_signal.clone()],
-                    outputs: vec![output_signal],
+                    outputs: vec![output_signal, node_out_signal],
                     clock_domain: None,
                     impl_style_hint: ImplStyleHint::default(),
                     span: None,
                 };
                 self.sir.combinational_nodes.push(node);
                 self.update_signal_driver(&output_name, node_id);
+                self.update_signal_driver(&format!("node_{}_out", node_id), node_id);
                 created_ops.push(("FLt", node_id, output_name));
             }
         }
@@ -4584,17 +4610,23 @@ impl<'a> MirToSirConverter<'a> {
                     bit_range: None,
                 };
                 let node_id = self.next_node_id();
+                // BUG #210 FIX: Also include node_N_out for mux connections
+                let node_out_signal = SignalRef {
+                    signal_id: format!("node_{}_out", node_id),
+                    bit_range: None,
+                };
                 let node = SirNode {
                     id: node_id,
                     kind: SirNodeKind::BinaryOp(BinaryOperation::FEq),
                     inputs: vec![a_signal.clone(), b_signal.clone()],
-                    outputs: vec![output_signal],
+                    outputs: vec![output_signal, node_out_signal],
                     clock_domain: None,
                     impl_style_hint: ImplStyleHint::default(),
                     span: None,
                 };
                 self.sir.combinational_nodes.push(node);
                 self.update_signal_driver(&output_name, node_id);
+                self.update_signal_driver(&format!("node_{}_out", node_id), node_id);
                 created_ops.push(("FEq", node_id, output_name));
             }
         }
@@ -4609,17 +4641,23 @@ impl<'a> MirToSirConverter<'a> {
                     bit_range: None,
                 };
                 let node_id = self.next_node_id();
+                // BUG #210 FIX: Also include node_N_out for mux connections
+                let node_out_signal = SignalRef {
+                    signal_id: format!("node_{}_out", node_id),
+                    bit_range: None,
+                };
                 let node = SirNode {
                     id: node_id,
                     kind: SirNodeKind::BinaryOp(BinaryOperation::FGt),
                     inputs: vec![a_signal.clone(), b_signal.clone()],
-                    outputs: vec![output_signal],
+                    outputs: vec![output_signal, node_out_signal],
                     clock_domain: None,
                     impl_style_hint: ImplStyleHint::default(),
                     span: None,
                 };
                 self.sir.combinational_nodes.push(node);
                 self.update_signal_driver(&output_name, node_id);
+                self.update_signal_driver(&format!("node_{}_out", node_id), node_id);
                 created_ops.push(("FGt", node_id, output_name));
             }
         }
