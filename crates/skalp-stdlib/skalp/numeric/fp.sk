@@ -1140,19 +1140,19 @@ impl Neg for fp16 {
     }
 }
 
-// /// Square root for fp16: sqrt(a) using FpSqrt entity
-// impl Sqrt for fp16 {
-//     fn sqrt(a: Self) -> Self {
-//         signal result: fp16;
-//         signal flags: bit[5];
-//         let sqrt_op = FpSqrt<IEEE754_16> {
-//             x: a as fp<IEEE754_16>,
-//             result: result as fp<IEEE754_16>,
-//             flags: flags
-//         };
-//         result
-//     }
-// }
+/// Square root for fp16: sqrt(a) using FpSqrt entity
+impl Sqrt for fp16 {
+    fn sqrt(a: Self) -> Self {
+        signal result: fp16;
+        signal flags: bit[5];
+        let sqrt_op = FpSqrt<IEEE754_16> {
+            x: a as fp<IEEE754_16>,
+            result: result as fp<IEEE754_16>,
+            flags: flags
+        };
+        result
+    }
+}
 
 /// Absolute value for fp16: abs(a) = |a|
 /// Clears the sign bit (IEEE 754 sign-magnitude representation)
