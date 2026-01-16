@@ -12039,12 +12039,14 @@ impl HirBuilderContext {
 
         // Extract base type from type annotation (e.g., `: bit[6]`)
         // If no type annotation, default to nat[32]
+        // Note: The parser wraps types in TypeAnnotation, so we must check for that too
         let base_type = node
             .children()
             .find(|n| {
                 matches!(
                     n.kind(),
-                    SyntaxKind::BitType
+                    SyntaxKind::TypeAnnotation
+                        | SyntaxKind::BitType
                         | SyntaxKind::NatType
                         | SyntaxKind::IntType
                         | SyntaxKind::LogicType

@@ -151,6 +151,9 @@ struct MirToSirConverter<'a> {
     // BUG FIX: Track elaborated instance paths to detect circular references
     // This prevents infinite recursion when modules have circular instantiation chains
     elaborated_instances: std::collections::HashSet<String>,
+    // BUG FIX #209: Track parent module ID for each instance prefix
+    // This allows us to look up the correct grandparent module when resolving 3+ levels of hierarchy
+    instance_parent_module_ids: HashMap<String, skalp_mir::ModuleId>,
 }
 
 impl<'a> MirToSirConverter<'a> {
@@ -168,6 +171,7 @@ impl<'a> MirToSirConverter<'a> {
             tuple_source_map,
             instance_port_mappings: HashMap::new(),
             elaborated_instances: std::collections::HashSet::new(),
+            instance_parent_module_ids: HashMap::new(),
         }
     }
 
@@ -3038,7 +3042,7 @@ impl<'a> MirToSirConverter<'a> {
             // Comparison operations return 1-bit boolean
             SirType::Bits(1)
         } else {
-            // Arithmetic/logic operations use max width
+            // Other arithmetic/logic operations use max width
             let width = left_type.width().max(right_type.width());
             SirType::Bits(width)
         };
@@ -4993,6 +4997,17 @@ impl<'a> MirToSirConverter<'a> {
             println!("🔑🔑🔑 BUG #124 EARLY: Storing basic port_mapping for inst_prefix='{}' with {} entries BEFORE nested elaboration", inst_prefix, basic_port_mapping.len());
             self.instance_port_mappings
                 .insert(inst_prefix.to_string(), basic_port_mapping);
+
+            // BUG FIX #209: Also store the parent module ID so we can look up the correct
+            // grandparent module when resolving 3+ levels of hierarchy
+            if let Some(parent_module) = parent_module_for_signals {
+                println!(
+                    "🔑🔑🔑 BUG #209: Storing parent module ID {:?} for inst_prefix='{}'",
+                    parent_module.id, inst_prefix
+                );
+                self.instance_parent_module_ids
+                    .insert(inst_prefix.to_string(), parent_module.id);
+            }
         }
 
         // Step 2: FIRST recursively elaborate any instances within the child
@@ -6308,17 +6323,50 @@ impl<'a> MirToSirConverter<'a> {
                                     .unwrap_or_default();
                                 if let Some(parent_module) = parent_module_for_signals {
                                     println!("🎨🎨🎨   -> Recursing with parent_module='{}' as child_module, parent_prefix='{}', parent_port_mapping.len()={}", parent_module.name, parent_prefix, parent_port_mapping.len());
-                                    // BUG #113 FIX: When recursing to resolve parent expressions, we need to
-                                    // provide proper context for nested modules. If the parent module's ports
-                                    // reference the grandparent (top-level module), we need to provide that context.
-                                    // Use self.mir as the grandparent context since it's the top-level module.
+
+                                    // BUG FIX #209: Look up the correct grandparent module for 3+ level hierarchies
+                                    // instead of always using self.mir. The grandparent is the module that owns
+                                    // the SignalIds in parent_port_mapping.
+                                    let (grandparent_module, grandparent_prefix) = if let Some(
+                                        grandparent_id,
+                                    ) =
+                                        self.instance_parent_module_ids.get(parent_key)
+                                    {
+                                        // Find the grandparent module by ID
+                                        if let Some(gp_module) = self
+                                            .mir_design
+                                            .modules
+                                            .iter()
+                                            .find(|m| m.id == *grandparent_id)
+                                        {
+                                            // Calculate grandparent prefix by stripping the last component from parent_key
+                                            // e.g., "m.ppgen" -> "m.", "m" -> ""
+                                            let gp_prefix = if let Some(pos) = parent_key.rfind('.')
+                                            {
+                                                format!("{}.", &parent_key[..pos])
+                                            } else {
+                                                String::new()
+                                            };
+                                            println!("🎨🎨🎨   -> BUG #209 FIX: Using grandparent '{}' with prefix '{}' (from instance_parent_module_ids)", gp_module.name, gp_prefix);
+                                            (gp_module.clone(), gp_prefix)
+                                        } else {
+                                            // Fallback to self.mir if module not found
+                                            println!("🎨🎨🎨   -> BUG #209: Grandparent ID {:?} not found, falling back to self.mir", grandparent_id);
+                                            (self.mir.clone(), String::new())
+                                        }
+                                    } else {
+                                        // No stored parent - we're at first level nesting, use self.mir
+                                        println!("🎨🎨🎨   -> BUG #209: No grandparent stored for '{}', using self.mir", parent_key);
+                                        (self.mir.clone(), String::new())
+                                    };
+
                                     return self.create_expression_node_for_instance_with_context(
                                         parent_expr,
                                         parent_prefix, // Use parent prefix for parent context
                                         &parent_port_mapping, // BUG #124: Use parent's port_mapping for proper resolution
                                         parent_module, // BUG #113: Use parent module since Port refs are from parent
-                                        Some(&self.mir.clone()), // Use top-level module as grandparent context
-                                        "",                      // Top-level has no prefix
+                                        Some(&grandparent_module), // BUG #209: Use correct grandparent, not always self.mir
+                                        &grandparent_prefix, // BUG #209: Use correct grandparent prefix
                                     );
                                 } else {
                                     // No parent module - we're at top level, look up in self.mir
@@ -7125,12 +7173,38 @@ impl<'a> MirToSirConverter<'a> {
                                     if let Some(grandparent_expr) =
                                         parent_port_mapping.get(&port.name)
                                     {
-                                        // The parent's port is mapped to grandparent signal
-                                        // Recursively resolve without parent context
+                                        // BUG FIX #209: The parent's port is mapped to grandparent signal
+                                        // We need to recursively resolve WITH proper grandparent context
+                                        // Look up the grandparent module from instance_parent_module_ids
+                                        let (gp_module, gp_prefix) = if let Some(grandparent_id) =
+                                            self.instance_parent_module_ids.get(parent_inst_name)
+                                        {
+                                            if let Some(gp_mod) = self
+                                                .mir_design
+                                                .modules
+                                                .iter()
+                                                .find(|m| m.id == *grandparent_id)
+                                            {
+                                                // Calculate grandparent prefix
+                                                let gp_pref = if let Some(pos) =
+                                                    parent_inst_name.rfind('.')
+                                                {
+                                                    format!("{}.", &parent_inst_name[..pos])
+                                                } else {
+                                                    String::new()
+                                                };
+                                                (Some(gp_mod), gp_pref)
+                                            } else {
+                                                (None, String::new())
+                                            }
+                                        } else {
+                                            (None, String::new())
+                                        };
+
                                         return self.get_signal_name_from_expression_with_context(
                                             grandparent_expr,
-                                            None,
-                                            "",
+                                            gp_module,
+                                            &gp_prefix,
                                         );
                                     }
                                 }

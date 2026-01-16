@@ -2,7 +2,6 @@ use crate::sir::*;
 use std::fmt::Write;
 
 pub fn generate_metal_shader(sir_module: &SirModule) -> String {
-    println!(">>> GENERATE_METAL_SHADER CALLED <<<");
     let mut shader = String::new();
     let mut generator = MetalShaderGenerator::new(&mut shader);
 
@@ -11,14 +10,8 @@ pub fn generate_metal_shader(sir_module: &SirModule) -> String {
     generator.generate_combinational_kernels(sir_module);
     generator.generate_sequential_kernel(sir_module);
 
-    println!(">>> METAL SHADER GENERATION COMPLETE <<<");
-
-    // DEBUG: Write shader to temp file for inspection
+    // Write shader to temp file for testing/debugging
     let _ = std::fs::write("/tmp/skalp_shader.metal", &shader);
-    eprintln!(
-        ">>> Shader written to /tmp/skalp_shader.metal ({} bytes) <<<",
-        shader.len()
-    );
 
     shader
 }
@@ -1135,6 +1128,54 @@ impl<'a> MetalShaderGenerator<'a> {
             // Get the output signal width from the SIR module
             let output_width = self.get_signal_width_from_sir(sir, output);
 
+            // BUG FIX #212: For 33-64 bit Add/Sub operations, use ulong arithmetic
+            // uint2 element-wise addition doesn't propagate carry between elements,
+            // causing incorrect results for large values. Cast to ulong for proper
+            // 64-bit arithmetic with carry handling.
+            let is_add_sub = matches!(op, BinaryOperation::Add | BinaryOperation::Sub);
+            if is_add_sub && output_width > 32 && output_width <= 64 {
+                let left_width = self.get_signal_width_from_sir(sir, left);
+                let right_width = self.get_signal_width_from_sir(sir, right);
+
+                self.write_indented(&format!(
+                    "// BUG #212: Use ulong for {}-bit {} with carry propagation\n",
+                    output_width, op_str
+                ));
+
+                // Convert operands to ulong
+                let left_expr = if left_width <= 32 {
+                    format!("(ulong)signals->{}", self.sanitize_name(left))
+                } else {
+                    // uint2 -> ulong: low element + (high element << 32)
+                    format!(
+                        "((ulong)signals->{}[0] | ((ulong)signals->{}[1] << 32))",
+                        self.sanitize_name(left),
+                        self.sanitize_name(left)
+                    )
+                };
+
+                let right_expr = if right_width <= 32 {
+                    format!("(ulong)signals->{}", self.sanitize_name(right))
+                } else {
+                    format!(
+                        "((ulong)signals->{}[0] | ((ulong)signals->{}[1] << 32))",
+                        self.sanitize_name(right),
+                        self.sanitize_name(right)
+                    )
+                };
+
+                // Perform operation and convert back to uint2
+                self.write_indented(&format!(
+                    "{{ ulong _tmp = {} {} {}; signals->{}[0] = (uint)_tmp; signals->{}[1] = (uint)(_tmp >> 32); }}\n",
+                    left_expr,
+                    op_str,
+                    right_expr,
+                    self.sanitize_name(output),
+                    self.sanitize_name(output)
+                ));
+                return;
+            }
+
             if output_width > 128 {
                 // Wide bit type - use element-wise operations
                 // BUG FIX #75: For shift operations, check if right operand is scalar
@@ -1796,27 +1837,15 @@ impl<'a> MetalShaderGenerator<'a> {
             let false_val = &node.inputs[2].signal_id;
             let output = &node.outputs[0].signal_id;
 
-            // BUG #117q DEBUG: Print mux node info
-            println!(
-                "🔧 MUX node {}: sel='{}', true='{}', false='{}', out='{}'",
-                node.id, sel, true_val, false_val, output
-            );
-
-            // BUG FIX #87: Check ALL outputs of this node to find the correct width.
+            // BUG FIX #87/#210: Check ALL outputs of this node to find the correct width.
             // Intermediate signals like node_XXXX_out may not be registered in sir.signals,
             // but if this mux drives a module output (like 'result'), that output IS registered.
             // Use the maximum width found among all outputs.
             let mut output_width = self.get_signal_width_from_sir(sir, output);
-            // BUG FIX #87: Check ALL outputs to find correct width (removed debug output)
-            if output_width == 32 && node.outputs.len() > 1 {
-                // First output defaulted to 32 - check other outputs
+            if node.outputs.len() > 1 {
                 for other_output in &node.outputs[1..] {
                     let other_width = self.get_signal_width_from_sir(sir, &other_output.signal_id);
                     if other_width > output_width {
-                        eprintln!(
-                            "🔧 [BUG #87 MUX] Node {} output '{}' width defaulted to 32, using width {} from '{}'",
-                            node.id, output, other_width, other_output.signal_id
-                        );
                         output_width = other_width;
                     }
                 }
@@ -3519,6 +3548,13 @@ impl<'a> MetalShaderGenerator<'a> {
                 let component_idx = bit_offset / 32;
                 let bit_in_component = bit_offset % 32;
 
+                // BUG FIX #213: Check if input spans the 32-bit boundary
+                // E.g., 12-bit signal at bit_offset=24 occupies bits 24-35, spanning [0] and [1]
+                let end_bit = bit_offset + width - 1;
+                let end_component_idx = end_bit / 32;
+                let spans_boundary =
+                    component_idx < end_component_idx && component_idx < 2 && end_component_idx < 2;
+
                 if component_idx < 2 {
                     // BUG FIX #61: Use format_signal_for_bitwise_op to handle float types
                     let component_str = self.format_signal_for_bitwise_op(sir, input_name);
@@ -3542,30 +3578,67 @@ impl<'a> MetalShaderGenerator<'a> {
                         }
                     };
 
-                    // BUG FIX #88: Handle multiple inputs mapping to the same component
-                    // When bit_in_component > 0, we need to shift and OR with existing value
-                    if bit_in_component > 0 && components[component_idx] != "0u" {
-                        // Need to combine with existing value using OR and shift
-                        // The new value goes at bit_in_component position
-                        if new_value == "0u" {
-                            // Shifting 0 by any amount is still 0, no change needed
-                        } else {
+                    // BUG FIX #213: Handle inputs that span the 32-bit boundary
+                    if spans_boundary {
+                        // Split the input: lower bits to component 0, upper bits to component 1
+                        let bits_in_low = 32 - bit_in_component; // How many bits fit in [0]
+                        let bits_in_high = width - bits_in_low; // Remaining bits for [1]
+
+                        // Low part: input & ((1 << bits_in_low) - 1), shifted to bit_in_component
+                        let low_mask = (1u64 << bits_in_low) - 1;
+                        let low_value = format!("(({}) & 0x{:X}u)", new_value, low_mask);
+                        if bit_in_component > 0 && components[component_idx] != "0u" {
                             components[component_idx] = format!(
                                 "({} | ({} << {}))",
-                                components[component_idx], new_value, bit_in_component
+                                components[component_idx], low_value, bit_in_component
                             );
-                        }
-                    } else if bit_in_component > 0 && components[component_idx] == "0u" {
-                        // Component was zero, just shift the new value
-                        if new_value == "0u" {
-                            // 0 << n = 0, keep as 0u
-                        } else {
+                        } else if bit_in_component > 0 {
                             components[component_idx] =
-                                format!("({} << {})", new_value, bit_in_component);
+                                format!("({} << {})", low_value, bit_in_component);
+                        } else if components[component_idx] != "0u" {
+                            components[component_idx] =
+                                format!("({} | {})", components[component_idx], low_value);
+                        } else {
+                            components[component_idx] = low_value;
+                        }
+
+                        // High part: (input >> bits_in_low), placed at bit 0 of component 1
+                        let high_value = format!("(({}) >> {})", new_value, bits_in_low);
+                        // Only include if there are actual high bits
+                        if bits_in_high > 0 {
+                            if components[component_idx + 1] != "0u" {
+                                components[component_idx + 1] =
+                                    format!("({} | {})", components[component_idx + 1], high_value);
+                            } else {
+                                components[component_idx + 1] = high_value;
+                            }
                         }
                     } else {
-                        // bit_in_component == 0, simple assignment (no shift needed)
-                        components[component_idx] = new_value;
+                        // BUG FIX #88: Handle multiple inputs mapping to the same component
+                        // When bit_in_component > 0, we need to shift and OR with existing value
+                        if bit_in_component > 0 && components[component_idx] != "0u" {
+                            // Need to combine with existing value using OR and shift
+                            // The new value goes at bit_in_component position
+                            if new_value == "0u" {
+                                // Shifting 0 by any amount is still 0, no change needed
+                            } else {
+                                components[component_idx] = format!(
+                                    "({} | ({} << {}))",
+                                    components[component_idx], new_value, bit_in_component
+                                );
+                            }
+                        } else if bit_in_component > 0 && components[component_idx] == "0u" {
+                            // Component was zero, just shift the new value
+                            if new_value == "0u" {
+                                // 0 << n = 0, keep as 0u
+                            } else {
+                                components[component_idx] =
+                                    format!("({} << {})", new_value, bit_in_component);
+                            }
+                        } else {
+                            // bit_in_component == 0, simple assignment (no shift needed)
+                            components[component_idx] = new_value;
+                        }
                     }
                 }
                 bit_offset += width;
@@ -3646,9 +3719,6 @@ impl<'a> MetalShaderGenerator<'a> {
     }
 
     fn generate_node_computation_v2(&mut self, sir: &SirModule, node: &SirNode) {
-        if matches!(node.kind, SirNodeKind::Concat) {
-            eprintln!("🔧 MATCH CONCAT: node {}", node.id);
-        }
         match &node.kind {
             SirNodeKind::BinaryOp(op) => self.generate_binary_op(sir, node, op),
             SirNodeKind::UnaryOp(op) => self.generate_unary_op(sir, node, op),
@@ -3665,10 +3735,6 @@ impl<'a> MetalShaderGenerator<'a> {
                     for additional_output in node.outputs.iter().skip(1) {
                         let add_name = &additional_output.signal_id;
                         let dst_width = self.get_signal_width_from_sir(sir, add_name);
-                        println!(
-                            ">>> BUG #117q FIX: Copying {} -> {} (src_width={}, dst_width={})",
-                            primary_output, add_name, src_width, dst_width
-                        );
                         if src_width > 128 || dst_width > 128 {
                             // Wide bit type - element-wise copy
                             let src_array_size = src_width.div_ceil(32);

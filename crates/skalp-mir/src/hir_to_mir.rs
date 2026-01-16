@@ -15514,7 +15514,10 @@ impl<'hir> HirToMir<'hir> {
                     })
                 }
             }
-            DataType::Enum(_) => hir::HirType::Nat(32),
+            DataType::Enum(enum_type) => {
+                // Use the enum's declared base type instead of defaulting to 32-bit
+                self.convert_mir_to_hir_type(&enum_type.base_type)
+            }
             DataType::Union(_) => hir::HirType::Nat(32),
             DataType::Ncl(width) => hir::HirType::Ncl(*width as u32),
         }
