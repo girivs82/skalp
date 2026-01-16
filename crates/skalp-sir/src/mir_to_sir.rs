@@ -2549,8 +2549,32 @@ impl<'a> MirToSirConverter<'a> {
                     })
                     .collect();
 
-                eprintln!("  → Created {} SIR nodes for concat", part_nodes.len());
-                self.create_concat_node_with_width(part_nodes, target_width)
+                // BUG FIX #214: Truncate elements that exceed their target width
+                // This handles cases like 64-bit multiply results going into 32-bit tuple elements
+                let truncated_nodes: Vec<usize> = part_nodes
+                    .iter()
+                    .zip(part_widths.iter())
+                    .map(|(&node, &target_opt)| {
+                        if let Some(target_width) = target_opt {
+                            let actual_width = self.get_node_output_width(node);
+                            if actual_width > target_width {
+                                eprintln!(
+                                    "  ✂️ BUG #214: Truncating element from {} to {} bits",
+                                    actual_width, target_width
+                                );
+                                // Create slice to extract low bits [target_width-1:0]
+                                self.create_slice_node(node, target_width - 1, 0)
+                            } else {
+                                node
+                            }
+                        } else {
+                            node
+                        }
+                    })
+                    .collect();
+
+                eprintln!("  → Created {} SIR nodes for concat", truncated_nodes.len());
+                self.create_concat_node_with_width(truncated_nodes, target_width)
             }
             ExpressionKind::Cast { expr, .. } => {
                 // Cast is a no-op for hardware generation (bitwise reinterpretation)
@@ -3041,6 +3065,18 @@ impl<'a> MirToSirConverter<'a> {
         ) {
             // Comparison operations return 1-bit boolean
             SirType::Bits(1)
+        } else if bin_op == BinaryOperation::Mul {
+            // BUG FIX #214: Multiply produces full precision result
+            // m-bit × n-bit = (m+n)-bit (hardware correct semantics)
+            // Truncation happens at assignment to typed targets (tuples, typed variables)
+            let width = left_type.width() + right_type.width();
+            eprintln!(
+                "🔧 BUG #214: Mul full precision: {}×{} → {} bits",
+                left_type.width(),
+                right_type.width(),
+                width
+            );
+            SirType::Bits(width)
         } else {
             // Other arithmetic/logic operations use max width
             let width = left_type.width().max(right_type.width());
@@ -4132,6 +4168,28 @@ impl<'a> MirToSirConverter<'a> {
 
         // Default to 8 bits for the counter example
         8
+    }
+
+    /// Get the output width of a node by looking at its output signal
+    fn get_node_output_width(&self, node_id: usize) -> usize {
+        // First check combinational nodes
+        for node in &self.sir.combinational_nodes {
+            if node.id == node_id {
+                if let Some(output) = node.outputs.first() {
+                    return self.get_signal_width(&output.signal_id);
+                }
+            }
+        }
+        // Check sequential nodes
+        for node in &self.sir.sequential_nodes {
+            if node.id == node_id {
+                if let Some(output) = node.outputs.first() {
+                    return self.get_signal_width(&output.signal_id);
+                }
+            }
+        }
+        // Default fallback
+        32
     }
 
     fn get_signal_type(&self, signal_name: &str) -> SirType {

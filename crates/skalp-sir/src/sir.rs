@@ -204,7 +204,7 @@ pub enum SirNodeKind {
     Reset,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum BinaryOperation {
     // Integer arithmetic
     Add,
