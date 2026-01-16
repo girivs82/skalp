@@ -666,6 +666,49 @@ fn remap_expr_ports(
                 .collect();
             hir::HirExpression::Concat(new_exprs)
         }
+        // BUG FIX: Handle Ternary expressions (condition ? true : false)
+        // Without this, port IDs inside ternary expressions are NOT remapped,
+        // causing references like `port_9` instead of actual port names.
+        hir::HirExpression::Ternary {
+            condition,
+            true_expr,
+            false_expr,
+        } => {
+            let new_cond = remap_expr_ports(condition, port_id_map);
+            let new_true = remap_expr_ports(true_expr, port_id_map);
+            let new_false = remap_expr_ports(false_expr, port_id_map);
+            hir::HirExpression::Ternary {
+                condition: Box::new(new_cond),
+                true_expr: Box::new(new_true),
+                false_expr: Box::new(new_false),
+            }
+        }
+        // BUG FIX: Handle ArrayRepeat expressions {count{value}}
+        hir::HirExpression::ArrayRepeat { count, value } => {
+            let new_count = remap_expr_ports(count, port_id_map);
+            let new_value = remap_expr_ports(value, port_id_map);
+            hir::HirExpression::ArrayRepeat {
+                count: Box::new(new_count),
+                value: Box::new(new_value),
+            }
+        }
+        // BUG FIX: Handle Block expressions { statements; result_expr }
+        // Block expressions appear inside If expressions (then_expr/else_expr).
+        // Without this, port IDs inside block result expressions are NOT remapped.
+        hir::HirExpression::Block {
+            statements,
+            result_expr,
+        } => {
+            let new_statements = statements
+                .iter()
+                .map(|s| remap_statement_ports(s, port_id_map))
+                .collect();
+            let new_result = remap_expr_ports(result_expr, port_id_map);
+            hir::HirExpression::Block {
+                statements: new_statements,
+                result_expr: Box::new(new_result),
+            }
+        }
         _ => expr.clone(),
     }
 }

@@ -1,0 +1,399 @@
+// Partitionable Mantissa Adder for Multi-Format FP Support
+//
+// This module implements a 28-bit adder that can operate as:
+// - 1× 28-bit adder (FP32 mantissa + guard bits)
+// - 2× 14-bit adders (FP16 mantissa + guard bits)
+// - 4× 7-bit adders (FP8 mantissa + guard bits)
+//
+// The key mechanism is carry-cut logic at section boundaries that
+// either propagates or blocks carries based on the operating mode.
+
+// =============================================================================
+// Operating Mode Definitions
+// =============================================================================
+
+/// Adder partition mode
+pub enum AdderMode: bit[2] {
+    Single = 0,  // 1× 28-bit (FP32)
+    Dual   = 1,  // 2× 14-bit (FP16×2)
+    Quad   = 2   // 4× 7-bit (FP8×4)
+}
+
+// =============================================================================
+// Basic Building Blocks
+// =============================================================================
+
+/// Full Adder - single bit addition with carry
+pub entity FullAdder {
+    in a: bit
+    in b: bit
+    in cin: bit
+    out sum: bit
+    out cout: bit
+}
+
+impl FullAdder {
+    signal p: bit = a ^ b      // Propagate
+    signal g: bit = a & b      // Generate
+    sum = p ^ cin
+    cout = g | (p & cin)
+}
+
+/// 7-bit Adder Section
+/// Basic building block for the partitionable adder
+pub entity AdderSection7 {
+    in a: bit[7]
+    in b: bit[7]
+    in cin: bit
+    out sum: bit[7]
+    out cout: bit
+}
+
+impl AdderSection7 {
+    // Use built-in addition with carry handling
+    // Extended to 8 bits to capture carry out
+    signal extended_a: bit[8] = {1'b0, a}
+    signal extended_b: bit[8] = {1'b0, b}
+    signal extended_cin: bit[8] = {7'b0, cin}
+    signal result: bit[8] = extended_a + extended_b + extended_cin
+
+    sum = result[6:0]
+    cout = result[7]
+}
+
+/// 14-bit Adder Section (for FP16)
+/// Composed of two 7-bit sections with internal carry propagation
+pub entity AdderSection14 {
+    in a: bit[14]
+    in b: bit[14]
+    in cin: bit
+    out sum: bit[14]
+    out cout: bit
+}
+
+impl AdderSection14 {
+    signal extended_a: bit[15] = {1'b0, a}
+    signal extended_b: bit[15] = {1'b0, b}
+    signal extended_cin: bit[15] = {14'b0, cin}
+    signal result: bit[15] = extended_a + extended_b + extended_cin
+
+    sum = result[13:0]
+    cout = result[14]
+}
+
+// =============================================================================
+// Carry Cut Logic
+// =============================================================================
+
+/// Carry Cut - conditionally blocks or passes carry between sections
+/// When enable=1, carry passes through (sections connected)
+/// When enable=0, carry is blocked and alternate_cin is used instead
+pub entity CarryCut {
+    in carry_from_prev: bit   // Carry from previous section
+    in alternate_cin: bit     // External carry input when cut is active
+    in enable: bit            // 1=pass carry, 0=use alternate
+    out carry_to_next: bit
+}
+
+impl CarryCut {
+    carry_to_next = if enable { carry_from_prev } else { alternate_cin }
+}
+
+// =============================================================================
+// Main Partitionable Adder
+// =============================================================================
+
+/// Partitionable 28-bit Mantissa Adder
+///
+/// Section layout (28 bits total):
+///   [sec3: 7b][sec2: 7b][sec1: 7b][sec0: 7b]
+///            ↑         ↑         ↑
+///          cut2      cut1      cut0
+///
+/// Mode behavior:
+///   Single (FP32×1): All cuts pass → one 28-bit adder
+///   Dual (FP16×2):   cut1 blocks → two 14-bit adders (sec0+sec1, sec2+sec3)
+///   Quad (FP8×4):    All cuts block → four 7-bit adders
+///
+pub entity PartitionableMantissaAdder {
+    // Operands (28 bits each)
+    in a: bit[28]
+    in b: bit[28]
+
+    // Per-section carry inputs
+    // In Single mode, only cin[0] is used
+    // In Dual mode, cin[0] and cin[2] are used
+    // In Quad mode, all four are used
+    in cin: bit[4]
+
+    // Operating mode
+    in mode: AdderMode
+
+    // Results
+    out sum: bit[28]
+
+    // Per-section carry outputs (useful for overflow detection)
+    out cout: bit[4]
+}
+
+impl PartitionableMantissaAdder {
+    // =========================================================================
+    // Input Sectioning
+    // =========================================================================
+
+    // Split 28-bit inputs into four 7-bit sections
+    signal a0: bit[7] = a[6:0]
+    signal a1: bit[7] = a[13:7]
+    signal a2: bit[7] = a[20:14]
+    signal a3: bit[7] = a[27:21]
+
+    signal b0: bit[7] = b[6:0]
+    signal b1: bit[7] = b[13:7]
+    signal b2: bit[7] = b[20:14]
+    signal b3: bit[7] = b[27:21]
+
+    // =========================================================================
+    // Carry Cut Enable Logic
+    // =========================================================================
+
+    // Determine which cuts are enabled based on mode
+    signal cut0_enable: bit = (mode == AdderMode::Single) | (mode == AdderMode::Dual)
+    signal cut1_enable: bit = (mode == AdderMode::Single)
+    signal cut2_enable: bit = (mode == AdderMode::Single) | (mode == AdderMode::Dual)
+
+    // =========================================================================
+    // Section Adders with Carry Cuts
+    // =========================================================================
+
+    // Section 0: Always uses cin[0]
+    signal sum0: bit[7]
+    signal cout0: bit
+    let sec0 = AdderSection7 {
+        a: a0,
+        b: b0,
+        cin: cin[0],
+        sum: sum0,
+        cout: cout0
+    }
+
+    // Carry cut 0: between section 0 and 1
+    signal cin1: bit
+    let cut0 = CarryCut {
+        carry_from_prev: cout0,
+        alternate_cin: cin[1],
+        enable: cut0_enable,
+        carry_to_next: cin1
+    }
+
+    // Section 1
+    signal sum1: bit[7]
+    signal cout1: bit
+    let sec1 = AdderSection7 {
+        a: a1,
+        b: b1,
+        cin: cin1,
+        sum: sum1,
+        cout: cout1
+    }
+
+    // Carry cut 1: between section 1 and 2 (the "middle" cut for FP16 mode)
+    signal cin2: bit
+    let cut1 = CarryCut {
+        carry_from_prev: cout1,
+        alternate_cin: cin[2],
+        enable: cut1_enable,
+        carry_to_next: cin2
+    }
+
+    // Section 2
+    signal sum2: bit[7]
+    signal cout2: bit
+    let sec2 = AdderSection7 {
+        a: a2,
+        b: b2,
+        cin: cin2,
+        sum: sum2,
+        cout: cout2
+    }
+
+    // Carry cut 2: between section 2 and 3
+    signal cin3: bit
+    let cut2 = CarryCut {
+        carry_from_prev: cout2,
+        alternate_cin: cin[3],
+        enable: cut2_enable,
+        carry_to_next: cin3
+    }
+
+    // Section 3
+    signal sum3: bit[7]
+    signal cout3: bit
+    let sec3 = AdderSection7 {
+        a: a3,
+        b: b3,
+        cin: cin3,
+        sum: sum3,
+        cout: cout3
+    }
+
+    // =========================================================================
+    // Output Assembly
+    // =========================================================================
+
+    // Concatenate section sums into 28-bit result
+    sum = {sum3, sum2, sum1, sum0}
+
+    // Section carry outputs
+    cout = {cout3, cout2, cout1, cout0}
+}
+
+// =============================================================================
+// Convenience Wrappers for Common Use Cases
+// =============================================================================
+
+/// FP32 Mantissa Adder (single 28-bit operation)
+pub entity FP32MantissaAdder {
+    in a: bit[28]
+    in b: bit[28]
+    in cin: bit
+    out sum: bit[28]
+    out cout: bit
+}
+
+impl FP32MantissaAdder {
+    signal sum_out: bit[28]
+    signal cout_vec: bit[4]
+
+    let adder = PartitionableMantissaAdder {
+        a: a,
+        b: b,
+        cin: {3'b0, cin},  // Only cin[0] used in Single mode
+        mode: AdderMode::Single,
+        sum: sum_out,
+        cout: cout_vec
+    }
+
+    sum = sum_out
+    cout = cout_vec[3]  // Final carry out
+}
+
+/// Dual FP16 Mantissa Adder (two 14-bit operations)
+pub entity DualFP16MantissaAdder {
+    // Low half (bits 13:0)
+    in a_lo: bit[14]
+    in b_lo: bit[14]
+    in cin_lo: bit
+    out sum_lo: bit[14]
+    out cout_lo: bit
+
+    // High half (bits 27:14)
+    in a_hi: bit[14]
+    in b_hi: bit[14]
+    in cin_hi: bit
+    out sum_hi: bit[14]
+    out cout_hi: bit
+}
+
+impl DualFP16MantissaAdder {
+    signal sum_out: bit[28]
+    signal cout_vec: bit[4]
+
+    let adder = PartitionableMantissaAdder {
+        a: {a_hi, a_lo},
+        b: {b_hi, b_lo},
+        cin: {1'b0, cin_hi, 1'b0, cin_lo},  // cin[0] and cin[2] used
+        mode: AdderMode::Dual,
+        sum: sum_out,
+        cout: cout_vec
+    }
+
+    sum_lo = sum_out[13:0]
+    sum_hi = sum_out[27:14]
+    cout_lo = cout_vec[1]   // Carry out of section 1
+    cout_hi = cout_vec[3]   // Carry out of section 3
+}
+
+/// Quad FP8 Mantissa Adder (four 7-bit operations)
+pub entity QuadFP8MantissaAdder {
+    in a0: bit[7]
+    in a1: bit[7]
+    in a2: bit[7]
+    in a3: bit[7]
+
+    in b0: bit[7]
+    in b1: bit[7]
+    in b2: bit[7]
+    in b3: bit[7]
+
+    in cin: bit[4]
+
+    out sum0: bit[7]
+    out sum1: bit[7]
+    out sum2: bit[7]
+    out sum3: bit[7]
+
+    out cout: bit[4]
+}
+
+impl QuadFP8MantissaAdder {
+    signal sum_out: bit[28]
+    signal cout_out: bit[4]
+
+    let adder = PartitionableMantissaAdder {
+        a: {a3, a2, a1, a0},
+        b: {b3, b2, b1, b0},
+        cin: cin,
+        mode: AdderMode::Quad,
+        sum: sum_out,
+        cout: cout_out
+    }
+
+    sum0 = sum_out[6:0]
+    sum1 = sum_out[13:7]
+    sum2 = sum_out[20:14]
+    sum3 = sum_out[27:21]
+    cout = cout_out
+}
+
+// =============================================================================
+// Subtraction Support
+// =============================================================================
+
+/// Partitionable Mantissa Adder/Subtractor
+/// For subtraction, we compute A + (~B) + 1 = A - B
+/// The sub signal controls whether to invert B and set cin=1
+pub entity PartitionableMantissaAddSub {
+    in a: bit[28]
+    in b: bit[28]
+    in sub: bit[4]     // Per-section subtract control (1=subtract, 0=add)
+    in mode: AdderMode
+    out sum: bit[28]
+    out cout: bit[4]
+}
+
+impl PartitionableMantissaAddSub {
+    // Conditionally invert B for subtraction (per-section)
+    signal b0_inv: bit[7] = if sub[0] { !b[6:0] } else { b[6:0] }
+    signal b1_inv: bit[7] = if sub[1] { !b[13:7] } else { b[13:7] }
+    signal b2_inv: bit[7] = if sub[2] { !b[20:14] } else { b[20:14] }
+    signal b3_inv: bit[7] = if sub[3] { !b[27:21] } else { b[27:21] }
+
+    signal b_inv: bit[28] = {b3_inv, b2_inv, b1_inv, b0_inv}
+
+    // For subtraction, set cin=1 to complete two's complement
+    // sub signal becomes the carry-in for each section
+    signal sum_out: bit[28]
+    signal cout_out: bit[4]
+
+    let adder = PartitionableMantissaAdder {
+        a: a,
+        b: b_inv,
+        cin: sub,  // cin=1 for subtract sections
+        mode: mode,
+        sum: sum_out,
+        cout: cout_out
+    }
+
+    sum = sum_out
+    cout = cout_out
+}

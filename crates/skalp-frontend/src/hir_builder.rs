@@ -1502,6 +1502,7 @@ impl HirBuilderContext {
         // BUG FIX: The parser may create IdentExpr and IndexExpr as siblings (e.g., op[0] becomes
         // [IdentExpr(op), IndexExpr([0])]). We should prefer IndexExpr/FieldExpr when both exist,
         // as build_expression for IndexExpr will properly combine with the preceding IdentExpr.
+        // BUG FIX #CAST-PORT: Also include CastExpr for connections like "mode: mode as AdderMode"
         let expr_children: Vec<_> = node
             .children()
             .filter(|n| {
@@ -1513,18 +1514,81 @@ impl HirBuilderContext {
                         | SyntaxKind::UnaryExpr
                         | SyntaxKind::FieldExpr
                         | SyntaxKind::IndexExpr
+                        | SyntaxKind::CastExpr // BUG FIX #CAST-PORT: Support cast expressions in port connections
                 )
             })
             .collect();
 
-        // Prefer IndexExpr/FieldExpr over IdentExpr when both exist (parser splits op[0] into two nodes)
+        // BUG FIX #CAST-PORT: Handle the parser pattern where CastExpr is a sibling of IdentExpr
+        // For "mode: mode as AdderMode", parser creates [IdentExpr(mode), CastExpr(AdderMode)]
+        // where CastExpr only contains the type, not the expression to cast.
+        let has_cast = expr_children
+            .iter()
+            .any(|n| n.kind() == SyntaxKind::CastExpr);
+        let has_ident_before_cast = expr_children.len() > 1
+            && has_cast
+            && expr_children
+                .iter()
+                .take(expr_children.len().saturating_sub(1))
+                .any(|n| {
+                    matches!(
+                        n.kind(),
+                        SyntaxKind::IdentExpr | SyntaxKind::FieldExpr | SyntaxKind::IndexExpr
+                    )
+                });
+
+        if has_ident_before_cast {
+            // Parser bug: CastExpr doesn't contain its expression, it's a sibling
+            // Find the expression before the cast and the cast's target type
+            let cast_node = expr_children
+                .iter()
+                .find(|n| n.kind() == SyntaxKind::CastExpr)?;
+
+            // Check if CastExpr has no child expression (only TypeAnnotation)
+            let cast_has_expr = cast_node.children().any(|n| {
+                matches!(
+                    n.kind(),
+                    SyntaxKind::IdentExpr
+                        | SyntaxKind::LiteralExpr
+                        | SyntaxKind::BinaryExpr
+                        | SyntaxKind::UnaryExpr
+                        | SyntaxKind::FieldExpr
+                        | SyntaxKind::IndexExpr
+                )
+            });
+
+            if !cast_has_expr {
+                // CastExpr only has TypeAnnotation - build combined cast expression
+                // Find the expression to cast (the sibling before CastExpr)
+                let base_expr_node = expr_children
+                    .iter()
+                    .filter(|n| n.kind() != SyntaxKind::CastExpr)
+                    .next_back()?;
+
+                let base_expr = self.build_expression(base_expr_node)?;
+                let target_type = self.extract_hir_type(cast_node);
+
+                return Some(HirConnection {
+                    port: port_name,
+                    expr: HirExpression::Cast(HirCastExpr {
+                        expr: Box::new(base_expr),
+                        target_type,
+                    }),
+                });
+            }
+        }
+
+        // Prefer IndexExpr/FieldExpr/CastExpr over IdentExpr when both exist
         let expr_node = if expr_children.len() > 1 {
             expr_children
                 .iter()
                 .find(|n| {
                     matches!(
                         n.kind(),
-                        SyntaxKind::IndexExpr | SyntaxKind::FieldExpr | SyntaxKind::BinaryExpr
+                        SyntaxKind::IndexExpr
+                            | SyntaxKind::FieldExpr
+                            | SyntaxKind::BinaryExpr
+                            | SyntaxKind::CastExpr
                     )
                 })
                 .or(expr_children.first())
@@ -7369,25 +7433,58 @@ impl HirBuilderContext {
             let type_name = idents[0].clone();
             let member_name = idents[1].clone();
 
-            // Heuristic to distinguish between enum variants and associated constants:
-            // - Associated constants are typically SCREAMING_SNAKE_CASE (all caps with underscores)
-            // - Enum variants are typically PascalCase or lowercase
-            // This heuristic works for the standard library (fp32::ZERO, T::MAX_VALUE, etc.)
-            let is_const = member_name.chars().all(|c| c.is_uppercase() || c == '_');
+            // Use type metadata to determine if this is an enum variant or associated constant
+            // Priority:
+            // 1. Check if type_name is a known enum type with this variant -> EnumVariant
+            // 2. Check if type_name is a known type with associated constants -> AssociatedConstant
+            // 3. Default to EnumVariant (more common case, will error later if wrong)
 
-            if is_const {
-                // Associated constant (e.g., fp32::ZERO, T::MAX_VALUE)
-                Some(HirExpression::AssociatedConstant {
+            // Check if type_name is a known enum type
+            if let Some(user_type) = self.symbols.user_types.get(&type_name) {
+                if let crate::hir::HirType::Enum(enum_def) = user_type {
+                    // Verify the variant exists in this enum
+                    let variant_exists = enum_def.variants.iter().any(|v| v.name == member_name);
+                    if variant_exists {
+                        return Some(HirExpression::EnumVariant {
+                            enum_type: type_name,
+                            variant: member_name,
+                        });
+                    }
+                    // Variant doesn't exist - could be a typo, but treat as enum variant
+                    // to get a proper error message later
+                    return Some(HirExpression::EnumVariant {
+                        enum_type: type_name,
+                        variant: member_name,
+                    });
+                }
+                // It's a known type but not an enum - treat as associated constant
+                return Some(HirExpression::AssociatedConstant {
                     type_name,
                     constant_name: member_name,
-                })
-            } else {
-                // Enum variant (e.g., State::Idle)
-                Some(HirExpression::EnumVariant {
-                    enum_type: type_name,
-                    variant: member_name,
-                })
+                });
             }
+
+            // Check if type_name is a built-in type with associated constants (fp32, fp16, etc.)
+            let is_builtin_fp_type = matches!(
+                type_name.as_str(),
+                "fp32" | "fp16" | "fp64" | "bf16" | "fp8_e4m3" | "fp8_e5m2"
+            );
+
+            if is_builtin_fp_type {
+                // Floating-point types have associated constants like ZERO, ONE, etc.
+                return Some(HirExpression::AssociatedConstant {
+                    type_name,
+                    constant_name: member_name,
+                });
+            }
+
+            // Unknown type - default to EnumVariant since that's more common
+            // This handles cases where the enum is defined in an imported module
+            // that hasn't been fully resolved yet
+            Some(HirExpression::EnumVariant {
+                enum_type: type_name,
+                variant: member_name,
+            })
         } else {
             None
         }
