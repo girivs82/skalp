@@ -19094,14 +19094,17 @@ impl<'hir> HirToMir<'hir> {
             }
 
             let signal_id = self.next_signal_id();
-            // Type inference would go here - for now use bit[32] as placeholder
+            // BUG FIX #FP16-WIDTH: Infer type from let_stmt.var_type instead of hardcoded Bit(32)
+            // The HIR builder correctly infers types for slices (e.g., a[15:0] -> Bit(16))
+            // Using the HIR type ensures signals have correct widths for FP16 and other operations
+            let inferred_type = self.convert_type(&let_stmt.var_type);
             // BUG FIX #85: Include VariableId in signal name to avoid collisions between match arms
             // Different match arms can have variables with the same name but different IDs
             let unique_signal_name = format!("{}_{}", let_stmt.name, let_stmt.id.0);
             let signal = Signal {
                 id: signal_id,
                 name: unique_signal_name.clone(),
-                signal_type: DataType::Bit(32), // Placeholder - should infer from expression
+                signal_type: inferred_type.clone(),
                 initial: None,
                 clock_domain: None,
                 span: None,
@@ -19122,7 +19125,7 @@ impl<'hir> HirToMir<'hir> {
             let variable = Variable {
                 id: VariableId(let_stmt.id.0),    // Use the HIR VariableId
                 name: unique_signal_name.clone(), // Use unique name here too
-                var_type: DataType::Bit(32),      // Match the signal type
+                var_type: inferred_type, // BUG FIX #FP16-WIDTH: Use inferred type, not hardcoded Bit(32)
                 initial: None,
                 span: None,
             };
@@ -19363,11 +19366,13 @@ impl<'hir> HirToMir<'hir> {
 
                             // Create signal for this let binding
                             let signal_id = self.next_signal_id();
+                            // BUG FIX #FP16-WIDTH: Infer type from let_stmt.var_type
+                            let inferred_type = self.convert_type(&let_stmt.var_type);
                             let unique_signal_name = format!("{}_{}", let_stmt.name, let_stmt.id.0);
                             let signal = Signal {
                                 id: signal_id,
                                 name: unique_signal_name.clone(),
-                                signal_type: DataType::Bit(32),
+                                signal_type: inferred_type.clone(),
                                 initial: None,
                                 clock_domain: None,
                                 span: None,
@@ -19386,7 +19391,7 @@ impl<'hir> HirToMir<'hir> {
                             let variable = Variable {
                                 id: VariableId(let_stmt.id.0),
                                 name: unique_signal_name.clone(),
-                                var_type: DataType::Bit(32),
+                                var_type: inferred_type,
                                 initial: None,
                                 span: None,
                             };

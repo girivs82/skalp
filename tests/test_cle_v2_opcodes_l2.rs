@@ -122,11 +122,26 @@ async fn execute_fp16_binary(tb: &mut Testbench, a: f32, b: f32) -> f32 {
     let a_bits = f32_to_fp16(a) as u32;
     let b_bits = f32_to_fp16(b) as u32;
     let data = ((b_bits as u64) << 32) | (a_bits as u64);
+    println!(
+        "DEBUG FP16: a={} (0x{:04X}), b={} (0x{:04X}), data=0x{:016X}",
+        a, a_bits, b, b_bits, data
+    );
     tb.set("data_read", data)
         .set("data_read_valid", 1u64)
         .set("execute_enable", 1u64);
+
+    // Debug: check immediate fu_result (same as FP32 test)
+    tb.step().await;
+    let fu_imm: u32 = tb.get_as("debug_fu_result").await;
+    println!("    FP16 immediate fu_result: 0x{:08X}", fu_imm);
+
     tb.clock(4).await;
     let result: u64 = tb.get_as("data_write").await;
+    println!(
+        "DEBUG FP16: data_write=0x{:016X}, result_bits=0x{:04X}",
+        result,
+        (result & 0xFFFF) as u16
+    );
     fp16_to_f32((result & 0xFFFF) as u16)
 }
 
@@ -312,14 +327,9 @@ async fn test_l2_fp32_sqrt() {
 
 // =============================================================================
 // FP16 Operations
-// NOTE: FP16 tests are temporarily ignored due to compiler bug #FP16-IEEE754.
-// The IEEE754_16 constant isn't being resolved correctly during trait impl
-// compilation, causing FP16 entity instantiations to fail silently.
-// See: crates/skalp-stdlib/skalp/numeric/fp.sk, impl Add for fp16
 // =============================================================================
 
 #[tokio::test]
-#[ignore = "FP16 disabled: IEEE754_16 constant resolution bug in trait impl compilation"]
 async fn test_l2_fp16_add() {
     if !source_available() {
         return;
@@ -355,7 +365,6 @@ async fn test_l2_fp16_add() {
 }
 
 #[tokio::test]
-#[ignore = "FP16 disabled: IEEE754_16 constant resolution bug in trait impl compilation"]
 async fn test_l2_fp16_mul() {
     if !source_available() {
         return;
@@ -390,7 +399,6 @@ async fn test_l2_fp16_mul() {
 }
 
 #[tokio::test]
-#[ignore = "FP16 disabled: IEEE754_16 constant resolution bug in trait impl compilation"]
 async fn test_l2_fp16_div() {
     if !source_available() {
         return;
@@ -424,7 +432,6 @@ async fn test_l2_fp16_div() {
 }
 
 #[tokio::test]
-#[ignore = "FP16 disabled: IEEE754_16 constant resolution bug in trait impl compilation"]
 async fn test_l2_fp16_sqrt() {
     if !source_available() {
         return;
@@ -491,7 +498,6 @@ async fn test_l2_fp32_mac() {
 }
 
 #[tokio::test]
-#[ignore = "FP16 disabled: IEEE754_16 constant resolution bug in trait impl compilation"]
 async fn test_l2_fp16_mac() {
     if !source_available() {
         return;

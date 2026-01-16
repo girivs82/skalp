@@ -429,6 +429,15 @@ fn merge_trait_implementations_for_existing_types(target: &mut Hir, source: &Hir
         target_types
     );
 
+    // BUG #FP16-IEEE754 FIX: Build a map of constant names to IDs from the source HIR
+    // This is needed to rewrite GenericParam("IEEE754_16") to Constant(id) in trait impls
+    let constant_map = build_constant_name_map(source);
+    eprintln!(
+        "[MERGE_TRAIT_IMPLS_DEBUG] Built constant map with {} entries: {:?}",
+        constant_map.len(),
+        constant_map.keys().collect::<Vec<_>>()
+    );
+
     // Track which trait definitions we need to merge
     let mut traits_to_merge: std::collections::HashSet<String> = std::collections::HashSet::new();
 
@@ -464,7 +473,11 @@ fn merge_trait_implementations_for_existing_types(target: &mut Hir, source: &Hir
                 if !already_exists {
                     // Track that we need this trait definition
                     traits_to_merge.insert(trait_impl.trait_name.clone());
-                    target.trait_implementations.push(trait_impl.clone());
+                    // BUG #FP16-IEEE754 FIX: Rewrite GenericParam references to Constant
+                    // before pushing the trait implementation to target
+                    let rewritten_impl =
+                        rewrite_trait_impl_generic_params(trait_impl.clone(), &constant_map);
+                    target.trait_implementations.push(rewritten_impl);
                 }
             }
         }
@@ -712,6 +725,252 @@ fn remap_statement_ports(
     }
 }
 
+// ============================================================================
+// GenericParam to Constant Rewriting (BUG #FP16-IEEE754 FIX)
+// ============================================================================
+// When trait implementations are imported from modules, their method bodies
+// may contain GenericParam("IEEE754_16") references that should be Constant(id)
+// references. This happens because when the source module was built, the
+// constants weren't in the symbol table yet. We fix this by rewriting
+// GenericParam references to Constant references when merging trait impls.
+
+/// Build a map of constant names to their IDs from the HIR
+fn build_constant_name_map(hir: &Hir) -> IndexMap<String, hir::ConstantId> {
+    let mut map = IndexMap::new();
+
+    // Collect constants from all implementation blocks
+    for implementation in &hir.implementations {
+        for constant in &implementation.constants {
+            map.insert(constant.name.clone(), constant.id);
+        }
+    }
+
+    map
+}
+
+/// Rewrite GenericParam expressions to Constant expressions where a matching constant exists
+fn rewrite_generic_params_to_constants(
+    expr: &hir::HirExpression,
+    constant_map: &IndexMap<String, hir::ConstantId>,
+) -> hir::HirExpression {
+    match expr {
+        // This is the key fix: convert GenericParam to Constant if we have a matching constant
+        hir::HirExpression::GenericParam(name) => {
+            if let Some(&constant_id) = constant_map.get(name) {
+                hir::HirExpression::Constant(constant_id)
+            } else {
+                expr.clone()
+            }
+        }
+        hir::HirExpression::Binary(bin) => {
+            let left = rewrite_generic_params_to_constants(&bin.left, constant_map);
+            let right = rewrite_generic_params_to_constants(&bin.right, constant_map);
+            hir::HirExpression::Binary(hir::HirBinaryExpr {
+                op: bin.op.clone(),
+                left: Box::new(left),
+                right: Box::new(right),
+                is_trait_op: bin.is_trait_op,
+            })
+        }
+        hir::HirExpression::Unary(unary) => {
+            let operand = rewrite_generic_params_to_constants(&unary.operand, constant_map);
+            hir::HirExpression::Unary(hir::HirUnaryExpr {
+                op: unary.op.clone(),
+                operand: Box::new(operand),
+            })
+        }
+        hir::HirExpression::Index(base, index) => {
+            let new_base = rewrite_generic_params_to_constants(base, constant_map);
+            let new_index = rewrite_generic_params_to_constants(index, constant_map);
+            hir::HirExpression::Index(Box::new(new_base), Box::new(new_index))
+        }
+        hir::HirExpression::Range(base, high, low) => {
+            let new_base = rewrite_generic_params_to_constants(base, constant_map);
+            let new_high = rewrite_generic_params_to_constants(high, constant_map);
+            let new_low = rewrite_generic_params_to_constants(low, constant_map);
+            hir::HirExpression::Range(Box::new(new_base), Box::new(new_high), Box::new(new_low))
+        }
+        hir::HirExpression::FieldAccess { base, field } => {
+            let new_base = rewrite_generic_params_to_constants(base, constant_map);
+            hir::HirExpression::FieldAccess {
+                base: Box::new(new_base),
+                field: field.clone(),
+            }
+        }
+        hir::HirExpression::Call(call) => {
+            let new_args = call
+                .args
+                .iter()
+                .map(|arg| rewrite_generic_params_to_constants(arg, constant_map))
+                .collect();
+            // Note: type_args and named_type_args are HirType, not HirExpression
+            // They don't contain GenericParam expressions, so we don't rewrite them
+            hir::HirExpression::Call(hir::HirCallExpr {
+                function: call.function.clone(),
+                type_args: call.type_args.clone(),
+                named_type_args: call.named_type_args.clone(),
+                args: new_args,
+                impl_style: call.impl_style,
+            })
+        }
+        hir::HirExpression::If(if_expr) => {
+            let new_cond = rewrite_generic_params_to_constants(&if_expr.condition, constant_map);
+            let new_then = rewrite_generic_params_to_constants(&if_expr.then_expr, constant_map);
+            let new_else = rewrite_generic_params_to_constants(&if_expr.else_expr, constant_map);
+            hir::HirExpression::If(hir::HirIfExpr {
+                condition: Box::new(new_cond),
+                then_expr: Box::new(new_then),
+                else_expr: Box::new(new_else),
+            })
+        }
+        hir::HirExpression::Concat(exprs) => {
+            let new_exprs = exprs
+                .iter()
+                .map(|e| rewrite_generic_params_to_constants(e, constant_map))
+                .collect();
+            hir::HirExpression::Concat(new_exprs)
+        }
+        hir::HirExpression::Cast(cast_expr) => {
+            let new_expr = rewrite_generic_params_to_constants(&cast_expr.expr, constant_map);
+            hir::HirExpression::Cast(hir::HirCastExpr {
+                expr: Box::new(new_expr),
+                target_type: cast_expr.target_type.clone(),
+            })
+        }
+        hir::HirExpression::StructLiteral(struct_lit) => {
+            // Rewrite generic_args which may contain GenericParam expressions
+            let new_generic_args = struct_lit
+                .generic_args
+                .iter()
+                .map(|arg| rewrite_generic_params_to_constants(arg, constant_map))
+                .collect();
+            // Rewrite field values
+            let new_fields = struct_lit
+                .fields
+                .iter()
+                .map(|field| hir::HirStructFieldInit {
+                    name: field.name.clone(),
+                    value: rewrite_generic_params_to_constants(&field.value, constant_map),
+                })
+                .collect();
+            hir::HirExpression::StructLiteral(hir::HirStructLiteral {
+                type_name: struct_lit.type_name.clone(),
+                generic_args: new_generic_args,
+                fields: new_fields,
+            })
+        }
+        _ => expr.clone(),
+    }
+}
+
+/// Rewrite GenericParam references to Constant in a statement
+fn rewrite_statement_generic_params(
+    stmt: &hir::HirStatement,
+    constant_map: &IndexMap<String, hir::ConstantId>,
+) -> hir::HirStatement {
+    match stmt {
+        hir::HirStatement::Assignment(assign) => {
+            let mut new_assign = assign.clone();
+            new_assign.rhs = rewrite_generic_params_to_constants(&assign.rhs, constant_map);
+            hir::HirStatement::Assignment(new_assign)
+        }
+        hir::HirStatement::If(if_stmt) => {
+            let mut new_if = if_stmt.clone();
+            new_if.condition =
+                rewrite_generic_params_to_constants(&if_stmt.condition, constant_map);
+            new_if.then_statements = if_stmt
+                .then_statements
+                .iter()
+                .map(|s| rewrite_statement_generic_params(s, constant_map))
+                .collect();
+            new_if.else_statements = if_stmt.else_statements.as_ref().map(|stmts| {
+                stmts
+                    .iter()
+                    .map(|s| rewrite_statement_generic_params(s, constant_map))
+                    .collect()
+            });
+            hir::HirStatement::If(new_if)
+        }
+        hir::HirStatement::Match(match_stmt) => {
+            let mut new_match = match_stmt.clone();
+            new_match.expr = rewrite_generic_params_to_constants(&match_stmt.expr, constant_map);
+            new_match.arms = match_stmt
+                .arms
+                .iter()
+                .map(|arm| {
+                    let mut new_arm = arm.clone();
+                    new_arm.statements = arm
+                        .statements
+                        .iter()
+                        .map(|s| rewrite_statement_generic_params(s, constant_map))
+                        .collect();
+                    // Also rewrite the guard expression if present
+                    new_arm.guard = arm
+                        .guard
+                        .as_ref()
+                        .map(|g| rewrite_generic_params_to_constants(g, constant_map));
+                    new_arm
+                })
+                .collect();
+            hir::HirStatement::Match(new_match)
+        }
+        hir::HirStatement::Let(let_stmt) => {
+            let mut new_let = let_stmt.clone();
+            new_let.value = rewrite_generic_params_to_constants(&let_stmt.value, constant_map);
+            hir::HirStatement::Let(new_let)
+        }
+        hir::HirStatement::Return(Some(expr)) => hir::HirStatement::Return(Some(
+            rewrite_generic_params_to_constants(expr, constant_map),
+        )),
+        hir::HirStatement::Expression(expr) => {
+            hir::HirStatement::Expression(rewrite_generic_params_to_constants(expr, constant_map))
+        }
+        hir::HirStatement::Block(stmts) => hir::HirStatement::Block(
+            stmts
+                .iter()
+                .map(|s| rewrite_statement_generic_params(s, constant_map))
+                .collect(),
+        ),
+        hir::HirStatement::For(for_stmt) => {
+            let mut new_for = for_stmt.clone();
+            new_for.range.start =
+                rewrite_generic_params_to_constants(&for_stmt.range.start, constant_map);
+            new_for.range.end =
+                rewrite_generic_params_to_constants(&for_stmt.range.end, constant_map);
+            if let Some(step) = &for_stmt.range.step {
+                new_for.range.step = Some(Box::new(rewrite_generic_params_to_constants(
+                    step,
+                    constant_map,
+                )));
+            }
+            new_for.body = for_stmt
+                .body
+                .iter()
+                .map(|s| rewrite_statement_generic_params(s, constant_map))
+                .collect();
+            hir::HirStatement::For(new_for)
+        }
+        _ => stmt.clone(),
+    }
+}
+
+/// Rewrite GenericParam references in a trait implementation's method bodies
+fn rewrite_trait_impl_generic_params(
+    mut trait_impl: hir::HirTraitImplementation,
+    constant_map: &IndexMap<String, hir::ConstantId>,
+) -> hir::HirTraitImplementation {
+    // Rewrite method implementations
+    for method in &mut trait_impl.method_implementations {
+        method.body = method
+            .body
+            .iter()
+            .map(|stmt| rewrite_statement_generic_params(stmt, constant_map))
+            .collect();
+    }
+
+    trait_impl
+}
+
 /// Merge a specific symbol from a module into the current HIR
 fn merge_symbol(target: &mut Hir, source: &Hir, symbol_name: &str) -> Result<()> {
     eprintln!(
@@ -849,6 +1108,9 @@ fn merge_symbol(target: &mut Hir, source: &Hir, symbol_name: &str) -> Result<()>
     if let Some(distinct) = source.distinct_types.iter().find(|d| d.name == symbol_name) {
         target.distinct_types.push(distinct.clone());
 
+        // BUG #FP16-IEEE754 FIX: Build constant map for rewriting GenericParams
+        let constant_map = build_constant_name_map(source);
+
         // Also merge all trait implementations that target this type
         // This is critical for trait-based operator resolution (e.g., impl Add for fp32)
         for trait_impl in &source.trait_implementations {
@@ -876,7 +1138,10 @@ fn merge_symbol(target: &mut Hir, source: &Hir, symbol_name: &str) -> Result<()>
                         && matches!(&ti.target, hir::TraitImplTarget::Type(hir::HirType::Custom(tn)) if tn == symbol_name)
                 });
                 if !already_exists {
-                    target.trait_implementations.push(trait_impl.clone());
+                    // BUG #FP16-IEEE754 FIX: Rewrite GenericParam references to Constant
+                    let rewritten_impl =
+                        rewrite_trait_impl_generic_params(trait_impl.clone(), &constant_map);
+                    target.trait_implementations.push(rewritten_impl);
 
                     // BUG #207 FIX: Also merge entities that this trait impl's methods depend on
                     // When a trait impl like `impl Add for fp32` has a method that instantiates
@@ -1421,10 +1686,17 @@ fn merge_all_symbols(target: &mut Hir, source: &Hir) -> Result<()> {
         target.trait_definitions.push(trait_def.clone());
     }
 
+    // BUG #FP16-IEEE754 FIX: Build constant map for rewriting GenericParams to Constants
+    // When trait implementations are imported, their method bodies may contain
+    // GenericParam("IEEE754_16") that should be Constant(id). We fix this by
+    // rewriting during the merge.
+    let constant_map = build_constant_name_map(source);
+
     // Merge all trait implementations (needed for trait-based operator resolution)
     for trait_impl in &source.trait_implementations {
-        // Trait implementations don't have visibility, import all
-        target.trait_implementations.push(trait_impl.clone());
+        // BUG #FP16-IEEE754 FIX: Rewrite GenericParam references to Constant
+        let rewritten_impl = rewrite_trait_impl_generic_params(trait_impl.clone(), &constant_map);
+        target.trait_implementations.push(rewritten_impl);
     }
 
     // Merge all public distinct types (needed for proper type resolution)
