@@ -1146,6 +1146,130 @@ impl GateNetlist {
         self.net_map.insert(net2_name.to_string(), net1_id);
     }
 
+    /// Merge multiple net pairs efficiently in a single pass through all cells.
+    ///
+    /// This is O(P + M) where P = number of pairs, M = number of cells,
+    /// compared to O(P * M) for calling `merge_nets_by_name` P times.
+    ///
+    /// Each pair is (survivor_name, merged_name) where merged_name's connections
+    /// will be redirected to survivor_name.
+    pub fn merge_nets_batched(&mut self, pairs: &[(&str, &str)]) {
+        if pairs.is_empty() {
+            return;
+        }
+
+        // Phase 1: Collect all net IDs and build union-find structure
+        // parent[id] = id means id is a root, parent[id] = other means id points to other
+        let num_nets = self.nets.len();
+        let mut parent: Vec<u32> = (0..num_nets as u32).collect();
+
+        // Helper function: find with path compression (iterative)
+        fn find(parent: &mut [u32], mut x: u32) -> u32 {
+            let mut root = x;
+            while parent[root as usize] != root {
+                root = parent[root as usize];
+            }
+            // Path compression
+            while parent[x as usize] != root {
+                let next = parent[x as usize];
+                parent[x as usize] = root;
+                x = next;
+            }
+            root
+        }
+
+        // Helper function: union (by making net2 point to net1)
+        fn union(parent: &mut [u32], net1: u32, net2: u32) {
+            let root1 = find(parent, net1);
+            let root2 = find(parent, net2);
+            if root1 != root2 {
+                parent[root2 as usize] = root1;
+            }
+        }
+
+        // Process all pairs, building the union-find structure
+        let mut net_names_to_update: Vec<(String, u32)> = Vec::with_capacity(pairs.len());
+
+        for (survivor_name, merged_name) in pairs {
+            let net1_id = match self.net_map.get(*survivor_name) {
+                Some(&id) => id,
+                None => continue,
+            };
+            let net2_id = match self.net_map.get(*merged_name) {
+                Some(&id) => id,
+                None => continue,
+            };
+
+            if net1_id == net2_id {
+                continue;
+            }
+
+            union(&mut parent, net1_id.0, net2_id.0);
+            net_names_to_update.push((merged_name.to_string(), net1_id.0));
+        }
+
+        // Phase 2: Build final mapping from each net to its canonical representative
+        let mut remap: HashMap<u32, u32> = HashMap::with_capacity(num_nets / 4);
+        for i in 0..num_nets as u32 {
+            let root = find(&mut parent, i);
+            if root != i {
+                remap.insert(i, root);
+            }
+        }
+
+        if remap.is_empty() {
+            return;
+        }
+
+        // Phase 3: Update all cells in a single pass
+        for cell in &mut self.cells {
+            for input in &mut cell.inputs {
+                if let Some(&new_id) = remap.get(&input.0) {
+                    *input = GateNetId(new_id);
+                }
+            }
+            for output in &mut cell.outputs {
+                if let Some(&new_id) = remap.get(&output.0) {
+                    *output = GateNetId(new_id);
+                }
+            }
+            if let Some(clock_id) = cell.clock {
+                if let Some(&new_id) = remap.get(&clock_id.0) {
+                    cell.clock = Some(GateNetId(new_id));
+                }
+            }
+            if let Some(reset_id) = cell.reset {
+                if let Some(&new_id) = remap.get(&reset_id.0) {
+                    cell.reset = Some(GateNetId(new_id));
+                }
+            }
+        }
+
+        // Phase 4: Update net metadata and net_map
+        for (old_id, new_id) in &remap {
+            let old_idx = *old_id as usize;
+            let new_idx = *new_id as usize;
+
+            // Merge fanout
+            let old_fanout = std::mem::take(&mut self.nets[old_idx].fanout);
+            self.nets[new_idx].fanout.extend(old_fanout);
+
+            // Transfer driver if new net doesn't have one
+            if self.nets[new_idx].driver.is_none() {
+                self.nets[new_idx].driver = self.nets[old_idx].driver;
+                self.nets[new_idx].driver_pin = self.nets[old_idx].driver_pin;
+            }
+
+            // Clear old net
+            self.nets[old_idx].driver = None;
+        }
+
+        // Update net_map for merged names to point to survivor
+        for (merged_name, survivor_id) in net_names_to_update {
+            self.net_map.insert(merged_name, GateNetId(survivor_id));
+        }
+    }
+
     /// Add a tie cell for a constant value
     pub fn add_tie_cell(&mut self, net_name: &str, value: u64) {
         let net_id = match self.net_map.get(net_name) {

@@ -2,6 +2,11 @@
 //!
 //! Tests that NCL (Null Convention Logic) gate-level simulation works
 //! on the CLE v2 async design with encoding at async entity boundaries.
+//!
+//! This test is release-only due to the large design requiring significant
+//! stack space and compilation time in debug mode.
+
+#![cfg(not(debug_assertions))]
 
 use skalp_testing::Testbench;
 

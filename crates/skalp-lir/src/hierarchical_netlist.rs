@@ -109,7 +109,7 @@ impl HierarchicalNetlist {
             .collect();
         result.is_ncl = !ncl_instances.is_empty();
         if result.is_ncl {
-            eprintln!(
+            trace!(
                 "[FLATTEN] NCL detected in {} instances, setting is_ncl=true",
                 ncl_instances.len()
             );
@@ -226,7 +226,7 @@ impl HierarchicalNetlist {
         // result.propagate_constants();
         // let removed = result.remove_dead_cells();
         // if removed > 0 {
-        //     eprintln!("[FLATTEN] Removed {} dead cells after stitching", removed);
+        //     trace!("[FLATTEN] Removed {} dead cells after stitching", removed);
         // }
 
         // Phase 5: Post-flatten buffer removal
@@ -244,7 +244,7 @@ impl HierarchicalNetlist {
             optimizer.set_enable_buffer_removal(true);
             let opt_stats = optimizer.optimize(&mut result);
             if opt_stats.cells_removed > 0 {
-                eprintln!(
+                trace!(
                     "[FLATTEN] Post-flatten buffer removal: {} cells removed ({} → {})",
                     opt_stats.cells_removed,
                     cells_before,
@@ -271,6 +271,10 @@ impl HierarchicalNetlist {
             "[STITCH] Starting port stitching for {} instances",
             self.instances.len()
         );
+
+        // Collect all merge pairs for batched processing
+        // Each pair is (survivor_name, merged_name) - survivor's name is preserved
+        let mut merge_pairs: Vec<(String, String)> = Vec::new();
 
         // Sort instance paths for deterministic ordering
         let mut sorted_paths: Vec<_> = self.instances.keys().collect();
@@ -314,7 +318,7 @@ impl HierarchicalNetlist {
                         if child_exists && parent_exists {
                             // Direct single-net merge - parent first so its name survives
                             trace!("[STITCH]   ✓ {} <-> {}", child_net_name, parent_net_name);
-                            result.merge_nets_by_name(&parent_net_name, &child_net_name);
+                            merge_pairs.push((parent_net_name, child_net_name));
                         } else {
                             // Try bit-level stitching for multi-bit ports
                             let child_bits = result.find_bit_indexed_nets(&child_net_name);
@@ -330,7 +334,10 @@ impl HierarchicalNetlist {
                                 for (idx, child_bit_net) in &child_bits {
                                     // Find matching parent bit - O(1) lookup
                                     if let Some(parent_bit_net) = parent_map.get(idx) {
-                                        result.merge_nets_by_name(parent_bit_net, child_bit_net);
+                                        merge_pairs.push((
+                                            (*parent_bit_net).clone(),
+                                            child_bit_net.clone(),
+                                        ));
                                         stitched += 1;
                                     }
                                 }
@@ -359,8 +366,10 @@ impl HierarchicalNetlist {
                                     // Stitch true rails
                                     for (idx, child_bit_net) in &child_t {
                                         if let Some(parent_bit_net) = parent_t_map.get(idx) {
-                                            result
-                                                .merge_nets_by_name(parent_bit_net, child_bit_net);
+                                            merge_pairs.push((
+                                                (*parent_bit_net).clone(),
+                                                child_bit_net.clone(),
+                                            ));
                                             stitched += 1;
                                         }
                                     }
@@ -368,8 +377,10 @@ impl HierarchicalNetlist {
                                     // Stitch false rails
                                     for (idx, child_bit_net) in &child_f {
                                         if let Some(parent_bit_net) = parent_f_map.get(idx) {
-                                            result
-                                                .merge_nets_by_name(parent_bit_net, child_bit_net);
+                                            merge_pairs.push((
+                                                (*parent_bit_net).clone(),
+                                                child_bit_net.clone(),
+                                            ));
                                             stitched += 1;
                                         }
                                     }
@@ -409,8 +420,10 @@ impl HierarchicalNetlist {
                                     // Stitch true rails
                                     for (idx, child_bit_net) in &child_t {
                                         if let Some(parent_bit_net) = parent_t_map.get(idx) {
-                                            result
-                                                .merge_nets_by_name(parent_bit_net, child_bit_net);
+                                            merge_pairs.push((
+                                                (*parent_bit_net).clone(),
+                                                child_bit_net.clone(),
+                                            ));
                                             stitched += 1;
                                         }
                                     }
@@ -418,8 +431,10 @@ impl HierarchicalNetlist {
                                     // Stitch false rails
                                     for (idx, child_bit_net) in &child_f {
                                         if let Some(parent_bit_net) = parent_f_map.get(idx) {
-                                            result
-                                                .merge_nets_by_name(parent_bit_net, child_bit_net);
+                                            merge_pairs.push((
+                                                (*parent_bit_net).clone(),
+                                                child_bit_net.clone(),
+                                            ));
                                             stitched += 1;
                                         }
                                     }
@@ -479,9 +494,10 @@ impl HierarchicalNetlist {
                             result.add_tie_cell(&net_name, *value);
                         } else {
                             // Net doesn't exist - this might be an unused connection
-                            eprintln!(
+                            trace!(
                                 "[STITCH]   ✗ Constant 0x{:X} -> {} (net not found)",
-                                value, net_name
+                                value,
+                                net_name
                             );
                         }
                     }
@@ -495,7 +511,7 @@ impl HierarchicalNetlist {
                         let net2_exists = result.get_net(&net2).is_some();
 
                         if net1_exists && net2_exists {
-                            result.merge_nets_by_name(&net1, &net2);
+                            merge_pairs.push((net1, net2));
                         } else {
                             // Try bit-level stitching
                             let bits1 = result.find_bit_indexed_nets(&net1);
@@ -506,7 +522,7 @@ impl HierarchicalNetlist {
                                     if let Some((_, bit2_net)) =
                                         bits2.iter().find(|(idx2, _)| idx2 == idx)
                                     {
-                                        result.merge_nets_by_name(bit1_net, bit2_net);
+                                        merge_pairs.push((bit1_net.clone(), bit2_net.clone()));
                                     }
                                 }
                             }
@@ -534,14 +550,18 @@ impl HierarchicalNetlist {
                                     let parent_bit_net =
                                         format!("{}[{}]", parent_base, parent_bit_idx);
                                     if result.get_net(&parent_bit_net).is_some() {
-                                        result.merge_nets_by_name(&parent_bit_net, child_bit_net);
+                                        merge_pairs.push((parent_bit_net, child_bit_net.clone()));
                                         stitched += 1;
                                     }
                                 }
                             }
-                            eprintln!(
+                            trace!(
                                 "[STITCH]   ✓ {} <-> {}[{}:{}] (range: {} bits)",
-                                child_net_name, parent_base, high, low, stitched
+                                child_net_name,
+                                parent_base,
+                                high,
+                                low,
+                                stitched
                             );
                         } else {
                             // Try NCL dual-rail range stitching
@@ -560,12 +580,12 @@ impl HierarchicalNetlist {
                                         let parent_bit_net =
                                             format!("{}_t[{}]", parent_base, parent_bit_idx);
                                         if result.get_net(&parent_bit_net).is_some() {
-                                            result
-                                                .merge_nets_by_name(&parent_bit_net, child_bit_net);
+                                            merge_pairs
+                                                .push((parent_bit_net, child_bit_net.clone()));
                                             stitched += 1;
                                         } else if stitched == 0 && *child_idx == 0 {
                                             // BUG #200 DEBUG: Log first missing parent net
-                                            eprintln!(
+                                            trace!(
                                                 "[STITCH]     DEBUG: Parent net '{}' NOT FOUND for {}",
                                                 parent_bit_net, parent_base
                                             );
@@ -580,21 +600,28 @@ impl HierarchicalNetlist {
                                         let parent_bit_net =
                                             format!("{}_f[{}]", parent_base, parent_bit_idx);
                                         if result.get_net(&parent_bit_net).is_some() {
-                                            result
-                                                .merge_nets_by_name(&parent_bit_net, child_bit_net);
+                                            merge_pairs
+                                                .push((parent_bit_net, child_bit_net.clone()));
                                             stitched += 1;
                                         }
                                     }
                                 }
 
-                                eprintln!(
+                                trace!(
                                     "[STITCH]   ✓ {} <-> {}[{}:{}] (NCL range: {} nets)",
-                                    child_net_name, parent_base, high, low, stitched
+                                    child_net_name,
+                                    parent_base,
+                                    high,
+                                    low,
+                                    stitched
                                 );
                             } else {
-                                eprintln!(
+                                trace!(
                                     "[STITCH]   ✗ {} -> {}[{}:{}] (no child bits found)",
-                                    child_net_name, parent_base, high, low
+                                    child_net_name,
+                                    parent_base,
+                                    high,
+                                    low
                                 );
                             }
                         }
@@ -613,7 +640,7 @@ impl HierarchicalNetlist {
                         if result.get_net(&child_net_name).is_some()
                             && result.get_net(&parent_bit_net).is_some()
                         {
-                            result.merge_nets_by_name(&parent_bit_net, &child_net_name);
+                            merge_pairs.push((parent_bit_net.clone(), child_net_name.clone()));
                             trace!("[STITCH]   ✓ {} <-> {}", child_net_name, parent_bit_net);
                         } else {
                             // Try child bit 0 -> parent bit
@@ -621,18 +648,32 @@ impl HierarchicalNetlist {
                             if result.get_net(&child_bit0).is_some()
                                 && result.get_net(&parent_bit_net).is_some()
                             {
-                                result.merge_nets_by_name(&parent_bit_net, &child_bit0);
+                                merge_pairs.push((parent_bit_net.clone(), child_bit0.clone()));
                                 trace!("[STITCH]   ✓ {} <-> {}", child_bit0, parent_bit_net);
                             } else {
-                                eprintln!(
+                                trace!(
                                     "[STITCH]   ✗ {} -> {} (nets not found)",
-                                    child_net_name, parent_bit_net
+                                    child_net_name,
+                                    parent_bit_net
                                 );
                             }
                         }
                     }
                 }
             }
+        }
+
+        // Apply all merges in a single batched pass
+        if !merge_pairs.is_empty() {
+            trace!(
+                "[STITCH] Applying {} merge pairs in batched mode",
+                merge_pairs.len()
+            );
+            let pairs_refs: Vec<(&str, &str)> = merge_pairs
+                .iter()
+                .map(|(s, m)| (s.as_str(), m.as_str()))
+                .collect();
+            result.merge_nets_batched(&pairs_refs);
         }
     }
 
