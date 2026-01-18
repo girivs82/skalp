@@ -1,5 +1,15 @@
 # Intent Syntax Refinements
 
+> **DEPRECATION NOTICE**: The attribute-based syntax (`#[foo]`) for synthesis intents has been
+> unified with the `with intent::name` syntax. See [INTENT_SYSTEM_COMPREHENSIVE_DESIGN.md](INTENT_SYSTEM_COMPREHENSIVE_DESIGN.md)
+> for the current syntax specification.
+>
+> **Key change**: Use `expr with intent::name` instead of `#[name] expr`.
+> Attributes (`#[...]`) are now reserved for metadata annotations (safety, memory config, etc.),
+> not synthesis intents.
+
+---
+
 **Ergonomic Syntax for Common Intent Patterns**
 
 This document describes syntactic sugar and shorthand forms for the intent system, making common patterns more concise while maintaining the full power of intent blocks.

@@ -144,6 +144,11 @@ impl<'a> ParseState<'a> {
             self.parse_where_clause();
         }
 
+        // Optional 'with intent::name' clause
+        if self.at(SyntaxKind::WithKw) && self.peek_at(1, SyntaxKind::IntentKw) {
+            self.parse_intent_ref();
+        }
+
         // Port list
         self.expect(SyntaxKind::LBrace);
         self.parse_port_list();
@@ -242,14 +247,9 @@ impl<'a> ParseState<'a> {
             self.parse_generic_params();
         }
 
-        // Optional 'with' clause for intents
-        if self.at(SyntaxKind::WithKw) {
-            self.bump(); // consume 'with'
-            self.expect(SyntaxKind::Ident); // intent name
-                                            // Optional generic parameters for intent
-            if self.at(SyntaxKind::Lt) {
-                self.parse_generic_params();
-            }
+        // Optional 'with intent::name' clause for intents
+        if self.at(SyntaxKind::WithKw) && self.peek_at(1, SyntaxKind::IntentKw) {
+            self.parse_intent_ref();
         }
 
         // Implementation body
@@ -408,6 +408,10 @@ impl<'a> ParseState<'a> {
                 Some(SyntaxKind::ForKw) => self.parse_for_stmt(),
                 Some(SyntaxKind::GenerateKw) => self.parse_generate_stmt(),
                 Some(SyntaxKind::FlowKw) => self.parse_flow_statement(),
+                // with intent::name { ... } block statement
+                Some(SyntaxKind::WithKw) if self.peek_at(1, SyntaxKind::IntentKw) => {
+                    self.parse_with_intent_block();
+                }
                 Some(SyntaxKind::BarrierKw) => self.parse_barrier_stmt(),
                 Some(SyntaxKind::AssignKw) => self.parse_continuous_assignment(),
                 Some(SyntaxKind::CovergroupKw) => self.parse_covergroup_decl(),
@@ -868,6 +872,10 @@ impl<'a> ParseState<'a> {
             self.skip_trivia();
 
             match self.current_kind() {
+                // with intent::name { ... } block statement
+                Some(SyntaxKind::WithKw) if self.peek_at(1, SyntaxKind::IntentKw) => {
+                    self.parse_with_intent_block();
+                }
                 Some(SyntaxKind::IfKw) => self.parse_if_statement(),
                 Some(SyntaxKind::MatchKw) => self.parse_match_statement(),
                 Some(SyntaxKind::ForKw) => self.parse_for_stmt(),
@@ -1907,6 +1915,21 @@ impl<'a> ParseState<'a> {
         self.parse_flow_pipeline();
 
         self.expect(SyntaxKind::RBrace);
+
+        self.finish_node();
+    }
+
+    /// Parse with intent block statement: `with intent::name { ... }`
+    fn parse_with_intent_block(&mut self) {
+        self.start_node(SyntaxKind::WithIntentExpr);
+
+        // Parse the intent reference
+        self.parse_intent_ref();
+
+        self.skip_trivia();
+
+        // Parse the block (includes braces)
+        self.parse_block_statement();
 
         self.finish_node();
     }
@@ -4423,8 +4446,49 @@ impl<'a> ParseState<'a> {
     }
 
     /// Parse expression with operator precedence
+    /// Also handles postfix `with intent::name` syntax
     fn parse_expression(&mut self) {
+        let checkpoint = self.builder.checkpoint();
         self.parse_ternary_expr();
+
+        // Check for 'with intent::name' postfix
+        if self.at(SyntaxKind::WithKw) {
+            // Look ahead to see if this is 'with intent::'
+            if self.peek_at(1, SyntaxKind::IntentKw) {
+                self.builder.start_node_at(
+                    checkpoint,
+                    rowan::SyntaxKind(SyntaxKind::WithIntentExpr as u16),
+                );
+                self.parse_intent_ref();
+                self.builder.finish_node();
+            }
+        }
+    }
+
+    /// Parse intent reference: `with intent::name` or `with intent::name + intent::name`
+    fn parse_intent_ref(&mut self) {
+        self.start_node(SyntaxKind::IntentRef);
+
+        self.expect(SyntaxKind::WithKw); // consume 'with'
+        self.skip_trivia();
+        self.expect(SyntaxKind::IntentKw); // consume 'intent'
+        self.skip_trivia();
+        self.expect(SyntaxKind::ColonColon); // consume '::'
+        self.skip_trivia();
+        self.expect(SyntaxKind::Ident); // consume intent name
+
+        // Handle composition: `with intent::a + intent::b`
+        while self.at(SyntaxKind::Plus) {
+            self.bump(); // consume '+'
+            self.skip_trivia();
+            self.expect(SyntaxKind::IntentKw); // consume 'intent'
+            self.skip_trivia();
+            self.expect(SyntaxKind::ColonColon); // consume '::'
+            self.skip_trivia();
+            self.expect(SyntaxKind::Ident); // consume intent name
+        }
+
+        self.finish_node();
     }
 
     /// Parse ternary conditional expression: condition ? true_expr : false_expr
@@ -5521,6 +5585,34 @@ impl<'a> ParseState<'a> {
     /// Check if current token is of given kind
     fn at(&self, kind: SyntaxKind) -> bool {
         self.current_kind() == Some(kind)
+    }
+
+    /// Peek ahead by offset tokens (skipping trivia) and check if it's the given kind
+    /// offset=1 checks the next non-trivia token after current
+    fn peek_at(&self, offset: usize, kind: SyntaxKind) -> bool {
+        let mut pos = self.current;
+        let mut skipped = 0;
+
+        // Skip 'offset' non-trivia tokens
+        while skipped < offset {
+            pos += 1;
+            if pos >= self.tokens.len() {
+                return false;
+            }
+            let token_kind = SyntaxKind::from(self.tokens[pos].token.clone());
+            if !token_kind.is_trivia() {
+                skipped += 1;
+            }
+        }
+
+        // Now 'pos' points to the offset-th non-trivia token after current
+        // Check if it matches the expected kind
+        if pos < self.tokens.len() {
+            let token_kind = SyntaxKind::from(self.tokens[pos].token.clone());
+            return token_kind == kind;
+        }
+
+        false
     }
 
     /// Check if at port direction keyword
@@ -7646,6 +7738,117 @@ mod tests {
         assert!(
             errors.is_empty(),
             "Intent declarations without leading whitespace should parse without errors"
+        );
+        assert_eq!(tree.kind(), SyntaxKind::SourceFile);
+    }
+
+    #[test]
+    fn test_parse_with_intent_expression() {
+        let source = r#"
+            entity Test {
+                in a: bit[32]
+                in b: bit[32]
+                out result: bit[32]
+            }
+
+            impl Test {
+                let tmp = (a * b) with intent::throughput;
+                result = tmp
+            }
+        "#;
+        let (tree, errors) = parse_with_errors(source);
+
+        eprintln!("Errors: {:?}", errors);
+        assert!(
+            errors.is_empty(),
+            "Expression with intent should parse without errors"
+        );
+        assert_eq!(tree.kind(), SyntaxKind::SourceFile);
+    }
+
+    #[test]
+    fn test_parse_with_intent_block() {
+        let source = r#"
+            entity Test {
+                in a: bit[32]
+                out result: bit[32]
+            }
+
+            impl Test {
+                with intent::simd_friendly {
+                    let tmp = a * 2;
+                    result = tmp
+                }
+            }
+        "#;
+        let (tree, errors) = parse_with_errors(source);
+
+        eprintln!("Errors: {:?}", errors);
+        assert!(
+            errors.is_empty(),
+            "With intent block should parse without errors"
+        );
+        assert_eq!(tree.kind(), SyntaxKind::SourceFile);
+    }
+
+    #[test]
+    fn test_parse_entity_with_intent() {
+        let source = r#"
+            entity FastProcessor with intent::throughput {
+                in a: bit[32]
+                out result: bit[32]
+            }
+        "#;
+        let (tree, errors) = parse_with_errors(source);
+
+        eprintln!("Errors: {:?}", errors);
+        assert!(
+            errors.is_empty(),
+            "Entity with intent should parse without errors"
+        );
+        assert_eq!(tree.kind(), SyntaxKind::SourceFile);
+    }
+
+    #[test]
+    fn test_parse_impl_with_intent() {
+        let source = r#"
+            entity Test {
+                in a: bit[32]
+                out result: bit[32]
+            }
+
+            impl Test with intent::area_efficient {
+                result = a
+            }
+        "#;
+        let (tree, errors) = parse_with_errors(source);
+
+        eprintln!("Errors: {:?}", errors);
+        assert!(
+            errors.is_empty(),
+            "Impl with intent should parse without errors"
+        );
+        assert_eq!(tree.kind(), SyntaxKind::SourceFile);
+    }
+
+    #[test]
+    fn test_parse_with_intent_composition() {
+        let source = r#"
+            entity Test {
+                in a: bit[32]
+                out result: bit[32]
+            }
+
+            impl Test {
+                result = (a * 2) with intent::throughput + intent::low_power
+            }
+        "#;
+        let (tree, errors) = parse_with_errors(source);
+
+        eprintln!("Errors: {:?}", errors);
+        assert!(
+            errors.is_empty(),
+            "Intent composition should parse without errors"
         );
         assert_eq!(tree.kind(), SyntaxKind::SourceFile);
     }

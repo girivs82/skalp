@@ -439,6 +439,8 @@ pub enum SyntaxKind {
     ClosureExpr,
     ClosureParamList,
     ClosureParam,
+    WithIntentExpr, // expr with intent::name
+    IntentRef,      // intent::name reference
 
     // Types
     TypeExpr,
@@ -892,6 +894,8 @@ impl SyntaxKind {
             UsePath => "use path",
             UseTree => "use tree",
             Visibility => "visibility",
+            WithIntentExpr => "expression with intent",
+            IntentRef => "intent reference",
 
             _ => "unknown",
         }

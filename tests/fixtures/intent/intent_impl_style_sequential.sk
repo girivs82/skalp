@@ -1,4 +1,4 @@
-// Test impl_style::sequential intent
+// Test impl_style::sequential intent using new 'with intent::' syntax
 entity TestImplStyleSequential {
     in a: bit[32]
     in b: bit[32]
@@ -6,7 +6,6 @@ entity TestImplStyleSequential {
 }
 
 impl TestImplStyleSequential {
-    #[impl_style::sequential]
-    let tmp = a - b;
+    let tmp = (a - b) with intent::impl_style_sequential;
     result = tmp
 }

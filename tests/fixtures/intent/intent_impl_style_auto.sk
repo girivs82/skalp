@@ -1,4 +1,4 @@
-// Test impl_style::auto intent (default behavior)
+// Test impl_style::auto intent (default behavior) using new 'with intent::' syntax
 entity TestImplStyleAuto {
     in a: bit[32]
     in b: bit[32]
@@ -6,7 +6,6 @@ entity TestImplStyleAuto {
 }
 
 impl TestImplStyleAuto {
-    #[impl_style::auto]
-    let tmp = a | b;
+    let tmp = (a | b) with intent::impl_style_auto;
     result = tmp
 }

@@ -1,4 +1,4 @@
-// Test impl_style::tree intent
+// Test impl_style::tree intent using new 'with intent::' syntax
 entity TestImplStyleTree {
     in a: bit[32]
     in b: bit[32]
@@ -6,7 +6,6 @@ entity TestImplStyleTree {
 }
 
 impl TestImplStyleTree {
-    #[impl_style::tree]
-    let tmp = a * b;
+    let tmp = (a * b) with intent::impl_style_tree;
     result = tmp
 }

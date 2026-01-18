@@ -4467,6 +4467,7 @@ impl HirBuilderContext {
                         | SyntaxKind::StructLiteral // BUG FIX #71: Support struct literal expressions in let bindings
                         | SyntaxKind::ArrayLiteral // BUG FIX #148: Support array/concat literals in let bindings
                         | SyntaxKind::ConcatExpr // BUG FIX #148: Support concat expressions in let bindings
+                        | SyntaxKind::WithIntentExpr // Support 'with intent::' expressions
                 )
             })
             .collect();
@@ -5336,6 +5337,7 @@ impl HirBuilderContext {
             SyntaxKind::MatchExpr => self.build_match_expr(node),
             SyntaxKind::CastExpr => self.build_cast_expr(node),
             SyntaxKind::BlockExpr => self.build_block_expr(node),
+            SyntaxKind::WithIntentExpr => self.build_with_intent_expr(node),
             SyntaxKind::ParenExpr => {
                 // Unwrap parentheses - but handle parser bug where complex expressions
                 // inside parens are represented as multiple sibling BinaryExpr nodes
@@ -7737,6 +7739,91 @@ impl HirBuilderContext {
             statements,
             result_expr: Box::new(final_expr),
         })
+    }
+
+    /// Build expression with intent annotation
+    /// Handles: `expr with intent::name` or `with intent::name { block }`
+    fn build_with_intent_expr(&mut self, node: &SyntaxNode) -> Option<HirExpression> {
+        // Extract the intent name from IntentRef child
+        let intent_name = node
+            .children()
+            .find(|n| n.kind() == SyntaxKind::IntentRef)
+            .and_then(|ref_node| {
+                // IntentRef contains: 'with' 'intent' '::' ident ['+' 'intent' '::' ident]*
+                // Extract the first intent name (after the '::')
+                ref_node
+                    .children_with_tokens()
+                    .filter_map(|elem| elem.into_token())
+                    .find(|t| t.kind() == SyntaxKind::Ident)
+                    .map(|t| t.text().to_string())
+            });
+
+        // Map intent name to ImplStyle
+        if let Some(name) = &intent_name {
+            let impl_style = match name.as_str() {
+                "impl_style_parallel" | "parallel" => Some(ImplStyle::Parallel),
+                "impl_style_tree" | "tree" => Some(ImplStyle::Tree),
+                "impl_style_sequential" | "sequential" => Some(ImplStyle::Sequential),
+                "impl_style_auto" | "auto" => Some(ImplStyle::Auto),
+                // For other intents, we'd look them up in intent definitions
+                // For now, default to Auto
+                _ => {
+                    trace!(
+                        "[HIR_INTENT] Unknown intent '{}', using Auto impl_style",
+                        name
+                    );
+                    Some(ImplStyle::Auto)
+                }
+            };
+
+            if let Some(style) = impl_style {
+                self.pending_impl_style = Some(style);
+            }
+        }
+
+        // Find the inner expression or block
+        // For `expr with intent::name`, the expression comes before IntentRef
+        // For `with intent::name { block }`, there's a BlockStmt child
+        let inner_expr = node
+            .children()
+            .find(|n| {
+                matches!(
+                    n.kind(),
+                    SyntaxKind::LiteralExpr
+                        | SyntaxKind::IdentExpr
+                        | SyntaxKind::BinaryExpr
+                        | SyntaxKind::UnaryExpr
+                        | SyntaxKind::CallExpr
+                        | SyntaxKind::FieldExpr
+                        | SyntaxKind::IndexExpr
+                        | SyntaxKind::PathExpr
+                        | SyntaxKind::ParenExpr
+                        | SyntaxKind::IfExpr
+                        | SyntaxKind::MatchExpr
+                        | SyntaxKind::CastExpr
+                        | SyntaxKind::TernaryExpr
+                        | SyntaxKind::ConcatExpr
+                        | SyntaxKind::ReplicateExpr
+                        | SyntaxKind::TupleExpr
+                        | SyntaxKind::ArrayLiteral
+                        | SyntaxKind::StructLiteral
+                        | SyntaxKind::BlockStmt
+                        | SyntaxKind::BlockExpr
+                )
+            })
+            .and_then(|n| {
+                if n.kind() == SyntaxKind::BlockStmt {
+                    // For block statements, build as block expression
+                    self.build_block_expr(&n)
+                } else {
+                    self.build_expression(&n)
+                }
+            });
+
+        // Clear pending impl_style after building (consumed or not)
+        self.pending_impl_style = None;
+
+        inner_expr
     }
 
     /// Build match expression

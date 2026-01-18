@@ -1,4 +1,4 @@
-// Test impl_style::parallel intent
+// Test impl_style::parallel intent using new 'with intent::' syntax
 entity TestImplStyleParallel {
     in a: bit[32]
     in b: bit[32]
@@ -6,7 +6,6 @@ entity TestImplStyleParallel {
 }
 
 impl TestImplStyleParallel {
-    #[impl_style::parallel]
-    let tmp = a + b;
+    let tmp = (a + b) with intent::impl_style_parallel;
     result = tmp
 }
