@@ -31,6 +31,22 @@
 use crate::lir::{Lir, LirNode, LirNodeId, LirOp, LirSignal, LirSignalId};
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
+use std::sync::OnceLock;
+
+/// Check if NCL debug logging is enabled (cached for performance)
+fn ncl_debug_enabled() -> bool {
+    static DEBUG_ENABLED: OnceLock<bool> = OnceLock::new();
+    *DEBUG_ENABLED.get_or_init(|| std::env::var("SKALP_DEBUG_NCL").is_ok())
+}
+
+/// Macro for conditional NCL debug logging
+macro_rules! ncl_debug {
+    ($($arg:tt)*) => {
+        if ncl_debug_enabled() {
+            eprintln!($($arg)*);
+        }
+    };
+}
 
 /// Configuration for NCL expansion
 ///
@@ -2187,24 +2203,24 @@ pub fn expand_to_ncl(lir: &Lir, config: &NclConfig) -> NclExpandResult {
     let mut expander = NclExpander::new(&lir.name, config.clone());
 
     // Debug: print original LIR structure
-    eprintln!("=== NCL Expand (Full Dual-Rail): Original LIR ===");
-    eprintln!("Signals ({}):", lir.signals.len());
+    ncl_debug!("=== NCL Expand (Full Dual-Rail): Original LIR ===");
+    ncl_debug!("Signals ({}):", lir.signals.len());
     for sig in &lir.signals {
-        eprintln!(
+        ncl_debug!(
             "  {:?} '{}' w={} in={} out={}",
             sig.id, sig.name, sig.width, sig.is_input, sig.is_output
         );
     }
-    eprintln!("Nodes ({}):", lir.nodes.len());
+    ncl_debug!("Nodes ({}):", lir.nodes.len());
     for node in &lir.nodes {
-        eprintln!(
+        ncl_debug!(
             "  {:?} op={:?} inputs={:?} output={:?}",
             node.id, node.op, node.inputs, node.output
         );
     }
-    eprintln!("Inputs: {:?}", lir.inputs);
-    eprintln!("Outputs: {:?}", lir.outputs);
-    eprintln!("================================");
+    ncl_debug!("Inputs: {:?}", lir.inputs);
+    ncl_debug!("Outputs: {:?}", lir.outputs);
+    ncl_debug!("================================");
 
     // Step 1: Create dual-rail signals for all original signals
     for signal in &lir.signals {
@@ -2660,8 +2676,8 @@ pub fn expand_to_ncl(lir: &Lir, config: &NclConfig) -> NclExpandResult {
 ///                                        (original LIR)
 /// ```
 pub fn expand_to_ncl_boundary(lir: &Lir, config: &NclConfig) -> NclExpandResult {
-    eprintln!("=== NCL Expand (Boundary-Only): {} ===", lir.name);
-    eprintln!(
+    ncl_debug!("=== NCL Expand (Boundary-Only): {} ===", lir.name);
+    ncl_debug!(
         "Original: {} signals, {} nodes",
         lir.signals.len(),
         lir.nodes.len()
@@ -2804,14 +2820,14 @@ pub fn expand_to_ncl_boundary(lir: &Lir, config: &NclConfig) -> NclExpandResult 
         stage_completions.push(completion_id);
     }
 
-    eprintln!(
+    ncl_debug!(
         "Boundary NCL: {} signals, {} nodes (was {} signals, {} nodes)",
         new_lir.signals.len(),
         new_lir.nodes.len(),
         lir.signals.len(),
         lir.nodes.len()
     );
-    eprintln!("=== NCL Expand (Boundary-Only) Complete ===");
+    ncl_debug!("=== NCL Expand (Boundary-Only) Complete ===");
 
     NclExpandResult {
         lir: new_lir,
@@ -2874,11 +2890,11 @@ pub fn apply_boundary_ncl_to_hierarchy(
             // Override specified - respect it
             match mode {
                 NclBoundaryMode::ForceBoundary => {
-                    eprintln!("🔧 NCL override: '{}' forced to have boundary", path);
+                    ncl_debug!("🔧 NCL override: '{}' forced to have boundary", path);
                     true
                 }
                 NclBoundaryMode::ForceCoalesce => {
-                    eprintln!(
+                    ncl_debug!(
                         "🔧 NCL override: '{}' forced to coalesce (no boundary)",
                         path
                     );
@@ -2894,7 +2910,7 @@ pub fn apply_boundary_ncl_to_hierarchy(
         if needs_ncl_boundary {
             // Apply boundary NCL
             let ncl_result = expand_to_ncl_boundary(&instance.lir_result.lir, config);
-            eprintln!(
+            ncl_debug!(
                 "⚡ NCL boundary for '{}': {} -> {} signals, {} -> {} nodes (parent is sync)",
                 path,
                 instance.lir_result.lir.signals.len(),
@@ -2925,7 +2941,7 @@ pub fn apply_boundary_ncl_to_hierarchy(
         } else {
             // Coalesce - keep as single-rail (no NCL boundary)
             if instance.is_async {
-                eprintln!(
+                ncl_debug!(
                     "🔗 NCL coalesce '{}': keeping single-rail (parent is async)",
                     path
                 );

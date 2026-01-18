@@ -22,6 +22,22 @@ use skalp_mir::mir::{
     ExpressionKind, LValue, Module, PortDirection, PortId, Process, ProcessKind, ReduceOp,
     SafetyContext, SensitivityList, SignalId, Statement, UnaryOp, Value, Variable, VariableId,
 };
+use std::sync::OnceLock;
+
+/// Check if elaborate debugging is enabled (cached for performance)
+fn elaborate_debug_enabled() -> bool {
+    static DEBUG_ENABLED: OnceLock<bool> = OnceLock::new();
+    *DEBUG_ENABLED.get_or_init(|| std::env::var("SKALP_DEBUG_ELABORATE").is_ok())
+}
+
+/// Macro for conditional elaborate debug logging
+macro_rules! elaborate_debug {
+    ($($arg:tt)*) => {
+        if elaborate_debug_enabled() {
+            eprintln!($($arg)*);
+        }
+    };
+}
 
 /// Convert MIR SafetyContext to LIR LirSafetyInfo
 fn safety_context_to_lir_info(ctx: &SafetyContext) -> LirSafetyInfo {
@@ -266,7 +282,7 @@ impl MirToLirTransform {
         // Use OR to combine module's async flag with inherited async context
         let is_async = module.is_async || is_async_context;
         let final_lir = if is_async {
-            eprintln!(
+            elaborate_debug!(
                 "⚡ NCL: Expanding module '{}' to dual-rail NCL logic{}",
                 module.name,
                 if is_async_context && !module.is_async {
@@ -276,7 +292,7 @@ impl MirToLirTransform {
                 }
             );
             let ncl_result = expand_to_ncl(&self.lir, &NclConfig::default());
-            eprintln!(
+            elaborate_debug!(
                 "⚡ NCL: Expanded {} signals -> {} dual-rail signals",
                 self.lir.signals.len(),
                 ncl_result.lir.signals.len()
@@ -2624,7 +2640,7 @@ fn elaborate_instance(
                 inst.connections.len()
             );
             for (port_name, expr) in &inst.connections {
-                eprintln!("[ELABORATE]     {} -> {:?}", port_name, expr.kind);
+                elaborate_debug!("[ELABORATE]     {} -> {:?}", port_name, expr.kind);
             }
             let child_connections = extract_connection_info(&inst.connections, module);
 

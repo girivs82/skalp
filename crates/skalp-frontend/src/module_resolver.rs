@@ -10,10 +10,26 @@ use anyhow::{bail, Context, Result};
 use indexmap::IndexMap;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 use crate::hir::{Hir, HirImport, HirImportPath};
 use crate::hir_builder::HirBuilderContext;
 use crate::parse;
+
+/// Check if module resolver debug logging is enabled
+fn resolver_debug_enabled() -> bool {
+    static DEBUG_ENABLED: OnceLock<bool> = OnceLock::new();
+    *DEBUG_ENABLED.get_or_init(|| std::env::var("SKALP_DEBUG_RESOLVER").is_ok())
+}
+
+/// Macro for conditional resolver debug logging
+macro_rules! resolver_debug {
+    ($($arg:tt)*) => {
+        if resolver_debug_enabled() {
+            eprintln!($($arg)*);
+        }
+    };
+}
 
 /// Supported file extensions for SKALP modules
 /// `.sk` - Source files (full implementation)
@@ -68,7 +84,7 @@ impl ModuleResolver {
         // Try to read skalp.toml to get src_dirs configuration
         let manifest_path = root_dir.join("skalp.toml");
         if manifest_path.exists() {
-            eprintln!("[MODULE_RESOLVER] Found skalp.toml at: {:?}", manifest_path);
+            resolver_debug!("[MODULE_RESOLVER] Found skalp.toml at: {:?}", manifest_path);
             if let Ok(contents) = std::fs::read_to_string(&manifest_path) {
                 if let Ok(manifest) = toml::from_str::<serde_json::Value>(&contents) {
                     // Try to extract src_dirs from [build] section
@@ -181,8 +197,8 @@ impl ModuleResolver {
             }
 
             if !found_stdlib {
-                eprintln!("[MODULE_RESOLVER] Warning: Could not find SKALP stdlib. Imports like 'use bitops::*' will fail.");
-                eprintln!("[MODULE_RESOLVER] Hint: Set SKALP_STDLIB_PATH environment variable or ensure crates/skalp-stdlib exists in a parent directory.");
+                resolver_debug!("[MODULE_RESOLVER] Warning: Could not find SKALP stdlib. Imports like 'use bitops::*' will fail.");
+                resolver_debug!("[MODULE_RESOLVER] Hint: Set SKALP_STDLIB_PATH environment variable or ensure crates/skalp-stdlib exists in a parent directory.");
             }
         }
 
@@ -191,7 +207,7 @@ impl ModuleResolver {
             search_paths.len()
         );
         for (i, path) in search_paths.iter().enumerate() {
-            eprintln!("[MODULE_RESOLVER]   {}: {:?}", i + 1, path);
+            resolver_debug!("[MODULE_RESOLVER]   {}: {:?}", i + 1, path);
         }
 
         Self {
@@ -227,7 +243,7 @@ impl ModuleResolver {
 
         // Handle `crate::` prefix - resolve relative to root_dir
         if segments.first().map(|s| s.as_str()) == Some("crate") {
-            eprintln!("[MODULE_RESOLVER] Resolving crate:: import");
+            resolver_debug!("[MODULE_RESOLVER] Resolving crate:: import");
             // Skip the "crate" segment and resolve from root_dir
             let remaining_segments = &segments[1..];
 
@@ -315,7 +331,7 @@ impl ModuleResolver {
 
     /// Load a module from a file path
     pub fn load_module(&mut self, path: &Path) -> Result<()> {
-        eprintln!("[MODULE_RESOLVER] Loading module: {:?}", path);
+        resolver_debug!("[MODULE_RESOLVER] Loading module: {:?}", path);
 
         // Check if already loaded
         if self.loaded_modules.contains_key(path) {
@@ -328,16 +344,16 @@ impl ModuleResolver {
 
         // Check for circular dependency
         if self.loading.contains(path) {
-            eprintln!("[MODULE_RESOLVER] Circular dependency detected: {:?}", path);
+            resolver_debug!("[MODULE_RESOLVER] Circular dependency detected: {:?}", path);
             bail!("Circular dependency detected: {:?}", path);
         }
 
         // Mark as loading
-        eprintln!("[MODULE_RESOLVER] Marking as loading: {:?}", path);
+        resolver_debug!("[MODULE_RESOLVER] Marking as loading: {:?}", path);
         self.loading.insert(path.to_path_buf());
 
         // Read and parse the file
-        eprintln!("[MODULE_RESOLVER] Reading file: {:?}", path);
+        resolver_debug!("[MODULE_RESOLVER] Reading file: {:?}", path);
         let source = std::fs::read_to_string(path)
             .with_context(|| format!("Failed to read module file: {:?}", path))?;
 
@@ -362,7 +378,7 @@ impl ModuleResolver {
         }
 
         // Build HIR
-        eprintln!("[MODULE_RESOLVER] Building HIR for {:?}", path);
+        resolver_debug!("[MODULE_RESOLVER] Building HIR for {:?}", path);
         let mut builder = HirBuilderContext::new();
         let mut hir = builder.build(&syntax_tree).map_err(|errors| {
             anyhow::anyhow!(
@@ -392,7 +408,7 @@ impl ModuleResolver {
                 path
             );
             let dep_path = self.resolve_import_path(import)?;
-            eprintln!("[MODULE_RESOLVER] Resolved import to: {:?}", dep_path);
+            resolver_debug!("[MODULE_RESOLVER] Resolved import to: {:?}", dep_path);
             // Recursively load (this will use cache if already loaded)
             self.load_module(&dep_path)?;
             eprintln!(

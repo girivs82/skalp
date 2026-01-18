@@ -12,6 +12,22 @@ use crate::syntax::{SyntaxKind, SyntaxNode, SyntaxNodeExt};
 use crate::typeck::TypeChecker;
 use indexmap::IndexMap;
 use std::path::PathBuf;
+use std::sync::OnceLock;
+
+/// Check if HIR debug logging is enabled (cached for performance)
+fn hir_debug_enabled() -> bool {
+    static DEBUG_ENABLED: OnceLock<bool> = OnceLock::new();
+    *DEBUG_ENABLED.get_or_init(|| std::env::var("SKALP_DEBUG_HIR").is_ok())
+}
+
+/// Macro for conditional HIR debug logging
+macro_rules! hir_debug {
+    ($($arg:tt)*) => {
+        if hir_debug_enabled() {
+            eprintln!($($arg)*);
+        }
+    };
+}
 
 /// Maximum recursion depth to prevent stack overflow
 /// Note: Deeply nested expressions should use intermediate let bindings instead
@@ -5290,7 +5306,7 @@ impl HirBuilderContext {
     /// Build expression
     #[allow(clippy::comparison_chain)]
     fn build_expression(&mut self, node: &SyntaxNode) -> Option<HirExpression> {
-        eprintln!(
+        hir_debug!(
             "[HIR_BUILD_EXPR] Building expression, node kind: {:?}",
             node.kind()
         );
@@ -5388,7 +5404,7 @@ impl HirBuilderContext {
     /// Build literal expression
     fn build_literal_expr(&mut self, node: &SyntaxNode) -> Option<HirExpression> {
         if let Some(token) = node.first_child_or_token() {
-            eprintln!(
+            hir_debug!(
                 "[HIR_LITERAL_DEBUG] build_literal_expr: token.kind() = {:?}",
                 token.kind()
             );
