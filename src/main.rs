@@ -474,15 +474,18 @@ enum CacheCommands {
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    // Set up logging
-    let log_level = match cli.verbose {
-        0 => "warn",
-        1 => "info",
-        2 => "debug",
-        _ => "trace",
-    };
+    // Set up logging - RUST_LOG takes precedence, then verbose flag
+    let log_level = std::env::var("RUST_LOG").unwrap_or_else(|_| match cli.verbose {
+        0 => "warn".to_string(),
+        1 => "info".to_string(),
+        2 => "debug".to_string(),
+        _ => "trace".to_string(),
+    });
 
-    tracing_subscriber::fmt().with_env_filter(log_level).init();
+    tracing_subscriber::fmt()
+        .with_env_filter(&log_level)
+        .with_target(true) // Show module path in logs
+        .init();
 
     match cli.command {
         Commands::New { name } => {

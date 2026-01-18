@@ -5,12 +5,16 @@
 
 use skalp_testing::Testbench;
 
-const CLE_V2_ASYNC_SOURCE: &str = "/Users/girivs/src/hw/karythra/rtl/skalp/cle/src/main_v2_async.sk";
+const CLE_V2_ASYNC_SOURCE: &str =
+    "/Users/girivs/src/hw/karythra/rtl/skalp/cle/src/main_v2_async.sk";
 const TOP_MODULE: &str = "KarythraCLE_V2_Async";
 
 #[tokio::test]
 async fn test_cle_v2_async_ncl_creation() {
-    std::env::set_var("SKALP_STDLIB_PATH", "/Users/girivs/src/hw/hls/crates/skalp-stdlib");
+    std::env::set_var(
+        "SKALP_STDLIB_PATH",
+        "/Users/girivs/src/hw/hls/crates/skalp-stdlib",
+    );
 
     println!("=== CLE v2 Async NCL Simulation Test ===\n");
     println!("Creating NCL testbench for {}...", TOP_MODULE);

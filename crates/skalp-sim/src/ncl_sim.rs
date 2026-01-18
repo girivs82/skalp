@@ -49,6 +49,7 @@
 use indexmap::IndexMap;
 use skalp_lir::gate_netlist::{CellId, GateNetId, GateNetlist};
 use skalp_lir::PrimitiveType;
+use tracing::trace;
 
 /// NCL signal phase
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -306,7 +307,7 @@ impl NclSimulator {
                 (nets.get(t_idx).copied(), nets.get(f_idx).copied(), width)
             } else {
                 if bit == 0 {
-                    eprintln!(
+                    trace!(
                         "[NCL_SIM] set_dual_rail: input '{}' not found. Available: {:?}",
                         name,
                         self.input_nets.keys().collect::<Vec<_>>()
@@ -319,31 +320,21 @@ impl NclSimulator {
         if let Some(t_net) = t_net {
             self.set_net(t_net, value.true_rail());
             if bit == 0 {
-                std::io::Write::write_all(
-                    &mut std::io::stderr(),
-                    format!(
-                        "[NCL_SIM] set_dual_rail: '{}' bit {} t_net={:?} f_net={:?} width={} value={:?}\n",
-                        name, bit, t_net, f_net, width, value
-                    )
-                    .as_bytes(),
-                )
-                .ok();
+                trace!(
+                    "[NCL_SIM] set_dual_rail: '{}' bit {} t_net={:?} f_net={:?} width={} value={:?}",
+                    name, bit, t_net, f_net, width, value
+                );
             }
         }
         if let Some(f_net) = f_net {
             self.set_net(f_net, value.false_rail());
             if bit == 0 {
-                std::io::Write::write_all(
-                    &mut std::io::stderr(),
-                    format!(
-                        "[NCL_SIM] set_dual_rail: f_net={:?} set to {} (verify: {})\n",
-                        f_net,
-                        value.false_rail(),
-                        self.get_net(f_net)
-                    )
-                    .as_bytes(),
-                )
-                .ok();
+                trace!(
+                    "[NCL_SIM] set_dual_rail: f_net={:?} set to {} (verify: {})",
+                    f_net,
+                    value.false_rail(),
+                    self.get_net(f_net)
+                );
             }
         }
     }

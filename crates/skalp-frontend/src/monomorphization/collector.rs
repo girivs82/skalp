@@ -8,6 +8,7 @@ use crate::hir::{
     HirInstance, HirPort, HirType,
 };
 use indexmap::{IndexMap, IndexSet};
+use tracing::trace;
 
 /// A specific instantiation of a generic entity
 #[derive(Debug, Clone)]
@@ -440,7 +441,7 @@ impl<'hir> InstantiationCollector<'hir> {
         let entity = match self.hir.entities.iter().find(|e| e.name == *type_name) {
             Some(e) => e.clone(),
             None => {
-                eprintln!("[COLLECTOR] Entity '{}' NOT FOUND", type_name);
+                trace!("[COLLECTOR] Entity '{}' NOT FOUND", type_name);
                 return;
             }
         };

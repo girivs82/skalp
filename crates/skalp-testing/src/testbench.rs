@@ -414,8 +414,7 @@ impl Testbench {
         let start_total = Instant::now();
         eprintln!(
             "⏱️  [TESTBENCH] Starting NCL compilation of '{}' (top: {:?})",
-            source_path,
-            top_module
+            source_path, top_module
         );
 
         let path = Path::new(source_path);

@@ -23,25 +23,10 @@ use skalp_mir::mir::{
     SafetyContext, SensitivityList, SignalId, Statement, UnaryOp, Value, Variable, VariableId,
 };
 use std::collections::HashMap;
-use std::sync::OnceLock;
+use tracing::{debug, info, trace};
 
 /// Type alias for LIR cache key: (module_name, is_async_context)
 type LirCacheKey = (String, bool);
-
-/// Check if elaborate debugging is enabled (cached for performance)
-fn elaborate_debug_enabled() -> bool {
-    static DEBUG_ENABLED: OnceLock<bool> = OnceLock::new();
-    *DEBUG_ENABLED.get_or_init(|| std::env::var("SKALP_DEBUG_ELABORATE").is_ok())
-}
-
-/// Macro for conditional elaborate debug logging
-macro_rules! elaborate_debug {
-    ($($arg:tt)*) => {
-        if elaborate_debug_enabled() {
-            eprintln!($($arg)*);
-        }
-    };
-}
 
 /// Convert MIR SafetyContext to LIR LirSafetyInfo
 fn safety_context_to_lir_info(ctx: &SafetyContext) -> LirSafetyInfo {
@@ -286,7 +271,7 @@ impl MirToLirTransform {
         // Use OR to combine module's async flag with inherited async context
         let is_async = module.is_async || is_async_context;
         let final_lir = if is_async {
-            elaborate_debug!(
+            trace!(
                 "⚡ NCL: Expanding module '{}' to dual-rail NCL logic{}",
                 module.name,
                 if is_async_context && !module.is_async {
@@ -296,7 +281,7 @@ impl MirToLirTransform {
                 }
             );
             let ncl_result = expand_to_ncl(&self.lir, &NclConfig::default());
-            elaborate_debug!(
+            trace!(
                 "⚡ NCL: Expanded {} signals -> {} dual-rail signals",
                 self.lir.signals.len(),
                 ncl_result.lir.signals.len()
@@ -2542,13 +2527,13 @@ fn elaborate_instance_for_optimize_first(
         // Use skip_ncl to get single-rail LIR for optimize-first flow
         // Use cache to avoid redundant LIR computation for same module type
         if let Some(cached_result) = lir_cache.get(&module.name) {
-            elaborate_debug!(
+            trace!(
                 "[LIR_CACHE] Cache hit for module '{}' (skip_ncl)",
                 module.name
             );
             cached_result.clone()
         } else {
-            elaborate_debug!(
+            trace!(
                 "[LIR_CACHE] Cache miss for module '{}' (skip_ncl), computing LIR",
                 module.name
             );
@@ -2659,14 +2644,14 @@ fn elaborate_instance(
         // Use cache to avoid redundant NCL expansion for same module type
         let cache_key = (module.name.clone(), is_async_context);
         if let Some(cached_result) = lir_cache.get(&cache_key) {
-            elaborate_debug!(
+            trace!(
                 "[LIR_CACHE] Cache hit for module '{}' (async={})",
                 module.name,
                 is_async_context
             );
             cached_result.clone()
         } else {
-            elaborate_debug!(
+            trace!(
                 "[LIR_CACHE] Cache miss for module '{}' (async={}), computing LIR",
                 module.name,
                 is_async_context
@@ -2705,7 +2690,7 @@ fn elaborate_instance(
                 inst.connections.len()
             );
             for (port_name, expr) in &inst.connections {
-                elaborate_debug!("[ELABORATE]     {} -> {:?}", port_name, expr.kind);
+                trace!("[ELABORATE]     {} -> {:?}", port_name, expr.kind);
             }
             let child_connections = extract_connection_info(&inst.connections, module);
 

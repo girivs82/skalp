@@ -6,6 +6,7 @@ use crate::const_eval::{ConstEvaluator, ConstValue};
 use crate::hir::{Hir, HirEntity, HirExpression, HirImplementation, HirType};
 use crate::monomorphization::collector::{Instantiation, IntentValue};
 use indexmap::IndexMap;
+use tracing::trace;
 
 /// Monomorphization engine
 pub struct MonomorphizationEngine<'hir> {
@@ -160,7 +161,7 @@ impl<'hir> MonomorphizationEngine<'hir> {
 
             // If no new instantiations, we've reached a fixed point
             if new_instantiations.is_empty() {
-                eprintln!("[MONOMORPHIZE] No new instantiations, breaking loop");
+                trace!("[MONOMORPHIZE] No new instantiations, breaking loop");
                 break;
             }
 

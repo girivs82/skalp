@@ -19,6 +19,7 @@ bincode = "1.3"
 blake3 = "1.5"
 aes-gcm = { version = "0.10", optional = true }
 rand = { version = "0.8", optional = true }
+tracing = "0.1"
 
 [dev-dependencies]
 skalp-frontend = { path = "../skalp-frontend" }

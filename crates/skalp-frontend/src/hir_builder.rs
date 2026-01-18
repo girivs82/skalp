@@ -12,22 +12,7 @@ use crate::syntax::{SyntaxKind, SyntaxNode, SyntaxNodeExt};
 use crate::typeck::TypeChecker;
 use indexmap::IndexMap;
 use std::path::PathBuf;
-use std::sync::OnceLock;
-
-/// Check if HIR debug logging is enabled (cached for performance)
-fn hir_debug_enabled() -> bool {
-    static DEBUG_ENABLED: OnceLock<bool> = OnceLock::new();
-    *DEBUG_ENABLED.get_or_init(|| std::env::var("SKALP_DEBUG_HIR").is_ok())
-}
-
-/// Macro for conditional HIR debug logging
-macro_rules! hir_debug {
-    ($($arg:tt)*) => {
-        if hir_debug_enabled() {
-            eprintln!($($arg)*);
-        }
-    };
-}
+use tracing::trace;
 
 /// Maximum recursion depth to prevent stack overflow
 /// Note: Deeply nested expressions should use intermediate let bindings instead
@@ -421,7 +406,7 @@ impl HirBuilderContext {
     /// BUG FIX #67: Register imported function return types for type inference
     pub fn preregister_function(&mut self, function: &HirFunction) {
         if let Some(ref return_type) = function.return_type {
-            eprintln!(
+            trace!(
                 "\u{1f4e6} BUG #67 FIX: Pre-registering imported function '{}' with return type: {:?}",
                 function.name, return_type
             );
@@ -435,9 +420,10 @@ impl HirBuilderContext {
     /// This ensures imported distinct types like `fp32` resolve to `HirType::Custom("fp32")`
     /// instead of falling back to hardcoded `HirType::Float32`
     pub fn preregister_distinct_type(&mut self, distinct: &crate::hir::HirDistinctType) {
-        eprintln!(
+        trace!(
             "📦 Pre-registering distinct type '{}' -> Custom(\"{}\")",
-            distinct.name, distinct.name
+            distinct.name,
+            distinct.name
         );
         self.symbols.user_types.insert(
             distinct.name.clone(),
@@ -814,12 +800,12 @@ impl HirBuilderContext {
                             // Parser creates function calls as: IdentExpr + CallExpr siblings
                             // Use build_chained_rhs_expression to combine them
                             for (i, ch) in child.children().enumerate() {
-                                eprintln!("  [{}] {:?}", i, ch.kind());
+                                trace!("  [{}] {:?}", i, ch.kind());
                             }
 
                             // Build the RHS by combining IdentExpr + CallExpr siblings
                             let rhs_nodes: Vec<_> = child.children().skip(1).collect();
-                            eprintln!(
+                            trace!(
                                 "[HIR_ENTITY_DEBUG] Building RHS from {} nodes",
                                 rhs_nodes.len()
                             );
@@ -857,7 +843,7 @@ impl HirBuilderContext {
                             };
 
                             if let Some(rhs_expr) = rhs_expr {
-                                eprintln!(
+                                trace!(
                                     "[HIR_ENTITY_DEBUG] RHS expression type: {:?}",
                                     std::mem::discriminant(&rhs_expr)
                                 );
@@ -952,7 +938,7 @@ impl HirBuilderContext {
             }
         }
 
-        eprintln!(
+        trace!(
             "[HIR_ENTITY_DEBUG] Built entity '{}' with {} signals and {} assignments",
             name,
             signals.len(),
@@ -967,9 +953,10 @@ impl HirBuilderContext {
 
         // Consume pending safety mechanism config (from #[safety_mechanism(...)] attribute)
         let safety_mechanism_config = self.pending_safety_mechanism_config.take();
-        eprintln!(
+        trace!(
             "🔍 [BUILD_ENTITY] Entity '{}' - safety_mechanism_config = {:?}",
-            name, safety_mechanism_config
+            name,
+            safety_mechanism_config
         );
 
         // Consume pending SEooC config (from #[seooc(...)] attribute)
@@ -985,9 +972,10 @@ impl HirBuilderContext {
             }
 
             if config.is_some() {
-                eprintln!(
+                trace!(
                     "🔍 [BUILD_ENTITY] Entity '{}' - seooc_config = {:?}",
-                    name, config
+                    name,
+                    config
                 );
             }
 
@@ -1119,7 +1107,7 @@ impl HirBuilderContext {
     fn build_implementation(&mut self, node: &SyntaxNode) -> Option<HirImplementation> {
         // Get target entity name
         let entity_name = self.extract_name(node)?;
-        eprintln!(
+        trace!(
             "[HIR_IMPL_DEBUG] build_implementation: entity_name='{}', symbols.entities has {} entries",
             entity_name,
             self.symbols.entities.len()
@@ -1132,7 +1120,7 @@ impl HirBuilderContext {
         let entity = match self.symbols.entities.get(&entity_name) {
             Some(e) => *e,
             None => {
-                eprintln!(
+                trace!(
                     "[HIR_IMPL_DEBUG] build_implementation: entity '{}' NOT FOUND in symbols.entities, skipping impl block",
                     entity_name
                 );
@@ -1179,12 +1167,13 @@ impl HirBuilderContext {
 
         // Build implementation items
         let children_count = node.children().count();
-        eprintln!(
+        trace!(
             "[HIR_IMPL_DEBUG] build_implementation for '{}': {} children in impl block",
-            entity_name, children_count
+            entity_name,
+            children_count
         );
         for child in node.children() {
-            eprintln!("[HIR_IMPL_DEBUG]   child kind: {:?}", child.kind());
+            trace!("[HIR_IMPL_DEBUG]   child kind: {:?}", child.kind());
             match child.kind() {
                 SyntaxKind::Attribute => {
                     // Process attribute to set pending configs (e.g., #[implements(...)])
@@ -1226,19 +1215,20 @@ impl HirBuilderContext {
                     // Let bindings in impl blocks are treated as variables with combinational assignments
                     // Handle both simple let and tuple destructuring
                     let let_stmts = self.build_let_statements_from_node(&child);
-                    eprintln!(
+                    trace!(
                         "[HIR_IMPL_DEBUG] LetStmt produced {} statements",
                         let_stmts.len()
                     );
                     for stmt in let_stmts {
                         if let HirStatement::Let(let_stmt) = stmt {
-                            eprintln!(
+                            trace!(
                                 "[HIR_IMPL_DEBUG] Processing let binding '{}' (id: {:?})",
-                                let_stmt.name, let_stmt.id
+                                let_stmt.name,
+                                let_stmt.id
                             );
                             // BUG #65/#66 DEBUG: Log if creating variable with Float16 type
                             if matches!(let_stmt.var_type, HirType::Float16) {
-                                eprintln!("[BUG #65/#66 FOUND IT IN HIR!] Creating HIR variable '{}' with Float16 type", let_stmt.name);
+                                trace!("[BUG #65/#66 FOUND IT IN HIR!] Creating HIR variable '{}' with Float16 type", let_stmt.name);
                             }
 
                             // Create a variable for the let binding
@@ -1315,7 +1305,7 @@ impl HirBuilderContext {
             }
         }
 
-        eprintln!(
+        trace!(
             "[HIR_IMPL_DEBUG] build_implementation '{}' complete: {} signals, {} constants, {} assignments",
             entity_name, signals.len(), constants.len(), assignments.len()
         );
@@ -2081,9 +2071,10 @@ impl HirBuilderContext {
         // BUG FIX #67: Register function return type for type inference of function calls
         // This allows tuple destructuring to correctly infer element types from function call results
         if let Some(ref ret_type) = return_type {
-            eprintln!(
+            trace!(
                 "\u{1f527} BUG #67 FIX: Registering return type for function '{}': {:?}",
-                name, ret_type
+                name,
+                ret_type
             );
             self.symbols
                 .function_return_types
@@ -2108,7 +2099,7 @@ impl HirBuilderContext {
 
     /// Build event block
     fn build_event_block(&mut self, node: &SyntaxNode) -> Option<HirEventBlock> {
-        eprintln!("[HIR_EVENT] Building event block");
+        trace!("[HIR_EVENT] Building event block");
         let id = self.next_block_id();
 
         // Build triggers
@@ -2116,12 +2107,12 @@ impl HirBuilderContext {
         if let Some(trigger_list) = node.first_child_of_kind(SyntaxKind::EventTriggerList) {
             for trigger_node in trigger_list.children_of_kind(SyntaxKind::EventTrigger) {
                 if let Some(trigger) = self.build_event_trigger(&trigger_node) {
-                    eprintln!("[HIR_EVENT]   Found trigger: {:?}", trigger.edge);
+                    trace!("[HIR_EVENT]   Found trigger: {:?}", trigger.edge);
                     triggers.push(trigger);
                 }
             }
         }
-        eprintln!("[HIR_EVENT] Built {} triggers", triggers.len());
+        trace!("[HIR_EVENT] Built {} triggers", triggers.len());
 
         // Build statements - push EventBlock context for unified assignment operator
         // Assignments inside on() blocks should be non-blocking (generates <=)
@@ -2131,7 +2122,7 @@ impl HirBuilderContext {
             statements = self.build_statements(&block);
         }
         self.pop_context();
-        eprintln!(
+        trace!(
             "[HIR_EVENT] Built {} statements in event block",
             statements.len()
         );
@@ -2388,14 +2379,12 @@ impl HirBuilderContext {
                 SyntaxKind::AssignmentStmt => {
                     // Determine assignment type from operator
                     let assignment_type = self.determine_assignment_type(&child);
-                    eprintln!("[HIR_COLLECT] Found AssignmentStmt, calling build_assignment");
+                    trace!("[HIR_COLLECT] Found AssignmentStmt, calling build_assignment");
                     if let Some(assignment) = self.build_assignment(&child, assignment_type) {
-                        eprintln!(
-                            "[HIR_COLLECT] ✓ build_assignment succeeded, added to statements"
-                        );
+                        trace!("[HIR_COLLECT] ✓ build_assignment succeeded, added to statements");
                         statements.push(HirStatement::Assignment(assignment));
                     } else {
-                        eprintln!(
+                        trace!(
                             "[HIR_COLLECT] ❌ build_assignment returned None, assignment DROPPED!"
                         );
                     }
@@ -2954,13 +2943,13 @@ impl HirBuilderContext {
         };
 
         // Handle RHS - if there are multiple expressions, we need to combine them
-        eprintln!(
+        trace!(
             "[BUILD_ASSIGNMENT_DEBUG] rhs_start_idx={}, exprs.len()={}",
             rhs_start_idx,
             exprs.len()
         );
         for (idx, expr) in exprs.iter().enumerate() {
-            eprintln!(
+            trace!(
                 "[BUILD_ASSIGNMENT_DEBUG]   exprs[{}]: {:?}",
                 idx,
                 expr.kind()
@@ -3156,7 +3145,7 @@ impl HirBuilderContext {
                             })
                             .map(|t| t.text().to_string())?;
 
-                        eprintln!("[HIR_CHAINED_RHS] Detected method call pattern: receiver + FieldExpr(.{}) + CallExpr", method_name);
+                        trace!("[HIR_CHAINED_RHS] Detected method call pattern: receiver + FieldExpr(.{}) + CallExpr", method_name);
 
                         // Parse CallExpr arguments
                         let call_node = &rhs_exprs[i + 1];
@@ -3217,7 +3206,7 @@ impl HirBuilderContext {
                                 let arg_nodes = &call_children[arg_start..arg_end];
                                 if let Some(arg_expr) = self.build_chained_rhs_expression(arg_nodes)
                                 {
-                                    eprintln!(
+                                    trace!(
                                         "[HIR_CHAINED_RHS]   Built method call arg from {} nodes",
                                         arg_nodes.len()
                                     );
@@ -3231,7 +3220,7 @@ impl HirBuilderContext {
                             }
                         }
 
-                        eprintln!("[HIR_CHAINED_RHS] Created method call '{}' with {} total args (receiver + {} explicit)", method_name, args.len(), args.len() - 1);
+                        trace!("[HIR_CHAINED_RHS] Created method call '{}' with {} total args (receiver + {} explicit)", method_name, args.len(), args.len() - 1);
 
                         result = HirExpression::Call(HirCallExpr {
                             function: method_name,
@@ -3749,7 +3738,7 @@ impl HirBuilderContext {
     /// In preserve mode (#[preserve_generate]), this creates a HirGenerateFor that
     /// will be emitted as a Verilog generate block.
     fn build_generate_for_statement(&mut self, node: &SyntaxNode) -> Option<HirStatement> {
-        eprintln!("[build_generate_for_statement] Starting");
+        trace!("[build_generate_for_statement] Starting");
 
         // Check for preserve_generate attribute
         let preserve_mode = self.pending_preserve_generate.take().unwrap_or(false);
@@ -3761,7 +3750,7 @@ impl HirBuilderContext {
             .find(|t| t.kind() == SyntaxKind::Ident)?
             .text()
             .to_string();
-        eprintln!(
+        trace!(
             "[build_generate_for_statement] Iterator variable: {}",
             iterator
         );
@@ -3777,7 +3766,7 @@ impl HirBuilderContext {
             .children()
             .find(|c| c.kind() == SyntaxKind::RangeExpr)?;
         let range = self.build_range_expression_with_step(&range_node, node)?;
-        eprintln!(
+        trace!(
             "[build_generate_for_statement] Built range: inclusive={}, has_step={}",
             range.inclusive,
             range.step.is_some()
@@ -3802,7 +3791,7 @@ impl HirBuilderContext {
                 _ => {}
             }
         }
-        eprintln!(
+        trace!(
             "[build_generate_for_statement] Built {} body statements",
             body_stmts.len()
         );
@@ -3900,7 +3889,7 @@ impl HirBuilderContext {
 
     /// Build a generate if statement from a GenerateIfStmt node
     fn build_generate_if_statement(&mut self, node: &SyntaxNode) -> Option<HirStatement> {
-        eprintln!("[build_generate_if_statement] Starting");
+        trace!("[build_generate_if_statement] Starting");
 
         let preserve_mode = self.pending_preserve_generate.take().unwrap_or(false);
 
@@ -4061,7 +4050,7 @@ impl HirBuilderContext {
 
     /// Build a generate match statement from a GenerateMatchStmt node
     fn build_generate_match_statement(&mut self, node: &SyntaxNode) -> Option<HirStatement> {
-        eprintln!("[build_generate_match_statement] Starting");
+        trace!("[build_generate_match_statement] Starting");
 
         let preserve_mode = self.pending_preserve_generate.take().unwrap_or(false);
 
@@ -4309,9 +4298,10 @@ impl HirBuilderContext {
                         let element_types = vec![HirType::Nat(32); var_names.len()];
                         HirType::Tuple(element_types)
                     });
-                eprintln!(
+                trace!(
                     "🔍 TUPLE TYPE INFERENCE: Variable({}) -> {:?}",
-                    var_id.0, var_type
+                    var_id.0,
+                    var_type
                 );
                 var_type
             } else if let HirExpression::Call(ref call_expr) = value {
@@ -4326,9 +4316,10 @@ impl HirBuilderContext {
                         let element_types = vec![HirType::Nat(32); var_names.len()];
                         HirType::Tuple(element_types)
                     });
-                eprintln!(
+                trace!(
                     "🔍 TUPLE TYPE INFERENCE: Call({}) -> {:?}",
-                    call_expr.function, func_return_type
+                    call_expr.function,
+                    func_return_type
                 );
                 func_return_type
             } else {
@@ -4369,9 +4360,12 @@ impl HirBuilderContext {
             };
 
             // DEBUG: Log element type assignment for tuple destructuring
-            eprintln!(
+            trace!(
                 "🔍 TUPLE DESTRUCTURE: var='{}', index={}, element_type={:?}, tuple_type={:?}",
-                var_name, index, element_type, tmp_type
+                var_name,
+                index,
+                element_type,
+                tmp_type
             );
 
             // Create field access expression: _tuple_tmp_N.index
@@ -5306,7 +5300,7 @@ impl HirBuilderContext {
     /// Build expression
     #[allow(clippy::comparison_chain)]
     fn build_expression(&mut self, node: &SyntaxNode) -> Option<HirExpression> {
-        hir_debug!(
+        trace!(
             "[HIR_BUILD_EXPR] Building expression, node kind: {:?}",
             node.kind()
         );
@@ -5404,7 +5398,7 @@ impl HirBuilderContext {
     /// Build literal expression
     fn build_literal_expr(&mut self, node: &SyntaxNode) -> Option<HirExpression> {
         if let Some(token) = node.first_child_or_token() {
-            hir_debug!(
+            trace!(
                 "[HIR_LITERAL_DEBUG] build_literal_expr: token.kind() = {:?}",
                 token.kind()
             );
@@ -5520,9 +5514,10 @@ impl HirBuilderContext {
         // Look up symbol FIRST - user-defined symbols (ports, signals, variables) take
         // precedence over builtin functions. This allows users to name ports "min", "max", etc.
         if let Some(symbol) = self.symbols.lookup(&name) {
-            eprintln!(
+            trace!(
                 "[HIR_IDENT_DEBUG] build_ident_expr: '{}' FOUND in symbol table -> {:?}",
-                name, symbol
+                name,
+                symbol
             );
             match symbol {
                 SymbolId::Port(id) => {
@@ -5558,7 +5553,7 @@ impl HirBuilderContext {
             // Treat unresolved identifiers as generic parameters or function parameters
             // This allows const function parameters to be referenced in function bodies
             // They will be bound during const evaluation
-            eprintln!(
+            trace!(
                 "[HIR_IDENT_DEBUG] build_ident_expr: '{}' NOT FOUND -> treating as GenericParam",
                 name
             );
@@ -5568,7 +5563,7 @@ impl HirBuilderContext {
 
     /// Build function call expression
     fn build_call_expr(&mut self, node: &SyntaxNode) -> Option<HirExpression> {
-        eprintln!("[HIR_BUILD_CALL] Building call expression");
+        trace!("[HIR_BUILD_CALL] Building call expression");
         // Check if this is a method call: CallExpr preceded by a FieldExpr sibling
         // The parser creates FieldExpr and CallExpr as SIBLINGS, not parent-child:
         //   Statement
@@ -5577,7 +5572,7 @@ impl HirBuilderContext {
         //
         // We transform receiver.method(args) to: method(receiver, args)
         if let Some(parent) = node.parent() {
-            eprintln!("[HIR_BUILD_CALL] Has parent");
+            trace!("[HIR_BUILD_CALL] Has parent");
 
             let siblings: Vec<_> = parent.children().collect();
             let call_pos = siblings.iter().position(|n| n == node)?;
@@ -5664,11 +5659,11 @@ impl HirBuilderContext {
                         // Group children into arguments by building chained expressions
                         // Each argument starts with a primary expression (IdentExpr, LiteralExpr, etc.)
                         // and may be followed by postfix operations (FieldExpr, IndexExpr)
-                        eprintln!("[HIR_METHOD_CALL] Method '{}': parsing {} CallExpr children as arguments", method_name, call_children.len());
+                        trace!("[HIR_METHOD_CALL] Method '{}': parsing {} CallExpr children as arguments", method_name, call_children.len());
                         let mut i = 0;
                         while i < call_children.len() {
                             let child = &call_children[i];
-                            eprintln!("[HIR_METHOD_CALL]   child[{}]: {:?}", i, child.kind());
+                            trace!("[HIR_METHOD_CALL]   child[{}]: {:?}", i, child.kind());
 
                             // BUG FIX #71 Part 4b: Skip IdentExpr if followed by CallExpr
                             // This pattern indicates a function call: IdentExpr(function_name) + CallExpr(args)
@@ -5678,7 +5673,7 @@ impl HirBuilderContext {
                                 && i + 1 < call_children.len()
                                 && call_children[i + 1].kind() == SyntaxKind::CallExpr
                             {
-                                eprintln!("[HIR_METHOD_CALL]   Skipping IdentExpr (function name for following CallExpr)");
+                                trace!("[HIR_METHOD_CALL]   Skipping IdentExpr (function name for following CallExpr)");
                                 i += 1;
                                 continue;
                             }
@@ -5718,7 +5713,7 @@ impl HirBuilderContext {
                                         // INCLUDE both in the argument range
                                         // BUG FIX #71 Part 4f: Continue collecting to handle chained method calls
                                         // Example: (4.0).mul(a).mul(c) should collect all of: Literal(4.0), FieldExpr(.mul), CallExpr([a]), FieldExpr(.mul), CallExpr([c])
-                                        eprintln!("[HIR_METHOD_CALL]   Including FieldExpr+CallExpr pattern (nested method call) in argument");
+                                        trace!("[HIR_METHOD_CALL]   Including FieldExpr+CallExpr pattern (nested method call) in argument");
                                         arg_end += 2; // Include both FieldExpr and CallExpr
                                                       // Don't break - continue to collect more chained method calls
                                     } else {
@@ -5727,13 +5722,14 @@ impl HirBuilderContext {
                                 }
 
                                 // Build chained expression from arg_start to arg_end
-                                eprintln!(
+                                trace!(
                                     "[HIR_METHOD_CALL]   Building arg from nodes[{}..{}]",
-                                    arg_start, arg_end
+                                    arg_start,
+                                    arg_end
                                 );
                                 #[allow(clippy::needless_range_loop)]
                                 for j in arg_start..arg_end {
-                                    eprintln!(
+                                    trace!(
                                         "[HIR_METHOD_CALL]     arg_node[{}]: {:?}",
                                         j,
                                         call_children[j].kind()
@@ -5742,10 +5738,10 @@ impl HirBuilderContext {
                                 let arg_nodes = &call_children[arg_start..arg_end];
                                 if let Some(arg_expr) = self.build_chained_rhs_expression(arg_nodes)
                                 {
-                                    eprintln!("[HIR_METHOD_CALL]   Successfully built arg, adding to args list");
+                                    trace!("[HIR_METHOD_CALL]   Successfully built arg, adding to args list");
                                     args.push(arg_expr);
                                 } else {
-                                    eprintln!("[HIR_METHOD_CALL]   WARNING: build_chained_rhs_expression returned None, argument DROPPED!");
+                                    trace!("[HIR_METHOD_CALL]   WARNING: build_chained_rhs_expression returned None, argument DROPPED!");
                                 }
 
                                 i = arg_end;
@@ -5755,11 +5751,11 @@ impl HirBuilderContext {
                                 // Note: With Bug Fix #71 Part 4e, FieldExpr+CallExpr patterns are now
                                 // included in the primary expression's argument range, so we shouldn't
                                 // encounter them here in the non-primary branch
-                                eprintln!("[HIR_METHOD_CALL]   Skipping non-primary expression");
+                                trace!("[HIR_METHOD_CALL]   Skipping non-primary expression");
                                 i += 1;
                             }
                         }
-                        eprintln!("[HIR_METHOD_CALL] Method '{}': created Call with {} total args (receiver + {} explicit)", method_name, args.len(), args.len() - 1);
+                        trace!("[HIR_METHOD_CALL] Method '{}': created Call with {} total args (receiver + {} explicit)", method_name, args.len(), args.len() - 1);
 
                         return Some(HirExpression::Call(HirCallExpr {
                             function: method_name,
@@ -5827,12 +5823,12 @@ impl HirBuilderContext {
         let mut type_args = Vec::new();
         let mut named_type_args = IndexMap::new();
         if let Some(arg_list) = node.first_child_of_kind(SyntaxKind::ArgList) {
-            eprintln!(
+            trace!(
                 "[HIR_TYPE_ARGS] Found ArgList with {} children",
                 arg_list.children().count()
             );
             for arg_node in arg_list.children() {
-                eprintln!(
+                trace!(
                     "[HIR_TYPE_ARGS] Processing arg_node kind: {:?}",
                     arg_node.kind()
                 );
@@ -5843,13 +5839,13 @@ impl HirBuilderContext {
                     if let Some(name_token) = arg_node.first_token_of_kind(SyntaxKind::Ident) {
                         let name = name_token.text().to_string();
                         let hir_type = self.extract_hir_type(&arg_node);
-                        eprintln!("[HIR_TYPE_ARGS] Named arg '{}' = {:?}", name, hir_type);
+                        trace!("[HIR_TYPE_ARGS] Named arg '{}' = {:?}", name, hir_type);
                         named_type_args.insert(name, hir_type);
                     }
                 } else {
                     // Positional argument
                     let hir_type = self.extract_hir_type(&arg_node);
-                    eprintln!("[HIR_TYPE_ARGS] Extracted type: {:?}", hir_type);
+                    trace!("[HIR_TYPE_ARGS] Extracted type: {:?}", hir_type);
                     type_args.push(hir_type);
                 }
             }
@@ -5878,9 +5874,7 @@ impl HirBuilderContext {
                 && i + 1 < call_children.len()
                 && call_children[i + 1].kind() == SyntaxKind::CallExpr
             {
-                eprintln!(
-                    "[HIR_CALL_FIX] Skipping IdentExpr (function name for following CallExpr)"
-                );
+                trace!("[HIR_CALL_FIX] Skipping IdentExpr (function name for following CallExpr)");
                 i += 1;
                 continue;
             }
@@ -5936,7 +5930,7 @@ impl HirBuilderContext {
         // Parse generic arguments if present (e.g., FpAdd<IEEE754_32> { ... })
         let mut generic_args = Vec::new();
         if let Some(arg_list) = node.first_child_of_kind(SyntaxKind::ArgList) {
-            eprintln!(
+            trace!(
                 "[HIR_STRUCT_DEBUG] Found ArgList with {} children for struct '{}'",
                 arg_list.children().count(),
                 type_name
@@ -5961,14 +5955,14 @@ impl HirBuilderContext {
         // Parse field initializations
         let mut fields = Vec::new();
         let all_children: Vec<_> = node.children().collect();
-        eprintln!(
+        trace!(
             "[HIR_STRUCT_DEBUG] StructLiteral {} has {} total children, {} generic_args",
             type_name,
             all_children.len(),
             generic_args.len()
         );
         for (i, child) in all_children.iter().enumerate() {
-            eprintln!("  child[{}]: {:?}", i, child.kind());
+            trace!("  child[{}]: {:?}", i, child.kind());
             if child.kind() == SyntaxKind::StructFieldInit {
                 if let Some(field_init) = self.build_struct_field_init(child) {
                     fields.push(field_init);
@@ -5976,14 +5970,14 @@ impl HirBuilderContext {
             }
         }
 
-        eprintln!(
+        trace!(
             "[HIR_STRUCT_DEBUG] build_struct_literal: type={}, {} fields, {} generic_args",
             type_name,
             fields.len(),
             generic_args.len()
         );
         for (i, f) in fields.iter().enumerate() {
-            eprintln!("  [{}] field: {}", i, f.name);
+            trace!("  [{}] field: {}", i, f.name);
         }
 
         Some(HirExpression::StructLiteral(HirStructLiteral {
@@ -6198,7 +6192,7 @@ impl HirBuilderContext {
     /// Build concatenation expression: {a, b, c}
     fn build_concat_expr(&mut self, node: &SyntaxNode) -> Option<HirExpression> {
         for child in node.children() {
-            eprintln!("  - {:?}", child.kind());
+            trace!("  - {:?}", child.kind());
         }
 
         // BUG #210 FIX: Handle parser quirk where `a[0]` is split into [IdentExpr(a), IndexExpr([0])]
@@ -6255,14 +6249,14 @@ impl HirBuilderContext {
             }
         }
 
-        eprintln!(
+        trace!(
             "[HIR_CONCAT_DEBUG] Found {} expressions in concat",
             expressions.len()
         );
         if expressions.is_empty() {
             None
         } else {
-            eprintln!(
+            trace!(
                 "[HIR_CONCAT_DEBUG] Returning Concat with {} elements",
                 expressions.len()
             );
@@ -6314,12 +6308,12 @@ impl HirBuilderContext {
         let child_nodes: Vec<SyntaxNode> = node.children().collect();
 
         // DEBUG: Show what children the TernaryExpr has
-        eprintln!(
+        trace!(
             "[TERNARY_DEBUG] TernaryExpr has {} children:",
             child_nodes.len()
         );
         for (idx, child) in child_nodes.iter().enumerate() {
-            eprintln!(
+            trace!(
                 "[TERNARY_DEBUG]   child[{}]: {:?} = '{}'",
                 idx,
                 child.kind(),
@@ -6402,13 +6396,13 @@ impl HirBuilderContext {
 
         // Debug: Show all children of this StructFieldInit
         let all_children: Vec<_> = node.children().collect();
-        eprintln!(
+        trace!(
             "[HIR_FIELD_DEBUG] StructFieldInit '{}' has {} children:",
             name,
             all_children.len()
         );
         for (i, child) in all_children.iter().enumerate() {
-            eprintln!("  child[{}]: {:?}", i, child.kind());
+            trace!("  child[{}]: {:?}", i, child.kind());
         }
 
         // Find the expression child
@@ -6456,14 +6450,14 @@ impl HirBuilderContext {
         };
 
         if expr_child.is_none() {
-            eprintln!(
+            trace!(
                 "[HIR_FIELD_DEBUG] StructFieldInit '{}': NO MATCHING EXPRESSION CHILD FOUND!",
                 name
             );
             return None;
         }
 
-        eprintln!(
+        trace!(
             "[HIR_FIELD_DEBUG] StructFieldInit '{}': found expression child {:?}",
             name,
             expr_child.as_ref().unwrap().kind()
@@ -6471,7 +6465,7 @@ impl HirBuilderContext {
 
         let value = self.build_expression(expr_child.as_ref().unwrap());
         if value.is_none() {
-            eprintln!(
+            trace!(
                 "[HIR_FIELD_DEBUG] StructFieldInit '{}': build_expression RETURNED NONE!",
                 name
             );
@@ -7045,7 +7039,7 @@ impl HirBuilderContext {
                 }
             }
 
-            eprintln!("[HIR_CHAIN_RESULT] Final chained result: {:?}", result);
+            trace!("[HIR_CHAIN_RESULT] Final chained result: {:?}", result);
             return Some(result);
         }
 
@@ -7177,27 +7171,27 @@ impl HirBuilderContext {
 
         // Get base expression and field name
         let children: Vec<_> = node.children().collect();
-        eprintln!(
+        trace!(
             "[HIR_FIELD_EXPR_DEBUG] build_field_expr: {} children",
             children.len()
         );
 
         // Also show children_with_tokens to see what's in this node
         let all_elems: Vec<_> = node.children_with_tokens().collect();
-        eprintln!(
+        trace!(
             "[HIR_FIELD_EXPR_DEBUG] build_field_expr: {} children_with_tokens:",
             all_elems.len()
         );
         for (i, elem) in all_elems.iter().enumerate() {
             if let Some(token) = elem.as_token() {
-                eprintln!(
+                trace!(
                     "  [{}] TOKEN: kind={:?}, text={}",
                     i,
                     token.kind(),
                     token.text()
                 );
             } else if let Some(child) = elem.as_node() {
-                eprintln!("  [{}] NODE: kind={:?}", i, child.kind());
+                trace!("  [{}] NODE: kind={:?}", i, child.kind());
             }
         }
 
@@ -7218,7 +7212,7 @@ impl HirBuilderContext {
                 if let Some(pos) = siblings.iter().position(|n| n == node) {
                     if pos > 0 {
                         let prev = &siblings[pos - 1];
-                        eprintln!(
+                        trace!(
                             "[HIR_FIELD_EXPR_DEBUG] build_field_expr: found preceding sibling {:?}",
                             prev.kind()
                         );
@@ -7247,7 +7241,7 @@ impl HirBuilderContext {
             return None;
         }
 
-        eprintln!(
+        trace!(
             "[HIR_FIELD_EXPR_DEBUG] build_field_expr: child[0] kind = {:?}",
             children[0].kind()
         );
@@ -7258,12 +7252,12 @@ impl HirBuilderContext {
             .children_with_tokens()
             .filter_map(|elem| elem.into_token())
             .collect();
-        eprintln!(
+        trace!(
             "[HIR_FIELD_EXPR_DEBUG] build_field_expr: {} tokens total",
             all_tokens.len()
         );
         for (i, token) in all_tokens.iter().enumerate() {
-            eprintln!(
+            trace!(
                 "  token[{}]: kind={:?}, text={}",
                 i,
                 token.kind(),
@@ -7282,13 +7276,11 @@ impl HirBuilderContext {
             });
 
         if field_name.is_none() {
-            eprintln!(
-                "[HIR_FIELD_EXPR_DEBUG] build_field_expr: FIELD NAME NOT FOUND, returning None"
-            );
+            trace!("[HIR_FIELD_EXPR_DEBUG] build_field_expr: FIELD NAME NOT FOUND, returning None");
             return None;
         }
 
-        eprintln!(
+        trace!(
             "[HIR_FIELD_EXPR_DEBUG] build_field_expr: SUCCESS, field='{}'",
             field_name.as_ref().unwrap()
         );
@@ -10404,7 +10396,7 @@ impl HirBuilderContext {
             .any(|t| t.kind() == SyntaxKind::Ident && t.text() == "safety_mechanism");
 
         // Debug: show all tokens in the attribute
-        eprintln!(
+        trace!(
             "🔍 [ATTR] Checking attribute tokens: {:?}",
             tokens
                 .iter()
@@ -10536,9 +10528,11 @@ impl HirBuilderContext {
         }
 
         // Only return Some if we found at least the mechanism type
-        eprintln!(
+        trace!(
             "🔍 [ATTR] Parsed: mechanism_type={:?}, dc={:?}, lc={:?}",
-            mechanism_type, dc, lc
+            mechanism_type,
+            dc,
+            lc
         );
         if mechanism_type.is_some() || dc.is_some() || lc.is_some() {
             Some(SafetyMechanismConfig {
@@ -11330,7 +11324,7 @@ impl HirBuilderContext {
                         // Check for generic type arguments (e.g., fp<F>, vec<T, N>)
                         if let Some(arg_list) = child.first_child_of_kind(SyntaxKind::ArgList) {
                             // This is a parametric type with generic arguments
-                            eprintln!(
+                            trace!(
                                 "[TYPE_PARAMETRIC] Found parametric type '{}' with ArgList",
                                 type_name
                             );
@@ -11342,7 +11336,7 @@ impl HirBuilderContext {
                                     if arg_child.kind() == SyntaxKind::Arg {
                                         if let Some(expr_node) = arg_child.children().next() {
                                             if let Some(expr) = self.build_expression(&expr_node) {
-                                                eprintln!(
+                                                trace!(
                                                     "[TYPE_PARAMETRIC] fp<...> format expr: {:?}",
                                                     expr
                                                 );
@@ -11353,7 +11347,7 @@ impl HirBuilderContext {
                                         }
                                     } else if let Some(expr) = self.build_expression(&arg_child) {
                                         // Direct expression without Arg wrapper
-                                        eprintln!(
+                                        trace!(
                                             "[TYPE_PARAMETRIC] fp<...> direct format expr: {:?}",
                                             expr
                                         );
@@ -11892,7 +11886,7 @@ impl HirBuilderContext {
             && expr_nodes[0].kind() == SyntaxKind::IdentExpr
             && expr_nodes[1].kind() == SyntaxKind::CallExpr
         {
-            eprintln!(
+            trace!(
                 "[FIND_INIT_VALUE] Signal '{}' using IdentExpr+CallExpr pattern for function call (node text: {:?})",
                 signal_name,
                 expr_nodes.iter().map(|n| n.text().to_string()).collect::<Vec<_>>()
@@ -11931,7 +11925,7 @@ impl HirBuilderContext {
                 }
             }
 
-            eprintln!(
+            trace!(
                 "[FIND_INIT_VALUE] Signal '{}' IdentExpr+CallExpr: built Call expr with func='{}', {} args",
                 signal_name,
                 func_name,
@@ -12837,7 +12831,7 @@ impl HirBuilderContext {
         // This ensures parameter references in the body are resolved as GenericParams,
         // not as Port references from other entity contexts
         for param in &params {
-            eprintln!(
+            trace!(
                 "[TRAIT_METHOD_IMPL] Registering parameter '{}' in scope as GenericParam",
                 param.name
             );

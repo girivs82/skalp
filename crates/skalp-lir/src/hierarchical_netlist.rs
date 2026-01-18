@@ -8,22 +8,7 @@ use crate::gate_netlist::{Cell, CellId, GateNet, GateNetId, GateNetlist};
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
-use std::sync::OnceLock;
-
-/// Check if stitch debugging is enabled (cached for performance)
-fn stitch_debug_enabled() -> bool {
-    static DEBUG_ENABLED: OnceLock<bool> = OnceLock::new();
-    *DEBUG_ENABLED.get_or_init(|| std::env::var("SKALP_DEBUG_STITCH").is_ok())
-}
-
-/// Macro for conditional stitch debug logging
-macro_rules! stitch_debug {
-    ($($arg:tt)*) => {
-        if stitch_debug_enabled() {
-            eprintln!($($arg)*);
-        }
-    };
-}
+use tracing::trace;
 
 /// Path identifying a unique instance in the hierarchy (e.g., "top.cpu.alu")
 pub type InstancePath = String;
@@ -282,7 +267,7 @@ impl HierarchicalNetlist {
         result: &mut GateNetlist,
         _net_maps: &IndexMap<&InstancePath, IndexMap<GateNetId, GateNetId>>,
     ) {
-        stitch_debug!(
+        trace!(
             "[STITCH] Starting port stitching for {} instances",
             self.instances.len()
         );
@@ -297,7 +282,7 @@ impl HierarchicalNetlist {
             let parent_path = path.rfind('.').map(|pos| &path[..pos]).unwrap_or("");
 
             if !inst.port_connections.is_empty() {
-                stitch_debug!(
+                trace!(
                     "[STITCH] Instance '{}' has {} port connections",
                     path,
                     inst.port_connections.len()
@@ -328,7 +313,7 @@ impl HierarchicalNetlist {
 
                         if child_exists && parent_exists {
                             // Direct single-net merge - parent first so its name survives
-                            stitch_debug!("[STITCH]   ✓ {} <-> {}", child_net_name, parent_net_name);
+                            trace!("[STITCH]   ✓ {} <-> {}", child_net_name, parent_net_name);
                             result.merge_nets_by_name(&parent_net_name, &child_net_name);
                         } else {
                             // Try bit-level stitching for multi-bit ports
@@ -349,9 +334,11 @@ impl HierarchicalNetlist {
                                         stitched += 1;
                                     }
                                 }
-                                stitch_debug!(
+                                trace!(
                                     "[STITCH]   ✓ {} <-> {} (bit-level: {} bits)",
-                                    child_net_name, parent_net_name, stitched
+                                    child_net_name,
+                                    parent_net_name,
+                                    stitched
                                 );
                             } else if !child_bits.is_empty() || !parent_bits.is_empty() {
                                 // Mismatch: one is bit-indexed, the other isn't
@@ -372,7 +359,8 @@ impl HierarchicalNetlist {
                                     // Stitch true rails
                                     for (idx, child_bit_net) in &child_t {
                                         if let Some(parent_bit_net) = parent_t_map.get(idx) {
-                                            result.merge_nets_by_name(parent_bit_net, child_bit_net);
+                                            result
+                                                .merge_nets_by_name(parent_bit_net, child_bit_net);
                                             stitched += 1;
                                         }
                                     }
@@ -380,17 +368,20 @@ impl HierarchicalNetlist {
                                     // Stitch false rails
                                     for (idx, child_bit_net) in &child_f {
                                         if let Some(parent_bit_net) = parent_f_map.get(idx) {
-                                            result.merge_nets_by_name(parent_bit_net, child_bit_net);
+                                            result
+                                                .merge_nets_by_name(parent_bit_net, child_bit_net);
                                             stitched += 1;
                                         }
                                     }
 
-                                    stitch_debug!(
+                                    trace!(
                                         "[STITCH]   ✓ {} <-> {} (NCL dual-rail: {} nets)",
-                                        child_net_name, parent_net_name, stitched
+                                        child_net_name,
+                                        parent_net_name,
+                                        stitched
                                     );
                                 } else {
-                                    stitch_debug!(
+                                    trace!(
                                         "[STITCH]   ~ {} -> {} (child_bits={}, parent_bits={}, ncl_t={}/{})",
                                         child_net_name,
                                         parent_net_name,
@@ -418,7 +409,8 @@ impl HierarchicalNetlist {
                                     // Stitch true rails
                                     for (idx, child_bit_net) in &child_t {
                                         if let Some(parent_bit_net) = parent_t_map.get(idx) {
-                                            result.merge_nets_by_name(parent_bit_net, child_bit_net);
+                                            result
+                                                .merge_nets_by_name(parent_bit_net, child_bit_net);
                                             stitched += 1;
                                         }
                                     }
@@ -426,18 +418,21 @@ impl HierarchicalNetlist {
                                     // Stitch false rails
                                     for (idx, child_bit_net) in &child_f {
                                         if let Some(parent_bit_net) = parent_f_map.get(idx) {
-                                            result.merge_nets_by_name(parent_bit_net, child_bit_net);
+                                            result
+                                                .merge_nets_by_name(parent_bit_net, child_bit_net);
                                             stitched += 1;
                                         }
                                     }
 
-                                    stitch_debug!(
+                                    trace!(
                                         "[STITCH]   ✓ {} <-> {} (NCL dual-rail: {} nets)",
-                                        child_net_name, parent_net_name, stitched
+                                        child_net_name,
+                                        parent_net_name,
+                                        stitched
                                     );
                                 } else if !child_t.is_empty() || !parent_t.is_empty() {
                                     // One side has NCL nets, the other doesn't
-                                    stitch_debug!(
+                                    trace!(
                                         "[STITCH]   ~ {} -> {} (NCL mismatch: child_t={}, parent_t={})",
                                         child_net_name,
                                         parent_net_name,
@@ -446,9 +441,10 @@ impl HierarchicalNetlist {
                                     );
                                 } else {
                                     // Neither exists at all - might be unused connection
-                                    stitch_debug!(
+                                    trace!(
                                         "[STITCH]   ✗ {} -> {} (neither exists)",
-                                        child_net_name, parent_net_name
+                                        child_net_name,
+                                        parent_net_name
                                     );
                                 }
                             }
@@ -460,7 +456,7 @@ impl HierarchicalNetlist {
                         let net_name = format!("{}.{}", path, port_name);
                         let child_bits = result.find_bit_indexed_nets(&net_name);
 
-                        stitch_debug!(
+                        trace!(
                             "[STITCH]   Looking for '{}' - found {} bit-indexed nets",
                             net_name,
                             child_bits.len()
@@ -468,7 +464,7 @@ impl HierarchicalNetlist {
 
                         if !child_bits.is_empty() {
                             // Multi-bit port: create a tie cell for each bit
-                            stitch_debug!(
+                            trace!(
                                 "[STITCH]   Constant 0x{:X} -> {} ({} bits)",
                                 value,
                                 net_name,
@@ -618,7 +614,7 @@ impl HierarchicalNetlist {
                             && result.get_net(&parent_bit_net).is_some()
                         {
                             result.merge_nets_by_name(&parent_bit_net, &child_net_name);
-                            stitch_debug!("[STITCH]   ✓ {} <-> {}", child_net_name, parent_bit_net);
+                            trace!("[STITCH]   ✓ {} <-> {}", child_net_name, parent_bit_net);
                         } else {
                             // Try child bit 0 -> parent bit
                             let child_bit0 = format!("{}[0]", child_net_name);
@@ -626,7 +622,7 @@ impl HierarchicalNetlist {
                                 && result.get_net(&parent_bit_net).is_some()
                             {
                                 result.merge_nets_by_name(&parent_bit_net, &child_bit0);
-                                stitch_debug!("[STITCH]   ✓ {} <-> {}", child_bit0, parent_bit_net);
+                                trace!("[STITCH]   ✓ {} <-> {}", child_bit0, parent_bit_net);
                             } else {
                                 eprintln!(
                                     "[STITCH]   ✗ {} -> {} (nets not found)",
