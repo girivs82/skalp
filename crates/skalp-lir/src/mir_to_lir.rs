@@ -22,7 +22,11 @@ use skalp_mir::mir::{
     ExpressionKind, LValue, Module, PortDirection, PortId, Process, ProcessKind, ReduceOp,
     SafetyContext, SensitivityList, SignalId, Statement, UnaryOp, Value, Variable, VariableId,
 };
+use std::collections::HashMap;
 use std::sync::OnceLock;
+
+/// Type alias for LIR cache key: (module_name, is_async_context)
+type LirCacheKey = (String, bool);
 
 /// Check if elaborate debugging is enabled (cached for performance)
 fn elaborate_debug_enabled() -> bool {
@@ -80,7 +84,7 @@ pub struct BlackboxInfo {
 }
 
 /// Result of MIR to LIR transformation
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct MirToLirResult {
     /// The generated word-level LIR
     pub lir: Lir,
@@ -2286,6 +2290,9 @@ pub fn lower_mir_hierarchical(mir: &Mir) -> HierarchicalMirToLirResult {
         hierarchy: IndexMap::new(),
     };
 
+    // Create LIR cache to avoid redundant NCL expansion for same module types
+    let mut lir_cache: HashMap<LirCacheKey, MirToLirResult> = HashMap::new();
+
     // Recursively elaborate instances
     // Top module uses its own is_async flag, no inherited context
     elaborate_instance(
@@ -2296,6 +2303,13 @@ pub fn lower_mir_hierarchical(mir: &Mir) -> HierarchicalMirToLirResult {
         &IndexMap::new(), // No constant inputs at top level
         false,            // No inherited async context for top module
         &mut result,
+        &mut lir_cache,
+    );
+
+    // Log cache statistics
+    println!(
+        "[HIER_LIR] LIR cache: {} unique module/async combinations cached",
+        lir_cache.len()
     );
 
     result
@@ -2466,6 +2480,9 @@ pub fn lower_mir_hierarchical_for_optimize_first(mir: &Mir) -> (HierarchicalMirT
         hierarchy: IndexMap::new(),
     };
 
+    // Create LIR cache to avoid redundant LIR computation for same module types
+    let mut lir_cache: HashMap<String, MirToLirResult> = HashMap::new();
+
     // Elaborate instances with is_async_context = FALSE to skip NCL expansion
     // We pass false even for async modules so they get single-rail gates
     elaborate_instance_for_optimize_first(
@@ -2475,6 +2492,13 @@ pub fn lower_mir_hierarchical_for_optimize_first(mir: &Mir) -> (HierarchicalMirT
         "top",
         &IndexMap::new(),
         &mut result,
+        &mut lir_cache,
+    );
+
+    // Log cache statistics
+    println!(
+        "[HIER_LIR_OPT] LIR cache: {} unique modules cached",
+        lir_cache.len()
     );
 
     (result, has_async)
@@ -2485,6 +2509,7 @@ pub fn lower_mir_hierarchical_for_optimize_first(mir: &Mir) -> (HierarchicalMirT
 /// This always passes is_async_context = false to skip NCL expansion,
 /// regardless of whether the module is async. The dual-rail conversion
 /// will be done later after optimization.
+#[allow(clippy::too_many_arguments)]
 fn elaborate_instance_for_optimize_first(
     module_map: &IndexMap<ModuleId, &Module>,
     _module_by_name: &IndexMap<&str, &Module>,
@@ -2492,6 +2517,7 @@ fn elaborate_instance_for_optimize_first(
     instance_path: &str,
     parent_connections: &IndexMap<String, PortConnectionInfo>,
     result: &mut HierarchicalMirToLirResult,
+    lir_cache: &mut HashMap<String, MirToLirResult>,
 ) {
     // Use skip_ncl to completely skip NCL expansion for optimize-first flow
     let lir_result = if let Some(ref vendor_config) = module.vendor_ip_config {
@@ -2514,7 +2540,22 @@ fn elaborate_instance_for_optimize_first(
         }
     } else {
         // Use skip_ncl to get single-rail LIR for optimize-first flow
-        lower_mir_module_to_lir_skip_ncl(module)
+        // Use cache to avoid redundant LIR computation for same module type
+        if let Some(cached_result) = lir_cache.get(&module.name) {
+            elaborate_debug!(
+                "[LIR_CACHE] Cache hit for module '{}' (skip_ncl)",
+                module.name
+            );
+            cached_result.clone()
+        } else {
+            elaborate_debug!(
+                "[LIR_CACHE] Cache miss for module '{}' (skip_ncl), computing LIR",
+                module.name
+            );
+            let computed_result = lower_mir_module_to_lir_skip_ncl(module);
+            lir_cache.insert(module.name.clone(), computed_result.clone());
+            computed_result
+        }
     };
 
     // Collect child instance paths
@@ -2545,6 +2586,7 @@ fn elaborate_instance_for_optimize_first(
                 &child_path,
                 &child_connections,
                 result,
+                lir_cache,
             );
         }
     }
@@ -2573,6 +2615,10 @@ fn elaborate_instance_for_optimize_first(
 /// The `is_async_context` parameter indicates whether this module is being
 /// instantiated within an async parent. If true, the module will be NCL-expanded
 /// even if it wasn't declared with `async entity`.
+///
+/// The `lir_cache` parameter caches LIR results by (module_name, is_async_context)
+/// to avoid redundant NCL expansion for multiple instances of the same module type.
+#[allow(clippy::too_many_arguments)]
 fn elaborate_instance(
     module_map: &IndexMap<ModuleId, &Module>,
     _module_by_name: &IndexMap<&str, &Module>,
@@ -2581,6 +2627,7 @@ fn elaborate_instance(
     parent_connections: &IndexMap<String, PortConnectionInfo>,
     is_async_context: bool,
     result: &mut HierarchicalMirToLirResult,
+    lir_cache: &mut HashMap<LirCacheKey, MirToLirResult>,
 ) {
     // Compute effective async status: module's own flag OR inherited from parent
     let effective_is_async = module.is_async || is_async_context;
@@ -2609,7 +2656,25 @@ fn elaborate_instance(
         }
     } else {
         // Normal MIR to LIR transformation with async context propagation
-        lower_mir_module_to_lir_with_context(module, is_async_context)
+        // Use cache to avoid redundant NCL expansion for same module type
+        let cache_key = (module.name.clone(), is_async_context);
+        if let Some(cached_result) = lir_cache.get(&cache_key) {
+            elaborate_debug!(
+                "[LIR_CACHE] Cache hit for module '{}' (async={})",
+                module.name,
+                is_async_context
+            );
+            cached_result.clone()
+        } else {
+            elaborate_debug!(
+                "[LIR_CACHE] Cache miss for module '{}' (async={}), computing LIR",
+                module.name,
+                is_async_context
+            );
+            let computed_result = lower_mir_module_to_lir_with_context(module, is_async_context);
+            lir_cache.insert(cache_key, computed_result.clone());
+            computed_result
+        }
     };
 
     // Collect child instance paths
@@ -2654,6 +2719,7 @@ fn elaborate_instance(
                 &child_connections,
                 effective_is_async, // Propagate async context to child
                 result,
+                lir_cache, // Pass cache to avoid redundant LIR computation
             );
         }
     }

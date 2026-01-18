@@ -588,14 +588,12 @@ impl GateNetlist {
                 let idx_str = &name[bracket_pos + 1..name.len() - 1];
                 if let Ok(idx) = idx_str.parse::<usize>() {
                     // Check if this is an NCL rail (ends with _t or _f before the bracket)
-                    if prefix.ends_with("_t") {
-                        let base_prefix = &prefix[..prefix.len() - 2];
+                    if let Some(base_prefix) = prefix.strip_suffix("_t") {
                         ncl_true_index
                             .entry(base_prefix.to_string())
                             .or_default()
                             .push((idx, name.to_string()));
-                    } else if prefix.ends_with("_f") {
-                        let base_prefix = &prefix[..prefix.len() - 2];
+                    } else if let Some(base_prefix) = prefix.strip_suffix("_f") {
                         ncl_false_index
                             .entry(base_prefix.to_string())
                             .or_default()
@@ -611,14 +609,12 @@ impl GateNetlist {
             }
         } else {
             // Check for NCL 1-bit signals: prefix_t or prefix_f (no bracket)
-            if name.ends_with("_t") {
-                let base_prefix = &name[..name.len() - 2];
+            if let Some(base_prefix) = name.strip_suffix("_t") {
                 ncl_true_index
                     .entry(base_prefix.to_string())
                     .or_default()
                     .push((0, name.to_string()));
-            } else if name.ends_with("_f") {
-                let base_prefix = &name[..name.len() - 2];
+            } else if let Some(base_prefix) = name.strip_suffix("_f") {
                 ncl_false_index
                     .entry(base_prefix.to_string())
                     .or_default()
@@ -1205,7 +1201,11 @@ impl GateNetlist {
     ) -> (Vec<(usize, String)>, Vec<(usize, String)>) {
         // O(1) lookup in the NCL prefix indexes
         let true_rail = self.ncl_true_index.get(prefix).cloned().unwrap_or_default();
-        let false_rail = self.ncl_false_index.get(prefix).cloned().unwrap_or_default();
+        let false_rail = self
+            .ncl_false_index
+            .get(prefix)
+            .cloned()
+            .unwrap_or_default();
         (true_rail, false_rail)
     }
 
