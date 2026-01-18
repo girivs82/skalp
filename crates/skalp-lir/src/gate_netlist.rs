@@ -18,6 +18,7 @@ use crate::lir::LirSafetyInfo;
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use skalp_frontend::hir::DetectionConfig;
+use std::collections::HashMap;
 
 // ============================================================================
 // Cell Types
@@ -490,6 +491,19 @@ pub struct GateNetlist {
     /// Statistics (skipped during serialization - rebuilt from cells/nets)
     #[serde(skip, default)]
     pub stats: GateNetlistStats,
+    // ===== Prefix Index for Fast Net Lookups =====
+    /// Index for bit-indexed nets: prefix -> [(bit_index, full_name), ...]
+    /// E.g., "signal" -> [(0, "signal[0]"), (1, "signal[1]"), ...]
+    #[serde(skip, default)]
+    bit_index: HashMap<String, Vec<(usize, String)>>,
+    /// Index for NCL true rail nets: prefix -> [(bit_index, full_name), ...]
+    /// E.g., "signal" -> [(0, "signal_t[0]"), (1, "signal_t[1]"), ...]
+    #[serde(skip, default)]
+    ncl_true_index: HashMap<String, Vec<(usize, String)>>,
+    /// Index for NCL false rail nets: prefix -> [(bit_index, full_name), ...]
+    /// E.g., "signal" -> [(0, "signal_f[0]"), (1, "signal_f[1]"), ...]
+    #[serde(skip, default)]
+    ncl_false_index: HashMap<String, Vec<(usize, String)>>,
 }
 
 impl GateNetlist {
@@ -507,6 +521,9 @@ impl GateNetlist {
             is_ncl: false,
             net_map: IndexMap::new(),
             stats: GateNetlistStats::default(),
+            bit_index: HashMap::new(),
+            ncl_true_index: HashMap::new(),
+            ncl_false_index: HashMap::new(),
         }
     }
 
@@ -516,12 +533,98 @@ impl GateNetlist {
     pub fn rebuild_cache(&mut self) {
         // Rebuild net_map from nets
         self.net_map.clear();
+        self.bit_index.clear();
+        self.ncl_true_index.clear();
+        self.ncl_false_index.clear();
+
         for net in &self.nets {
             self.net_map.insert(net.name.clone(), net.id);
+            // Also rebuild prefix indexes
+            Self::index_net_name_static(
+                &net.name,
+                &mut self.bit_index,
+                &mut self.ncl_true_index,
+                &mut self.ncl_false_index,
+            );
+        }
+
+        // Sort all index entries by bit index for consistent ordering
+        for entries in self.bit_index.values_mut() {
+            entries.sort_by_key(|(idx, _)| *idx);
+        }
+        for entries in self.ncl_true_index.values_mut() {
+            entries.sort_by_key(|(idx, _)| *idx);
+        }
+        for entries in self.ncl_false_index.values_mut() {
+            entries.sort_by_key(|(idx, _)| *idx);
         }
 
         // Rebuild stats
         self.stats = GateNetlistStats::from_netlist(self);
+    }
+
+    /// Parse a net name and add it to the appropriate prefix indexes.
+    /// Called when adding a new net.
+    fn index_net_name(&mut self, name: &str) {
+        Self::index_net_name_static(
+            name,
+            &mut self.bit_index,
+            &mut self.ncl_true_index,
+            &mut self.ncl_false_index,
+        );
+    }
+
+    /// Static helper to parse net name and add to indexes (for use in rebuild_cache)
+    fn index_net_name_static(
+        name: &str,
+        bit_index: &mut HashMap<String, Vec<(usize, String)>>,
+        ncl_true_index: &mut HashMap<String, Vec<(usize, String)>>,
+        ncl_false_index: &mut HashMap<String, Vec<(usize, String)>>,
+    ) {
+        // Check for bit-indexed pattern: prefix[N]
+        if let Some(bracket_pos) = name.rfind('[') {
+            if name.ends_with(']') {
+                let prefix = &name[..bracket_pos];
+                let idx_str = &name[bracket_pos + 1..name.len() - 1];
+                if let Ok(idx) = idx_str.parse::<usize>() {
+                    // Check if this is an NCL rail (ends with _t or _f before the bracket)
+                    if prefix.ends_with("_t") {
+                        let base_prefix = &prefix[..prefix.len() - 2];
+                        ncl_true_index
+                            .entry(base_prefix.to_string())
+                            .or_default()
+                            .push((idx, name.to_string()));
+                    } else if prefix.ends_with("_f") {
+                        let base_prefix = &prefix[..prefix.len() - 2];
+                        ncl_false_index
+                            .entry(base_prefix.to_string())
+                            .or_default()
+                            .push((idx, name.to_string()));
+                    } else {
+                        // Regular bit-indexed net
+                        bit_index
+                            .entry(prefix.to_string())
+                            .or_default()
+                            .push((idx, name.to_string()));
+                    }
+                }
+            }
+        } else {
+            // Check for NCL 1-bit signals: prefix_t or prefix_f (no bracket)
+            if name.ends_with("_t") {
+                let base_prefix = &name[..name.len() - 2];
+                ncl_true_index
+                    .entry(base_prefix.to_string())
+                    .or_default()
+                    .push((0, name.to_string()));
+            } else if name.ends_with("_f") {
+                let base_prefix = &name[..name.len() - 2];
+                ncl_false_index
+                    .entry(base_prefix.to_string())
+                    .or_default()
+                    .push((0, name.to_string()));
+            }
+        }
     }
 
     /// Add a net and return its ID
@@ -529,6 +632,8 @@ impl GateNetlist {
         let id = GateNetId(self.nets.len() as u32);
         net.id = id;
         self.net_map.insert(net.name.clone(), id);
+        // Index the net name for fast prefix lookups
+        self.index_net_name(&net.name);
         self.nets.push(net);
         id
     }
@@ -962,7 +1067,9 @@ impl GateNetlist {
             detection_config: None,
             alias_of: None,
         };
-        self.net_map.insert(name, id);
+        self.net_map.insert(name.clone(), id);
+        // Index the net name for fast prefix lookups
+        self.index_net_name(&name);
         self.nets.push(net);
         id
     }
@@ -1074,26 +1181,11 @@ impl GateNetlist {
     }
 
     /// Find all bit-indexed nets matching a prefix (e.g., "signal" matches "signal[0]", "signal[1]", etc.)
-    /// Returns a sorted list of (bit_index, net_name) pairs
+    /// Returns a sorted list of (bit_index, net_name) pairs.
+    /// Uses O(1) prefix index lookup instead of O(n) scan.
     pub fn find_bit_indexed_nets(&self, prefix: &str) -> Vec<(usize, String)> {
-        let mut result = Vec::new();
-
-        // Pattern: prefix[N] where N is a non-negative integer
-        for name in self.net_map.keys() {
-            if let Some(rest) = name.strip_prefix(prefix) {
-                if let Some(inner) = rest.strip_prefix('[') {
-                    if let Some(idx_str) = inner.strip_suffix(']') {
-                        if let Ok(idx) = idx_str.parse::<usize>() {
-                            result.push((idx, name.clone()));
-                        }
-                    }
-                }
-            }
-        }
-
-        // Sort by bit index
-        result.sort_by_key(|(idx, _)| *idx);
-        result
+        // O(1) lookup in the prefix index
+        self.bit_index.get(prefix).cloned().unwrap_or_default()
     }
 
     /// Find all NCL dual-rail bit-indexed nets matching a prefix
@@ -1105,50 +1197,15 @@ impl GateNetlist {
     /// Returns two sorted lists: (true_rail_nets, false_rail_nets)
     /// Each list contains (bit_index, net_name) pairs.
     /// For 1-bit signals, the net name is just {prefix}_t without [0], so we check for exact match too.
+    /// Uses O(1) prefix index lookup instead of O(n) scan.
     #[allow(clippy::type_complexity)]
     pub fn find_ncl_bit_indexed_nets(
         &self,
         prefix: &str,
     ) -> (Vec<(usize, String)>, Vec<(usize, String)>) {
-        let mut true_rail = Vec::new();
-        let mut false_rail = Vec::new();
-
-        let prefix_t = format!("{}_t", prefix);
-        let prefix_f = format!("{}_f", prefix);
-
-        for name in self.net_map.keys() {
-            // Check for true rail: prefix_t[N] or exact match prefix_t (for 1-bit signals)
-            if name == &prefix_t {
-                // Exact match - 1-bit signal without bit index
-                true_rail.push((0, name.clone()));
-            } else if let Some(rest) = name.strip_prefix(&prefix_t) {
-                if let Some(inner) = rest.strip_prefix('[') {
-                    if let Some(idx_str) = inner.strip_suffix(']') {
-                        if let Ok(idx) = idx_str.parse::<usize>() {
-                            true_rail.push((idx, name.clone()));
-                        }
-                    }
-                }
-            }
-            // Check for false rail: prefix_f[N] or exact match prefix_f (for 1-bit signals)
-            if name == &prefix_f {
-                // Exact match - 1-bit signal without bit index
-                false_rail.push((0, name.clone()));
-            } else if let Some(rest) = name.strip_prefix(&prefix_f) {
-                if let Some(inner) = rest.strip_prefix('[') {
-                    if let Some(idx_str) = inner.strip_suffix(']') {
-                        if let Ok(idx) = idx_str.parse::<usize>() {
-                            false_rail.push((idx, name.clone()));
-                        }
-                    }
-                }
-            }
-        }
-
-        // Sort by bit index
-        true_rail.sort_by_key(|(idx, _)| *idx);
-        false_rail.sort_by_key(|(idx, _)| *idx);
-
+        // O(1) lookup in the NCL prefix indexes
+        let true_rail = self.ncl_true_index.get(prefix).cloned().unwrap_or_default();
+        let false_rail = self.ncl_false_index.get(prefix).cloned().unwrap_or_default();
         (true_rail, false_rail)
     }
 
