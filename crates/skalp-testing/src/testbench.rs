@@ -136,7 +136,27 @@ impl Testbench {
             ..Default::default()
         };
 
-        Self::from_source_ncl(source_path, config).await
+        Self::from_source_ncl_with_top(source_path, config, None).await
+    }
+
+    /// Create an NCL testbench with explicit top module name
+    ///
+    /// Same as `ncl()` but allows specifying which module to use as top.
+    pub async fn ncl_with_top_module(source_path: &str, top_module: &str) -> Result<Self> {
+        let use_gpu = std::env::var("SKALP_SIM_MODE")
+            .map(|v| v.to_lowercase() != "cpu")
+            .unwrap_or(true);
+
+        let config = UnifiedSimConfig {
+            level: SimLevel::GateLevel,
+            circuit_mode: CircuitMode::Ncl,
+            hw_accel: if use_gpu { HwAccel::Auto } else { HwAccel::Cpu },
+            max_iterations: 100000,
+            ncl_debug: false,
+            ..Default::default()
+        };
+
+        Self::from_source_ncl_with_top(source_path, config, Some(top_module)).await
     }
 
     /// Create an NCL testbench from a pre-compiled GateNetlist
@@ -383,27 +403,43 @@ impl Testbench {
         })
     }
 
-    async fn from_source_ncl(source_path: &str, config: UnifiedSimConfig) -> Result<Self> {
-        use skalp_frontend::parse_and_build_hir_from_file;
+    async fn from_source_ncl_with_top(
+        source_path: &str,
+        config: UnifiedSimConfig,
+        top_module: Option<&str>,
+    ) -> Result<Self> {
         use skalp_lir::{get_stdlib_library, lower_mir_hierarchical, map_hierarchical_to_gates};
         use std::time::Instant;
 
         let start_total = Instant::now();
         eprintln!(
-            "⏱️  [TESTBENCH] Starting NCL compilation of '{}'",
-            source_path
+            "⏱️  [TESTBENCH] Starting NCL compilation of '{}' (top: {:?})",
+            source_path,
+            top_module
         );
 
         let path = Path::new(source_path);
 
-        // Parse HIR
-        let hir = parse_and_build_hir_from_file(path)?;
+        // Parse with compilation context (supports module resolution)
+        let context = skalp_frontend::parse_and_build_compilation_context(path)?;
 
-        // Compile to MIR
+        // Compile to MIR with modules
         let compiler = MirCompiler::new();
         let mir = compiler
-            .compile_to_mir(&hir)
+            .compile_to_mir_with_modules(&context.main_hir, &context.module_hirs)
             .map_err(|e| anyhow::anyhow!("MIR compilation failed: {}", e))?;
+
+        // If explicit top module specified, verify it exists
+        if let Some(top_name) = top_module {
+            if !mir.modules.iter().any(|m| m.name == top_name) {
+                anyhow::bail!(
+                    "Top module '{}' not found. Available modules: {:?}",
+                    top_name,
+                    mir.modules.iter().map(|m| &m.name).collect::<Vec<_>>()
+                );
+            }
+            eprintln!("⏱️  [TESTBENCH] Using explicit top module: {}", top_name);
+        }
 
         // Load technology library and synthesize
         let library = get_stdlib_library("generic_asic")
