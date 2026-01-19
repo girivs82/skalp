@@ -14,6 +14,15 @@ use skalp_frontend::types::Width;
 use std::path::PathBuf;
 use tracing::trace;
 
+// Stack growth constants for deeply recursive expression conversion
+// Red zone: minimum stack space before growing (128KB)
+// We use a larger red zone to detect low stack earlier and avoid
+// running out during the setup of the new stack.
+const STACK_RED_ZONE: usize = 128 * 1024;
+// Stack size: how much to grow by when needed (4MB)
+// Larger stack segments reduce the frequency of allocations.
+const STACK_GROW_SIZE: usize = 4 * 1024 * 1024;
+
 /// Maximum recursion depth for type inference and expression annotation
 /// This prevents stack overflow on deeply nested expressions like {{{{{...}}}}}
 /// Increased to 32768 to support complex match expressions with nested function calls (e.g., exec_l4_l5)
@@ -4950,7 +4959,22 @@ impl<'hir> HirToMir<'hir> {
     }
 
     /// Convert HIR expression to MIR
+    ///
+    /// This wrapper ensures we have enough stack space for deeply recursive
+    /// expression conversion (e.g., complex stdlib imports with many nested calls).
     fn convert_expression(
+        &mut self,
+        expr: &hir::HirExpression,
+        depth: usize,
+    ) -> Option<Expression> {
+        // Use stacker to grow the stack when needed for deep recursion
+        stacker::maybe_grow(STACK_RED_ZONE, STACK_GROW_SIZE, || {
+            self.convert_expression_impl(expr, depth)
+        })
+    }
+
+    /// Implementation of HIR expression to MIR conversion
+    fn convert_expression_impl(
         &mut self,
         expr: &hir::HirExpression,
         depth: usize,
@@ -9046,8 +9070,24 @@ impl<'hir> HirToMir<'hir> {
     }
 
     /// Helper: Substitute variable references in an expression with current values
+    ///
+    /// This wrapper ensures we have enough stack space for deeply recursive substitution.
     #[allow(clippy::only_used_in_recursion)]
     fn substitute_variables(
+        &self,
+        expr: &hir::HirExpression,
+        var_exprs: &IndexMap<hir::VariableId, hir::HirExpression>,
+        _let_bindings: &[hir::HirLetStatement],
+    ) -> hir::HirExpression {
+        // Use stacker to grow the stack when needed for deep recursion
+        stacker::maybe_grow(STACK_RED_ZONE, STACK_GROW_SIZE, || {
+            self.substitute_variables_impl(expr, var_exprs, _let_bindings)
+        })
+    }
+
+    /// Implementation of variable substitution
+    #[allow(clippy::only_used_in_recursion)]
+    fn substitute_variables_impl(
         &self,
         expr: &hir::HirExpression,
         var_exprs: &IndexMap<hir::VariableId, hir::HirExpression>,
@@ -9815,7 +9855,22 @@ impl<'hir> HirToMir<'hir> {
 
     /// Substitute parameters and local variables in an expression with argument expressions
     /// This version takes a var_id_to_name map for looking up function-local let bindings
+    ///
+    /// This wrapper ensures we have enough stack space for deeply recursive substitution.
     fn substitute_expression_with_var_map(
+        &mut self,
+        expr: &hir::HirExpression,
+        param_map: &IndexMap<String, &hir::HirExpression>,
+        var_id_to_name: &IndexMap<hir::VariableId, String>,
+    ) -> Option<hir::HirExpression> {
+        // Use stacker to grow the stack when needed for deep recursion
+        stacker::maybe_grow(STACK_RED_ZONE, STACK_GROW_SIZE, || {
+            self.substitute_expression_with_var_map_impl(expr, param_map, var_id_to_name)
+        })
+    }
+
+    /// Implementation of expression substitution with variable map
+    fn substitute_expression_with_var_map_impl(
         &mut self,
         expr: &hir::HirExpression,
         param_map: &IndexMap<String, &hir::HirExpression>,
@@ -10805,7 +10860,17 @@ impl<'hir> HirToMir<'hir> {
     }
 
     /// Infer the type of a HIR expression from context (BUG #76 FIX - full Option A)
+    ///
+    /// This wrapper ensures we have enough stack space for deeply recursive type inference.
     fn infer_hir_expression_type(&self, expr: &hir::HirExpression, depth: usize) -> Type {
+        // Use stacker to grow the stack when needed for deep recursion
+        stacker::maybe_grow(STACK_RED_ZONE, STACK_GROW_SIZE, || {
+            self.infer_hir_expression_type_impl(expr, depth)
+        })
+    }
+
+    /// Implementation of HIR expression type inference
+    fn infer_hir_expression_type_impl(&self, expr: &hir::HirExpression, depth: usize) -> Type {
         // Guard against stack overflow on deeply nested expressions
         if depth > MAX_EXPRESSION_RECURSION_DEPTH {
             panic!(
@@ -11678,7 +11743,23 @@ impl<'hir> HirToMir<'hir> {
     }
 
     // Helper function to recursively substitute both parameters and let bindings
+    //
+    // This wrapper ensures we have enough stack space for deeply recursive substitution.
     fn substitute_hir_expr_recursively(
+        &self,
+        expr: &hir::HirExpression,
+        params: &IndexMap<String, hir::HirExpression>,
+        lets: &IndexMap<String, hir::HirExpression>,
+        var_id_to_name: &IndexMap<hir::VariableId, String>,
+    ) -> Option<hir::HirExpression> {
+        // Use stacker to grow the stack when needed for deep recursion
+        stacker::maybe_grow(STACK_RED_ZONE, STACK_GROW_SIZE, || {
+            self.substitute_hir_expr_recursively_impl(expr, params, lets, var_id_to_name)
+        })
+    }
+
+    // Implementation of recursive HIR expression substitution
+    fn substitute_hir_expr_recursively_impl(
         &self,
         expr: &hir::HirExpression,
         params: &IndexMap<String, hir::HirExpression>,
@@ -12258,7 +12339,21 @@ impl<'hir> HirToMir<'hir> {
 
     /// BUG FIX #91: Simple name-based expression substitution for module synthesis
     /// Substitutes variable references (by name from GenericParam) with expressions from the map
+    ///
+    /// This wrapper ensures we have enough stack space for deeply recursive substitution.
     fn substitute_hir_expr_with_map(
+        &self,
+        expr: &hir::HirExpression,
+        name_map: &IndexMap<String, hir::HirExpression>,
+    ) -> hir::HirExpression {
+        // Use stacker to grow the stack when needed for deep recursion
+        stacker::maybe_grow(STACK_RED_ZONE, STACK_GROW_SIZE, || {
+            self.substitute_hir_expr_with_map_impl(expr, name_map)
+        })
+    }
+
+    /// Implementation of name-based HIR expression substitution
+    fn substitute_hir_expr_with_map_impl(
         &self,
         expr: &hir::HirExpression,
         name_map: &IndexMap<String, hir::HirExpression>,
@@ -12643,8 +12738,23 @@ impl<'hir> HirToMir<'hir> {
     /// BUG FIX #91: Substitute Variables by VariableId with expressions from the map
     /// This handles the case where Block's result_expr contains Variables referencing
     /// let bindings that were defined in the same Block.
+    ///
+    /// This wrapper ensures we have enough stack space for deeply recursive substitution.
     #[allow(clippy::only_used_in_recursion)]
     fn substitute_var_ids_in_expr(
+        &self,
+        expr: &hir::HirExpression,
+        var_id_map: &IndexMap<hir::VariableId, hir::HirExpression>,
+    ) -> hir::HirExpression {
+        // Use stacker to grow the stack when needed for deep recursion
+        stacker::maybe_grow(STACK_RED_ZONE, STACK_GROW_SIZE, || {
+            self.substitute_var_ids_in_expr_impl(expr, var_id_map)
+        })
+    }
+
+    /// Implementation of variable ID substitution
+    #[allow(clippy::only_used_in_recursion)]
+    fn substitute_var_ids_in_expr_impl(
         &self,
         expr: &hir::HirExpression,
         var_id_map: &IndexMap<hir::VariableId, hir::HirExpression>,
@@ -17851,7 +17961,22 @@ impl<'hir> HirToMir<'hir> {
     /// Convert an HIR expression to MIR in the context of module synthesis
     /// This is a simplified converter that primarily handles variable lookups in module context
     /// and delegates most expression types to the main converter
+    ///
+    /// This wrapper ensures we have enough stack space for deeply recursive module expression conversion.
     fn convert_hir_expr_for_module(
+        &mut self,
+        expr: &hir::HirExpression,
+        ctx: &ModuleSynthesisContext,
+        depth: usize,
+    ) -> Option<Expression> {
+        // Use stacker to grow the stack when needed for deep recursion
+        stacker::maybe_grow(STACK_RED_ZONE, STACK_GROW_SIZE, || {
+            self.convert_hir_expr_for_module_impl(expr, ctx, depth)
+        })
+    }
+
+    /// Implementation of module context HIR expression conversion
+    fn convert_hir_expr_for_module_impl(
         &mut self,
         expr: &hir::HirExpression,
         ctx: &ModuleSynthesisContext,

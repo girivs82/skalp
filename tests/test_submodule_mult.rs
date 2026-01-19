@@ -276,7 +276,6 @@ async fn test_signal_chain() {
 }
 
 #[tokio::test]
-#[ignore = "requires RUST_MIN_STACK=33554432 for deep MIR recursion"]
 async fn test_stdlib_import() {
     setup_stdlib_path();
 
@@ -347,7 +346,6 @@ async fn test_ppgen_stdlib_import() {
 }
 
 #[tokio::test]
-#[ignore = "requires RUST_MIN_STACK=33554432 for deep MIR recursion"]
 async fn test_accum_stdlib_import() {
     setup_stdlib_path();
 
@@ -366,7 +364,6 @@ async fn test_accum_stdlib_import() {
 }
 
 #[tokio::test]
-#[ignore = "requires RUST_MIN_STACK=33554432 for deep MIR recursion"]
 async fn test_pmult_direct_import() {
     setup_stdlib_path();
 
