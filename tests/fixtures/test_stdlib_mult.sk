@@ -1,0 +1,26 @@
+// Test using partitionable multiplier from stdlib
+use skalp::numeric::partitionable_multiplier::*;
+
+pub entity TestMult {
+    in a: bit[24]
+    in b: bit[24]
+    in mode: bit[2]  // Use explicit width instead of enum type
+    out result: bit[48]
+    out prod0: bit[12]
+    out prod1: bit[12]
+    out prod2: bit[12]
+    out prod3: bit[12]
+}
+
+impl TestMult {
+    let m = PartitionableMantissaMultiplier {
+        a: a,
+        b: b,
+        mode: mode,
+        result: result,
+        prod0: prod0,
+        prod1: prod1,
+        prod2: prod2,
+        prod3: prod3
+    }
+}

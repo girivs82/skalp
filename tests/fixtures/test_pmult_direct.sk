@@ -1,0 +1,27 @@
+// Test direct import of PartitionableMantissaMultiplier
+use skalp::numeric::partitionable_multiplier::PartitionableMantissaMultiplier;
+use skalp::numeric::partitionable_multiplier::MultiplierMode;
+
+pub entity TestPMultDirect {
+    in a: bit[24]
+    in b: bit[24]
+    in mode: bit[2]
+    out result: bit[48]
+    out prod0: bit[12]
+    out prod1: bit[12]
+    out prod2: bit[12]
+    out prod3: bit[12]
+}
+
+impl TestPMultDirect {
+    let m = PartitionableMantissaMultiplier {
+        a: a,
+        b: b,
+        mode: mode as MultiplierMode,
+        result: result,
+        prod0: prod0,
+        prod1: prod1,
+        prod2: prod2,
+        prod3: prod3
+    }
+}

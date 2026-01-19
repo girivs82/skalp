@@ -1,0 +1,28 @@
+// Test stdlib import of PartialProductAccumulator
+use skalp::numeric::partitionable_multiplier::PartialProductAccumulator;
+use skalp::numeric::partitionable_multiplier::MultiplierMode;
+
+pub entity TestAccum {
+    in p00: bit[12]
+    in mode: bit[2]
+    out result: bit[48]
+    out prod0: bit[12]
+}
+
+impl TestAccum {
+    // Zero out all other inputs
+    signal zero: bit[12] = 0
+
+    let accum = PartialProductAccumulator {
+        p00: p00, p01: zero, p02: zero, p03: zero,
+        p10: zero, p11: zero, p12: zero, p13: zero,
+        p20: zero, p21: zero, p22: zero, p23: zero,
+        p30: zero, p31: zero, p32: zero, p33: zero,
+        mode: mode as MultiplierMode,
+        result: result,
+        prod0: prod0,
+        prod1: _,
+        prod2: _,
+        prod3: _
+    }
+}
