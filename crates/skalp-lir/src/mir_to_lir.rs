@@ -192,12 +192,12 @@ impl MirToLirTransform {
         // Phase 6: NCL expansion for async modules
         // Convert synchronous LIR to dual-rail NCL logic
         let final_lir = if module.is_async {
-            eprintln!(
+            trace!(
                 "⚡ NCL: Expanding module '{}' to dual-rail NCL logic",
                 module.name
             );
             let ncl_result = expand_to_ncl(&self.lir, &NclConfig::default());
-            eprintln!(
+            trace!(
                 "⚡ NCL: Expanded {} signals -> {} dual-rail signals",
                 self.lir.signals.len(),
                 ncl_result.lir.signals.len()
@@ -351,7 +351,7 @@ impl MirToLirTransform {
         // Phase 6: SKIP NCL expansion - keep as single-rail LIR
         // The dual-rail conversion will be done after gate-level optimization
         if module.is_async {
-            eprintln!(
+            trace!(
                 "⚡ NCL Optimize-First: Skipping NCL expansion for async module '{}' (will convert after optimization)",
                 module.name
             );
@@ -433,7 +433,7 @@ impl MirToLirTransform {
         // This is critical for hierarchical flattening where sub-module output ports
         // marked with #[detection_signal] become internal signals in the flattened design
         if signal.is_detection_signal() {
-            println!(
+            trace!(
                 "✅ [WORD_LIR_DETECTION] Marking internal signal '{}' as detection",
                 signal.name
             );
@@ -1013,7 +1013,7 @@ impl MirToLirTransform {
             // TupleFieldAccess extracts an element from a tuple (Concat of signals)
             // e.g., let (x, y, z) = func() where func returns (a, b, c)
             ExpressionKind::TupleFieldAccess { base, index } => {
-                eprintln!(
+                trace!(
                     "🔍 TUPLE_FIELD_ACCESS: index={}, expected_width={}, base.kind={:?}",
                     index,
                     expected_width,
@@ -1024,9 +1024,10 @@ impl MirToLirTransform {
                 let base_width = self.infer_expression_width(base);
                 let base_signal = self.transform_expression(base, base_width);
 
-                eprintln!(
+                trace!(
                     "🔍 TUPLE_FIELD_ACCESS: base_width={}, base_signal={:?}",
-                    base_width, base_signal
+                    base_width,
+                    base_signal
                 );
 
                 // For a 3-element tuple of 32-bit values (total 96 bits):
@@ -1914,7 +1915,7 @@ fn load_compiled_ip_as_lir(
 ) -> Result<MirToLirResult, String> {
     use std::path::Path;
 
-    eprintln!(
+    trace!(
         "📦 COMPILED_IP: Loading pre-compiled IP from '{}'",
         config.skb_path
     );
@@ -1982,14 +1983,14 @@ fn load_compiled_ip_as_lir(
 
     // Verify port count matches (basic sanity check)
     if compiled_ip.port_info.len() != module.ports.len() {
-        eprintln!(
+        trace!(
             "⚠️ COMPILED_IP: Port count mismatch - compiled IP has {} ports, module has {}",
             compiled_ip.port_info.len(),
             module.ports.len()
         );
     }
 
-    eprintln!(
+    trace!(
         "📦 COMPILED_IP: Loaded '{}' successfully ({} ports, {} cells)",
         compiled_ip.header.library_name,
         compiled_ip.port_info.len(),
@@ -2121,7 +2122,7 @@ pub fn lower_mir_hierarchical(mir: &Mir) -> HierarchicalMirToLirResult {
         mir.modules.iter().map(|m| (m.name.as_str(), m)).collect();
 
     // DEBUG: Print module ID to name mapping
-    println!(
+    trace!(
         "[HIER_LIR_DEBUG] Module ID mapping (first 10): {:?}",
         mir.modules
             .iter()
@@ -2131,7 +2132,7 @@ pub fn lower_mir_hierarchical(mir: &Mir) -> HierarchicalMirToLirResult {
     );
     // Find KarythraCLEAsync module ID
     if let Some(kcle) = mir.modules.iter().find(|m| m.name == "KarythraCLEAsync") {
-        println!(
+        trace!(
             "[HIER_LIR_DEBUG] KarythraCLEAsync has ModuleId({})",
             kcle.id.0
         );
@@ -2148,14 +2149,14 @@ pub fn lower_mir_hierarchical(mir: &Mir) -> HierarchicalMirToLirResult {
         for inst in &module.instances {
             // Debug: track what's instantiating what
             if module.name == "FpSub" && inst.name == "adder" {
-                println!(
+                trace!(
                     "[HIER_LIR_DEBUG] FpSub's 'adder' instance has module=ModuleId({})",
                     inst.module.0
                 );
             }
             if let Some(child_module) = mir.modules.iter().find(|m| m.id == inst.module) {
                 if child_module.name == "KarythraCLEAsync" {
-                    println!(
+                    trace!(
                         "[HIER_LIR_DEBUG] Module '{}' instantiates 'KarythraCLEAsync' via instance '{}'",
                         module.name, inst.name
                     );
@@ -2167,11 +2168,11 @@ pub fn lower_mir_hierarchical(mir: &Mir) -> HierarchicalMirToLirResult {
 
     // Find top module: has instances but is not instantiated by others
     // If no such module exists, fall back to first non-instantiated module
-    println!(
+    trace!(
         "[HIER_LIR] Looking for top module among {} modules",
         mir.modules.len()
     );
-    println!(
+    trace!(
         "[HIER_LIR] modules_with_instances: {:?}",
         mir.modules
             .iter()
@@ -2179,7 +2180,7 @@ pub fn lower_mir_hierarchical(mir: &Mir) -> HierarchicalMirToLirResult {
             .map(|m| &m.name)
             .collect::<Vec<_>>()
     );
-    println!(
+    trace!(
         "[HIER_LIR] instantiated_modules (have parents): {:?}",
         mir.modules
             .iter()
@@ -2262,7 +2263,7 @@ pub fn lower_mir_hierarchical(mir: &Mir) -> HierarchicalMirToLirResult {
             .unwrap_or(&mir.modules[0])
     };
 
-    println!(
+    trace!(
         "[HIER_LIR] Selected top module: '{}' (id={}, {} instances)",
         top_module.name,
         top_module.id.0,
@@ -2292,7 +2293,7 @@ pub fn lower_mir_hierarchical(mir: &Mir) -> HierarchicalMirToLirResult {
     );
 
     // Log cache statistics
-    println!(
+    trace!(
         "[HIER_LIR] LIR cache: {} unique module/async combinations cached",
         lir_cache.len()
     );
@@ -2316,7 +2317,7 @@ pub fn lower_mir_hierarchical_for_optimize_first(mir: &Mir) -> (HierarchicalMirT
     // Check if any module is async
     let has_async = mir.modules.iter().any(|m| m.is_async);
     if has_async {
-        eprintln!(
+        trace!(
             "⚡ NCL Optimize-First: Skipping NCL expansion for {} modules",
             mir.modules.iter().filter(|m| m.is_async).count()
         );
@@ -2452,7 +2453,7 @@ pub fn lower_mir_hierarchical_for_optimize_first(mir: &Mir) -> (HierarchicalMirT
         }
     };
 
-    eprintln!(
+    trace!(
         "[TOP_DETECT] Selected '{}' as top module (has {} instances, is_async={})",
         top_module.name,
         top_module.instances.len(),
@@ -2481,7 +2482,7 @@ pub fn lower_mir_hierarchical_for_optimize_first(mir: &Mir) -> (HierarchicalMirT
     );
 
     // Log cache statistics
-    println!(
+    trace!(
         "[HIER_LIR_OPT] LIR cache: {} unique modules cached",
         lir_cache.len()
     );
@@ -2506,18 +2507,21 @@ fn elaborate_instance_for_optimize_first(
 ) {
     // Use skip_ncl to completely skip NCL expansion for optimize-first flow
     let lir_result = if let Some(ref vendor_config) = module.vendor_ip_config {
-        eprintln!(
+        trace!(
             "🔌 VENDOR_IP: Module '{}' is a blackbox (ip={}), skipping internal elaboration",
-            module.name, vendor_config.ip_name
+            module.name,
+            vendor_config.ip_name
         );
         create_blackbox_lir_placeholder(module, vendor_config)
     } else if let Some(ref config) = module.compiled_ip_config {
         match load_compiled_ip_as_lir(config, module) {
             Ok(lir_result) => lir_result,
             Err(e) => {
-                eprintln!(
+                trace!(
                     "⚠️ COMPILED_IP: Failed to load '{}' for module '{}': {}",
-                    config.skb_path, module.name, e
+                    config.skb_path,
+                    module.name,
+                    e
                 );
                 // Use skip_ncl to get single-rail LIR
                 lower_mir_module_to_lir_skip_ncl(module)
@@ -2546,7 +2550,7 @@ fn elaborate_instance_for_optimize_first(
     // Collect child instance paths
     let mut children: Vec<String> = Vec::new();
 
-    eprintln!(
+    trace!(
         "[ELABORATE-OPT] Module '{}' at path '{}' has {} instances (async={})",
         module.name,
         instance_path,
@@ -2621,9 +2625,10 @@ fn elaborate_instance(
     let lir_result = if let Some(ref vendor_config) = module.vendor_ip_config {
         // This is a vendor IP / blackbox - create a placeholder LIR result
         // The actual blackbox cell will be created during tech mapping
-        eprintln!(
+        trace!(
             "🔌 VENDOR_IP: Module '{}' is a blackbox (ip={}), skipping internal elaboration",
-            module.name, vendor_config.ip_name
+            module.name,
+            vendor_config.ip_name
         );
         create_blackbox_lir_placeholder(module, vendor_config)
     } else if let Some(ref config) = module.compiled_ip_config {
@@ -2631,11 +2636,13 @@ fn elaborate_instance(
         match load_compiled_ip_as_lir(config, module) {
             Ok(lir_result) => lir_result,
             Err(e) => {
-                eprintln!(
+                trace!(
                     "⚠️ COMPILED_IP: Failed to load '{}' for module '{}': {}",
-                    config.skb_path, module.name, e
+                    config.skb_path,
+                    module.name,
+                    e
                 );
-                eprintln!("⚠️ COMPILED_IP: Falling back to normal elaboration");
+                trace!("⚠️ COMPILED_IP: Falling back to normal elaboration");
                 lower_mir_module_to_lir_with_context(module, is_async_context)
             }
         }
@@ -2665,7 +2672,7 @@ fn elaborate_instance(
     // Collect child instance paths
     let mut children: Vec<String> = Vec::new();
 
-    eprintln!(
+    trace!(
         "[ELABORATE] Module '{}' at path '{}' has {} instances",
         module.name,
         instance_path,
@@ -2674,9 +2681,10 @@ fn elaborate_instance(
 
     // Process child instances
     for inst in &module.instances {
-        eprintln!(
+        trace!(
             "[ELABORATE]   Processing child instance '{}' -> module_id={}",
-            inst.name, inst.module.0
+            inst.name,
+            inst.module.0
         );
         let child_path = format!("{}.{}", instance_path, inst.name);
         children.push(child_path.clone());
@@ -2684,7 +2692,7 @@ fn elaborate_instance(
         // Find child module by ID
         if let Some(child_mod) = module_map.get(&inst.module).copied() {
             // Extract connection info using parent module for name lookup
-            eprintln!(
+            trace!(
                 "[ELABORATE]   Instance '{}' has {} connections:",
                 inst.name,
                 inst.connections.len()
@@ -2770,9 +2778,10 @@ fn extract_connection_info(
                         // This handles cases where a let binding with a constant value
                         // is passed as an argument to a module instance
                         if let Some(const_val) = lookup_variable_constant(parent_module, *var_id) {
-                            eprintln!(
+                            trace!(
                                 "[EXTRACT_CONN] BUG #168 FIX: Resolved var_{} to constant 0x{:X}",
-                                var_id.0, const_val
+                                var_id.0,
+                                const_val
                             );
                             PortConnectionInfo::Constant(const_val)
                         } else {
@@ -2814,24 +2823,27 @@ fn extract_connection_info(
                                 let base_name = lvalue_to_name_with_module(base, parent_module);
                                 let high_val = extract_const_index(high).unwrap_or(0);
                                 let low_val = extract_const_index(low).unwrap_or(0);
-                                eprintln!(
+                                trace!(
                                     "[EXTRACT_CONN] BUG #200 FIX: Cast->RangeSelect: {}[{}:{}]",
-                                    base_name, high_val, low_val
+                                    base_name,
+                                    high_val,
+                                    low_val
                                 );
                                 PortConnectionInfo::Range(base_name, high_val, low_val)
                             }
                             LValue::BitSelect { base, index } => {
                                 let base_name = lvalue_to_name_with_module(base, parent_module);
                                 let bit_idx = extract_const_index(index).unwrap_or(0);
-                                eprintln!(
+                                trace!(
                                     "[EXTRACT_CONN] BUG #200 FIX: Cast->BitSelect: {}[{}]",
-                                    base_name, bit_idx
+                                    base_name,
+                                    bit_idx
                                 );
                                 PortConnectionInfo::BitSelect(base_name, bit_idx)
                             }
                             _ => {
                                 let signal_name = lvalue_to_name_with_module(lvalue, parent_module);
-                                eprintln!(
+                                trace!(
                                     "[EXTRACT_CONN] BUG #190 FIX: Unwrapped Cast to signal '{}'",
                                     signal_name
                                 );
@@ -2841,7 +2853,7 @@ fn extract_connection_info(
                     }
                     ExpressionKind::Literal(value) => {
                         let const_val = value_to_u64(value);
-                        eprintln!(
+                        trace!(
                             "[EXTRACT_CONN] BUG #190 FIX: Unwrapped Cast to constant 0x{:X}",
                             const_val
                         );
@@ -2849,7 +2861,7 @@ fn extract_connection_info(
                     }
                     _ => {
                         // Complex inner expression - still need to create synthetic signal
-                        eprintln!(
+                        trace!(
                             "[EXTRACT_CONN] BUG #190: Cast inner is complex: {:?}",
                             inner_expr.kind
                         );
@@ -2859,9 +2871,10 @@ fn extract_connection_info(
             }
             _ => {
                 // Complex expression - treat as signal
-                eprintln!(
+                trace!(
                     "[EXTRACT_CONN] Complex expression for port '{}': {:?}",
-                    port_name, expr.kind
+                    port_name,
+                    expr.kind
                 );
                 PortConnectionInfo::Signal(format!("expr_{}", port_name))
             }
@@ -2875,7 +2888,7 @@ fn extract_connection_info(
 /// BUG #168 FIX: Look up a variable's constant value from the module
 /// Returns Some(value) if the variable is assigned a constant, None otherwise
 fn lookup_variable_constant(module: &Module, var_id: VariableId) -> Option<u64> {
-    eprintln!(
+    trace!(
         "[LOOKUP_VAR] Looking for var_{} in module '{}' ({} assignments, {} processes)",
         var_id.0,
         module.name,
@@ -2888,9 +2901,11 @@ fn lookup_variable_constant(module: &Module, var_id: VariableId) -> Option<u64> 
         if let LValue::Variable(id) = &assign.lhs {
             if *id == var_id {
                 let value = extract_constant_value(&assign.rhs);
-                eprintln!(
+                trace!(
                     "[LOOKUP_VAR] Found var_{} in continuous assignment #{} -> {:?}",
-                    var_id.0, idx, value
+                    var_id.0,
+                    idx,
+                    value
                 );
                 return value;
             }
@@ -2901,18 +2916,21 @@ fn lookup_variable_constant(module: &Module, var_id: VariableId) -> Option<u64> 
     for (proc_idx, process) in module.processes.iter().enumerate() {
         for stmt in &process.body.statements {
             if let Some(value) = find_variable_constant_in_stmt(stmt, var_id) {
-                eprintln!(
+                trace!(
                     "[LOOKUP_VAR] Found var_{} in process #{} -> 0x{:X}",
-                    var_id.0, proc_idx, value
+                    var_id.0,
+                    proc_idx,
+                    value
                 );
                 return Some(value);
             }
         }
     }
 
-    eprintln!(
+    trace!(
         "[LOOKUP_VAR] var_{} NOT FOUND in module '{}'",
-        var_id.0, module.name
+        var_id.0,
+        module.name
     );
     None
 }
@@ -3040,14 +3058,14 @@ fn lvalue_to_name_with_module(lvalue: &LValue, module: &Module) -> String {
 
                 // Print first assignment RHS to understand the structure
                 if let Some(first_assign) = module.assignments.first() {
-                    eprintln!(
+                    trace!(
                         "[BUG200_ASSIGN_DEBUG] First assignment LHS={:?}, RHS has Variable refs: {}",
                         first_assign.lhs,
                         contains_variable_ref(&first_assign.rhs, *id)
                     );
                 }
 
-                eprintln!(
+                trace!(
                     "[BUG200_DEBUG] Variable({}) NOT FOUND in module '{}' - signals: {}, ports: {}",
                     id.0,
                     module.name,

@@ -2601,6 +2601,7 @@ impl HirBuilderContext {
                             | SyntaxKind::TupleExpr
                             | SyntaxKind::ConcatExpr
                             | SyntaxKind::StructLiteral
+                            | SyntaxKind::WithIntentExpr
                     )
                 });
 
@@ -2645,6 +2646,7 @@ impl HirBuilderContext {
                                     | SyntaxKind::ConcatExpr
                                     | SyntaxKind::CastExpr
                                     | SyntaxKind::StructLiteral
+                                    | SyntaxKind::WithIntentExpr
                             )
                         })
                         .and_then(|n| self.build_expression(n))

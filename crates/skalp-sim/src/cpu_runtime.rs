@@ -130,7 +130,9 @@ impl CpuRuntime {
             SirNodeKind::Constant { value, width } => {
                 let byte_size = width.div_ceil(8);
                 let mut bytes = vec![0u8; byte_size];
-                for (i, byte) in bytes.iter_mut().enumerate().take(byte_size) {
+                // Only extract bytes from the u64 value for indices where the shift is valid
+                // For i*8 >= 64, the byte remains 0 (already initialized)
+                for (i, byte) in bytes.iter_mut().enumerate().take(byte_size.min(8)) {
                     *byte = ((value >> (i * 8)) & 0xFF) as u8;
                 }
                 bytes

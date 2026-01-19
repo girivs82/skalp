@@ -342,6 +342,13 @@ impl<'hir> HirToMir<'hir> {
 
     /// Transform HIR to MIR
     pub fn transform(&mut self, hir: &'hir Hir) -> Mir {
+        use std::io::Write;
+        let _ = writeln!(
+            std::io::stderr(),
+            "[DEBUG TRANSFORM X6] entities={}, funcs={}",
+            hir.entities.len(),
+            hir.functions.len()
+        );
         use std::time::Instant;
         let transform_start = Instant::now();
 
@@ -5506,6 +5513,11 @@ impl<'hir> HirToMir<'hir> {
                 Some(Expression::new(ExpressionKind::Unary { op, operand }, ty))
             }
             hir::HirExpression::Call(call) => {
+                eprintln!(
+                    "[DEBUG CALL] Entering Call arm for function='{}', args={}",
+                    call.function,
+                    call.args.len()
+                );
                 trace!(
                     "🔥🔥🔥 CALL ARM MATCHED: function='{}' 🔥🔥🔥",
                     call.function
@@ -5820,6 +5832,11 @@ impl<'hir> HirToMir<'hir> {
                     );
 
                     let result = self.inline_function_call(call);
+                    eprintln!(
+                        "[DEBUG #85] inline_function_call('{}') returned: is_some={}",
+                        call.function,
+                        result.is_some()
+                    );
 
                     // BUG FIX #IMPORT_MATCH: Restore match_arm_prefix after inlining
                     self.match_arm_prefix = saved_match_arm_prefix;
@@ -5830,6 +5847,7 @@ impl<'hir> HirToMir<'hir> {
                     );
 
                     if result.is_none() {
+                        eprintln!("[DEBUG #85] Inlining FAILED for '{}' - falling back to module synthesis!", call.function);
                         trace!(
                             "⚠️ [BUG #85 FIX] Call '{}' inlining FAILED - falling back to module synthesis!",
                             call.function
@@ -5844,6 +5862,10 @@ impl<'hir> HirToMir<'hir> {
                 }
 
                 // Path 2: SYNTHESIZE MODULE (complex functions OR inlining failed)
+                eprintln!(
+                    "[DEBUG #85] Entering module synthesis path for '{}'",
+                    call.function
+                );
                 {
                     // Path 2: SYNTHESIZE MODULE (complex functions with >5 nested calls)
                     trace!(
@@ -5852,6 +5874,28 @@ impl<'hir> HirToMir<'hir> {
                     );
                     trace!(
                         "[HYBRID] ⚙️  Decision: SYNTHESIZE MODULE for function '{}' (exceeds threshold)",
+                        call.function
+                    );
+
+                    // BUG FIX #DUPLICATE_INSTANCES: Check module_call_cache FIRST to prevent duplicate instances
+                    // When tuple destructuring like `let (a, b, c) = func()` is processed, each tuple
+                    // element access causes convert_field_access to call convert_expression on the same Call.
+                    // Without caching, each call creates a new module instance.
+                    // Build cache key from function name and HIR args (consistent with convert_hir_expr_for_module)
+                    let cache_key = format!("{}@{:?}", call.function, call.args);
+                    if let Some(cached) = self.module_call_cache.get(&cache_key) {
+                        trace!(
+                            "📞📞📞 BUG FIX #DUPLICATE_INSTANCES: Using CACHED Call result for '{}' in convert_expression 📞📞📞",
+                            call.function
+                        );
+                        eprintln!(
+                            "[DEBUG #85] CACHE HIT for '{}' - returning cached result",
+                            call.function
+                        );
+                        return Some(cached.clone());
+                    }
+                    trace!(
+                        "📞📞📞 BUG FIX #DUPLICATE_INSTANCES: CACHE MISS for '{}' - will create instance 📞📞📞",
                         call.function
                     );
 
@@ -5894,6 +5938,10 @@ impl<'hir> HirToMir<'hir> {
                         });
 
                         if let Some(func) = func {
+                            eprintln!(
+                                "[DEBUG] About to call synthesize_function_as_module for '{}'",
+                                call.function
+                            );
                             self.synthesize_function_as_module(func)
                         } else {
                             trace!("❌ [HYBRID ERROR] Cannot synthesize '{}' - function not found in HIR!",
@@ -6013,7 +6061,7 @@ impl<'hir> HirToMir<'hir> {
 
                     // Step 5: Return an Expression that references the pre-allocated result signal(s)
                     // BUG FIX #92: For tuple returns, return a Concat of all result signals
-                    if result_signal_ids.len() > 1 {
+                    let result = if result_signal_ids.len() > 1 {
                         // Tuple return: create Concat of all result signals
                         // BUG FIX #92: Use forward order (result_0 at MSB) to match TupleLiteral
                         // which packs elements MSB-first: (a, b, c) -> {a, b, c}
@@ -6026,16 +6074,25 @@ impl<'hir> HirToMir<'hir> {
                             })
                             .collect();
                         trace!("[HYBRID] ✓ Returning Concat of {} result signals for tuple (forward order)", concat_elements.len());
-                        Some(Expression::with_unknown_type(ExpressionKind::Concat(
-                            concat_elements,
-                        )))
+                        Expression::with_unknown_type(ExpressionKind::Concat(concat_elements))
                     } else {
                         // Single return
-                        Some(Expression::new(
+                        Expression::new(
                             ExpressionKind::Ref(LValue::Signal(result_signal_ids[0])),
                             ty,
-                        ))
-                    }
+                        )
+                    };
+
+                    // BUG FIX #DUPLICATE_INSTANCES: Cache the result for future lookups
+                    // This prevents duplicate module instances when the same Call is processed
+                    // multiple times (e.g., during tuple destructuring element access)
+                    self.module_call_cache.insert(cache_key, result.clone());
+                    eprintln!(
+                        "[DEBUG #85] Cached result for '{}' in convert_expression",
+                        call.function
+                    );
+
+                    Some(result)
                 }
             }
             hir::HirExpression::Index(base, index) => {
@@ -7461,9 +7518,14 @@ impl<'hir> HirToMir<'hir> {
                     // Compare match_value with literal
                     // Clone the pre-converted match value instead of re-converting
                     let left = Box::new(match_value_expr.clone());
-                    let right = Box::new(Expression::with_unknown_type(ExpressionKind::Literal(
-                        self.convert_literal(lit)?,
-                    )));
+                    // BUG #FIX: Use scrutinee's width for pattern constant
+                    let pattern_value =
+                        self.convert_literal_with_scrutinee_width(lit, &match_value_expr.ty);
+                    let right = Box::new(Expression {
+                        kind: ExpressionKind::Literal(pattern_value?),
+                        ty: match_value_expr.ty.clone(),
+                        span: None,
+                    });
                     Some(Expression::with_unknown_type(ExpressionKind::Binary {
                         op: BinaryOp::Equal,
                         left,
@@ -7606,12 +7668,17 @@ impl<'hir> HirToMir<'hir> {
                 }
                 hir::HirPattern::Literal(lit) => {
                     // Build: (sel == lit) ? value : 0 -> ({W{sel==lit}} & value)
+                    // BUG #FIX: Use scrutinee's width for pattern constant
+                    let pattern_value =
+                        self.convert_literal_with_scrutinee_width(lit, &match_value_expr.ty);
                     let condition = Expression::with_unknown_type(ExpressionKind::Binary {
                         op: BinaryOp::Equal,
                         left: Box::new(match_value_expr.clone()),
-                        right: Box::new(Expression::with_unknown_type(ExpressionKind::Literal(
-                            self.convert_literal(lit)?,
-                        ))),
+                        right: Box::new(Expression {
+                            kind: ExpressionKind::Literal(pattern_value?),
+                            ty: match_value_expr.ty.clone(),
+                            span: None,
+                        }),
                     });
                     let value = self.convert_expression(&arm.expr, 0)?;
 
@@ -7762,9 +7829,14 @@ impl<'hir> HirToMir<'hir> {
             let condition = match &arm.pattern {
                 hir::HirPattern::Literal(lit) => {
                     let left = Box::new(match_value_expr.clone());
-                    let right = Box::new(Expression::with_unknown_type(ExpressionKind::Literal(
-                        self.convert_literal(lit)?,
-                    )));
+                    // BUG #FIX: Use scrutinee's width for pattern constant
+                    let pattern_value =
+                        self.convert_literal_with_scrutinee_width(lit, &match_value_expr.ty);
+                    let right = Box::new(Expression {
+                        kind: ExpressionKind::Literal(pattern_value?),
+                        ty: match_value_expr.ty.clone(),
+                        span: None,
+                    });
                     Some(Expression::with_unknown_type(ExpressionKind::Binary {
                         op: BinaryOp::Equal,
                         left,
@@ -7993,9 +8065,15 @@ impl<'hir> HirToMir<'hir> {
             let condition = match &arm.pattern {
                 hir::HirPattern::Literal(lit) => {
                     let left = Box::new(match_value_expr.clone());
-                    let right = Box::new(Expression::with_unknown_type(ExpressionKind::Literal(
-                        self.convert_literal(lit)?,
-                    )));
+                    // BUG #FIX: Use scrutinee's width for pattern constant
+                    // Without this, pattern 45 becomes 32-bit while opcode is 6-bit
+                    let pattern_value =
+                        self.convert_literal_with_scrutinee_width(lit, &match_value_expr.ty);
+                    let right = Box::new(Expression {
+                        kind: ExpressionKind::Literal(pattern_value?),
+                        ty: match_value_expr.ty.clone(),
+                        span: None,
+                    });
                     Some(Expression::with_unknown_type(ExpressionKind::Binary {
                         op: BinaryOp::Equal,
                         left,
@@ -8166,6 +8244,35 @@ impl<'hir> HirToMir<'hir> {
                     value,
                 })
             }
+        }
+    }
+
+    /// Convert HIR literal to MIR Value, using the scrutinee's type width
+    /// for integer literals. This ensures pattern constants match the scrutinee width.
+    fn convert_literal_with_scrutinee_width(
+        &mut self,
+        lit: &hir::HirLiteral,
+        scrutinee_ty: &skalp_frontend::types::Type,
+    ) -> Option<Value> {
+        match lit {
+            hir::HirLiteral::Integer(val) => {
+                // Get width from scrutinee type
+                let width = match scrutinee_ty {
+                    skalp_frontend::types::Type::Bit(skalp_frontend::types::Width::Fixed(w)) => *w,
+                    skalp_frontend::types::Type::Logic(skalp_frontend::types::Width::Fixed(w)) => {
+                        *w
+                    }
+                    skalp_frontend::types::Type::Int(skalp_frontend::types::Width::Fixed(w)) => *w,
+                    skalp_frontend::types::Type::Nat(skalp_frontend::types::Width::Fixed(w)) => *w,
+                    _ => 32, // Default to 32 bits if we can't determine
+                };
+                Some(Value::BitVector {
+                    width: width as usize,
+                    value: *val,
+                })
+            }
+            // For non-integer literals, use the standard conversion
+            _ => self.convert_literal(lit),
         }
     }
 
@@ -14670,13 +14777,40 @@ impl<'hir> HirToMir<'hir> {
         &self,
         call: &hir::HirCallExpr,
     ) -> Option<(Vec<hir::HirParameter>, Vec<hir::HirStatement>)> {
+        use std::io::Write;
+        let _ = writeln!(
+            std::io::stderr(),
+            "[DEBUG TRAIT] try_find_trait_method_for_call: function='{}', args={}",
+            call.function,
+            call.args.len()
+        );
+
         // Only handle single-argument calls (unary trait methods)
         if call.args.len() != 1 {
+            let _ = writeln!(std::io::stderr(), "[DEBUG TRAIT] ❌ Not single-arg call");
             return None;
         }
 
         // Map function name to trait name
-        let trait_name = Self::function_name_to_trait_name(&call.function)?;
+        let trait_name = match Self::function_name_to_trait_name(&call.function) {
+            Some(n) => {
+                let _ = writeln!(
+                    std::io::stderr(),
+                    "[DEBUG TRAIT] ✓ Mapped '{}' to trait '{}'",
+                    call.function,
+                    n
+                );
+                n
+            }
+            None => {
+                let _ = writeln!(
+                    std::io::stderr(),
+                    "[DEBUG TRAIT] ❌ No trait mapping for '{}'",
+                    call.function
+                );
+                return None;
+            }
+        };
 
         trace!(
             "[TRAIT_FUNC_RESOLVE] Trying to resolve '{}' as trait method {}::{}",
@@ -14686,7 +14820,24 @@ impl<'hir> HirToMir<'hir> {
         );
 
         // Infer the type of the argument
-        let arg_type = self.infer_hir_type(&call.args[0])?;
+        let arg_type = match self.infer_hir_type(&call.args[0]) {
+            Some(t) => {
+                let _ = writeln!(
+                    std::io::stderr(),
+                    "[DEBUG TRAIT] ✓ Arg type inferred: {:?}",
+                    t
+                );
+                t
+            }
+            None => {
+                let _ = writeln!(
+                    std::io::stderr(),
+                    "[DEBUG TRAIT] ❌ Failed to infer arg type for '{}'",
+                    call.function
+                );
+                return None;
+            }
+        };
 
         // Get type name for trait lookup
         let type_name = match &arg_type {
@@ -14694,8 +14845,22 @@ impl<'hir> HirToMir<'hir> {
             hir::HirType::Float32 => "fp32".to_string(),
             hir::HirType::Float64 => "fp64".to_string(),
             hir::HirType::Float16 => "fp16".to_string(),
-            _ => return None,
+            _ => {
+                let _ = writeln!(
+                    std::io::stderr(),
+                    "[DEBUG TRAIT] ❌ Unsupported arg type: {:?}",
+                    arg_type
+                );
+                return None;
+            }
         };
+
+        let _ = writeln!(
+            std::io::stderr(),
+            "[DEBUG TRAIT] Looking for impl {} for {}",
+            trait_name,
+            type_name
+        );
 
         trace!(
             "[TRAIT_FUNC_RESOLVE] Argument type is '{}', looking for impl {} for {}",
@@ -14705,17 +14870,74 @@ impl<'hir> HirToMir<'hir> {
         );
 
         // Get parameters from trait definition
-        let method_def = self.find_trait_method_definition(trait_name, &call.function)?;
+        let method_def = match self.find_trait_method_definition(trait_name, &call.function) {
+            Some(m) => {
+                let _ = writeln!(
+                    std::io::stderr(),
+                    "[DEBUG TRAIT] ✓ Found trait method def for {}::{}",
+                    trait_name,
+                    call.function
+                );
+                m
+            }
+            None => {
+                let _ = writeln!(
+                    std::io::stderr(),
+                    "[DEBUG TRAIT] ❌ No trait method def for {}::{}",
+                    trait_name,
+                    call.function
+                );
+                return None;
+            }
+        };
         let params = method_def.parameters.clone();
 
         // Find the trait implementation for the body
-        let trait_impl = self.find_trait_impl(&type_name, trait_name)?;
+        let trait_impl = match self.find_trait_impl(&type_name, trait_name) {
+            Some(i) => {
+                let _ = writeln!(
+                    std::io::stderr(),
+                    "[DEBUG TRAIT] ✓ Found impl {} for {}",
+                    trait_name,
+                    type_name
+                );
+                i
+            }
+            None => {
+                let _ = writeln!(
+                    std::io::stderr(),
+                    "[DEBUG TRAIT] ❌ No impl {} for {}",
+                    trait_name,
+                    type_name
+                );
+                return None;
+            }
+        };
 
         // Find the method implementation (body)
-        let method_impl = trait_impl
+        let method_impl = match trait_impl
             .method_implementations
             .iter()
-            .find(|m| m.name == call.function)?;
+            .find(|m| m.name == call.function)
+        {
+            Some(m) => {
+                let _ = writeln!(
+                    std::io::stderr(),
+                    "[DEBUG TRAIT] ✓ Found method impl '{}' with {} stmts",
+                    call.function,
+                    m.body.len()
+                );
+                m
+            }
+            None => {
+                let _ = writeln!(
+                    std::io::stderr(),
+                    "[DEBUG TRAIT] ❌ No method impl '{}' in trait impl",
+                    call.function
+                );
+                return None;
+            }
+        };
 
         trace!(
             "[TRAIT_FUNC_RESOLVE] ✅ Found impl {} for {}, method '{}' has {} params and {} body stmts",
@@ -18027,6 +18249,14 @@ impl<'hir> HirToMir<'hir> {
                 // BUG FIX #91: If not a module synthesis case, INLINE within module context
                 // Previously we fell back to convert_expression which lost the module context.
                 // Now we inline the function body and convert it within the module context.
+                {
+                    use std::io::Write;
+                    let _ = writeln!(
+                        std::io::stderr(),
+                        "[DEBUG CALL] Trying to inline '{}' within module context",
+                        call.function
+                    );
+                }
                 trace!(
                     "    🔄🔄🔄 BUG91_INLINE: Inlining '{}' within module context 🔄🔄🔄",
                     call.function
@@ -18046,16 +18276,36 @@ impl<'hir> HirToMir<'hir> {
                 // This produces a fully-expanded HIR expression with NO Variable references,
                 // which can then be safely converted within the module context.
                 if let Some(inlined_hir) = self.inline_function_call_to_hir_with_lets(call) {
+                    {
+                        use std::io::Write;
+                        let _ = writeln!(
+                            std::io::stderr(),
+                            "[DEBUG CALL] ✓ inline_function_call_to_hir_with_lets SUCCESS for '{}'",
+                            call.function
+                        );
+                    }
                     trace!("    🔄🔄🔄 BUG118_INLINE: inline_function_call_to_hir_with_lets SUCCESS for '{}', type: {:?}",
                              call.function, std::mem::discriminant(&inlined_hir));
 
                     // Convert the fully-inlined HIR expression within module context
                     return self.convert_hir_expr_for_module(&inlined_hir, ctx, depth + 1);
                 } else {
+                    {
+                        use std::io::Write;
+                        let _ = writeln!(std::io::stderr(), "[DEBUG CALL] ❌ inline_function_call_to_hir_with_lets FAILED for '{}'!", call.function);
+                    }
                     trace!("    🔄🔄🔄 BUG118_INLINE: inline_function_call_to_hir_with_lets FAILED for '{}'!", call.function);
                 }
 
                 // Last resort fallback if inlining fails
+                {
+                    use std::io::Write;
+                    let _ = writeln!(
+                        std::io::stderr(),
+                        "[DEBUG CALL] Falling back to convert_expression for '{}'",
+                        call.function
+                    );
+                }
                 trace!(
                     "    ⚠️ BUG91_INLINE: Falling back to regular convert_expression for '{}'",
                     call.function
@@ -18369,6 +18619,25 @@ impl<'hir> HirToMir<'hir> {
                                 hir.entities.iter().any(|e| e.name == struct_lit.type_name)
                             });
                             if is_entity {
+                                // BUG #212 FIX: Set up module context maps BEFORE calling convert_statement
+                                // When convert_statement processes entity struct literal fields, it calls
+                                // convert_expression which needs access to current_module_param_to_port
+                                // and current_module_var_to_signal to resolve GenericParam and Variable
+                                // references to the correct module ports/signals.
+                                // Without this, entity input ports get connected to 0 instead of actual signals.
+                                let saved_param_to_port = self.current_module_param_to_port.take();
+                                let saved_var_to_signal = self.current_module_var_to_signal.take();
+
+                                self.current_module_param_to_port = Some(ctx.param_to_port.clone());
+                                self.current_module_var_to_signal = Some(ctx.var_to_signal.clone());
+
+                                trace!(
+                                    "[BUG #212 FIX] Entity StructLiteral '{}': Setting module context maps (param_to_port={} entries, var_to_signal={} entries)",
+                                    struct_lit.type_name,
+                                    ctx.param_to_port.len(),
+                                    ctx.var_to_signal.len()
+                                );
+
                                 // Delegate to convert_statement which properly handles entity instantiation
                                 // This will create the entity instance and set up placeholder mappings
                                 let temp_let = hir::HirLetStatement {
@@ -18379,6 +18648,11 @@ impl<'hir> HirToMir<'hir> {
                                     mutable: let_stmt.mutable,
                                 };
                                 let _ = self.convert_statement(&hir::HirStatement::Let(temp_let));
+
+                                // Restore previous module context maps
+                                self.current_module_param_to_port = saved_param_to_port;
+                                self.current_module_var_to_signal = saved_var_to_signal;
+
                                 // Skip normal processing - convert_statement handled it
                                 let_substitutions
                                     .insert(let_stmt.name.clone(), substituted_value.clone());
@@ -18800,6 +19074,30 @@ impl<'hir> HirToMir<'hir> {
     ///
     /// Returns the ModuleId which can be used to instantiate the module at call sites.
     fn synthesize_function_as_module(&mut self, func: &hir::HirFunction) -> ModuleId {
+        use std::io::Write;
+        let _ = writeln!(
+            std::io::stderr(),
+            "[SYNTH] Synthesizing function '{}' with {} statements",
+            func.name,
+            func.body.len()
+        );
+        for (i, stmt) in func.body.iter().enumerate() {
+            let _ = writeln!(
+                std::io::stderr(),
+                "[SYNTH]   stmt {}: {:?}",
+                i,
+                std::mem::discriminant(stmt)
+            );
+            // Check if it's a Return with or without value
+            if let hir::HirStatement::Return(opt_val) = stmt {
+                let _ = writeln!(
+                    std::io::stderr(),
+                    "[SYNTH]   stmt {} is Return, has_value={}",
+                    i,
+                    opt_val.is_some()
+                );
+            }
+        }
         trace!(
             "🏗️🏗️🏗️ SYNTHESIZE_FUNCTION_AS_MODULE: '{}' 🏗️🏗️🏗️",
             func.name
@@ -19010,6 +19308,15 @@ impl<'hir> HirToMir<'hir> {
         );
         for (i, stmt) in body.iter().enumerate() {
             trace!("   [{:02}] {:?}", i, std::mem::discriminant(stmt));
+            // Check if it's a Return with or without value (AFTER transform)
+            if let hir::HirStatement::Return(opt_val) = stmt {
+                let _ = writeln!(
+                    std::io::stderr(),
+                    "[SYNTH AFTER] stmt {} is Return, has_value={}",
+                    i,
+                    opt_val.is_some()
+                );
+            }
         }
 
         let mut let_bindings: Vec<hir::HirLetStatement> = Vec::new();
@@ -19034,6 +19341,18 @@ impl<'hir> HirToMir<'hir> {
                 }
                 hir::HirStatement::Return(Some(val)) => {
                     return_expr = Some(val.clone());
+                    eprintln!(
+                        "[DEBUG SYNTH] Found return expression: {:?} for function '{}'",
+                        std::mem::discriminant(val),
+                        ctx.func_name
+                    );
+                    if let hir::HirExpression::Match(m) = val {
+                        eprintln!(
+                            "[DEBUG SYNTH] Return is Match with {} arms, mux_style={:?}",
+                            m.arms.len(),
+                            m.mux_style
+                        );
+                    }
                     trace!(
                         "    • Found return expression: {:?}",
                         std::mem::discriminant(val)
@@ -19090,7 +19409,14 @@ impl<'hir> HirToMir<'hir> {
                         _ => {}
                     }
                 }
-                hir::HirStatement::Return(None) => {}
+                hir::HirStatement::Return(None) => {
+                    use std::io::Write;
+                    let _ = writeln!(
+                        std::io::stderr(),
+                        "[DEBUG SYNTH] Found Return(None) for function '{}' - no return value!",
+                        ctx.func_name
+                    );
+                }
                 hir::HirStatement::If(if_stmt) => {
                     // Check if this is an early return pattern (if condition { return ... })
                     if_return_statements.push(if_stmt);
@@ -19226,6 +19552,15 @@ impl<'hir> HirToMir<'hir> {
         );
 
         // Phase 3b: Convert let binding expressions to continuous assignments
+        {
+            use std::io::Write;
+            let _ = writeln!(
+                std::io::stderr(),
+                "[DEBUG PHASE3B] Converting {} let bindings to assignments for func '{}'",
+                let_bindings.len(),
+                func.name
+            );
+        }
         trace!(
             "  🔧 Phase 3b: Converting {} let bindings to assignments",
             let_bindings.len()
@@ -19246,6 +19581,15 @@ impl<'hir> HirToMir<'hir> {
             let signal_id = ctx.var_to_signal[&let_stmt.id];
 
             // Convert HIR expression to MIR using the module context
+            {
+                use std::io::Write;
+                let _ = writeln!(
+                    std::io::stderr(),
+                    "[DEBUG LET] Converting '{}' (expr={:?})",
+                    let_stmt.name,
+                    std::mem::discriminant(&let_stmt.value)
+                );
+            }
             match self.convert_hir_expr_for_module(&let_stmt.value, &ctx, 0) {
                 Some(converted_expr) => {
                     let assignment = ContinuousAssign {
@@ -19254,6 +19598,15 @@ impl<'hir> HirToMir<'hir> {
                         span: None,
                     };
                     module.assignments.push(assignment);
+                    {
+                        use std::io::Write;
+                        let _ = writeln!(
+                            std::io::stderr(),
+                            "[DEBUG LET] ✓ '{}' -> signal_id={}",
+                            let_stmt.name,
+                            signal_id.0
+                        );
+                    }
                     trace!(
                         "    ✓ Created assignment for '{}' (signal_id={})",
                         let_stmt.name,
@@ -19261,6 +19614,14 @@ impl<'hir> HirToMir<'hir> {
                     );
                 }
                 None => {
+                    {
+                        use std::io::Write;
+                        let _ = writeln!(
+                            std::io::stderr(),
+                            "[DEBUG LET] ❌ FAILED: '{}'",
+                            let_stmt.name
+                        );
+                    }
                     trace!(
                         "    ❌ Failed to convert expression for '{}' - using placeholder",
                         let_stmt.name
