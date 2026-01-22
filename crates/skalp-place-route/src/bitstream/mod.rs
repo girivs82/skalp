@@ -173,6 +173,39 @@ impl Bitstream {
         report
     }
 
+    /// Convert to ASCII representation (for debugging)
+    /// Note: This is a basic hex dump for binary formats, or the raw content for ASCII formats
+    pub fn to_ascii(&self) -> String {
+        match self.format {
+            BitstreamFormat::IceStormAscii
+            | BitstreamFormat::VtrBitstream
+            | BitstreamFormat::OpenFpgaBitstream => {
+                // Already ASCII-based, return as string
+                String::from_utf8_lossy(&self.data).to_string()
+            }
+            BitstreamFormat::IceStormBinary | BitstreamFormat::TrellisBinary => {
+                // Generate a hex dump for binary formats
+                let mut output = String::new();
+                output.push_str(&format!(
+                    ".comment SKALP P&R bitstream for {}\n",
+                    self.device
+                ));
+                output.push_str(&format!(".device {}\n\n", self.device));
+                output.push_str(".binary_dump\n");
+
+                for (i, chunk) in self.data.chunks(16).enumerate() {
+                    output.push_str(&format!("{:08x}: ", i * 16));
+                    for byte in chunk {
+                        output.push_str(&format!("{:02x} ", byte));
+                    }
+                    output.push('\n');
+                }
+
+                output
+            }
+        }
+    }
+
     /// Verify bitstream integrity
     pub fn verify(&self) -> Result<()> {
         match self.format {

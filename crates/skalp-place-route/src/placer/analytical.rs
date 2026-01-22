@@ -30,15 +30,14 @@ impl<'a, D: Device> AnalyticalPlacer<'a, D> {
             return Ok(PlacementResult::new());
         }
 
-        // Map cells to indices
+        // Map cells to indices using their position in the Vec (more reliable than cell.id)
+        // This handles cases where cell.id might not match the Vec index
         let cell_indices: HashMap<CellId, usize> = netlist
             .cells
             .iter()
             .enumerate()
             .map(|(i, cell)| (cell.id, i))
             .collect();
-
-        let index_to_cell: Vec<CellId> = netlist.cells.iter().map(|c| c.id).collect();
 
         // Build connectivity matrix (Laplacian)
         let mut laplacian = vec![vec![0.0f64; n]; n];
@@ -49,14 +48,18 @@ impl<'a, D: Device> AnalyticalPlacer<'a, D> {
         for net in &netlist.nets {
             let mut connected_cells: Vec<CellId> = Vec::new();
 
-            // Add driver
+            // Add driver (only if it exists in the cell list)
             if let Some(driver) = net.driver {
-                connected_cells.push(driver);
+                if cell_indices.contains_key(&driver) {
+                    connected_cells.push(driver);
+                }
             }
 
-            // Add fanout cells
+            // Add fanout cells (only if they exist in the cell list)
             for (cell_id, _) in &net.fanout {
-                connected_cells.push(*cell_id);
+                if cell_indices.contains_key(cell_id) {
+                    connected_cells.push(*cell_id);
+                }
             }
 
             // Skip nets with 0 or 1 connections
@@ -114,10 +117,8 @@ impl<'a, D: Device> AnalyticalPlacer<'a, D> {
         let mut result = PlacementResult::new();
         let mut used_locations: HashMap<(u32, u32, usize), bool> = HashMap::new();
 
-        for (idx, &cell_id) in index_to_cell.iter().enumerate() {
-            let cell = netlist.get_cell(cell_id).ok_or_else(|| {
-                PlaceRouteError::PlacementFailed(format!("Cell {:?} not found", cell_id))
-            })?;
+        for (idx, cell) in netlist.cells.iter().enumerate() {
+            let cell_id = cell.id;
             let bel_type = self.cell_to_bel_type(&cell.cell_type);
 
             // Get continuous position

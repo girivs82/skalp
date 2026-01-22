@@ -203,13 +203,43 @@ enum Commands {
         /// Source file
         source: PathBuf,
 
-        /// Target device (e.g., ice40-hx8k)
+        /// Target device (e.g., ice40-hx8k, ice40-hx1k, ice40-up5k)
         #[arg(short, long)]
         device: String,
 
         /// Full flow (place, route, bitstream)
         #[arg(short, long)]
         full_flow: bool,
+
+        /// Output directory
+        #[arg(short, long, default_value = "build")]
+        output: PathBuf,
+
+        /// P&R quality preset (fast, default, high_quality)
+        #[arg(long, default_value = "default")]
+        pnr_preset: String,
+    },
+
+    /// Run place and route on an existing gate-level netlist
+    Pnr {
+        /// Gate-level netlist file (JSON format from previous synthesis)
+        netlist: PathBuf,
+
+        /// Target device (e.g., ice40-hx8k, ice40-hx1k, ice40-up5k)
+        #[arg(short, long)]
+        device: String,
+
+        /// Output directory
+        #[arg(short, long, default_value = "build")]
+        output: PathBuf,
+
+        /// P&R quality preset (fast, default, high_quality)
+        #[arg(long, default_value = "default")]
+        preset: String,
+
+        /// Target frequency in MHz (for timing analysis)
+        #[arg(long)]
+        frequency: Option<f64>,
     },
 
     /// Program the FPGA device
@@ -571,8 +601,20 @@ fn main() -> Result<()> {
             source,
             device,
             full_flow,
+            output,
+            pnr_preset,
         } => {
-            synthesize_design(&source, &device, full_flow)?;
+            synthesize_design(&source, &device, full_flow, &output, &pnr_preset)?;
+        }
+
+        Commands::Pnr {
+            netlist,
+            device,
+            output,
+            preset,
+            frequency,
+        } => {
+            run_place_and_route(&netlist, &device, &output, &preset, frequency)?;
         }
 
         Commands::Program {
@@ -2156,16 +2198,255 @@ fn run_cpu_fault_sim(sir: &skalp_sim::sir::Sir, cycles: u64, max_faults: usize) 
     );
 }
 
-/// Synthesize design for FPGA/ASIC
-/// NOTE: This function is being migrated to use GateNetlist instead of legacy LIR
-fn synthesize_design(source: &PathBuf, device: &str, _full_flow: bool) -> Result<()> {
+/// Synthesize design for FPGA target
+fn synthesize_design(
+    source: &PathBuf,
+    device: &str,
+    full_flow: bool,
+    output_dir: &PathBuf,
+    pnr_preset: &str,
+) -> Result<()> {
+    use skalp_frontend::parse_and_build_hir_from_file;
+    use skalp_lir::{get_stdlib_library, lower_mir_module_to_lir, map_lir_to_gates_optimized};
+
     println!("🔧 Synthesizing design for device: {}", device);
+    println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
     println!("Source: {:?}", source);
+
+    // Parse device string (e.g., "ice40-hx8k" -> ("ice40", "hx8k"))
+    let (family, variant) = device.split_once('-').ok_or_else(|| {
+        anyhow::anyhow!(
+            "Invalid device format: '{}'. Expected format: family-variant (e.g., ice40-hx8k)",
+            device
+        )
+    })?;
+
+    // Determine library to use based on device family
+    let library_name = match family {
+        "ice40" => "ice40",
+        "xc7" | "xilinx" => "generic_asic", // Xilinx support pending
+        "sky130" => "sky130",
+        "freepdk45" => "freepdk45",
+        _ => anyhow::bail!(
+            "Unsupported device family: {}. Supported: ice40, sky130, freepdk45",
+            family
+        ),
+    };
+
+    // Load technology library
+    let library = get_stdlib_library(library_name)
+        .context(format!("Failed to load {} library", library_name))?;
+    println!("Library: {}", library_name);
+
+    // Parse and build HIR
+    let hir = parse_and_build_hir_from_file(source).context("Failed to parse source")?;
+
+    // Lower to MIR
+    let compiler =
+        skalp_mir::MirCompiler::new().with_optimization_level(skalp_mir::OptimizationLevel::None);
+    let mir = compiler
+        .compile_to_mir(&hir)
+        .map_err(|e| anyhow::anyhow!("MIR compilation failed: {}", e))?;
+
+    // Get top module
+    let top_module = mir
+        .modules
+        .first()
+        .ok_or_else(|| anyhow::anyhow!("No modules found in design"))?;
+    println!("Module: {}", top_module.name);
+
+    // Lower to LIR
+    let lir_result = lower_mir_module_to_lir(top_module);
+
+    // Technology mapping
+    let tech_result = map_lir_to_gates_optimized(&lir_result.lir, &library);
+    let gate_netlist = tech_result.netlist;
+    println!("Cells: {}", gate_netlist.cells.len());
+    println!("Nets: {}", gate_netlist.nets.len());
+
+    // Create output directory
+    fs::create_dir_all(output_dir)?;
+
+    // Save gate-level netlist as JSON
+    let netlist_path = output_dir.join("design_gates.json");
+    let netlist_json = serde_json::to_string_pretty(&gate_netlist)?;
+    fs::write(&netlist_path, &netlist_json)?;
+    println!("Gate netlist: {:?}", netlist_path);
+
+    // Save Verilog
+    let verilog_path = output_dir.join("design_gates.v");
+    fs::write(&verilog_path, gate_netlist.to_verilog())?;
+    println!("Verilog: {:?}", verilog_path);
+
+    // Run place and route if full_flow is enabled
+    if full_flow && family == "ice40" {
+        println!();
+        println!("🔧 Running Place & Route...");
+        run_pnr_on_netlist(&gate_netlist, variant, output_dir, pnr_preset, None)?;
+    } else if full_flow {
+        println!();
+        println!("⚠️  Place & route only supported for iCE40 devices currently");
+    }
+
     println!();
-    println!("⚠️  Synthesis is being migrated to use GateNetlist.");
-    println!("   The new flow: HIR → MIR → WordLir → TechMapper → GateNetlist → Backend");
-    println!("   Supported devices: ice40-hx1k, ice40-hx8k, xc7a35t, sky130, freepdk45");
-    anyhow::bail!("FPGA/ASIC synthesis temporarily disabled during GateNetlist migration");
+    println!("✅ Synthesis complete");
+    Ok(())
+}
+
+/// Run place and route on an existing gate-level netlist
+fn run_place_and_route(
+    netlist_path: &PathBuf,
+    device: &str,
+    output_dir: &PathBuf,
+    preset: &str,
+    frequency: Option<f64>,
+) -> Result<()> {
+    println!("🔧 Place & Route");
+    println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    println!("Netlist: {:?}", netlist_path);
+    println!("Device: {}", device);
+
+    // Parse device string
+    let (family, variant) = device.split_once('-').ok_or_else(|| {
+        anyhow::anyhow!(
+            "Invalid device format: '{}'. Expected: family-variant (e.g., ice40-hx8k)",
+            device
+        )
+    })?;
+
+    if family != "ice40" {
+        anyhow::bail!(
+            "Place & route only supports iCE40 devices currently. Got: {}",
+            family
+        );
+    }
+
+    // Load netlist from JSON
+    let netlist_json = fs::read_to_string(netlist_path)?;
+    let gate_netlist: skalp_lir::gate_netlist::GateNetlist =
+        serde_json::from_str(&netlist_json).context("Failed to parse gate-level netlist JSON")?;
+
+    println!("Design: {}", gate_netlist.name);
+    println!("Cells: {}", gate_netlist.cells.len());
+    println!("Nets: {}", gate_netlist.nets.len());
+
+    // Create output directory
+    fs::create_dir_all(output_dir)?;
+
+    // Run P&R
+    run_pnr_on_netlist(&gate_netlist, variant, output_dir, preset, frequency)?;
+
+    println!();
+    println!("✅ Place & route complete");
+    Ok(())
+}
+
+/// Internal function to run P&R on a GateNetlist
+fn run_pnr_on_netlist(
+    gate_netlist: &skalp_lir::gate_netlist::GateNetlist,
+    variant: &str,
+    output_dir: &std::path::Path,
+    preset: &str,
+    frequency: Option<f64>,
+) -> Result<()> {
+    use skalp_place_route::{place_and_route, Ice40Variant, PnrConfig, TimingConfig};
+
+    // Parse iCE40 variant
+    let ice40_variant = match variant.to_lowercase().as_str() {
+        "hx1k" => Ice40Variant::Hx1k,
+        "hx4k" => Ice40Variant::Hx4k,
+        "hx8k" => Ice40Variant::Hx8k,
+        "lp1k" => Ice40Variant::Lp1k,
+        "lp4k" => Ice40Variant::Lp4k,
+        "lp8k" => Ice40Variant::Lp8k,
+        "up5k" => Ice40Variant::Up5k,
+        _ => anyhow::bail!(
+            "Unknown iCE40 variant: {}. Supported: hx1k, hx4k, hx8k, lp1k, lp4k, lp8k, up5k",
+            variant
+        ),
+    };
+
+    // Select P&R preset
+    let mut config = match preset.to_lowercase().as_str() {
+        "fast" => PnrConfig::fast(),
+        "default" => PnrConfig::default(),
+        "high_quality" | "high-quality" => PnrConfig::high_quality(),
+        _ => {
+            println!("⚠️  Unknown preset '{}', using default", preset);
+            PnrConfig::default()
+        }
+    };
+
+    // Apply target frequency if specified
+    if let Some(freq) = frequency {
+        config.timing = Some(TimingConfig {
+            target_frequency: freq,
+            ..TimingConfig::default()
+        });
+    }
+
+    println!("Variant: {:?}", ice40_variant);
+    println!("Preset: {}", preset);
+    if let Some(ref timing) = config.timing {
+        println!("Target freq: {} MHz", timing.target_frequency);
+    }
+
+    // Run place and route
+    println!();
+    println!("Running placement...");
+    let result = place_and_route(gate_netlist, ice40_variant, config)?;
+
+    // Report results
+    println!("Placement:");
+    println!("  Cells placed: {}", result.placement.placements.len());
+
+    println!("Routing:");
+    println!("  Nets routed: {}", result.routing.routes.len());
+    println!("  Total wirelength: {}", result.routing.wirelength);
+    println!("  Congestion: {:.2}", result.routing.congestion);
+    if result.routing.success {
+        println!("  Status: ✅ Success");
+    } else {
+        println!("  Status: ⚠️ Incomplete (some nets unrouted)");
+    }
+
+    // Report timing if available
+    if let Some(ref timing) = result.timing {
+        println!("Timing:");
+        println!("  Target: {} MHz", timing.target_frequency);
+        println!("  Achieved: {:.2} MHz", timing.design_frequency);
+        if timing.meets_timing {
+            println!("  Status: ✅ Timing met");
+        } else {
+            println!("  Status: ⚠️ {} failing paths", timing.failing_paths);
+            println!("  Worst slack: {:.2} ns", -timing.worst_negative_slack);
+        }
+    }
+
+    // Write bitstream
+    let bin_path = output_dir.join("design.bin");
+    result.bitstream.write_to_file(&bin_path)?;
+    println!();
+    println!(
+        "Bitstream: {:?} ({} bytes)",
+        bin_path,
+        result.bitstream.data.len()
+    );
+
+    // Also write ASCII format for debugging
+    let asc_path = output_dir.join("design.asc");
+    fs::write(&asc_path, result.bitstream.to_ascii())?;
+    println!("ASCII: {:?}", asc_path);
+
+    // Write timing report if available
+    if let Some(ref timing) = result.timing {
+        let timing_path = output_dir.join("timing_report.json");
+        let timing_json = serde_json::to_string_pretty(timing)?;
+        fs::write(&timing_path, timing_json)?;
+        println!("Timing report: {:?}", timing_path);
+    }
+
+    Ok(())
 }
 
 /// Program FPGA device

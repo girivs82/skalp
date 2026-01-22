@@ -244,14 +244,17 @@ impl<'a, D: Device> PathFinder<'a, D> {
         let net = &netlist.nets[net_id.0 as usize];
         let mut route = Route::new(net_id);
 
-        // Get source location
-        let driver_id = net.driver.ok_or_else(|| {
-            PlaceRouteError::RoutingFailed(format!("Net {:?} has no driver", net_id))
-        })?;
+        // Get source location - skip if driver not found
+        let driver_id = match net.driver {
+            Some(id) => id,
+            None => return Ok(route), // No driver, return empty route
+        };
 
-        let source_loc = placement.get(driver_id).ok_or_else(|| {
-            PlaceRouteError::RoutingFailed(format!("Driver {:?} not placed", driver_id))
-        })?;
+        // Skip nets where driver isn't placed (may be I/O or removed cell)
+        let source_loc = match placement.get(driver_id) {
+            Some(loc) => loc,
+            None => return Ok(route), // Driver not placed, skip this net
+        };
 
         // Get source wire
         let source_wires = self.device.tile_wires(source_loc.tile_x, source_loc.tile_y);
@@ -318,14 +321,17 @@ impl<'a, D: Device> PathFinder<'a, D> {
         let net = &netlist.nets[net_id.0 as usize];
         let mut route = Route::new(net_id);
 
-        // Get source location
-        let driver_id = net.driver.ok_or_else(|| {
-            PlaceRouteError::RoutingFailed(format!("Net {:?} has no driver", net_id))
-        })?;
+        // Get source location - skip if driver not found
+        let driver_id = match net.driver {
+            Some(id) => id,
+            None => return Ok(route), // No driver, return empty route
+        };
 
-        let source_loc = placement.get(driver_id).ok_or_else(|| {
-            PlaceRouteError::RoutingFailed(format!("Driver {:?} not placed", driver_id))
-        })?;
+        // Skip nets where driver isn't placed (may be I/O or removed cell)
+        let source_loc = match placement.get(driver_id) {
+            Some(loc) => loc,
+            None => return Ok(route), // Driver not placed, skip this net
+        };
 
         // Get source wire
         let source_wires = self.device.tile_wires(source_loc.tile_x, source_loc.tile_y);
