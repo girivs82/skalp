@@ -1049,4 +1049,131 @@ mod tests {
 
         assert!(result.routing.success, "Routing should succeed");
     }
+
+    #[test]
+    fn test_io_pin_constraints() {
+        use crate::placer::IoConstraints;
+
+        // Create a design with I/O cells
+        let mut netlist = GateNetlist::new("io_test".to_string(), "ice40".to_string());
+
+        // Clock input
+        let clock_net = netlist.add_net({
+            let mut net =
+                GateNet::new_input(skalp_lir::gate_netlist::GateNetId(0), "clk".to_string());
+            net.is_clock = true;
+            net
+        });
+
+        // Data input
+        let data_in = netlist.add_net(GateNet::new_input(
+            skalp_lir::gate_netlist::GateNetId(1),
+            "data_in".to_string(),
+        ));
+
+        // Data output
+        let data_out = netlist.add_net(GateNet::new_output(
+            skalp_lir::gate_netlist::GateNetId(2),
+            "data_out".to_string(),
+        ));
+
+        // Create I/O cells
+        let io_clk = Cell::new_comb(
+            skalp_lir::gate_netlist::CellId(0),
+            "SB_IO".to_string(),
+            "ice40".to_string(),
+            0.0,
+            "io.clk".to_string(),
+            vec![],
+            vec![clock_net],
+        );
+        netlist.add_cell(io_clk);
+
+        let io_data_in = Cell::new_comb(
+            skalp_lir::gate_netlist::CellId(1),
+            "SB_IO".to_string(),
+            "ice40".to_string(),
+            0.0,
+            "io.data_in".to_string(),
+            vec![],
+            vec![data_in],
+        );
+        netlist.add_cell(io_data_in);
+
+        let io_data_out = Cell::new_comb(
+            skalp_lir::gate_netlist::CellId(2),
+            "SB_IO".to_string(),
+            "ice40".to_string(),
+            0.0,
+            "io.data_out".to_string(),
+            vec![data_in],
+            vec![data_out],
+        );
+        netlist.add_cell(io_data_out);
+
+        // Create I/O constraints
+        let mut io_constraints = IoConstraints::for_package("ct256");
+        io_constraints.set_pin("clk", "J3");
+        io_constraints.set_pin("data_in", "H16");
+        io_constraints.set_pin("data_out", "J14");
+
+        // Configure P&R with constraints
+        let mut config = PnrConfig::fast();
+        config.placer.io_constraints = io_constraints;
+
+        // Run P&R
+        let result = place_and_route(&netlist, Ice40Variant::Hx8k, config).unwrap();
+
+        println!("\n=== I/O Pin Constraints Test ===");
+        println!("Cells placed: {}", result.placement.placements.len());
+
+        // Verify placements
+        for (cell_id, loc) in &result.placement.placements {
+            if let Some(cell) = netlist.get_cell(*cell_id) {
+                if cell.cell_type.contains("IO") {
+                    println!(
+                        "  {} ({:?}): tile ({}, {}), bel {}",
+                        cell.path, loc.bel_type, loc.tile_x, loc.tile_y, loc.bel_index
+                    );
+                }
+            }
+        }
+
+        // The test verifies that I/O constraints are applied without errors
+        // Specific pin locations depend on the package database
+        assert!(
+            result.placement.placements.len() >= 3,
+            "Should place all cells"
+        );
+    }
+
+    #[test]
+    fn test_pcf_constraint_parsing() {
+        use crate::placer::IoConstraints;
+
+        let pcf_content = r#"
+# Pin constraints for test design
+set_io clk J3
+set_io led[0] B5
+set_io led[1] B4
+set_io btn A6
+"#;
+
+        let constraints = IoConstraints::from_pcf(pcf_content).unwrap();
+
+        assert_eq!(constraints.len(), 4);
+        assert!(constraints.has_constraint("clk"));
+        assert!(constraints.has_constraint("led[0]"));
+        assert!(constraints.has_constraint("led[1]"));
+        assert!(constraints.has_constraint("btn"));
+
+        // Verify pin mappings
+        assert_eq!(constraints.get("clk").unwrap().pin_name, "J3");
+        assert_eq!(constraints.get("led[0]").unwrap().pin_name, "B5");
+
+        // Test PCF generation
+        let generated_pcf = constraints.to_pcf();
+        assert!(generated_pcf.contains("set_io"));
+        println!("\n=== Generated PCF ===\n{}", generated_pcf);
+    }
 }

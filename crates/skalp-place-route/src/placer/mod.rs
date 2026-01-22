@@ -4,13 +4,16 @@
 //! - Analytical placement using quadratic wirelength minimization
 //! - Legalization to valid BEL sites
 //! - Simulated annealing refinement
+//! - I/O pin constraints
 
 mod analytical;
 mod annealing;
+mod constraints;
 mod legalization;
 
 pub use analytical::AnalyticalPlacer;
 pub use annealing::SimulatedAnnealing;
+pub use constraints::{IoConstraints, PinConstraint, PullType};
 pub use legalization::Legalizer;
 
 use crate::device::{BelType, Device, TileType};
@@ -58,6 +61,8 @@ pub struct PlacerConfig {
     pub congestion_weight: f64,
     /// Random seed for reproducibility
     pub seed: u64,
+    /// I/O pin constraints
+    pub io_constraints: IoConstraints,
 }
 
 impl Default for PlacerConfig {
@@ -71,6 +76,7 @@ impl Default for PlacerConfig {
             wirelength_weight: 0.4,
             congestion_weight: 0.1,
             seed: 42,
+            io_constraints: IoConstraints::new(),
         }
     }
 }
@@ -178,6 +184,14 @@ impl<D: Device + Clone> Placer<D> {
         // Check device capacity
         self.check_capacity(netlist)?;
 
+        // Validate and resolve I/O constraints
+        let resolved_constraints = if !self.config.io_constraints.is_empty() {
+            self.config.io_constraints.validate(&self.device)?;
+            self.config.io_constraints.resolve(&self.device)?
+        } else {
+            HashMap::new()
+        };
+
         // Run placement algorithm
         let mut result = match self.config.algorithm {
             PlacementAlgorithm::Random => self.random_placement(netlist)?,
@@ -252,6 +266,11 @@ impl<D: Device + Clone> Placer<D> {
             }
         };
 
+        // Apply I/O constraints - override placements for constrained I/O cells
+        if !resolved_constraints.is_empty() {
+            self.apply_io_constraints(&mut result, netlist, &resolved_constraints)?;
+        }
+
         // Calculate final metrics
         result.wirelength = self.calculate_wirelength(&result, netlist);
         result.utilization = self.calculate_utilization(&result);
@@ -311,6 +330,69 @@ impl<D: Device + Clone> Placer<D> {
                 required: required_brams,
                 available: stats.total_brams,
             });
+        }
+
+        Ok(())
+    }
+
+    /// Apply I/O constraints to placement result
+    fn apply_io_constraints(
+        &self,
+        result: &mut PlacementResult,
+        netlist: &GateNetlist,
+        resolved_constraints: &HashMap<String, (u32, u32, usize)>,
+    ) -> Result<()> {
+        // Build a map from signal name to cell ID
+        // For I/O cells, the path typically contains the port name
+        let mut signal_to_cell: HashMap<&str, CellId> = HashMap::new();
+
+        for cell in &netlist.cells {
+            // Check if this is an I/O cell
+            if cell.cell_type.contains("IO") || cell.cell_type.starts_with("SB_IO") {
+                // Extract signal name from path (e.g., "top.clk" -> "clk")
+                let signal_name = cell.path.split('.').next_back().unwrap_or(&cell.path);
+                signal_to_cell.insert(signal_name, cell.id);
+
+                // Also try the full path
+                signal_to_cell.insert(&cell.path, cell.id);
+            }
+        }
+
+        // Apply each constraint
+        for (signal_name, &(tile_x, tile_y, bel_index)) in resolved_constraints {
+            // Find the cell for this signal
+            let cell_id = if let Some(&id) = signal_to_cell.get(signal_name.as_str()) {
+                id
+            } else {
+                // Try matching by port name suffix
+                let mut found = None;
+                for (name, &id) in &signal_to_cell {
+                    if name.ends_with(signal_name) || signal_name.ends_with(name) {
+                        found = Some(id);
+                        break;
+                    }
+                }
+                match found {
+                    Some(id) => id,
+                    None => {
+                        // Signal not found - this is a warning, not an error
+                        // The signal might not exist in the design
+                        continue;
+                    }
+                }
+            };
+
+            // Update the placement
+            let bel_type = if let Some(existing) = result.placements.get(&cell_id) {
+                existing.bel_type
+            } else {
+                BelType::IoCell
+            };
+
+            result.placements.insert(
+                cell_id,
+                PlacementLoc::new(tile_x, tile_y, bel_index, bel_type),
+            );
         }
 
         Ok(())

@@ -248,9 +248,9 @@ impl<D: Device + Clone> Router<D> {
 
         // Merge PathFinder results (only for non-global/carry nets)
         for (net_id, route) in pathfinder_result.routes {
-            if !result.routes.contains_key(&net_id) {
+            if let std::collections::hash_map::Entry::Vacant(e) = result.routes.entry(net_id) {
                 result.wirelength += route.wires.len() as u64;
-                result.routes.insert(net_id, route);
+                e.insert(route);
             }
         }
 

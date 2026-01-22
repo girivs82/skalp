@@ -68,7 +68,10 @@ pub use device::{
     TileType, Wire, WireId, WireType,
 };
 pub use error::{PlaceRouteError, Result};
-pub use placer::{PlacementAlgorithm, PlacementLoc, PlacementResult, Placer, PlacerConfig};
+pub use placer::{
+    IoConstraints, PinConstraint, PlacementAlgorithm, PlacementLoc, PlacementResult, Placer,
+    PlacerConfig, PullType,
+};
 pub use pnr::{
     place_and_route, place_and_route_hx1k, place_and_route_hx8k, place_and_route_up5k, PnrConfig,
     PnrResult,
