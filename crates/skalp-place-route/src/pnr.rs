@@ -344,6 +344,53 @@ mod tests {
     }
 
     #[test]
+    fn test_bel_pin_wires() {
+        use crate::device::ice40::Ice40Device;
+
+        let device = Ice40Device::new(Ice40Variant::Hx1k);
+
+        println!("\n=== BEL Pin Wire Mapping Test ===");
+        println!("Total BEL pin wires: {}", device.bel_wire_count());
+
+        // Test logic tile at (6, 9) - a typical logic tile
+        let tile_x = 6;
+        let tile_y = 9;
+
+        // Check LUT output wires
+        for lc_idx in 0..8 {
+            if let Some(wire_id) = device.lut_output_wire(tile_x, tile_y, lc_idx) {
+                println!("  LC{} output wire: {:?}", lc_idx, wire_id);
+            }
+        }
+
+        // Check LUT input wires for LC0
+        for input_idx in 0..4 {
+            if let Some(wire_id) = device.lut_input_wire(tile_x, tile_y, 0, input_idx) {
+                println!("  LC0 input {} wire: {:?}", input_idx, wire_id);
+            }
+        }
+
+        // Check clock wire
+        if let Some(wire_id) = device.clock_wire(tile_x, tile_y) {
+            println!("  Clock wire: {:?}", wire_id);
+        }
+
+        // Verify we have BEL pin wires
+        assert!(
+            device.bel_wire_count() > 1000,
+            "Should have many BEL pin wires from chipdb"
+        );
+
+        // Verify LUT output wires exist
+        let lut_out = device.lut_output_wire(tile_x, tile_y, 0);
+        assert!(lut_out.is_some(), "Should find lutff_0/out wire");
+
+        // Verify LUT input wires exist
+        let lut_in = device.lut_input_wire(tile_x, tile_y, 0, 0);
+        assert!(lut_in.is_some(), "Should find lutff_0/in_0 wire");
+    }
+
+    #[test]
     fn test_bitstream_routing_bits() {
         // Create a counter netlist that will have routing
         let mut netlist = GateNetlist::new("counter".to_string(), "ice40".to_string());

@@ -263,6 +263,42 @@ pub trait Device: Send + Sync {
 
     /// Check if a cell type can be placed on a BEL type
     fn can_place(&self, cell_type: &str, bel_type: BelType) -> bool;
+
+    // BEL pin wire methods (optional, for proper routing endpoints)
+
+    /// Get wire ID for a LUT output pin
+    /// lc_idx is 0-7 for the 8 logic cells in a tile
+    fn lut_output_wire(&self, _tile_x: u32, _tile_y: u32, _lc_idx: usize) -> Option<WireId> {
+        None
+    }
+
+    /// Get wire ID for a LUT input pin
+    /// lc_idx is 0-7, input_idx is 0-3 for the 4 inputs
+    fn lut_input_wire(
+        &self,
+        _tile_x: u32,
+        _tile_y: u32,
+        _lc_idx: usize,
+        _input_idx: usize,
+    ) -> Option<WireId> {
+        None
+    }
+
+    /// Get wire ID for the global clock signal in a logic tile
+    fn clock_wire(&self, _tile_x: u32, _tile_y: u32) -> Option<WireId> {
+        None
+    }
+
+    /// Get wire ID for I/O data output
+    /// iob_idx is 0 or 1 for the two I/O blocks in an I/O tile
+    fn io_output_wire(&self, _tile_x: u32, _tile_y: u32, _iob_idx: usize) -> Option<WireId> {
+        None
+    }
+
+    /// Get wire ID for I/O data input (signal coming from pad into fabric)
+    fn io_input_wire(&self, _tile_x: u32, _tile_y: u32, _iob_idx: usize) -> Option<WireId> {
+        None
+    }
 }
 
 /// Tile trait

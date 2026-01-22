@@ -41,6 +41,9 @@ pub struct ChipDb {
     pub tile_dimensions: HashMap<TileType, TileBitDimensions>,
     /// LC bit mappings (for logic tiles)
     pub lc_mappings: Vec<LcBitMapping>,
+    /// BEL pin to wire mapping: (tile_x, tile_y, pin_name) -> wire_id
+    /// Pin names are like "lutff_0/out", "lutff_0/in_0", "io_0/D_OUT_0", etc.
+    pub bel_wires: HashMap<(u32, u32, String), u32>,
 }
 
 /// Wire information
@@ -164,6 +167,7 @@ impl ChipDb {
             gbufin: Vec::new(),
             tile_dimensions: HashMap::new(),
             lc_mappings: Vec::new(),
+            bel_wires: HashMap::new(),
         };
 
         let mut current_section = Section::None;
@@ -494,6 +498,22 @@ impl ChipDb {
             }
         }
 
+        // Build BEL pin to wire mapping from wire segments
+        // This maps (tile_x, tile_y, pin_name) -> wire_id for quick lookup
+        for (wire_id, wire_info) in &chipdb.wires {
+            for (tile_x, tile_y, segment_name) in &wire_info.segments {
+                // Only index BEL pin wires (lutff_*, io_*, lutff_global/*)
+                if segment_name.starts_with("lutff_")
+                    || segment_name.starts_with("io_")
+                    || segment_name.starts_with("ram/")
+                {
+                    chipdb
+                        .bel_wires
+                        .insert((*tile_x, *tile_y, segment_name.clone()), *wire_id);
+                }
+            }
+        }
+
         Ok(chipdb)
     }
 
@@ -506,6 +526,52 @@ impl ChipDb {
             Ice40Variant::Up5k => include_str!("chipdb/chipdb-5k.txt"),
         };
         Self::parse(content)
+    }
+
+    /// Get wire ID for a BEL pin at a specific tile location
+    /// Pin names are like "lutff_0/out", "lutff_0/in_0", "io_0/D_OUT_0", etc.
+    pub fn bel_pin_wire(&self, tile_x: u32, tile_y: u32, pin_name: &str) -> Option<u32> {
+        self.bel_wires
+            .get(&(tile_x, tile_y, pin_name.to_string()))
+            .copied()
+    }
+
+    /// Get wire ID for a LUT output pin
+    /// lc_idx is 0-7 for the 8 logic cells in a tile
+    pub fn lut_output_wire(&self, tile_x: u32, tile_y: u32, lc_idx: usize) -> Option<u32> {
+        let pin_name = format!("lutff_{}/out", lc_idx);
+        self.bel_pin_wire(tile_x, tile_y, &pin_name)
+    }
+
+    /// Get wire ID for a LUT input pin
+    /// lc_idx is 0-7, input_idx is 0-3 for the 4 inputs
+    pub fn lut_input_wire(
+        &self,
+        tile_x: u32,
+        tile_y: u32,
+        lc_idx: usize,
+        input_idx: usize,
+    ) -> Option<u32> {
+        let pin_name = format!("lutff_{}/in_{}", lc_idx, input_idx);
+        self.bel_pin_wire(tile_x, tile_y, &pin_name)
+    }
+
+    /// Get wire ID for the global clock signal in a logic tile
+    pub fn clock_wire(&self, tile_x: u32, tile_y: u32) -> Option<u32> {
+        self.bel_pin_wire(tile_x, tile_y, "lutff_global/clk")
+    }
+
+    /// Get wire ID for I/O data output
+    /// iob_idx is 0 or 1 for the two I/O blocks in an I/O tile
+    pub fn io_output_wire(&self, tile_x: u32, tile_y: u32, iob_idx: usize) -> Option<u32> {
+        let pin_name = format!("io_{}/D_OUT_0", iob_idx);
+        self.bel_pin_wire(tile_x, tile_y, &pin_name)
+    }
+
+    /// Get wire ID for I/O data input
+    pub fn io_input_wire(&self, tile_x: u32, tile_y: u32, iob_idx: usize) -> Option<u32> {
+        let pin_name = format!("io_{}/D_IN_0", iob_idx);
+        self.bel_pin_wire(tile_x, tile_y, &pin_name)
     }
 
     /// Build wires for the device

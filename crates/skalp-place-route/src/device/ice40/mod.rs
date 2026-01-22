@@ -115,6 +115,8 @@ pub struct Ice40Device {
     wire_src_pips: HashMap<WireId, Vec<PipId>>,
     /// Tile to wire mapping
     tile_wires: HashMap<(u32, u32), Vec<WireId>>,
+    /// BEL pin to wire mapping: (tile_x, tile_y, pin_name) -> wire_id
+    bel_wires: HashMap<(u32, u32, String), WireId>,
     /// Package pin mappings
     packages: HashMap<String, PackagePins>,
     /// Routing architecture
@@ -146,6 +148,13 @@ impl Ice40Device {
 
         let grid_size = (chipdb.width, chipdb.height);
 
+        // Convert bel_wires from chipdb (u32) to WireId
+        let bel_wires: HashMap<(u32, u32, String), WireId> = chipdb
+            .bel_wires
+            .iter()
+            .map(|(k, v)| (k.clone(), WireId(*v)))
+            .collect();
+
         let mut device = Self {
             variant,
             grid_size,
@@ -156,6 +165,7 @@ impl Ice40Device {
             wire_to_pips: HashMap::new(),
             wire_src_pips: HashMap::new(),
             tile_wires: HashMap::new(),
+            bel_wires,
             packages: HashMap::new(),
             routing: Self::default_routing(),
             clock_resources: Self::default_clock_resources(),
@@ -286,6 +296,7 @@ impl Ice40Device {
             wire_to_pips: HashMap::new(),
             wire_src_pips: HashMap::new(),
             tile_wires: HashMap::new(),
+            bel_wires: HashMap::new(),
             packages: HashMap::new(),
             routing: Self::default_routing(),
             clock_resources: Self::default_clock_resources(),
@@ -320,6 +331,58 @@ impl Ice40Device {
     /// Get the total number of PIPs in the device
     pub fn pip_count(&self) -> usize {
         self.pips.len()
+    }
+
+    /// Get wire ID for a BEL pin at a specific tile location
+    /// Pin names are like "lutff_0/out", "lutff_0/in_0", "io_0/D_OUT_0", etc.
+    pub fn bel_pin_wire(&self, tile_x: u32, tile_y: u32, pin_name: &str) -> Option<WireId> {
+        self.bel_wires
+            .get(&(tile_x, tile_y, pin_name.to_string()))
+            .copied()
+    }
+
+    /// Get wire ID for a LUT output pin
+    /// lc_idx is 0-7 for the 8 logic cells in a tile
+    pub fn lut_output_wire(&self, tile_x: u32, tile_y: u32, lc_idx: usize) -> Option<WireId> {
+        let pin_name = format!("lutff_{}/out", lc_idx);
+        self.bel_pin_wire(tile_x, tile_y, &pin_name)
+    }
+
+    /// Get wire ID for a LUT input pin
+    /// lc_idx is 0-7, input_idx is 0-3 for the 4 inputs
+    pub fn lut_input_wire(
+        &self,
+        tile_x: u32,
+        tile_y: u32,
+        lc_idx: usize,
+        input_idx: usize,
+    ) -> Option<WireId> {
+        let pin_name = format!("lutff_{}/in_{}", lc_idx, input_idx);
+        self.bel_pin_wire(tile_x, tile_y, &pin_name)
+    }
+
+    /// Get wire ID for the global clock signal in a logic tile
+    pub fn clock_wire(&self, tile_x: u32, tile_y: u32) -> Option<WireId> {
+        self.bel_pin_wire(tile_x, tile_y, "lutff_global/clk")
+    }
+
+    /// Get wire ID for I/O data output
+    /// iob_idx is 0 or 1 for the two I/O blocks in an I/O tile
+    pub fn io_output_wire(&self, tile_x: u32, tile_y: u32, iob_idx: usize) -> Option<WireId> {
+        let pin_name = format!("io_{}/D_OUT_0", iob_idx);
+        self.bel_pin_wire(tile_x, tile_y, &pin_name)
+    }
+
+    /// Get wire ID for I/O data input (signal coming from pad into fabric)
+    /// iob_idx is 0 or 1 for the two I/O blocks in an I/O tile
+    pub fn io_input_wire(&self, tile_x: u32, tile_y: u32, iob_idx: usize) -> Option<WireId> {
+        let pin_name = format!("io_{}/D_IN_0", iob_idx);
+        self.bel_pin_wire(tile_x, tile_y, &pin_name)
+    }
+
+    /// Get the number of BEL pin wires mapped
+    pub fn bel_wire_count(&self) -> usize {
+        self.bel_wires.len()
     }
 
     /// Default routing architecture for iCE40
@@ -1199,6 +1262,34 @@ impl Device for Ice40Device {
             BelType::GlobalBuf => cell_type == "SB_GB" || cell_type.contains("GBUF"),
             _ => false,
         }
+    }
+
+    // BEL pin wire overrides using real chipdb data
+
+    fn lut_output_wire(&self, tile_x: u32, tile_y: u32, lc_idx: usize) -> Option<WireId> {
+        Ice40Device::lut_output_wire(self, tile_x, tile_y, lc_idx)
+    }
+
+    fn lut_input_wire(
+        &self,
+        tile_x: u32,
+        tile_y: u32,
+        lc_idx: usize,
+        input_idx: usize,
+    ) -> Option<WireId> {
+        Ice40Device::lut_input_wire(self, tile_x, tile_y, lc_idx, input_idx)
+    }
+
+    fn clock_wire(&self, tile_x: u32, tile_y: u32) -> Option<WireId> {
+        Ice40Device::clock_wire(self, tile_x, tile_y)
+    }
+
+    fn io_output_wire(&self, tile_x: u32, tile_y: u32, iob_idx: usize) -> Option<WireId> {
+        Ice40Device::io_output_wire(self, tile_x, tile_y, iob_idx)
+    }
+
+    fn io_input_wire(&self, tile_x: u32, tile_y: u32, iob_idx: usize) -> Option<WireId> {
+        Ice40Device::io_input_wire(self, tile_x, tile_y, iob_idx)
     }
 }
 

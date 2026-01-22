@@ -9,10 +9,10 @@
 
 use super::astar::AStarRouter;
 use super::{Route, RoutingResult};
-use crate::device::{Device, WireId};
+use crate::device::{BelType, Device, WireId};
 use crate::error::{PlaceRouteError, Result};
-use crate::placer::PlacementResult;
-use skalp_lir::gate_netlist::{GateNetId, GateNetlist};
+use crate::placer::{PlacementLoc, PlacementResult};
+use skalp_lir::gate_netlist::{CellId, GateNetId, GateNetlist};
 use std::collections::{HashMap, HashSet};
 
 /// Wire congestion tracking
@@ -355,13 +355,12 @@ impl<'a, D: Device> PathFinder<'a, D> {
             None => return Ok(route), // Driver not placed, skip this net
         };
 
-        // Get source wire - select based on BEL index to avoid wire conflicts
-        let source_wires = self.device.tile_wires(source_loc.tile_x, source_loc.tile_y);
+        // Get source wire using proper BEL pin lookup
         let source_wire = self
-            .select_bel_wire(&source_wires, source_loc.bel_index)
+            .get_source_wire(driver_id, source_loc, netlist)
             .ok_or_else(|| {
                 PlaceRouteError::RoutingFailed(format!(
-                    "No wires in tile ({}, {})",
+                    "No source wire for cell at ({}, {})",
                     source_loc.tile_x, source_loc.tile_y
                 ))
             })?;
@@ -381,14 +380,14 @@ impl<'a, D: Device> PathFinder<'a, D> {
             .collect();
 
         // Route to each sink
-        for (sink_id, _pin) in &net.fanout {
+        for (sink_id, pin_idx) in &net.fanout {
             let sink_loc = match placement.get(*sink_id) {
                 Some(loc) => loc,
                 None => continue,
             };
 
-            let sink_wires = self.device.tile_wires(sink_loc.tile_x, sink_loc.tile_y);
-            let sink_wire = match self.select_bel_wire(&sink_wires, sink_loc.bel_index) {
+            // Get sink wire using proper BEL pin lookup
+            let sink_wire = match self.get_sink_wire(*sink_id, sink_loc, *pin_idx, netlist) {
                 Some(w) => w,
                 None => continue,
             };
@@ -415,6 +414,114 @@ impl<'a, D: Device> PathFinder<'a, D> {
         }
 
         Ok(route)
+    }
+
+    /// Get the output wire for a cell (source of a net)
+    fn get_source_wire(
+        &self,
+        cell_id: CellId,
+        loc: &PlacementLoc,
+        netlist: &GateNetlist,
+    ) -> Option<WireId> {
+        // Convert BEL index to LC index
+        let lc_idx = if loc.bel_index >= 16 {
+            7 // Carry uses LC7
+        } else {
+            loc.bel_index / 2
+        };
+
+        // Get cell type to determine which wire to use
+        let cell = netlist.cells.iter().find(|c| c.id == cell_id)?;
+
+        match loc.bel_type {
+            BelType::Lut4 => {
+                // LUT output wire
+                self.device
+                    .lut_output_wire(loc.tile_x, loc.tile_y, lc_idx)
+                    .or_else(|| self.fallback_source_wire(loc, lc_idx))
+            }
+            BelType::Dff | BelType::DffE | BelType::DffSr | BelType::DffSrE => {
+                // DFF output is same as LUT output (shared in iCE40)
+                self.device
+                    .lut_output_wire(loc.tile_x, loc.tile_y, lc_idx)
+                    .or_else(|| self.fallback_source_wire(loc, lc_idx))
+            }
+            BelType::IoCell => {
+                // I/O input wire (data coming from pad into fabric)
+                let iob_idx = loc.bel_index % 2;
+                // Check if this is an input cell
+                if cell.cell_type.contains("INPUT") || cell.inputs.is_empty() {
+                    self.device
+                        .io_input_wire(loc.tile_x, loc.tile_y, iob_idx)
+                        .or_else(|| self.fallback_source_wire(loc, iob_idx))
+                } else {
+                    // Output cell - shouldn't be a source
+                    self.fallback_source_wire(loc, iob_idx)
+                }
+            }
+            _ => self.fallback_source_wire(loc, lc_idx),
+        }
+    }
+
+    /// Get the input wire for a cell (sink of a net)
+    fn get_sink_wire(
+        &self,
+        cell_id: CellId,
+        loc: &PlacementLoc,
+        pin_idx: usize,
+        netlist: &GateNetlist,
+    ) -> Option<WireId> {
+        // Convert BEL index to LC index
+        let lc_idx = if loc.bel_index >= 16 {
+            7 // Carry uses LC7
+        } else {
+            loc.bel_index / 2
+        };
+
+        // Get cell type to determine which wire to use
+        let cell = netlist.cells.iter().find(|c| c.id == cell_id)?;
+
+        match loc.bel_type {
+            BelType::Lut4 => {
+                // Use the pin index directly as LUT input index (0-3)
+                let input_idx = pin_idx.min(3);
+                self.device
+                    .lut_input_wire(loc.tile_x, loc.tile_y, lc_idx, input_idx)
+                    .or_else(|| self.fallback_sink_wire(loc, lc_idx))
+            }
+            BelType::Dff | BelType::DffE | BelType::DffSr | BelType::DffSrE => {
+                // DFF data input - uses same wire as LUT input 0 in iCE40
+                // (The DFF input comes from the LUT output in the same LC,
+                // but when driven externally it uses input 0)
+                self.device
+                    .lut_input_wire(loc.tile_x, loc.tile_y, lc_idx, 0)
+                    .or_else(|| self.fallback_sink_wire(loc, lc_idx))
+            }
+            BelType::IoCell => {
+                // I/O output wire (data going to pad from fabric)
+                let iob_idx = loc.bel_index % 2;
+                if cell.cell_type.contains("OUTPUT") || cell.outputs.is_empty() {
+                    self.device
+                        .io_output_wire(loc.tile_x, loc.tile_y, iob_idx)
+                        .or_else(|| self.fallback_sink_wire(loc, iob_idx))
+                } else {
+                    self.fallback_sink_wire(loc, iob_idx)
+                }
+            }
+            _ => self.fallback_sink_wire(loc, lc_idx),
+        }
+    }
+
+    /// Fallback to using tile wires when BEL pin wires aren't available
+    fn fallback_source_wire(&self, loc: &PlacementLoc, idx: usize) -> Option<WireId> {
+        let wires = self.device.tile_wires(loc.tile_x, loc.tile_y);
+        self.select_bel_wire(&wires, idx)
+    }
+
+    /// Fallback to using tile wires when BEL pin wires aren't available
+    fn fallback_sink_wire(&self, loc: &PlacementLoc, idx: usize) -> Option<WireId> {
+        let wires = self.device.tile_wires(loc.tile_x, loc.tile_y);
+        self.select_bel_wire(&wires, idx)
     }
 
     /// Select a wire for a specific BEL index
