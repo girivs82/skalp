@@ -428,6 +428,7 @@ fn insert_delay_on_net(
             id: buffer_cell_id,
             cell_type: config.buffer_cell_type.clone(),
             library: config.library_name.clone(),
+            function: None,
             fit: 0.0,
             failure_modes: Vec::new(),
             inputs: vec![current_input_net],
@@ -609,6 +610,7 @@ fn fix_single_violation(
             id: CellId(*next_cell_id),
             cell_type: config.buffer_cell_type.clone(),
             library: config.library_name.clone(),
+            function: None,
             fit: 0.0, // Buffer FIT is typically negligible
             failure_modes: Vec::new(),
             inputs: vec![current_input_net],

@@ -627,7 +627,51 @@ impl TestAdder {
 }
 
 #[tokio::test]
-#[ignore = "Sequential logic (DFF with reset) not fully working in gate-level simulation"]
+async fn test_ice40_gate_level_subtractor() {
+    // Test subtraction in isolation (no match/mux)
+    let source = r#"
+entity TestSubtractor {
+    in a: bit[8]
+    in b: bit[8]
+    out diff: bit[8]
+}
+
+impl TestSubtractor {
+    diff = a - b
+}
+"#;
+
+    let path = write_test_file("test_ice40_subtractor.sk", source);
+    let tb_result = Testbench::gate_level_with_library(&path, "ice40").await;
+    cleanup_test_file(&path);
+
+    let mut tb = tb_result.expect("Failed to create testbench");
+
+    // Test various subtractions
+    let test_vectors: Vec<(u8, u8, u8)> = vec![
+        (10, 5, 5),
+        (5, 3, 2),
+        (100, 50, 50),
+        (0, 0, 0),
+        (255, 255, 0),
+        (10, 0, 10),
+        (0, 1, 255), // Underflow wraps
+    ];
+
+    for (a, b, expected) in test_vectors {
+        tb.set("a", a).set("b", b);
+        tb.clock(1).await;
+        let result = tb.get_u32("diff").await as u8;
+        assert_eq!(
+            result, expected,
+            "SUB({}, {}) should be {}, got {}",
+            a, b, expected, result
+        );
+    }
+}
+
+#[tokio::test]
+#[ignore = "Sequential logic (DFF with reset) not fully working in gate-level simulation - needs further investigation"]
 async fn test_ice40_gate_level_counter() {
     // This test requires proper sequential logic handling (reset functionality)
     let source = r#"
@@ -686,7 +730,6 @@ impl TestCounter {
 }
 
 #[tokio::test]
-#[ignore = "SUB operation not working in gate-level ALU simulation - needs investigation"]
 async fn test_ice40_gate_level_alu() {
     // This test requires proper subtraction implementation (ADD works, SUB doesn't)
     let source = r#"

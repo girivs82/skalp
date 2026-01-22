@@ -91,6 +91,8 @@ struct PrimitiveInfo {
     outputs: Vec<SirSignalId>,
     is_sequential: bool,
     clock: Option<SirSignalId>,
+    reset: Option<SirSignalId>,
+    reset_active_high: bool,
 }
 
 /// GPU-compatible primitive representation
@@ -111,6 +113,10 @@ struct GpuPrimitive {
     is_sequential: u32,
     /// Clock signal index (for sequential)
     clock: u32,
+    /// Reset signal index (for sequential, 0xFFFFFFFF if no reset)
+    reset: u32,
+    /// Reset active high (1) or active low (0)
+    reset_active_high: u32,
     /// LUT initialization value (for LUT4/LUT6)
     lut_init: u32,
 }
@@ -218,6 +224,8 @@ impl GpuGateRuntime {
                         outputs: outputs.clone(),
                         is_sequential: false,
                         clock: None,
+                        reset: None,
+                        reset_active_high: true,
                     });
                 }
             }
@@ -225,6 +233,13 @@ impl GpuGateRuntime {
 
         // Collect primitives from sequential blocks
         for block in &module.seq_blocks {
+            // Extract reset info from block
+            let (reset_signal, reset_active_high) = block
+                .reset
+                .as_ref()
+                .map(|r| (Some(r.signal), r.active_high))
+                .unwrap_or((None, true));
+
             for op in &block.operations {
                 if let SirOperation::Primitive {
                     id,
@@ -241,6 +256,8 @@ impl GpuGateRuntime {
                         outputs: outputs.clone(),
                         is_sequential: true,
                         clock: Some(block.clock),
+                        reset: reset_signal,
+                        reset_active_high,
                     });
                 }
             }
@@ -289,6 +306,9 @@ impl GpuGateRuntime {
                     })
                     .unwrap_or(0);
 
+                // Find reset signal index (0xFFFFFFFF means no reset)
+                let reset_idx = p.reset.map(|r| r.0).unwrap_or(0xFFFFFFFF);
+
                 GpuPrimitive {
                     ptype: encode_ptype(&p.ptype),
                     inputs,
@@ -297,6 +317,8 @@ impl GpuGateRuntime {
                     num_outputs: p.outputs.len().min(2) as u32,
                     is_sequential: if p.is_sequential { 1 } else { 0 },
                     clock: clock_idx,
+                    reset: reset_idx,
+                    reset_active_high: if p.reset_active_high { 1 } else { 0 },
                     lut_init: get_lut_init(&p.ptype),
                 }
             })
@@ -414,6 +436,8 @@ struct Primitive {
     uint num_outputs;
     uint is_sequential;
     uint clock;
+    uint reset;         // Reset signal index (0xFFFFFFFF means no reset)
+    uint reset_active_high;  // 1 = active high, 0 = active low
     uint lut_init;      // LUT initialization value (16 bits for LUT4)
 };
 
@@ -539,10 +563,27 @@ kernel void eval_sequential(
     // Check if our clock has a rising edge
     if (((clock_mask >> prim.clock) & 1) == 0) return;
 
+    // Check if reset is active
+    bool reset_active = false;
+    if (prim.reset != 0xFFFFFFFF) {
+        uint reset_val = signals_in[prim.reset];
+        if (prim.reset_active_high == 1) {
+            reset_active = (reset_val != 0);
+        } else {
+            reset_active = (reset_val == 0);
+        }
+    }
+
     // DFF: output = D input (inputs[1] is D, inputs[0] is clk)
     if (prim.ptype == PTYPE_DFF_P || prim.ptype == PTYPE_DFF_N) {
-        uint d_input = signals_in[prim.inputs[1]];
-        signals_out[prim.outputs[0]] = d_input;
+        if (reset_active) {
+            // Reset: set output to 0
+            signals_out[prim.outputs[0]] = 0;
+        } else {
+            // Normal: sample D input
+            uint d_input = signals_in[prim.inputs[1]];
+            signals_out[prim.outputs[0]] = d_input;
+        }
     }
 }
 "#

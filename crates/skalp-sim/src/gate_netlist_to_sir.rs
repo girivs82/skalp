@@ -24,6 +24,7 @@ use indexmap::IndexMap;
 use skalp_frontend::hir::DetectionMode;
 use skalp_lir::gate_netlist::{Cell, CellId, GateNet, GateNetId, GateNetlist};
 use skalp_lir::lir::{PrimitiveId, PrimitiveType};
+use skalp_lir::tech_library::CellFunction;
 use std::collections::VecDeque;
 
 // ============================================================================
@@ -156,7 +157,10 @@ impl GateNetlistToSirConverter {
             self.total_fit += cell.fit;
 
             // Map cell type to PrimitiveType
-            // If the cell has a LUT init value, use LUT4/LUT6 instead of parsing the cell type name
+            // Priority:
+            // 1. LUT init value -> LUT4/LUT6
+            // 2. Cell function from library -> direct mapping
+            // 3. Cell type name -> pattern matching fallback
             let ptype = if let Some(init) = cell.lut_init {
                 // Determine LUT size from number of inputs
                 let num_inputs = cell.inputs.len();
@@ -165,7 +169,11 @@ impl GateNetlistToSirConverter {
                 } else {
                     PrimitiveType::Lut6 { init }
                 }
+            } else if let Some(func) = &cell.function {
+                // Use the library-provided function for accurate mapping
+                self.cell_function_to_primitive(func)
             } else {
+                // Fallback to cell type name parsing
                 self.cell_type_to_primitive(&cell.cell_type)
             };
 
@@ -284,6 +292,106 @@ impl GateNetlistToSirConverter {
                     }
                 }
             }
+        }
+    }
+
+    /// Map CellFunction (from library) to PrimitiveType
+    /// This is the preferred method as it uses the library's semantic function definition
+    fn cell_function_to_primitive(&self, func: &CellFunction) -> PrimitiveType {
+        match func {
+            // Basic gates
+            CellFunction::Inv => PrimitiveType::Inv,
+            CellFunction::Nand2 => PrimitiveType::Nand { inputs: 2 },
+            CellFunction::Nand3 => PrimitiveType::Nand { inputs: 3 },
+            CellFunction::Nand4 => PrimitiveType::Nand { inputs: 4 },
+            CellFunction::Nor2 => PrimitiveType::Nor { inputs: 2 },
+            CellFunction::Nor3 => PrimitiveType::Nor { inputs: 3 },
+            CellFunction::Nor4 => PrimitiveType::Nor { inputs: 4 },
+            CellFunction::And2 => PrimitiveType::And { inputs: 2 },
+            CellFunction::And3 => PrimitiveType::And { inputs: 3 },
+            CellFunction::And4 => PrimitiveType::And { inputs: 4 },
+            CellFunction::Or2 => PrimitiveType::Or { inputs: 2 },
+            CellFunction::Or3 => PrimitiveType::Or { inputs: 3 },
+            CellFunction::Or4 => PrimitiveType::Or { inputs: 4 },
+            CellFunction::Xor2 => PrimitiveType::Xor,
+            CellFunction::Xnor2 => PrimitiveType::Xnor,
+            CellFunction::Buf => PrimitiveType::Buf,
+            CellFunction::AndNot => PrimitiveType::And { inputs: 2 }, // Approximation
+            CellFunction::OrNot => PrimitiveType::Or { inputs: 2 },   // Approximation
+
+            // Complex gates (approximations)
+            CellFunction::Aoi21 | CellFunction::Aoi22 => PrimitiveType::Nand { inputs: 2 },
+            CellFunction::Oai21 | CellFunction::Oai22 => PrimitiveType::Nor { inputs: 2 },
+
+            // Multiplexers
+            CellFunction::Mux2 => PrimitiveType::Mux2,
+            CellFunction::Mux4 => PrimitiveType::Mux4,
+
+            // Arithmetic
+            CellFunction::HalfAdder => PrimitiveType::HalfAdder,
+            CellFunction::FullAdder => PrimitiveType::FullAdder,
+            CellFunction::Adder(_) => PrimitiveType::FullAdder, // Treat as full adder chain
+            CellFunction::Carry => PrimitiveType::CarryCell,
+
+            // Floating-Point
+            CellFunction::FpAdd32 => PrimitiveType::Fp32Add,
+            CellFunction::FpSub32 => PrimitiveType::Fp32Sub,
+            CellFunction::FpMul32 => PrimitiveType::Fp32Mul,
+            CellFunction::FpDiv32 => PrimitiveType::Fp32Div,
+            CellFunction::FpLt32 => PrimitiveType::Fp32Lt,
+            CellFunction::FpGt32 => PrimitiveType::Fp32Gt,
+            CellFunction::FpLe32 => PrimitiveType::Fp32Le,
+            CellFunction::FpGe32 => PrimitiveType::Fp32Ge,
+
+            // Sequential
+            CellFunction::Dff => PrimitiveType::DffP,
+            CellFunction::DffR => PrimitiveType::DffP, // DFF with reset
+            CellFunction::DffE => PrimitiveType::DffE, // DFF with enable
+            CellFunction::DffRE => PrimitiveType::DffE, // DFF with reset and enable
+            CellFunction::Latch => PrimitiveType::Dlatch,
+
+            // Tristate
+            CellFunction::Tristate => PrimitiveType::Tribuf {
+                enable_active_high: true,
+            },
+
+            // Power infrastructure - treat as buffers for simulation
+            CellFunction::LevelShifterLH
+            | CellFunction::LevelShifterHL
+            | CellFunction::IsolationAnd
+            | CellFunction::IsolationOr
+            | CellFunction::IsolationLatch => PrimitiveType::Buf,
+            CellFunction::RetentionDff => PrimitiveType::DffP,
+
+            // NCL gates
+            CellFunction::Th12 => PrimitiveType::Th12,
+            CellFunction::Th22 => PrimitiveType::Th22,
+            CellFunction::Th13 => PrimitiveType::Th13,
+            CellFunction::Th23 => PrimitiveType::Th23,
+            CellFunction::Th33 => PrimitiveType::Th33,
+            CellFunction::Th14 => PrimitiveType::Th14,
+            CellFunction::Th24 => PrimitiveType::Th24,
+            CellFunction::Th34 => PrimitiveType::Th34,
+            CellFunction::Th44 => PrimitiveType::Th44,
+            // Generic THmn gate - map based on m and n values
+            CellFunction::Thmn { m, n } => {
+                // Map to the closest standard TH gate
+                match (m, n) {
+                    (1, 2) => PrimitiveType::Th12,
+                    (2, 2) => PrimitiveType::Th22,
+                    (1, 3) => PrimitiveType::Th13,
+                    (2, 3) => PrimitiveType::Th23,
+                    (3, 3) => PrimitiveType::Th33,
+                    (1, 4) => PrimitiveType::Th14,
+                    (2, 4) => PrimitiveType::Th24,
+                    (3, 4) => PrimitiveType::Th34,
+                    (4, 4) => PrimitiveType::Th44,
+                    _ => PrimitiveType::Th22, // Default to Th22 for unknown
+                }
+            }
+
+            // Default: treat unknown functions as buffers
+            _ => PrimitiveType::Buf,
         }
     }
 

@@ -722,9 +722,40 @@ impl GateLevelSimulator {
                 };
 
                 if matches_edge {
-                    // Evaluate sequential operations (DFFs)
-                    for op in &block.operations {
-                        self.evaluate_operation(op);
+                    // Check if reset is active
+                    let reset_active = if let Some(reset_spec) = &block.reset {
+                        let reset_value = self
+                            .state
+                            .signals
+                            .get(&reset_spec.signal.0)
+                            .and_then(|v| v.first().copied())
+                            .unwrap_or(false);
+                        // Check against active_high flag
+                        if reset_spec.active_high {
+                            reset_value
+                        } else {
+                            !reset_value
+                        }
+                    } else {
+                        false
+                    };
+
+                    if reset_active {
+                        // Reset all registers in this block to 0
+                        for op in &block.operations {
+                            if let SirOperation::Primitive { outputs, .. } = op {
+                                for out in outputs {
+                                    let width =
+                                        self.signal_widths.get(&out.0).copied().unwrap_or(1);
+                                    self.state.signals.insert(out.0, vec![false; width]);
+                                }
+                            }
+                        }
+                    } else {
+                        // Normal operation: evaluate sequential operations (DFFs)
+                        for op in &block.operations {
+                            self.evaluate_operation(op);
+                        }
                     }
                 }
             }

@@ -26,6 +26,7 @@ use indexmap::IndexMap;
 /// Information extracted from a library cell for tech mapping
 struct LibraryCellInfo {
     name: String,
+    function: CellFunction,
     fit: f64,
     failure_modes: Vec<CellFailureMode>,
 }
@@ -35,6 +36,7 @@ impl LibraryCellInfo {
     fn from_library_cell(cell: &LibraryCell) -> Self {
         Self {
             name: cell.name.clone(),
+            function: cell.function.clone(),
             fit: cell.fit,
             failure_modes: cell
                 .failure_modes
@@ -1062,6 +1064,7 @@ impl<'a> TechMapper<'a> {
                 vec![not_b],
             );
             cell.source_op = Some("Inverter".to_string());
+            cell.function = Some(inv_info.function.clone());
             cell.failure_modes = inv_info.failure_modes.clone();
             self.add_cell(cell);
             inv_b.push(not_b);
@@ -1107,6 +1110,7 @@ impl<'a> TechMapper<'a> {
                 vec![diff, cout],
             );
             cell.source_op = Some("FullAdder".to_string());
+            cell.function = Some(fa_info.function.clone());
             cell.failure_modes = fa_info.failure_modes.clone();
             self.add_cell(cell);
 
@@ -4711,6 +4715,7 @@ impl<'a> TechMapper<'a> {
             CellFunction::Thmn { m, n } => {
                 return LibraryCellInfo {
                     name: format!("TH{}{}", m, n),
+                    function: function.clone(),
                     fit: 0.5 + 0.1 * (*n as f64),
                     failure_modes: vec![],
                 };
@@ -4718,6 +4723,7 @@ impl<'a> TechMapper<'a> {
             CellFunction::NclCompletion { width } => {
                 return LibraryCellInfo {
                     name: format!("NCL_COMPLETE{}", width),
+                    function: function.clone(),
                     fit: 0.1 * (*width as f64),
                     failure_modes: vec![],
                 };
@@ -4727,6 +4733,7 @@ impl<'a> TechMapper<'a> {
 
         LibraryCellInfo {
             name: name.to_string(),
+            function: function.clone(),
             fit,
             failure_modes: vec![],
         }
@@ -5285,7 +5292,8 @@ fn create_blackbox_netlist(
         id: CellId(0),
         cell_type: format!("BLACKBOX_{}", blackbox_info.cell_name),
         library: library_name,
-        fit: 0.0, // Unknown FIT for blackbox
+        function: None, // Unknown function for blackbox
+        fit: 0.0,       // Unknown FIT for blackbox
         failure_modes: Vec::new(),
         inputs: input_nets.clone(),
         outputs: output_nets.clone(),

@@ -15,6 +15,7 @@
 //! cells with known FIT rates and failure modes from the technology library.
 
 use crate::lir::LirSafetyInfo;
+use crate::tech_library::CellFunction;
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use skalp_frontend::hir::DetectionConfig;
@@ -41,6 +42,8 @@ pub struct Cell {
     pub cell_type: String,
     /// Library name this cell comes from
     pub library: String,
+    /// Cell function (from library) - used for simulation primitive mapping
+    pub function: Option<CellFunction>,
     /// FIT rate for this cell (from library)
     pub fit: f64,
     /// Failure modes with their FIT contributions
@@ -80,6 +83,7 @@ impl Cell {
             id,
             cell_type,
             library,
+            function: None,
             fit,
             failure_modes: Vec::new(),
             inputs,
@@ -109,6 +113,7 @@ impl Cell {
             id,
             cell_type,
             library,
+            function: None,
             fit,
             failure_modes: Vec::new(),
             inputs,
@@ -139,6 +144,7 @@ impl Cell {
             id,
             cell_type,
             library,
+            function: None,
             fit,
             failure_modes: Vec::new(),
             inputs,
@@ -172,6 +178,7 @@ impl Cell {
             id,
             cell_type,
             library,
+            function: None,
             fit,
             failure_modes: Vec::new(),
             inputs: vec![data, enable], // [D, E] ordering
@@ -188,6 +195,12 @@ impl Cell {
     /// Set the safety classification for this cell
     pub fn with_safety_classification(mut self, classification: CellSafetyClassification) -> Self {
         self.safety_classification = classification;
+        self
+    }
+
+    /// Set the cell function (from library)
+    pub fn with_function(mut self, function: CellFunction) -> Self {
+        self.function = Some(function);
         self
     }
 
