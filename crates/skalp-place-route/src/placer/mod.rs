@@ -584,11 +584,107 @@ impl<D: Device + Clone> Placer<D> {
         result.placements.len() as f64 / total_resources as f64
     }
 
+    /// Estimate routing congestion based on placement
+    ///
+    /// Uses a grid-based estimation model:
+    /// 1. Divides the device into tiles (already the natural unit)
+    /// 2. Estimates wire crossings through each tile based on net bounding boxes
+    /// 3. Returns normalized congestion (0.0 = no congestion, 1.0+ = congested)
+    fn estimate_congestion(&self, result: &PlacementResult, netlist: &GateNetlist) -> f64 {
+        let (grid_x, grid_y) = self.device.grid_size();
+
+        // Track estimated wire demand per tile
+        let mut wire_demand: HashMap<(u32, u32), f64> = HashMap::new();
+
+        // For each net, estimate wire crossings through tiles in bounding box
+        for net in &netlist.nets {
+            // Get bounding box of connected cells
+            let mut min_x = u32::MAX;
+            let mut max_x = 0u32;
+            let mut min_y = u32::MAX;
+            let mut max_y = 0u32;
+            let mut pin_count = 0;
+
+            // Driver
+            if let Some(driver_id) = net.driver {
+                if let Some(loc) = result.placements.get(&driver_id) {
+                    min_x = min_x.min(loc.tile_x);
+                    max_x = max_x.max(loc.tile_x);
+                    min_y = min_y.min(loc.tile_y);
+                    max_y = max_y.max(loc.tile_y);
+                    pin_count += 1;
+                }
+            }
+
+            // Fanout
+            for (cell_id, _pin) in &net.fanout {
+                if let Some(loc) = result.placements.get(cell_id) {
+                    min_x = min_x.min(loc.tile_x);
+                    max_x = max_x.max(loc.tile_x);
+                    min_y = min_y.min(loc.tile_y);
+                    max_y = max_y.max(loc.tile_y);
+                    pin_count += 1;
+                }
+            }
+
+            // Skip nets with less than 2 pins
+            if pin_count < 2 || min_x > max_x || min_y > max_y {
+                continue;
+            }
+
+            // Estimate wire demand using Steiner tree approximation
+            // For a net spanning (dx, dy) with n pins, wire demand ~= (dx + dy) * (1 + (n-2)/4)
+            let dx = max_x - min_x;
+            let dy = max_y - min_y;
+            let steiner_factor = 1.0 + (pin_count as f64 - 2.0) / 4.0;
+            let net_demand = (dx + dy) as f64 * steiner_factor.min(3.0);
+
+            // Distribute demand across tiles in bounding box
+            let area = ((dx + 1) * (dy + 1)) as f64;
+            let demand_per_tile = net_demand / area;
+
+            for x in min_x..=max_x {
+                for y in min_y..=max_y {
+                    *wire_demand.entry((x, y)).or_insert(0.0) += demand_per_tile;
+                }
+            }
+        }
+
+        // Calculate congestion metric
+        // Assume each logic tile has ~20 routing tracks capacity
+        let tracks_per_tile: f64 = 20.0;
+        let mut max_congestion: f64 = 0.0;
+        let mut total_congestion: f64 = 0.0;
+        let mut congested_tiles: u32 = 0;
+
+        for x in 0..grid_x {
+            for y in 0..grid_y {
+                let demand = wire_demand.get(&(x, y)).copied().unwrap_or(0.0);
+                let tile_congestion = demand / tracks_per_tile;
+                if tile_congestion > max_congestion {
+                    max_congestion = tile_congestion;
+                }
+                total_congestion += tile_congestion;
+                if tile_congestion > 1.0 {
+                    congested_tiles += 1;
+                }
+            }
+        }
+
+        // Combined congestion metric: weighted average of max and average congestion
+        let total_tiles = (grid_x * grid_y) as f64;
+        let avg_congestion = total_congestion / total_tiles;
+        let congested_ratio = congested_tiles as f64 / total_tiles;
+
+        // Return a combined metric that penalizes both hot spots and widespread congestion
+        0.5 * max_congestion + 0.3 * avg_congestion + 0.2 * congested_ratio * 10.0
+    }
+
     /// Calculate combined placement cost
     fn calculate_cost(&self, result: &PlacementResult, netlist: &GateNetlist) -> f64 {
         let wl = self.calculate_wirelength(result, netlist) as f64;
         let timing = result.timing_score;
-        let congestion = 0.0; // TODO: implement congestion estimation
+        let congestion = self.estimate_congestion(result, netlist);
 
         self.config.wirelength_weight * wl
             + self.config.timing_weight * timing
