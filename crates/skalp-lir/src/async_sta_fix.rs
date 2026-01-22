@@ -847,6 +847,7 @@ mod tests {
             source_op: None,
             safety_classification: Default::default(),
             lut_init: None,
+            function: None,
         };
 
         // AND2 cell (slow path: 25ps)
@@ -864,6 +865,7 @@ mod tests {
             source_op: None,
             safety_classification: Default::default(),
             lut_init: None,
+            function: None,
         };
 
         netlist.cells.push(inv_cell);

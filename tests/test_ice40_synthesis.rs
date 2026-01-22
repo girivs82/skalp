@@ -671,14 +671,13 @@ impl TestSubtractor {
 }
 
 #[tokio::test]
-#[ignore = "Sequential logic (DFF with reset) not fully working in gate-level simulation - needs further investigation"]
 async fn test_ice40_gate_level_counter() {
     // This test requires proper sequential logic handling (reset functionality)
     let source = r#"
 entity TestCounter {
     in clk: clock
     in enable: bit
-    in rst: bit
+    in rst: reset
     out count: bit[4]
 }
 

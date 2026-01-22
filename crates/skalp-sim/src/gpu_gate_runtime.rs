@@ -574,14 +574,14 @@ kernel void eval_sequential(
         }
     }
 
-    // DFF: output = D input (inputs[1] is D, inputs[0] is clk)
+    // DFF: output = D input (inputs[0] is D, clock is handled via clock_mask)
     if (prim.ptype == PTYPE_DFF_P || prim.ptype == PTYPE_DFF_N) {
         if (reset_active) {
             // Reset: set output to 0
             signals_out[prim.outputs[0]] = 0;
         } else {
             // Normal: sample D input
-            uint d_input = signals_in[prim.inputs[1]];
+            uint d_input = signals_in[prim.inputs[0]];
             signals_out[prim.outputs[0]] = d_input;
         }
     }
@@ -740,7 +740,6 @@ kernel void eval_sequential(
 
     /// Step simulation by one cycle
     pub fn step(&mut self) {
-        println!("[GPU] step() called, use_gpu={}", self.use_gpu);
         if self.use_gpu {
             self.step_gpu();
         } else {
@@ -962,6 +961,62 @@ kernel void eval_sequential(
 
                 command_buffer.commit();
                 command_buffer.wait_until_completed();
+            }
+
+            // Run combinational logic again to propagate updated register values through buffers
+            // This ensures that output ports (connected via buffers) reflect the new DFF outputs
+            for _iter in 0..MAX_ITERATIONS {
+                let (src, dst) = if self.current_buffer_is_a {
+                    (buf_a, buf_b)
+                } else {
+                    (buf_b, buf_a)
+                };
+
+                unsafe {
+                    let src_ptr = src.contents() as *const u32;
+                    let dst_ptr = dst.contents() as *mut u32;
+                    std::ptr::copy_nonoverlapping(src_ptr, dst_ptr, self.num_signals.max(1));
+                }
+
+                if let Some(pipeline) = &self.comb_pipeline {
+                    let command_buffer = self.command_queue.new_command_buffer();
+                    let encoder = command_buffer.new_compute_command_encoder();
+
+                    encoder.set_compute_pipeline_state(pipeline);
+                    encoder.set_buffer(0, Some(prim_buf), 0);
+                    encoder.set_buffer(1, Some(src), 0);
+                    encoder.set_buffer(2, Some(dst), 0);
+
+                    let num_prims = self.primitives.len() as u32;
+                    encoder.set_bytes(
+                        3,
+                        std::mem::size_of::<u32>() as u64,
+                        &num_prims as *const u32 as _,
+                    );
+
+                    let thread_group_size = MTLSize::new(64, 1, 1);
+                    let grid_size = MTLSize::new(self.primitives.len().max(1) as u64, 1, 1);
+
+                    encoder.dispatch_threads(grid_size, thread_group_size);
+                    encoder.end_encoding();
+
+                    command_buffer.commit();
+                    command_buffer.wait_until_completed();
+                }
+
+                let converged = unsafe {
+                    let src_ptr = src.contents() as *const u32;
+                    let dst_ptr = dst.contents() as *const u32;
+                    let src_slice = std::slice::from_raw_parts(src_ptr, self.num_signals.max(1));
+                    let dst_slice = std::slice::from_raw_parts(dst_ptr, self.num_signals.max(1));
+                    src_slice == dst_slice
+                };
+
+                self.current_buffer_is_a = !self.current_buffer_is_a;
+
+                if converged {
+                    break;
+                }
             }
         }
 
