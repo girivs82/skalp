@@ -1,0 +1,15 @@
+// Test: Recursive function - should error during compilation
+
+fn factorial(n: bit[8]) -> bit[8] {
+    return if n == 0 { 1 } else { n * factorial(n - 1) };
+}
+
+entity RecursiveTest {
+    in clk: clock
+    in n: bit[8]
+    out result: bit[8]
+}
+
+impl RecursiveTest {
+    result = factorial(n)
+}

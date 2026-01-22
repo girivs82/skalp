@@ -1,0 +1,35 @@
+// Test: Partial product generation with bit slicing (4 partial products)
+// Splits 12-bit inputs into 6-bit halves and computes 4 partial products
+
+pub entity Mult6x6 {
+    in a: bit[6]
+    in b: bit[6]
+    out product: bit[12]
+}
+
+impl Mult6x6 {
+    product = a * b
+}
+
+pub entity PPGen4 {
+    in a: bit[12]
+    in b: bit[12]
+    out p00: bit[12]  // a_lo * b_lo
+    out p01: bit[12]  // a_lo * b_hi
+    out p10: bit[12]  // a_hi * b_lo
+    out p11: bit[12]  // a_hi * b_hi
+}
+
+impl PPGen4 {
+    // Slice inputs into low and high 6-bit halves
+    signal a_lo: bit[6] = a[5:0]
+    signal a_hi: bit[6] = a[11:6]
+    signal b_lo: bit[6] = b[5:0]
+    signal b_hi: bit[6] = b[11:6]
+
+    // Generate all 4 partial products using multiplier submodules
+    let m00 = Mult6x6 { a: a_lo, b: b_lo, product: p00 }
+    let m01 = Mult6x6 { a: a_lo, b: b_hi, product: p01 }
+    let m10 = Mult6x6 { a: a_hi, b: b_lo, product: p10 }
+    let m11 = Mult6x6 { a: a_hi, b: b_hi, product: p11 }
+}

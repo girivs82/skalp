@@ -1,0 +1,45 @@
+// Test: 3-level nested module hierarchy (Mult6x6 -> DualMult -> QuadMult)
+
+pub entity Mult6x6 {
+    in a: bit[6]
+    in b: bit[6]
+    out product: bit[12]
+}
+
+impl Mult6x6 {
+    product = a * b
+}
+
+pub entity DualMult {
+    in a0: bit[6]
+    in b0: bit[6]
+    in a1: bit[6]
+    in b1: bit[6]
+    out p0: bit[12]
+    out p1: bit[12]
+}
+
+impl DualMult {
+    let m0 = Mult6x6 { a: a0, b: b0, product: p0 }
+    let m1 = Mult6x6 { a: a1, b: b1, product: p1 }
+}
+
+pub entity QuadMult {
+    in x0: bit[6]
+    in y0: bit[6]
+    in x1: bit[6]
+    in y1: bit[6]
+    in x2: bit[6]
+    in y2: bit[6]
+    in x3: bit[6]
+    in y3: bit[6]
+    out r0: bit[12]
+    out r1: bit[12]
+    out r2: bit[12]
+    out r3: bit[12]
+}
+
+impl QuadMult {
+    let dm0 = DualMult { a0: x0, b0: y0, a1: x1, b1: y1, p0: r0, p1: r1 }
+    let dm1 = DualMult { a0: x2, b0: y2, a1: x3, b1: y3, p0: r2, p1: r3 }
+}

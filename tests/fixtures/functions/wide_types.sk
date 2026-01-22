@@ -1,0 +1,16 @@
+// Test: Function with wide bit types (32-bit)
+
+fn add32(a: bit[32], b: bit[32]) -> bit[32] {
+    return a + b
+}
+
+entity WideTypesTest {
+    in clk: clock
+    in x: bit[32]
+    in y: bit[32]
+    out result: bit[32]
+}
+
+impl WideTypesTest {
+    result = add32(x, y)
+}

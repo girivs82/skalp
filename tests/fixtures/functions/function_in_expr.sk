@@ -1,0 +1,16 @@
+// Test: Function call in larger expression - add(a, b) * 2
+
+fn add(a: bit[8], b: bit[8]) -> bit[8] {
+    return a + b
+}
+
+entity FunctionInExprTest {
+    in clk: clock
+    in a: bit[8]
+    in b: bit[8]
+    out result: bit[8]
+}
+
+impl FunctionInExprTest {
+    result = add(a, b) * 2
+}

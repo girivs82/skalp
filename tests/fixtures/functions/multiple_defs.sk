@@ -1,0 +1,29 @@
+// Test: Multiple function definitions with selector
+
+fn add(a: bit[8], b: bit[8]) -> bit[8] {
+    return a + b
+}
+
+fn sub(a: bit[8], b: bit[8]) -> bit[8] {
+    return a - b
+}
+
+fn mul(a: bit[8], b: bit[8]) -> bit[8] {
+    return a * b
+}
+
+entity MultipleDefsTest {
+    in clk: clock
+    in sel: bit[8]
+    in a: bit[8]
+    in b: bit[8]
+    out result: bit[8]
+}
+
+impl MultipleDefsTest {
+    result = match sel {
+        0 => add(a, b),
+        1 => sub(a, b),
+        _ => mul(a, b),
+    }
+}

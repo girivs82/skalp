@@ -1,0 +1,27 @@
+// Test: Function call in sequential (clocked) block
+
+fn add(a: bit[8], b: bit[8]) -> bit[8] {
+    return a + b
+}
+
+entity SequentialTest {
+    in clk: clock
+    in rst: bit[1]
+    in a: bit[8]
+    in b: bit[8]
+    out result: bit[8]
+}
+
+impl SequentialTest {
+    signal reg_result: bit[8] = 0
+
+    on(clk.rise) {
+        if (rst == 1) {
+            reg_result = 0
+        } else {
+            reg_result = add(a, b)
+        }
+    }
+
+    result = reg_result
+}

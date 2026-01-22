@@ -1,0 +1,17 @@
+// Test: Nested function calls - add(add(a, b), c)
+
+fn add(a: bit[8], b: bit[8]) -> bit[8] {
+    return a + b
+}
+
+entity NestedCallsTest {
+    in clk: clock
+    in a: bit[8]
+    in b: bit[8]
+    in c: bit[8]
+    out result: bit[8]
+}
+
+impl NestedCallsTest {
+    result = add(add(a, b), c)
+}

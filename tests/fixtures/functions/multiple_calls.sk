@@ -1,0 +1,29 @@
+// Test: Multiple function calls in same module
+
+fn add(a: bit[8], b: bit[8]) -> bit[8] {
+    return a + b
+}
+
+fn sub(a: bit[8], b: bit[8]) -> bit[8] {
+    return a - b
+}
+
+fn mul(a: bit[8], b: bit[8]) -> bit[8] {
+    return a * b
+}
+
+entity MultipleCallsTest {
+    in clk: clock
+    in a: bit[8]
+    in b: bit[8]
+    in c: bit[8]
+    out r1: bit[8]
+    out r2: bit[8]
+    out r3: bit[8]
+}
+
+impl MultipleCallsTest {
+    r1 = add(a, b)
+    r2 = sub(a, b)
+    r3 = mul(a, c)
+}
