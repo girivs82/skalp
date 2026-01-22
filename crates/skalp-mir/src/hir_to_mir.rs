@@ -14790,17 +14790,15 @@ impl<'hir> HirToMir<'hir> {
         type_name: &str,
         trait_name: &str,
     ) -> Option<&'a hir::HirTraitImplementation> {
-        let hir = self.hir.as_ref()?;
-
         trace!(
-            "[FIND_TRAIT_IMPL] Looking for trait '{}' on type '{}', HIR has {} trait_impls",
+            "[FIND_TRAIT_IMPL] Looking for impl {} for {}, module_hirs.len()={}",
             trait_name,
             type_name,
-            hir.trait_implementations.len()
+            self.module_hirs.len()
         );
 
-        // Look through all trait implementations for a match
-        let result = hir.trait_implementations.iter().find(|impl_| {
+        // Helper closure to check if a trait impl matches
+        let impl_matches = |impl_: &hir::HirTraitImplementation| -> bool {
             // Check if the trait matches
             if impl_.trait_name != trait_name {
                 return false;
@@ -14810,41 +14808,81 @@ impl<'hir> HirToMir<'hir> {
             match &impl_.target {
                 hir::TraitImplTarget::Type(ty) => {
                     // Check if the type matches by name
-                    // Handle both Custom types and primitive float types
+                    // Handle Custom types, primitive float types, and bit types
                     // (float types may be used due to fallback resolution in hir_builder)
-                    let impl_type_name = match ty {
-                        hir::HirType::Custom(name) => Some(name.as_str()),
-                        hir::HirType::Float32 => Some("fp32"),
-                        hir::HirType::Float64 => Some("fp64"),
-                        hir::HirType::Float16 => Some("fp16"),
-                        _ => None,
-                    };
-
-                    if let Some(impl_type) = impl_type_name {
-                        let matches = impl_type == type_name;
-                        if matches {
-                            trace!(
-                                "[FIND_TRAIT_IMPL] FOUND: impl {} for {} matches!",
-                                trait_name,
-                                type_name
-                            );
-                        }
-                        matches
-                    } else {
-                        false
+                    match ty {
+                        hir::HirType::Custom(name) => name == type_name,
+                        hir::HirType::Float32 => type_name == "fp32",
+                        hir::HirType::Float64 => type_name == "fp64",
+                        hir::HirType::Float16 => type_name == "fp16",
+                        hir::HirType::Bit(width) => type_name == format!("bit[{}]", width),
+                        hir::HirType::Bool => type_name == "bool",
+                        hir::HirType::Int(width) => type_name == format!("int[{}]", width),
+                        _ => false,
                     }
                 }
                 hir::TraitImplTarget::Entity(_) => false,
             }
-        });
-        if result.is_none() {
+        };
+
+        // First, search in main HIR
+        if let Some(hir) = self.hir.as_ref() {
             trace!(
-                "[FIND_TRAIT_IMPL] NOT FOUND: no impl {} for {}",
+                "[FIND_TRAIT_IMPL] Looking for trait '{}' on type '{}', HIR has {} trait_impls",
                 trait_name,
-                type_name
+                type_name,
+                hir.trait_implementations.len()
             );
+
+            if let Some(result) = hir
+                .trait_implementations
+                .iter()
+                .find(|impl_| impl_matches(impl_))
+            {
+                trace!(
+                    "[FIND_TRAIT_IMPL] FOUND in main HIR: impl {} for {}",
+                    trait_name,
+                    type_name
+                );
+                return Some(result);
+            }
         }
-        result
+
+        // If not found in main HIR, search through module_hirs (stdlib modules)
+        // This allows trait implementations from stdlib to be used even when not explicitly imported
+        trace!(
+            "[FIND_TRAIT_IMPL] Not in main HIR, searching {} module HIRs",
+            self.module_hirs.len()
+        );
+
+        for (module_path, module_hir) in &self.module_hirs {
+            trace!(
+                "[FIND_TRAIT_IMPL] Checking module {:?} with {} trait_impls",
+                module_path,
+                module_hir.trait_implementations.len()
+            );
+            if let Some(result) = module_hir
+                .trait_implementations
+                .iter()
+                .find(|impl_| impl_matches(impl_))
+            {
+                trace!(
+                    "[FIND_TRAIT_IMPL] FOUND in module {:?}: impl {} for {}",
+                    module_path,
+                    trait_name,
+                    type_name
+                );
+                return Some(result);
+            }
+        }
+
+        trace!(
+            "[FIND_TRAIT_IMPL] NOT FOUND: no impl {} for {} in main HIR or {} module HIRs",
+            trait_name,
+            type_name,
+            self.module_hirs.len()
+        );
+        None
     }
 
     /// Get the trait name for a binary operator
@@ -14915,11 +14953,41 @@ impl<'hir> HirToMir<'hir> {
     /// When `sqrt(x)` is called and x has type `fp32`, we look for `impl Sqrt for fp32`.
     fn function_name_to_trait_name(func_name: &str) -> Option<&'static str> {
         match func_name {
+            // Unary traits
             "sqrt" => Some("Sqrt"),
             "abs" => Some("Abs"),
             "neg" => Some("Neg"),
+            // Binary traits
+            "add" => Some("Addable"),
+            "sub" => Some("Subtractable"),
+            "mul" => Some("Multipliable"),
+            "div" => Some("Divisible"),
+            // Standard library trait names
+            "Add" | "add_" => Some("Add"),
+            "Sub" | "sub_" => Some("Sub"),
+            "Mul" | "mul_" => Some("Mul"),
+            "Div" | "div_" => Some("Div"),
             _ => None,
         }
+    }
+
+    /// Check if a function name represents a binary trait method
+    fn is_binary_trait_method(func_name: &str) -> bool {
+        matches!(
+            func_name,
+            "add"
+                | "sub"
+                | "mul"
+                | "div"
+                | "Add"
+                | "Sub"
+                | "Mul"
+                | "Div"
+                | "add_"
+                | "sub_"
+                | "mul_"
+                | "div_"
+        )
     }
 
     /// Try to find a trait method for a function call
@@ -14942,9 +15010,15 @@ impl<'hir> HirToMir<'hir> {
             call.args.len()
         );
 
-        // Only handle single-argument calls (unary trait methods)
-        if call.args.len() != 1 {
-            let _ = writeln!(std::io::stderr(), "[DEBUG TRAIT] ❌ Not single-arg call");
+        // Handle both single-argument (unary) and two-argument (binary) trait methods
+        let is_binary = Self::is_binary_trait_method(&call.function);
+        if call.args.len() != 1 && !(is_binary && call.args.len() == 2) {
+            let _ = writeln!(
+                std::io::stderr(),
+                "[DEBUG TRAIT] ❌ Unsupported arg count: {} for '{}'",
+                call.args.len(),
+                call.function
+            );
             return None;
         }
 
@@ -15002,6 +15076,10 @@ impl<'hir> HirToMir<'hir> {
             hir::HirType::Float32 => "fp32".to_string(),
             hir::HirType::Float64 => "fp64".to_string(),
             hir::HirType::Float16 => "fp16".to_string(),
+            // Support bit types with width annotation for trait lookup
+            hir::HirType::Bit(width) => format!("bit[{}]", width),
+            hir::HirType::Bool => "bool".to_string(),
+            hir::HirType::Int(width) => format!("int[{}]", width),
             _ => {
                 let _ = writeln!(
                     std::io::stderr(),
@@ -15026,30 +15104,7 @@ impl<'hir> HirToMir<'hir> {
             type_name
         );
 
-        // Get parameters from trait definition
-        let method_def = match self.find_trait_method_definition(trait_name, &call.function) {
-            Some(m) => {
-                let _ = writeln!(
-                    std::io::stderr(),
-                    "[DEBUG TRAIT] ✓ Found trait method def for {}::{}",
-                    trait_name,
-                    call.function
-                );
-                m
-            }
-            None => {
-                let _ = writeln!(
-                    std::io::stderr(),
-                    "[DEBUG TRAIT] ❌ No trait method def for {}::{}",
-                    trait_name,
-                    call.function
-                );
-                return None;
-            }
-        };
-        let params = method_def.parameters.clone();
-
-        // Find the trait implementation for the body
+        // Find the trait implementation first (we need this regardless)
         let trait_impl = match self.find_trait_impl(&type_name, trait_name) {
             Some(i) => {
                 let _ = writeln!(
@@ -15068,6 +15123,53 @@ impl<'hir> HirToMir<'hir> {
                     type_name
                 );
                 return None;
+            }
+        };
+
+        // Get parameters from trait definition, or synthesize for known traits
+        let is_binary = Self::is_binary_trait_method(&call.function);
+        let params = match self.find_trait_method_definition(trait_name, &call.function) {
+            Some(m) => {
+                let _ = writeln!(
+                    std::io::stderr(),
+                    "[DEBUG TRAIT] ✓ Found trait method def for {}::{}",
+                    trait_name,
+                    call.function
+                );
+                m.parameters.clone()
+            }
+            None => {
+                // BUG FIX: Synthesize parameters for known traits when trait definition
+                // is not available (e.g., when impl is imported but trait definition is in another module)
+                let _ = writeln!(
+                    std::io::stderr(),
+                    "[DEBUG TRAIT] ⚠️ No trait method def for {}::{}, synthesizing {} parameters",
+                    trait_name,
+                    call.function,
+                    if is_binary { "binary" } else { "unary" }
+                );
+                if is_binary {
+                    // Binary traits (Add, Sub, Mul, Div, etc.) have two Self parameters
+                    vec![
+                        hir::HirParameter {
+                            name: "self".to_string(),
+                            param_type: arg_type.clone(),
+                            default_value: None,
+                        },
+                        hir::HirParameter {
+                            name: "other".to_string(),
+                            param_type: arg_type.clone(),
+                            default_value: None,
+                        },
+                    ]
+                } else {
+                    // Unary traits (Sqrt, Abs, Neg) have a single Self parameter
+                    vec![hir::HirParameter {
+                        name: "a".to_string(),
+                        param_type: arg_type.clone(),
+                        default_value: None,
+                    }]
+                }
             }
         };
 

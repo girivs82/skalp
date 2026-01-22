@@ -208,6 +208,51 @@ impl ModuleResolver {
         self.search_paths.push(path);
     }
 
+    /// Get the search paths (for stdlib detection)
+    pub fn search_paths(&self) -> &[PathBuf] {
+        &self.search_paths
+    }
+
+    /// Preload stdlib numeric modules for fp32/fp16/fp64 trait implementations
+    ///
+    /// This ensures that trait implementations like `impl Sqrt for fp32` are available
+    /// even when the source file doesn't explicitly import them.
+    ///
+    /// Bug Fix: Without this, calls like `sqrt(fp32_value)` fail because the trait
+    /// implementation isn't found.
+    pub fn preload_stdlib_numeric(&mut self) -> Result<()> {
+        // Find the stdlib skalp/numeric directory in search paths
+        for search_path in self.search_paths.clone() {
+            // Check for skalp/numeric/fp.sk (contains fp32 trait implementations)
+            let fp_path = search_path.join("skalp/numeric/fp.sk");
+            if fp_path.exists() {
+                eprintln!(
+                    "[MODULE_RESOLVER] Preloading stdlib numeric module: {:?}",
+                    fp_path
+                );
+                if let Err(e) = self.load_module(&fp_path) {
+                    eprintln!("[MODULE_RESOLVER] Warning: Failed to preload fp.sk: {}", e);
+                }
+            }
+
+            // Check for skalp/numeric/traits.sk (contains trait definitions)
+            let traits_path = search_path.join("skalp/numeric/traits.sk");
+            if traits_path.exists() {
+                eprintln!(
+                    "[MODULE_RESOLVER] Preloading stdlib traits module: {:?}",
+                    traits_path
+                );
+                if let Err(e) = self.load_module(&traits_path) {
+                    eprintln!(
+                        "[MODULE_RESOLVER] Warning: Failed to preload traits.sk: {}",
+                        e
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Resolve an import path to a file path
     ///
     /// Examples:

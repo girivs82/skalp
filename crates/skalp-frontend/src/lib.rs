@@ -136,6 +136,12 @@ pub fn parse_and_build_compilation_context(file_path: &Path) -> Result<Compilati
     hir = merge_imports(&hir, &dependencies, &resolver)
         .context("Failed to merge imported symbols")?;
 
+    // Preload stdlib numeric modules for fp32/fp16/fp64 trait implementations
+    // This ensures trait implementations are available even without explicit imports
+    resolver
+        .preload_stdlib_numeric()
+        .context("Failed to preload stdlib numeric modules")?;
+
     // Second pass: Rebuild instances now that all entities are available
     hir = rebuild_instances_with_imports(&hir, file_path)
         .context("Failed to rebuild instances with imports")?;
