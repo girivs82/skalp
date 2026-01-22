@@ -578,6 +578,10 @@ pub enum CellFunction {
     HalfAdder,
     FullAdder,
     Adder(u32), // N-bit adder
+    /// Dedicated carry propagation cell (FPGA carry chain)
+    /// Inputs: a, b, cin; Output: cout
+    /// Used with LUT4 that computes sum = a XOR b XOR cin
+    Carry,
 
     // Floating-Point (IEEE 754 soft macros)
     /// FP32 Adder: result = a + b
@@ -756,6 +760,10 @@ impl CellFunction {
             CellFunction::FullAdder => (
                 vec!["a".into(), "b".into(), "cin".into()],
                 vec!["sum".into(), "cout".into()],
+            ),
+            CellFunction::Carry => (
+                vec!["a".into(), "b".into(), "cin".into()],
+                vec!["cout".into()],
             ),
             CellFunction::Adder(n) => {
                 let mut inputs = Vec::new();
@@ -1287,6 +1295,10 @@ pub struct TechLibrary {
     pub reference_temperature: Option<f64>,
     /// Reference voltage in volts
     pub reference_voltage: Option<f64>,
+    /// LUT size for FPGA libraries (e.g., 4 for LUT4, 6 for LUT6)
+    /// When set, the synthesis engine uses this for cut enumeration.
+    /// For ASIC libraries, this should be None.
+    pub lut_size: Option<u32>,
     /// All library cells indexed by name
     cells: IndexMap<String, LibraryCell>,
     /// Cells indexed by function
@@ -1304,10 +1316,21 @@ impl TechLibrary {
             version: None,
             reference_temperature: None,
             reference_voltage: None,
+            lut_size: None,
             cells: IndexMap::new(),
             cells_by_function: IndexMap::new(),
             decomposition_rules: Vec::new(),
         }
+    }
+
+    /// Check if this is an FPGA library (has LUT-based cells)
+    pub fn is_fpga(&self) -> bool {
+        self.lut_size.is_some()
+    }
+
+    /// Get the LUT size for FPGA libraries, or default (4) for unknown
+    pub fn get_lut_size(&self) -> usize {
+        self.lut_size.map(|s| s as usize).unwrap_or(4)
     }
 
     /// Add a cell to the library
@@ -1881,6 +1904,7 @@ const ASIC_7NM_SKLIB: &str = include_str!("../../skalp-stdlib/libraries/asic_7nm
 const ASIC_28NM_SKLIB: &str = include_str!("../../skalp-stdlib/libraries/asic_28nm.sklib");
 const FPGA_LUT4_SKLIB: &str = include_str!("../../skalp-stdlib/libraries/fpga_lut4.sklib");
 const FPGA_LUT6_SKLIB: &str = include_str!("../../skalp-stdlib/libraries/fpga_lut6.sklib");
+const ICE40_SKLIB: &str = include_str!("../../skalp-stdlib/libraries/ice40.sklib");
 
 /// List all available standard library names
 pub fn list_stdlib_libraries() -> Vec<&'static str> {
@@ -1890,6 +1914,7 @@ pub fn list_stdlib_libraries() -> Vec<&'static str> {
         "asic_28nm",
         "fpga_lut4",
         "fpga_lut6",
+        "ice40",
     ]
 }
 
@@ -1905,6 +1930,7 @@ pub fn list_stdlib_libraries() -> Vec<&'static str> {
 /// - `asic_28nm` (alias: `28nm`) - 28nm process node
 /// - `fpga_lut4` (alias: `fpga`) - FPGA with 4-input LUTs
 /// - `fpga_lut6` - FPGA with 6-input LUTs
+/// - `ice40` (aliases: `lattice`, `lattice_ice40`) - Lattice iCE40 FPGA
 pub fn get_stdlib_library(name: &str) -> Result<TechLibrary, LibraryLoadError> {
     // Normalize name to canonical form
     let canonical_name = match name {
@@ -1913,6 +1939,7 @@ pub fn get_stdlib_library(name: &str) -> Result<TechLibrary, LibraryLoadError> {
         "asic_28nm" | "28nm" => "asic_28nm",
         "fpga_lut4" | "fpga" => "fpga_lut4",
         "fpga_lut6" => "fpga_lut6",
+        "ice40" | "lattice" | "lattice_ice40" => "ice40",
         _ => {
             return Err(LibraryLoadError::NotFound(format!(
                 "Unknown library '{}'. Available: {}",
@@ -1940,6 +1967,7 @@ pub fn get_stdlib_library(name: &str) -> Result<TechLibrary, LibraryLoadError> {
         "asic_28nm" => ASIC_28NM_SKLIB,
         "fpga_lut4" => FPGA_LUT4_SKLIB,
         "fpga_lut6" => FPGA_LUT6_SKLIB,
+        "ice40" => ICE40_SKLIB,
         _ => unreachable!(), // Already validated above
     };
 
@@ -1970,6 +1998,9 @@ struct TomlLibraryMeta {
     reference_temperature_c: Option<f64>,
     #[serde(default)]
     reference_voltage_v: Option<f64>,
+    /// LUT size for FPGA libraries (e.g., 4 for LUT4, 6 for LUT6)
+    #[serde(default)]
+    lut_size: Option<u32>,
 }
 
 /// Cell definition in TOML format
@@ -2091,6 +2122,7 @@ impl TomlLibrary {
         lib.version = self.library.version;
         lib.reference_temperature = self.library.reference_temperature_c;
         lib.reference_voltage = self.library.reference_voltage_v;
+        lib.lut_size = self.library.lut_size;
 
         for cell in self.cells {
             let library_cell = cell.into_library_cell()?;
@@ -2115,6 +2147,7 @@ impl TomlLibrary {
                 process_node_nm: lib.process_node,
                 reference_temperature_c: lib.reference_temperature,
                 reference_voltage_v: lib.reference_voltage,
+                lut_size: lib.lut_size,
             },
             cells,
         }
@@ -2360,6 +2393,7 @@ fn parse_cell_function(s: &str) -> Result<CellFunction, LibraryLoadError> {
         "mux4" => Ok(CellFunction::Mux4),
         "ha" | "half_adder" | "halfadder" => Ok(CellFunction::HalfAdder),
         "fa" | "full_adder" | "fulladder" => Ok(CellFunction::FullAdder),
+        "carry" | "carry_chain" => Ok(CellFunction::Carry),
         "dff" => Ok(CellFunction::Dff),
         "dffr" | "dff_r" => Ok(CellFunction::DffR),
         "dffe" | "dff_e" => Ok(CellFunction::DffE),
@@ -2442,6 +2476,7 @@ fn format_cell_function(f: &CellFunction) -> String {
         CellFunction::Mux4 => "mux4".to_string(),
         CellFunction::HalfAdder => "half_adder".to_string(),
         CellFunction::FullAdder => "full_adder".to_string(),
+        CellFunction::Carry => "carry".to_string(),
         CellFunction::Adder(n) => format!("adder{}", n),
         CellFunction::Dff => "dff".to_string(),
         CellFunction::DffR => "dffr".to_string(),
@@ -3144,5 +3179,64 @@ mod tests {
         // Print for debugging
         println!("TH22 cell: {:?}", th22.name);
         println!("TH12 cell: {:?}", th12.name);
+    }
+
+    #[test]
+    fn test_ice40_library_loads() {
+        let lib = get_stdlib_library("ice40").expect("Failed to load ice40 library");
+        assert_eq!(lib.name, "ice40");
+
+        // Verify basic gates are present
+        let inv = lib.find_best_cell(&CellFunction::Inv);
+        assert!(inv.is_some(), "INV cell should be present in ice40 library");
+        assert!(
+            inv.unwrap().name.starts_with("SB_LUT4"),
+            "ice40 INV should be an SB_LUT4 variant"
+        );
+
+        let and2 = lib.find_best_cell(&CellFunction::And2);
+        assert!(
+            and2.is_some(),
+            "AND2 cell should be present in ice40 library"
+        );
+
+        let or2 = lib.find_best_cell(&CellFunction::Or2);
+        assert!(or2.is_some(), "OR2 cell should be present in ice40 library");
+
+        let xor2 = lib.find_best_cell(&CellFunction::Xor2);
+        assert!(
+            xor2.is_some(),
+            "XOR2 cell should be present in ice40 library"
+        );
+    }
+
+    #[test]
+    fn test_ice40_has_sequential_cells() {
+        let lib = get_stdlib_library("ice40").expect("Failed to load ice40 library");
+
+        // Verify DFF is present
+        let dff = lib.find_best_cell(&CellFunction::Dff);
+        assert!(dff.is_some(), "DFF cell should be present in ice40 library");
+        assert_eq!(dff.unwrap().name, "SB_DFF");
+
+        // Verify DFF with enable
+        let dffe = lib.find_best_cell(&CellFunction::DffE);
+        assert!(
+            dffe.is_some(),
+            "DFF with enable should be present in ice40 library"
+        );
+        assert_eq!(dffe.unwrap().name, "SB_DFFE");
+    }
+
+    #[test]
+    fn test_ice40_aliases() {
+        // Test that aliases work correctly
+        let ice40 = get_stdlib_library("ice40").expect("Failed to load ice40");
+        let lattice = get_stdlib_library("lattice").expect("Failed to load lattice alias");
+        let lattice_ice40 =
+            get_stdlib_library("lattice_ice40").expect("Failed to load lattice_ice40 alias");
+
+        assert_eq!(ice40.name, lattice.name);
+        assert_eq!(ice40.name, lattice_ice40.name);
     }
 }

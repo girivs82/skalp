@@ -342,6 +342,83 @@ impl GateNetlistToSirConverter {
             return PrimitiveType::Fp32Ge;
         }
 
+        // Handle iCE40 FPGA cell names (SB_LUT4_*, SB_DFF*, SB_CARRY, etc.)
+        if upper.starts_with("SB_LUT4_AND2") {
+            return PrimitiveType::And { inputs: 2 };
+        }
+        if upper.starts_with("SB_LUT4_AND3") {
+            return PrimitiveType::And { inputs: 3 };
+        }
+        if upper.starts_with("SB_LUT4_AND4") {
+            return PrimitiveType::And { inputs: 4 };
+        }
+        if upper.starts_with("SB_LUT4_OR2") {
+            return PrimitiveType::Or { inputs: 2 };
+        }
+        if upper.starts_with("SB_LUT4_OR3") {
+            return PrimitiveType::Or { inputs: 3 };
+        }
+        if upper.starts_with("SB_LUT4_OR4") {
+            return PrimitiveType::Or { inputs: 4 };
+        }
+        if upper.starts_with("SB_LUT4_XOR2") {
+            return PrimitiveType::Xor;
+        }
+        if upper.starts_with("SB_LUT4_XNOR2") {
+            return PrimitiveType::Xnor;
+        }
+        if upper.starts_with("SB_LUT4_NAND2") {
+            return PrimitiveType::Nand { inputs: 2 };
+        }
+        if upper.starts_with("SB_LUT4_NOR2") {
+            return PrimitiveType::Nor { inputs: 2 };
+        }
+        if upper.starts_with("SB_LUT4_MUX2") {
+            return PrimitiveType::Mux2;
+        }
+        if upper.starts_with("SB_LUT4_INV") {
+            return PrimitiveType::Inv;
+        }
+        if upper.starts_with("SB_LUT4_BUF") {
+            return PrimitiveType::Buf;
+        }
+        // Generic LUT4 - treat as buffer (will be handled by LUT evaluation)
+        if upper.starts_with("SB_LUT4") {
+            return PrimitiveType::Buf;
+        }
+        // iCE40 flip-flops
+        if upper.starts_with("SB_DFFER") || upper.starts_with("SB_DFFESR") {
+            return PrimitiveType::DffE; // DFF with enable and reset
+        }
+        if upper.starts_with("SB_DFFE") {
+            return PrimitiveType::DffE; // DFF with enable
+        }
+        if upper.starts_with("SB_DFFSR") || upper.starts_with("SB_DFFR") {
+            return PrimitiveType::DffP; // DFF with reset
+        }
+        if upper.starts_with("SB_DFF") {
+            return PrimitiveType::DffP; // Basic DFF
+        }
+        // iCE40 carry cell (used in adders)
+        if upper.starts_with("SB_CARRY") {
+            return PrimitiveType::And { inputs: 2 }; // Approximation for carry logic
+        }
+        // iCE40 tie cells
+        if upper.starts_with("SB_VCC") {
+            return PrimitiveType::Constant { value: true };
+        }
+        if upper.starts_with("SB_GND") {
+            return PrimitiveType::Constant { value: false };
+        }
+        // iCE40 global buffer
+        if upper.starts_with("SB_GB") {
+            return PrimitiveType::Buf;
+        }
+        // iCE40 I/O cell
+        if upper.starts_with("SB_IO") {
+            return PrimitiveType::Buf;
+        }
+
         // Normalize cell type (remove drive strength suffix like "_X1", "_X2")
         let base_type = cell_type
             .split('_')

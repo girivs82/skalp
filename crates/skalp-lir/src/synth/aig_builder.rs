@@ -504,6 +504,20 @@ impl<'a> AigBuilder<'a> {
                 return;
             }
 
+            // Carry cell: CO = (a & b) | ((a | b) & cin) = majority(a, b, cin)
+            // This is a single-output cell used in FPGA carry chains
+            CellFunction::Carry => {
+                let a = inputs.first().copied().unwrap_or(AigLit::false_lit());
+                let b = inputs.get(1).copied().unwrap_or(AigLit::false_lit());
+                let cin = inputs.get(2).copied().unwrap_or(AigLit::false_lit());
+
+                // Carry = (a & b) | (cin & (a | b)) = majority function
+                let ab_and = self.aig.add_and(a, b);
+                let ab_or = self.aig.add_or(a, b);
+                let cin_ab_or = self.aig.add_and(cin, ab_or);
+                self.aig.add_or(ab_and, cin_ab_or)
+            }
+
             // Sequential elements
             // Note: Latches are pre-created in pre_create_latches() to handle feedback loops
             // Here we just update their data input with the computed value

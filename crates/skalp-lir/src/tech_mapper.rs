@@ -810,6 +810,10 @@ impl<'a> TechMapper<'a> {
     }
 
     /// Map an adder using ripple carry
+    ///
+    /// Uses different strategies based on available library cells:
+    /// - If Carry cell exists (FPGA with carry chain): uses XOR + Carry cells
+    /// - Otherwise: uses HalfAdder + FullAdder cells
     fn map_adder(
         &mut self,
         width: u32,
@@ -844,6 +848,13 @@ impl<'a> TechMapper<'a> {
             cell.failure_modes = adder_info.failure_modes;
             self.add_cell(cell);
             self.stats.direct_mappings += 1;
+            return;
+        }
+
+        // Check for FPGA carry chain support
+        if let Some(carry_cell) = self.library.find_best_cell(&CellFunction::Carry) {
+            // Use FPGA carry chain: XOR for sum, Carry cell for carry propagation
+            self.map_adder_fpga_carry_chain(width, inputs, outputs, path, carry_cell);
             return;
         }
 
@@ -892,6 +903,120 @@ impl<'a> TechMapper<'a> {
                 cell.source_op = Some("HalfAdder".to_string());
                 cell.failure_modes = ha_info.failure_modes.clone();
                 self.add_cell(cell);
+            }
+
+            carry_net = Some(cout);
+        }
+
+        self.stats.decomposed_mappings += 1;
+    }
+
+    /// Map an adder using FPGA carry chain primitives
+    ///
+    /// For FPGAs like iCE40, arithmetic uses dedicated carry chain cells:
+    /// - LUT computes: sum = a XOR b XOR cin
+    /// - Carry cell computes: cout = (a & b) | ((a | b) & cin)
+    fn map_adder_fpga_carry_chain(
+        &mut self,
+        width: u32,
+        inputs: &[Vec<GateNetId>],
+        outputs: &[GateNetId],
+        path: &str,
+        carry_cell: &LibraryCell,
+    ) {
+        let carry_info = LibraryCellInfo::from_library_cell(carry_cell);
+        let xor_info = self.get_cell_info(&CellFunction::Xor2);
+
+        let mut carry_net: Option<GateNetId> = None;
+
+        for bit in 0..width as usize {
+            let a = inputs[0].get(bit).copied().unwrap_or(inputs[0][0]);
+            let b = inputs[1].get(bit).copied().unwrap_or(inputs[1][0]);
+            let sum = outputs.get(bit).copied().unwrap_or(outputs[0]);
+
+            // Create carry output net
+            let cout = self.alloc_net_id();
+            self.netlist
+                .add_net(GateNet::new(cout, format!("{}.cout{}", path, bit)));
+            self.stats.nets_created += 1;
+
+            if let Some(cin) = carry_net {
+                // Full adder using XOR + Carry
+                // First XOR: a XOR b
+                let ab_xor = self.alloc_net_id();
+                self.netlist
+                    .add_net(GateNet::new(ab_xor, format!("{}.ab_xor{}", path, bit)));
+                self.stats.nets_created += 1;
+
+                let mut xor1_cell = Cell::new_comb(
+                    CellId(0),
+                    xor_info.name.clone(),
+                    self.library.name.clone(),
+                    xor_info.fit,
+                    format!("{}.xor1_{}", path, bit),
+                    vec![a, b],
+                    vec![ab_xor],
+                );
+                xor1_cell.source_op = Some("XOR".to_string());
+                xor1_cell.failure_modes = xor_info.failure_modes.clone();
+                self.add_cell(xor1_cell);
+
+                // Second XOR: (a XOR b) XOR cin = sum
+                let mut xor2_cell = Cell::new_comb(
+                    CellId(0),
+                    xor_info.name.clone(),
+                    self.library.name.clone(),
+                    xor_info.fit,
+                    format!("{}.xor2_{}", path, bit),
+                    vec![ab_xor, cin],
+                    vec![sum],
+                );
+                xor2_cell.source_op = Some("XOR".to_string());
+                xor2_cell.failure_modes = xor_info.failure_modes.clone();
+                self.add_cell(xor2_cell);
+
+                // Carry cell: cout = (a & b) | ((a | b) & cin)
+                let mut carry_cell = Cell::new_comb(
+                    CellId(0),
+                    carry_info.name.clone(),
+                    self.library.name.clone(),
+                    carry_info.fit,
+                    format!("{}.carry{}", path, bit),
+                    vec![a, b, cin],
+                    vec![cout],
+                );
+                carry_cell.source_op = Some("Carry".to_string());
+                carry_cell.failure_modes = carry_info.failure_modes.clone();
+                self.add_cell(carry_cell);
+            } else {
+                // Half adder for first bit: XOR for sum, AND for carry
+                let mut xor_cell = Cell::new_comb(
+                    CellId(0),
+                    xor_info.name.clone(),
+                    self.library.name.clone(),
+                    xor_info.fit,
+                    format!("{}.xor_{}", path, bit),
+                    vec![a, b],
+                    vec![sum],
+                );
+                xor_cell.source_op = Some("XOR".to_string());
+                xor_cell.failure_modes = xor_info.failure_modes.clone();
+                self.add_cell(xor_cell);
+
+                // For the first bit, carry = a & b
+                let and_info = self.get_cell_info(&CellFunction::And2);
+                let mut and_cell = Cell::new_comb(
+                    CellId(0),
+                    and_info.name.clone(),
+                    self.library.name.clone(),
+                    and_info.fit,
+                    format!("{}.and_{}", path, bit),
+                    vec![a, b],
+                    vec![cout],
+                );
+                and_cell.source_op = Some("AND".to_string());
+                and_cell.failure_modes = and_info.failure_modes.clone();
+                self.add_cell(and_cell);
             }
 
             carry_net = Some(cout);
@@ -4867,6 +4992,68 @@ pub fn map_word_lir_to_gates(word_lir: &Lir, library: &TechLibrary) -> TechMapRe
     map_lir_to_gates(word_lir, library)
 }
 
+/// Full synthesis: LIR → tech mapping → AIG optimization → technology mapping
+///
+/// This function provides a complete synthesis flow that includes:
+/// 1. Initial technology mapping (LIR to gate netlist)
+/// 2. AIG-based optimization passes (rewrite, refactor, balance, FRAIG, etc.)
+/// 3. Library-aware technology mapping with cut enumeration
+///
+/// The optimization level is automatically configured based on the library:
+/// - FPGA libraries: uses lut_size for K-feasible cuts
+/// - ASIC libraries: uses default cut size for more optimization freedom
+///
+/// # Arguments
+/// * `lir` - The LIR (Low-level IR) to synthesize
+/// * `library` - Target technology library
+/// * `preset` - Synthesis preset controlling optimization effort
+///
+/// # Example
+/// ```ignore
+/// use skalp_lir::{synthesize, SynthPreset};
+///
+/// let result = synthesize(&lir, &library, SynthPreset::Balanced);
+/// println!("Cells after optimization: {}", result.netlist.cells.len());
+/// ```
+pub fn synthesize(
+    lir: &Lir,
+    library: &TechLibrary,
+    preset: crate::synth::SynthPreset,
+) -> crate::synth::SynthResult {
+    use crate::synth::SynthEngine;
+
+    // Step 1: Initial tech mapping
+    let initial_result = map_lir_to_gates(lir, library);
+
+    // Step 2: Run synthesis engine with AIG optimization
+    let mut engine = SynthEngine::with_preset(preset);
+    engine.optimize(&initial_result.netlist, library)
+}
+
+/// Full synthesis with default balanced preset
+///
+/// Convenience function that uses `SynthPreset::Balanced` for a good
+/// trade-off between optimization quality and runtime.
+pub fn synthesize_balanced(lir: &Lir, library: &TechLibrary) -> crate::synth::SynthResult {
+    synthesize(lir, library, crate::synth::SynthPreset::Balanced)
+}
+
+/// Full synthesis with area-focused optimization
+///
+/// Uses `SynthPreset::Area` for aggressive area minimization.
+/// Useful for area-constrained designs.
+pub fn synthesize_for_area(lir: &Lir, library: &TechLibrary) -> crate::synth::SynthResult {
+    synthesize(lir, library, crate::synth::SynthPreset::Area)
+}
+
+/// Full synthesis with timing-focused optimization
+///
+/// Uses `SynthPreset::Timing` for timing-driven optimization.
+/// Useful for timing-critical designs.
+pub fn synthesize_for_timing(lir: &Lir, library: &TechLibrary) -> crate::synth::SynthResult {
+    synthesize(lir, library, crate::synth::SynthPreset::Timing)
+}
+
 /// Map hierarchical MIR result to HierarchicalNetlist
 ///
 /// Takes the result of `lower_mir_hierarchical` and maps each instance's LIR
@@ -5338,5 +5525,82 @@ mod tests {
         assert_eq!(cell.failure_modes[1].name, "stuck_at_1");
         assert_eq!(cell.failure_modes[2].name, "transient");
         assert_eq!(cell.failure_modes[2].fault_type, FaultType::Transient);
+    }
+
+    #[test]
+    fn test_ice40_carry_chain_mapping() {
+        // Load the ice40 library
+        let lib =
+            crate::tech_library::get_stdlib_library("ice40").expect("Failed to load ice40 library");
+
+        // Create a simple adder
+        let mut word_lir = Lir::new("test_ice40_adder".to_string());
+        let a = word_lir.add_input("a".to_string(), 4);
+        let b = word_lir.add_input("b".to_string(), 4);
+        let sum = word_lir.add_output("sum".to_string(), 4);
+
+        word_lir.add_node(
+            LirOp::Add {
+                width: 4,
+                has_carry: false,
+            },
+            vec![a, b],
+            sum,
+            "test.add".to_string(),
+        );
+
+        let result = map_word_lir_to_gates(&word_lir, &lib);
+
+        // Verify no warnings
+        assert!(
+            result.warnings.is_empty(),
+            "Should have no warnings, got: {:?}",
+            result.warnings
+        );
+
+        // Verify cells were created
+        assert!(result.stats.cells_created > 0, "Should have created cells");
+
+        // Count Carry cells (should have 3 for bits 1-3, first bit uses AND)
+        let carry_cells: Vec<_> = result
+            .netlist
+            .cells
+            .iter()
+            .filter(|c| c.cell_type.contains("SB_CARRY"))
+            .collect();
+        assert_eq!(
+            carry_cells.len(),
+            3,
+            "Should have 3 Carry cells for 4-bit adder (bits 1-3)"
+        );
+
+        // Count XOR cells (should have 7: 1 for first bit, 2 for each of bits 1-3)
+        let xor_cells: Vec<_> = result
+            .netlist
+            .cells
+            .iter()
+            .filter(|c| c.cell_type.contains("SB_LUT4_XOR2"))
+            .collect();
+        assert_eq!(
+            xor_cells.len(),
+            7,
+            "Should have 7 XOR cells for 4-bit adder"
+        );
+
+        // Count AND cells (should have 1 for first bit carry)
+        let and_cells: Vec<_> = result
+            .netlist
+            .cells
+            .iter()
+            .filter(|c| c.cell_type.contains("SB_LUT4_AND2"))
+            .collect();
+        assert_eq!(and_cells.len(), 1, "Should have 1 AND cell for first bit");
+
+        // Total cells = 1 XOR + 1 AND (bit 0) + 3 * (2 XOR + 1 Carry) (bits 1-3)
+        // = 2 + 9 = 11 cells
+        assert_eq!(
+            result.stats.cells_created, 11,
+            "Should have 11 cells total for 4-bit ice40 adder"
+        );
     }
 }

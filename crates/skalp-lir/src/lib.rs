@@ -87,8 +87,8 @@ pub use tech_library::{
 // Technology mapper
 pub use tech_mapper::{
     map_hierarchical_to_gates, map_lir_to_gates, map_lir_to_gates_optimized,
-    map_lir_to_gates_with_opt_level, map_word_lir_to_gates, TechMapResult, TechMapStats,
-    TechMapper,
+    map_lir_to_gates_with_opt_level, map_word_lir_to_gates, synthesize, synthesize_balanced,
+    synthesize_for_area, synthesize_for_timing, TechMapResult, TechMapStats, TechMapper,
 };
 
 // Structural pattern detection for safety mechanisms
@@ -115,7 +115,10 @@ pub use hierarchical_netlist::{
 };
 
 // Synthesis engine (AIG-based optimization)
-pub use synth::{Aig, AigBuilder, AigLit, AigNode, AigNodeId, AigSafetyInfo, AigStats, AigWriter};
+pub use synth::{
+    Aig, AigBuilder, AigLit, AigNode, AigNodeId, AigSafetyInfo, AigStats, AigWriter, SynthConfig,
+    SynthEngine, SynthPreset, SynthResult,
+};
 
 // Other exports
 pub use netlist::Netlist;

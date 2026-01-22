@@ -852,12 +852,15 @@ impl SynthEngine {
             }
             SynthPreset::Quick => {
                 // Fast mapping with minimal optimization, using library cells
-                let mapper = CutMapper::from_library_with_config(library, CutMapperConfig::fast());
+                // Cut size auto-configured from library's lut_size
+                let config = CutMapperConfig::fast_for_library(library);
+                let mapper = CutMapper::from_library_with_config(library, config);
                 mapper.map(aig)
             }
             SynthPreset::Full | SynthPreset::Resyn2 => {
                 // Quality mapping with priority cuts and area recovery
-                let mut config = CutMapperConfig::quality();
+                // Cut size auto-configured from library's lut_size
+                let mut config = CutMapperConfig::quality_for_library(library);
                 // Enable choice-aware mapping if AIG has choice nodes
                 config.use_choices = aig.choice_node_count() > 0;
                 let mapper = CutMapper::from_library_with_config(library, config);
@@ -865,11 +868,13 @@ impl SynthEngine {
             }
             SynthPreset::Area | SynthPreset::Compress2 => {
                 // Area-focused mapping with aggressive area recovery
+                // Cut size auto-configured from library's lut_size
+                let config = CutMapperConfig::for_library(library);
                 let config = CutMapperConfig {
                     use_priority_cuts: true,
                     area_recovery: true,
                     recovery_iterations: 3,
-                    ..Default::default()
+                    ..config
                 };
                 let mut mapper = CutMapper::from_library_with_config(library, config);
                 mapper.set_objective(MappingObjective::Area);
@@ -877,7 +882,8 @@ impl SynthEngine {
             }
             SynthPreset::Balanced => {
                 // Quality mapping using library cells
-                let config = CutMapperConfig::quality();
+                // Cut size auto-configured from library's lut_size
+                let config = CutMapperConfig::for_library(library);
                 let mapper = CutMapper::from_library_with_config(library, config);
                 mapper.map(aig)
             }

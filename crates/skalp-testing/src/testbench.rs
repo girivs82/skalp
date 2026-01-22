@@ -102,6 +102,19 @@ impl Testbench {
     ///
     /// Gate-level simulation provides accurate timing using primitive gates.
     pub async fn gate_level(source_path: &str) -> Result<Self> {
+        Self::gate_level_with_library(source_path, "generic_asic").await
+    }
+
+    /// Create a gate-level synchronous testbench with a specific technology library
+    ///
+    /// This allows testing designs synthesized with different technology libraries
+    /// like "ice40", "fpga_lut4", "fpga_lut6", etc.
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// let mut tb = Testbench::gate_level_with_library("design.sk", "ice40").await.unwrap();
+    /// ```
+    pub async fn gate_level_with_library(source_path: &str, library_name: &str) -> Result<Self> {
         let use_gpu = std::env::var("SKALP_SIM_MODE")
             .map(|v| v.to_lowercase() != "cpu")
             .unwrap_or(true);
@@ -115,7 +128,7 @@ impl Testbench {
             ..Default::default()
         };
 
-        Self::from_source_gate_level(source_path, config).await
+        Self::from_source_gate_level_with_library(source_path, config, library_name).await
     }
 
     /// Create an NCL (asynchronous) testbench from source
@@ -322,7 +335,16 @@ impl Testbench {
         })
     }
 
+    #[allow(dead_code)]
     async fn from_source_gate_level(source_path: &str, config: UnifiedSimConfig) -> Result<Self> {
+        Self::from_source_gate_level_with_library(source_path, config, "generic_asic").await
+    }
+
+    async fn from_source_gate_level_with_library(
+        source_path: &str,
+        config: UnifiedSimConfig,
+        library_name: &str,
+    ) -> Result<Self> {
         use skalp_frontend::parse_and_build_hir_from_file;
         use skalp_lir::{
             get_stdlib_library, lower_mir_hierarchical, lower_mir_module_to_lir,
@@ -332,8 +354,8 @@ impl Testbench {
 
         let start_total = Instant::now();
         eprintln!(
-            "⏱️  [TESTBENCH] Starting gate-level compilation of '{}'",
-            source_path
+            "⏱️  [TESTBENCH] Starting gate-level compilation of '{}' with library '{}'",
+            source_path, library_name
         );
 
         let path = Path::new(source_path);
@@ -348,8 +370,13 @@ impl Testbench {
             .map_err(|e| anyhow::anyhow!("MIR compilation failed: {}", e))?;
 
         // Load technology library
-        let library = get_stdlib_library("generic_asic")
-            .map_err(|e| anyhow::anyhow!("Failed to load technology library: {:?}", e))?;
+        let library = get_stdlib_library(library_name).map_err(|e| {
+            anyhow::anyhow!(
+                "Failed to load technology library '{}': {:?}",
+                library_name,
+                e
+            )
+        })?;
 
         // Lower to GateNetlist
         let has_hierarchy =
@@ -370,7 +397,8 @@ impl Testbench {
         };
 
         eprintln!(
-            "⏱️  [TESTBENCH] Gate netlist: {} cells, {} nets",
+            "⏱️  [TESTBENCH] Gate netlist ({}): {} cells, {} nets",
+            library_name,
             netlist.cells.len(),
             netlist.nets.len()
         );

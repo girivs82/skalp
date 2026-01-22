@@ -70,6 +70,53 @@ impl CutMapperConfig {
             use_choices: true,
         }
     }
+
+    /// Set cut size (for configuring based on library LUT size)
+    pub fn with_cut_size(mut self, k: usize) -> Self {
+        self.cut_size = k;
+        self
+    }
+
+    /// Configuration optimized for a specific library
+    ///
+    /// For FPGA libraries with lut_size, uses that as the cut size.
+    /// For ASIC libraries, uses a larger cut size for more optimization freedom.
+    pub fn for_library(library: &crate::tech_library::TechLibrary) -> Self {
+        let cut_size = library.get_lut_size();
+        Self {
+            cut_size,
+            max_cuts: if cut_size <= 4 { 8 } else { 12 },
+            use_priority_cuts: true,
+            area_recovery: true,
+            recovery_iterations: 2,
+            use_choices: false,
+        }
+    }
+
+    /// Fast configuration optimized for a specific library
+    pub fn fast_for_library(library: &crate::tech_library::TechLibrary) -> Self {
+        Self {
+            cut_size: library.get_lut_size(),
+            max_cuts: 4,
+            use_priority_cuts: false,
+            area_recovery: false,
+            recovery_iterations: 0,
+            use_choices: false,
+        }
+    }
+
+    /// Quality configuration optimized for a specific library
+    pub fn quality_for_library(library: &crate::tech_library::TechLibrary) -> Self {
+        let cut_size = library.get_lut_size();
+        Self {
+            cut_size,
+            max_cuts: if cut_size <= 4 { 10 } else { 14 },
+            use_priority_cuts: true,
+            area_recovery: true,
+            recovery_iterations: 3,
+            use_choices: true,
+        }
+    }
 }
 
 /// Cut-based technology mapper

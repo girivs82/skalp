@@ -6,6 +6,7 @@ name = "fpga_lut4"
 version = "1.0.0"
 reference_temperature_c = 85.0
 reference_voltage_v = 1.0
+lut_size = 4
 
 # =============================================================================
 # LUT4-based Combinational Cells

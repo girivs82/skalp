@@ -1,0 +1,1110 @@
+# Lattice iCE40 FPGA Library
+#
+# This library targets the Lattice iCE40 family (iCE40LP, iCE40HX, iCE40UP)
+# using the actual Lattice primitive names compatible with Yosys/nextpnr.
+#
+# References:
+# - Lattice iCE40 Technology Library (TN1253)
+# - Project IceStorm documentation
+# - Yosys ice40 cell library
+
+[library]
+name = "ice40"
+version = "1.0.0"
+vendor = "Lattice"
+family = "iCE40"
+reference_temperature_c = 85.0
+reference_voltage_v = 1.2
+lut_size = 4
+
+# =============================================================================
+# SB_LUT4 - 4-input Look-Up Table
+# The fundamental logic element in iCE40. Can implement any 4-input function.
+# INIT parameter contains 16-bit truth table.
+# =============================================================================
+
+[[cells]]
+name = "SB_LUT4"
+function = "lut4"
+fit = 0.15
+inputs = ["I0", "I1", "I2", "I3"]
+outputs = ["O"]
+nominal_voltage_mv = 1200
+min_voltage_mv = 1100
+timing_margin_voltage_mv = 1140
+voltage_delay_coefficient = 0.12
+voltage_sensitivity = 5
+
+[[cells.failure_modes]]
+name = "config_upset"
+fit = 0.08
+fault_type = "data_retention"
+mechanism = "sram_soft_error"
+
+[[cells.failure_modes]]
+name = "stuck_at_0"
+fit = 0.015
+fault_type = "stuck_at_0"
+mechanism = "oxide_breakdown"
+
+[[cells.failure_modes]]
+name = "stuck_at_1"
+fit = 0.015
+fault_type = "stuck_at_1"
+mechanism = "electromigration"
+
+[[cells.failure_modes]]
+name = "transient"
+fit = 0.025
+fault_type = "transient"
+mechanism = "single_event_transient"
+
+[[cells.failure_modes]]
+name = "routing_open"
+fit = 0.008
+fault_type = "open"
+mechanism = "interconnect_failure"
+
+[[cells.failure_modes]]
+name = "routing_bridge"
+fit = 0.007
+fault_type = "bridge"
+mechanism = "interconnect_bridge"
+
+# =============================================================================
+# SB_CARRY - Carry Chain Cell
+# Fast carry propagation for arithmetic operations.
+# CO = (I0 & I1) | ((I0 | I1) & CI)
+# =============================================================================
+
+[[cells]]
+name = "SB_CARRY"
+function = "carry"
+fit = 0.10
+inputs = ["I0", "I1", "CI"]
+outputs = ["CO"]
+nominal_voltage_mv = 1200
+min_voltage_mv = 1100
+timing_margin_voltage_mv = 1140
+voltage_delay_coefficient = 0.08
+voltage_sensitivity = 4
+
+[[cells.failure_modes]]
+name = "config_upset"
+fit = 0.05
+fault_type = "data_retention"
+mechanism = "sram_soft_error"
+
+[[cells.failure_modes]]
+name = "stuck_at_0"
+fit = 0.012
+fault_type = "stuck_at_0"
+mechanism = "oxide_breakdown"
+
+[[cells.failure_modes]]
+name = "stuck_at_1"
+fit = 0.012
+fault_type = "stuck_at_1"
+mechanism = "electromigration"
+
+[[cells.failure_modes]]
+name = "transient"
+fit = 0.018
+fault_type = "transient"
+mechanism = "single_event_transient"
+
+[[cells.failure_modes]]
+name = "delay"
+fit = 0.008
+fault_type = "delay"
+mechanism = "carry_chain_delay"
+
+# =============================================================================
+# Flip-Flops - SB_DFF family
+# All DFFs are positive-edge triggered.
+# =============================================================================
+
+# SB_DFF - Basic D Flip-Flop
+[[cells]]
+name = "SB_DFF"
+function = "dff"
+fit = 0.20
+inputs = ["D"]
+outputs = ["Q"]
+nominal_voltage_mv = 1200
+min_voltage_mv = 1100
+timing_margin_voltage_mv = 1140
+voltage_delay_coefficient = 0.10
+voltage_sensitivity = 3
+setup_ps = 250
+hold_ps = 0
+clk_to_q_ps = 540
+
+[[cells.failure_modes]]
+name = "config_upset"
+fit = 0.08
+fault_type = "data_retention"
+mechanism = "sram_soft_error"
+
+[[cells.failure_modes]]
+name = "data_retention"
+fit = 0.05
+fault_type = "data_retention"
+mechanism = "storage_node_upset"
+
+[[cells.failure_modes]]
+name = "timing"
+fit = 0.04
+fault_type = "timing"
+mechanism = "setup_hold_violation"
+
+[[cells.failure_modes]]
+name = "stuck_at_0"
+fit = 0.015
+fault_type = "stuck_at_0"
+mechanism = "oxide_breakdown"
+
+[[cells.failure_modes]]
+name = "stuck_at_1"
+fit = 0.015
+fault_type = "stuck_at_1"
+mechanism = "electromigration"
+
+# SB_DFFE - D Flip-Flop with Enable
+[[cells]]
+name = "SB_DFFE"
+function = "dffe"
+fit = 0.22
+inputs = ["D", "E"]
+outputs = ["Q"]
+nominal_voltage_mv = 1200
+min_voltage_mv = 1100
+timing_margin_voltage_mv = 1140
+voltage_delay_coefficient = 0.10
+voltage_sensitivity = 3
+setup_ps = 250
+hold_ps = 0
+clk_to_q_ps = 540
+
+[[cells.failure_modes]]
+name = "config_upset"
+fit = 0.09
+fault_type = "data_retention"
+mechanism = "sram_soft_error"
+
+[[cells.failure_modes]]
+name = "data_retention"
+fit = 0.055
+fault_type = "data_retention"
+mechanism = "storage_node_upset"
+
+[[cells.failure_modes]]
+name = "timing"
+fit = 0.045
+fault_type = "timing"
+mechanism = "setup_hold_violation"
+
+[[cells.failure_modes]]
+name = "stuck_at_0"
+fit = 0.015
+fault_type = "stuck_at_0"
+mechanism = "oxide_breakdown"
+
+[[cells.failure_modes]]
+name = "stuck_at_1"
+fit = 0.015
+fault_type = "stuck_at_1"
+mechanism = "electromigration"
+
+# SB_DFFSR - D Flip-Flop with Sync Reset
+[[cells]]
+name = "SB_DFFSR"
+function = "dffr"
+fit = 0.24
+inputs = ["D", "R"]
+outputs = ["Q"]
+nominal_voltage_mv = 1200
+min_voltage_mv = 1100
+timing_margin_voltage_mv = 1140
+voltage_delay_coefficient = 0.10
+voltage_sensitivity = 3
+setup_ps = 250
+hold_ps = 0
+clk_to_q_ps = 540
+
+[[cells.failure_modes]]
+name = "config_upset"
+fit = 0.10
+fault_type = "data_retention"
+mechanism = "sram_soft_error"
+
+[[cells.failure_modes]]
+name = "data_retention"
+fit = 0.06
+fault_type = "data_retention"
+mechanism = "storage_node_upset"
+
+[[cells.failure_modes]]
+name = "timing"
+fit = 0.05
+fault_type = "timing"
+mechanism = "setup_hold_violation"
+
+[[cells.failure_modes]]
+name = "stuck_at_0"
+fit = 0.015
+fault_type = "stuck_at_0"
+mechanism = "oxide_breakdown"
+
+[[cells.failure_modes]]
+name = "stuck_at_1"
+fit = 0.015
+fault_type = "stuck_at_1"
+mechanism = "electromigration"
+
+# SB_DFFESR - D Flip-Flop with Enable and Sync Reset
+[[cells]]
+name = "SB_DFFESR"
+function = "dffre"
+fit = 0.26
+inputs = ["D", "E", "R"]
+outputs = ["Q"]
+nominal_voltage_mv = 1200
+min_voltage_mv = 1100
+timing_margin_voltage_mv = 1140
+voltage_delay_coefficient = 0.10
+voltage_sensitivity = 3
+setup_ps = 250
+hold_ps = 0
+clk_to_q_ps = 540
+
+[[cells.failure_modes]]
+name = "config_upset"
+fit = 0.11
+fault_type = "data_retention"
+mechanism = "sram_soft_error"
+
+[[cells.failure_modes]]
+name = "data_retention"
+fit = 0.065
+fault_type = "data_retention"
+mechanism = "storage_node_upset"
+
+[[cells.failure_modes]]
+name = "timing"
+fit = 0.055
+fault_type = "timing"
+mechanism = "setup_hold_violation"
+
+[[cells.failure_modes]]
+name = "stuck_at_0"
+fit = 0.015
+fault_type = "stuck_at_0"
+mechanism = "oxide_breakdown"
+
+[[cells.failure_modes]]
+name = "stuck_at_1"
+fit = 0.015
+fault_type = "stuck_at_1"
+mechanism = "electromigration"
+
+# SB_DFFR - D Flip-Flop with Async Reset
+[[cells]]
+name = "SB_DFFR"
+function = "dffr"
+fit = 0.24
+inputs = ["D", "R"]
+outputs = ["Q"]
+nominal_voltage_mv = 1200
+min_voltage_mv = 1100
+timing_margin_voltage_mv = 1140
+voltage_delay_coefficient = 0.10
+voltage_sensitivity = 3
+setup_ps = 250
+hold_ps = 0
+clk_to_q_ps = 540
+
+[[cells.failure_modes]]
+name = "config_upset"
+fit = 0.10
+fault_type = "data_retention"
+mechanism = "sram_soft_error"
+
+[[cells.failure_modes]]
+name = "data_retention"
+fit = 0.06
+fault_type = "data_retention"
+mechanism = "storage_node_upset"
+
+[[cells.failure_modes]]
+name = "timing"
+fit = 0.05
+fault_type = "timing"
+mechanism = "setup_hold_violation"
+
+[[cells.failure_modes]]
+name = "stuck_at_0"
+fit = 0.015
+fault_type = "stuck_at_0"
+mechanism = "oxide_breakdown"
+
+[[cells.failure_modes]]
+name = "stuck_at_1"
+fit = 0.015
+fault_type = "stuck_at_1"
+mechanism = "electromigration"
+
+# SB_DFFER - D Flip-Flop with Enable and Async Reset
+[[cells]]
+name = "SB_DFFER"
+function = "dffre"
+fit = 0.26
+inputs = ["D", "E", "R"]
+outputs = ["Q"]
+nominal_voltage_mv = 1200
+min_voltage_mv = 1100
+timing_margin_voltage_mv = 1140
+voltage_delay_coefficient = 0.10
+voltage_sensitivity = 3
+setup_ps = 250
+hold_ps = 0
+clk_to_q_ps = 540
+
+[[cells.failure_modes]]
+name = "config_upset"
+fit = 0.11
+fault_type = "data_retention"
+mechanism = "sram_soft_error"
+
+[[cells.failure_modes]]
+name = "data_retention"
+fit = 0.065
+fault_type = "data_retention"
+mechanism = "storage_node_upset"
+
+[[cells.failure_modes]]
+name = "timing"
+fit = 0.055
+fault_type = "timing"
+mechanism = "setup_hold_violation"
+
+[[cells.failure_modes]]
+name = "stuck_at_0"
+fit = 0.015
+fault_type = "stuck_at_0"
+mechanism = "oxide_breakdown"
+
+[[cells.failure_modes]]
+name = "stuck_at_1"
+fit = 0.015
+fault_type = "stuck_at_1"
+mechanism = "electromigration"
+
+# =============================================================================
+# SB_IO - I/O Cell
+# Configurable I/O buffer with various drive strengths and standards.
+# =============================================================================
+
+[[cells]]
+name = "SB_IO"
+function = "io"
+fit = 0.30
+inputs = ["D_OUT_0", "D_OUT_1", "OUTPUT_ENABLE"]
+outputs = ["D_IN_0", "D_IN_1"]
+nominal_voltage_mv = 3300
+min_voltage_mv = 1650
+timing_margin_voltage_mv = 2500
+voltage_delay_coefficient = 0.05
+voltage_sensitivity = 2
+
+[[cells.failure_modes]]
+name = "esd_damage"
+fit = 0.10
+fault_type = "stuck_at_0"
+mechanism = "esd_failure"
+
+[[cells.failure_modes]]
+name = "bond_wire"
+fit = 0.08
+fault_type = "open"
+mechanism = "bond_wire_failure"
+
+[[cells.failure_modes]]
+name = "driver_stuck"
+fit = 0.06
+fault_type = "stuck_at_1"
+mechanism = "output_driver_failure"
+
+[[cells.failure_modes]]
+name = "input_stuck"
+fit = 0.06
+fault_type = "stuck_at_0"
+mechanism = "input_buffer_failure"
+
+# =============================================================================
+# SB_GB - Global Buffer
+# For clock and high-fanout signal distribution.
+# =============================================================================
+
+[[cells]]
+name = "SB_GB"
+function = "buf"
+fit = 0.08
+inputs = ["USER_SIGNAL_TO_GLOBAL_BUFFER"]
+outputs = ["GLOBAL_BUFFER_OUTPUT"]
+nominal_voltage_mv = 1200
+min_voltage_mv = 1100
+timing_margin_voltage_mv = 1140
+voltage_delay_coefficient = 0.05
+voltage_sensitivity = 2
+
+[[cells.failure_modes]]
+name = "config_upset"
+fit = 0.03
+fault_type = "data_retention"
+mechanism = "sram_soft_error"
+
+[[cells.failure_modes]]
+name = "clock_path"
+fit = 0.03
+fault_type = "clock_path"
+mechanism = "global_routing_failure"
+
+[[cells.failure_modes]]
+name = "delay"
+fit = 0.02
+fault_type = "delay"
+mechanism = "clock_jitter"
+
+# =============================================================================
+# SB_RAM40_4K - 4Kbit Block RAM
+# Configurable as 256x16, 512x8, 1024x4, or 2048x2.
+# =============================================================================
+
+[[cells]]
+name = "SB_RAM40_4K"
+function = "ram"
+fit = 1.50
+inputs = ["RDATA", "RADDR", "RCLK", "RCLKE", "RE", "WDATA", "WADDR", "WCLK", "WCLKE", "WE"]
+outputs = ["RDATA"]
+nominal_voltage_mv = 1200
+min_voltage_mv = 1100
+timing_margin_voltage_mv = 1140
+voltage_delay_coefficient = 0.15
+voltage_sensitivity = 4
+setup_ps = 300
+hold_ps = 100
+clk_to_q_ps = 800
+
+[[cells.failure_modes]]
+name = "config_upset"
+fit = 0.50
+fault_type = "data_retention"
+mechanism = "sram_soft_error"
+
+[[cells.failure_modes]]
+name = "data_retention"
+fit = 0.40
+fault_type = "data_retention"
+mechanism = "storage_cell_failure"
+
+[[cells.failure_modes]]
+name = "address_decode"
+fit = 0.20
+fault_type = "stuck_at_0"
+mechanism = "decoder_failure"
+
+[[cells.failure_modes]]
+name = "timing"
+fit = 0.20
+fault_type = "timing"
+mechanism = "setup_hold_violation"
+
+[[cells.failure_modes]]
+name = "stuck_bit"
+fit = 0.15
+fault_type = "stuck_at_1"
+mechanism = "bit_cell_failure"
+
+[[cells.failure_modes]]
+name = "power"
+fit = 0.05
+fault_type = "open"
+mechanism = "power_rail_failure"
+
+# =============================================================================
+# Constant Tie Cells
+# =============================================================================
+
+[[cells]]
+name = "SB_VCC"
+function = "tie_high"
+fit = 0.01
+inputs = []
+outputs = ["V"]
+nominal_voltage_mv = 1200
+min_voltage_mv = 1100
+timing_margin_voltage_mv = 1150
+voltage_delay_coefficient = 0.0
+voltage_sensitivity = 1
+
+[[cells.failure_modes]]
+name = "stuck_at_0"
+fit = 0.005
+fault_type = "stuck_at_0"
+mechanism = "routing_open"
+
+[[cells.failure_modes]]
+name = "open"
+fit = 0.005
+fault_type = "open"
+mechanism = "via_failure"
+
+[[cells]]
+name = "SB_GND"
+function = "tie_low"
+fit = 0.01
+inputs = []
+outputs = ["G"]
+nominal_voltage_mv = 1200
+min_voltage_mv = 1100
+timing_margin_voltage_mv = 1150
+voltage_delay_coefficient = 0.0
+voltage_sensitivity = 1
+
+[[cells.failure_modes]]
+name = "stuck_at_1"
+fit = 0.005
+fault_type = "stuck_at_1"
+mechanism = "routing_short"
+
+[[cells.failure_modes]]
+name = "open"
+fit = 0.005
+fault_type = "open"
+mechanism = "via_failure"
+
+# =============================================================================
+# Mapped Functions using SB_LUT4
+# These provide the function->cell mapping for the tech mapper.
+# =============================================================================
+
+# Inverter via SB_LUT4 (INIT = 0x5555)
+[[cells]]
+name = "SB_LUT4_INV"
+function = "inv"
+fit = 0.15
+inputs = ["I0"]
+outputs = ["O"]
+nominal_voltage_mv = 1200
+min_voltage_mv = 1100
+timing_margin_voltage_mv = 1140
+voltage_delay_coefficient = 0.12
+voltage_sensitivity = 5
+
+[[cells.failure_modes]]
+name = "config_upset"
+fit = 0.08
+fault_type = "data_retention"
+mechanism = "sram_soft_error"
+
+[[cells.failure_modes]]
+name = "stuck_at_0"
+fit = 0.035
+fault_type = "stuck_at_0"
+mechanism = "oxide_breakdown"
+
+[[cells.failure_modes]]
+name = "stuck_at_1"
+fit = 0.035
+fault_type = "stuck_at_1"
+mechanism = "electromigration"
+
+# Buffer via SB_LUT4 (INIT = 0xAAAA)
+[[cells]]
+name = "SB_LUT4_BUF"
+function = "buf"
+fit = 0.15
+inputs = ["I0"]
+outputs = ["O"]
+nominal_voltage_mv = 1200
+min_voltage_mv = 1100
+timing_margin_voltage_mv = 1140
+voltage_delay_coefficient = 0.12
+voltage_sensitivity = 5
+
+[[cells.failure_modes]]
+name = "config_upset"
+fit = 0.08
+fault_type = "data_retention"
+mechanism = "sram_soft_error"
+
+[[cells.failure_modes]]
+name = "stuck_at_0"
+fit = 0.035
+fault_type = "stuck_at_0"
+mechanism = "oxide_breakdown"
+
+[[cells.failure_modes]]
+name = "stuck_at_1"
+fit = 0.035
+fault_type = "stuck_at_1"
+mechanism = "electromigration"
+
+# AND2 via SB_LUT4 (INIT = 0x8888)
+[[cells]]
+name = "SB_LUT4_AND2"
+function = "and2"
+fit = 0.15
+inputs = ["I0", "I1"]
+outputs = ["O"]
+nominal_voltage_mv = 1200
+min_voltage_mv = 1100
+timing_margin_voltage_mv = 1140
+voltage_delay_coefficient = 0.12
+voltage_sensitivity = 5
+
+[[cells.failure_modes]]
+name = "config_upset"
+fit = 0.08
+fault_type = "data_retention"
+mechanism = "sram_soft_error"
+
+[[cells.failure_modes]]
+name = "stuck_at_0"
+fit = 0.035
+fault_type = "stuck_at_0"
+mechanism = "oxide_breakdown"
+
+[[cells.failure_modes]]
+name = "stuck_at_1"
+fit = 0.035
+fault_type = "stuck_at_1"
+mechanism = "electromigration"
+
+# OR2 via SB_LUT4 (INIT = 0xEEEE)
+[[cells]]
+name = "SB_LUT4_OR2"
+function = "or2"
+fit = 0.15
+inputs = ["I0", "I1"]
+outputs = ["O"]
+nominal_voltage_mv = 1200
+min_voltage_mv = 1100
+timing_margin_voltage_mv = 1140
+voltage_delay_coefficient = 0.12
+voltage_sensitivity = 5
+
+[[cells.failure_modes]]
+name = "config_upset"
+fit = 0.08
+fault_type = "data_retention"
+mechanism = "sram_soft_error"
+
+[[cells.failure_modes]]
+name = "stuck_at_0"
+fit = 0.035
+fault_type = "stuck_at_0"
+mechanism = "oxide_breakdown"
+
+[[cells.failure_modes]]
+name = "stuck_at_1"
+fit = 0.035
+fault_type = "stuck_at_1"
+mechanism = "electromigration"
+
+# XOR2 via SB_LUT4 (INIT = 0x6666)
+[[cells]]
+name = "SB_LUT4_XOR2"
+function = "xor2"
+fit = 0.15
+inputs = ["I0", "I1"]
+outputs = ["O"]
+nominal_voltage_mv = 1200
+min_voltage_mv = 1100
+timing_margin_voltage_mv = 1140
+voltage_delay_coefficient = 0.12
+voltage_sensitivity = 5
+
+[[cells.failure_modes]]
+name = "config_upset"
+fit = 0.08
+fault_type = "data_retention"
+mechanism = "sram_soft_error"
+
+[[cells.failure_modes]]
+name = "stuck_at_0"
+fit = 0.035
+fault_type = "stuck_at_0"
+mechanism = "oxide_breakdown"
+
+[[cells.failure_modes]]
+name = "stuck_at_1"
+fit = 0.035
+fault_type = "stuck_at_1"
+mechanism = "electromigration"
+
+# NAND2 via SB_LUT4 (INIT = 0x7777)
+[[cells]]
+name = "SB_LUT4_NAND2"
+function = "nand2"
+fit = 0.15
+inputs = ["I0", "I1"]
+outputs = ["O"]
+nominal_voltage_mv = 1200
+min_voltage_mv = 1100
+timing_margin_voltage_mv = 1140
+voltage_delay_coefficient = 0.12
+voltage_sensitivity = 5
+
+[[cells.failure_modes]]
+name = "config_upset"
+fit = 0.08
+fault_type = "data_retention"
+mechanism = "sram_soft_error"
+
+[[cells.failure_modes]]
+name = "stuck_at_0"
+fit = 0.035
+fault_type = "stuck_at_0"
+mechanism = "oxide_breakdown"
+
+[[cells.failure_modes]]
+name = "stuck_at_1"
+fit = 0.035
+fault_type = "stuck_at_1"
+mechanism = "electromigration"
+
+# NOR2 via SB_LUT4 (INIT = 0x1111)
+[[cells]]
+name = "SB_LUT4_NOR2"
+function = "nor2"
+fit = 0.15
+inputs = ["I0", "I1"]
+outputs = ["O"]
+nominal_voltage_mv = 1200
+min_voltage_mv = 1100
+timing_margin_voltage_mv = 1140
+voltage_delay_coefficient = 0.12
+voltage_sensitivity = 5
+
+[[cells.failure_modes]]
+name = "config_upset"
+fit = 0.08
+fault_type = "data_retention"
+mechanism = "sram_soft_error"
+
+[[cells.failure_modes]]
+name = "stuck_at_0"
+fit = 0.035
+fault_type = "stuck_at_0"
+mechanism = "oxide_breakdown"
+
+[[cells.failure_modes]]
+name = "stuck_at_1"
+fit = 0.035
+fault_type = "stuck_at_1"
+mechanism = "electromigration"
+
+# XNOR2 via SB_LUT4 (INIT = 0x9999)
+[[cells]]
+name = "SB_LUT4_XNOR2"
+function = "xnor2"
+fit = 0.15
+inputs = ["I0", "I1"]
+outputs = ["O"]
+nominal_voltage_mv = 1200
+min_voltage_mv = 1100
+timing_margin_voltage_mv = 1140
+voltage_delay_coefficient = 0.12
+voltage_sensitivity = 5
+
+[[cells.failure_modes]]
+name = "config_upset"
+fit = 0.08
+fault_type = "data_retention"
+mechanism = "sram_soft_error"
+
+[[cells.failure_modes]]
+name = "stuck_at_0"
+fit = 0.035
+fault_type = "stuck_at_0"
+mechanism = "oxide_breakdown"
+
+[[cells.failure_modes]]
+name = "stuck_at_1"
+fit = 0.035
+fault_type = "stuck_at_1"
+mechanism = "electromigration"
+
+# MUX2 via SB_LUT4 (INIT = 0xCACA: sel ? b : a)
+[[cells]]
+name = "SB_LUT4_MUX2"
+function = "mux2"
+fit = 0.15
+inputs = ["I0", "I1", "I2"]
+outputs = ["O"]
+nominal_voltage_mv = 1200
+min_voltage_mv = 1100
+timing_margin_voltage_mv = 1140
+voltage_delay_coefficient = 0.12
+voltage_sensitivity = 5
+
+[[cells.failure_modes]]
+name = "config_upset"
+fit = 0.08
+fault_type = "data_retention"
+mechanism = "sram_soft_error"
+
+[[cells.failure_modes]]
+name = "stuck_at_0"
+fit = 0.035
+fault_type = "stuck_at_0"
+mechanism = "oxide_breakdown"
+
+[[cells.failure_modes]]
+name = "stuck_at_1"
+fit = 0.035
+fault_type = "stuck_at_1"
+mechanism = "electromigration"
+
+# AND3 via SB_LUT4 (INIT = 0x8080)
+[[cells]]
+name = "SB_LUT4_AND3"
+function = "and3"
+fit = 0.15
+inputs = ["I0", "I1", "I2"]
+outputs = ["O"]
+nominal_voltage_mv = 1200
+min_voltage_mv = 1100
+timing_margin_voltage_mv = 1140
+voltage_delay_coefficient = 0.12
+voltage_sensitivity = 5
+
+[[cells.failure_modes]]
+name = "config_upset"
+fit = 0.08
+fault_type = "data_retention"
+mechanism = "sram_soft_error"
+
+[[cells.failure_modes]]
+name = "stuck_at_0"
+fit = 0.035
+fault_type = "stuck_at_0"
+mechanism = "oxide_breakdown"
+
+[[cells.failure_modes]]
+name = "stuck_at_1"
+fit = 0.035
+fault_type = "stuck_at_1"
+mechanism = "electromigration"
+
+# OR3 via SB_LUT4 (INIT = 0xFEFE)
+[[cells]]
+name = "SB_LUT4_OR3"
+function = "or3"
+fit = 0.15
+inputs = ["I0", "I1", "I2"]
+outputs = ["O"]
+nominal_voltage_mv = 1200
+min_voltage_mv = 1100
+timing_margin_voltage_mv = 1140
+voltage_delay_coefficient = 0.12
+voltage_sensitivity = 5
+
+[[cells.failure_modes]]
+name = "config_upset"
+fit = 0.08
+fault_type = "data_retention"
+mechanism = "sram_soft_error"
+
+[[cells.failure_modes]]
+name = "stuck_at_0"
+fit = 0.035
+fault_type = "stuck_at_0"
+mechanism = "oxide_breakdown"
+
+[[cells.failure_modes]]
+name = "stuck_at_1"
+fit = 0.035
+fault_type = "stuck_at_1"
+mechanism = "electromigration"
+
+# AND4 via SB_LUT4 (INIT = 0x8000)
+[[cells]]
+name = "SB_LUT4_AND4"
+function = "and4"
+fit = 0.15
+inputs = ["I0", "I1", "I2", "I3"]
+outputs = ["O"]
+nominal_voltage_mv = 1200
+min_voltage_mv = 1100
+timing_margin_voltage_mv = 1140
+voltage_delay_coefficient = 0.12
+voltage_sensitivity = 5
+
+[[cells.failure_modes]]
+name = "config_upset"
+fit = 0.08
+fault_type = "data_retention"
+mechanism = "sram_soft_error"
+
+[[cells.failure_modes]]
+name = "stuck_at_0"
+fit = 0.035
+fault_type = "stuck_at_0"
+mechanism = "oxide_breakdown"
+
+[[cells.failure_modes]]
+name = "stuck_at_1"
+fit = 0.035
+fault_type = "stuck_at_1"
+mechanism = "electromigration"
+
+# OR4 via SB_LUT4 (INIT = 0xFFFE)
+[[cells]]
+name = "SB_LUT4_OR4"
+function = "or4"
+fit = 0.15
+inputs = ["I0", "I1", "I2", "I3"]
+outputs = ["O"]
+nominal_voltage_mv = 1200
+min_voltage_mv = 1100
+timing_margin_voltage_mv = 1140
+voltage_delay_coefficient = 0.12
+voltage_sensitivity = 5
+
+[[cells.failure_modes]]
+name = "config_upset"
+fit = 0.08
+fault_type = "data_retention"
+mechanism = "sram_soft_error"
+
+[[cells.failure_modes]]
+name = "stuck_at_0"
+fit = 0.035
+fault_type = "stuck_at_0"
+mechanism = "oxide_breakdown"
+
+[[cells.failure_modes]]
+name = "stuck_at_1"
+fit = 0.035
+fault_type = "stuck_at_1"
+mechanism = "electromigration"
+
+# =============================================================================
+# Arithmetic cells using SB_LUT4 + SB_CARRY
+# =============================================================================
+
+# Half Adder: Sum via LUT4 XOR, Carry via SB_CARRY
+[[cells]]
+name = "SB_FA_HALF"
+function = "half_adder"
+fit = 0.25
+inputs = ["A", "B"]
+outputs = ["SUM", "COUT"]
+nominal_voltage_mv = 1200
+min_voltage_mv = 1100
+timing_margin_voltage_mv = 1140
+voltage_delay_coefficient = 0.10
+voltage_sensitivity = 4
+
+[[cells.failure_modes]]
+name = "config_upset"
+fit = 0.13
+fault_type = "data_retention"
+mechanism = "sram_soft_error"
+
+[[cells.failure_modes]]
+name = "stuck_at_0"
+fit = 0.05
+fault_type = "stuck_at_0"
+mechanism = "oxide_breakdown"
+
+[[cells.failure_modes]]
+name = "stuck_at_1"
+fit = 0.05
+fault_type = "stuck_at_1"
+mechanism = "electromigration"
+
+[[cells.failure_modes]]
+name = "delay"
+fit = 0.02
+fault_type = "delay"
+mechanism = "carry_path_delay"
+
+# Full Adder: Sum via LUT4 XOR3, Carry via SB_CARRY
+[[cells]]
+name = "SB_FA_FULL"
+function = "full_adder"
+fit = 0.30
+inputs = ["A", "B", "CIN"]
+outputs = ["SUM", "COUT"]
+nominal_voltage_mv = 1200
+min_voltage_mv = 1100
+timing_margin_voltage_mv = 1140
+voltage_delay_coefficient = 0.10
+voltage_sensitivity = 4
+
+[[cells.failure_modes]]
+name = "config_upset"
+fit = 0.15
+fault_type = "data_retention"
+mechanism = "sram_soft_error"
+
+[[cells.failure_modes]]
+name = "stuck_at_0"
+fit = 0.06
+fault_type = "stuck_at_0"
+mechanism = "oxide_breakdown"
+
+[[cells.failure_modes]]
+name = "stuck_at_1"
+fit = 0.06
+fault_type = "stuck_at_1"
+mechanism = "electromigration"
+
+[[cells.failure_modes]]
+name = "delay"
+fit = 0.03
+fault_type = "delay"
+mechanism = "carry_path_delay"
+
+# =============================================================================
+# Decomposition Rules for iCE40
+# =============================================================================
+
+[[decomposition_rules]]
+name = "and_to_lut4"
+source = "and"
+targets = ["lut4"]
+connectivity = "direct"
+fit_multiplier = 1.0
+
+[[decomposition_rules]]
+name = "or_to_lut4"
+source = "or"
+targets = ["lut4"]
+connectivity = "direct"
+fit_multiplier = 1.0
+
+[[decomposition_rules]]
+name = "xor_to_lut4"
+source = "xor"
+targets = ["lut4"]
+connectivity = "direct"
+fit_multiplier = 1.0
+
+[[decomposition_rules]]
+name = "mux_to_lut4"
+source = "mux2"
+targets = ["lut4"]
+connectivity = "direct"
+fit_multiplier = 1.0
+
+[[decomposition_rules]]
+name = "add_to_carry_chain"
+source = "add"
+targets = ["half_adder", "full_adder"]
+connectivity = "ripple_carry"
+fit_multiplier = 1.0
