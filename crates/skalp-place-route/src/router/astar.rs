@@ -109,19 +109,16 @@ impl<'a, D: Device> AStarRouter<'a, D> {
             // Get current g-score
             let current_g = g_scores.get(&current.wire).copied().unwrap_or(f64::MAX);
 
-            // Expand neighbors via PIPs
-            for pip_id in self.device.wire_pips(current.wire) {
+            // Expand neighbors via PIPs (forward routing - current wire is source)
+            for pip_id in self.device.wire_src_pips(current.wire) {
                 let pip = match self.device.pip(pip_id) {
                     Some(p) => p,
                     None => continue,
                 };
 
                 // Get the destination wire (the one we're routing to)
-                let neighbor = if pip.src_wire == current.wire {
-                    pip.dst_wire
-                } else {
-                    pip.src_wire
-                };
+                // Since we're using wire_src_pips, current.wire should be pip.src_wire
+                let neighbor = pip.dst_wire;
 
                 // Skip blocked wires
                 if blocked_set.contains(&neighbor) {

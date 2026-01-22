@@ -206,4 +206,85 @@ mod tests {
         assert!(!pnr_result.placement.placements.is_empty());
         assert!(!pnr_result.bitstream.data.is_empty());
     }
+
+    #[test]
+    fn test_routing_quality() {
+        // Create a more complex netlist to test routing
+        let mut netlist = GateNetlist::new("counter".to_string(), "ice40".to_string());
+
+        // Clock net
+        let clock_net = netlist.add_net({
+            let mut net = GateNet::new_input(
+                skalp_lir::gate_netlist::GateNetId(0),
+                "clk".to_string(),
+            );
+            net.is_clock = true;
+            net
+        });
+
+        // Create a chain of 4 LUT-DFF pairs
+        let mut prev_net = clock_net; // Start signal
+        for i in 0..4 {
+            // Internal net from LUT to DFF
+            let lut_out = netlist.add_net(GateNet::new(
+                skalp_lir::gate_netlist::GateNetId(10 + i as u32),
+                format!("lut{}_out", i),
+            ));
+
+            // Output from DFF (feedback or output)
+            let dff_out = netlist.add_net(GateNet::new(
+                skalp_lir::gate_netlist::GateNetId(20 + i as u32),
+                format!("dff{}_out", i),
+            ));
+
+            // LUT
+            netlist.add_cell(Cell::new_comb(
+                skalp_lir::gate_netlist::CellId(i as u32),
+                "SB_LUT4".to_string(),
+                "ice40".to_string(),
+                0.0,
+                format!("chain.lut{}", i),
+                vec![prev_net],
+                vec![lut_out],
+            ));
+
+            // DFF
+            let mut dff = Cell::new_seq(
+                skalp_lir::gate_netlist::CellId(10 + i as u32),
+                "SB_DFF".to_string(),
+                "ice40".to_string(),
+                0.0,
+                format!("chain.dff{}", i),
+                vec![lut_out],
+                vec![dff_out],
+                clock_net,
+                None, // No reset
+            );
+            dff.clock = Some(clock_net);
+            netlist.add_cell(dff);
+
+            prev_net = dff_out;
+        }
+
+        let config = PnrConfig::default();
+        let result = place_and_route(&netlist, Ice40Variant::Hx1k, config).unwrap();
+
+        println!("\n=== Routing Quality Test ===");
+        println!("Cells: {}", result.placement.placements.len());
+        println!("Routing success: {}", result.routing.success);
+        println!("Congestion: {:.2}", result.routing.congestion);
+        println!("Iterations: {}", result.routing.iterations);
+
+        let routed = result.routing.routes.values().filter(|r| !r.wires.is_empty()).count();
+        let total = result.routing.routes.len();
+        println!("Routed nets: {}/{}", routed, total);
+
+        // Print some route details
+        for (net_id, route) in result.routing.routes.iter().take(3) {
+            println!("  Net {:?}: {} wires, {} PIPs", net_id, route.wires.len(), route.pips.len());
+        }
+
+        assert!(result.routing.success, "Routing should succeed");
+        assert!(result.routing.congestion < 5.0, "Congestion should be acceptable");
+    }
 }

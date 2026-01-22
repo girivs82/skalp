@@ -109,8 +109,10 @@ pub struct Ice40Device {
     wire_names: HashMap<String, WireId>,
     /// All PIPs
     pips: Vec<Pip>,
-    /// Wire to PIP mapping (PIPs that drive this wire)
+    /// Wire to PIP mapping (PIPs that drive this wire - wire is destination)
     wire_to_pips: HashMap<WireId, Vec<PipId>>,
+    /// Wire to PIP mapping (PIPs driven by this wire - wire is source)
+    wire_src_pips: HashMap<WireId, Vec<PipId>>,
     /// Tile to wire mapping
     tile_wires: HashMap<(u32, u32), Vec<WireId>>,
     /// Package pin mappings
@@ -152,6 +154,7 @@ impl Ice40Device {
             wire_names: HashMap::new(),
             pips: Vec::new(),
             wire_to_pips: HashMap::new(),
+            wire_src_pips: HashMap::new(),
             tile_wires: HashMap::new(),
             packages: HashMap::new(),
             routing: Self::default_routing(),
@@ -175,9 +178,16 @@ impl Ice40Device {
 
         // Build PIPs from chipdb
         for pip in chipdb.build_pips() {
+            // Index by destination wire (for finding what drives a wire)
             device
                 .wire_to_pips
                 .entry(pip.dst_wire)
+                .or_default()
+                .push(pip.id);
+            // Index by source wire (for forward routing - finding where a wire can go)
+            device
+                .wire_src_pips
+                .entry(pip.src_wire)
                 .or_default()
                 .push(pip.id);
             device.pips.push(pip);
@@ -274,6 +284,7 @@ impl Ice40Device {
             wire_names: HashMap::new(),
             pips: Vec::new(),
             wire_to_pips: HashMap::new(),
+            wire_src_pips: HashMap::new(),
             tile_wires: HashMap::new(),
             packages: HashMap::new(),
             routing: Self::default_routing(),
@@ -860,6 +871,7 @@ impl Ice40Device {
                     tile_y: y,
                 };
                 self.wire_to_pips.entry(span).or_default().push(pip.id);
+                self.wire_src_pips.entry(local).or_default().push(pip.id);
                 self.pips.push(pip);
                 *pip_id += 1;
             }
@@ -878,6 +890,7 @@ impl Ice40Device {
                     tile_y: y,
                 };
                 self.wire_to_pips.entry(local).or_default().push(pip.id);
+                self.wire_src_pips.entry(span).or_default().push(pip.id);
                 self.pips.push(pip);
                 *pip_id += 1;
             }
@@ -897,6 +910,7 @@ impl Ice40Device {
                         tile_y: y,
                     };
                     self.wire_to_pips.entry(dst).or_default().push(pip.id);
+                    self.wire_src_pips.entry(src).or_default().push(pip.id);
                     self.pips.push(pip);
                     *pip_id += 1;
                 }
@@ -940,6 +954,7 @@ impl Ice40Device {
                             tile_y: y,
                         };
                         self.wire_to_pips.entry(dst).or_default().push(pip.id);
+                        self.wire_src_pips.entry(src).or_default().push(pip.id);
                         self.pips.push(pip);
                         *pip_id += 1;
                     }
@@ -968,6 +983,7 @@ impl Ice40Device {
                             tile_y: y,
                         };
                         self.wire_to_pips.entry(dst).or_default().push(pip.id);
+                        self.wire_src_pips.entry(src).or_default().push(pip.id);
                         self.pips.push(pip);
                         *pip_id += 1;
                     }
@@ -1136,6 +1152,10 @@ impl Device for Ice40Device {
 
     fn wire_pips(&self, wire_id: WireId) -> Vec<PipId> {
         self.wire_to_pips.get(&wire_id).cloned().unwrap_or_default()
+    }
+
+    fn wire_src_pips(&self, wire_id: WireId) -> Vec<PipId> {
+        self.wire_src_pips.get(&wire_id).cloned().unwrap_or_default()
     }
 
     fn packages(&self) -> &HashMap<String, PackagePins> {

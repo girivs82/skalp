@@ -246,8 +246,11 @@ pub trait Device: Send + Sync {
     /// Get all wires in a tile
     fn tile_wires(&self, x: u32, y: u32) -> Vec<WireId>;
 
-    /// Get all PIPs that can drive a wire
+    /// Get all PIPs that can drive a wire (wire is destination)
     fn wire_pips(&self, wire_id: WireId) -> Vec<PipId>;
+
+    /// Get all PIPs driven by a wire (wire is source) - for forward routing
+    fn wire_src_pips(&self, wire_id: WireId) -> Vec<PipId>;
 
     /// Get package pin mappings
     fn packages(&self) -> &HashMap<String, PackagePins>;
