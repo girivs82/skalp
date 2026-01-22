@@ -308,7 +308,8 @@ impl<D: Device + Clone> Placer<D> {
                     if tile.tile_type() == tile_type {
                         // Find an unused BEL
                         for (bel_idx, bel) in tile.bels().iter().enumerate() {
-                            if bel.bel_type == bel_type && !used_bels.contains_key(&(x, y, bel_idx))
+                            if Self::bel_types_compatible(bel.bel_type, bel_type)
+                                && !used_bels.contains_key(&(x, y, bel_idx))
                             {
                                 used_bels.insert((x, y, bel_idx), cell_id);
                                 result
@@ -379,6 +380,27 @@ impl<D: Device + Clone> Placer<D> {
             BelType::Pll => TileType::Pll,
             BelType::DspSlice => TileType::Dsp,
         }
+    }
+
+    /// Check if two BEL types are compatible for placement
+    /// In iCE40, all DFF variants use the same hardware with different config bits
+    fn bel_types_compatible(available: BelType, required: BelType) -> bool {
+        if available == required {
+            return true;
+        }
+        matches!(
+            (available, required),
+            // A basic Dff BEL can implement any DFF variant
+            (BelType::Dff, BelType::DffE)
+                | (BelType::Dff, BelType::DffSr)
+                | (BelType::Dff, BelType::DffSrE)
+                // Any FF type can implement a basic DFF
+                | (BelType::DffE, BelType::Dff)
+                | (BelType::DffSr, BelType::Dff)
+                | (BelType::DffSrE, BelType::Dff)
+                | (BelType::DffSrE, BelType::DffE)
+                | (BelType::DffSrE, BelType::DffSr)
+        )
     }
 
     /// Calculate total wirelength (HPWL)

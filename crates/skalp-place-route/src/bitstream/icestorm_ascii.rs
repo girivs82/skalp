@@ -48,6 +48,14 @@ struct IoConfig {
     pullup_enable: bool,
 }
 
+/// Global network configuration
+/// Tracks which global networks (0-7) are in use
+#[derive(Debug, Clone, Default)]
+struct GlobalNetworkConfig {
+    /// Bitmask of active global networks (bit N = glb_netwk_N is active)
+    active_networks: u8,
+}
+
 impl IoConfig {
     /// Create config for simple input
     fn simple_input() -> Self {
@@ -134,6 +142,9 @@ impl<'a> IceStormAscii<'a> {
         // Collect I/O configurations from placement and netlist
         let io_configs = self.collect_io_configs(placement, netlist);
 
+        // Collect global network configuration
+        let global_config = self.collect_global_config(placement);
+
         // Generate tile configurations
         for y in 0..height {
             for x in 0..width {
@@ -148,6 +159,7 @@ impl<'a> IceStormAscii<'a> {
                                 routing,
                                 &lut_inits,
                                 &dff_configs,
+                                &global_config,
                             );
                         }
                         TileType::IoTop
@@ -292,16 +304,17 @@ impl<'a> IceStormAscii<'a> {
             // Also check for carry cells (they set carry_enable bit)
             if matches!(loc.bel_type, BelType::Carry) {
                 // Carry cells set the carry_enable bit on their associated LC
-                // The carry chain typically spans LC 0-7 in a tile
-                let config = DffConfig {
-                    carry_enable: true,
-                    ..Default::default()
-                };
-                // For carry cells, bel_index is 16 (after LUT/DFF pairs)
-                // We need to set carry_enable on the appropriate LCs based on how carry is used
-                // For now, set it on LC 0 (this may need refinement)
-                let lc_idx = 0;
-                dff_configs.insert((loc.tile_x, loc.tile_y, lc_idx), config);
+                // In iCE40, carry chain spans LC 0-7, and multiple carry cells form a chain
+                // We enable carry_enable on all LCs that might be part of the chain
+                // The bel_index for carry is typically 16 (after LUT/DFF pairs)
+                // We need to track which tile has carry cells and enable carry on all relevant LCs
+                let tile_key = (loc.tile_x, loc.tile_y);
+                for lc_idx in 0..8 {
+                    let entry = dff_configs
+                        .entry((tile_key.0, tile_key.1, lc_idx))
+                        .or_insert(DffConfig::default());
+                    entry.carry_enable = true;
+                }
             }
         }
 
@@ -385,6 +398,39 @@ impl<'a> IceStormAscii<'a> {
         }
     }
 
+    /// Collect global network configuration from placement
+    /// Determines which global networks (0-7) are in use based on SB_GB placements
+    fn collect_global_config(&self, placement: &PlacementResult) -> GlobalNetworkConfig {
+        let mut config = GlobalNetworkConfig::default();
+
+        // Check for global buffer cells
+        for (_cell_id, loc) in &placement.placements {
+            if matches!(loc.bel_type, BelType::GlobalBuf) {
+                // Map global buffer placement to global network index
+                // In iCE40, the global network index is typically related to the gbufin location
+                // For simplicity, enable all global networks when any global buffer is used
+                config.active_networks = 0xFF; // Enable all 8 global networks
+                break;
+            }
+        }
+
+        // Also check for DFF cells which need clock distribution
+        // DFFs require global networks to be active for clock signals
+        let has_dffs = placement.placements.values().any(|loc| {
+            matches!(
+                loc.bel_type,
+                BelType::Dff | BelType::DffE | BelType::DffSr | BelType::DffSrE
+            )
+        });
+
+        if has_dffs {
+            // Enable global network 0 (typically used for primary clock)
+            config.active_networks |= 0x01;
+        }
+
+        config
+    }
+
     /// Generate logic tile configuration
     /// Logic tiles have 54 columns x 16 rows of config bits
     fn generate_logic_tile(
@@ -396,6 +442,7 @@ impl<'a> IceStormAscii<'a> {
         routing: &RoutingResult,
         lut_inits: &HashMap<(u32, u32, usize), u16>,
         dff_configs: &HashMap<(u32, u32, usize), DffConfig>,
+        global_config: &GlobalNetworkConfig,
     ) {
         // Check if any cells are placed in this tile
         let cells_in_tile: Vec<_> = placement
@@ -480,6 +527,28 @@ impl<'a> IceStormAscii<'a> {
                             }
                         }
                     }
+                }
+            }
+
+            // Set column buffer control bits for global networks
+            // Logic tile ColBufCtrl bit positions (from chipdb):
+            //   glb_netwk_0: B0[1], glb_netwk_1: B1[2], glb_netwk_2: B5[2]
+            //   glb_netwk_3: B7[2], glb_netwk_4: B9[2], glb_netwk_5: B11[2]
+            //   glb_netwk_6: B13[2], glb_netwk_7: B15[2]
+            let colbuf_positions: [(usize, usize, u8); 8] = [
+                (0, 1, 0),   // glb_netwk_0 at B0[1]
+                (1, 2, 1),   // glb_netwk_1 at B1[2]
+                (5, 2, 2),   // glb_netwk_2 at B5[2]
+                (7, 2, 3),   // glb_netwk_3 at B7[2]
+                (9, 2, 4),   // glb_netwk_4 at B9[2]
+                (11, 2, 5),  // glb_netwk_5 at B11[2]
+                (13, 2, 6),  // glb_netwk_6 at B13[2]
+                (15, 2, 7),  // glb_netwk_7 at B15[2]
+            ];
+
+            for (row, col, glb_idx) in colbuf_positions {
+                if (global_config.active_networks >> glb_idx) & 1 == 1 {
+                    bits[row][col] = true;
                 }
             }
         }

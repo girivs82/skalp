@@ -3,7 +3,7 @@
 //! Refines placement using simulated annealing with HPWL cost function.
 
 use super::{PlacementLoc, PlacementResult};
-use crate::device::Device;
+use crate::device::{BelType, Device};
 use crate::error::Result;
 use rand::{Rng, SeedableRng};
 use skalp_lir::gate_netlist::{CellId, GateNetlist};
@@ -167,10 +167,11 @@ impl<'a, D: Device> SimulatedAnnealing<'a, D> {
         // Find a valid BEL at the new location
         if let Some(tile) = self.device.tile_at(new_x, new_y) {
             for (bel_idx, bel) in tile.bels().iter().enumerate() {
-                if bel.bel_type == current_loc.bel_type {
+                if Self::bel_types_compatible(bel.bel_type, current_loc.bel_type) {
+                    // Keep the cell's original bel_type (requirement) not the BEL's type
                     return Move::Relocate(
                         cell_id,
-                        PlacementLoc::new(new_x, new_y, bel_idx, bel.bel_type),
+                        PlacementLoc::new(new_x, new_y, bel_idx, current_loc.bel_type),
                     );
                 }
             }
@@ -275,5 +276,26 @@ impl<'a, D: Device> SimulatedAnnealing<'a, D> {
         }
 
         total_hpwl
+    }
+
+    /// Check if two BEL types are compatible for placement
+    /// In iCE40, all DFF variants use the same hardware with different config bits
+    fn bel_types_compatible(available: BelType, required: BelType) -> bool {
+        if available == required {
+            return true;
+        }
+        matches!(
+            (available, required),
+            // A basic Dff BEL can implement any DFF variant
+            (BelType::Dff, BelType::DffE)
+                | (BelType::Dff, BelType::DffSr)
+                | (BelType::Dff, BelType::DffSrE)
+                // Any FF type can implement a basic DFF
+                | (BelType::DffE, BelType::Dff)
+                | (BelType::DffSr, BelType::Dff)
+                | (BelType::DffSrE, BelType::Dff)
+                | (BelType::DffSrE, BelType::DffE)
+                | (BelType::DffSrE, BelType::DffSr)
+        )
     }
 }

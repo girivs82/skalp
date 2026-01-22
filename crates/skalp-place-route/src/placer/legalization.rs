@@ -105,7 +105,12 @@ impl<'a, D: Device> Legalizer<'a, D> {
     fn bel_types_compatible(&self, available: BelType, required: BelType) -> bool {
         matches!(
             (available, required),
-            (BelType::DffE, BelType::Dff)
+            // A basic Dff BEL can implement any DFF variant
+            (BelType::Dff, BelType::DffE)
+                | (BelType::Dff, BelType::DffSr)
+                | (BelType::Dff, BelType::DffSrE)
+                // Any FF type can implement a basic DFF
+                | (BelType::DffE, BelType::Dff)
                 | (BelType::DffSr, BelType::Dff)
                 | (BelType::DffSrE, BelType::Dff)
                 | (BelType::DffSrE, BelType::DffE)

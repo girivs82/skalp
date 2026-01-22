@@ -291,6 +291,11 @@ impl<'a, D: Device> AnalyticalPlacer<'a, D> {
     /// Check if two BEL types are compatible
     fn bel_types_compatible(&self, available: BelType, required: BelType) -> bool {
         match (available, required) {
+            // A basic Dff BEL can implement any DFF variant
+            // (iCE40 DFFs are all the same hardware with different config bits)
+            (BelType::Dff, BelType::DffE) => true,
+            (BelType::Dff, BelType::DffSr) => true,
+            (BelType::Dff, BelType::DffSrE) => true,
             // Any FF type can implement a basic DFF
             (BelType::DffE, BelType::Dff) => true,
             (BelType::DffSr, BelType::Dff) => true,
