@@ -2,6 +2,12 @@
 //!
 //! Evaluates compile-time constant expressions for monomorphization
 
+// Stack growth constants for deeply recursive const evaluation
+// Red zone: minimum stack space before growing (256KB)
+const STACK_RED_ZONE: usize = 256 * 1024;
+// Stack size: how much to grow by when needed (8MB)
+const STACK_GROW_SIZE: usize = 8 * 1024 * 1024;
+
 use crate::hir::{
     ConstantId, HirBinaryOp, HirEnumType, HirExpression, HirFunction, HirLiteral, HirStatement,
     HirType, HirUnaryOp,
@@ -267,7 +273,14 @@ impl ConstEvaluator {
     }
 
     /// Evaluate a const expression
+    ///
+    /// This wrapper ensures we have enough stack space for deeply recursive evaluation.
     pub fn eval(&mut self, expr: &HirExpression) -> Result<ConstValue, EvalError> {
+        stacker::maybe_grow(STACK_RED_ZONE, STACK_GROW_SIZE, || self.eval_impl(expr))
+    }
+
+    /// Implementation of const expression evaluation
+    fn eval_impl(&mut self, expr: &HirExpression) -> Result<ConstValue, EvalError> {
         // Check recursion depth
         const MAX_RECURSION_DEPTH: usize = 100;
         if self.recursion_depth >= MAX_RECURSION_DEPTH {

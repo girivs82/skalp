@@ -18,6 +18,12 @@ use tracing::trace;
 /// Note: Deeply nested expressions should use intermediate let bindings instead
 const MAX_RECURSION_DEPTH: usize = 100;
 
+// Stack growth constants for deeply recursive expression building
+// Red zone: minimum stack space before growing (256KB)
+const STACK_RED_ZONE: usize = 256 * 1024;
+// Stack size: how much to grow by when needed (8MB)
+const STACK_GROW_SIZE: usize = 8 * 1024 * 1024;
+
 /// List of builtin/intrinsic functions that don't require symbol resolution
 const BUILTIN_FUNCTIONS: &[&str] = &[
     // Logarithmic & Exponential
@@ -5301,8 +5307,18 @@ impl HirBuilderContext {
     }
 
     /// Build expression
+    ///
+    /// This wrapper ensures we have enough stack space for deeply recursive expression building.
     #[allow(clippy::comparison_chain)]
     fn build_expression(&mut self, node: &SyntaxNode) -> Option<HirExpression> {
+        stacker::maybe_grow(STACK_RED_ZONE, STACK_GROW_SIZE, || {
+            self.build_expression_impl(node)
+        })
+    }
+
+    /// Implementation of expression building
+    #[allow(clippy::comparison_chain)]
+    fn build_expression_impl(&mut self, node: &SyntaxNode) -> Option<HirExpression> {
         trace!(
             "[HIR_BUILD_EXPR] Building expression, node kind: {:?}",
             node.kind()

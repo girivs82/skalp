@@ -15,13 +15,13 @@ use std::path::PathBuf;
 use tracing::trace;
 
 // Stack growth constants for deeply recursive expression conversion
-// Red zone: minimum stack space before growing (128KB)
+// Red zone: minimum stack space before growing (256KB)
 // We use a larger red zone to detect low stack earlier and avoid
 // running out during the setup of the new stack.
-const STACK_RED_ZONE: usize = 128 * 1024;
-// Stack size: how much to grow by when needed (4MB)
+const STACK_RED_ZONE: usize = 256 * 1024;
+// Stack size: how much to grow by when needed (8MB)
 // Larger stack segments reduce the frequency of allocations.
-const STACK_GROW_SIZE: usize = 4 * 1024 * 1024;
+const STACK_GROW_SIZE: usize = 8 * 1024 * 1024;
 
 /// Maximum recursion depth for type inference and expression annotation
 /// This prevents stack overflow on deeply nested expressions like {{{{{...}}}}}
@@ -8468,8 +8468,20 @@ impl<'hir> HirToMir<'hir> {
         self.transform_early_returns_recursive(body)
     }
 
+    /// This wrapper ensures we have enough stack space for deeply recursive transformation.
     #[allow(clippy::only_used_in_recursion)]
     fn transform_early_returns_recursive(
+        &self,
+        body: Vec<hir::HirStatement>,
+    ) -> Vec<hir::HirStatement> {
+        stacker::maybe_grow(STACK_RED_ZONE, STACK_GROW_SIZE, || {
+            self.transform_early_returns_recursive_impl(body)
+        })
+    }
+
+    /// Implementation of early returns transformation
+    #[allow(clippy::only_used_in_recursion)]
+    fn transform_early_returns_recursive_impl(
         &self,
         body: Vec<hir::HirStatement>,
     ) -> Vec<hir::HirStatement> {
@@ -10833,8 +10845,18 @@ impl<'hir> HirToMir<'hir> {
     }
 
     /// Convert HIR type to frontend Type for MIR expression annotation (BUG #76 FIX)
+    ///
+    /// This wrapper ensures we have enough stack space for deeply recursive type conversion.
     #[allow(clippy::only_used_in_recursion)]
     fn hir_type_to_type(&self, hir_type: &hir::HirType) -> Type {
+        stacker::maybe_grow(STACK_RED_ZONE, STACK_GROW_SIZE, || {
+            self.hir_type_to_type_impl(hir_type)
+        })
+    }
+
+    /// Implementation of HIR type to frontend Type conversion
+    #[allow(clippy::only_used_in_recursion)]
+    fn hir_type_to_type_impl(&self, hir_type: &hir::HirType) -> Type {
         use skalp_frontend::types::Width;
 
         match hir_type {
@@ -11323,8 +11345,18 @@ impl<'hir> HirToMir<'hir> {
     }
 
     /// Check if an expression contains a call to a specific function
+    ///
+    /// This wrapper ensures we have enough stack space for deeply recursive checking.
     #[allow(clippy::only_used_in_recursion)]
     fn expression_contains_call(&self, expr: &hir::HirExpression, func_name: &str) -> bool {
+        stacker::maybe_grow(STACK_RED_ZONE, STACK_GROW_SIZE, || {
+            self.expression_contains_call_impl(expr, func_name)
+        })
+    }
+
+    /// Implementation of expression contains call check
+    #[allow(clippy::only_used_in_recursion)]
+    fn expression_contains_call_impl(&self, expr: &hir::HirExpression, func_name: &str) -> bool {
         match expr {
             hir::HirExpression::Call(call) => {
                 if call.function == func_name {
@@ -13110,8 +13142,23 @@ impl<'hir> HirToMir<'hir> {
     /// - fp_sub's Block has local Variable(6)=a_fp
     /// - quadratic_solve's sqrt_disc is also Variable(6)
     /// - Without filtering, sqrt_disc would incorrectly get replaced with a_fp's value
+    ///
+    /// This wrapper ensures we have enough stack space for deeply recursive substitution.
     #[allow(clippy::only_used_in_recursion)]
     fn substitute_var_ids_in_expr_filtered(
+        &self,
+        expr: &hir::HirExpression,
+        var_id_map: &IndexMap<hir::VariableId, hir::HirExpression>,
+        local_var_ids: &std::collections::HashSet<hir::VariableId>,
+    ) -> hir::HirExpression {
+        stacker::maybe_grow(STACK_RED_ZONE, STACK_GROW_SIZE, || {
+            self.substitute_var_ids_in_expr_filtered_impl(expr, var_id_map, local_var_ids)
+        })
+    }
+
+    /// Implementation of filtered variable ID substitution
+    #[allow(clippy::only_used_in_recursion)]
+    fn substitute_var_ids_in_expr_filtered_impl(
         &self,
         expr: &hir::HirExpression,
         var_id_map: &IndexMap<hir::VariableId, hir::HirExpression>,
@@ -15182,7 +15229,16 @@ impl<'hir> HirToMir<'hir> {
     }
 
     /// Convert HIR type to MIR data type
+    ///
+    /// This wrapper ensures we have enough stack space for deeply recursive type conversion.
     fn convert_type(&mut self, hir_type: &hir::HirType) -> DataType {
+        stacker::maybe_grow(STACK_RED_ZONE, STACK_GROW_SIZE, || {
+            self.convert_type_impl(hir_type)
+        })
+    }
+
+    /// Implementation of HIR type to MIR data type conversion
+    fn convert_type_impl(&mut self, hir_type: &hir::HirType) -> DataType {
         match hir_type {
             hir::HirType::Bit(width) => DataType::Bit(*width as usize),
             hir::HirType::Bool => DataType::Bool,
@@ -15575,8 +15631,18 @@ impl<'hir> HirToMir<'hir> {
 
     /// Try to evaluate a const expression at compile time
     /// Returns Some(value) if the expression can be evaluated, None otherwise
+    ///
+    /// This wrapper ensures we have enough stack space for deeply recursive evaluation.
     #[allow(clippy::only_used_in_recursion)]
     fn try_eval_const_expr(&mut self, expr: &hir::HirExpression) -> Option<u64> {
+        stacker::maybe_grow(STACK_RED_ZONE, STACK_GROW_SIZE, || {
+            self.try_eval_const_expr_impl(expr)
+        })
+    }
+
+    /// Implementation of const expression evaluation
+    #[allow(clippy::only_used_in_recursion)]
+    fn try_eval_const_expr_impl(&mut self, expr: &hir::HirExpression) -> Option<u64> {
         // Try using the const evaluator first (handles both built-in and user-defined functions)
         if let Ok(const_val) = self.const_evaluator.eval(expr) {
             return const_val.as_nat().map(|n| n as u64);
@@ -17233,7 +17299,16 @@ impl<'hir> HirToMir<'hir> {
     /// Count the number of function calls in a HIR expression (recursively)
     /// This is used by the hybrid inlining/module-instantiation heuristic to decide
     /// whether a function is "simple" (inline it) or "complex" (synthesize as module)
+    ///
+    /// This wrapper ensures we have enough stack space for deeply recursive counting.
     fn count_function_calls(&self, expr: &hir::HirExpression) -> usize {
+        stacker::maybe_grow(STACK_RED_ZONE, STACK_GROW_SIZE, || {
+            self.count_function_calls_impl(expr)
+        })
+    }
+
+    /// Implementation of function call counting
+    fn count_function_calls_impl(&self, expr: &hir::HirExpression) -> usize {
         match expr {
             hir::HirExpression::Call(call_expr) => {
                 // This is a function call - count it as 1, plus any calls in arguments

@@ -3076,6 +3076,7 @@ dependencies = [
  "rowan",
  "serde",
  "serde_json",
+ "stacker",
  "tempfile",
  "thiserror 1.0.69",
  "toml",
