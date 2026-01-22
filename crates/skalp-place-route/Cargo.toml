@@ -2,6 +2,7 @@
 name = "skalp-place-route"
 version = "0.1.0"
 edition = "2021"
+description = "Native FPGA Place and Route for SKALP"
 
 [dependencies]
 skalp-lir = { path = "../skalp-lir" }
@@ -9,4 +10,9 @@ skalp-frontend = { path = "../skalp-frontend" }
 petgraph = "0.6"
 indexmap = "2.0"
 thiserror = "1.0"
-rayon = "1.7"  # Parallel processing
+rayon = "1.7"
+serde = { version = "1.0", features = ["derive"] }
+rand = "0.8"
+
+[dev-dependencies]
+# For testing

@@ -3239,7 +3239,9 @@ version = "0.1.0"
 dependencies = [
  "indexmap",
  "petgraph",
+ "rand 0.8.5",
  "rayon",
+ "serde",
  "skalp-frontend",
  "skalp-lir",
  "thiserror 1.0.69",
