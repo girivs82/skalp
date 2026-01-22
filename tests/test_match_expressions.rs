@@ -4,7 +4,6 @@ mod match_expression_tests {
     use skalp_mir::{MirCompiler, OptimizationLevel};
 
     #[test]
-    #[ignore = "Test hangs during full suite - passes individually, test isolation issue"]
     fn test_state_machine_with_match() {
         let source = r#"
         entity StateMachine {
@@ -94,7 +93,6 @@ mod match_expression_tests {
     }
 
     #[test]
-    #[ignore = "Test hangs during full suite - passes individually, test isolation issue"]
     fn test_simple_match_with_literals() {
         let source = r#"
         entity SimpleMatch {
@@ -145,7 +143,6 @@ mod match_expression_tests {
     }
 
     #[test]
-    #[ignore = "Test hangs during full suite - passes individually, test isolation issue"]
     fn test_match_with_guards() {
         let source = r#"
         entity GuardedMatch {

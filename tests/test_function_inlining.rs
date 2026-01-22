@@ -50,7 +50,7 @@ async fn test_simple_bitwise_and() {
 }
 
 #[tokio::test]
-#[ignore]
+#[ignore = "missing fixture: multiple_calls.sk"]
 async fn test_multiple_function_calls() {
     // Test calling multiple different functions in same module
     let mut tb = Testbench::new("tests/fixtures/functions/multiple_calls.sk")
@@ -71,7 +71,7 @@ async fn test_multiple_function_calls() {
 }
 
 #[tokio::test]
-#[ignore]
+#[ignore = "missing fixture: nested_calls.sk"]
 async fn test_nested_function_calls() {
     // Test: result = add(add(a, b), c)
     let mut tb = Testbench::new("tests/fixtures/functions/nested_calls.sk")
@@ -86,7 +86,7 @@ async fn test_nested_function_calls() {
 }
 
 #[tokio::test]
-#[ignore]
+#[ignore = "missing fixture: function_in_expr.sk"]
 async fn test_function_in_expression() {
     // Test: result = add(a, b) * 2
     let mut tb = Testbench::new("tests/fixtures/functions/function_in_expr.sk")
@@ -103,7 +103,6 @@ async fn test_function_in_expression() {
 /// Phase 3 Tests: Functions with Let Bindings
 
 #[tokio::test]
-#[ignore]
 async fn test_function_with_single_let() {
     // fn add_double(a, b) { let sum = a + b; return sum * 2 }
     let mut tb = Testbench::new("tests/fixtures/functions/let_single.sk")
@@ -118,7 +117,6 @@ async fn test_function_with_single_let() {
 }
 
 #[tokio::test]
-#[ignore]
 async fn test_function_with_multiple_lets() {
     // fn complex(a, b, c) {
     //     let sum = a + b
@@ -137,7 +135,6 @@ async fn test_function_with_multiple_lets() {
 }
 
 #[tokio::test]
-#[ignore]
 async fn test_function_with_dependent_lets() {
     // fn chain(a, b, c) {
     //     let x = a + b
@@ -161,7 +158,6 @@ async fn test_function_with_dependent_lets() {
 /// Phase 4 Tests: Control Flow (If/Match Expressions)
 
 #[tokio::test]
-#[ignore]
 async fn test_function_with_if_expr() {
     // fn max(a, b) { if a > b { return a } else { return b } }
     let mut tb = Testbench::new("tests/fixtures/functions/if_expr.sk")
@@ -180,7 +176,6 @@ async fn test_function_with_if_expr() {
 }
 
 #[tokio::test]
-#[ignore]
 async fn test_function_with_nested_if() {
     // fn clamp(x, min, max) {
     //     if x < min { return min }
@@ -208,7 +203,6 @@ async fn test_function_with_nested_if() {
 }
 
 #[tokio::test]
-#[ignore]
 async fn test_function_with_match_expr() {
     // fn decode(op) {
     //     match op {
@@ -242,7 +236,7 @@ async fn test_function_with_match_expr() {
 /// Phase 5 Tests: Edge Cases and Limitations
 
 #[tokio::test]
-#[ignore]
+#[ignore = "missing fixture: recursive.sk"]
 #[should_panic(expected = "Recursive function calls are not supported")]
 async fn test_recursive_function_errors() {
     // fn factorial(n) { if n == 0 { return 1 } else { return n * factorial(n-1) } }
@@ -253,7 +247,7 @@ async fn test_recursive_function_errors() {
 }
 
 #[tokio::test]
-#[ignore]
+#[ignore = "missing fixture: wide_types.sk"]
 async fn test_function_with_wide_types() {
     // Test functions work with wider bit widths
     let mut tb = Testbench::new("tests/fixtures/functions/wide_types.sk")
@@ -266,7 +260,7 @@ async fn test_function_with_wide_types() {
 }
 
 #[tokio::test]
-#[ignore]
+#[ignore = "missing fixture: sequential.sk"]
 async fn test_function_in_sequential_block() {
     // Test function calls work in sequential (clocked) logic
     let mut tb = Testbench::new("tests/fixtures/functions/sequential.sk")
@@ -287,7 +281,7 @@ async fn test_function_in_sequential_block() {
 }
 
 #[tokio::test]
-#[ignore]
+#[ignore = "missing fixture: multiple_defs.sk"]
 async fn test_multiple_functions_same_impl() {
     // Test module with multiple function definitions
     let mut tb = Testbench::new("tests/fixtures/functions/multiple_defs.sk")
