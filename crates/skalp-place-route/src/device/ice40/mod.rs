@@ -123,6 +123,8 @@ pub struct Ice40Device {
     routing: RoutingArchitecture,
     /// Clock resources
     clock_resources: ClockResources,
+    /// Global buffer input locations: (tile_x, tile_y, glb_num)
+    gbufin: Vec<(u32, u32, u8)>,
     /// Logic tiles
     pub logic_tiles: Vec<LogicTile>,
     /// I/O tiles
@@ -155,6 +157,13 @@ impl Ice40Device {
             .map(|(k, v)| (k.clone(), WireId(*v)))
             .collect();
 
+        // Extract gbufin locations from chipdb
+        let gbufin: Vec<(u32, u32, u8)> = chipdb
+            .gbufin
+            .iter()
+            .map(|g| (g.tile_x, g.tile_y, g.glb_num))
+            .collect();
+
         let mut device = Self {
             variant,
             grid_size,
@@ -169,6 +178,7 @@ impl Ice40Device {
             packages: HashMap::new(),
             routing: Self::default_routing(),
             clock_resources: Self::default_clock_resources(),
+            gbufin,
             logic_tiles: Vec::new(),
             io_tiles: Vec::new(),
             memory_blocks: Vec::new(),
@@ -300,6 +310,7 @@ impl Ice40Device {
             packages: HashMap::new(),
             routing: Self::default_routing(),
             clock_resources: Self::default_clock_resources(),
+            gbufin: Vec::new(), // Synthetic device has no gbufin info
             logic_tiles: Vec::new(),
             io_tiles: Vec::new(),
             memory_blocks: Vec::new(),
@@ -383,6 +394,66 @@ impl Ice40Device {
     /// Get the number of BEL pin wires mapped
     pub fn bel_wire_count(&self) -> usize {
         self.bel_wires.len()
+    }
+
+    /// Get global buffer input locations
+    /// Returns list of (tile_x, tile_y, global_network_index)
+    pub fn gbuf_locations(&self) -> &[(u32, u32, u8)] {
+        &self.gbufin
+    }
+
+    /// Get the global buffer location nearest to a given tile
+    pub fn nearest_gbuf(&self, tile_x: u32, tile_y: u32) -> Option<(u32, u32, u8)> {
+        self.gbufin
+            .iter()
+            .min_by_key(|(gx, gy, _)| {
+                let dx = (*gx as i32 - tile_x as i32).unsigned_abs();
+                let dy = (*gy as i32 - tile_y as i32).unsigned_abs();
+                dx + dy
+            })
+            .copied()
+    }
+
+    /// Get a global clock wire for a specific network index
+    /// The wire name pattern is typically "glb_netwk_{glb_num}" or similar
+    pub fn global_network_wire(&self, glb_num: u8) -> Option<WireId> {
+        // Try common global wire naming patterns
+        let patterns = [
+            format!("glb_netwk_{}", glb_num),
+            format!("glb2local_{}", glb_num),
+            format!("global_{}", glb_num),
+        ];
+
+        for pattern in &patterns {
+            if let Some(wire_id) = self.wire_names.get(pattern) {
+                return Some(*wire_id);
+            }
+        }
+
+        // Fall back to searching for any global wire
+        for wire in &self.wires {
+            if matches!(wire.wire_type, WireType::Global(n) if n == glb_num) {
+                return Some(wire.id);
+            }
+        }
+
+        None
+    }
+
+    /// Get global wire in a specific tile
+    pub fn global_wire_at_tile(&self, tile_x: u32, tile_y: u32, glb_num: u8) -> Option<WireId> {
+        // Look for the global clock wire in this tile
+        let tile_wires = self.tile_wires.get(&(tile_x, tile_y))?;
+
+        for &wire_id in tile_wires {
+            if let Some(wire) = self.wires.get(wire_id.0 as usize) {
+                if matches!(wire.wire_type, WireType::Global(n) if n == glb_num) {
+                    return Some(wire_id);
+                }
+            }
+        }
+
+        None
     }
 
     /// Default routing architecture for iCE40

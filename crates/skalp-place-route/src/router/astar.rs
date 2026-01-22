@@ -63,12 +63,27 @@ impl<'a, D: Device> AStarRouter<'a, D> {
     }
 
     /// Find a path with custom wire costs (for congestion-aware routing)
+    /// wire_costs: additional cost multiplier per wire (typically from congestion)
     pub fn find_path_with_costs(
         &self,
         source: WireId,
         sink: WireId,
         blocked: &[WireId],
         wire_costs: &HashMap<WireId, f64>,
+    ) -> Result<(Vec<WireId>, Vec<PipId>)> {
+        self.find_path_timing_aware(source, sink, blocked, wire_costs, 0.0)
+    }
+
+    /// Find a path with timing-aware cost function
+    /// wire_costs: congestion cost multiplier per wire
+    /// timing_weight: how much to weight PIP delays (0.0 = ignore, 1.0 = fully weight)
+    pub fn find_path_timing_aware(
+        &self,
+        source: WireId,
+        sink: WireId,
+        blocked: &[WireId],
+        wire_costs: &HashMap<WireId, f64>,
+        timing_weight: f64,
     ) -> Result<(Vec<WireId>, Vec<PipId>)> {
         let blocked_set: HashSet<_> = blocked.iter().copied().collect();
 
@@ -130,8 +145,16 @@ impl<'a, D: Device> AStarRouter<'a, D> {
                     continue;
                 }
 
-                // Calculate cost
-                let pip_cost = pip.cost() as f64;
+                // Calculate cost with optional timing awareness
+                // pip_cost includes base cost + delay contribution
+                let base_pip_cost = pip.cost() as f64;
+                // For timing-driven routing, add extra cost for high-delay PIPs
+                let timing_cost = if timing_weight > 0.0 {
+                    timing_weight * (pip.delay as f64 / 50.0) // Normalize delay contribution
+                } else {
+                    0.0
+                };
+                let pip_cost = base_pip_cost + timing_cost;
                 let wire_cost = wire_costs.get(&neighbor).copied().unwrap_or(1.0);
                 let tentative_g = current_g + pip_cost * wire_cost;
 

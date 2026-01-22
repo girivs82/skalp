@@ -6,11 +6,17 @@
 //! - Global clock/reset routing
 
 mod astar;
+mod carry_chain;
 mod global_nets;
+mod lut_permutation;
 mod pathfinder;
 
 pub use astar::AStarRouter;
+pub use carry_chain::CarryChainRouter;
 pub use global_nets::GlobalNetRouter;
+pub use lut_permutation::{
+    all_lut4_permutations, permute_lut4_init, LutPermutation, LutPermutationOptimizer,
+};
 pub use pathfinder::PathFinder;
 
 use crate::device::{Device, PipId, WireId};
@@ -149,13 +155,72 @@ impl<D: Device + Clone> Router<D> {
         Self { config, device }
     }
 
-    /// Route a design
+    /// Route a design using integrated specialized routers
+    ///
+    /// The routing flow:
+    /// 1. Route global nets (clocks/resets) through dedicated GBUF network
+    /// 2. Route carry chain nets through dedicated carry wires
+    /// 3. Route remaining nets through PathFinder/A*
     pub fn route(
         &mut self,
         netlist: &GateNetlist,
         placement: &PlacementResult,
     ) -> Result<RoutingResult> {
-        match self.config.algorithm {
+        let mut result = RoutingResult::new();
+
+        // Phase 1: Route global nets (clocks and resets) through dedicated resources
+        let mut global_router = GlobalNetRouter::new(&self.device);
+        let carry_router = CarryChainRouter::new(&self.device);
+
+        let mut global_net_ids = Vec::new();
+        let mut carry_net_ids = Vec::new();
+        let mut regular_net_ids = Vec::new();
+
+        // Classify nets
+        for net in &netlist.nets {
+            if net.driver.is_none() || net.fanout.is_empty() {
+                continue;
+            }
+
+            if global_router.is_global_net(net) {
+                global_net_ids.push(net.id);
+            } else if carry_router.is_carry_net(net, netlist) {
+                carry_net_ids.push(net.id);
+            } else {
+                regular_net_ids.push(net.id);
+            }
+        }
+
+        // Route global nets through GBUF network
+        for net_id in &global_net_ids {
+            match global_router.route_clock(*net_id, netlist, placement) {
+                Ok(route) => {
+                    result.wirelength += route.wires.len() as u64;
+                    result.routes.insert(*net_id, route);
+                }
+                Err(_) => {
+                    // Fall back to regular routing if global routing fails
+                    regular_net_ids.push(*net_id);
+                }
+            }
+        }
+
+        // Route carry chain nets through dedicated wires
+        for net_id in &carry_net_ids {
+            match carry_router.route_carry(*net_id, netlist, placement) {
+                Ok(route) => {
+                    result.wirelength += route.wires.len() as u64;
+                    result.routes.insert(*net_id, route);
+                }
+                Err(_) => {
+                    // Fall back to regular routing if carry routing fails
+                    regular_net_ids.push(*net_id);
+                }
+            }
+        }
+
+        // Phase 2: Route remaining nets through PathFinder
+        let pathfinder_result = match self.config.algorithm {
             RoutingAlgorithm::PathFinderAStar => {
                 let pathfinder = PathFinder::new(
                     &self.device,
@@ -166,21 +231,34 @@ impl<D: Device + Clone> Router<D> {
                 pathfinder.route(netlist, placement)
             }
             RoutingAlgorithm::MazeRouting => {
-                // Use simple A* without congestion negotiation
                 let astar = AStarRouter::new(&self.device);
                 self.simple_astar_route(&astar, netlist, placement)
             }
             RoutingAlgorithm::TimingDriven => {
-                // Use PathFinder with timing weights
-                let pathfinder = PathFinder::new(
+                let pathfinder = PathFinder::new_timing_driven(
                     &self.device,
                     self.config.max_iterations,
                     self.config.history_cost_factor,
                     self.config.present_congestion_factor,
+                    self.config.timing_weight,
                 );
                 pathfinder.route(netlist, placement)
             }
+        }?;
+
+        // Merge PathFinder results (only for non-global/carry nets)
+        for (net_id, route) in pathfinder_result.routes {
+            if !result.routes.contains_key(&net_id) {
+                result.wirelength += route.wires.len() as u64;
+                result.routes.insert(net_id, route);
+            }
         }
+
+        result.congestion = pathfinder_result.congestion;
+        result.iterations = pathfinder_result.iterations;
+        result.success = pathfinder_result.success;
+
+        Ok(result)
     }
 
     /// Simple A* routing (no congestion negotiation)

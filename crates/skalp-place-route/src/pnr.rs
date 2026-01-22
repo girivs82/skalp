@@ -516,4 +516,352 @@ mod tests {
             "Bitstream should have some active configuration bits"
         );
     }
+
+    #[test]
+    fn test_timing_driven_routing() {
+        use crate::router::RoutingAlgorithm;
+
+        // Create a netlist with a timing-critical path (register to register)
+        let mut netlist = GateNetlist::new("timing_test".to_string(), "ice40".to_string());
+
+        // Clock net
+        let clock_net = netlist.add_net({
+            let mut net =
+                GateNet::new_input(skalp_lir::gate_netlist::GateNetId(0), "clk".to_string());
+            net.is_clock = true;
+            net
+        });
+
+        // Create a timing-critical path: DFF -> LUT -> LUT -> LUT -> DFF
+        // This simulates a combinational path between registers
+        let dff1_out = netlist.add_net(GateNet::new(
+            skalp_lir::gate_netlist::GateNetId(1),
+            "dff1_out".to_string(),
+        ));
+        let lut1_out = netlist.add_net(GateNet::new(
+            skalp_lir::gate_netlist::GateNetId(2),
+            "lut1_out".to_string(),
+        ));
+        let lut2_out = netlist.add_net(GateNet::new(
+            skalp_lir::gate_netlist::GateNetId(3),
+            "lut2_out".to_string(),
+        ));
+        let lut3_out = netlist.add_net(GateNet::new(
+            skalp_lir::gate_netlist::GateNetId(4),
+            "lut3_out".to_string(),
+        ));
+        let dff2_out = netlist.add_net(GateNet::new(
+            skalp_lir::gate_netlist::GateNetId(5),
+            "dff2_out".to_string(),
+        ));
+
+        // Input DFF
+        let mut dff1 = Cell::new_seq(
+            skalp_lir::gate_netlist::CellId(0),
+            "SB_DFF".to_string(),
+            "ice40".to_string(),
+            0.0,
+            "path.dff1".to_string(),
+            vec![clock_net], // Using clock as D input for simplicity
+            vec![dff1_out],
+            clock_net,
+            None,
+        );
+        dff1.clock = Some(clock_net);
+        netlist.add_cell(dff1);
+
+        // LUT chain (combinational path)
+        netlist.add_cell(Cell::new_comb(
+            skalp_lir::gate_netlist::CellId(1),
+            "SB_LUT4".to_string(),
+            "ice40".to_string(),
+            0.0,
+            "path.lut1".to_string(),
+            vec![dff1_out],
+            vec![lut1_out],
+        ));
+
+        netlist.add_cell(Cell::new_comb(
+            skalp_lir::gate_netlist::CellId(2),
+            "SB_LUT4".to_string(),
+            "ice40".to_string(),
+            0.0,
+            "path.lut2".to_string(),
+            vec![lut1_out],
+            vec![lut2_out],
+        ));
+
+        netlist.add_cell(Cell::new_comb(
+            skalp_lir::gate_netlist::CellId(3),
+            "SB_LUT4".to_string(),
+            "ice40".to_string(),
+            0.0,
+            "path.lut3".to_string(),
+            vec![lut2_out],
+            vec![lut3_out],
+        ));
+
+        // Output DFF
+        let mut dff2 = Cell::new_seq(
+            skalp_lir::gate_netlist::CellId(4),
+            "SB_DFF".to_string(),
+            "ice40".to_string(),
+            0.0,
+            "path.dff2".to_string(),
+            vec![lut3_out],
+            vec![dff2_out],
+            clock_net,
+            None,
+        );
+        dff2.clock = Some(clock_net);
+        netlist.add_cell(dff2);
+
+        // Test with timing-driven routing
+        let mut config = PnrConfig::default();
+        config.router.algorithm = RoutingAlgorithm::TimingDriven;
+        config.router.timing_weight = 0.5; // Medium timing emphasis
+
+        let result = place_and_route(&netlist, Ice40Variant::Hx1k, config).unwrap();
+
+        println!("\n=== Timing-Driven Routing Test ===");
+        println!("Cells: {}", result.placement.placements.len());
+        println!("Routing success: {}", result.routing.success);
+        println!("Congestion: {:.2}", result.routing.congestion);
+        println!("Total wirelength: {}", result.routing.wirelength);
+        println!("Iterations: {}", result.routing.iterations);
+
+        // Calculate total delay
+        let total_delay: u32 = result.routing.routes.values().map(|r| r.delay).sum();
+        println!("Total route delay: {} ps", total_delay);
+
+        // Print route details
+        for (net_id, route) in result.routing.routes.iter() {
+            if !route.wires.is_empty() {
+                println!(
+                    "  Net {:?}: {} wires, {} PIPs, delay {} ps",
+                    net_id,
+                    route.wires.len(),
+                    route.pips.len(),
+                    route.delay
+                );
+            }
+        }
+
+        assert!(
+            result.routing.success,
+            "Timing-driven routing should succeed"
+        );
+
+        // For timing-driven routing, we expect the router to find paths
+        // even if they have slightly higher congestion, in favor of lower delay
+        let routed_nets = result
+            .routing
+            .routes
+            .values()
+            .filter(|r| !r.wires.is_empty())
+            .count();
+        assert!(
+            routed_nets >= 4,
+            "Should route at least 4 nets (the critical path)"
+        );
+    }
+
+    #[test]
+    fn test_global_clock_routing() {
+        use crate::device::ice40::Ice40Device;
+        use crate::router::GlobalNetRouter;
+
+        // Create a design with clock distribution
+        let mut netlist = GateNetlist::new("clock_test".to_string(), "ice40".to_string());
+
+        // Clock net
+        let clock_net = netlist.add_net({
+            let mut net =
+                GateNet::new_input(skalp_lir::gate_netlist::GateNetId(0), "clk".to_string());
+            net.is_clock = true;
+            net
+        });
+
+        // Create 4 DFFs that all use the same clock
+        for i in 0..4 {
+            let dff_in = netlist.add_net(GateNet::new(
+                skalp_lir::gate_netlist::GateNetId(10 + i as u32),
+                format!("dff{}_in", i),
+            ));
+            let dff_out = netlist.add_net(GateNet::new(
+                skalp_lir::gate_netlist::GateNetId(20 + i as u32),
+                format!("dff{}_out", i),
+            ));
+
+            let mut dff = Cell::new_seq(
+                skalp_lir::gate_netlist::CellId(i as u32),
+                "SB_DFF".to_string(),
+                "ice40".to_string(),
+                0.0,
+                format!("reg{}", i),
+                vec![dff_in],
+                vec![dff_out],
+                clock_net,
+                None,
+            );
+            dff.clock = Some(clock_net);
+            netlist.add_cell(dff);
+        }
+
+        // Run P&R to get placement
+        let config = PnrConfig::default();
+        let result = place_and_route(&netlist, Ice40Variant::Hx1k, config).unwrap();
+
+        println!("\n=== Global Clock Routing Test ===");
+        println!("Cells: {}", result.placement.placements.len());
+
+        // Test the GlobalNetRouter directly
+        let device = Ice40Device::new(Ice40Variant::Hx1k);
+        let mut global_router = GlobalNetRouter::new(&device);
+
+        // Check gbuf locations
+        println!("GBUF locations: {:?}", device.gbuf_locations());
+
+        // Route the clock net through global resources
+        let clock_id = skalp_lir::gate_netlist::GateNetId(0);
+        let clock_route = global_router.route_clock(clock_id, &netlist, &result.placement);
+
+        assert!(clock_route.is_ok(), "Global clock routing should succeed");
+
+        let route = clock_route.unwrap();
+        println!(
+            "Clock route: {} wires, {} sinks",
+            route.wires.len(),
+            route.sinks.len()
+        );
+        println!("Clock route delay: {} ps", route.delay);
+
+        // Verify the clock route reaches all DFFs
+        // We should have at least some sinks for the clock net
+        assert!(
+            !route.wires.is_empty(),
+            "Clock route should have at least one wire"
+        );
+
+        // Check global network allocation
+        let allocation = global_router.get_network_allocation(clock_id);
+        println!("Allocated global network: {:?}", allocation);
+        assert!(
+            allocation.is_some(),
+            "Clock should be allocated to a global network"
+        );
+
+        // Verify available networks decreased
+        assert!(
+            global_router.available_networks() < 8,
+            "Should have used at least one global network"
+        );
+    }
+
+    #[test]
+    fn test_integrated_routing_flow() {
+        // Create a design with clock and regular nets
+        // This tests that specialized routers integrate properly with PathFinder
+        let mut netlist = GateNetlist::new("integrated_test".to_string(), "ice40".to_string());
+
+        // Clock net (will use GBUF)
+        let clock_net = netlist.add_net({
+            let mut net =
+                GateNet::new_input(skalp_lir::gate_netlist::GateNetId(0), "clk".to_string());
+            net.is_clock = true;
+            net
+        });
+
+        // Create a LUT-DFF chain similar to test_routing_quality
+        // This ensures we have properly connected nets
+        let mut prev_net = clock_net;
+        for i in 0..3 {
+            // LUT output
+            let lut_out = netlist.add_net(GateNet::new(
+                skalp_lir::gate_netlist::GateNetId(10 + i as u32),
+                format!("lut{}_out", i),
+            ));
+
+            // DFF output
+            let dff_out = netlist.add_net(GateNet::new(
+                skalp_lir::gate_netlist::GateNetId(20 + i as u32),
+                format!("dff{}_out", i),
+            ));
+
+            // LUT
+            netlist.add_cell(Cell::new_comb(
+                skalp_lir::gate_netlist::CellId(i as u32),
+                "SB_LUT4".to_string(),
+                "ice40".to_string(),
+                0.0,
+                format!("chain.lut{}", i),
+                vec![prev_net],
+                vec![lut_out],
+            ));
+
+            // DFF with clock
+            let mut dff = Cell::new_seq(
+                skalp_lir::gate_netlist::CellId(10 + i as u32),
+                "SB_DFF".to_string(),
+                "ice40".to_string(),
+                0.0,
+                format!("chain.dff{}", i),
+                vec![lut_out],
+                vec![dff_out],
+                clock_net,
+                None,
+            );
+            dff.clock = Some(clock_net);
+            netlist.add_cell(dff);
+
+            prev_net = dff_out;
+        }
+
+        // Run P&R
+        let config = PnrConfig::default();
+        let result = place_and_route(&netlist, Ice40Variant::Hx1k, config).unwrap();
+
+        println!("\n=== Integrated Routing Flow Test ===");
+        println!("Cells: {}", result.placement.placements.len());
+        println!("Total routes: {}", result.routing.routes.len());
+        println!("Routing success: {}", result.routing.success);
+        println!("Total wirelength: {}", result.routing.wirelength);
+
+        // Count routes by type
+        let mut global_routes = 0;
+        let mut regular_routes = 0;
+
+        for (net_id, route) in &result.routing.routes {
+            let net = &netlist.nets[net_id.0 as usize];
+            if net.is_clock || net.is_reset {
+                global_routes += 1;
+                println!(
+                    "  Global net {:?}: {} wires, delay {} ps",
+                    net_id,
+                    route.wires.len(),
+                    route.delay
+                );
+            } else {
+                regular_routes += 1;
+                println!(
+                    "  Regular net {:?}: {} wires, {} PIPs",
+                    net_id,
+                    route.wires.len(),
+                    route.pips.len()
+                );
+            }
+        }
+
+        println!(
+            "Global routes: {}, Regular routes: {}",
+            global_routes, regular_routes
+        );
+
+        // Verify we have routes
+        assert!(result.routing.success, "Integrated routing should succeed");
+        assert!(
+            result.routing.routes.len() >= 4,
+            "Should have at least 4 routes (clock + 3 data paths)"
+        );
+    }
 }
