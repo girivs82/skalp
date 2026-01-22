@@ -256,14 +256,16 @@ impl<'a, D: Device> PathFinder<'a, D> {
             None => return Ok(route), // Driver not placed, skip this net
         };
 
-        // Get source wire
+        // Get source wire - select based on BEL index to avoid wire conflicts
         let source_wires = self.device.tile_wires(source_loc.tile_x, source_loc.tile_y);
-        let source_wire = source_wires.first().copied().ok_or_else(|| {
-            PlaceRouteError::RoutingFailed(format!(
-                "No wires in tile ({}, {})",
-                source_loc.tile_x, source_loc.tile_y
-            ))
-        })?;
+        let source_wire = self
+            .select_bel_wire(&source_wires, source_loc.bel_index)
+            .ok_or_else(|| {
+                PlaceRouteError::RoutingFailed(format!(
+                    "No wires in tile ({}, {})",
+                    source_loc.tile_x, source_loc.tile_y
+                ))
+            })?;
 
         route.source = source_wire;
 
@@ -275,7 +277,7 @@ impl<'a, D: Device> PathFinder<'a, D> {
             };
 
             let sink_wires = self.device.tile_wires(sink_loc.tile_x, sink_loc.tile_y);
-            let sink_wire = match sink_wires.first().copied() {
+            let sink_wire = match self.select_bel_wire(&sink_wires, sink_loc.bel_index) {
                 Some(w) => w,
                 None => continue,
             };
@@ -333,14 +335,16 @@ impl<'a, D: Device> PathFinder<'a, D> {
             None => return Ok(route), // Driver not placed, skip this net
         };
 
-        // Get source wire
+        // Get source wire - select based on BEL index to avoid wire conflicts
         let source_wires = self.device.tile_wires(source_loc.tile_x, source_loc.tile_y);
-        let source_wire = source_wires.first().copied().ok_or_else(|| {
-            PlaceRouteError::RoutingFailed(format!(
-                "No wires in tile ({}, {})",
-                source_loc.tile_x, source_loc.tile_y
-            ))
-        })?;
+        let source_wire = self
+            .select_bel_wire(&source_wires, source_loc.bel_index)
+            .ok_or_else(|| {
+                PlaceRouteError::RoutingFailed(format!(
+                    "No wires in tile ({}, {})",
+                    source_loc.tile_x, source_loc.tile_y
+                ))
+            })?;
 
         route.source = source_wire;
 
@@ -364,7 +368,7 @@ impl<'a, D: Device> PathFinder<'a, D> {
             };
 
             let sink_wires = self.device.tile_wires(sink_loc.tile_x, sink_loc.tile_y);
-            let sink_wire = match sink_wires.first().copied() {
+            let sink_wire = match self.select_bel_wire(&sink_wires, sink_loc.bel_index) {
                 Some(w) => w,
                 None => continue,
             };
@@ -391,5 +395,25 @@ impl<'a, D: Device> PathFinder<'a, D> {
         }
 
         Ok(route)
+    }
+
+    /// Select a wire for a specific BEL index
+    /// In iCE40, each LC has associated local wires (local_g0 for LC0, local_g1 for LC1, etc.)
+    fn select_bel_wire(&self, wires: &[WireId], bel_index: usize) -> Option<WireId> {
+        if wires.is_empty() {
+            return None;
+        }
+
+        // Try to find a local wire matching the BEL index
+        // Local wires are typically the first 8 wires in the tile (local_g0 through local_g7)
+        let wire_idx = bel_index % 8; // Wrap around for BEL indices > 7
+
+        // If we have enough wires, use the BEL-specific one
+        if wire_idx < wires.len() {
+            Some(wires[wire_idx])
+        } else {
+            // Fall back to first wire if not enough wires in tile
+            wires.first().copied()
+        }
     }
 }

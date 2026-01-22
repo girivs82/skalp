@@ -18,6 +18,76 @@ use crate::router::RoutingResult;
 use skalp_lir::gate_netlist::GateNetlist;
 use std::collections::HashMap;
 
+/// DFF configuration bits for an LC
+/// In iCE40, each LC has 20 configuration bits: 16 for LUT init, 4 for DFF config
+#[derive(Debug, Clone, Copy, Default)]
+struct DffConfig {
+    /// Bit 16: Use negative edge of clock
+    neg_clk: bool,
+    /// Bit 17: Use carry chain enable
+    carry_enable: bool,
+    /// Bit 18: Use DFF output (vs combinational)
+    dff_enable: bool,
+    /// Bit 19: Async set/reset mode
+    set_no_reset: bool,
+}
+
+/// I/O cell configuration for iCE40
+/// Each I/O tile has 2 IOBs (IOB_0 and IOB_1) with 6-bit PINTYPE configuration
+#[derive(Debug, Clone, Copy, Default)]
+struct IoConfig {
+    /// PINTYPE[1:0]: Input mode (0=pin, 1=registered, 2=DDR, 3=latched)
+    input_mode: u8,
+    /// PINTYPE[3:2]: Output select (0=DQ, 1=registered, 2=DDR, 3=latched)
+    output_select: u8,
+    /// PINTYPE[5:4]: Output mode (0=none, 1=output, 2=tristate, 3=enable)
+    output_mode: u8,
+    /// Input enable
+    input_enable: bool,
+    /// Pull-up resistor enable
+    pullup_enable: bool,
+}
+
+impl IoConfig {
+    /// Create config for simple input
+    fn simple_input() -> Self {
+        Self {
+            input_mode: 0,      // Direct pin input
+            output_select: 0,   // Not used
+            output_mode: 0,     // No output
+            input_enable: true, // Enable input
+            pullup_enable: false,
+        }
+    }
+
+    /// Create config for simple output
+    fn simple_output() -> Self {
+        Self {
+            input_mode: 0,       // Not used
+            output_select: 0,    // Direct output
+            output_mode: 1,      // Output enabled
+            input_enable: false, // No input
+            pullup_enable: false,
+        }
+    }
+
+    /// Create config for bidirectional I/O
+    fn bidirectional() -> Self {
+        Self {
+            input_mode: 0,      // Direct pin input
+            output_select: 0,   // Direct output
+            output_mode: 2,     // Tristate output
+            input_enable: true, // Enable input
+            pullup_enable: false,
+        }
+    }
+
+    /// Get the 6-bit PINTYPE value
+    fn pintype(&self) -> u8 {
+        (self.output_mode & 0x3) << 4 | (self.output_select & 0x3) << 2 | (self.input_mode & 0x3)
+    }
+}
+
 /// IceStorm ASCII format generator
 pub struct IceStormAscii<'a> {
     device: &'a Ice40Device,
@@ -58,6 +128,12 @@ impl<'a> IceStormAscii<'a> {
         // Collect LUT init values from placement and netlist
         let lut_inits = self.collect_lut_inits(placement, netlist);
 
+        // Collect DFF configurations from placement and netlist
+        let dff_configs = self.collect_dff_configs(placement, netlist);
+
+        // Collect I/O configurations from placement and netlist
+        let io_configs = self.collect_io_configs(placement, netlist);
+
         // Generate tile configurations
         for y in 0..height {
             for x in 0..width {
@@ -65,14 +141,20 @@ impl<'a> IceStormAscii<'a> {
                     match tile.tile_type() {
                         TileType::Logic => {
                             self.generate_logic_tile(
-                                &mut asc, x, y, placement, routing, &lut_inits,
+                                &mut asc,
+                                x,
+                                y,
+                                placement,
+                                routing,
+                                &lut_inits,
+                                &dff_configs,
                             );
                         }
                         TileType::IoTop
                         | TileType::IoBottom
                         | TileType::IoLeft
                         | TileType::IoRight => {
-                            self.generate_io_tile(&mut asc, x, y, placement, routing);
+                            self.generate_io_tile(&mut asc, x, y, placement, routing, &io_configs);
                         }
                         TileType::RamTop => {
                             self.generate_ramt_tile(&mut asc, x, y, placement);
@@ -116,7 +198,10 @@ impl<'a> IceStormAscii<'a> {
                 } else {
                     0x0000
                 };
-                lut_inits.insert((loc.tile_x, loc.tile_y, loc.bel_index), init);
+                // Convert bel_index to LC index: LUTs are at even indices (0, 2, 4, ...)
+                // LC_idx = bel_index / 2
+                let lc_idx = loc.bel_index / 2;
+                lut_inits.insert((loc.tile_x, loc.tile_y, lc_idx), init);
             }
         }
 
@@ -165,6 +250,141 @@ impl<'a> IceStormAscii<'a> {
         }
     }
 
+    /// Collect DFF configurations from placement and netlist
+    fn collect_dff_configs(
+        &self,
+        placement: &PlacementResult,
+        netlist: Option<&GateNetlist>,
+    ) -> HashMap<(u32, u32, usize), DffConfig> {
+        let mut dff_configs = HashMap::new();
+
+        for (cell_id, loc) in &placement.placements {
+            // Check if this is a DFF cell type
+            let is_dff = matches!(
+                loc.bel_type,
+                BelType::Dff | BelType::DffE | BelType::DffSr | BelType::DffSrE
+            );
+
+            if is_dff {
+                // Get cell type from netlist to determine specific DFF configuration
+                let config = if let Some(netlist) = netlist {
+                    netlist
+                        .cells
+                        .iter()
+                        .find(|c| c.id.0 == cell_id.0)
+                        .map(|cell| Self::derive_dff_config(&cell.cell_type))
+                        .unwrap_or_else(|| DffConfig {
+                            dff_enable: true,
+                            ..Default::default()
+                        })
+                } else {
+                    DffConfig {
+                        dff_enable: true,
+                        ..Default::default()
+                    }
+                };
+                // Convert bel_index to LC index: DFFs are at odd indices (1, 3, 5, ...)
+                // LC_idx = bel_index / 2
+                let lc_idx = loc.bel_index / 2;
+                dff_configs.insert((loc.tile_x, loc.tile_y, lc_idx), config);
+            }
+
+            // Also check for carry cells (they set carry_enable bit)
+            if matches!(loc.bel_type, BelType::Carry) {
+                // Carry cells set the carry_enable bit on their associated LC
+                // The carry chain typically spans LC 0-7 in a tile
+                let config = DffConfig {
+                    carry_enable: true,
+                    ..Default::default()
+                };
+                // For carry cells, bel_index is 16 (after LUT/DFF pairs)
+                // We need to set carry_enable on the appropriate LCs based on how carry is used
+                // For now, set it on LC 0 (this may need refinement)
+                let lc_idx = 0;
+                dff_configs.insert((loc.tile_x, loc.tile_y, lc_idx), config);
+            }
+        }
+
+        dff_configs
+    }
+
+    /// Derive DFF configuration from cell type name
+    /// Maps iCE40 DFF cell types to their configuration bits
+    fn derive_dff_config(cell_type: &str) -> DffConfig {
+        // DFF configuration bits:
+        // - neg_clk: Use falling edge of clock (SB_DFFN* variants)
+        // - carry_enable: Use carry chain (SB_CARRY)
+        // - dff_enable: Use DFF output instead of LUT output
+        // - set_no_reset: Async set/reset mode (SB_DFFSR*, SB_DFFSS* have async set)
+
+        let neg_clk = cell_type.contains("DFFN")
+            || cell_type.contains("_N")
+            || cell_type.ends_with("N")
+            || cell_type.contains("SB_DFFN");
+
+        let set_no_reset = cell_type.contains("DFFSR")
+            || cell_type.contains("DFFSS")
+            || cell_type.contains("_SR")
+            || cell_type.contains("_SS");
+
+        DffConfig {
+            neg_clk,
+            carry_enable: false, // Set separately for carry cells
+            dff_enable: true,    // Always true for DFF cells
+            set_no_reset,
+        }
+    }
+
+    /// Collect I/O configurations from placement and netlist
+    fn collect_io_configs(
+        &self,
+        placement: &PlacementResult,
+        netlist: Option<&GateNetlist>,
+    ) -> HashMap<(u32, u32, usize), IoConfig> {
+        let mut io_configs = HashMap::new();
+
+        for (cell_id, loc) in &placement.placements {
+            if matches!(loc.bel_type, BelType::IoCell) {
+                // Get cell type from netlist to determine I/O direction
+                let config = if let Some(netlist) = netlist {
+                    netlist
+                        .cells
+                        .iter()
+                        .find(|c| c.id.0 == cell_id.0)
+                        .map(|cell| Self::derive_io_config(&cell.cell_type))
+                        .unwrap_or_default()
+                } else {
+                    IoConfig::default()
+                };
+
+                // I/O tiles have 2 IOBs (IOB_0 at bel_idx 0, IOB_1 at bel_idx 1)
+                let iob_idx = loc.bel_index % 2;
+                io_configs.insert((loc.tile_x, loc.tile_y, iob_idx), config);
+            }
+        }
+
+        io_configs
+    }
+
+    /// Derive I/O configuration from cell type
+    fn derive_io_config(cell_type: &str) -> IoConfig {
+        // SB_IO has a parameter that specifies the pin type
+        // For now, derive from cell type naming convention
+        if cell_type.contains("_INPUT") || cell_type.ends_with("_I") {
+            IoConfig::simple_input()
+        } else if cell_type.contains("_OUTPUT") || cell_type.ends_with("_O") {
+            IoConfig::simple_output()
+        } else if cell_type.contains("_INOUT") || cell_type.contains("_IO") {
+            IoConfig::bidirectional()
+        } else if cell_type == "SB_IO" {
+            // Default SB_IO without direction hint - treat as bidirectional
+            IoConfig::bidirectional()
+        } else {
+            // Default: simple input
+            IoConfig::simple_input()
+        }
+    }
+
     /// Generate logic tile configuration
     /// Logic tiles have 54 columns x 16 rows of config bits
     fn generate_logic_tile(
@@ -175,6 +395,7 @@ impl<'a> IceStormAscii<'a> {
         placement: &PlacementResult,
         routing: &RoutingResult,
         lut_inits: &HashMap<(u32, u32, usize), u16>,
+        dff_configs: &HashMap<(u32, u32, usize), DffConfig>,
     ) {
         // Check if any cells are placed in this tile
         let cells_in_tile: Vec<_> = placement
@@ -220,6 +441,28 @@ impl<'a> IceStormAscii<'a> {
                         bits[row as usize][col as usize] = bit_value;
                     }
                 }
+
+                // Set DFF configuration bits (bits 16-19)
+                // Bit 16: NegClk, Bit 17: CarryEnable, Bit 18: DffEnable, Bit 19: Set_NoReset
+                if let Some(dff_config) = dff_configs.get(&(x, y, lc_idx)) {
+                    let dff_bits = [
+                        dff_config.neg_clk,      // Bit 16
+                        dff_config.carry_enable, // Bit 17
+                        dff_config.dff_enable,   // Bit 18
+                        dff_config.set_no_reset, // Bit 19
+                    ];
+
+                    // Apply DFF config bits using positions 16-19 from the mapping
+                    for (bit_offset, &bit_value) in dff_bits.iter().enumerate() {
+                        let bit_idx = 16 + bit_offset;
+                        if bit_idx < lc_mapping.bit_positions.len() {
+                            let (row, col) = lc_mapping.bit_positions[bit_idx];
+                            if row < 16 && col < 54 {
+                                bits[row as usize][col as usize] = bit_value;
+                            }
+                        }
+                    }
+                }
             }
 
             // Set routing configuration bits for PIPs
@@ -261,6 +504,7 @@ impl<'a> IceStormAscii<'a> {
         y: u32,
         placement: &PlacementResult,
         routing: &RoutingResult,
+        io_configs: &HashMap<(u32, u32, usize), IoConfig>,
     ) {
         let cells_in_tile: Vec<_> = placement
             .placements
@@ -294,6 +538,53 @@ impl<'a> IceStormAscii<'a> {
         let mut bits = [[false; 18]; 16];
 
         if let Some(ref chipdb) = self.chipdb {
+            // Set I/O cell configuration bits
+            // IOB_0 PINTYPE bit positions (from chipdb):
+            //   PINTYPE_0: B3[17], PINTYPE_1: B3[16], PINTYPE_2: B0[17]
+            //   PINTYPE_3: B0[16], PINTYPE_4: B4[16], PINTYPE_5: B4[17]
+            // IOB_1 PINTYPE bit positions:
+            //   PINTYPE_0: B13[17], PINTYPE_1: B13[16], PINTYPE_2: B10[17]
+            //   PINTYPE_3: B10[16], PINTYPE_4: B14[16], PINTYPE_5: B14[17]
+            // IoCtrl bits:
+            //   IE_0: B9[3], IE_1: B6[3]
+            //   REN_0: B6[2], REN_1: B1[3]
+
+            // IOB_0 configuration
+            if let Some(config) = io_configs.get(&(x, y, 0)) {
+                let pintype = config.pintype();
+                // Set PINTYPE bits for IOB_0
+                bits[3][17] = (pintype >> 0) & 1 == 1; // PINTYPE_0
+                bits[3][16] = (pintype >> 1) & 1 == 1; // PINTYPE_1
+                bits[0][17] = (pintype >> 2) & 1 == 1; // PINTYPE_2
+                bits[0][16] = (pintype >> 3) & 1 == 1; // PINTYPE_3
+                bits[4][16] = (pintype >> 4) & 1 == 1; // PINTYPE_4
+                bits[4][17] = (pintype >> 5) & 1 == 1; // PINTYPE_5
+
+                // Set input enable (IE_0)
+                bits[9][3] = config.input_enable;
+
+                // Set pull-up resistor enable (REN_0)
+                bits[6][2] = config.pullup_enable;
+            }
+
+            // IOB_1 configuration
+            if let Some(config) = io_configs.get(&(x, y, 1)) {
+                let pintype = config.pintype();
+                // Set PINTYPE bits for IOB_1
+                bits[13][17] = (pintype >> 0) & 1 == 1; // PINTYPE_0
+                bits[13][16] = (pintype >> 1) & 1 == 1; // PINTYPE_1
+                bits[10][17] = (pintype >> 2) & 1 == 1; // PINTYPE_2
+                bits[10][16] = (pintype >> 3) & 1 == 1; // PINTYPE_3
+                bits[14][16] = (pintype >> 4) & 1 == 1; // PINTYPE_4
+                bits[14][17] = (pintype >> 5) & 1 == 1; // PINTYPE_5
+
+                // Set input enable (IE_1)
+                bits[6][3] = config.input_enable;
+
+                // Set pull-up resistor enable (REN_1)
+                bits[1][3] = config.pullup_enable;
+            }
+
             // Set routing configuration bits for PIPs
             for pip_id in &pips_in_tile {
                 if let Some(pip_info) = chipdb.pips.get(pip_id.0 as usize) {
