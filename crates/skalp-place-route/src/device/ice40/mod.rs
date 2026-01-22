@@ -312,6 +312,16 @@ impl Ice40Device {
         Self::new(Ice40Variant::Up5k)
     }
 
+    /// Get the total number of wires in the device
+    pub fn wire_count(&self) -> usize {
+        self.wires.len()
+    }
+
+    /// Get the total number of PIPs in the device
+    pub fn pip_count(&self) -> usize {
+        self.pips.len()
+    }
+
     /// Default routing architecture for iCE40
     fn default_routing() -> RoutingArchitecture {
         RoutingArchitecture {
@@ -1155,7 +1165,10 @@ impl Device for Ice40Device {
     }
 
     fn wire_src_pips(&self, wire_id: WireId) -> Vec<PipId> {
-        self.wire_src_pips.get(&wire_id).cloned().unwrap_or_default()
+        self.wire_src_pips
+            .get(&wire_id)
+            .cloned()
+            .unwrap_or_default()
     }
 
     fn packages(&self) -> &HashMap<String, PackagePins> {

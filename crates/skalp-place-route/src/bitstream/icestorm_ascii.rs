@@ -92,7 +92,9 @@ impl IoConfig {
 
     /// Get the 6-bit PINTYPE value
     fn pintype(&self) -> u8 {
-        ((self.output_mode & 0x3) << 4) | ((self.output_select & 0x3) << 2) | (self.input_mode & 0x3)
+        ((self.output_mode & 0x3) << 4)
+            | ((self.output_select & 0x3) << 2)
+            | (self.input_mode & 0x3)
     }
 }
 
@@ -536,14 +538,14 @@ impl<'a> IceStormAscii<'a> {
             //   glb_netwk_3: B7[2], glb_netwk_4: B9[2], glb_netwk_5: B11[2]
             //   glb_netwk_6: B13[2], glb_netwk_7: B15[2]
             let colbuf_positions: [(usize, usize, u8); 8] = [
-                (0, 1, 0),   // glb_netwk_0 at B0[1]
-                (1, 2, 1),   // glb_netwk_1 at B1[2]
-                (5, 2, 2),   // glb_netwk_2 at B5[2]
-                (7, 2, 3),   // glb_netwk_3 at B7[2]
-                (9, 2, 4),   // glb_netwk_4 at B9[2]
-                (11, 2, 5),  // glb_netwk_5 at B11[2]
-                (13, 2, 6),  // glb_netwk_6 at B13[2]
-                (15, 2, 7),  // glb_netwk_7 at B15[2]
+                (0, 1, 0),  // glb_netwk_0 at B0[1]
+                (1, 2, 1),  // glb_netwk_1 at B1[2]
+                (5, 2, 2),  // glb_netwk_2 at B5[2]
+                (7, 2, 3),  // glb_netwk_3 at B7[2]
+                (9, 2, 4),  // glb_netwk_4 at B9[2]
+                (11, 2, 5), // glb_netwk_5 at B11[2]
+                (13, 2, 6), // glb_netwk_6 at B13[2]
+                (15, 2, 7), // glb_netwk_7 at B15[2]
             ];
 
             for (row, col, glb_idx) in colbuf_positions {

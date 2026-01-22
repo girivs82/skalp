@@ -214,10 +214,8 @@ mod tests {
 
         // Clock net
         let clock_net = netlist.add_net({
-            let mut net = GateNet::new_input(
-                skalp_lir::gate_netlist::GateNetId(0),
-                "clk".to_string(),
-            );
+            let mut net =
+                GateNet::new_input(skalp_lir::gate_netlist::GateNetId(0), "clk".to_string());
             net.is_clock = true;
             net
         });
@@ -275,16 +273,200 @@ mod tests {
         println!("Congestion: {:.2}", result.routing.congestion);
         println!("Iterations: {}", result.routing.iterations);
 
-        let routed = result.routing.routes.values().filter(|r| !r.wires.is_empty()).count();
+        let routed = result
+            .routing
+            .routes
+            .values()
+            .filter(|r| !r.wires.is_empty())
+            .count();
         let total = result.routing.routes.len();
         println!("Routed nets: {}/{}", routed, total);
 
-        // Print some route details
-        for (net_id, route) in result.routing.routes.iter().take(3) {
-            println!("  Net {:?}: {} wires, {} PIPs", net_id, route.wires.len(), route.pips.len());
+        // Print route details for all routes
+        for (net_id, route) in result.routing.routes.iter() {
+            if !route.wires.is_empty() || !route.pips.is_empty() {
+                println!(
+                    "  Net {:?}: {} wires, {} PIPs",
+                    net_id,
+                    route.wires.len(),
+                    route.pips.len()
+                );
+            }
         }
 
         assert!(result.routing.success, "Routing should succeed");
-        assert!(result.routing.congestion < 5.0, "Congestion should be acceptable");
+        assert!(
+            result.routing.congestion < 5.0,
+            "Congestion should be acceptable"
+        );
+    }
+
+    #[test]
+    fn test_pip_connectivity() {
+        use crate::device::ice40::Ice40Device;
+        use crate::device::Device;
+
+        let device = Ice40Device::new(Ice40Variant::Hx1k);
+
+        println!("\n=== PIP Connectivity Test ===");
+        println!("Total wires: {}", device.wire_count());
+        println!("Total PIPs: {}", device.pip_count());
+
+        // Check a logic tile
+        let tile_wires = device.tile_wires(5, 5);
+        println!("Wires at tile (5,5): {}", tile_wires.len());
+
+        let mut wires_with_src_pips = 0;
+        let mut wires_with_dst_pips = 0;
+
+        for &wire_id in &tile_wires {
+            let src_pips = device.wire_src_pips(wire_id);
+            let dst_pips = device.wire_pips(wire_id);
+            if !src_pips.is_empty() {
+                wires_with_src_pips += 1;
+            }
+            if !dst_pips.is_empty() {
+                wires_with_dst_pips += 1;
+            }
+        }
+
+        println!("Wires with src PIPs (can drive): {}", wires_with_src_pips);
+        println!(
+            "Wires with dst PIPs (can be driven): {}",
+            wires_with_dst_pips
+        );
+
+        // The chipdb should have PIPs for most wires
+        assert!(
+            device.pip_count() > 10000,
+            "Should have many PIPs from chipdb"
+        );
+    }
+
+    #[test]
+    fn test_bitstream_routing_bits() {
+        // Create a counter netlist that will have routing
+        let mut netlist = GateNetlist::new("counter".to_string(), "ice40".to_string());
+
+        // Clock net
+        let clock_net = netlist.add_net({
+            let mut net =
+                GateNet::new_input(skalp_lir::gate_netlist::GateNetId(0), "clk".to_string());
+            net.is_clock = true;
+            net
+        });
+
+        // Create a chain of 4 LUT-DFF pairs
+        let mut prev_net = clock_net;
+        for i in 0..4 {
+            let lut_out = netlist.add_net(GateNet::new(
+                skalp_lir::gate_netlist::GateNetId(10 + i as u32),
+                format!("lut{}_out", i),
+            ));
+
+            let dff_out = netlist.add_net(GateNet::new(
+                skalp_lir::gate_netlist::GateNetId(20 + i as u32),
+                format!("dff{}_out", i),
+            ));
+
+            netlist.add_cell(Cell::new_comb(
+                skalp_lir::gate_netlist::CellId(i as u32),
+                "SB_LUT4".to_string(),
+                "ice40".to_string(),
+                0.0,
+                format!("chain.lut{}", i),
+                vec![prev_net],
+                vec![lut_out],
+            ));
+
+            let mut dff = Cell::new_seq(
+                skalp_lir::gate_netlist::CellId(10 + i as u32),
+                "SB_DFF".to_string(),
+                "ice40".to_string(),
+                0.0,
+                format!("chain.dff{}", i),
+                vec![lut_out],
+                vec![dff_out],
+                clock_net,
+                None,
+            );
+            dff.clock = Some(clock_net);
+            netlist.add_cell(dff);
+
+            prev_net = dff_out;
+        }
+
+        let config = PnrConfig::default();
+        let result = place_and_route(&netlist, Ice40Variant::Hx1k, config).unwrap();
+
+        println!("\n=== Bitstream Routing Test ===");
+        println!("Routing success: {}", result.routing.success);
+
+        // Count PIPs used in routing
+        let total_pips: usize = result.routing.routes.values().map(|r| r.pips.len()).sum();
+        println!("Total PIPs used in routing: {}", total_pips);
+
+        // Generate ASCII bitstream with netlist for LUT init values
+        let asc = result.to_icestorm_ascii_with_netlist(Some(&netlist));
+
+        // Check that the bitstream has content
+        assert!(!asc.is_empty(), "Bitstream should not be empty");
+        assert!(asc.contains(".device 1k"), "Should have device header");
+
+        // Print first few logic tiles to see the bit patterns
+        let lines: Vec<&str> = asc.lines().collect();
+        let mut tile_count = 0;
+        let mut in_tile = false;
+        let mut tile_bits = Vec::new();
+
+        for line in &lines {
+            if line.starts_with(".logic_tile") {
+                tile_count += 1;
+                in_tile = true;
+                tile_bits.clear();
+                println!("\n{}", line);
+            } else if in_tile {
+                if line.is_empty() {
+                    // End of tile
+                    in_tile = false;
+                    // Count non-zero bits
+                    let total_bits: usize = tile_bits
+                        .iter()
+                        .map(|s: &&str| s.chars().filter(|&c| c == '1').count())
+                        .sum();
+                    if total_bits > 0 {
+                        println!("  Active bits: {}", total_bits);
+                    }
+                } else {
+                    tile_bits.push(*line);
+                    // Only print rows with non-zero bits
+                    if line.contains('1') {
+                        println!(
+                            "  Row: {} ({} bits set)",
+                            tile_bits.len() - 1,
+                            line.chars().filter(|&c| c == '1').count()
+                        );
+                    }
+                }
+            }
+
+            // Only show first 5 logic tiles
+            if tile_count > 5 && !in_tile {
+                break;
+            }
+        }
+
+        // Verify that we have at least some active bits (LUT init or routing)
+        let total_ones: usize = asc
+            .lines()
+            .filter(|l| !l.starts_with('.') && !l.is_empty())
+            .map(|l| l.chars().filter(|&c| c == '1').count())
+            .sum();
+        println!("\nTotal '1' bits in bitstream: {}", total_ones);
+
+        assert!(
+            total_ones > 0,
+            "Bitstream should have some active configuration bits"
+        );
     }
 }
