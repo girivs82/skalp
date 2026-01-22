@@ -93,10 +93,15 @@ pub struct PnrResult {
 impl PnrResult {
     /// Generate IceStorm ASCII format bitstream
     pub fn to_icestorm_ascii(&self) -> String {
+        self.to_icestorm_ascii_with_netlist(None)
+    }
+
+    /// Generate IceStorm ASCII format bitstream with LUT init values from netlist
+    pub fn to_icestorm_ascii_with_netlist(&self, netlist: Option<&GateNetlist>) -> String {
         let device = Ice40Device::new(self.variant);
         let ascii_gen = crate::bitstream::IceStormAscii::new(&device);
         ascii_gen
-            .generate(&self.placement, &self.routing)
+            .generate(&self.placement, &self.routing, netlist)
             .unwrap_or_else(|e| format!(".comment Error generating ASCII: {}\n", e))
     }
 }
@@ -126,9 +131,9 @@ pub fn place_and_route(
         None
     };
 
-    // Generate bitstream
+    // Generate bitstream (with netlist for LUT init values)
     let generator = BitstreamGenerator::with_config(device.clone(), config.bitstream.clone());
-    let bitstream = generator.generate(&placement, &routing)?;
+    let bitstream = generator.generate_with_netlist(&placement, &routing, Some(netlist))?;
 
     Ok(PnrResult {
         placement,

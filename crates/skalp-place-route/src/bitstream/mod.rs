@@ -16,6 +16,7 @@ use crate::error::{PlaceRouteError, Result};
 use crate::placer::PlacementResult;
 use crate::router::RoutingResult;
 use serde::{Deserialize, Serialize};
+use skalp_lir::gate_netlist::GateNetlist;
 use std::path::Path;
 
 /// Bitstream format
@@ -288,8 +289,18 @@ impl BitstreamGenerator {
         placement: &PlacementResult,
         routing: &RoutingResult,
     ) -> Result<Bitstream> {
+        self.generate_with_netlist(placement, routing, None)
+    }
+
+    /// Generate bitstream from placement, routing, and netlist (for LUT init values)
+    pub fn generate_with_netlist(
+        &self,
+        placement: &PlacementResult,
+        routing: &RoutingResult,
+        netlist: Option<&GateNetlist>,
+    ) -> Result<Bitstream> {
         match self.config.format {
-            BitstreamFormat::IceStormAscii => self.generate_ascii(placement, routing),
+            BitstreamFormat::IceStormAscii => self.generate_ascii(placement, routing, netlist),
             BitstreamFormat::IceStormBinary => self.generate_binary(placement, routing),
             BitstreamFormat::VtrBitstream => self.generate_vtr(placement, routing),
             BitstreamFormat::TrellisBinary => self.generate_trellis(placement, routing),
@@ -302,9 +313,10 @@ impl BitstreamGenerator {
         &self,
         placement: &PlacementResult,
         routing: &RoutingResult,
+        netlist: Option<&GateNetlist>,
     ) -> Result<Bitstream> {
         let ascii_gen = IceStormAscii::new(&self.device);
-        let data = ascii_gen.generate(placement, routing)?;
+        let data = ascii_gen.generate(placement, routing, netlist)?;
 
         let mut bitstream = Bitstream::new(
             self.device.name().to_string(),

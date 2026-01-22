@@ -2433,9 +2433,12 @@ fn run_pnr_on_netlist(
         result.bitstream.data.len()
     );
 
-    // Also write IceStorm ASCII format for debugging
+    // Also write IceStorm ASCII format for debugging (with LUT init values from netlist)
     let asc_path = output_dir.join("design.asc");
-    fs::write(&asc_path, result.to_icestorm_ascii())?;
+    fs::write(
+        &asc_path,
+        result.to_icestorm_ascii_with_netlist(Some(gate_netlist)),
+    )?;
     println!("ASCII: {:?}", asc_path);
 
     // Write timing report if available
