@@ -55,11 +55,11 @@ impl Default for RouterConfig {
     fn default() -> Self {
         Self {
             algorithm: RoutingAlgorithm::PathFinderAStar,
-            max_iterations: 50,
+            max_iterations: 100, // Increased for better convergence
             allow_ripup: true,
             max_congestion: 1.5,
-            history_cost_factor: 0.5,
-            present_congestion_factor: 1.0,
+            history_cost_factor: 1.0, // Increased for stronger congestion avoidance
+            present_congestion_factor: 1.5, // Increased to penalize current congestion more
             timing_weight: 0.3,
         }
     }

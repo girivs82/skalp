@@ -245,13 +245,18 @@ impl<D: Device + Clone> TimingAnalyzer<D> {
             }
         }
 
+        // Ensure minimum realistic path delay for iCE40
+        // Even the simplest path has at least: clock-to-Q + routing + setup
+        // Minimum realistic delay: ~2ns (for a reg->reg path with minimal logic)
+        let min_realistic_delay = self.delay_model.dff_clk_to_q
+            + self.delay_model.local_wire_delay
+            + self.delay_model.dff_setup;
+        worst_delay = worst_delay.max(min_realistic_delay);
+
         // Convert to frequency
         let period = worst_delay + self.config.setup_margin + self.config.clock_uncertainty;
-        let frequency = if period > 0.0 {
-            1000.0 / period
-        } else {
-            1000.0
-        }; // MHz
+        // Cap maximum frequency to realistic iCE40 limits (275 MHz max)
+        let frequency = (1000.0 / period).min(275.0); // MHz
 
         let target_period = 1000.0 / self.config.target_frequency;
         let worst_slack = target_period - worst_delay - self.config.setup_margin;

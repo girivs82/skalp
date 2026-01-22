@@ -188,13 +188,13 @@ impl CramBuilder {
         self.current_tile = Some((x, y, kind));
         self.current_row = 0;
         // Initialize tile if not present
-        self.tiles.entry((x, y)).or_insert_with(Vec::new);
+        self.tiles.entry((x, y)).or_default();
     }
 
     fn add_bit_row(&mut self, row_str: &str) {
         if let Some((x, y, _kind)) = self.current_tile {
             let bits: Vec<bool> = row_str.chars().map(|c| c == '1').collect();
-            let tile_data = self.tiles.entry((x, y)).or_insert_with(Vec::new);
+            let tile_data = self.tiles.entry((x, y)).or_default();
             tile_data.push(bits);
             self.current_row += 1;
         }
