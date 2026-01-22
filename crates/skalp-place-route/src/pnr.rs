@@ -1148,6 +1148,110 @@ mod tests {
     }
 
     #[test]
+    fn test_parallel_simulated_annealing() {
+        use crate::placer::PlacementAlgorithm;
+        use std::time::Instant;
+
+        // Create a larger design to benefit from parallelism
+        let mut netlist = GateNetlist::new("parallel_test".to_string(), "ice40".to_string());
+
+        // Clock net
+        let clock_net = netlist.add_net({
+            let mut net =
+                GateNet::new_input(skalp_lir::gate_netlist::GateNetId(0), "clk".to_string());
+            net.is_clock = true;
+            net
+        });
+
+        // Create a chain of LUTs and DFFs
+        let mut prev_net = clock_net;
+        for i in 0..20 {
+            let lut_out = netlist.add_net(GateNet::new(
+                skalp_lir::gate_netlist::GateNetId(10 + i as u32),
+                format!("lut{}_out", i),
+            ));
+
+            let dff_out = netlist.add_net(GateNet::new(
+                skalp_lir::gate_netlist::GateNetId(100 + i as u32),
+                format!("dff{}_out", i),
+            ));
+
+            // LUT
+            netlist.add_cell(Cell::new_comb(
+                skalp_lir::gate_netlist::CellId(i as u32),
+                "SB_LUT4".to_string(),
+                "ice40".to_string(),
+                0.0,
+                format!("chain.lut{}", i),
+                vec![prev_net],
+                vec![lut_out],
+            ));
+
+            // DFF
+            let mut dff = Cell::new_seq(
+                skalp_lir::gate_netlist::CellId(100 + i as u32),
+                "SB_DFF".to_string(),
+                "ice40".to_string(),
+                0.0,
+                format!("chain.dff{}", i),
+                vec![lut_out],
+                vec![dff_out],
+                clock_net,
+                None,
+            );
+            dff.clock = Some(clock_net);
+            netlist.add_cell(dff);
+
+            prev_net = dff_out;
+        }
+
+        // Test parallel placement
+        let mut config = PnrConfig::fast();
+        config.placer.algorithm = PlacementAlgorithm::SimulatedAnnealing;
+        config.placer.parallel = true;
+        config.placer.parallel_batch_size = 32;
+        config.placer.max_iterations = 500;
+
+        let start = Instant::now();
+        let result = place_and_route(&netlist, Ice40Variant::Hx1k, config).unwrap();
+        let parallel_time = start.elapsed();
+
+        println!("\n=== Parallel SA Test ===");
+        println!("Cells placed: {}", result.placement.placements.len());
+        println!("Wirelength: {}", result.placement.wirelength);
+        println!("Time: {:?}", parallel_time);
+
+        // Verify placement succeeded
+        assert!(
+            result.placement.placements.len() >= 40,
+            "Should place all cells"
+        );
+        assert!(result.routing.success, "Routing should succeed");
+
+        // Compare with serial (optional benchmark)
+        let mut serial_config = PnrConfig::fast();
+        serial_config.placer.algorithm = PlacementAlgorithm::SimulatedAnnealing;
+        serial_config.placer.parallel = false;
+        serial_config.placer.max_iterations = 500;
+
+        let start = Instant::now();
+        let serial_result = place_and_route(&netlist, Ice40Variant::Hx1k, serial_config).unwrap();
+        let serial_time = start.elapsed();
+
+        println!("Serial time: {:?}", serial_time);
+        println!(
+            "Speedup: {:.2}x",
+            serial_time.as_secs_f64() / parallel_time.as_secs_f64()
+        );
+
+        // Both should produce valid results
+        assert!(
+            serial_result.placement.placements.len() >= 40,
+            "Serial should also place all cells"
+        );
+    }
+
+    #[test]
     fn test_pcf_constraint_parsing() {
         use crate::placer::IoConstraints;
 

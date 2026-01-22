@@ -63,6 +63,10 @@ pub struct PlacerConfig {
     pub seed: u64,
     /// I/O pin constraints
     pub io_constraints: IoConstraints,
+    /// Enable parallel move evaluation in simulated annealing
+    pub parallel: bool,
+    /// Batch size for parallel move evaluation
+    pub parallel_batch_size: usize,
 }
 
 impl Default for PlacerConfig {
@@ -77,6 +81,8 @@ impl Default for PlacerConfig {
             congestion_weight: 0.1,
             seed: 42,
             io_constraints: IoConstraints::new(),
+            parallel: false, // Default to serial for determinism
+            parallel_batch_size: 64,
         }
     }
 }
@@ -212,7 +218,9 @@ impl<D: Device + Clone> Placer<D> {
                     self.config.initial_temperature,
                     self.config.cooling_rate,
                     self.config.max_iterations,
-                );
+                )
+                .with_parallel(self.config.parallel)
+                .with_batch_size(self.config.parallel_batch_size);
                 annealer.optimize(initial, netlist)?
             }
             PlacementAlgorithm::AnalyticalWithRefinement => {
@@ -230,7 +238,9 @@ impl<D: Device + Clone> Placer<D> {
                     self.config.initial_temperature * 0.5, // Lower temp for refinement
                     self.config.cooling_rate,
                     self.config.max_iterations / 2,
-                );
+                )
+                .with_parallel(self.config.parallel)
+                .with_batch_size(self.config.parallel_batch_size);
                 annealer.optimize(legalized, netlist)?
             }
             PlacementAlgorithm::TimingDriven => {
@@ -242,7 +252,9 @@ impl<D: Device + Clone> Placer<D> {
                     self.config.cooling_rate,
                     self.config.max_iterations,
                     self.config.timing_weight,
-                );
+                )
+                .with_parallel(self.config.parallel)
+                .with_batch_size(self.config.parallel_batch_size);
                 annealer.optimize(initial, netlist)?
             }
             PlacementAlgorithm::AnalyticalTimingDriven => {
@@ -261,7 +273,9 @@ impl<D: Device + Clone> Placer<D> {
                     self.config.cooling_rate,
                     self.config.max_iterations / 2,
                     self.config.timing_weight,
-                );
+                )
+                .with_parallel(self.config.parallel)
+                .with_batch_size(self.config.parallel_batch_size);
                 annealer.optimize(legalized, netlist)?
             }
         };

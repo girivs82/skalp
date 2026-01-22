@@ -2,14 +2,17 @@
 //!
 //! Refines placement using simulated annealing with HPWL cost function.
 //! Supports timing-driven placement by incorporating estimated path delays.
+//! Includes parallel move evaluation for improved performance on multi-core systems.
 
 use super::{PlacementLoc, PlacementResult};
 use crate::device::{BelType, Device};
 use crate::error::Result;
 use crate::timing::DelayModel;
 use rand::{Rng, SeedableRng};
+use rayon::prelude::*;
 use skalp_lir::gate_netlist::{CellId, GateNetId, GateNetlist};
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Move operation for simulated annealing
 #[derive(Debug, Clone)]
@@ -30,6 +33,10 @@ pub struct SimulatedAnnealing<'a, D: Device> {
     timing_weight: f64,
     /// Delay model for timing estimation
     delay_model: DelayModel,
+    /// Enable parallel move evaluation
+    parallel: bool,
+    /// Number of parallel moves to evaluate per batch
+    parallel_batch_size: usize,
 }
 
 impl<'a, D: Device> SimulatedAnnealing<'a, D> {
@@ -42,6 +49,8 @@ impl<'a, D: Device> SimulatedAnnealing<'a, D> {
             max_iterations,
             timing_weight: 0.0, // Pure wirelength mode
             delay_model: DelayModel::ice40_default(),
+            parallel: false,
+            parallel_batch_size: 64,
         }
     }
 
@@ -60,6 +69,8 @@ impl<'a, D: Device> SimulatedAnnealing<'a, D> {
             max_iterations,
             timing_weight: timing_weight.clamp(0.0, 1.0),
             delay_model: DelayModel::ice40_default(),
+            parallel: false,
+            parallel_batch_size: 64,
         }
     }
 
@@ -69,8 +80,33 @@ impl<'a, D: Device> SimulatedAnnealing<'a, D> {
         self
     }
 
+    /// Enable parallel move evaluation
+    pub fn with_parallel(mut self, parallel: bool) -> Self {
+        self.parallel = parallel;
+        self
+    }
+
+    /// Set parallel batch size (number of moves to evaluate in parallel)
+    pub fn with_batch_size(mut self, batch_size: usize) -> Self {
+        self.parallel_batch_size = batch_size.max(1);
+        self
+    }
+
     /// Optimize a placement using simulated annealing
     pub fn optimize(
+        &self,
+        initial: PlacementResult,
+        netlist: &GateNetlist,
+    ) -> Result<PlacementResult> {
+        if self.parallel {
+            self.optimize_parallel(initial, netlist)
+        } else {
+            self.optimize_serial(initial, netlist)
+        }
+    }
+
+    /// Serial simulated annealing optimization
+    fn optimize_serial(
         &self,
         initial: PlacementResult,
         netlist: &GateNetlist,
@@ -135,6 +171,147 @@ impl<'a, D: Device> SimulatedAnnealing<'a, D> {
                     current = new_placement;
                     location_to_cell = new_loc_map;
                     current_cost = new_cost;
+
+                    if current_cost < best_cost {
+                        best = current.clone();
+                        best_cost = current_cost;
+                    }
+                }
+            }
+
+            // Cool down
+            temperature *= self.cooling_rate;
+
+            // Early termination if temperature is too low
+            if temperature < 0.01 {
+                break;
+            }
+        }
+
+        // Update metrics
+        let mut result = best;
+        result.cost = best_cost;
+
+        // Calculate timing score for timing-driven mode
+        if self.timing_weight > 0.0 {
+            result.timing_score = self.estimate_timing_score(&result, netlist);
+        }
+
+        Ok(result)
+    }
+
+    /// Parallel simulated annealing optimization
+    ///
+    /// Evaluates multiple moves in parallel and selects the best improving moves.
+    /// This provides speedup on multi-core systems while maintaining solution quality.
+    fn optimize_parallel(
+        &self,
+        initial: PlacementResult,
+        netlist: &GateNetlist,
+    ) -> Result<PlacementResult> {
+        let mut current = initial;
+
+        // Compute net criticalities for timing-driven mode
+        let net_criticalities = if self.timing_weight > 0.0 {
+            self.compute_net_criticalities(netlist, &current)
+        } else {
+            HashMap::new()
+        };
+
+        let mut current_cost = self.calculate_combined_cost(&current, netlist, &net_criticalities);
+        let mut best = current.clone();
+        let mut best_cost = current_cost;
+
+        let mut temperature = self.initial_temp;
+
+        // Build reverse mapping: location -> cell_id
+        let mut location_to_cell: HashMap<(u32, u32, usize), CellId> = HashMap::new();
+        for (&cell_id, loc) in &current.placements {
+            location_to_cell.insert((loc.tile_x, loc.tile_y, loc.bel_index), cell_id);
+        }
+
+        let cells: Vec<CellId> = current.placements.keys().copied().collect();
+        let batch_size = self.parallel_batch_size;
+        let batches_per_temp = (cells.len().max(100) / batch_size).max(1);
+
+        // Thread-safe counter for accepted moves (for statistics)
+        let accepted_count = AtomicUsize::new(0);
+
+        for _iteration in 0..self.max_iterations {
+            // Process batches at this temperature
+            for _ in 0..batches_per_temp {
+                // Generate a batch of candidate moves using different seeds
+                let moves: Vec<Move> = (0..batch_size)
+                    .into_par_iter()
+                    .map(|i| {
+                        let mut rng = rand::rngs::StdRng::seed_from_u64(
+                            42 + _iteration as u64 * 1000 + i as u64,
+                        );
+                        if self.timing_weight > 0.0 && rng.gen::<f64>() < 0.3 {
+                            self.generate_critical_path_move(
+                                &current,
+                                &cells,
+                                netlist,
+                                &net_criticalities,
+                                &mut rng,
+                            )
+                        } else {
+                            self.generate_move(&current, &cells, &mut rng)
+                        }
+                    })
+                    .collect();
+
+                // Evaluate all moves in parallel
+                #[allow(clippy::type_complexity)]
+                let evaluated: Vec<(
+                    Move,
+                    PlacementResult,
+                    HashMap<(u32, u32, usize), CellId>,
+                    f64,
+                )> = moves
+                    .into_par_iter()
+                    .map(|move_op| {
+                        let (new_placement, new_loc_map) =
+                            self.apply_move(&current, &location_to_cell, &move_op);
+                        let new_cost = self.calculate_combined_cost(
+                            &new_placement,
+                            netlist,
+                            &net_criticalities,
+                        );
+                        (move_op, new_placement, new_loc_map, new_cost)
+                    })
+                    .collect();
+
+                // Find the best improving move (or best move if temperature allows)
+                let mut best_move_idx: Option<usize> = None;
+                let mut best_delta = f64::MAX;
+                let mut rng = rand::rngs::StdRng::seed_from_u64(42 + _iteration as u64);
+
+                for (idx, (_, _, _, new_cost)) in evaluated.iter().enumerate() {
+                    let delta = new_cost - current_cost;
+
+                    // Check acceptance
+                    let accept = if delta <= 0.0 {
+                        true
+                    } else {
+                        let probability = (-delta / temperature).exp();
+                        rng.gen::<f64>() < probability
+                    };
+
+                    if accept && delta < best_delta {
+                        best_move_idx = Some(idx);
+                        best_delta = delta;
+                    }
+                }
+
+                // Apply the best accepted move
+                if let Some(idx) = best_move_idx {
+                    let (_, new_placement, new_loc_map, new_cost) =
+                        evaluated.into_iter().nth(idx).unwrap();
+                    current = new_placement;
+                    location_to_cell = new_loc_map;
+                    current_cost = new_cost;
+                    accepted_count.fetch_add(1, Ordering::Relaxed);
 
                     if current_cost < best_cost {
                         best = current.clone();
