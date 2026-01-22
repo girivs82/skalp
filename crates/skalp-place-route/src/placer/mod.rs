@@ -13,7 +13,10 @@ mod legalization;
 
 pub use analytical::AnalyticalPlacer;
 pub use annealing::SimulatedAnnealing;
-pub use constraints::{IoConstraints, PinConstraint, PullType};
+pub use constraints::{
+    BelConstraint, FrequencyConstraint, IoConstraints, PinConstraint, PlacementRegion,
+    PullResistor, PullType, RegionConstraint,
+};
 pub use legalization::Legalizer;
 
 use crate::device::{BelType, Device, TileType};

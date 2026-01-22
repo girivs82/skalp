@@ -55,10 +55,12 @@
 pub mod bitstream;
 pub mod device;
 pub mod error;
+pub mod packing;
 pub mod placer;
 pub mod pnr;
 pub mod router;
 pub mod timing;
+pub mod utils;
 
 // Re-export main types for convenience
 pub use bitstream::{Bitstream, BitstreamConfig, BitstreamFormat, BitstreamGenerator};
@@ -69,8 +71,9 @@ pub use device::{
 };
 pub use error::{PlaceRouteError, Result};
 pub use placer::{
-    IoConstraints, PinConstraint, PlacementAlgorithm, PlacementLoc, PlacementResult, Placer,
-    PlacerConfig, PullType,
+    BelConstraint, FrequencyConstraint, IoConstraints, PinConstraint, PlacementAlgorithm,
+    PlacementLoc, PlacementRegion, PlacementResult, Placer, PlacerConfig, PullResistor, PullType,
+    RegionConstraint,
 };
 pub use pnr::{
     place_and_route, place_and_route_hx1k, place_and_route_hx8k, place_and_route_up5k, PnrConfig,
@@ -78,3 +81,7 @@ pub use pnr::{
 };
 pub use router::{Route, Router, RouterConfig, RoutingAlgorithm, RoutingResult};
 pub use timing::{DelayModel, TimingAnalyzer, TimingConfig, TimingDrivenPlacer, TimingReport};
+
+// Packing and utilities
+pub use packing::{CellPacker, DffConfig, PackedCell, PackedCellType, PackingResult, PackingStats};
+pub use utils::{BramContent, BramSwapper, PllCalculator, PllConfig};
