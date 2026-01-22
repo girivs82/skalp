@@ -1031,6 +1031,7 @@ mod tests {
             reset: None,
             source_op: None,
             safety_classification: Default::default(),
+            lut_init: None,
         };
 
         let cell2 = Cell {
@@ -1046,6 +1047,7 @@ mod tests {
             reset: None,
             source_op: None,
             safety_classification: Default::default(),
+            lut_init: None,
         };
 
         netlist.cells.push(cell1);
@@ -1107,6 +1109,7 @@ mod tests {
             reset: None,
             source_op: None,
             safety_classification: Default::default(),
+            lut_init: None,
         };
         netlist.cells.push(cell);
 
@@ -1150,6 +1153,7 @@ mod tests {
             reset: None,
             source_op: None,
             safety_classification: Default::default(),
+            lut_init: None,
         };
 
         // Long path: chain of 4 AND gates (4 * 25 = 100ps)
@@ -1166,6 +1170,7 @@ mod tests {
             reset: None,
             source_op: None,
             safety_classification: Default::default(),
+            lut_init: None,
         };
 
         input_net.fanout = vec![(CellId(0), 0), (CellId(1), 0)];
@@ -1311,6 +1316,7 @@ mod tests {
             reset: None,
             source_op: None,
             safety_classification: Default::default(),
+            lut_init: None,
         };
 
         // AND2 cell
@@ -1327,6 +1333,7 @@ mod tests {
             reset: None,
             source_op: None,
             safety_classification: Default::default(),
+            lut_init: None,
         };
 
         netlist.cells.push(inv_cell);
@@ -1486,6 +1493,7 @@ mod tests {
             reset: None,
             source_op: None,
             safety_classification: Default::default(),
+            lut_init: None,
         };
 
         // Long path: AND gate (25ps)
@@ -1502,6 +1510,7 @@ mod tests {
             reset: None,
             source_op: None,
             safety_classification: Default::default(),
+            lut_init: None,
         };
 
         input_net.fanout = vec![(CellId(0), 0), (CellId(1), 0)];

@@ -539,9 +539,8 @@ impl TestXor {
 }
 
 #[tokio::test]
-#[ignore = "LUT4 truth table simulation not yet implemented"]
 async fn test_ice40_gate_level_mux() {
-    // Note: This test requires LUT4 truth table evaluation in the simulator
+    // This test validates LUT4 truth table evaluation for mux operations
     // The iCE40 library uses SB_LUT4 for complex logic which needs INIT parameter
     let source = r#"
 entity TestMux {
@@ -584,9 +583,8 @@ impl TestMux {
 }
 
 #[tokio::test]
-#[ignore = "LUT4 truth table simulation not yet implemented"]
 async fn test_ice40_gate_level_adder() {
-    // Note: This test requires LUT4 truth table evaluation for carry chain logic
+    // This test validates LUT4 and carry chain (SB_CARRY) simulation for addition
     let source = r#"
 entity TestAdder {
     in a: bit[8]
@@ -629,9 +627,9 @@ impl TestAdder {
 }
 
 #[tokio::test]
-#[ignore = "LUT4 truth table simulation not yet implemented"]
+#[ignore = "Sequential logic (DFF with reset) not fully working in gate-level simulation"]
 async fn test_ice40_gate_level_counter() {
-    // Note: This test requires LUT4 truth table evaluation for counter logic
+    // This test requires proper sequential logic handling (reset functionality)
     let source = r#"
 entity TestCounter {
     in clk: clock
@@ -688,9 +686,9 @@ impl TestCounter {
 }
 
 #[tokio::test]
-#[ignore = "LUT4 truth table simulation not yet implemented"]
+#[ignore = "SUB operation not working in gate-level ALU simulation - needs investigation"]
 async fn test_ice40_gate_level_alu() {
-    // Note: This test requires LUT4 truth table evaluation for ALU operations
+    // This test requires proper subtraction implementation (ADD works, SUB doesn't)
     let source = r#"
 entity TestAlu {
     in a: bit[8]

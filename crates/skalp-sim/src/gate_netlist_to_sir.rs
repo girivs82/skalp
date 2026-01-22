@@ -156,7 +156,18 @@ impl GateNetlistToSirConverter {
             self.total_fit += cell.fit;
 
             // Map cell type to PrimitiveType
-            let ptype = self.cell_type_to_primitive(&cell.cell_type);
+            // If the cell has a LUT init value, use LUT4/LUT6 instead of parsing the cell type name
+            let ptype = if let Some(init) = cell.lut_init {
+                // Determine LUT size from number of inputs
+                let num_inputs = cell.inputs.len();
+                if num_inputs <= 4 {
+                    PrimitiveType::Lut4 { init: init as u16 }
+                } else {
+                    PrimitiveType::Lut6 { init }
+                }
+            } else {
+                self.cell_type_to_primitive(&cell.cell_type)
+            };
 
             // Convert input/output net IDs to signal IDs
             let inputs: Vec<SirSignalId> = cell
@@ -400,8 +411,9 @@ impl GateNetlistToSirConverter {
             return PrimitiveType::DffP; // Basic DFF
         }
         // iCE40 carry cell (used in adders)
+        // CO = (I0 & I1) | ((I0 | I1) & CI)
         if upper.starts_with("SB_CARRY") {
-            return PrimitiveType::And { inputs: 2 }; // Approximation for carry logic
+            return PrimitiveType::CarryCell;
         }
         // iCE40 tie cells
         if upper.starts_with("SB_VCC") {

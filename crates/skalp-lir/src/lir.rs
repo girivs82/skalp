@@ -99,6 +99,9 @@ pub enum PrimitiveType {
     HalfAdder,
     /// Full adder (inputs: [a, b, cin], outputs: [sum, cout])
     FullAdder,
+    /// Carry cell for FPGA carry chains (inputs: [i0, i1, ci], output: co)
+    /// CO = (I0 & I1) | ((I0 | I1) & CI)
+    CarryCell,
     /// Comparator bit (inputs: [a, b, lt_in, eq_in], outputs: [lt_out, eq_out])
     CompBit,
 
@@ -133,6 +136,21 @@ pub enum PrimitiveType {
     Constant {
         /// Value to drive
         value: bool,
+    },
+
+    // === Programmable Logic (FPGA LUTs) ===
+    /// 4-input Look-Up Table (16-bit truth table)
+    /// Used in most FPGAs (iCE40, Xilinx 7-series, etc.)
+    /// The init value encodes the truth table: output = (init >> input_addr) & 1
+    Lut4 {
+        /// 16-bit initialization value (truth table)
+        init: u16,
+    },
+    /// 6-input Look-Up Table (64-bit truth table)
+    /// Used in larger FPGAs (Xilinx UltraScale, Intel Stratix)
+    Lut6 {
+        /// 64-bit initialization value (truth table)
+        init: u64,
     },
 
     // === Power Infrastructure ===
@@ -283,11 +301,14 @@ impl PrimitiveType {
             PrimitiveType::SRlatch => 2,
             PrimitiveType::HalfAdder => 2,
             PrimitiveType::FullAdder => 3,
+            PrimitiveType::CarryCell => 3,
             PrimitiveType::CompBit => 4,
             PrimitiveType::MemCell => 3,
             PrimitiveType::RegCell => 3,
             PrimitiveType::ClkBuf => 1,
             PrimitiveType::Constant { .. } => 0,
+            PrimitiveType::Lut4 { .. } => 4,
+            PrimitiveType::Lut6 { .. } => 6,
             PrimitiveType::LevelShifter { .. } => 1,
             PrimitiveType::IsolationCell { .. } => 2,
             PrimitiveType::RetentionDff { has_reset } => {
@@ -364,11 +385,15 @@ impl PrimitiveType {
             PrimitiveType::Dlatch | PrimitiveType::SRlatch => 0.8,
             PrimitiveType::HalfAdder => 0.2,
             PrimitiveType::FullAdder => 0.3,
+            PrimitiveType::CarryCell => 0.1, // Simpler than full adder
             PrimitiveType::CompBit => 0.15,
             PrimitiveType::MemCell => 2.0,
             PrimitiveType::RegCell => 1.5,
             PrimitiveType::ClkBuf => 0.1,
             PrimitiveType::Constant { .. } => 0.0,
+            // FPGA LUTs - SRAM-based configuration memory
+            PrimitiveType::Lut4 { .. } => 0.5, // 16 SRAM cells
+            PrimitiveType::Lut6 { .. } => 1.0, // 64 SRAM cells
             PrimitiveType::LevelShifter { .. } => 0.3,
             PrimitiveType::IsolationCell { .. } => 0.15,
             PrimitiveType::RetentionDff { .. } => 1.5,
@@ -429,11 +454,14 @@ impl PrimitiveType {
             PrimitiveType::SRlatch => "SRLATCH",
             PrimitiveType::HalfAdder => "HA",
             PrimitiveType::FullAdder => "FA",
+            PrimitiveType::CarryCell => "CARRY",
             PrimitiveType::CompBit => "COMP",
             PrimitiveType::MemCell => "MEM",
             PrimitiveType::RegCell => "REG",
             PrimitiveType::ClkBuf => "CLKBUF",
             PrimitiveType::Constant { .. } => "CONST",
+            PrimitiveType::Lut4 { .. } => "LUT4",
+            PrimitiveType::Lut6 { .. } => "LUT6",
             PrimitiveType::LevelShifter { .. } => "LVLSHIFT",
             PrimitiveType::IsolationCell { .. } => "ISO",
             PrimitiveType::RetentionDff { .. } => "RETDFF",
@@ -480,6 +508,8 @@ impl std::fmt::Display for PrimitiveType {
                 }
             }
             PrimitiveType::Constant { value } => write!(f, "CONST{}", if *value { 1 } else { 0 }),
+            PrimitiveType::Lut4 { init } => write!(f, "LUT4[{:#06x}]", init),
+            PrimitiveType::Lut6 { init } => write!(f, "LUT6[{:#018x}]", init),
             PrimitiveType::LevelShifter {
                 from_voltage,
                 to_voltage,

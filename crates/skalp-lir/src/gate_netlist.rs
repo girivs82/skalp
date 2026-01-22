@@ -60,6 +60,9 @@ pub struct Cell {
     /// Safety classification: Functional vs SafetyMechanism
     /// Used for ISO 26262 FMEDA to track λSM (safety mechanism failure rate)
     pub safety_classification: CellSafetyClassification,
+    /// LUT initialization value (for FPGA LUT cells)
+    /// For LUT4: 16-bit truth table, For LUT6: 64-bit truth table
+    pub lut_init: Option<u64>,
 }
 
 impl Cell {
@@ -86,6 +89,36 @@ impl Cell {
             reset: None,
             source_op: None,
             safety_classification: CellSafetyClassification::default(),
+            lut_init: None,
+        }
+    }
+
+    /// Create a new combinational LUT cell with initialization value
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_lut(
+        id: CellId,
+        cell_type: String,
+        library: String,
+        fit: f64,
+        path: String,
+        inputs: Vec<GateNetId>,
+        outputs: Vec<GateNetId>,
+        init: u64,
+    ) -> Self {
+        Self {
+            id,
+            cell_type,
+            library,
+            fit,
+            failure_modes: Vec::new(),
+            inputs,
+            outputs,
+            path,
+            clock: None,
+            reset: None,
+            source_op: None,
+            safety_classification: CellSafetyClassification::default(),
+            lut_init: Some(init),
         }
     }
 
@@ -115,6 +148,7 @@ impl Cell {
             reset,
             source_op: None,
             safety_classification: CellSafetyClassification::default(),
+            lut_init: None,
         }
     }
 
@@ -147,6 +181,7 @@ impl Cell {
             reset,
             source_op: None,
             safety_classification: CellSafetyClassification::default(),
+            lut_init: None,
         }
     }
 

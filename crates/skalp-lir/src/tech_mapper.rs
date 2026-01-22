@@ -5294,6 +5294,7 @@ fn create_blackbox_netlist(
         reset: None,
         source_op: Some(format!("blackbox:{}", blackbox_info.cell_name)),
         safety_classification: CellSafetyClassification::Functional,
+        lut_init: None,
     };
     netlist.cells.push(blackbox_cell);
 

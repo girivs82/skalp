@@ -111,6 +111,8 @@ struct GpuPrimitive {
     is_sequential: u32,
     /// Clock signal index (for sequential)
     clock: u32,
+    /// LUT initialization value (for LUT4/LUT6)
+    lut_init: u32,
 }
 
 #[cfg(target_os = "macos")]
@@ -295,6 +297,7 @@ impl GpuGateRuntime {
                     num_outputs: p.outputs.len().min(2) as u32,
                     is_sequential: if p.is_sequential { 1 } else { 0 },
                     clock: clock_idx,
+                    lut_init: get_lut_init(&p.ptype),
                 }
             })
             .collect();
@@ -397,7 +400,11 @@ constant uint PTYPE_DFF_P = 10;
 constant uint PTYPE_DFF_N = 11;
 constant uint PTYPE_HALF_ADDER = 12;
 constant uint PTYPE_FULL_ADDER = 13;
-constant uint PTYPE_CONST = 14;
+constant uint PTYPE_CARRY_CELL = 14;
+constant uint PTYPE_CONST = 15;
+constant uint PTYPE_LUT4 = 16;
+constant uint PTYPE_LUT6_LO = 17;  // LUT6 low 32 bits of init
+constant uint PTYPE_LUT6_HI = 18;  // LUT6 high 32 bits of init
 
 struct Primitive {
     uint ptype;
@@ -407,6 +414,7 @@ struct Primitive {
     uint num_outputs;
     uint is_sequential;
     uint clock;
+    uint lut_init;      // LUT initialization value (16 bits for LUT4)
 };
 
 // Evaluate a combinational gate
@@ -435,7 +443,7 @@ uint eval_gate(uint ptype, uint in0, uint in1, uint in2, uint in3, uint num_inpu
         case PTYPE_BUF:
             return in0;
         case PTYPE_MUX2:
-            return (in2 == 0) ? in0 : in1;  // sel=in2
+            return (in0 == 0) ? in1 : in2;  // inputs: [sel=in0, d0=in1, d1=in2], output: sel ? d1 : d0
         case PTYPE_HALF_ADDER:
             // Returns sum in bit 0, carry in bit 1
             return (in0 ^ in1) | ((in0 & in1) << 1);
@@ -446,6 +454,10 @@ uint eval_gate(uint ptype, uint in0, uint in1, uint in2, uint in3, uint num_inpu
                 uint carry = (in0 & in1) | (in1 & in2) | (in0 & in2);
                 return sum | (carry << 1);
             }
+        case PTYPE_CARRY_CELL:
+            // FPGA carry cell: CO = (I0 & I1) | ((I0 | I1) & CI)
+            // inputs: [i0=in0, i1=in1, ci=in2]
+            return (in0 & in1) | ((in0 | in1) & in2);
         case PTYPE_CONST:
             return in0;
         default:
@@ -481,6 +493,15 @@ kernel void eval_combinational(
     uint in1 = (prim.num_inputs > 1) ? signals_in[prim.inputs[1]] : 0;
     uint in2 = (prim.num_inputs > 2) ? signals_in[prim.inputs[2]] : 0;
     uint in3 = (prim.num_inputs > 3) ? signals_in[prim.inputs[3]] : 0;
+
+    // Handle LUT4 specially - use lut_init as truth table
+    if (prim.ptype == PTYPE_LUT4) {
+        // LUT4: output = (init >> addr) & 1
+        // addr is formed from 4 inputs: addr = i3*8 + i2*4 + i1*2 + i0
+        uint addr = in0 | (in1 << 1) | (in2 << 2) | (in3 << 3);
+        signals_out[prim.outputs[0]] = (prim.lut_init >> addr) & 1;
+        return;
+    }
 
     // Evaluate gate
     uint result = eval_gate(prim.ptype, in0, in1, in2, in3, prim.num_inputs);
@@ -1239,8 +1260,20 @@ fn encode_ptype(ptype: &PrimitiveType) -> u32 {
         PrimitiveType::DffN => 11,
         PrimitiveType::HalfAdder => 12,
         PrimitiveType::FullAdder => 13,
-        PrimitiveType::Constant { .. } => 14,
-        _ => 15,
+        PrimitiveType::CarryCell => 14,
+        PrimitiveType::Constant { .. } => 15,
+        PrimitiveType::Lut4 { .. } => 16,
+        PrimitiveType::Lut6 { .. } => 17, // Currently unsupported on GPU
+        _ => 255,                         // Unsupported - will output 0
+    }
+}
+
+/// Extract LUT init value from primitive type
+fn get_lut_init(ptype: &PrimitiveType) -> u32 {
+    match ptype {
+        PrimitiveType::Lut4 { init } => *init as u32,
+        PrimitiveType::Lut6 { init } => *init as u32, // Only lower 32 bits
+        _ => 0,
     }
 }
 

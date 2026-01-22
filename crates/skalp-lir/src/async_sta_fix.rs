@@ -437,6 +437,7 @@ fn insert_delay_on_net(
             reset: None,
             source_op: Some("async_sta_fix_ready_delay".to_string()),
             safety_classification: CellSafetyClassification::default(),
+            lut_init: None,
         };
 
         // Add buffer cell's fanout to the input net
@@ -617,6 +618,7 @@ fn fix_single_violation(
             reset: None,
             source_op: Some("async_sta_fix".to_string()),
             safety_classification: CellSafetyClassification::default(),
+            lut_init: None,
         };
 
         let buffer_cell_id = buffer_cell.id;
@@ -842,6 +844,7 @@ mod tests {
             reset: None,
             source_op: None,
             safety_classification: Default::default(),
+            lut_init: None,
         };
 
         // AND2 cell (slow path: 25ps)
@@ -858,6 +861,7 @@ mod tests {
             reset: None,
             source_op: None,
             safety_classification: Default::default(),
+            lut_init: None,
         };
 
         netlist.cells.push(inv_cell);

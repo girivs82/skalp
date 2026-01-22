@@ -156,6 +156,16 @@ pub fn evaluate_primitive(ptype: &PrimitiveType, inputs: &[bool]) -> Vec<bool> {
             vec![sum, cout]
         }
 
+        PrimitiveType::CarryCell => {
+            // FPGA carry cell: inputs [i0, i1, ci], output [co]
+            // CO = (I0 & I1) | ((I0 | I1) & CI)
+            let i0 = inputs.first().copied().unwrap_or(false);
+            let i1 = inputs.get(1).copied().unwrap_or(false);
+            let ci = inputs.get(2).copied().unwrap_or(false);
+            let co = (i0 & i1) | ((i0 | i1) & ci);
+            vec![co]
+        }
+
         PrimitiveType::CompBit => {
             // inputs: [a, b, lt_in, eq_in], outputs: [lt_out, eq_out]
             let a = inputs.first().copied().unwrap_or(false);
@@ -391,6 +401,34 @@ pub fn evaluate_primitive(ptype: &PrimitiveType, inputs: &[bool]) -> Vec<bool> {
             }
 
             vec![all_data || all_null]
+        }
+
+        // === FPGA Look-Up Tables ===
+        PrimitiveType::Lut4 { init } => {
+            // 4-input LUT: output = (init >> addr) & 1
+            // Address is formed from inputs: addr = i3*8 + i2*4 + i1*2 + i0
+            // iCE40 SB_LUT4 input ordering: I0=LSB, I3=MSB
+            let i0 = inputs.first().copied().unwrap_or(false) as u16;
+            let i1 = inputs.get(1).copied().unwrap_or(false) as u16;
+            let i2 = inputs.get(2).copied().unwrap_or(false) as u16;
+            let i3 = inputs.get(3).copied().unwrap_or(false) as u16;
+            let addr = i0 | (i1 << 1) | (i2 << 2) | (i3 << 3);
+            let result = (init >> addr) & 1 == 1;
+            vec![result]
+        }
+
+        PrimitiveType::Lut6 { init } => {
+            // 6-input LUT: output = (init >> addr) & 1
+            // Address is formed from inputs: addr = i5*32 + i4*16 + i3*8 + i2*4 + i1*2 + i0
+            let i0 = inputs.first().copied().unwrap_or(false) as u64;
+            let i1 = inputs.get(1).copied().unwrap_or(false) as u64;
+            let i2 = inputs.get(2).copied().unwrap_or(false) as u64;
+            let i3 = inputs.get(3).copied().unwrap_or(false) as u64;
+            let i4 = inputs.get(4).copied().unwrap_or(false) as u64;
+            let i5 = inputs.get(5).copied().unwrap_or(false) as u64;
+            let addr = i0 | (i1 << 1) | (i2 << 2) | (i3 << 3) | (i4 << 4) | (i5 << 5);
+            let result = (init >> addr) & 1 == 1;
+            vec![result]
         }
     }
 }
