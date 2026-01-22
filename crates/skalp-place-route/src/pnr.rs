@@ -864,4 +864,189 @@ mod tests {
             "Should have at least 4 routes (clock + 3 data paths)"
         );
     }
+
+    #[test]
+    fn test_timing_driven_placement() {
+        use crate::placer::PlacementAlgorithm;
+
+        // Create a design with a clear critical path
+        let mut netlist = GateNetlist::new("timing_test".to_string(), "ice40".to_string());
+
+        // Clock net
+        let clock_net = netlist.add_net({
+            let mut net =
+                GateNet::new_input(skalp_lir::gate_netlist::GateNetId(0), "clk".to_string());
+            net.is_clock = true;
+            net
+        });
+
+        // Create a long combinational path: DFF -> LUT -> LUT -> LUT -> LUT -> DFF
+        // This creates timing pressure that should affect placement
+        let dff1_out = netlist.add_net(GateNet::new(
+            skalp_lir::gate_netlist::GateNetId(1),
+            "dff1_q".to_string(),
+        ));
+        let lut1_out = netlist.add_net(GateNet::new(
+            skalp_lir::gate_netlist::GateNetId(2),
+            "lut1_out".to_string(),
+        ));
+        let lut2_out = netlist.add_net(GateNet::new(
+            skalp_lir::gate_netlist::GateNetId(3),
+            "lut2_out".to_string(),
+        ));
+        let lut3_out = netlist.add_net(GateNet::new(
+            skalp_lir::gate_netlist::GateNetId(4),
+            "lut3_out".to_string(),
+        ));
+        let lut4_out = netlist.add_net(GateNet::new(
+            skalp_lir::gate_netlist::GateNetId(5),
+            "lut4_out".to_string(),
+        ));
+        let dff2_out = netlist.add_net(GateNet::new(
+            skalp_lir::gate_netlist::GateNetId(6),
+            "dff2_q".to_string(),
+        ));
+
+        // Input DFF
+        let mut dff1 = Cell::new_seq(
+            skalp_lir::gate_netlist::CellId(0),
+            "SB_DFF".to_string(),
+            "ice40".to_string(),
+            0.0,
+            "path.dff1".to_string(),
+            vec![clock_net], // D input (use clock for simplicity)
+            vec![dff1_out],
+            clock_net,
+            None,
+        );
+        dff1.clock = Some(clock_net);
+        netlist.add_cell(dff1);
+
+        // Long combinational chain (4 LUTs)
+        netlist.add_cell(Cell::new_comb(
+            skalp_lir::gate_netlist::CellId(1),
+            "SB_LUT4".to_string(),
+            "ice40".to_string(),
+            0.0,
+            "path.lut1".to_string(),
+            vec![dff1_out],
+            vec![lut1_out],
+        ));
+
+        netlist.add_cell(Cell::new_comb(
+            skalp_lir::gate_netlist::CellId(2),
+            "SB_LUT4".to_string(),
+            "ice40".to_string(),
+            0.0,
+            "path.lut2".to_string(),
+            vec![lut1_out],
+            vec![lut2_out],
+        ));
+
+        netlist.add_cell(Cell::new_comb(
+            skalp_lir::gate_netlist::CellId(3),
+            "SB_LUT4".to_string(),
+            "ice40".to_string(),
+            0.0,
+            "path.lut3".to_string(),
+            vec![lut2_out],
+            vec![lut3_out],
+        ));
+
+        netlist.add_cell(Cell::new_comb(
+            skalp_lir::gate_netlist::CellId(4),
+            "SB_LUT4".to_string(),
+            "ice40".to_string(),
+            0.0,
+            "path.lut4".to_string(),
+            vec![lut3_out],
+            vec![lut4_out],
+        ));
+
+        // Output DFF
+        let mut dff2 = Cell::new_seq(
+            skalp_lir::gate_netlist::CellId(5),
+            "SB_DFF".to_string(),
+            "ice40".to_string(),
+            0.0,
+            "path.dff2".to_string(),
+            vec![lut4_out],
+            vec![dff2_out],
+            clock_net,
+            None,
+        );
+        dff2.clock = Some(clock_net);
+        netlist.add_cell(dff2);
+
+        // Test with timing-driven placement
+        let mut config = PnrConfig::default();
+        config.placer.algorithm = PlacementAlgorithm::AnalyticalTimingDriven;
+        config.placer.timing_weight = 0.7; // High timing emphasis
+        config.placer.max_iterations = 2000;
+
+        let result = place_and_route(&netlist, Ice40Variant::Hx1k, config).unwrap();
+
+        println!("\n=== Timing-Driven Placement Test ===");
+        println!("Cells placed: {}", result.placement.placements.len());
+        println!("Wirelength: {}", result.placement.wirelength);
+        println!("Timing score: {:.2}", result.placement.timing_score);
+        println!("Placement cost: {:.2}", result.placement.cost);
+
+        // Print placements for the critical path
+        let critical_path_cells = [
+            "path.dff1",
+            "path.lut1",
+            "path.lut2",
+            "path.lut3",
+            "path.lut4",
+            "path.dff2",
+        ];
+        println!("\nCritical path placement:");
+        for (cell_id, loc) in &result.placement.placements {
+            if let Some(cell) = netlist.get_cell(*cell_id) {
+                if critical_path_cells.contains(&cell.path.as_str()) {
+                    println!(
+                        "  {} ({:?}): tile ({}, {}), bel {}",
+                        cell.path, cell.cell_type, loc.tile_x, loc.tile_y, loc.bel_index
+                    );
+                }
+            }
+        }
+
+        // For timing-driven placement, we expect cells on the critical path
+        // to be placed close together
+        let mut path_positions: Vec<(u32, u32)> = Vec::new();
+        for (cell_id, loc) in &result.placement.placements {
+            if let Some(cell) = netlist.get_cell(*cell_id) {
+                if critical_path_cells.contains(&cell.path.as_str()) {
+                    path_positions.push((loc.tile_x, loc.tile_y));
+                }
+            }
+        }
+
+        // Calculate bounding box of critical path
+        if !path_positions.is_empty() {
+            let min_x = path_positions.iter().map(|(x, _)| *x).min().unwrap();
+            let max_x = path_positions.iter().map(|(x, _)| *x).max().unwrap();
+            let min_y = path_positions.iter().map(|(_, y)| *y).min().unwrap();
+            let max_y = path_positions.iter().map(|(_, y)| *y).max().unwrap();
+
+            let bbox_hpwl = (max_x - min_x) + (max_y - min_y);
+            println!(
+                "\nCritical path bounding box: ({},{}) to ({},{})",
+                min_x, min_y, max_x, max_y
+            );
+            println!("Critical path HPWL: {}", bbox_hpwl);
+
+            // Timing-driven placement should keep critical path relatively compact
+            // For a 6-cell path, HPWL should be reasonable (< 15 tiles)
+            assert!(
+                bbox_hpwl < 15,
+                "Critical path should be placed compactly, HPWL was {}",
+                bbox_hpwl
+            );
+        }
+
+        assert!(result.routing.success, "Routing should succeed");
+    }
 }

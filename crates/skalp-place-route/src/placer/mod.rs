@@ -33,6 +33,10 @@ pub enum PlacementAlgorithm {
     /// Analytical with simulated annealing refinement
     #[default]
     AnalyticalWithRefinement,
+    /// Timing-driven simulated annealing
+    TimingDriven,
+    /// Analytical with timing-driven refinement
+    AnalyticalTimingDriven,
 }
 
 /// Placer configuration
@@ -212,6 +216,37 @@ impl<D: Device + Clone> Placer<D> {
                     self.config.initial_temperature * 0.5, // Lower temp for refinement
                     self.config.cooling_rate,
                     self.config.max_iterations / 2,
+                );
+                annealer.optimize(legalized, netlist)?
+            }
+            PlacementAlgorithm::TimingDriven => {
+                // Timing-driven simulated annealing from random start
+                let initial = self.random_placement(netlist)?;
+                let annealer = SimulatedAnnealing::new_timing_driven(
+                    &self.device,
+                    self.config.initial_temperature,
+                    self.config.cooling_rate,
+                    self.config.max_iterations,
+                    self.config.timing_weight,
+                );
+                annealer.optimize(initial, netlist)?
+            }
+            PlacementAlgorithm::AnalyticalTimingDriven => {
+                // Analytical + legalization + timing-driven SA refinement
+                let analytical = AnalyticalPlacer::new(&self.device);
+                let initial = analytical.place(netlist)?;
+
+                // Legalize
+                let legalizer = Legalizer::new(&self.device);
+                let legalized = legalizer.legalize(initial, netlist)?;
+
+                // Timing-driven SA refinement
+                let annealer = SimulatedAnnealing::new_timing_driven(
+                    &self.device,
+                    self.config.initial_temperature * 0.5,
+                    self.config.cooling_rate,
+                    self.config.max_iterations / 2,
+                    self.config.timing_weight,
                 );
                 annealer.optimize(legalized, netlist)?
             }
