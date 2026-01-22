@@ -86,6 +86,19 @@ pub struct PnrResult {
     pub bitstream: Bitstream,
     /// Timing report (if enabled)
     pub timing: Option<TimingReport>,
+    /// Device variant used
+    pub variant: Ice40Variant,
+}
+
+impl PnrResult {
+    /// Generate IceStorm ASCII format bitstream
+    pub fn to_icestorm_ascii(&self) -> String {
+        let device = Ice40Device::new(self.variant);
+        let ascii_gen = crate::bitstream::IceStormAscii::new(&device);
+        ascii_gen
+            .generate(&self.placement, &self.routing)
+            .unwrap_or_else(|e| format!(".comment Error generating ASCII: {}\n", e))
+    }
 }
 
 /// Run place and route on a GateNetlist for iCE40
@@ -122,6 +135,7 @@ pub fn place_and_route(
         routing,
         bitstream,
         timing,
+        variant,
     })
 }
 

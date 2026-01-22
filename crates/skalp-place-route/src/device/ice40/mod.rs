@@ -4,9 +4,11 @@
 //! supporting HX1K, HX4K, HX8K, LP1K, LP8K, and UP5K variants.
 
 mod chipdb;
+pub mod chipdb_parser;
 mod tiles;
 
 pub use chipdb::Ice40ChipDb;
+pub use chipdb_parser::ChipDb;
 pub use tiles::Ice40Tile;
 
 use super::{
@@ -128,6 +130,141 @@ pub struct Ice40Device {
 impl Ice40Device {
     /// Create a new iCE40 device with default architecture
     pub fn new(variant: Ice40Variant) -> Self {
+        // Try to load from real chipdb first
+        if let Ok(device) = Self::from_chipdb(variant) {
+            return device;
+        }
+        // Fall back to synthetic architecture
+        Self::new_synthetic(variant)
+    }
+
+    /// Create from real IceStorm chipdb data
+    pub fn from_chipdb(variant: Ice40Variant) -> Result<Self, String> {
+        let chipdb = chipdb_parser::ChipDb::load_embedded(variant)?;
+
+        let grid_size = (chipdb.width, chipdb.height);
+
+        let mut device = Self {
+            variant,
+            grid_size,
+            tiles: Vec::new(),
+            wires: Vec::new(),
+            wire_names: HashMap::new(),
+            pips: Vec::new(),
+            wire_to_pips: HashMap::new(),
+            tile_wires: HashMap::new(),
+            packages: HashMap::new(),
+            routing: Self::default_routing(),
+            clock_resources: Self::default_clock_resources(),
+            logic_tiles: Vec::new(),
+            io_tiles: Vec::new(),
+            memory_blocks: Vec::new(),
+        };
+
+        // Build wires from chipdb
+        for wire in chipdb.build_wires() {
+            device.wire_names.insert(wire.name.clone(), wire.id);
+            // Track tile wires
+            device
+                .tile_wires
+                .entry((wire.tile_x, wire.tile_y))
+                .or_default()
+                .push(wire.id);
+            device.wires.push(wire);
+        }
+
+        // Build PIPs from chipdb
+        for pip in chipdb.build_pips() {
+            device
+                .wire_to_pips
+                .entry(pip.dst_wire)
+                .or_default()
+                .push(pip.id);
+            device.pips.push(pip);
+        }
+
+        // Build tiles from chipdb
+        let (width, height) = grid_size;
+        device.tiles = vec![vec![None; width as usize]; height as usize];
+
+        let mut bel_id = 0u32;
+        for (&(x, y), &tile_type) in &chipdb.tiles {
+            let bels = chipdb.build_bels_for_tile(x, y);
+            bel_id += bels.len() as u32;
+            let tile = Ice40Tile::new(tile_type, x, y, bels);
+
+            // Track tile types
+            match tile_type {
+                TileType::Logic => {
+                    device.logic_tiles.push(LogicTile {
+                        x,
+                        y,
+                        lut_count: 8,
+                        ff_count: 8,
+                        has_carry: true,
+                    });
+                }
+                TileType::IoTop | TileType::IoBottom | TileType::IoLeft | TileType::IoRight => {
+                    let side = match tile_type {
+                        TileType::IoTop => IoSide::Top,
+                        TileType::IoBottom => IoSide::Bottom,
+                        TileType::IoLeft => IoSide::Left,
+                        TileType::IoRight => IoSide::Right,
+                        _ => unreachable!(),
+                    };
+                    device.io_tiles.push(IoTile {
+                        x,
+                        y,
+                        io_count: 2,
+                        side,
+                        io_standards: vec![
+                            "LVCMOS33".to_string(),
+                            "LVCMOS25".to_string(),
+                            "LVCMOS18".to_string(),
+                        ],
+                        drive_strengths: vec![4, 8, 12],
+                        diff_pairs: false,
+                    });
+                }
+                TileType::RamTop => {
+                    device.memory_blocks.push(MemoryBlock {
+                        x,
+                        y,
+                        size_bits: 4096,
+                        widths: vec![1, 2, 4, 8, 16],
+                    });
+                }
+                _ => {}
+            }
+
+            if (y as usize) < device.tiles.len() && (x as usize) < device.tiles[y as usize].len() {
+                device.tiles[y as usize][x as usize] = Some(tile);
+            }
+        }
+
+        // Load package pins from chipdb
+        for (pkg_name, pins) in &chipdb.packages {
+            let mut pin_map = HashMap::new();
+            for pin in pins {
+                pin_map.insert(pin.pin_name.clone(), (pin.tile_x, pin.tile_y, pin.bel_idx));
+            }
+            device.packages.insert(
+                pkg_name.clone(),
+                PackagePins {
+                    name: pkg_name.clone(),
+                    pins: pin_map,
+                },
+            );
+        }
+
+        // Suppress unused variable warning
+        let _ = bel_id;
+
+        Ok(device)
+    }
+
+    /// Create a new iCE40 device with synthetic architecture (fallback)
+    fn new_synthetic(variant: Ice40Variant) -> Self {
         let grid_size = variant.grid_size();
         let mut device = Self {
             variant,
@@ -1042,5 +1179,64 @@ impl Ice40Device {
     /// Create an iCE40 HX8K device (for tests)
     pub fn ice40_hx8k() -> Self {
         Self::hx8k()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_ice40_hx1k_from_chipdb() {
+        let device = Ice40Device::hx1k();
+
+        // Verify grid size matches chipdb (14x18 for 1k)
+        let (w, h) = device.grid_size();
+        assert_eq!(w, 14, "Width should be 14");
+        assert_eq!(h, 18, "Height should be 18");
+
+        // Verify we have wires from chipdb
+        assert!(
+            device.wires.len() > 1000,
+            "Should have many wires from chipdb, got {}",
+            device.wires.len()
+        );
+
+        // Verify we have PIPs from chipdb
+        assert!(
+            device.pips.len() > 10000,
+            "Should have many PIPs from chipdb, got {}",
+            device.pips.len()
+        );
+
+        // Verify we have logic tiles
+        assert!(!device.logic_tiles.is_empty(), "Should have logic tiles");
+
+        // Verify we have package pins
+        assert!(
+            !device.packages.is_empty(),
+            "Should have package pin mappings"
+        );
+
+        // Verify stats
+        let stats = device.stats();
+        assert!(stats.total_luts > 0, "Should have LUTs");
+        assert!(stats.total_ios > 0, "Should have I/Os");
+    }
+
+    #[test]
+    fn test_ice40_hx8k_from_chipdb() {
+        let device = Ice40Device::hx8k();
+
+        // 8k should have more resources than 1k
+        let stats = device.stats();
+        assert!(stats.total_luts > 5000, "8k should have many LUTs");
+
+        // Verify we have PIPs
+        assert!(
+            device.pips.len() > 50000,
+            "8k should have many PIPs, got {}",
+            device.pips.len()
+        );
     }
 }

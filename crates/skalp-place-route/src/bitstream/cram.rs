@@ -220,9 +220,13 @@ impl ConfigRam {
             if let Some(cell) = netlist.get_cell(cell_id) {
                 match loc.bel_type {
                     BelType::Lut4 => {
-                        // Get LUT init value from cell - default to 0 if not specified
-                        // In a real implementation, this would come from the cell's attributes
-                        let init: u16 = 0;
+                        // Get LUT init value from cell's lut_init field or derive from cell_type
+                        let init: u16 = if let Some(init_val) = cell.lut_init {
+                            init_val as u16
+                        } else {
+                            // Derive from cell type name (e.g., SB_LUT4_XOR2 -> XOR truth table)
+                            derive_lut_init_from_cell_type(&cell.cell_type)
+                        };
                         self.configure_lut(loc.tile_x, loc.tile_y, loc.bel_index, init);
                     }
                     BelType::Dff | BelType::DffE | BelType::DffSr | BelType::DffSrE => {
@@ -301,5 +305,61 @@ impl ConfigRam {
                 }
             }
         }
+    }
+}
+
+/// Derive LUT initialization value from cell type name
+/// For iCE40 LUT4 cells, truth table is 16 bits
+fn derive_lut_init_from_cell_type(cell_type: &str) -> u16 {
+    // Extract the function from cell type name (e.g., SB_LUT4_XOR2 -> XOR2)
+    let func = if let Some(pos) = cell_type.rfind('_') {
+        &cell_type[pos + 1..]
+    } else {
+        cell_type
+    };
+
+    // Common 2-input LUT truth tables (inputs: I1, I0)
+    // Truth table bit i corresponds to input pattern i (binary)
+    match func {
+        // Basic gates (2-input)
+        "AND2" => 0x8888,  // I1 & I0: 1000 1000 1000 1000
+        "OR2" => 0xEEEE,   // I1 | I0: 1110 1110 1110 1110
+        "XOR2" => 0x6666,  // I1 ^ I0: 0110 0110 0110 0110
+        "NAND2" => 0x7777, // ~(I1 & I0): 0111 0111 0111 0111
+        "NOR2" => 0x1111,  // ~(I1 | I0): 0001 0001 0001 0001
+        "XNOR2" => 0x9999, // ~(I1 ^ I0): 1001 1001 1001 1001
+
+        // Multiplexer (I3=sel, I1=d1, I0=d0): sel ? d1 : d0
+        "MUX2" => 0xCACA, // 1100 1010 1100 1010
+
+        // Buffer/inverter
+        "BUF" | "BUFFER" => 0xAAAA, // I0: 1010 1010 1010 1010
+        "INV" | "NOT" => 0x5555,    // ~I0: 0101 0101 0101 0101
+
+        // Constants
+        "GND" | "ZERO" | "TIE0" => 0x0000,
+        "VCC" | "ONE" | "TIE1" => 0xFFFF,
+
+        // 3-input gates (I2, I1, I0)
+        "AND3" => 0x8080, // I2 & I1 & I0
+        "OR3" => 0xFEFE,  // I2 | I1 | I0
+        "XOR3" => 0x9696, // I2 ^ I1 ^ I0
+        "NAND3" => 0x7F7F,
+        "NOR3" => 0x0101,
+
+        // 4-input gates (I3, I2, I1, I0)
+        "AND4" => 0x8000, // I3 & I2 & I1 & I0
+        "OR4" => 0xFFFE,  // I3 | I2 | I1 | I0
+        "XOR4" => 0x6996, // I3 ^ I2 ^ I1 ^ I0
+        "NAND4" => 0x7FFF,
+        "NOR4" => 0x0001,
+
+        // Full adder sum: a ^ b ^ cin
+        "FASUM" => 0x9696,
+        // Full adder carry: (a & b) | (cin & (a ^ b))
+        "FACO" | "FACOUT" => 0xE8E8,
+
+        // Default: pass-through on I0 (buffer)
+        _ => 0xAAAA,
     }
 }

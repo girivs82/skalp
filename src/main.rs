@@ -2433,9 +2433,9 @@ fn run_pnr_on_netlist(
         result.bitstream.data.len()
     );
 
-    // Also write ASCII format for debugging
+    // Also write IceStorm ASCII format for debugging
     let asc_path = output_dir.join("design.asc");
-    fs::write(&asc_path, result.bitstream.to_ascii())?;
+    fs::write(&asc_path, result.to_icestorm_ascii())?;
     println!("ASCII: {:?}", asc_path);
 
     // Write timing report if available
