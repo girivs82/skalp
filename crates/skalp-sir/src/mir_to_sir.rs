@@ -2507,9 +2507,30 @@ impl<'a> MirToSirConverter<'a> {
             }
             ExpressionKind::Ref(lvalue) => self.create_lvalue_ref_node(lvalue),
             ExpressionKind::Binary { op, left, right } => {
-                // Propagate target width to operands so integer literals get correct width
-                let left_node = self.create_expression_node_with_width(left, target_width);
-                let right_node = self.create_expression_node_with_width(right, target_width);
+                // BUG #214 FIX: For comparison operations, don't propagate target_width to operands
+                // Comparison results are 1-bit, but operands should use their own type widths
+                // Otherwise 32-bit constants like BMS_TIMEOUT get truncated to 1-bit
+                use skalp_mir::BinaryOp;
+                let is_comparison = matches!(
+                    op,
+                    BinaryOp::Equal
+                        | BinaryOp::NotEqual
+                        | BinaryOp::Less
+                        | BinaryOp::LessEqual
+                        | BinaryOp::Greater
+                        | BinaryOp::GreaterEqual
+                );
+
+                let operand_width = if is_comparison {
+                    // Comparisons: operands should use their own type widths, not the 1-bit result width
+                    None
+                } else {
+                    // Arithmetic: propagate target width so integer literals get correct width
+                    target_width
+                };
+
+                let left_node = self.create_expression_node_with_width(left, operand_width);
+                let right_node = self.create_expression_node_with_width(right, operand_width);
                 self.create_binary_op_node(op, left_node, right_node)
             }
             ExpressionKind::Unary { op, operand } => {

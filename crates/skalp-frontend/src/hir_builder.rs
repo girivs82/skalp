@@ -439,10 +439,14 @@ impl HirBuilderContext {
 
     /// Pre-register constants from merged HIR (for handling imports)
     /// BUG #170 FIX: Register imported constants like IEEE754_32 for const generic resolution
+    /// BUG #214 FIX: Also add to scope so build_ident_expr can find constants during identifier lookup
     pub fn preregister_constant(&mut self, constant: &crate::hir::HirConstant) {
         self.symbols
             .constants
             .insert(constant.name.clone(), constant.id);
+        // Add to current scope (global at this point) so lookup() finds it
+        self.symbols
+            .add_to_scope(&constant.name, SymbolId::Constant(constant.id));
     }
 
     /// Build HIR from syntax tree
@@ -5463,7 +5467,8 @@ impl HirBuilderContext {
                         None
                     } else {
                         // Regular integer literal
-                        let value = text.parse::<u64>().ok()?;
+                        // BUG #214 FIX: Remove underscores before parsing (100_000_000 -> 100000000)
+                        let value = text.replace('_', "").parse::<u64>().ok()?;
                         Some(HirExpression::Literal(HirLiteral::Integer(value)))
                     }
                 }
