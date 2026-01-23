@@ -348,6 +348,15 @@ impl<'a> MirToSirConverter<'a> {
     }
 
     fn convert_signals(&mut self) {
+        // BUG #117r DEBUG: Check MIR signals at start of convert_signals
+        let prot_count = self.mir.signals.iter().filter(|s| s.name.starts_with("prot_faults")).count();
+        if prot_count > 0 {
+            println!("📍 CONVERT_SIGNALS START: module='{}', {} MIR signals total, {} starting with 'prot_faults'",
+                self.mir.name, self.mir.signals.len(), prot_count);
+            for s in self.mir.signals.iter().filter(|s| s.name.starts_with("prot_faults")) {
+                println!("   - {:?}: '{}'", s.id, s.name);
+            }
+        }
         for signal in &self.mir.signals {
             let sir_type = self.convert_type(&signal.signal_type);
             let width = sir_type.width();
@@ -856,6 +865,10 @@ impl<'a> MirToSirConverter<'a> {
                 Statement::If(if_stmt) => {
                     println!("   🔀 IF: Converting if statement in sequential context");
                     self.convert_if_in_sequential(if_stmt, clock, edge.clone());
+                }
+                Statement::Case(case_stmt) => {
+                    println!("   📋 CASE: Converting case statement in sequential context");
+                    self.convert_case_in_sequential(case_stmt, clock, edge.clone());
                 }
                 _ => {
                     println!(
@@ -1450,6 +1463,130 @@ impl<'a> MirToSirConverter<'a> {
         }
     }
 
+    /// Convert case/match statement in sequential context (event blocks)
+    /// BUG #117r FIX: State machines use match statements which need to generate flip-flops
+    fn convert_case_in_sequential(
+        &mut self,
+        case_stmt: &skalp_mir::CaseStatement,
+        clock: &str,
+        edge: ClockEdge,
+    ) {
+        println!(
+            "   🎯 CASE_IN_SEQ: Converting case statement with {} items",
+            case_stmt.items.len()
+        );
+
+        // Create expression node for the case expression (e.g., state_reg)
+        let case_expr_node = self.create_expression_node(&case_stmt.expr);
+        println!("      📝 Created case expression node: {}", case_expr_node);
+
+        // Collect all signals assigned in any case arm or default
+        let mut all_assignments: HashMap<String, Vec<(Vec<Expression>, Expression)>> =
+            HashMap::new();
+        let mut default_assignments: HashMap<String, Expression> = HashMap::new();
+
+        // Extract assignments from each case item
+        for item in &case_stmt.items {
+            let mut item_assignments = HashMap::new();
+            self.extract_assignments_from_block(&item.block.statements, &mut item_assignments);
+
+            for (signal_name, expr) in item_assignments {
+                all_assignments
+                    .entry(signal_name)
+                    .or_insert_with(Vec::new)
+                    .push((item.values.clone(), expr));
+            }
+        }
+
+        // Extract default assignments
+        if let Some(default_block) = &case_stmt.default {
+            self.extract_assignments_from_block(&default_block.statements, &mut default_assignments);
+        }
+
+        println!(
+            "      📊 Found {} signals assigned in case arms: {:?}",
+            all_assignments.len(),
+            all_assignments.keys().collect::<Vec<_>>()
+        );
+
+        // For each signal, build a mux tree and create a flip-flop
+        for (signal_name, case_arms) in &all_assignments {
+            println!("      🔧 Building mux tree for signal: {}", signal_name);
+
+            // Start with default value
+            let mut current_mux = if let Some(default_expr) = default_assignments.get(signal_name) {
+                self.create_expression_node(default_expr)
+            } else {
+                // No default - use current signal value (for state holding)
+                self.get_or_create_signal_driver(signal_name)
+            };
+
+            // Build mux chain from last case to first (so first has priority)
+            for (values, value_expr) in case_arms.iter().rev() {
+                let value_node = self.create_expression_node(value_expr);
+
+                // Create condition: case_expr == value (for each value in values list)
+                // For multiple values (e.g., State::A | State::B), we need to OR them
+                let condition_node = if values.is_empty() {
+                    // Should not happen, but handle gracefully
+                    continue;
+                } else if values.len() == 1 {
+                    // Single value match: case_expr == value
+                    let val_node = self.create_expression_node(&values[0]);
+                    self.create_binary_op_node(&skalp_mir::BinaryOp::Equal, case_expr_node, val_node)
+                } else {
+                    // Multiple values: (case_expr == v1) | (case_expr == v2) | ...
+                    let mut or_node = {
+                        let val_node = self.create_expression_node(&values[0]);
+                        self.create_binary_op_node(
+                            &skalp_mir::BinaryOp::Equal,
+                            case_expr_node,
+                            val_node,
+                        )
+                    };
+                    for value in &values[1..] {
+                        let val_node = self.create_expression_node(value);
+                        let eq_node = self.create_binary_op_node(
+                            &skalp_mir::BinaryOp::Equal,
+                            case_expr_node,
+                            val_node,
+                        );
+                        or_node = self.create_binary_op_node(
+                            &skalp_mir::BinaryOp::Or,
+                            or_node,
+                            eq_node,
+                        );
+                    }
+                    or_node
+                };
+
+                // Create mux: condition ? value_node : current_mux
+                current_mux = self.create_mux_node(condition_node, value_node, current_mux);
+            }
+
+            // Create flip-flop with the final mux
+            let ff_node = self.create_flipflop_with_input(current_mux, clock, edge.clone());
+            self.connect_node_to_signal(ff_node, signal_name);
+            println!(
+                "      ✅ Created FF {} for signal '{}'",
+                ff_node, signal_name
+            );
+        }
+
+        // Handle signals that only appear in default (not in any case arm)
+        for (signal_name, default_expr) in &default_assignments {
+            if !all_assignments.contains_key(signal_name) {
+                println!(
+                    "      📌 Signal '{}' only in default, creating FF with direct value",
+                    signal_name
+                );
+                let value_node = self.create_expression_node(default_expr);
+                let ff_node = self.create_flipflop_with_input(value_node, clock, edge.clone());
+                self.connect_node_to_signal(ff_node, signal_name);
+            }
+        }
+    }
+
     fn handle_array_writes_in_if_with_list(
         &mut self,
         if_stmt: &IfStatement,
@@ -1780,6 +1917,17 @@ impl<'a> MirToSirConverter<'a> {
                     // Recurse into nested blocks (CRITICAL for expanded array assignments)
                     self.collect_targets_from_block(&block.statements, targets);
                 }
+                Statement::Case(case_stmt) => {
+                    // BUG #117r FIX: Recurse into case/match statements
+                    // Collect targets from all case arms
+                    for item in &case_stmt.items {
+                        self.collect_targets_from_block(&item.block.statements, targets);
+                    }
+                    // Collect targets from default case
+                    if let Some(default_block) = &case_stmt.default {
+                        self.collect_targets_from_block(&default_block.statements, targets);
+                    }
+                }
                 _ => {}
             }
         }
@@ -1866,6 +2014,144 @@ impl<'a> MirToSirConverter<'a> {
         result
     }
 
+    /// Synthesize a mux tree for a specific target within a case statement
+    /// BUG #117r FIX: Handles match statements for state machine transitions
+    fn synthesize_case_for_target(
+        &mut self,
+        case_stmt: &skalp_mir::CaseStatement,
+        target: &str,
+    ) -> Option<usize> {
+        println!(
+            "      🎯 SYNTHESIZE_CASE_FOR_TARGET: target={}, {} items",
+            target,
+            case_stmt.items.len()
+        );
+
+        // Create expression node for the case expression (e.g., state_reg)
+        let case_expr_node = self.create_expression_node(&case_stmt.expr);
+
+        // Collect values and expressions for this target from all case arms
+        let mut case_arms: Vec<(Vec<&Expression>, Option<usize>)> = Vec::new();
+        let mut found_target = false;
+
+        for item in &case_stmt.items {
+            // Check if this arm assigns to our target
+            let arm_value = self.find_target_in_block(&item.block.statements, target);
+            if arm_value.is_some() {
+                found_target = true;
+            }
+            case_arms.push((item.values.iter().collect(), arm_value));
+        }
+
+        // Get default value
+        let default_value = if let Some(default_block) = &case_stmt.default {
+            let val = self.find_target_in_block(&default_block.statements, target);
+            if val.is_some() {
+                found_target = true;
+            }
+            val
+        } else {
+            None
+        };
+
+        // If no arm assigns to this target, return None
+        if !found_target {
+            println!("         ❌ No case arm assigns to {}", target);
+            return None;
+        }
+
+        // Build the mux tree
+        // Start with default value (or current signal value)
+        let mut current_mux = match default_value {
+            Some(val) => val,
+            None => self.create_signal_ref(target),
+        };
+
+        // Build mux chain from last case to first (so first has priority)
+        for (values, arm_value) in case_arms.iter().rev() {
+            // Skip arms that don't assign to this target
+            let value_node = match arm_value {
+                Some(val) => *val,
+                None => current_mux, // Keep previous value
+            };
+
+            // Create condition: case_expr == value
+            if values.is_empty() {
+                continue;
+            }
+
+            let condition_node = if values.len() == 1 {
+                let val_node = self.create_expression_node(values[0]);
+                self.create_binary_op_node(&skalp_mir::BinaryOp::Equal, case_expr_node, val_node)
+            } else {
+                // Multiple values: (case_expr == v1) | (case_expr == v2) | ...
+                let mut or_node = {
+                    let val_node = self.create_expression_node(values[0]);
+                    self.create_binary_op_node(
+                        &skalp_mir::BinaryOp::Equal,
+                        case_expr_node,
+                        val_node,
+                    )
+                };
+                for value in &values[1..] {
+                    let val_node = self.create_expression_node(value);
+                    let eq_node = self.create_binary_op_node(
+                        &skalp_mir::BinaryOp::Equal,
+                        case_expr_node,
+                        val_node,
+                    );
+                    or_node =
+                        self.create_binary_op_node(&skalp_mir::BinaryOp::Or, or_node, eq_node);
+                }
+                or_node
+            };
+
+            // Create mux: condition ? value_node : current_mux
+            current_mux = self.create_mux_node(condition_node, value_node, current_mux);
+        }
+
+        println!("         ✅ Built mux tree node_{}", current_mux);
+        Some(current_mux)
+    }
+
+    /// Find assignment to a specific target in a block
+    fn find_target_in_block(&mut self, statements: &[Statement], target: &str) -> Option<usize> {
+        for stmt in statements {
+            match stmt {
+                Statement::Assignment(assign) => {
+                    let assign_target = self.lvalue_to_string(&assign.lhs);
+                    if assign_target == target {
+                        return Some(self.create_expression_node(&assign.rhs));
+                    }
+                }
+                Statement::Block(block) => {
+                    if let Some(val) = self.find_target_in_block(&block.statements, target) {
+                        return Some(val);
+                    }
+                }
+                Statement::If(nested_if) => {
+                    // Recurse into nested if - synthesize it as a conditional
+                    let result = self.synthesize_conditional_assignment(nested_if, target);
+                    // Check if the result is not just a keep-value SignalRef
+                    let is_keep_value = self.sir.combinational_nodes.iter().any(|n| {
+                        n.id == result
+                            && matches!(n.kind, SirNodeKind::SignalRef { ref signal } if signal == target)
+                    });
+                    if !is_keep_value {
+                        return Some(result);
+                    }
+                }
+                Statement::Case(nested_case) => {
+                    if let Some(val) = self.synthesize_case_for_target(nested_case, target) {
+                        return Some(val);
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+
     fn process_branch_with_dependencies(
         &mut self,
         statements: &[Statement],
@@ -1914,6 +2200,17 @@ impl<'a> MirToSirConverter<'a> {
                     if let Some(result) =
                         self.process_branch_with_dependencies(&block.statements, target)
                     {
+                        return Some(result);
+                    }
+                }
+                Statement::Case(case_stmt) => {
+                    // BUG #117r FIX: Handle case/match statements in sequential branches
+                    println!(
+                        "         📋 CASE found in branch for target={}, synthesizing...",
+                        target
+                    );
+                    if let Some(result) = self.synthesize_case_for_target(case_stmt, target) {
+                        // Case statement assigned to target - return this result
                         return Some(result);
                     }
                 }
@@ -3814,8 +4111,142 @@ impl<'a> MirToSirConverter<'a> {
         }
     }
 
-    fn convert_case_to_mux_tree(&mut self, _case_stmt: &skalp_mir::CaseStatement) {
-        // TODO: Implement case to mux tree conversion
+    fn convert_case_to_mux_tree(&mut self, case_stmt: &skalp_mir::CaseStatement) {
+        // BUG #117r FIX: Implement case/match statement to mux tree conversion
+        // This enables state machines with match statements to generate proper transitions
+        eprintln!(
+            "🎯 CASE_TO_MUX: Converting case statement with {} items",
+            case_stmt.items.len()
+        );
+
+        // Create expression node for the case expression (e.g., state_reg)
+        let case_expr_node = self.create_expression_node(&case_stmt.expr);
+        eprintln!("   📝 Created case expression node: {}", case_expr_node);
+
+        // Collect all signals assigned in any case arm or default
+        let mut all_assignments: HashMap<String, Vec<(Vec<&Expression>, &Expression)>> =
+            HashMap::new();
+        let mut default_assignments: HashMap<String, &Expression> = HashMap::new();
+
+        // Extract assignments from each case item
+        for item in &case_stmt.items {
+            let mut item_assignments = HashMap::new();
+            self.extract_assignments_from_block_ref(&item.block.statements, &mut item_assignments);
+
+            for (signal_name, expr) in item_assignments {
+                all_assignments
+                    .entry(signal_name)
+                    .or_insert_with(Vec::new)
+                    .push((item.values.iter().collect(), expr));
+            }
+        }
+
+        // Extract default assignments
+        if let Some(default_block) = &case_stmt.default {
+            self.extract_assignments_from_block_ref(&default_block.statements, &mut default_assignments);
+        }
+
+        eprintln!(
+            "   📊 Found {} signals assigned in case arms",
+            all_assignments.len()
+        );
+
+        // For each signal, build a mux tree
+        for (signal_name, case_arms) in &all_assignments {
+            eprintln!("   🔧 Building mux tree for signal: {}", signal_name);
+
+            // Start with default value
+            let mut current_mux = if let Some(default_expr) = default_assignments.get(signal_name) {
+                self.create_expression_node(default_expr)
+            } else {
+                // No default - use current signal value (for state holding)
+                self.get_or_create_signal_driver(signal_name)
+            };
+
+            // Build mux chain from last case to first (so first has priority)
+            for (values, value_expr) in case_arms.iter().rev() {
+                let value_node = self.create_expression_node(value_expr);
+
+                // Create condition: case_expr == value (for each value in values list)
+                // For multiple values (e.g., State::A | State::B), we need to OR them
+                let condition_node = if values.is_empty() {
+                    // Should not happen, but handle gracefully
+                    continue;
+                } else if values.len() == 1 {
+                    // Single value match: case_expr == value
+                    let val_node = self.create_expression_node(values[0]);
+                    self.create_binary_op_node(&skalp_mir::BinaryOp::Equal, case_expr_node, val_node)
+                } else {
+                    // Multiple values: (case_expr == v1) | (case_expr == v2) | ...
+                    let mut or_node = {
+                        let val_node = self.create_expression_node(values[0]);
+                        self.create_binary_op_node(
+                            &skalp_mir::BinaryOp::Equal,
+                            case_expr_node,
+                            val_node,
+                        )
+                    };
+                    for value in &values[1..] {
+                        let val_node = self.create_expression_node(value);
+                        let eq_node = self.create_binary_op_node(
+                            &skalp_mir::BinaryOp::Equal,
+                            case_expr_node,
+                            val_node,
+                        );
+                        or_node = self.create_binary_op_node(
+                            &skalp_mir::BinaryOp::Or,
+                            or_node,
+                            eq_node,
+                        );
+                    }
+                    or_node
+                };
+
+                // Create mux: condition ? value_node : current_mux
+                current_mux = self.create_mux_node(condition_node, value_node, current_mux);
+            }
+
+            // Connect final mux to signal
+            self.connect_node_to_signal(current_mux, signal_name);
+            eprintln!(
+                "   ✅ Connected mux node {} to signal '{}'",
+                current_mux, signal_name
+            );
+        }
+
+        // Handle signals that only appear in default (not in any case arm)
+        for (signal_name, default_expr) in &default_assignments {
+            if !all_assignments.contains_key(signal_name) {
+                eprintln!(
+                    "   📌 Signal '{}' only in default, creating direct assignment",
+                    signal_name
+                );
+                let value_node = self.create_expression_node(default_expr);
+                self.connect_node_to_signal(value_node, signal_name);
+            }
+        }
+    }
+
+    /// Extract assignments from a block, returning references to expressions
+    fn extract_assignments_from_block_ref<'b>(
+        &self,
+        statements: &'b [Statement],
+        assignments: &mut HashMap<String, &'b Expression>,
+    ) {
+        for stmt in statements {
+            match stmt {
+                Statement::Assignment(assign) => {
+                    let target = self.lvalue_to_string(&assign.lhs);
+                    assignments.insert(target, &assign.rhs);
+                }
+                Statement::Block(block) => {
+                    self.extract_assignments_from_block_ref(&block.statements, assignments);
+                }
+                _ => {
+                    // Skip nested if/case statements - they should be handled separately
+                }
+            }
+        }
     }
 
     fn connect_node_to_signal(&mut self, node_id: usize, signal_name: &str) {
@@ -5039,11 +5470,31 @@ impl<'a> MirToSirConverter<'a> {
                 let sir_type = self.convert_type(&port.port_type);
                 let width = sir_type.width();
 
+                // BUG #117r FIX: Check if this port (or its parent struct port) is connected
+                // For flattened ports like "faults_bms_fault", we need to check if any parent
+                // prefix (e.g., "faults" or "faults_bms") is in connections.
+                // This handles nested struct flattening where names have multiple underscores.
+                let is_connected = if instance.connections.contains_key(&port.name) {
+                    true
+                } else {
+                    // Check if any prefix ending with "_" matches a connection
+                    // For "faults_bms_fault", check: "faults", "faults_bms"
+                    let mut found = false;
+                    let mut remaining = &port.name[..];
+                    while let Some(underscore_pos) = remaining.find('_') {
+                        let prefix = &port.name[..port.name.len() - remaining.len() + underscore_pos];
+                        if instance.connections.contains_key(prefix) {
+                            found = true;
+                            break;
+                        }
+                        remaining = &remaining[underscore_pos + 1..];
+                    }
+                    found
+                };
+
                 // Only create if not connected to parent (handled via port_mapping)
                 // and if it doesn't already exist
-                if !instance.connections.contains_key(&port.name)
-                    && !self.sir.signals.iter().any(|s| s.name == full_name)
-                {
+                if !is_connected && !self.sir.signals.iter().any(|s| s.name == full_name) {
                     println!(
                         "         ├─ Output Port: {} (type={:?}) → SIR signal (width={}) [BUG #185 FIX]",
                         port.name, port.port_type, width
@@ -5117,7 +5568,7 @@ impl<'a> MirToSirConverter<'a> {
         // Step 3: Convert child module's logic with instance prefix
         // This includes both combinational assignments and sequential processes
         // NOW nested instances are elaborated, so their output signals have drivers
-        eprintln!("💥💥💥 CALLING elaborate_child_logic_with_context for inst_prefix='{}', child_module='{}'", inst_prefix, child_module.name);
+        println!("💥💥💥 CALLING elaborate_child_logic_with_context for inst_prefix='{}', child_module='{}'", inst_prefix, child_module.name);
         self.elaborate_child_logic_with_context(
             child_module,
             inst_prefix,
@@ -5165,14 +5616,15 @@ impl<'a> MirToSirConverter<'a> {
             //
             // Find all child ports that start with port_name_ (flattened variants)
             let port_prefix = format!("{}_", port_name);
-            eprintln!(
-                "   🔎 Checking for flattened ports with prefix '{}'",
-                port_prefix
+            let port_names: Vec<_> = child_module.ports.iter().map(|p| p.name.as_str()).collect();
+            println!(
+                "   🔎 Checking for flattened ports with prefix '{}' in child_module '{}' ({} ports: {:?})",
+                port_prefix, child_module.name, child_module.ports.len(), port_names
             );
             for child_port in &child_module.ports {
-                eprintln!("      Child port: '{}'", child_port.name);
+                println!("      Port: '{}' (starts_with_prefix={})", child_port.name, child_port.name.starts_with(&port_prefix));
                 if child_port.name.starts_with(&port_prefix) {
-                    eprintln!("      ✅ MATCHES PREFIX!");
+                    println!("      ✅ MATCHES PREFIX!");
 
                     // This is a flattened field port like "wr_data_x"
                     // Get the suffix (e.g., "x" from "wr_data_x")
@@ -5181,19 +5633,19 @@ impl<'a> MirToSirConverter<'a> {
                     // Create corresponding parent signal name
                     // If parent_expr is a Ref to a signal/port, create Ref to signal_suffix
                     // Parent signals/ports are in self.mir (the parent module being elaborated)
-                    eprintln!(
-                        "         Suffix: '{}', parent_expr: {:?}",
-                        suffix, parent_expr
+                    println!(
+                        "         Suffix: '{}', parent_expr_kind: {:?}",
+                        suffix, std::mem::discriminant(&parent_expr.kind)
                     );
                     let parent_flattened_expr = if let ExpressionKind::Ref(lval) = &parent_expr.kind
                     {
-                        eprintln!("         Parent is ExpressionKind::Ref");
+                        println!("         Parent is ExpressionKind::Ref, lval={:?}", std::mem::discriminant(lval));
                         if let LValue::Signal(parent_sig_id) = lval {
-                            eprintln!("         Parent is LValue::Signal({:?})", parent_sig_id);
+                            println!("         Parent is LValue::Signal({:?}), mir has {} signals", parent_sig_id, self.mir.signals.len());
                             // Find parent signal in MIR module
                             let parent_sig_opt =
                                 self.mir.signals.iter().find(|s| s.id == *parent_sig_id);
-                            eprintln!(
+                            println!(
                                 "         Found parent signal: {:?}",
                                 parent_sig_opt.map(|s| &s.name)
                             );
@@ -5226,18 +5678,26 @@ impl<'a> MirToSirConverter<'a> {
                                     format!("{}_{}", parent_sig.name, suffix)
                                 };
 
-                                eprintln!(
-                                    "         Looking for flattened: '{}'",
-                                    parent_flattened_name
+                                println!(
+                                    "         Looking for flattened: '{}' in {} MIR signals",
+                                    parent_flattened_name, self.mir.signals.len()
                                 );
+                                // BUG #117r DEBUG: List all signals that start with "prot_faults"
+                                if parent_flattened_name.contains("prot_faults") {
+                                    let matching: Vec<_> = self.mir.signals.iter()
+                                        .filter(|s| s.name.starts_with("prot_faults"))
+                                        .map(|s| (&s.id, &s.name))
+                                        .collect();
+                                    println!("         MIR signals starting with 'prot_faults': {:?}", matching);
+                                }
                                 let parent_flattened_sig_opt = self
                                     .mir
                                     .signals
                                     .iter()
                                     .find(|s| s.name == parent_flattened_name);
-                                eprintln!(
+                                println!(
                                     "         Found flattened signal: {:?}",
-                                    parent_flattened_sig_opt.map(|s| &s.name)
+                                    parent_flattened_sig_opt.map(|s| (&s.id, &s.name))
                                 );
 
                                 parent_flattened_sig_opt.map(|s| {
@@ -5296,11 +5756,16 @@ impl<'a> MirToSirConverter<'a> {
                     };
 
                     if let Some(expr) = parent_flattened_expr {
-                        eprintln!(
-                            "   🔗 EXPANDING PORT MAPPING: {} → {:?}",
-                            child_port.name, expr
+                        println!(
+                            "   🔗 EXPANDING PORT MAPPING: {} → some_expr",
+                            child_port.name
                         );
                         port_mapping.insert(child_port.name.clone(), expr);
+                    } else {
+                        println!(
+                            "   ⚠️ NO PARENT EXPR for {}",
+                            child_port.name
+                        );
                     }
                 }
             }
@@ -7469,11 +7934,15 @@ impl<'a> MirToSirConverter<'a> {
         }
 
         // Pattern 2: base_field (struct flattening, no array index)
-        // Example: wr_data_x, wr_data_y
-        // Check if the last part is a single letter (struct field like x, y, z, w)
+        // Example: wr_data_x, wr_data_y, prot_faults_ov, faults_bms_fault
+        // BUG #117r FIX: Allow multi-character field names (ov, uv, bms_fault, etc.)
+        // Check if the last part starts with a letter (struct field)
         if parts.len() >= 2 {
             let potential_field = parts[parts.len() - 1];
-            if potential_field.len() == 1 && potential_field.chars().all(|c| c.is_alphabetic()) {
+            // Field must start with a letter (to distinguish from array indices which are all digits)
+            if !potential_field.is_empty()
+                && potential_field.chars().next().map_or(false, |c| c.is_alphabetic())
+            {
                 // Make sure the preceding part is NOT a digit (to avoid confusing with Pattern 3)
                 let preceding = parts[parts.len() - 2];
                 if !preceding.chars().all(|c| c.is_ascii_digit()) {

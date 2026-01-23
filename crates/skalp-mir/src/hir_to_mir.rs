@@ -5167,21 +5167,9 @@ impl<'hir> HirToMir<'hir> {
                 }
             }
             hir::HirPattern::Path(enum_name, variant_name) => {
-                // For enum patterns, we need to convert to the enum variant value
-                // TODO: Implement proper enum variant value lookup from type information
-                // For now, we'll use a simple mapping based on common variant names
-                let variant_value = match variant_name.as_str() {
-                    "Idle" => 0,
-                    "Active" => 1,
-                    "Done" => 2,
-                    _ => {
-                        // Calculate a simple hash for unknown variants to ensure consistent values
-                        variant_name.chars().map(|c| c as u32).sum::<u32>() % 16
-                    }
-                };
-                Some(Expression::with_unknown_type(ExpressionKind::Literal(
-                    Value::Integer(variant_value as i64),
-                )))
+                // BUG #117r FIX: Use resolve_enum_variant_value to get the actual enum value
+                // instead of the broken hash-based fallback that was causing state machine bugs
+                self.resolve_enum_variant_value(enum_name, variant_name)
             }
             hir::HirPattern::Variable(_) => {
                 // Variable patterns can't be converted to case values directly
