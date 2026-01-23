@@ -20,6 +20,11 @@ use crate::mir::{
 };
 use skalp_frontend::span::SourceSpan;
 
+// Stack growth constants for deeply nested types (matching hir_to_mir.rs)
+// BUG FIX #213: Prevent stack overflow when flattening large designs
+const STACK_RED_ZONE: usize = 256 * 1024;
+const STACK_GROW_SIZE: usize = 8 * 1024 * 1024;
+
 /// Information about a flattened field
 #[derive(Debug, Clone)]
 pub struct FlattenedField {
@@ -307,21 +312,23 @@ impl TypeFlattener {
     ) {
         match port_type {
             DataType::Struct(struct_type) => {
-                // Recursively flatten each struct field
+                // Recursively flatten each struct field (with stack growth)
                 for field in &struct_type.fields {
                     let field_name = format!("{}_{}", name, field.name);
                     let mut new_path = field_path.clone();
                     new_path.push(field.name.clone());
-                    self.flatten_port_recursive(
-                        &field_name,
-                        &field.field_type,
-                        direction,
-                        physical_constraints,
-                        span.clone(),
-                        new_path,
-                        ports,
-                        fields,
-                    );
+                    stacker::maybe_grow(STACK_RED_ZONE, STACK_GROW_SIZE, || {
+                        self.flatten_port_recursive(
+                            &field_name,
+                            &field.field_type,
+                            direction,
+                            physical_constraints,
+                            span.clone(),
+                            new_path,
+                            ports,
+                            fields,
+                        );
+                    });
                 }
             }
             DataType::Vec2(element_type)
@@ -339,16 +346,18 @@ impl TypeFlattener {
                     let comp_name = format!("{}_{}", name, component);
                     let mut new_path = field_path.clone();
                     new_path.push(component.to_string());
-                    self.flatten_port_recursive(
-                        &comp_name,
-                        element_type,
-                        direction,
-                        physical_constraints,
-                        span.clone(),
-                        new_path,
-                        ports,
-                        fields,
-                    );
+                    stacker::maybe_grow(STACK_RED_ZONE, STACK_GROW_SIZE, || {
+                        self.flatten_port_recursive(
+                            &comp_name,
+                            element_type,
+                            direction,
+                            physical_constraints,
+                            span.clone(),
+                            new_path,
+                            ports,
+                            fields,
+                        );
+                    });
                 }
             }
             DataType::Array(element_type, size) => {
@@ -375,40 +384,27 @@ impl TypeFlattener {
                         let elem_name = format!("{}_{}", name, i);
                         let mut new_path = field_path.clone();
                         new_path.push(i.to_string());
-                        self.flatten_port_recursive(
-                            &elem_name,
-                            element_type,
-                            direction,
-                            physical_constraints,
-                            span.clone(),
-                            new_path,
-                            ports,
-                            fields,
-                        );
+                        stacker::maybe_grow(STACK_RED_ZONE, STACK_GROW_SIZE, || {
+                            self.flatten_port_recursive(
+                                &elem_name,
+                                element_type,
+                                direction,
+                                physical_constraints,
+                                span.clone(),
+                                new_path,
+                                ports,
+                                fields,
+                            );
+                        });
                     }
                 }
             }
             DataType::Enum(enum_type) => {
                 // Enums expand to their base type
-                self.flatten_port_recursive(
-                    name,
-                    &enum_type.base_type,
-                    direction,
-                    physical_constraints,
-                    span,
-                    field_path,
-                    ports,
-                    fields,
-                );
-            }
-            DataType::Union(union_type) => {
-                // Unions expand to largest field
-                // For now, just use the first field type
-                // TODO: Proper union handling with tag field
-                if let Some(first_field) = union_type.fields.first() {
+                stacker::maybe_grow(STACK_RED_ZONE, STACK_GROW_SIZE, || {
                     self.flatten_port_recursive(
                         name,
-                        &first_field.field_type,
+                        &enum_type.base_type,
                         direction,
                         physical_constraints,
                         span,
@@ -416,6 +412,25 @@ impl TypeFlattener {
                         ports,
                         fields,
                     );
+                });
+            }
+            DataType::Union(union_type) => {
+                // Unions expand to largest field
+                // For now, just use the first field type
+                // TODO: Proper union handling with tag field
+                if let Some(first_field) = union_type.fields.first() {
+                    stacker::maybe_grow(STACK_RED_ZONE, STACK_GROW_SIZE, || {
+                        self.flatten_port_recursive(
+                            name,
+                            &first_field.field_type,
+                            direction,
+                            physical_constraints,
+                            span,
+                            field_path,
+                            ports,
+                            fields,
+                        );
+                    });
                 } else {
                     // Empty union - treat as 1-bit
                     self.create_leaf_port(
@@ -495,21 +510,23 @@ impl TypeFlattener {
     ) {
         match signal_type {
             DataType::Struct(struct_type) => {
-                // Recursively flatten each struct field
+                // Recursively flatten each struct field (with stack growth)
                 for field in &struct_type.fields {
                     let field_name = format!("{}_{}", name, field.name);
                     let mut new_path = field_path.clone();
                     new_path.push(field.name.clone());
-                    self.flatten_signal_recursive(
-                        &field_name,
-                        &field.field_type,
-                        None, // Don't propagate initial value for struct fields
-                        clock_domain,
-                        span.clone(),
-                        new_path,
-                        signals,
-                        fields,
-                    );
+                    stacker::maybe_grow(STACK_RED_ZONE, STACK_GROW_SIZE, || {
+                        self.flatten_signal_recursive(
+                            &field_name,
+                            &field.field_type,
+                            None, // Don't propagate initial value for struct fields
+                            clock_domain,
+                            span.clone(),
+                            new_path,
+                            signals,
+                            fields,
+                        );
+                    });
                 }
             }
             DataType::Vec2(element_type)
@@ -527,16 +544,18 @@ impl TypeFlattener {
                     let comp_name = format!("{}_{}", name, component);
                     let mut new_path = field_path.clone();
                     new_path.push(component.to_string());
-                    self.flatten_signal_recursive(
-                        &comp_name,
-                        element_type,
-                        None,
-                        clock_domain,
-                        span.clone(),
-                        new_path,
-                        signals,
-                        fields,
-                    );
+                    stacker::maybe_grow(STACK_RED_ZONE, STACK_GROW_SIZE, || {
+                        self.flatten_signal_recursive(
+                            &comp_name,
+                            element_type,
+                            None,
+                            clock_domain,
+                            span.clone(),
+                            new_path,
+                            signals,
+                            fields,
+                        );
+                    });
                 }
             }
             DataType::Array(element_type, size) => {
@@ -562,40 +581,27 @@ impl TypeFlattener {
                         let elem_name = format!("{}_{}", name, i);
                         let mut new_path = field_path.clone();
                         new_path.push(i.to_string());
-                        self.flatten_signal_recursive(
-                            &elem_name,
-                            element_type,
-                            None,
-                            clock_domain,
-                            span.clone(),
-                            new_path,
-                            signals,
-                            fields,
-                        );
+                        stacker::maybe_grow(STACK_RED_ZONE, STACK_GROW_SIZE, || {
+                            self.flatten_signal_recursive(
+                                &elem_name,
+                                element_type,
+                                None,
+                                clock_domain,
+                                span.clone(),
+                                new_path,
+                                signals,
+                                fields,
+                            );
+                        });
                     }
                 }
             }
             DataType::Enum(enum_type) => {
                 // Enums expand to their base type
-                self.flatten_signal_recursive(
-                    name,
-                    &enum_type.base_type,
-                    initial,
-                    clock_domain,
-                    span,
-                    field_path,
-                    signals,
-                    fields,
-                );
-            }
-            DataType::Union(union_type) => {
-                // Unions expand to largest field
-                // For now, just use the first field type
-                // TODO: Proper union handling with tag field
-                if let Some(first_field) = union_type.fields.first() {
+                stacker::maybe_grow(STACK_RED_ZONE, STACK_GROW_SIZE, || {
                     self.flatten_signal_recursive(
                         name,
-                        &first_field.field_type,
+                        &enum_type.base_type,
                         initial,
                         clock_domain,
                         span,
@@ -603,6 +609,25 @@ impl TypeFlattener {
                         signals,
                         fields,
                     );
+                });
+            }
+            DataType::Union(union_type) => {
+                // Unions expand to largest field
+                // For now, just use the first field type
+                // TODO: Proper union handling with tag field
+                if let Some(first_field) = union_type.fields.first() {
+                    stacker::maybe_grow(STACK_RED_ZONE, STACK_GROW_SIZE, || {
+                        self.flatten_signal_recursive(
+                            name,
+                            &first_field.field_type,
+                            initial,
+                            clock_domain,
+                            span,
+                            field_path,
+                            signals,
+                            fields,
+                        );
+                    });
                 } else {
                     // Empty union - treat as 1-bit
                     self.create_leaf_signal(
