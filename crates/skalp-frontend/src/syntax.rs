@@ -130,7 +130,7 @@ pub enum SyntaxKind {
     HsiKw,
     CoversKw,
     FttiKw,
-    TargetKw,
+    // TargetKw removed - "target" is now a contextual keyword
     TracesToKw,
     ImplementsKw,
     DecomposesKw,
@@ -577,7 +577,7 @@ impl SyntaxKind {
             | AsilKw | SafetyReqKw | SafetyGoalKw | SafetyEntityKw | SafetyTraitKw
             | FmeaTraitKw | HsiTraitKw | FmeaKw | FmedaKw | FmedaLibraryKw
             | PsmKw | LsmKw | HsrKw | DhsrKw | HsiKw
-            | CoversKw | FttiKw | TargetKw | TracesToKw | ImplementsKw | DecomposesKw
+            | CoversKw | FttiKw | TracesToKw | ImplementsKw | DecomposesKw
             | VerificationKw | DetectionTimeKw | DcKw | LcKw | IntervalKw
             | SpfmKw | LfmKw | PmhfKw | FailureModeKw | SeverityKw
             | ComponentKw | LibraryKw | PartKw | ExcludeKw | MaxLatencyKw
@@ -757,7 +757,6 @@ impl SyntaxKind {
             HsiKw => "'hsi'",
             CoversKw => "'covers'",
             FttiKw => "'ftti'",
-            TargetKw => "'target'",
             TracesToKw => "'traces_to'",
             ImplementsKw => "'implements'",
             DecomposesKw => "'decomposes'",
@@ -1094,7 +1093,7 @@ impl From<crate::lexer::Token> for SyntaxKind {
             Token::Hsi => HsiKw,
             Token::Covers => CoversKw,
             Token::Ftti => FttiKw,
-            Token::Target => TargetKw,
+            // Token::Target removed - now a contextual keyword
             Token::TracesTo => TracesToKw,
             Token::Implements => ImplementsKw,
             Token::Decomposes => DecomposesKw,

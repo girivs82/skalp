@@ -499,6 +499,13 @@ fn generate_module(mir_module: &Module, mir: &Mir) -> Result<String> {
             skalp_mir::PortDirection::InOut => "inout",
         };
 
+        // Debug: check for struct types before calling get_type_dimensions
+        if matches!(&port.port_type, skalp_mir::DataType::Struct(_)) {
+            eprintln!(
+                "[CODEGEN_STRUCT_PORT_DEBUG] Module '{}' port '{}' has STRUCT type: {:?}",
+                mir_module.name, port.name, port.port_type
+            );
+        }
         let (element_width, array_dim) = get_type_dimensions(&port.port_type);
         ports.push(format!(
             "    {} {}{}{}",
@@ -691,16 +698,7 @@ fn generate_module(mir_module: &Module, mir: &Mir) -> Result<String> {
     let mut assignment_count = 0;
 
     for assign in &mir_module.assignments {
-        eprintln!(
-            "[CODEGEN_DEBUG] Assignment LHS type: {:?}, RHS type: {:?}",
-            std::mem::discriminant(&assign.lhs),
-            std::mem::discriminant(&assign.rhs.kind)
-        );
         let expanded = expand_struct_assignment(&assign.lhs, &assign.rhs, mir_module);
-        eprintln!(
-            "[CODEGEN_DEBUG] Expanded into {} assignments",
-            expanded.len()
-        );
         for (lhs_str, rhs_str) in expanded {
             // Check if this target has already been assigned
             if assigned_targets.contains(&lhs_str) {
@@ -709,10 +707,6 @@ fn generate_module(mir_module: &Module, mir: &Mir) -> Result<String> {
             }
 
             assigned_targets.insert(lhs_str.clone());
-            eprintln!(
-                "[CODEGEN_DEBUG] Generating assignment: {} = {}",
-                lhs_str, rhs_str
-            );
             sv.push_str(&format!("    assign {} = {};\n", lhs_str, rhs_str));
             assignment_count += 1;
         }

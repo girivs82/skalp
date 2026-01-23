@@ -354,7 +354,7 @@ impl<'hir> HirToMir<'hir> {
         use std::io::Write;
         let _ = writeln!(
             std::io::stderr(),
-            "[DEBUG TRANSFORM X6] entities={}, funcs={}",
+            "[DEBUG TRANSFORM X7] entities={}, funcs={}",
             hir.entities.len(),
             hir.functions.len()
         );
@@ -1059,6 +1059,7 @@ impl<'hir> HirToMir<'hir> {
                             let mut output_ports: IndexMap<String, SignalId> = IndexMap::new();
 
                             // Create signals for each output port
+                            // BUG FIX: Flatten struct-typed ports into multiple scalar signals
                             for port in &entity.ports {
                                 if matches!(port.direction, hir::HirPortDirection::Output) {
                                     trace!(
@@ -1066,35 +1067,42 @@ impl<'hir> HirToMir<'hir> {
                                         port.name,
                                         port.is_detection_signal()
                                     );
-                                    let signal_id = self.next_signal_id();
                                     let signal_name =
                                         format!("{}_{}", hir_instance.name, port.name);
                                     let signal_type = self.convert_type(&port.port_type);
 
-                                    // Create the signal and add to module
-                                    // Propagate detection signal config from sub-module port
-                                    let signal = Signal {
-                                        id: signal_id,
-                                        name: signal_name.clone(),
-                                        signal_type: signal_type.clone(),
-                                        initial: None,
-                                        clock_domain: None,
-                                        span: None,
-                                        memory_config: None,
-                                        trace_config: None,
-                                        cdc_config: None,
-                                        breakpoint_config: None,
-                                        power_config: None,
-                                        safety_context: None,
-                                        detection_config: port.detection_config.clone(),
-                                        power_domain: port
+                                    // Use flatten_signal to properly handle struct types
+                                    let (flattened_signals, flattened_fields) = self.flatten_signal(
+                                        &signal_name,
+                                        &signal_type,
+                                        None,
+                                        None,
+                                        None,
+                                    );
+
+                                    // Add all flattened signals to the module
+                                    for mut signal in flattened_signals {
+                                        // Propagate detection signal config from sub-module port
+                                        signal.detection_config = port.detection_config.clone();
+                                        signal.power_domain = port
                                             .power_domain_config
                                             .as_ref()
-                                            .map(|c| c.domain_name.clone()),
-                                    };
-                                    module.signals.push(signal);
+                                            .map(|c| c.domain_name.clone());
+                                        module.signals.push(signal);
+                                    }
 
-                                    output_ports.insert(port.name.clone(), signal_id);
+                                    // Map each flattened field with its full path
+                                    // For scalar ports: "result" -> signal_id
+                                    // For struct ports: "gates_high_a" -> signal_id, "gates_low_a" -> signal_id, ...
+                                    for field in &flattened_fields {
+                                        // Build the key: port_name + field_path joined by "_"
+                                        let key = if field.field_path.is_empty() {
+                                            port.name.clone()
+                                        } else {
+                                            format!("{}_{}", port.name, field.field_path.join("_"))
+                                        };
+                                        output_ports.insert(key, SignalId(field.id));
+                                    }
 
                                     // BUG FIX: Also propagate detection flag to the connected signal
                                     // in the parent module (if this output port connects to a local signal)
@@ -3894,33 +3902,60 @@ impl<'hir> HirToMir<'hir> {
                         }
 
                         // Create signals for output ports and track them
+                        // BUG FIX: Flatten struct-typed ports into multiple scalar signals
                         let mut output_ports = IndexMap::new();
                         let mut output_signals = Vec::new();
                         for port in &entity.ports {
                             if matches!(port.direction, hir::HirPortDirection::Output) {
-                                // Create a signal to hold this output
-                                let signal_id = self.next_signal_id();
                                 let signal_name = format!("{}_{}", instance_name, port.name);
                                 let signal_type = self.convert_type(&port.port_type);
                                 // Propagate detection config from sub-module port
                                 let detection_cfg = port.detection_config.clone();
 
-                                // Track this output port
-                                output_ports.insert(port.name.clone(), signal_id);
-                                output_signals.push((
-                                    signal_id,
-                                    signal_name,
-                                    signal_type,
-                                    detection_cfg,
-                                ));
-
-                                // Add connection from instance output to signal
-                                connections.insert(
-                                    port.name.clone(),
-                                    Expression::with_unknown_type(ExpressionKind::Ref(
-                                        LValue::Signal(signal_id),
-                                    )),
+                                // Use flatten_signal to properly handle struct types
+                                let (flattened_signals, flattened_fields) = self.flatten_signal(
+                                    &signal_name,
+                                    &signal_type,
+                                    None,
+                                    None,
+                                    None,
                                 );
+
+                                // Add all flattened signals to output_signals for later processing
+                                for signal in flattened_signals {
+                                    output_signals.push((
+                                        signal.id,
+                                        signal.name.clone(),
+                                        signal.signal_type.clone(),
+                                        detection_cfg.clone(),
+                                    ));
+                                }
+
+                                // Map each flattened field with its full path for field access resolution
+                                // For scalar ports: "result" -> signal_id
+                                // For struct ports: "gates_high_a" -> signal_id, "gates_low_a" -> signal_id, ...
+                                for field in &flattened_fields {
+                                    let key = if field.field_path.is_empty() {
+                                        port.name.clone()
+                                    } else {
+                                        format!("{}_{}", port.name, field.field_path.join("_"))
+                                    };
+                                    output_ports.insert(key.clone(), SignalId(field.id));
+
+                                    // Add connection from instance output port to signal
+                                    // The flattened port names match the flattened signal names
+                                    let flattened_port_name = if field.field_path.is_empty() {
+                                        port.name.clone()
+                                    } else {
+                                        format!("{}_{}", port.name, field.field_path.join("_"))
+                                    };
+                                    connections.insert(
+                                        flattened_port_name,
+                                        Expression::with_unknown_type(ExpressionKind::Ref(
+                                            LValue::Signal(SignalId(field.id)),
+                                        )),
+                                    );
+                                }
                             }
                         }
 
@@ -16318,8 +16353,13 @@ impl<'hir> HirToMir<'hir> {
                 hir::HirExpression::GenericParam(param_name) => {
                     // BUG FIX #13-16, #21-23: First check if this is an instance output access
                     // Example: inner.result where inner is an instance of entity Inner
+                    // BUG FIX: Use full field path for struct-typed port lookups
+                    // For nested access like instance.gates.high_a, field_path = ["gates", "high_a"]
+                    // and we need to look up "gates_high_a" in output_ports
                     if let Some(output_ports) = self.instance_outputs_by_name.get(param_name) {
-                        if let Some(&signal_id) = output_ports.get(&normalized_field_name) {
+                        // Join the field path with underscores for the lookup key
+                        let lookup_key = field_path.join("_");
+                        if let Some(&signal_id) = output_ports.get(&lookup_key) {
                             return Some(Expression::with_unknown_type(ExpressionKind::Ref(
                                 LValue::Signal(signal_id),
                             )));
@@ -16910,11 +16950,78 @@ impl<'hir> HirToMir<'hir> {
                                     }));
                                     return Some(temp_struct);
                                 }
+                                // BUG FIX: Resolve Custom types to their struct definitions
+                                hir::HirType::Custom(ref type_name) => {
+                                    // Look up the type in user_defined_types
+                                    for udt in &hir.user_defined_types {
+                                        if udt.name == *type_name {
+                                            if let hir::HirType::Struct(ref struct_type) = udt.type_def {
+                                                return Some(struct_type);
+                                            }
+                                        }
+                                    }
+                                }
                                 _ => {}
                             }
                         }
                     }
                 }
+            }
+            // Handle direct Port expressions
+            hir::HirExpression::Port(id) => {
+                trace!("[STRUCT_TYPE_DEBUG] Handling Port expression, id={:?}", id);
+                // Look up the port in entities
+                for entity in &hir.entities {
+                    trace!("[STRUCT_TYPE_DEBUG] Checking entity '{}' with {} ports", entity.name, entity.ports.len());
+                    for port in &entity.ports {
+                        trace!("[STRUCT_TYPE_DEBUG] Checking port '{}' (id={:?})", port.name, port.id);
+                        if port.id == *id {
+                            trace!("[STRUCT_TYPE_DEBUG] Found matching port '{}', type={:?}", port.name, std::mem::discriminant(&port.port_type));
+                            match &port.port_type {
+                                hir::HirType::Struct(ref struct_type) => {
+                                    trace!("[STRUCT_TYPE_DEBUG] Port has Struct type, returning");
+                                    return Some(struct_type);
+                                }
+                                hir::HirType::Tuple(element_types) => {
+                                    let fields: Vec<hir::HirStructField> = element_types
+                                        .iter()
+                                        .enumerate()
+                                        .map(|(i, ty)| hir::HirStructField {
+                                            name: format!("_{}", i),
+                                            field_type: ty.clone(),
+                                        })
+                                        .collect();
+
+                                    let temp_struct = Box::leak(Box::new(hir::HirStructType {
+                                        name: format!("__tuple_{}", fields.len()),
+                                        fields,
+                                        packed: true,
+                                    }));
+                                    return Some(temp_struct);
+                                }
+                                // BUG FIX: Resolve Custom types to their struct definitions
+                                hir::HirType::Custom(ref type_name) => {
+                                    trace!("[STRUCT_TYPE_DEBUG] Port has Custom type '{}', looking up in {} user_defined_types", type_name, hir.user_defined_types.len());
+                                    for udt in &hir.user_defined_types {
+                                        trace!("[STRUCT_TYPE_DEBUG] Checking UDT '{}'", udt.name);
+                                        if udt.name == *type_name {
+                                            trace!("[STRUCT_TYPE_DEBUG] Found matching UDT, type_def discriminant={:?}", std::mem::discriminant(&udt.type_def));
+                                            if let hir::HirType::Struct(ref struct_type) = udt.type_def {
+                                                trace!("[STRUCT_TYPE_DEBUG] Resolved Custom to Struct, returning");
+                                                return Some(struct_type);
+                                            }
+                                        }
+                                    }
+                                    trace!("[STRUCT_TYPE_DEBUG] Custom type '{}' not found in user_defined_types!", type_name);
+                                }
+                                _ => {
+                                    trace!("[STRUCT_TYPE_DEBUG] Port type is not Struct/Tuple/Custom");
+                                }
+                            }
+                        }
+                    }
+                }
+                trace!("[STRUCT_TYPE_DEBUG] Port not found in any entity!");
             }
             // Note: Port access will be added when we understand how ports are referenced
             hir::HirExpression::Variable(id) => {

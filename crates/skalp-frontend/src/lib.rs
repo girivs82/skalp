@@ -1769,11 +1769,23 @@ fn merge_all_symbols(target: &mut Hir, source: &Hir) -> Result<()> {
     }
 
     // Merge all public user-defined types (structs, enums, unions)
+    eprintln!(
+        "[MERGE_ALL_SYMBOLS] source has {} user_defined_types",
+        source.user_defined_types.len()
+    );
     for user_type in &source.user_defined_types {
+        eprintln!(
+            "[MERGE_ALL_SYMBOLS] User type '{}' visibility={:?}",
+            user_type.name, user_type.visibility
+        );
         if user_type.visibility == HirVisibility::Public {
             target.user_defined_types.push(user_type.clone());
         }
     }
+    eprintln!(
+        "[MERGE_ALL_SYMBOLS] After merge, target has {} user_defined_types",
+        target.user_defined_types.len()
+    );
 
     // BUG #34 FIX: Merge all public constants (from implementation blocks)
     // Note: Constants don't currently have a visibility field in HIR, but we only merge

@@ -6475,10 +6475,14 @@ impl ParseState<'_> {
 
             match self.current_kind() {
                 Some(SyntaxKind::Ident) => {
-                    // id:, description:, ftti:, traces_to:
-                    self.parse_safety_kv_pair();
+                    // Check if this is the contextual keyword "target"
+                    if self.current_text() == Some("target") {
+                        self.parse_safety_target_block();
+                    } else {
+                        // id:, description:, ftti:, traces_to:
+                        self.parse_safety_kv_pair();
+                    }
                 }
-                Some(SyntaxKind::TargetKw) => self.parse_safety_target_block(),
                 Some(SyntaxKind::HsrKw) => self.parse_hsr_decl(),
                 Some(SyntaxKind::LsmKw) => self.parse_lsm_decl(),
                 Some(SyntaxKind::UseKw) => self.parse_safety_trait_usage(),
@@ -6584,7 +6588,12 @@ impl ParseState<'_> {
     /// Parse target { spfm: >= 99.0, lfm: >= 90.0, pmhf: <= 10.0 }
     fn parse_safety_target_block(&mut self) {
         self.start_node(SyntaxKind::SafetyTargetBlock);
-        self.expect(SyntaxKind::TargetKw);
+        // "target" is now a contextual keyword - expect identifier with text "target"
+        if self.at(SyntaxKind::Ident) && self.current_text() == Some("target") {
+            self.bump();
+        } else {
+            self.error("expected 'target'");
+        }
         self.expect(SyntaxKind::LBrace);
 
         while !self.at(SyntaxKind::RBrace) && !self.is_at_end() {

@@ -530,16 +530,9 @@ impl HirBuilderContext {
                         let name = struct_type.name.clone();
                         let type_def = HirType::Struct(struct_type);
 
-                        // Extract visibility
-                        let visibility = if child.children_with_tokens().any(|c| {
-                            c.as_token()
-                                .map(|t| t.kind() == SyntaxKind::PubKw)
-                                .unwrap_or(false)
-                        }) {
-                            HirVisibility::Public
-                        } else {
-                            HirVisibility::Private
-                        };
+                        // Use pending visibility (from preceding Visibility node)
+                        let visibility = pending_visibility;
+                        pending_visibility = HirVisibility::Private; // Reset after use
 
                         // Store struct type for later reference in symbol table
                         self.symbols
@@ -559,16 +552,9 @@ impl HirBuilderContext {
                         let name = enum_type.name.clone();
                         let type_def = HirType::Enum(Box::new(enum_type));
 
-                        // Extract visibility
-                        let visibility = if child.children_with_tokens().any(|c| {
-                            c.as_token()
-                                .map(|t| t.kind() == SyntaxKind::PubKw)
-                                .unwrap_or(false)
-                        }) {
-                            HirVisibility::Public
-                        } else {
-                            HirVisibility::Private
-                        };
+                        // Use pending visibility (from preceding Visibility node)
+                        let visibility = pending_visibility;
+                        pending_visibility = HirVisibility::Private; // Reset after use
 
                         // Store enum type for later reference in symbol table
                         self.symbols
@@ -588,16 +574,9 @@ impl HirBuilderContext {
                         let name = union_type.name.clone();
                         let type_def = HirType::Union(union_type);
 
-                        // Extract visibility
-                        let visibility = if child.children_with_tokens().any(|c| {
-                            c.as_token()
-                                .map(|t| t.kind() == SyntaxKind::PubKw)
-                                .unwrap_or(false)
-                        }) {
-                            HirVisibility::Public
-                        } else {
-                            HirVisibility::Private
-                        };
+                        // Use pending visibility (from preceding Visibility node)
+                        let visibility = pending_visibility;
+                        pending_visibility = HirVisibility::Private; // Reset after use
 
                         // Store union type for later reference in symbol table
                         self.symbols
@@ -11469,16 +11448,7 @@ impl HirBuilderContext {
 
                         // Check if this is a user-defined type (struct, enum, union, distinct) FIRST
                         // This allows stdlib-defined distinct types like fp32 to take precedence
-                        println!(
-                            "[TYPE_LOOKUP_DEBUG] Looking up type '{}', user_types has {} entries",
-                            type_name,
-                            self.symbols.user_types.len()
-                        );
                         if let Some(user_type) = self.symbols.user_types.get(&type_name) {
-                            println!(
-                                "[TYPE_LOOKUP_DEBUG] Found '{}' in user_types: {:?}",
-                                type_name, user_type
-                            );
                             return user_type.clone();
                         }
 

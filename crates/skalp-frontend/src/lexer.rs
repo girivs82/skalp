@@ -231,8 +231,8 @@ pub enum Token {
     Covers,
     #[token("ftti")]
     Ftti,
-    #[token("target")]
-    Target,
+    // NOTE: "target" removed as a keyword - it's now a contextual keyword
+    // parsed only in safety contexts, allowing use as a regular identifier
     #[token("traces_to")]
     TracesTo,
     #[token("implements")]
