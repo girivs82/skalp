@@ -5443,30 +5443,52 @@ impl<'a> MirToSirConverter<'a> {
     }
 
     /// Convert child process with parent module context
-    /// For now, sequential processes don't usually write to output ports directly,
-    /// so we delegate to the original function. Can be enhanced if needed.
+    /// BUG FIX #210: Pass parent context to properly resolve multi-level clock port mappings
     fn convert_child_process_with_context(
         &mut self,
         process: &skalp_mir::Process,
         inst_prefix: &str,
         port_mapping: &HashMap<String, Expression>,
         child_module: &Module,
-        _parent_module_for_signals: Option<&Module>,
-        _parent_prefix: &str,
+        parent_module_for_signals: Option<&Module>,
+        parent_prefix: &str,
     ) {
-        // For now, delegate to the original implementation
-        // Sequential processes typically don't write directly to output ports
-        // If issues arise with nested sequential process signal resolution, enhance this
-        self.convert_child_process(process, inst_prefix, port_mapping, child_module);
+        // Actually use the parent context for proper hierarchical resolution
+        self.convert_child_process_impl(
+            process,
+            inst_prefix,
+            port_mapping,
+            child_module,
+            parent_module_for_signals,
+            parent_prefix,
+        );
     }
 
     /// Convert child process (always block) with instance prefix
+    #[allow(dead_code)]
     fn convert_child_process(
         &mut self,
         process: &skalp_mir::Process,
         inst_prefix: &str,
         port_mapping: &HashMap<String, Expression>,
         child_module: &Module,
+    ) {
+        // Call without parent context (for top-level instances)
+        self.convert_child_process_impl(process, inst_prefix, port_mapping, child_module, None, "");
+    }
+
+    /// Implementation of child process conversion with optional parent context
+    /// BUG FIX #210: For nested instances, parent_module_for_signals contains the module
+    /// that owns the SignalIds in port_mapping values. This is needed to properly resolve
+    /// multi-level hierarchical port mappings (e.g., grandparent -> parent -> child for clocks).
+    fn convert_child_process_impl(
+        &mut self,
+        process: &skalp_mir::Process,
+        inst_prefix: &str,
+        port_mapping: &HashMap<String, Expression>,
+        child_module: &Module,
+        parent_module_for_signals: Option<&Module>,
+        parent_prefix: &str,
     ) {
         println!("            ├─ Process: {:?}", process.kind);
 
@@ -5486,6 +5508,7 @@ impl<'a> MirToSirConverter<'a> {
                     };
 
                     // Get clock signal name, mapping through ports if needed
+                    // BUG FIX #210: Use context-aware version to properly resolve multi-level hierarchy
                     let clock_lvalue = &edge_sens.signal;
                     eprintln!(
                         "🕐 CLOCK MAPPING: Attempting to map clock_lvalue={:?} for instance '{}'",
@@ -5495,12 +5518,19 @@ impl<'a> MirToSirConverter<'a> {
                         "   port_mapping keys: {:?}",
                         port_mapping.keys().collect::<Vec<_>>()
                     );
+                    eprintln!(
+                        "   parent_module: {:?}, parent_prefix: '{}'",
+                        parent_module_for_signals.map(|m| &m.name),
+                        parent_prefix
+                    );
 
-                    let clock_signal = if let Some(sig_name) = self.get_signal_from_lvalue(
+                    let clock_signal = if let Some(sig_name) = self.get_signal_from_lvalue_with_context(
                         clock_lvalue,
                         inst_prefix,
                         port_mapping,
                         child_module,
+                        parent_module_for_signals,
+                        parent_prefix,
                     ) {
                         eprintln!("   ✅ Mapped to: {}", sig_name);
                         sig_name
