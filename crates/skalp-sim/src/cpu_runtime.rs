@@ -1028,9 +1028,15 @@ impl SimulationRuntime for CpuRuntime {
     }
 
     async fn get_output(&self, name: &str) -> SimulationResult<Vec<u8>> {
+        // BUG FIX #212: Also expose internal signals and inputs for debugging
+        // First check declared outputs, then internal signals, then state, then inputs
+        // This allows testbenches to inspect internal state during simulation
         self.outputs
             .get(name)
+            .or_else(|| self.signals.get(name))
+            .or_else(|| self.state.get(name))
+            .or_else(|| self.inputs.get(name))
             .cloned()
-            .ok_or_else(|| SimulationError::InvalidInput(format!("Output {} not found", name)))
+            .ok_or_else(|| SimulationError::InvalidInput(format!("Signal '{}' not found in outputs, signals, state, or inputs", name)))
     }
 }

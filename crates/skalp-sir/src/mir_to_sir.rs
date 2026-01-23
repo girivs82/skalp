@@ -4952,14 +4952,18 @@ impl<'a> MirToSirConverter<'a> {
 
         // Step 1b: Also create signals for child module's variables (let bindings)
         // Variables need to become signals so they can be referenced by nested instances
+        // BUG FIX #211: Use unique variable names with ID suffix to match reference naming
         for variable in &child_module.variables {
-            let full_name = format!("{}.{}", inst_prefix, variable.name);
+            // Use the same naming convention as get_signal_from_lvalue_with_context:
+            // format!("{}_{}", var.name, var_id.0)
+            let var_unique_name = format!("{}_{}", variable.name, variable.id.0);
+            let full_name = format!("{}.{}", inst_prefix, var_unique_name);
             let sir_type = self.convert_type(&variable.var_type);
             let width = sir_type.width();
 
             println!(
-                "         ├─ Variable: {} (type={:?}) → SIR signal (width={})",
-                variable.name, variable.var_type, width
+                "         ├─ Variable: {} (id={}) (type={:?}) → SIR signal '{}' (width={})",
+                variable.name, variable.id.0, variable.var_type, full_name, width
             );
 
             self.sir.signals.push(SirSignal {
