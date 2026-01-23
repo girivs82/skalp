@@ -552,6 +552,14 @@ impl<'hir> HirToMir<'hir> {
                     .and_then(|expr| self.convert_literal_expr(expr));
                 let clock_domain = hir_signal.clock_domain.map(|id| ClockDomainId(id.0));
 
+                // BUG #117r DEBUG: Log signal flattening in hir_to_mir
+                if hir_signal.name.contains("prot_faults") || hir_signal.name.contains("FaultFlags") {
+                    eprintln!(
+                        "📍 HIR_TO_MIR FLATTEN: signal='{}', type={:?}",
+                        hir_signal.name, signal_type
+                    );
+                }
+
                 let (flattened_signals, flattened_fields) = self.flatten_signal(
                     &hir_signal.name,
                     &signal_type,
@@ -559,6 +567,17 @@ impl<'hir> HirToMir<'hir> {
                     clock_domain,
                     hir_signal.span.clone(),
                 );
+
+                // BUG #117r DEBUG: Log flattening result
+                if hir_signal.name.contains("prot_faults") {
+                    eprintln!(
+                        "📍 HIR_TO_MIR RESULT: signal='{}', num_flattened_signals={}, num_fields={}",
+                        hir_signal.name, flattened_signals.len(), flattened_fields.len()
+                    );
+                    for (i, sig) in flattened_signals.iter().enumerate() {
+                        eprintln!("   FlatSig[{}]: name='{}', id={:?}", i, sig.name, sig.id);
+                    }
+                }
 
                 if !flattened_fields.is_empty() {
                     self.flattened_signals
@@ -701,6 +720,9 @@ impl<'hir> HirToMir<'hir> {
                     impl_block.signals.len()
                 );
             }
+            // BUG #117r DEBUG: Log impl block processing
+            eprintln!("📍 SECOND_PASS: entity='{}', entity_id={:?}, {} instances, {} assignments",
+                impl_entity_name, impl_block.entity, impl_block.instances.len(), impl_block.assignments.len());
             if let Some(&module_id) = self.entity_map.get(&impl_block.entity) {
                 // Set current entity for generic parameter resolution
                 self.current_entity_id = Some(impl_block.entity);
@@ -752,6 +774,14 @@ impl<'hir> HirToMir<'hir> {
                             .and_then(|expr| self.convert_literal_expr(expr));
                         let clock_domain = hir_signal.clock_domain.map(|id| ClockDomainId(id.0));
 
+                        // BUG #117r DEBUG: Log signal flattening for impl block
+                        if hir_signal.name.contains("prot_faults") {
+                            println!(
+                                "📍 HIR_TO_MIR IMPL: signal='{}', type={:?}",
+                                hir_signal.name, signal_type
+                            );
+                        }
+
                         let (flattened_signals, flattened_fields) = self.flatten_signal(
                             &hir_signal.name,
                             &signal_type,
@@ -759,6 +789,18 @@ impl<'hir> HirToMir<'hir> {
                             clock_domain,
                             hir_signal.span.clone(),
                         );
+
+                        // BUG #117r DEBUG: Log flattening result for impl block
+                        if hir_signal.name.contains("prot_faults") {
+                            println!(
+                                "📍 HIR_TO_MIR IMPL RESULT: signal='{}', num_flattened_signals={}, num_fields={}",
+                                hir_signal.name, flattened_signals.len(), flattened_fields.len()
+                            );
+                            for (i, sig) in flattened_signals.iter().enumerate() {
+                                println!("   FlatSig[{}]: name='{}', id={:?}", i, sig.name, sig.id);
+                            }
+                        }
+
                         // CRITICAL FIX (Bug #21): Store flattening info for ALL composite types
                         // Even single-field structs need mapping because field name != signal name
                         // (e.g., signal "data: SimpleData" → flattened signal "data_value")
@@ -812,6 +854,12 @@ impl<'hir> HirToMir<'hir> {
                                 signal.safety_context = Some(convert_safety_config(safety_config));
                             }
                             module.signals.push(signal);
+                        }
+
+                        // BUG #117r DEBUG: Verify signals were added
+                        if hir_signal.name.contains("prot_faults") {
+                            let count = module.signals.iter().filter(|s| s.name.starts_with("prot_faults")).count();
+                            println!("📍 AFTER PUSH: module '{}' now has {} signals starting with 'prot_faults'", module.name, count);
                         }
 
                         // BUG FIX: Generate continuous assignment for impl signals with non-literal initial expressions
@@ -1164,8 +1212,28 @@ impl<'hir> HirToMir<'hir> {
                             std::mem::discriminant(&a.rhs)
                         );
                     }
+                    // BUG #117r DEBUG: Log impl block assignments being processed
+                    if module.name == "DabBatteryController" {
+                        println!("📍 IMPL_ASSIGN_LOOP: module='{}', {} assignments", module.name, impl_block.assignments.len());
+                    }
                     for (idx, hir_assign) in impl_block.assignments.iter().enumerate() {
                         let assignment_start = Instant::now();
+                        // BUG #117r DEBUG: Log each assignment
+                        if module.name == "DabBatteryController" {
+                            // More detailed debug for DabBatteryController
+                            let lhs_desc = match &hir_assign.lhs {
+                                hir::HirLValue::Variable(v) => format!("Variable({:?})", v),
+                                hir::HirLValue::Signal(s) => format!("Signal({:?})", s),
+                                hir::HirLValue::Port(p) => format!("Port({:?})", p),
+                                _ => format!("{:?}", std::mem::discriminant(&hir_assign.lhs)),
+                            };
+                            let rhs_desc = match &hir_assign.rhs {
+                                hir::HirExpression::StructLiteral(sl) => format!("StructLiteral('{}')", sl.type_name),
+                                hir::HirExpression::Signal(s) => format!("Signal({:?})", s),
+                                _ => format!("{:?}", std::mem::discriminant(&hir_assign.rhs)),
+                            };
+                            println!("   -> assign[{}]: LHS={}, RHS={}", idx, lhs_desc, rhs_desc);
+                        }
                         trace!(
                             "🟢🟢🟢 FOR_LOOP_ENTRY: Processing assignment {}/{} 🟢🟢🟢",
                             idx + 1,
@@ -1415,7 +1483,15 @@ impl<'hir> HirToMir<'hir> {
                     }
 
                     // Convert module instances
+                    // BUG #117r DEBUG: Log instances being processed
+                    if module.name == "DabBatteryController" {
+                        println!("📍 CONVERT_INSTANCES: module='{}', {} instances to convert",
+                            module.name, impl_block.instances.len());
+                    }
                     for hir_instance in &impl_block.instances {
+                        if module.name == "DabBatteryController" {
+                            println!("   -> instance '{}' of entity {:?}", hir_instance.name, hir_instance.entity);
+                        }
                         if let Some(instance) = self.convert_instance(hir_instance) {
                             module.instances.push(instance);
                         }
@@ -1736,6 +1812,11 @@ impl<'hir> HirToMir<'hir> {
                 }
             }
             hir::HirStatement::Let(let_stmt) => {
+                // BUG #117r DEBUG: Log all let statements being processed
+                if let_stmt.name.contains("protection") || let_stmt.name.contains("charge") {
+                    eprintln!("📍 CONVERT_LET: name='{}', value_type={:?}",
+                        let_stmt.name, std::mem::discriminant(&let_stmt.value));
+                }
                 trace!(
                     "🟠🟠🟠 [DEBUG] convert_statement: Processing Let for '{}' (ID {:?}), value type: {:?} 🟠🟠🟠",
                     let_stmt.name, let_stmt.id, std::mem::discriminant(&let_stmt.value)
@@ -1761,6 +1842,11 @@ impl<'hir> HirToMir<'hir> {
                 // Pattern: let inner = Inner { data };
                 // If the RHS is a StructLiteral and the type_name matches an entity, create a module instance
                 if let hir::HirExpression::StructLiteral(struct_lit) = &let_stmt.value {
+                    // BUG #117r DEBUG: Log struct literal entity detection
+                    if struct_lit.type_name.contains("Protection") || struct_lit.type_name.contains("Controller") {
+                        eprintln!("📍 STRUCT_LIT_ENTITY: let '{}' = {}{{...}} with {} fields",
+                            let_stmt.name, struct_lit.type_name, struct_lit.fields.len());
+                    }
                     // Check if this type_name matches an entity
                     let hir = self.hir.as_ref();
                     if let Some(hir) = hir {
@@ -2016,14 +2102,60 @@ impl<'hir> HirToMir<'hir> {
                                             "[HIER_CONN] Field '{}' is OUTPUT - using pre-created signal reference",
                                             field_init.name
                                         );
-                                        // The output signal connection was already added above in the output port loop
-                                        if let Some(&sig_id) = output_ports.get(&field_init.name) {
-                                            connections.insert(
-                                                field_init.name.clone(),
-                                                Expression::with_unknown_type(ExpressionKind::Ref(
-                                                    LValue::Signal(sig_id),
-                                                )),
-                                            );
+
+                                        // BUG #117r FIX: Check if this output port is a struct type that needs expansion
+                                        // Find the port to check its type
+                                        let port_opt = entity.ports.iter().find(|p| p.name == field_init.name);
+                                        let needs_expansion = port_opt.map(|port| {
+                                            match &port.port_type {
+                                                hir::HirType::Struct(_) | hir::HirType::Array(_, _) => true,
+                                                hir::HirType::Custom(name) => {
+                                                    // Check if Custom type resolves to a struct
+                                                    self.hir.as_ref().map(|hir| {
+                                                        hir.user_defined_types.iter().any(|ut| {
+                                                            &ut.name == name && matches!(ut.type_def, hir::HirType::Struct(_))
+                                                        })
+                                                    }).unwrap_or(false)
+                                                }
+                                                _ => false,
+                                            }
+                                        }).unwrap_or(false);
+
+                                        // BUG #117r DEBUG
+                                        if field_init.name.contains("faults") {
+                                            eprintln!("📍 STRUCT_LIT_OUT: field='{}', needs_expansion={}, port_type={:?}",
+                                                field_init.name, needs_expansion, port_opt.map(|p| &p.port_type));
+                                        }
+
+                                        // Try to expand connection if needed
+                                        let expanded_opt = if needs_expansion {
+                                            self.expand_instance_connection(&field_init.name, &field_init.value)
+                                        } else {
+                                            None
+                                        };
+
+                                        if let Some(expanded_conns) = expanded_opt {
+                                            // BUG #117r FIX: Insert all expanded connections for struct output
+                                            if field_init.name.contains("faults") {
+                                                eprintln!("📍 STRUCT_LIT_OUT_EXPAND: field='{}', expanded to {} connections",
+                                                    field_init.name, expanded_conns.len());
+                                                for (pn, _) in &expanded_conns {
+                                                    eprintln!("   -> port='{}'", pn);
+                                                }
+                                            }
+                                            for (port_name, expr) in expanded_conns {
+                                                connections.insert(port_name, expr);
+                                            }
+                                        } else {
+                                            // Fall back to single connection using pre-created signal
+                                            if let Some(&sig_id) = output_ports.get(&field_init.name) {
+                                                connections.insert(
+                                                    field_init.name.clone(),
+                                                    Expression::with_unknown_type(ExpressionKind::Ref(
+                                                        LValue::Signal(sig_id),
+                                                    )),
+                                                );
+                                            }
                                         }
                                     } else {
                                         // Input port - convert the expression normally
@@ -2079,7 +2211,48 @@ impl<'hir> HirToMir<'hir> {
                                         }
                                         trace!("[BUG #200 DEBUG] Entity '{}' input field '{}' structure:", struct_lit.type_name, field_init.name);
                                         debug_print_hir_expr(&field_init.value, "  ");
-                                        if let Some(expr) =
+
+                                        // BUG #117r FIX: Check if this port needs connection expansion (struct/array types)
+                                        // Find the port to check its type
+                                        let port_opt = entity.ports.iter().find(|p| p.name == field_init.name);
+                                        let needs_expansion = port_opt.map(|port| {
+                                            match &port.port_type {
+                                                hir::HirType::Struct(_) | hir::HirType::Array(_, _) => true,
+                                                hir::HirType::Custom(name) => {
+                                                    // Check if Custom type resolves to a struct
+                                                    self.hir.as_ref().map(|hir| {
+                                                        hir.user_defined_types.iter().any(|ut| {
+                                                            &ut.name == name && matches!(ut.type_def, hir::HirType::Struct(_))
+                                                        })
+                                                    }).unwrap_or(false)
+                                                }
+                                                _ => false,
+                                            }
+                                        }).unwrap_or(false);
+
+                                        // BUG #117r DEBUG
+                                        if field_init.name.contains("faults") || field_init.name.contains("threshold") {
+                                            eprintln!("📍 STRUCT_LIT_CONN: field='{}', needs_expansion={}, port_type={:?}",
+                                                field_init.name, needs_expansion, port_opt.map(|p| &p.port_type));
+                                        }
+
+                                        // Try to expand connection if needed
+                                        let expanded_opt = if needs_expansion {
+                                            self.expand_instance_connection(&field_init.name, &field_init.value)
+                                        } else {
+                                            None
+                                        };
+
+                                        if let Some(expanded_conns) = expanded_opt {
+                                            // BUG #117r FIX: Insert all expanded connections
+                                            if field_init.name.contains("faults") {
+                                                eprintln!("📍 STRUCT_LIT_EXPAND: field='{}', expanded to {} connections",
+                                                    field_init.name, expanded_conns.len());
+                                            }
+                                            for (port_name, expr) in expanded_conns {
+                                                connections.insert(port_name, expr);
+                                            }
+                                        } else if let Some(expr) =
                                             self.convert_expression(&field_init.value, 0)
                                         {
                                             trace!(
@@ -3811,6 +3984,9 @@ impl<'hir> HirToMir<'hir> {
         &mut self,
         assign: &hir::HirAssignment,
     ) -> Vec<ContinuousAssign> {
+        // BUG #117r DEBUG: Log ALL assignments to see what's being processed
+        eprintln!("📍 CONT_ASSIGN: LHS={:?}, RHS={:?}",
+            std::mem::discriminant(&assign.lhs), std::mem::discriminant(&assign.rhs));
         trace!(
             "[TRAIT_DEBUG] convert_continuous_assignment_expanded: type={:?}",
             assign.assignment_type
@@ -3831,6 +4007,9 @@ impl<'hir> HirToMir<'hir> {
         if let (hir::HirLValue::Variable(var_id), hir::HirExpression::StructLiteral(struct_lit)) =
             (&assign.lhs, &assign.rhs)
         {
+            // BUG #117r DEBUG: Log ALL struct literal assignments to entities
+            println!("📍 STRUCT_LIT_ASSIGN: var={:?}, type='{}', {} fields",
+                var_id, struct_lit.type_name, struct_lit.fields.len());
             // Check if this type_name matches an entity
             if let Some(hir) = self.hir.as_ref() {
                 // BUG #207 FIX: When struct_lit has generic_args, construct the specialized entity name
@@ -3907,54 +4086,111 @@ impl<'hir> HirToMir<'hir> {
                         let mut output_signals = Vec::new();
                         for port in &entity.ports {
                             if matches!(port.direction, hir::HirPortDirection::Output) {
-                                let signal_name = format!("{}_{}", instance_name, port.name);
-                                let signal_type = self.convert_type(&port.port_type);
-                                // Propagate detection config from sub-module port
-                                let detection_cfg = port.detection_config.clone();
+                                // BUG #117r FIX: Check if there's a connection to this output port
+                                // and if the RHS is a flattened signal, use those signals instead
+                                // of creating new ones
+                                let field_init_opt = struct_lit.fields.iter().find(|f| f.name == port.name);
 
-                                // Use flatten_signal to properly handle struct types
-                                let (flattened_signals, flattened_fields) = self.flatten_signal(
-                                    &signal_name,
-                                    &signal_type,
-                                    None,
-                                    None,
-                                    None,
-                                );
+                                // Check if this port needs connection expansion
+                                let needs_expansion = match &port.port_type {
+                                    hir::HirType::Struct(_) | hir::HirType::Array(_, _) => true,
+                                    hir::HirType::Custom(name) => {
+                                        // Check if Custom type resolves to a struct
+                                        self.hir.as_ref().map(|hir| {
+                                            hir.user_defined_types.iter().any(|ut| {
+                                                &ut.name == name && matches!(ut.type_def, hir::HirType::Struct(_))
+                                            })
+                                        }).unwrap_or(false)
+                                    }
+                                    _ => false,
+                                };
 
-                                // Add all flattened signals to output_signals for later processing
-                                for signal in flattened_signals {
-                                    output_signals.push((
-                                        signal.id,
-                                        signal.name.clone(),
-                                        signal.signal_type.clone(),
-                                        detection_cfg.clone(),
-                                    ));
-                                }
+                                // BUG #117r DEBUG: Log output port processing for ALL struct lit entity instantiations
+                                eprintln!("🔍 BUG#117r: Processing output port '{}' in instance '{}', needs_expansion={}, field_init_opt={:?}",
+                                    port.name, instance_name, needs_expansion, field_init_opt.map(|fi| format!("{:?}", fi.value)));
 
-                                // Map each flattened field with its full path for field access resolution
-                                // For scalar ports: "result" -> signal_id
-                                // For struct ports: "gates_high_a" -> signal_id, "gates_low_a" -> signal_id, ...
-                                for field in &flattened_fields {
-                                    let key = if field.field_path.is_empty() {
-                                        port.name.clone()
-                                    } else {
-                                        format!("{}_{}", port.name, field.field_path.join("_"))
-                                    };
-                                    output_ports.insert(key.clone(), SignalId(field.id));
+                                // Try to expand connection if RHS is a flattened signal
+                                let expanded_opt = if needs_expansion {
+                                    let result = field_init_opt.and_then(|fi| {
+                                        self.expand_instance_connection(&port.name, &fi.value)
+                                    });
+                                    // BUG #117r DEBUG
+                                    if instance_name == "protection" || port.name == "faults" {
+                                        eprintln!("🔍 BUG#117r: expand_instance_connection for port '{}' returned {:?}",
+                                            port.name, result.as_ref().map(|v| v.len()));
+                                    }
+                                    result
+                                } else {
+                                    None
+                                };
 
-                                    // Add connection from instance output port to signal
-                                    // The flattened port names match the flattened signal names
-                                    let flattened_port_name = if field.field_path.is_empty() {
-                                        port.name.clone()
-                                    } else {
-                                        format!("{}_{}", port.name, field.field_path.join("_"))
-                                    };
-                                    connections.insert(
-                                        flattened_port_name,
-                                        Expression::with_unknown_type(ExpressionKind::Ref(
-                                            LValue::Signal(SignalId(field.id)),
-                                        )),
+                                if let Some(expanded_conns) = expanded_opt {
+                                    // BUG #117r FIX: Use the flattened RHS signals directly
+                                    // Remove the original unexpanded connection
+                                    connections.remove(&port.name);
+
+                                    // Add all expanded connections
+                                    for (port_field_name, rhs_expr) in &expanded_conns {
+                                        connections.insert(port_field_name.clone(), rhs_expr.clone());
+
+                                        // Also track in output_ports for field access resolution
+                                        if let ExpressionKind::Ref(LValue::Signal(sig_id)) = &rhs_expr.kind {
+                                            output_ports.insert(port_field_name.clone(), *sig_id);
+                                        }
+                                    }
+
+                                    // No need to create new output signals - we're using existing flattened signals
+                                } else {
+                                    // Original behavior: create new output signals
+                                    let signal_name = format!("{}_{}", instance_name, port.name);
+                                    let signal_type = self.convert_type(&port.port_type);
+                                    // Propagate detection config from sub-module port
+                                    let detection_cfg = port.detection_config.clone();
+
+                                    // Use flatten_signal to properly handle struct types
+                                    let (flattened_signals, flattened_fields) = self.flatten_signal(
+                                        &signal_name,
+                                        &signal_type,
+                                        None,
+                                        None,
+                                        None,
                                     );
+
+                                    // Add all flattened signals to output_signals for later processing
+                                    for signal in flattened_signals {
+                                        output_signals.push((
+                                            signal.id,
+                                            signal.name.clone(),
+                                            signal.signal_type.clone(),
+                                            detection_cfg.clone(),
+                                        ));
+                                    }
+
+                                    // Map each flattened field with its full path for field access resolution
+                                    // For scalar ports: "result" -> signal_id
+                                    // For struct ports: "gates_high_a" -> signal_id, "gates_low_a" -> signal_id, ...
+                                    for field in &flattened_fields {
+                                        let key = if field.field_path.is_empty() {
+                                            port.name.clone()
+                                        } else {
+                                            format!("{}_{}", port.name, field.field_path.join("_"))
+                                        };
+                                        output_ports.insert(key.clone(), SignalId(field.id));
+
+                                        // Add connection from instance output port to signal
+                                        // The flattened port names match the flattened signal names
+                                        let flattened_port_name = if field.field_path.is_empty() {
+                                            port.name.clone()
+                                        } else {
+                                            format!("{}_{}", port.name, field.field_path.join("_"))
+                                        };
+                                        connections.insert(
+                                            flattened_port_name,
+                                            Expression::with_unknown_type(ExpressionKind::Ref(
+                                                LValue::Signal(SignalId(field.id)),
+                                            )),
+                                        );
+                                    }
                                 }
                             }
                         }
@@ -3994,6 +4230,13 @@ impl<'hir> HirToMir<'hir> {
 
         // BUG FIX #91: Try to expand tuple signal = function call assignments
         if let Some(assigns) = self.try_expand_tuple_call_continuous_assignment(assign) {
+            return assigns;
+        }
+
+        // BUG #117r FIX: Try to expand struct literal assignments to flattened ports
+        // This handles: output_port = StructType { field1: expr1, field2: expr2, ... }
+        // which should expand to: output_port_field1 = expr1, output_port_field2 = expr2, ...
+        if let Some(assigns) = self.try_expand_struct_literal_continuous_assignment(assign) {
             return assigns;
         }
 
@@ -4327,6 +4570,131 @@ impl<'hir> HirToMir<'hir> {
         Some(assignments)
     }
 
+    /// BUG #117r FIX: Expand struct literal assignments to flattened ports/signals
+    ///
+    /// This handles assignments like:
+    ///   faults = FaultFlags { ov: expr1, uv: expr2, ... }
+    ///
+    /// Which should expand to:
+    ///   faults_ov = expr1
+    ///   faults_uv = expr2
+    ///   ...
+    ///
+    /// This is critical for module output ports that are struct-typed. When the
+    /// port is flattened during type flattening, the struct literal assignment
+    /// must also be expanded to individual field assignments. Without this,
+    /// the flattened signals have no driver.
+    fn try_expand_struct_literal_continuous_assignment(
+        &mut self,
+        assign: &hir::HirAssignment,
+    ) -> Option<Vec<ContinuousAssign>> {
+        // Check if LHS is a flattened port or signal
+        let (lhs_hir_id, lhs_is_signal, lhs_fields) = match &assign.lhs {
+            hir::HirLValue::Signal(id) => {
+                if let Some(fields) = self.flattened_signals.get(id) {
+                    if fields.len() > 1 {
+                        // Multiple flattened fields indicates struct/composite type
+                        (id.0, true, fields.clone())
+                    } else {
+                        return None;
+                    }
+                } else {
+                    return None;
+                }
+            }
+            hir::HirLValue::Port(id) => {
+                if let Some(fields) = self.flattened_ports.get(id) {
+                    if fields.len() > 1 {
+                        // Multiple flattened fields indicates struct/composite type
+                        (id.0, false, fields.clone())
+                    } else {
+                        return None;
+                    }
+                } else {
+                    return None;
+                }
+            }
+            _ => return None,
+        };
+
+        // Check if RHS is a struct literal
+        let struct_lit = match &assign.rhs {
+            hir::HirExpression::StructLiteral(lit) => lit,
+            _ => return None,
+        };
+
+        trace!(
+            "[BUG #117r FIX] Expanding struct literal assignment: LHS id={} (is_signal={}), RHS type='{}' with {} fields",
+            lhs_hir_id, lhs_is_signal, struct_lit.type_name, struct_lit.fields.len()
+        );
+
+        // Build a map from field name to flattened field info
+        let mut field_map: std::collections::HashMap<String, &FlattenedField> =
+            std::collections::HashMap::new();
+        for field in &lhs_fields {
+            // The field_path contains the path from the struct root to this field
+            // For a single-level struct like FaultFlags { ov, uv, ... }, field_path = ["ov"], ["uv"], ...
+            // Join the path with underscores for matching
+            let field_key = field.field_path.join("_");
+            if !field_key.is_empty() {
+                field_map.insert(field_key, field);
+            }
+        }
+
+        trace!(
+            "[BUG #117r FIX] LHS flattened field keys: {:?}",
+            field_map.keys().collect::<Vec<_>>()
+        );
+
+        // Create an assignment for each struct literal field
+        let mut assignments = Vec::new();
+        for field_init in &struct_lit.fields {
+            // Look up the flattened field by name
+            if let Some(flattened_field) = field_map.get(&field_init.name) {
+                // Convert the RHS expression
+                if let Some(rhs_expr) = self.convert_expression(&field_init.value, 0) {
+                    let lhs_lval = if lhs_is_signal {
+                        LValue::Signal(SignalId(flattened_field.id))
+                    } else {
+                        LValue::Port(PortId(flattened_field.id))
+                    };
+
+                    trace!(
+                        "[BUG #117r FIX] Creating assignment: {} = <expr>",
+                        field_init.name
+                    );
+
+                    assignments.push(ContinuousAssign {
+                        lhs: lhs_lval,
+                        rhs: rhs_expr,
+                        span: None,
+                    });
+                } else {
+                    trace!(
+                        "[BUG #117r FIX] WARNING: Failed to convert expression for field '{}'",
+                        field_init.name
+                    );
+                }
+            } else {
+                trace!(
+                    "[BUG #117r FIX] WARNING: Field '{}' not found in flattened fields",
+                    field_init.name
+                );
+            }
+        }
+
+        if assignments.is_empty() {
+            trace!("[BUG #117r FIX] No assignments generated, returning None");
+            return None;
+        }
+
+        trace!(
+            "[BUG #117r FIX] Generated {} assignments for struct literal",
+            assignments.len()
+        );
+        Some(assignments)
+    }
+
     /// Convert module instance
     fn convert_instance(&mut self, instance: &hir::HirInstance) -> Option<ModuleInstance> {
         // Map entity ID to module ID
@@ -4388,17 +4756,42 @@ impl<'hir> HirToMir<'hir> {
             // Find the port in the entity
             let port_opt = entity.ports.iter().find(|p| p.name == conn.port);
 
+
             // Check if the RHS expression is a reference to a flattened signal/port
             let expanded_connections = if let Some(port) = port_opt {
                 // Check if port type is a struct or array that gets flattened
-                let needs_expansion = matches!(
-                    port.port_type,
-                    hir::HirType::Struct(_) | hir::HirType::Array(_, _)
-                );
+                // BUG #117r FIX: Also check Custom types (type aliases that may resolve to structs)
+                let needs_expansion = match &port.port_type {
+                    hir::HirType::Struct(_) | hir::HirType::Array(_, _) => true,
+                    hir::HirType::Custom(name) => {
+                        // BUG #117r FIX: Check if this Custom type resolves to a struct in the HIR
+                        let hir_is_some = self.hir.is_some();
+                        let result = self.hir
+                            .as_ref()
+                            .map(|hir| {
+                                hir.user_defined_types
+                                    .iter()
+                                    .any(|ut| &ut.name == name && matches!(ut.type_def, hir::HirType::Struct(_)))
+                            })
+                            .unwrap_or(false);
+                        result
+                    }
+                    _ => false,
+                };
 
                 if needs_expansion {
                     // Try to expand the connection
-                    self.expand_instance_connection(&conn.port, &conn.expr)?
+                    let expanded = self.expand_instance_connection(&conn.port, &conn.expr);
+                    // BUG #117r FIX: When expansion fails (e.g., FieldAccess expression like config.protection),
+                    // fall back to simple connection conversion instead of returning None and breaking the loop
+                    match expanded {
+                        Some(conns) => conns,
+                        None => {
+                            // Fall back to simple connection - the type may be handled correctly
+                            // even without expansion in some cases (or will error properly)
+                            vec![(conn.port.clone(), self.convert_expression(&conn.expr, 0)?)]
+                        }
+                    }
                 } else {
                     // Simple connection
                     vec![(conn.port.clone(), self.convert_expression(&conn.expr, 0)?)]
@@ -4441,25 +4834,15 @@ impl<'hir> HirToMir<'hir> {
             hir::HirExpression::Signal(id) => (id.0, true),
             hir::HirExpression::Port(id) => (id.0, false),
             _ => {
-                return None; // Complex expression, can't expand
+                return None; // Complex expression (like FieldAccess), can't expand
             }
         };
 
         // Get flattened fields for the RHS signal/port
         let rhs_fields = if is_signal {
-            match self.flattened_signals.get(&hir::SignalId(base_hir_id)) {
-                Some(fields) => fields.clone(),
-                None => {
-                    return None;
-                }
-            }
+            self.flattened_signals.get(&hir::SignalId(base_hir_id))?.clone()
         } else {
-            match self.flattened_ports.get(&hir::PortId(base_hir_id)) {
-                Some(fields) => fields.clone(),
-                None => {
-                    return None;
-                }
-            }
+            self.flattened_ports.get(&hir::PortId(base_hir_id))?.clone()
         };
 
         // Create connections for each flattened field
