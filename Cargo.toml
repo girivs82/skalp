@@ -59,7 +59,7 @@ skalp-sim = { path = "crates/skalp-sim" }
 skalp-backends = { path = "crates/skalp-backends" }
 skalp-testing = { path = "crates/skalp-testing" }
 skalp-safety = { path = "crates/skalp-safety" }
-skalp-place-route = { path = "crates/skalp-place-route" }
+skalp-place-route = { path = "crates/skalp-place-route", features = ["programmer"] }
 
 # Library system
 skalp-resolve = { path = "crates/skalp-resolve" }

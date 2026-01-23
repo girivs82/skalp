@@ -244,16 +244,21 @@ enum Commands {
 
     /// Program the FPGA device
     Program {
-        /// Bitstream file
-        bitstream: PathBuf,
+        /// Bitstream file (.bin format)
+        #[arg(required_unless_present_any = ["list", "reset_only"])]
+        bitstream: Option<PathBuf>,
 
-        /// Programming interface
-        #[arg(short, long, default_value = "spi")]
-        interface: String,
+        /// Target board (icebreaker, icebreaker-bitsy, hx8k-breakout, upduino3, auto)
+        #[arg(short, long, default_value = "auto")]
+        board: String,
 
-        /// Verify after programming
-        #[arg(short, long)]
-        verify: bool,
+        /// Reset the FPGA without programming
+        #[arg(long)]
+        reset_only: bool,
+
+        /// List detected boards and exit
+        #[arg(long)]
+        list: bool,
     },
 
     /// Format SKALP source files
@@ -619,10 +624,11 @@ fn main() -> Result<()> {
 
         Commands::Program {
             bitstream,
-            interface,
-            verify,
+            board,
+            reset_only,
+            list,
         } => {
-            program_device(&bitstream, &interface, verify)?;
+            program_device(bitstream.as_ref(), &board, reset_only, list)?;
         }
 
         Commands::Fmt { files, check } => {
@@ -2453,20 +2459,131 @@ fn run_pnr_on_netlist(
 }
 
 /// Program FPGA device
-fn program_device(bitstream: &PathBuf, interface: &str, verify: bool) -> Result<()> {
-    println!("📤 Programming device via {}...", interface);
-    println!("   Bitstream: {:?}", bitstream);
+fn program_device(
+    bitstream: Option<&PathBuf>,
+    board: &str,
+    reset_only: bool,
+    list: bool,
+) -> Result<()> {
+    use skalp_place_route::programmer::{BoardConfig, Ice40Programmer};
+
+    // List mode: just show detected boards (doesn't need board selection)
+    if list {
+        println!("🔍 Scanning for iCE40 boards...\n");
+        let boards = [
+            BoardConfig::IceBreaker,
+            BoardConfig::IceBreakerBitsy,
+            BoardConfig::LatticeHx8kBreakout,
+            BoardConfig::Upduino3,
+            BoardConfig::GenericFt2232h,
+            BoardConfig::GenericFt232h,
+        ];
+        let mut found = false;
+        for b in boards {
+            if Ice40Programmer::open(b).is_ok() {
+                let (vid, pid) = b.usb_id();
+                println!("   ✓ {} (VID:PID {:04x}:{:04x})", b.name(), vid, pid);
+                found = true;
+            }
+        }
+        if !found {
+            println!("   No boards detected. Is the board connected?");
+        }
+        return Ok(());
+    }
+
+    // Parse board configuration
+    let board_config = match board.to_lowercase().as_str() {
+        "icebreaker" => BoardConfig::IceBreaker,
+        "icebreaker-bitsy" => BoardConfig::IceBreakerBitsy,
+        "hx8k-breakout" | "hx8k" => BoardConfig::LatticeHx8kBreakout,
+        "upduino3" | "upduino" => BoardConfig::Upduino3,
+        "ft2232h" => BoardConfig::GenericFt2232h,
+        "ft232h" => BoardConfig::GenericFt232h,
+        "auto" => {
+            // Try to detect board automatically
+            println!("🔍 Auto-detecting board...");
+            let boards = [
+                BoardConfig::IceBreaker,
+                BoardConfig::LatticeHx8kBreakout,
+                BoardConfig::Upduino3,
+            ];
+            let mut detected = None;
+            for b in boards {
+                if Ice40Programmer::open(b).is_ok() {
+                    detected = Some(b);
+                    break;
+                }
+            }
+            match detected {
+                Some(b) => {
+                    println!("   Detected: {}", b.name());
+                    b
+                }
+                None => {
+                    anyhow::bail!(
+                        "No iCE40 board detected. Is the board connected?\n\
+                         Supported boards: icebreaker, icebreaker-bitsy, hx8k-breakout, upduino3"
+                    );
+                }
+            }
+        }
+        _ => {
+            anyhow::bail!(
+                "Unknown board: {}. Supported: icebreaker, icebreaker-bitsy, hx8k-breakout, upduino3, auto",
+                board
+            );
+        }
+    };
+
+    // Open the programmer
+    let mut programmer = Ice40Programmer::open(board_config).map_err(|e| {
+        anyhow::anyhow!(
+            "Failed to open programmer for {}: {}",
+            board_config.name(),
+            e
+        )
+    })?;
+
+    // Reset only mode
+    if reset_only {
+        println!("🔄 Resetting {}...", board_config.name());
+        programmer
+            .reset()
+            .map_err(|e| anyhow::anyhow!("Reset failed: {}", e))?;
+        println!("   ✓ Reset complete");
+        return Ok(());
+    }
+
+    // Check bitstream file (required for programming)
+    let bitstream = bitstream.ok_or_else(|| anyhow::anyhow!("Bitstream file is required"))?;
 
     if !bitstream.exists() {
         anyhow::bail!("Bitstream file not found: {:?}", bitstream);
     }
 
-    // This would interface with actual programming tools
-    println!("⚠️  Device programming not yet implemented");
-    println!("   Would program via: {}", interface);
+    // Read bitstream
+    let bitstream_data = std::fs::read(bitstream)?;
+    let size_kb = bitstream_data.len() as f64 / 1024.0;
 
-    if verify {
-        println!("   Would verify after programming");
+    println!("📤 Programming {}...", board_config.name());
+    println!("   Bitstream: {:?} ({:.1} KB)", bitstream, size_kb);
+
+    // Program the device
+    let result = programmer
+        .program(&bitstream_data)
+        .map_err(|e| anyhow::anyhow!("Programming failed: {}", e))?;
+
+    if result.cdone_high {
+        println!("   ✓ Programming successful");
+        println!(
+            "   {} bytes in {}ms ({:.1} KB/s)",
+            result.bytes_programmed, result.time_ms, result.rate_kbps
+        );
+    } else {
+        println!("   ⚠️  Programming complete but CDONE not high");
+        println!("   The FPGA may not have configured correctly.");
+        println!("   Check the bitstream and board connections.");
     }
 
     Ok(())
