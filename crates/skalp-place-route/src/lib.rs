@@ -58,6 +58,7 @@ pub mod error;
 pub mod packing;
 pub mod placer;
 pub mod pnr;
+pub mod programmer;
 pub mod router;
 pub mod timing;
 pub mod utils;
@@ -85,3 +86,8 @@ pub use timing::{DelayModel, TimingAnalyzer, TimingConfig, TimingDrivenPlacer, T
 // Packing and utilities
 pub use packing::{CellPacker, DffConfig, PackedCell, PackedCellType, PackingResult, PackingStats};
 pub use utils::{BramContent, BramSwapper, PllCalculator, PllConfig};
+
+// Programmer support (requires "programmer" feature)
+#[cfg(feature = "programmer")]
+pub use programmer::{detect_boards, program_ice40, FtdiDevice, Ice40Programmer};
+pub use programmer::{BoardConfig, FtdiPinConfig, ProgramResult};
