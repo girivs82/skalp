@@ -1505,8 +1505,14 @@ impl<'a> MirToSirConverter<'a> {
         // CRITICAL FIX: Exclude array write targets since they're already handled
         targets.retain(|target| !array_names.contains(target));
 
-        // BUG FIX: Filter out output ports - they should only be driven by continuous assignments
-        targets.retain(|target| !self.is_output_port(target));
+        // BUG FIX: Filter out output ports that are NOT state elements
+        // Registered outputs (assigned in on(clk.rise)) need FlipFlops, not continuous assignments
+        targets.retain(|target| {
+            let is_output = self.is_output_port(target);
+            let is_state_element = self.sir.state_elements.contains_key(target);
+            // Keep if: not an output, OR is an output that's also a state element (registered)
+            !is_output || is_state_element
+        });
 
         println!("   📋 COLLECTED TARGETS (after filtering): {:?}", targets);
         println!(
@@ -1576,11 +1582,16 @@ impl<'a> MirToSirConverter<'a> {
             all_targets.iter().collect::<Vec<_>>()
         );
 
-        // BUG FIX: Filter out output ports - they should only be driven by continuous assignments
-        all_targets.retain(|target| !self.is_output_port(target));
+        // BUG FIX: Filter out output ports that are NOT state elements
+        // Registered outputs (assigned in on(clk.rise)) need FlipFlops, not continuous assignments
+        all_targets.retain(|target| {
+            let is_output = self.is_output_port(target);
+            let is_state_element = self.sir.state_elements.contains_key(target);
+            !is_output || is_state_element
+        });
 
         println!(
-            "      📊 After filtering output ports: {} signals: {:?}",
+            "      📊 After filtering non-registered output ports: {} signals: {:?}",
             all_targets.len(),
             all_targets.iter().collect::<Vec<_>>()
         );
