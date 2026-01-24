@@ -9,6 +9,7 @@ pub fn generate_metal_shader(sir_module: &SirModule) -> String {
     generator.generate_struct_definitions(sir_module);
     generator.generate_combinational_kernels(sir_module);
     generator.generate_sequential_kernel(sir_module);
+    generator.generate_batched_simulation_kernel(sir_module);
 
     // Write shader to temp file for testing/debugging
     let _ = std::fs::write("/tmp/skalp_shader.metal", &shader);
@@ -24,6 +25,9 @@ struct MetalShaderGenerator<'a> {
     wide_signal_decomposition: std::collections::HashMap<String, (usize, usize, usize)>,
     /// Track recursion depth for concat generation (Bug #76 debug)
     concat_recursion_depth: usize,
+    /// Whether we're generating code for the batched simulation kernel.
+    /// In batched mode, registers are accessed via local_* variables instead of state->*
+    in_batched_mode: bool,
 }
 
 impl<'a> MetalShaderGenerator<'a> {
@@ -33,6 +37,7 @@ impl<'a> MetalShaderGenerator<'a> {
             indent: 0,
             wide_signal_decomposition: std::collections::HashMap::new(),
             concat_recursion_depth: 0,
+            in_batched_mode: false,
         }
     }
 
@@ -40,6 +45,17 @@ impl<'a> MetalShaderGenerator<'a> {
     /// This handles hierarchical signal names like "stage1.reg" -> "stage1_reg"
     fn sanitize_name(&self, name: &str) -> String {
         name.replace('.', "_")
+    }
+
+    /// Get the accessor string for a register.
+    /// In batched mode, returns `local_X`, otherwise returns `registers->X`
+    fn get_register_accessor(&self, name: &str) -> String {
+        let sanitized = self.sanitize_name(name);
+        if self.in_batched_mode {
+            format!("local_{}", sanitized)
+        } else {
+            format!("registers->{}", sanitized)
+        }
     }
 
     /// Generate code to write to an array element of a potentially decomposed signal
@@ -461,29 +477,31 @@ impl<'a> MetalShaderGenerator<'a> {
                             "// Element-wise copy for {}-bit output from register (uint[{}])\n",
                             output_width, array_size
                         ));
+                        let reg_accessor = self.get_register_accessor(&output.name);
                         self.write_indented(&format!(
                             "for (uint i = 0; i < {}; i++) {{\n",
                             array_size
                         ));
                         self.indent += 1;
                         self.write_indented(&format!(
-                            "signals->{}[i] = registers->{}[i];\n",
+                            "signals->{}[i] = {}[i];\n",
                             self.sanitize_name(&output.name),
-                            self.sanitize_name(&output.name)
+                            reg_accessor
                         ));
                         self.indent -= 1;
                         self.write_indented("}\n");
                     } else {
                         // Scalar - direct assignment
+                        let reg_accessor = self.get_register_accessor(&output.name);
                         self.write_indented(&format!(
-                            "signals->{} = registers->{};\n",
+                            "signals->{} = {};\n",
                             self.sanitize_name(&output.name),
-                            self.sanitize_name(&output.name)
+                            reg_accessor
                         ));
                     }
                     eprintln!(
-                        "🔗 OUTPUT (STATE): {} = registers->{}",
-                        output.name, output.name
+                        "🔗 OUTPUT (STATE): {} = register accessor",
+                        output.name
                     );
                 } else {
                     // Output is driven by combinational logic
@@ -1062,6 +1080,281 @@ impl<'a> MetalShaderGenerator<'a> {
         self.indent -= 1;
         writeln!(self.output, "}}\n").unwrap();
     }
+
+    /// Generate a batched simulation kernel that runs multiple cycles in one GPU dispatch
+    /// This provides massive speedup by eliminating per-cycle CPU<->GPU synchronization
+    fn generate_batched_simulation_kernel(&mut self, sir: &SirModule) {
+        // Enable batched mode so generate_signal_ref uses local_* variables
+        self.in_batched_mode = true;
+
+        writeln!(self.output, "// ============================================================").unwrap();
+        writeln!(self.output, "// BATCHED SIMULATION KERNEL - runs N cycles in single dispatch").unwrap();
+        writeln!(self.output, "// ============================================================").unwrap();
+        writeln!(self.output, "kernel void batched_simulation(").unwrap();
+        self.indent += 1;
+
+        self.write_indented("device Inputs* inputs [[buffer(0)]],\n");
+        self.write_indented("device Registers* registers [[buffer(1)]],\n");
+        self.write_indented("device Signals* signals [[buffer(2)]],\n");
+        self.write_indented("device const uint* params [[buffer(3)]],\n");
+        self.write_indented("uint tid [[thread_position_in_grid]]\n");
+
+        self.indent -= 1;
+        writeln!(self.output, ") {{").unwrap();
+        self.indent += 1;
+
+        // Only thread 0 does the work (single-threaded simulation)
+        self.write_indented("if (tid != 0) return;\n\n");
+
+        self.write_indented("uint num_cycles = params[0];\n");
+        self.write_indented("uint clock_offset = params[1]; // Offset of clock signal in Inputs\n\n");
+
+        // Create local register copies for fast access
+        self.write_indented("// Local register copies for fast iteration\n");
+        let mut sorted_states: Vec<_> = sir.state_elements.iter().collect();
+        sorted_states.sort_by_key(|(name, _)| *name);
+
+        for (state_name, state_elem) in &sorted_states {
+            let sanitized = self.sanitize_name(state_name);
+            let state_sir_type = self.get_signal_sir_type(sir, state_name);
+            let is_array = matches!(state_sir_type, Some(SirType::Array(_, _)));
+            let is_wide = state_elem.width > 128;
+
+            if !is_array && !is_wide {
+                let base_type = if state_elem.width <= 32 {
+                    "uint".to_string()
+                } else {
+                    self.get_metal_type_for_wide_bits(state_elem.width).0
+                };
+                self.write_indented(&format!(
+                    "{} local_{} = registers->{};\n",
+                    base_type, sanitized, sanitized
+                ));
+            }
+        }
+
+        self.write_indented("\n// Main simulation loop\n");
+        self.write_indented("for (uint cycle = 0; cycle < num_cycles; cycle++) {\n");
+        self.indent += 1;
+
+        // Phase 1: Write local registers to device memory for combinational to read
+        // (UMA makes this fast - shared memory, no copy)
+        self.write_indented("// Phase 1: Sync local registers to device memory\n");
+        for (state_name, state_elem) in &sorted_states {
+            let sanitized = self.sanitize_name(state_name);
+            let state_sir_type = self.get_signal_sir_type(sir, state_name);
+            let is_array = matches!(state_sir_type, Some(SirType::Array(_, _)));
+            let is_wide = state_elem.width > 128;
+
+            if !is_array && !is_wide {
+                self.write_indented(&format!(
+                    "registers->{} = local_{};\n",
+                    sanitized, sanitized
+                ));
+            }
+        }
+
+        // Phase 2: Evaluate all combinational logic
+        self.write_indented("\n// Phase 2: Evaluate combinational logic\n");
+        self.generate_batched_combinational_logic(sir);
+
+        // Phase 3: Update local registers (rising edge)
+        self.write_indented("\n// Phase 3: Sequential update (rising edge)\n");
+        self.generate_batched_sequential_updates(sir);
+
+        self.indent -= 1;
+        self.write_indented("}\n\n");
+
+        // Write local registers back to device memory
+        self.write_indented("// Write final register values back to device memory\n");
+        for (state_name, state_elem) in &sorted_states {
+            let sanitized = self.sanitize_name(state_name);
+            let state_sir_type = self.get_signal_sir_type(sir, state_name);
+            let is_array = matches!(state_sir_type, Some(SirType::Array(_, _)));
+            let is_wide = state_elem.width > 128;
+
+            if !is_array && !is_wide {
+                self.write_indented(&format!(
+                    "registers->{} = local_{};\n",
+                    sanitized, sanitized
+                ));
+            }
+        }
+
+        // Final combinational pass to update outputs
+        self.write_indented("\n// Final combinational pass to update outputs\n");
+        self.generate_batched_combinational_logic(sir);
+
+        self.indent -= 1;
+        writeln!(self.output, "}}\n").unwrap();
+
+        // Reset batched mode
+        self.in_batched_mode = false;
+    }
+
+    /// Generate inlined combinational logic for batched kernel
+    /// Uses local_* variables for registers instead of device memory
+    fn generate_batched_combinational_logic(&mut self, sir: &SirModule) {
+        // Use pre-computed topological order
+        for node_id in &sir.sorted_combinational_node_ids {
+            if let Some(node) = sir.combinational_nodes.iter().find(|n| n.id == *node_id) {
+                self.generate_batched_node_computation(sir, node);
+            }
+        }
+
+        // Assign outputs - check if they're driven by state elements or by combinational nodes
+        for output in &sir.outputs {
+            let output_width = self.get_signal_width_from_sir(sir, &output.name);
+            let is_wide = output_width > 128;
+
+            if sir.state_elements.contains_key(&output.name) {
+                // Output IS a state element - use local copy directly
+                if !is_wide {
+                    self.write_indented(&format!(
+                        "signals->{} = local_{};\n",
+                        self.sanitize_name(&output.name),
+                        self.sanitize_name(&output.name)
+                    ));
+                }
+            } else {
+                // Output is driven by combinational logic
+                // Find the signal that drives this output
+                if let Some(signal) = sir.signals.iter().find(|s| s.name == output.name) {
+                    if let Some(driver_node_id) = signal.driver_node {
+                        // Find the driver node's output signal name
+                        if let Some(driver_node) = sir.combinational_nodes.iter().find(|n| n.id == driver_node_id) {
+                            if let Some(driver_output) = driver_node.outputs.first() {
+                                if !is_wide {
+                                    self.write_indented(&format!(
+                                        "signals->{} = signals->{};\n",
+                                        self.sanitize_name(&output.name),
+                                        self.sanitize_name(&driver_output.signal_id)
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Generate a single node computation for batched kernel
+    /// Replaces register reads with local_* variables
+    fn generate_batched_node_computation(&mut self, sir: &SirModule, node: &SirNode) {
+        // Generate the same computation as regular kernel, but substitute
+        // registers->X with local_X for register reads
+        match &node.kind {
+            SirNodeKind::BinaryOp(op) => self.generate_binary_op(sir, node, op),
+            SirNodeKind::UnaryOp(op) => self.generate_unary_op(sir, node, op),
+            SirNodeKind::Constant { value, width } => {
+                self.generate_constant(sir, node, *value, *width)
+            }
+            SirNodeKind::Mux => self.generate_mux(sir, node),
+            SirNodeKind::ParallelMux { .. } => self.generate_mux(sir, node),
+            SirNodeKind::Slice { start, end } => self.generate_slice(sir, node, *start, *end),
+            SirNodeKind::Concat => self.generate_concat(sir, node),
+            SirNodeKind::SignalRef { signal } => {
+                // Handle SignalRef specially for batched mode
+                // - State elements use local_* variables
+                // - Input signals use inputs->*
+                // - Other signals use signals->*
+                if !node.outputs.is_empty() {
+                    let output = &node.outputs[0].signal_id;
+                    let is_input = sir.inputs.iter().any(|i| i.name == *signal);
+                    let source = if sir.state_elements.contains_key(signal) {
+                        format!("local_{}", self.sanitize_name(signal))
+                    } else if is_input {
+                        format!("inputs->{}", self.sanitize_name(signal))
+                    } else {
+                        format!("signals->{}", self.sanitize_name(signal))
+                    };
+                    self.write_indented(&format!(
+                        "signals->{} = {};\n",
+                        self.sanitize_name(output),
+                        source
+                    ));
+                }
+            }
+            SirNodeKind::ArrayRead => self.generate_array_read(sir, node),
+            SirNodeKind::ArrayWrite => self.generate_array_write(sir, node),
+            SirNodeKind::FlipFlop { .. } => {} // Sequential, not combinational
+            SirNodeKind::Latch { .. } => {}    // Sequential, not combinational
+            SirNodeKind::Memory { .. } => {}   // Memory, handled separately
+            SirNodeKind::ClockGate => {}       // Clock gating, handled separately
+            SirNodeKind::Reset => {}           // Reset logic, handled separately
+        }
+    }
+
+    /// Generate sequential updates for batched kernel using local variables
+    fn generate_batched_sequential_updates(&mut self, sir: &SirModule) {
+        // Sort sequential nodes by output name for consistency
+        let mut sorted_seq_nodes: Vec<_> = sir.sequential_nodes.iter().collect();
+        sorted_seq_nodes.sort_by(|a, b| {
+            let a_name = a.outputs.first().map(|o| o.signal_id.as_str()).unwrap_or("");
+            let b_name = b.outputs.first().map(|o| o.signal_id.as_str()).unwrap_or("");
+            a_name.cmp(b_name)
+        });
+
+        for node in sorted_seq_nodes {
+            if let SirNodeKind::FlipFlop { clock_edge } = &node.kind {
+                self.generate_batched_flipflop_update(sir, node, clock_edge);
+            }
+        }
+    }
+
+    /// Generate flip-flop update for batched kernel
+    /// In batched mode, each loop iteration represents a complete clock cycle,
+    /// so we update registers unconditionally (no edge detection needed).
+    fn generate_batched_flipflop_update(
+        &mut self,
+        sir: &SirModule,
+        node: &SirNode,
+        _edge: &ClockEdge,
+    ) {
+        if node.inputs.len() < 2 || node.outputs.is_empty() {
+            return;
+        }
+
+        let data_signal = &node.inputs[1].signal_id;
+        let output_signal = &node.outputs[0].signal_id;
+
+        let sanitized_output = self.sanitize_name(output_signal);
+        let sanitized_data = self.sanitize_name(data_signal);
+        let output_width = self.get_signal_width_from_sir(sir, output_signal);
+        let data_width = self.get_signal_width_from_sir(sir, data_signal);
+
+        // Check if we need vector-to-scalar conversion
+        // If data signal is wider than 32 bits (stored as vector/array) but output is <= 32 bits
+        let needs_vector_extraction = data_width > 32 && output_width <= 32;
+
+        // Get width mask for proper bit truncation
+        let mask = if output_width < 32 {
+            format!(" & 0x{:X}", (1u64 << output_width) - 1)
+        } else {
+            String::new()
+        };
+
+        // In batched mode, each iteration = one clock cycle
+        // Update register unconditionally (rising edge happens every iteration)
+        if needs_vector_extraction {
+            // Vector/array to scalar - extract first element
+            self.write_indented(&format!(
+                "local_{} = signals->{}[0]{}; // vector->scalar\n",
+                sanitized_output,
+                sanitized_data,
+                mask
+            ));
+        } else {
+            self.write_indented(&format!(
+                "local_{} = signals->{}{};\n",
+                sanitized_output,
+                sanitized_data,
+                mask
+            ));
+        }
+    }
+
     fn generate_binary_op(&mut self, sir: &SirModule, node: &SirNode, op: &BinaryOperation) {
         if node.inputs.len() >= 2 && !node.outputs.is_empty() {
             let left = &node.inputs[0].signal_id;
@@ -2335,7 +2628,7 @@ impl<'a> MetalShaderGenerator<'a> {
                 let array_index = shift / elem_type.width();
 
                 let array_location = if sir.state_elements.contains_key(input) {
-                    format!("registers->{}", self.sanitize_name(input))
+                    self.get_register_accessor(input)
                 } else {
                     format!("signals->{}", self.sanitize_name(input))
                 };
@@ -2484,7 +2777,7 @@ impl<'a> MetalShaderGenerator<'a> {
             // Map signal names to register names for flip-flop outputs
             let input_ref = if sir.state_elements.contains_key(input) {
                 // Direct register reference
-                format!("registers->{}", self.sanitize_name(input))
+                self.get_register_accessor(input)
             } else if input.starts_with("node_") && input.ends_with("_out") {
                 // This might be a flip-flop output signal, check if it corresponds to a register
                 let mut mapped_register = None;
@@ -2509,7 +2802,7 @@ impl<'a> MetalShaderGenerator<'a> {
                 }
 
                 if let Some(reg_name) = mapped_register {
-                    format!("registers->{}", self.sanitize_name(&reg_name))
+                    self.get_register_accessor(&reg_name)
                 } else {
                     format!("signals->{}", self.sanitize_name(input))
                 }
@@ -2895,7 +3188,7 @@ impl<'a> MetalShaderGenerator<'a> {
             if let Some(SirType::Array(elem_type, _size)) = array_type {
                 // Proper array - use direct indexing
                 let array_location = if sir.state_elements.contains_key(array_signal_name) {
-                    format!("registers->{}", self.sanitize_name(array_signal_name))
+                    self.get_register_accessor(array_signal_name)
                 } else {
                     format!("signals->{}", self.sanitize_name(array_signal_name))
                 };
@@ -3295,10 +3588,13 @@ impl<'a> MetalShaderGenerator<'a> {
 
     #[allow(dead_code)]
     fn generate_signal_ref(&mut self, node: &SirNode, signal: &str) {
+        // NOTE: This function is currently unused in favor of the inline SignalRef
+        // handling in generate_combinational_for_cone. Left here for reference.
         if !node.outputs.is_empty() && !node.inputs.is_empty() {
             let output = &node.outputs[0].signal_id;
 
             // Copy from state to signals
+            // Note: This assumes state-> prefix which may not work in batched mode
             self.write_indented(&format!(
                 "signals->{} = state->{};\n",
                 self.sanitize_name(output),
@@ -4021,7 +4317,7 @@ impl<'a> MetalShaderGenerator<'a> {
                             let source_location = if sir.inputs.iter().any(|i| i.name == *signal) {
                                 format!("inputs->{}", self.sanitize_name(signal))
                             } else if sir.state_elements.contains_key(signal) {
-                                format!("registers->{}", self.sanitize_name(signal))
+                                self.get_register_accessor(signal)
                             } else {
                                 format!("signals->{}", self.sanitize_name(signal))
                             };
@@ -4138,7 +4434,7 @@ impl<'a> MetalShaderGenerator<'a> {
                             let source_location = if sir.inputs.iter().any(|i| i.name == *signal) {
                                 format!("inputs->{}", self.sanitize_name(signal))
                             } else if sir.state_elements.contains_key(signal) {
-                                format!("registers->{}", self.sanitize_name(signal))
+                                self.get_register_accessor(signal)
                             } else {
                                 format!("signals->{}", self.sanitize_name(signal))
                             };
@@ -4167,7 +4463,7 @@ impl<'a> MetalShaderGenerator<'a> {
                         let source_location = if sir.inputs.iter().any(|i| i.name == *signal) {
                             format!("inputs->{}", self.sanitize_name(signal))
                         } else if sir.state_elements.contains_key(signal) {
-                            format!("registers->{}", self.sanitize_name(signal))
+                            self.get_register_accessor(signal)
                         } else {
                             format!("signals->{}", self.sanitize_name(signal))
                         };
@@ -4285,7 +4581,7 @@ impl<'a> MetalShaderGenerator<'a> {
                         let source_location = if is_input {
                             format!("inputs->{}", self.sanitize_name(signal))
                         } else if is_state {
-                            format!("registers->{}", self.sanitize_name(signal))
+                            self.get_register_accessor(signal)
                         } else {
                             format!("signals->{}", self.sanitize_name(signal))
                         };

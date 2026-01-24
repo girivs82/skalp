@@ -629,13 +629,26 @@ impl Testbench {
             self.sim.set_input(&signal, value).await;
         }
 
-        // Run clock cycles
-        for _ in 0..cycles {
-            self.sim.set_input(clock_name, 0).await;
-            self.sim.step().await;
+        // PERF: Use batched GPU execution for moderate cycle counts (100-10000)
+        // This provides speedup by eliminating per-cycle CPU<->GPU sync
+        // For very large counts, use step-by-step to avoid GPU kernel timeouts
+        const BATCH_MIN: usize = 100;
+        const BATCH_MAX: usize = 10000;
+
+        if cycles >= BATCH_MIN && cycles <= BATCH_MAX {
+            // Set clock high initially (batched kernel handles toggling internally)
             self.sim.set_input(clock_name, 1).await;
-            self.sim.step().await;
-            self.cycle_count += 1;
+            self.sim.run_batched(cycles as u64).await;
+            self.cycle_count += cycles as u64;
+        } else {
+            // Run clock cycles step-by-step for small counts
+            for _ in 0..cycles {
+                self.sim.set_input(clock_name, 0).await;
+                self.sim.step().await;
+                self.sim.set_input(clock_name, 1).await;
+                self.sim.step().await;
+                self.cycle_count += 1;
+            }
         }
 
         self
@@ -962,6 +975,30 @@ impl IntoSignalValue for f64 {
     }
 }
 
+impl IntoSignalValue for i8 {
+    fn into_bytes(self) -> Vec<u8> {
+        self.to_le_bytes().to_vec()
+    }
+}
+
+impl IntoSignalValue for i16 {
+    fn into_bytes(self) -> Vec<u8> {
+        self.to_le_bytes().to_vec()
+    }
+}
+
+impl IntoSignalValue for i32 {
+    fn into_bytes(self) -> Vec<u8> {
+        self.to_le_bytes().to_vec()
+    }
+}
+
+impl IntoSignalValue for i64 {
+    fn into_bytes(self) -> Vec<u8> {
+        self.to_le_bytes().to_vec()
+    }
+}
+
 /// Trait for converting signal byte values to Rust types
 pub trait FromSignalValue {
     fn from_bytes(bytes: &[u8]) -> Self;
@@ -1026,6 +1063,42 @@ impl FromSignalValue for f64 {
             arr[i] = b;
         }
         f64::from_le_bytes(arr)
+    }
+}
+
+impl FromSignalValue for i8 {
+    fn from_bytes(bytes: &[u8]) -> Self {
+        bytes.first().map(|&b| b as i8).unwrap_or(0)
+    }
+}
+
+impl FromSignalValue for i16 {
+    fn from_bytes(bytes: &[u8]) -> Self {
+        let mut arr = [0u8; 2];
+        for (i, &b) in bytes.iter().take(2).enumerate() {
+            arr[i] = b;
+        }
+        i16::from_le_bytes(arr)
+    }
+}
+
+impl FromSignalValue for i32 {
+    fn from_bytes(bytes: &[u8]) -> Self {
+        let mut arr = [0u8; 4];
+        for (i, &b) in bytes.iter().take(4).enumerate() {
+            arr[i] = b;
+        }
+        i32::from_le_bytes(arr)
+    }
+}
+
+impl FromSignalValue for i64 {
+    fn from_bytes(bytes: &[u8]) -> Self {
+        let mut arr = [0u8; 8];
+        for (i, &b) in bytes.iter().take(8).enumerate() {
+            arr[i] = b;
+        }
+        i64::from_le_bytes(arr)
     }
 }
 

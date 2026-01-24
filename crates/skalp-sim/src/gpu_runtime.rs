@@ -37,10 +37,14 @@ pub struct GpuRuntime {
     shadow_register_buffer: Option<Buffer>,
     signal_buffer: Option<Buffer>,
     output_buffer: Option<Buffer>, // Stores outputs from BEFORE sequential update
+    // PERF: Params buffer for batched simulation kernel
+    params_buffer: Option<Buffer>,
     current_cycle: u64,
     clock_manager: ClockManager,
     // PERF: Cache cone count to avoid expensive extract_combinational_cones() every step
     cached_cone_count: usize,
+    // PERF: Clock signal offset in input buffer for batched kernel
+    clock_signal_offset: usize,
 }
 
 impl GpuRuntime {
@@ -56,9 +60,11 @@ impl GpuRuntime {
             shadow_register_buffer: None,
             signal_buffer: None,
             output_buffer: None,
+            params_buffer: None,
             current_cycle: 0,
             clock_manager: ClockManager::new(),
             cached_cone_count: 0,
+            clock_signal_offset: 0,
         })
     }
 
@@ -781,8 +787,38 @@ impl SimulationRuntime for GpuRuntime {
             self.pipelines.insert("sequential".to_string(), pipeline);
         }
 
+        // PERF: Compile batched simulation kernel for multi-cycle execution
+        // Compile batched simulation kernel for multi-cycle execution
+        match self.compile_shader(&shader_source, "batched_simulation") {
+            Ok(pipeline) => {
+                self.pipelines.insert("batched".to_string(), pipeline);
+            }
+            Err(_e) => {
+                // Continue without batched kernel - will fall back to step mode
+            }
+        }
+
+        // Find clock signal offset in input buffer
+        // Look for the first clock signal (registered in clock_manager)
+        let mut clock_offset = 0usize;
+        for input in &module.inputs {
+            if self.clock_manager.clocks.contains_key(&input.name) {
+                self.clock_signal_offset = clock_offset;
+                break;
+            }
+            // Advance offset by input width (in u32 words)
+            clock_offset += (input.width + 31) / 32;
+        }
+
         // Allocate GPU buffers
         self.allocate_buffers(module)?;
+
+        // Allocate params buffer for batched kernel (2 u32: num_cycles, clock_offset)
+        self.params_buffer = Some(
+            self.device
+                .device
+                .new_buffer(8, MTLResourceOptions::StorageModeShared),
+        );
 
         Ok(())
     }
@@ -1049,5 +1085,80 @@ impl SimulationRuntime for GpuRuntime {
             "Output {} not found",
             name
         )))
+    }
+}
+
+// PERF: Batched simulation methods (not part of SimulationRuntime trait)
+impl GpuRuntime {
+    /// Run multiple cycles in a single GPU dispatch for massive speedup
+    /// This bypasses per-cycle CPU<->GPU synchronization overhead
+    pub async fn run_batched(&mut self, cycles: u64) -> SimulationResult<SimulationState> {
+        if let Some(pipeline) = self.pipelines.get("batched") {
+            // Set up params buffer with cycle count and clock offset
+            if let Some(params_buffer) = &self.params_buffer {
+                let params_ptr = params_buffer.contents() as *mut u32;
+                unsafe {
+                    *params_ptr = cycles as u32;
+                    *params_ptr.add(1) = self.clock_signal_offset as u32;
+                }
+            }
+
+            // Set clock high in input buffer (batched kernel handles toggling internally)
+            if let Some(input_buffer) = &self.input_buffer {
+                let input_ptr = input_buffer.contents() as *mut u32;
+                unsafe {
+                    *input_ptr.add(self.clock_signal_offset) = 1;
+                }
+            }
+
+            // Single GPU dispatch for all cycles
+            let command_buffer = self.device.command_queue.new_command_buffer();
+            let encoder = command_buffer.new_compute_command_encoder();
+
+            encoder.set_compute_pipeline_state(pipeline);
+
+            // Set buffers
+            if let Some(input_buffer) = &self.input_buffer {
+                encoder.set_buffer(0, Some(input_buffer), 0);
+            }
+            if let Some(register_buffer) = &self.register_buffer {
+                encoder.set_buffer(1, Some(register_buffer), 0);
+            }
+            if let Some(signal_buffer) = &self.signal_buffer {
+                encoder.set_buffer(2, Some(signal_buffer), 0);
+            }
+            if let Some(params_buffer) = &self.params_buffer {
+                encoder.set_buffer(3, Some(params_buffer), 0);
+            }
+
+            // Single thread does all the work
+            let thread_groups = metal::MTLSize {
+                width: 1,
+                height: 1,
+                depth: 1,
+            };
+            let threads_per_group = metal::MTLSize {
+                width: 1,
+                height: 1,
+                depth: 1,
+            };
+
+            encoder.dispatch_thread_groups(thread_groups, threads_per_group);
+            encoder.end_encoding();
+
+            command_buffer.commit();
+            command_buffer.wait_until_completed();
+
+            // Update cycle counter
+            self.current_cycle += cycles;
+
+            // Capture outputs
+            self.capture_outputs()?;
+        } else {
+            // No batched pipeline - fall back to step mode
+            // This shouldn't happen in normal operation
+        }
+
+        Ok(self.extract_state())
     }
 }
