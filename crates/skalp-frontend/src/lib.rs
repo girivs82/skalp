@@ -715,6 +715,73 @@ fn remap_expr_ports(
                 result_expr: Box::new(new_result),
             }
         }
+        // BUG #223 FIX: Handle Cast expressions (e.g., current_magnitude as nat[16])
+        // Without this, port IDs inside cast expressions are NOT remapped,
+        // causing incorrect port bindings in submodule instances.
+        hir::HirExpression::Cast(cast_expr) => {
+            let new_inner = remap_expr_ports(&cast_expr.expr, port_id_map);
+            hir::HirExpression::Cast(hir::HirCastExpr {
+                expr: Box::new(new_inner),
+                target_type: cast_expr.target_type.clone(),
+            })
+        }
+        // BUG #223 FIX: Handle Match expressions
+        // Match arms may contain expressions with port references
+        hir::HirExpression::Match(match_expr) => {
+            let new_scrutinee = remap_expr_ports(&match_expr.expr, port_id_map);
+            let new_arms = match_expr
+                .arms
+                .iter()
+                .map(|arm| hir::HirMatchArmExpr {
+                    pattern: arm.pattern.clone(),
+                    guard: arm.guard.as_ref().map(|g| remap_expr_ports(g, port_id_map)),
+                    expr: remap_expr_ports(&arm.expr, port_id_map),
+                })
+                .collect();
+            hir::HirExpression::Match(hir::HirMatchExpr {
+                expr: Box::new(new_scrutinee),
+                arms: new_arms,
+                mux_style: match_expr.mux_style.clone(),
+            })
+        }
+        // BUG #223 FIX: Handle StructLiteral expressions
+        // Struct fields may contain expressions with port references
+        hir::HirExpression::StructLiteral(struct_lit) => {
+            let new_fields = struct_lit
+                .fields
+                .iter()
+                .map(|field| hir::HirStructFieldInit {
+                    name: field.name.clone(),
+                    value: remap_expr_ports(&field.value, port_id_map),
+                })
+                .collect();
+            let new_generic_args = struct_lit
+                .generic_args
+                .iter()
+                .map(|arg| remap_expr_ports(arg, port_id_map))
+                .collect();
+            hir::HirExpression::StructLiteral(hir::HirStructLiteral {
+                type_name: struct_lit.type_name.clone(),
+                fields: new_fields,
+                generic_args: new_generic_args,
+            })
+        }
+        // BUG #223 FIX: Handle TupleLiteral expressions
+        hir::HirExpression::TupleLiteral(elements) => {
+            let new_elements = elements
+                .iter()
+                .map(|e| remap_expr_ports(e, port_id_map))
+                .collect();
+            hir::HirExpression::TupleLiteral(new_elements)
+        }
+        // BUG #223 FIX: Handle ArrayLiteral expressions
+        hir::HirExpression::ArrayLiteral(elements) => {
+            let new_elements = elements
+                .iter()
+                .map(|e| remap_expr_ports(e, port_id_map))
+                .collect();
+            hir::HirExpression::ArrayLiteral(new_elements)
+        }
         _ => expr.clone(),
     }
 }

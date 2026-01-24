@@ -2195,6 +2195,79 @@ impl<'a> MirToSirConverter<'a> {
         result
     }
 
+    /// BUG #222 FIX: Synthesize conditional assignment with an explicit default value
+    /// This is used when a direct assignment precedes the conditional in the same branch.
+    fn synthesize_conditional_assignment_with_default(
+        &mut self,
+        if_stmt: &IfStatement,
+        target: &str,
+        default_value: Option<usize>,
+    ) -> usize {
+        println!(
+            "      🔨 SYNTHESIZE_CONDITIONAL_ASSIGNMENT_WITH_DEFAULT: target={}, default={:?}",
+            target, default_value
+        );
+        let mut cases = Vec::new();
+
+        // Process then branch with local context
+        let then_value =
+            self.process_branch_with_dependencies(&if_stmt.then_block.statements, target);
+        println!("         DEBUG: then_value = {:?}", then_value);
+        let else_value = if let Some(else_block) = &if_stmt.else_block {
+            let result = self.process_branch_with_dependencies(&else_block.statements, target);
+            println!("         DEBUG: else_value = {:?}", result);
+            result
+        } else {
+            println!("         DEBUG: no else block");
+            None
+        };
+
+        // BUG #222 FIX: Use provided default when neither branch assigns
+        let keep_value = match default_value {
+            Some(default) => {
+                println!("         📝 BUG #222: Using provided default node_{}", default);
+                default
+            }
+            None => self.create_signal_ref(target),
+        };
+
+        // Build cases based on what we found
+        match (then_value, else_value) {
+            (Some(then_val), Some(else_val)) => {
+                // Both branches assign: create proper mux
+                let condition = self.create_expression_node(&if_stmt.condition);
+                cases.push((condition, then_val));
+                cases.push((0, else_val));
+            }
+            (Some(then_val), None) => {
+                // Only then assigns: mux(cond, then_val, keep_current or default)
+                let condition = self.create_expression_node(&if_stmt.condition);
+                cases.push((condition, then_val));
+                cases.push((0, keep_value));
+            }
+            (None, Some(else_val)) => {
+                // Only else assigns: mux(cond, keep_current or default, else_val)
+                let condition = self.create_expression_node(&if_stmt.condition);
+                cases.push((condition, keep_value));
+                cases.push((0, else_val));
+            }
+            (None, None) => {
+                // Neither assigns: return the default/keep value
+                println!("         ❌ No assignment to {} in either branch, using default", target);
+                return keep_value;
+            }
+        }
+
+        // Build priority-encoded mux tree
+        let result = if cases.is_empty() {
+            keep_value
+        } else {
+            self.build_priority_mux(&cases, target)
+        };
+        println!("         ➡️ RESULT (with default): node_{}", result);
+        result
+    }
+
     /// Synthesize a mux tree for a specific target within a case statement
     /// BUG #117r FIX: Handles match statements for state machine transitions
     fn synthesize_case_for_target(
@@ -2317,6 +2390,93 @@ impl<'a> MirToSirConverter<'a> {
         Some(current_mux)
     }
 
+    /// BUG #222 FIX: Synthesize case with an explicit default value
+    /// This is used when a direct assignment precedes the case statement.
+    fn synthesize_case_for_target_with_default(
+        &mut self,
+        case_stmt: &skalp_mir::CaseStatement,
+        target: &str,
+        default_value: Option<usize>,
+    ) -> Option<usize> {
+        println!(
+            "      🎯 SYNTHESIZE_CASE_FOR_TARGET_WITH_DEFAULT: target={}, default={:?}, {} items",
+            target, default_value, case_stmt.items.len()
+        );
+
+        // Create expression node for the case expression (e.g., state_reg)
+        let case_expr_node = self.create_expression_node(&case_stmt.expr);
+
+        // Collect values and expressions for this target from all case arms
+        let mut case_arms: Vec<(Vec<&Expression>, Option<usize>)> = Vec::new();
+        let mut found_target = false;
+
+        for item in case_stmt.items.iter() {
+            // BUG #222 FIX: Use find_target_in_block_with_default to properly handle nested conditionals
+            let arm_value = self.find_target_in_block(&item.block.statements, target);
+            if arm_value.is_some() {
+                found_target = true;
+            }
+            case_arms.push((item.values.iter().collect(), arm_value));
+        }
+
+        // Get default block value
+        let default_block_value = if let Some(default_block) = &case_stmt.default {
+            let val = self.find_target_in_block(&default_block.statements, target);
+            if val.is_some() {
+                found_target = true;
+            }
+            val
+        } else {
+            None
+        };
+
+        // If no arm assigns to this target, return None
+        if !found_target {
+            println!("         ❌ No case arm assigns to {}", target);
+            return None;
+        }
+
+        // BUG #222 FIX: Use provided default, or the default block value, or signal ref
+        let mut current_mux = match (default_block_value, default_value) {
+            (Some(block_val), _) => block_val,  // Default block has assignment
+            (None, Some(provided_default)) => provided_default,  // Use provided default
+            (None, None) => self.create_signal_ref(target),  // Keep current value
+        };
+
+        // Build mux chain from last case to first (so first has priority)
+        for (values, arm_value) in case_arms.iter().rev() {
+            let value_node = match arm_value {
+                Some(val) => *val,
+                None => current_mux,
+            };
+
+            if values.is_empty() {
+                continue;
+            }
+
+            let condition_node = if values.len() == 1 {
+                let val_node = self.create_expression_node(values[0]);
+                self.create_binary_op_node(&skalp_mir::BinaryOp::Equal, case_expr_node, val_node)
+            } else {
+                let mut or_node = {
+                    let val_node = self.create_expression_node(values[0]);
+                    self.create_binary_op_node(&skalp_mir::BinaryOp::Equal, case_expr_node, val_node)
+                };
+                for value in &values[1..] {
+                    let val_node = self.create_expression_node(value);
+                    let eq_node = self.create_binary_op_node(&skalp_mir::BinaryOp::Equal, case_expr_node, val_node);
+                    or_node = self.create_binary_op_node(&skalp_mir::BinaryOp::Or, or_node, eq_node);
+                }
+                or_node
+            };
+
+            current_mux = self.create_mux_node(condition_node, value_node, current_mux);
+        }
+
+        println!("         ✅ Built mux tree (with default) node_{}", current_mux);
+        Some(current_mux)
+    }
+
     /// Find assignment to a specific target in a block
     fn find_target_in_block(&mut self, statements: &[Statement], target: &str) -> Option<usize> {
         println!("         🔎 find_target_in_block: looking for '{}' in {} statements", target, statements.len());
@@ -2378,28 +2538,41 @@ impl<'a> MirToSirConverter<'a> {
         statements: &[Statement],
         target: &str,
     ) -> Option<usize> {
-        // CRITICAL: In sequential blocks (non-blocking assignments), all RHS values
-        // are sampled at the beginning of the clock cycle. We should NOT track
-        // intermediate computed values in a local context.
+        // BUG #222 FIX: Sequential assignment order handling
+        //
+        // In sequential blocks (on clk.rise), the semantics are:
+        // 1. All RHS values are sampled at the beginning of the clock cycle
+        // 2. Later assignments OVERRIDE earlier ones (last-write-wins)
+        //
+        // Example:
+        //   state_timer = state_timer + 1  // Default: increment
+        //   if enable && !fault {
+        //       state_timer = 0            // Override: reset when condition met
+        //   }
+        //
+        // Should produce: (enable && !fault) ? 0 : (state_timer + 1)
+        //
+        // The fix: Track a "current default" value. When we see conditional
+        // statements that might override, build muxes that use the default
+        // when conditions aren't met.
 
-        // Process ALL statements and collect results from nested ifs.
-        // For multiple independent ifs, we need to combine them properly:
-        // - Each nested if may or may not assign to our target
-        // - We need to merge all nested ifs that DO assign to target into a priority chain
-        // - Later statements override earlier ones (sequential semantics)
-
-        let mut nested_if_results = Vec::new();
+        let mut current_default: Option<usize> = None;
+        let mut conditional_results = Vec::new();
 
         for stmt in statements {
             match stmt {
                 Statement::Assignment(assign) => {
                     let assign_target = self.lvalue_to_string(&assign.lhs);
 
-                    // If this is a direct assignment to our target, it overrides everything
+                    // BUG #222 FIX: Direct assignment sets the default, but DON'T return early!
+                    // Later conditionals can still override this.
                     if assign_target == target {
                         let value = self.create_expression_node(&assign.rhs);
-                        // Clear previous nested ifs and return this direct assignment
-                        return Some(value);
+                        println!(
+                            "         📝 BUG #222 FIX: Direct assignment to '{}' sets default to node_{}",
+                            target, value
+                        );
+                        current_default = Some(value);
                     }
                 }
                 Statement::If(nested_if) => {
@@ -2408,8 +2581,13 @@ impl<'a> MirToSirConverter<'a> {
                         "         🔁 NESTED IF found in branch for target={}",
                         target
                     );
-                    let nested_result = self.synthesize_conditional_assignment(nested_if, target);
-                    nested_if_results.push(nested_result);
+                    // BUG #222 FIX: Pass current_default to use as the "keep" value
+                    let nested_result = self.synthesize_conditional_assignment_with_default(
+                        nested_if,
+                        target,
+                        current_default,
+                    );
+                    conditional_results.push(nested_result);
                 }
                 Statement::Block(block) => {
                     // CRITICAL FIX: Recurse into nested blocks (same bug as Bug #19)
@@ -2421,7 +2599,8 @@ impl<'a> MirToSirConverter<'a> {
                     if let Some(result) =
                         self.process_branch_with_dependencies(&block.statements, target)
                     {
-                        return Some(result);
+                        // BUG #222 FIX: Don't return early - update current_default instead
+                        current_default = Some(result);
                     }
                 }
                 Statement::Case(case_stmt) => {
@@ -2430,24 +2609,28 @@ impl<'a> MirToSirConverter<'a> {
                         "         📋 CASE found in branch for target={}, synthesizing...",
                         target
                     );
-                    if let Some(result) = self.synthesize_case_for_target(case_stmt, target) {
-                        // Case statement assigned to target - return this result
-                        return Some(result);
+                    // BUG #222 FIX: Pass current_default to case synthesis
+                    if let Some(result) = self.synthesize_case_for_target_with_default(
+                        case_stmt,
+                        target,
+                        current_default,
+                    ) {
+                        // Case statement assigned to target - use as new result
+                        conditional_results.push(result);
                     }
                 }
                 _ => {}
             }
         }
 
-        // Now we have all nested if results. We need to combine them.
-        // Each nested_if_result is already a full mux tree for that if statement.
-        // However, if a nested if doesn't assign to our target, it returns a SignalRef
-        // that just keeps the current value. We need to skip those and find the one
-        // that actually assigns.
-        //
-        // Filter out "keep value" signal refs by checking if the node is a SignalRef to target.
-        // Then use the last remaining result (sequential override semantics).
-        let meaningful_results: Vec<usize> = nested_if_results.into_iter()
+        // BUG #222 FIX: Combine all results
+        // - If we have conditional results, use the last one (which should have incorporated
+        //   the default as its "keep" value)
+        // - Otherwise, use the direct assignment default
+        // - If neither, return None (no assignment to target in this branch)
+
+        // Filter out "keep value" signal refs (conditions that don't actually assign)
+        let meaningful_results: Vec<usize> = conditional_results.into_iter()
             .filter(|&node_id| {
                 // Check if this node is just a SignalRef to our target
                 let is_keep_value = self.sir.combinational_nodes.iter().any(|n| {
@@ -2457,11 +2640,14 @@ impl<'a> MirToSirConverter<'a> {
             })
             .collect();
 
-        if meaningful_results.is_empty() {
-            None
-        } else {
-            // Use the last meaningful result (latest if statement that assigns)
+        if !meaningful_results.is_empty() {
+            // Use the last meaningful conditional result (which incorporates the default)
             Some(*meaningful_results.last().unwrap())
+        } else if current_default.is_some() {
+            // No conditionals modified target, but we had a direct assignment
+            current_default
+        } else {
+            None
         }
     }
 
@@ -3222,15 +3408,68 @@ impl<'a> MirToSirConverter<'a> {
                 // BUG FIX #92: create_slice_node expects (high, low) for HDL [high:low] notation
                 self.create_slice_node(base_node, high_bit, low_bit)
             }
-            ExpressionKind::FieldAccess {
-                base,
-                field: _field,
-            } => {
-                // For named field access, fall back to base expression
-                println!(
-                    "    ⚠️ FieldAccess on field '{}' - falling back to base",
-                    _field
-                );
+            ExpressionKind::FieldAccess { base, field } => {
+                // BUG #220 FIX: Properly resolve FieldAccess to flattened signal names
+                // Walk up the FieldAccess chain to find root and build field path
+                let mut field_path = vec![field.clone()];
+                let mut current_base = base.as_ref();
+
+                loop {
+                    match &current_base.kind {
+                        ExpressionKind::FieldAccess {
+                            base: inner_base,
+                            field: inner_field,
+                        } => {
+                            field_path.insert(0, inner_field.clone());
+                            current_base = inner_base.as_ref();
+                        }
+                        ExpressionKind::Ref(lvalue) => {
+                            // Found the root - construct the flattened signal name
+                            let root_name = match lvalue {
+                                LValue::Signal(sig_id) => {
+                                    self.mir.signals.iter().find(|s| s.id == *sig_id).map(|s| s.name.clone())
+                                }
+                                LValue::Port(port_id) => {
+                                    self.mir.ports.iter().find(|p| p.id == *port_id).map(|p| p.name.clone())
+                                }
+                                LValue::Variable(var_id) => {
+                                    self.mir.variables.iter().find(|v| v.id == *var_id).map(|v| {
+                                        // Variables use unique naming: name_id
+                                        format!("{}_{}", v.name, v.id.0)
+                                    })
+                                }
+                                _ => None,
+                            };
+
+                            if let Some(root) = root_name {
+                                // Build flattened name: root__field1__field2...
+                                let flattened_name = format!("{}__{}", root, field_path.join("__"));
+
+                                // Look up the flattened signal
+                                if let Some(internal_name) = self.mir_to_internal_name.get(&flattened_name).cloned() {
+                                    return self.get_or_create_signal_driver(&internal_name);
+                                }
+
+                                // Try with single underscore (some flattening uses _ instead of __)
+                                let flattened_name_single = format!("{}_{}", root, field_path.join("_"));
+                                if let Some(internal_name) = self.mir_to_internal_name.get(&flattened_name_single).cloned() {
+                                    return self.get_or_create_signal_driver(&internal_name);
+                                }
+
+                                // Try looking in MIR signals directly for flattened names
+                                for signal in &self.mir.signals {
+                                    if signal.name == flattened_name || signal.name == flattened_name_single {
+                                        return self.get_or_create_signal_driver(&signal.name);
+                                    }
+                                }
+                            }
+                            break;
+                        }
+                        _ => break,
+                    }
+                }
+
+                // Fallback: just use the base expression
                 self.create_expression_node_with_width(base, target_width)
             }
             _ => {
@@ -3356,6 +3595,9 @@ impl<'a> MirToSirConverter<'a> {
             LValue::Signal(sig_id) => {
                 // First try to find signal in current (top-level) module
                 if let Some(signal) = self.mir.signals.iter().find(|s| s.id == *sig_id) {
+                    // BUG #220 DEBUG: Trace signal reference resolution
+                    eprintln!("🔍🔍🔍 LVALUE_REF: Signal({}) -> '{}' in module '{}'",
+                        sig_id.0, signal.name, self.mir.name);
                     // Pass MIR name - get_or_create_signal_driver will translate to internal name
                     return self.get_or_create_signal_driver(&signal.name);
                 }
@@ -5972,25 +6214,30 @@ impl<'a> MirToSirConverter<'a> {
             // CRITICAL FIX for Bug #8: If this port was flattened from a struct/array,
             // we need to also add mappings for all the flattened field ports.
             // Example: "wr_data" → write_vertex becomes:
-            //   "wr_data_x" → write_vertex_x
-            //   "wr_data_y" → write_vertex_y
-            //   "wr_data_z" → write_vertex_z
+            //   "wr_data__x" → write_vertex__x
+            //   "wr_data__y" → write_vertex__y
+            //   "wr_data__z" → write_vertex__z
             //
-            // Find all child ports that start with port_name_ (flattened variants)
-            let port_prefix = format!("{}_", port_name);
+            // Find all child ports that start with port_name__ (flattened variants)
+            // BUG #XXX FIX: MIR uses DOUBLE underscores for struct field flattening
+            let port_prefix_double = format!("{}_", port_name); // Try single first for backward compat
+            let port_prefix_single = format!("{}__", port_name); // Double underscore is standard
             let port_names: Vec<_> = child_module.ports.iter().map(|p| p.name.as_str()).collect();
             println!(
-                "   🔎 Checking for flattened ports with prefix '{}' in child_module '{}' ({} ports: {:?})",
-                port_prefix, child_module.name, child_module.ports.len(), port_names
+                "   🔎 Checking for flattened ports with prefix '{}' or '{}' in child_module '{}' ({} ports: {:?})",
+                port_prefix_single, port_prefix_double, child_module.name, child_module.ports.len(), port_names
             );
             for child_port in &child_module.ports {
-                println!("      Port: '{}' (starts_with_prefix={})", child_port.name, child_port.name.starts_with(&port_prefix));
-                if child_port.name.starts_with(&port_prefix) {
+                let matches_single = child_port.name.starts_with(&port_prefix_single);
+                let matches_double = child_port.name.starts_with(&port_prefix_double);
+                println!("      Port: '{}' (matches_single={}, matches_double={})", child_port.name, matches_single, matches_double);
+                if matches_single || matches_double {
                     println!("      ✅ MATCHES PREFIX!");
 
-                    // This is a flattened field port like "wr_data_x"
-                    // Get the suffix (e.g., "x" from "wr_data_x")
-                    let suffix = &child_port.name[port_prefix.len()..];
+                    // This is a flattened field port like "wr_data__x"
+                    // Get the suffix (e.g., "x" from "wr_data__x")
+                    let prefix_len = if matches_double { port_prefix_double.len() } else { port_prefix_single.len() };
+                    let suffix = &child_port.name[prefix_len..];
 
                     // Create corresponding parent signal name
                     // If parent_expr is a Ref to a signal/port, create Ref to signal_suffix
@@ -6026,18 +6273,19 @@ impl<'a> MirToSirConverter<'a> {
                                         // Parent is already flattened - replace the field
                                         println!("         Parent ALREADY flattened with base '{}', idx '{}', field '{}', replacing with '{}'", base, idx, current_field, suffix);
                                         // Reconstruct with new field
+                                        // BUG FIX: Use double underscore for struct field flattening
                                         if idx.is_empty() {
-                                            format!("{}_{}", base, suffix)
+                                            format!("{}__{}", base, suffix)
                                         } else {
-                                            format!("{}_{}_{}", base, idx, suffix)
+                                            format!("{}__{}_{}", base, idx, suffix)
                                         }
                                     } else {
-                                        // Not flattened - append suffix
-                                        format!("{}_{}", parent_sig.name, suffix)
+                                        // Not flattened - append suffix with double underscore
+                                        format!("{}__{}", parent_sig.name, suffix)
                                     }
                                 } else {
-                                    // Not a flattened name - append suffix
-                                    format!("{}_{}", parent_sig.name, suffix)
+                                    // Not a flattened name - append suffix with double underscore
+                                    format!("{}__{}", parent_sig.name, suffix)
                                 };
 
                                 println!(
@@ -7256,21 +7504,35 @@ impl<'a> MirToSirConverter<'a> {
                     // the base signal name.
                     LValue::Port(port_id) => {
                         println!(
-                            "🎨🎨🎨   -> LValue::Port({}), checking port_mapping",
-                            port_id.0
+                            "🎨🎨🎨   -> LValue::Port({}), checking port_mapping in child_module='{}' (has {} ports)",
+                            port_id.0, child_module.name, child_module.ports.len()
                         );
+
+                        // BUG #223 DEBUG: Print all ports in child_module for debugging
+                        if child_module.name.contains("Comparator") || child_module.name.contains("Threshold") {
+                            println!("🔍🔍🔍 BUG #223 DEBUG: All ports in '{}':", child_module.name);
+                            for (i, p) in child_module.ports.iter().enumerate() {
+                                println!("🔍🔍🔍    [{}] id={} name='{}'", i, p.id.0, p.name);
+                            }
+                        }
 
                         // Look up the port name in child_module
                         let port_name = if let Some(port) =
                             child_module.ports.iter().find(|p| p.id == *port_id)
                         {
+                            println!("🎨🎨🎨   -> Found port by ID: id={} name='{}'", port.id.0, port.name);
                             Some(port.name.clone())
                         } else {
                             // Try by index (BUG #24 fallback)
                             let port_index = port_id.0 as usize;
+                            println!("🎨🎨🎨   -> ⚠️ Port ID {} NOT FOUND by id, falling back to index={}", port_id.0, port_index);
                             if port_index < child_module.ports.len() {
+                                let fallback_port = &child_module.ports[port_index];
+                                println!("🎨🎨🎨   -> ⚠️ BUG #24 FALLBACK: Using ports[{}].name='{}' (actual id={})",
+                                    port_index, fallback_port.name, fallback_port.id.0);
                                 Some(child_module.ports[port_index].name.clone())
                             } else {
+                                println!("🎨🎨🎨   -> ❌ Index {} out of bounds (len={})", port_index, child_module.ports.len());
                                 None
                             }
                         };
@@ -7999,9 +8261,20 @@ impl<'a> MirToSirConverter<'a> {
                     }
                 } else {
                     println!(
-                        "🔌🔌🔌 PORT LOOKUP: Port id={} NOT FOUND by direct lookup, trying index",
-                        port_id.0
+                        "🔌🔌🔌 PORT LOOKUP: Port id={} NOT FOUND by direct lookup in module '{}' (has {} ports)",
+                        port_id.0, child_module.name, child_module.ports.len()
                     );
+                    // BUG #223 DEBUG: Print all actual port IDs in the module
+                    println!("🔌🔌🔌 BUG #223 DEBUG: All ports in '{}':", child_module.name);
+                    for (i, p) in child_module.ports.iter().enumerate() {
+                        println!("🔌🔌🔌    [{}] id={} name='{}'", i, p.id.0, p.name);
+                    }
+
+                    // BUG #223 FIX: Try to find port by scanning for any port that could match
+                    // If the port_id is much larger than the number of ports, the old index fallback won't work.
+                    // Instead, try to use the port_mapping keys to guide the lookup.
+                    // This is a workaround for port ID renumbering during specialization.
+
                     // BUG#24 FIX: Port IDs get renumbered during monomorphization, but MIR Process
                     // objects still reference the original IDs. Fall back to using port ID value
                     // as an index, since ports remain in the same order after specialization.

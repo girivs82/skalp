@@ -1774,7 +1774,144 @@ impl<'hir> MonomorphizationEngine<'hir> {
                     value: Box::new(new_value),
                 }
             }
+            // BUG #223 FIX: Handle Cast expressions (e.g., current_magnitude as nat[16])
+            // Without this, port IDs inside cast expressions are NOT remapped,
+            // causing incorrect port bindings in submodule instances.
+            HirExpression::Cast(cast_expr) => {
+                let new_inner = self.remap_expr_ports(&cast_expr.expr, port_id_map);
+                HirExpression::Cast(crate::hir::HirCastExpr {
+                    expr: Box::new(new_inner),
+                    target_type: cast_expr.target_type.clone(),
+                })
+            }
+            // BUG #223 FIX: Handle Match expressions
+            HirExpression::Match(match_expr) => {
+                let new_scrutinee = self.remap_expr_ports(&match_expr.expr, port_id_map);
+                let new_arms = match_expr
+                    .arms
+                    .iter()
+                    .map(|arm| crate::hir::HirMatchArmExpr {
+                        pattern: arm.pattern.clone(),
+                        guard: arm.guard.as_ref().map(|g| self.remap_expr_ports(g, port_id_map)),
+                        expr: self.remap_expr_ports(&arm.expr, port_id_map),
+                    })
+                    .collect();
+                HirExpression::Match(crate::hir::HirMatchExpr {
+                    expr: Box::new(new_scrutinee),
+                    arms: new_arms,
+                    mux_style: match_expr.mux_style.clone(),
+                })
+            }
+            // BUG #223 FIX: Handle StructLiteral expressions
+            HirExpression::StructLiteral(struct_lit) => {
+                let new_fields = struct_lit
+                    .fields
+                    .iter()
+                    .map(|field| crate::hir::HirStructFieldInit {
+                        name: field.name.clone(),
+                        value: self.remap_expr_ports(&field.value, port_id_map),
+                    })
+                    .collect();
+                let new_generic_args = struct_lit
+                    .generic_args
+                    .iter()
+                    .map(|arg| self.remap_expr_ports(arg, port_id_map))
+                    .collect();
+                HirExpression::StructLiteral(crate::hir::HirStructLiteral {
+                    type_name: struct_lit.type_name.clone(),
+                    fields: new_fields,
+                    generic_args: new_generic_args,
+                })
+            }
+            // BUG #223 FIX: Handle TupleLiteral expressions
+            HirExpression::TupleLiteral(elements) => {
+                let new_elements = elements
+                    .iter()
+                    .map(|e| self.remap_expr_ports(e, port_id_map))
+                    .collect();
+                HirExpression::TupleLiteral(new_elements)
+            }
+            // BUG #223 FIX: Handle ArrayLiteral expressions
+            HirExpression::ArrayLiteral(elements) => {
+                let new_elements = elements
+                    .iter()
+                    .map(|e| self.remap_expr_ports(e, port_id_map))
+                    .collect();
+                HirExpression::ArrayLiteral(new_elements)
+            }
+            // BUG #223 FIX: Handle Block expressions
+            HirExpression::Block {
+                statements,
+                result_expr,
+            } => {
+                let new_statements = statements
+                    .iter()
+                    .map(|s| self.remap_statement_ports(s, port_id_map))
+                    .collect();
+                let new_result = self.remap_expr_ports(result_expr, port_id_map);
+                HirExpression::Block {
+                    statements: new_statements,
+                    result_expr: Box::new(new_result),
+                }
+            }
             _ => expr.clone(),
+        }
+    }
+
+    /// Remap port IDs in a statement (helper for Block expression handling)
+    fn remap_statement_ports(
+        &self,
+        stmt: &crate::hir::HirStatement,
+        port_id_map: &IndexMap<crate::hir::PortId, crate::hir::PortId>,
+    ) -> crate::hir::HirStatement {
+        use crate::hir::HirStatement;
+        match stmt {
+            HirStatement::Assignment(assign) => {
+                let mut new_assign = assign.clone();
+                new_assign.lhs = self.remap_lvalue_ports(&assign.lhs, port_id_map);
+                new_assign.rhs = self.remap_expr_ports(&assign.rhs, port_id_map);
+                HirStatement::Assignment(new_assign)
+            }
+            HirStatement::If(if_stmt) => {
+                let mut new_if = if_stmt.clone();
+                new_if.condition = self.remap_expr_ports(&if_stmt.condition, port_id_map);
+                new_if.then_statements = if_stmt
+                    .then_statements
+                    .iter()
+                    .map(|s| self.remap_statement_ports(s, port_id_map))
+                    .collect();
+                new_if.else_statements = if_stmt.else_statements.as_ref().map(|stmts| {
+                    stmts
+                        .iter()
+                        .map(|s| self.remap_statement_ports(s, port_id_map))
+                        .collect()
+                });
+                HirStatement::If(new_if)
+            }
+            HirStatement::Match(match_stmt) => {
+                let mut new_match = match_stmt.clone();
+                new_match.expr = self.remap_expr_ports(&match_stmt.expr, port_id_map);
+                new_match.arms = match_stmt
+                    .arms
+                    .iter()
+                    .map(|arm| {
+                        let mut new_arm = arm.clone();
+                        new_arm.statements = arm
+                            .statements
+                            .iter()
+                            .map(|s| self.remap_statement_ports(s, port_id_map))
+                            .collect();
+                        new_arm
+                    })
+                    .collect();
+                HirStatement::Match(new_match)
+            }
+            HirStatement::Let(let_stmt) => {
+                let mut new_let = let_stmt.clone();
+                new_let.value = self.remap_expr_ports(&let_stmt.value, port_id_map);
+                HirStatement::Let(new_let)
+            }
+            _ => stmt.clone(),
         }
     }
 
