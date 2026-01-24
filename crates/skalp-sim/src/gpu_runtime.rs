@@ -39,6 +39,8 @@ pub struct GpuRuntime {
     output_buffer: Option<Buffer>, // Stores outputs from BEFORE sequential update
     current_cycle: u64,
     clock_manager: ClockManager,
+    // PERF: Cache cone count to avoid expensive extract_combinational_cones() every step
+    cached_cone_count: usize,
 }
 
 impl GpuRuntime {
@@ -56,6 +58,7 @@ impl GpuRuntime {
             output_buffer: None,
             current_cycle: 0,
             clock_manager: ClockManager::new(),
+            cached_cone_count: 0,
         })
     }
 
@@ -453,23 +456,20 @@ impl GpuRuntime {
     }
 
     async fn execute_combinational(&mut self) -> Result<(), SimulationError> {
-        // Get the number of combinational cones from the module
-        let cone_count = if let Some(module) = &self.module {
-            let cones = module.extract_combinational_cones();
-            if cones.is_empty() {
-                1
-            } else {
-                cones.len()
-            } // Execute empty kernel if no cones
-        } else {
-            0
-        };
+        // PERF: Use cached cone count instead of expensive extract_combinational_cones()
+        let cone_count = self.cached_cone_count;
+        if cone_count == 0 {
+            return Ok(());
+        }
 
-        // Execute each combinational cone kernel
+        // PERF: Batch all cones into a single command buffer to reduce GPU overhead
+        // Previously each cone had its own command buffer with synchronous wait,
+        // causing ~100 GPU round-trips per step (50 cones × 2 combinational passes)
+        let command_buffer = self.device.command_queue.new_command_buffer();
+
         for i in 0..cone_count {
             let pipeline_name = format!("combinational_{}", i);
             if let Some(pipeline) = self.pipelines.get(&pipeline_name) {
-                let command_buffer = self.device.command_queue.new_command_buffer();
                 let encoder = command_buffer.new_compute_command_encoder();
 
                 encoder.set_compute_pipeline_state(pipeline);
@@ -500,13 +500,12 @@ impl GpuRuntime {
 
                 encoder.dispatch_thread_groups(thread_groups, threads_per_group);
                 encoder.end_encoding();
-
-                command_buffer.commit();
-                command_buffer.wait_until_completed();
             }
         }
 
-        // No debug here - moved to step() function
+        // PERF: Single wait for all cones instead of one per cone
+        command_buffer.commit();
+        command_buffer.wait_until_completed();
 
         Ok(())
     }
@@ -756,8 +755,10 @@ impl SimulationRuntime for GpuRuntime {
             eprintln!("✅ Metal shader written to /tmp/skalp_metal_shader.metal");
         }
 
-        // Get the number of combinational cones
+        // Get the number of combinational cones and cache it
+        // PERF: Only call extract_combinational_cones() once during init, not every step
         let cones = module.extract_combinational_cones();
+        self.cached_cone_count = if cones.is_empty() { 1 } else { cones.len() };
 
         // Compile combinational cone kernels
         if cones.is_empty() {
