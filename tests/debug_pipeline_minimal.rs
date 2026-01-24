@@ -94,12 +94,11 @@ mod minimal_pipeline_tests {
         }
 
         // Release reset and wait for valid bit
-        // With correct execution order (combinational before sequential),
-        // outputs reflect OLD register values, so valid goes high when pipeline_valid WAS 8
-        // The testbench steps twice per test vector, so outputs are checked 2 cycles later
+        // The testbench steps twice per test vector (rising + falling edge).
+        // Counter increments on rising edge, so after 8 non-reset cycles, counter = 8.
+        // After vector 11 (8th non-reset), counter becomes 8, valid = bit[3] = 1.
         for cycle in 4..16 {
-            // pipeline_valid reaches 8 at simulation cycle 23, so valid goes high at cycle 24
-            // testbench cycle 22 runs until cycle 24 after two steps
+            // Counter reaches 8 after 8 non-reset cycles (vector 11), valid goes high
             let expected_valid = if cycle >= 11 { 1 } else { 0 };
             testbench.add_test_vector(
                 TestVectorBuilder::new(cycle * 2)

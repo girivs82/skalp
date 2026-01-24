@@ -6430,6 +6430,8 @@ impl<'a> MirToSirConverter<'a> {
                                 port_mapping,
                                 child_module,
                                 &actual_target,
+                                parent_module_for_signals,
+                                parent_prefix,
                             );
 
                             let node_id = self.node_counter;
@@ -6717,6 +6719,8 @@ impl<'a> MirToSirConverter<'a> {
         port_mapping: &HashMap<String, Expression>,
         child_module: &Module,
         target: &str,
+        parent_module_for_signals: Option<&Module>,
+        parent_prefix: &str,
     ) -> usize {
         // Process all statements to find assignments to target
         for statement in statements {
@@ -6758,11 +6762,13 @@ impl<'a> MirToSirConverter<'a> {
                                         );
 
                                         // Create condition: index_expr == element_idx
-                                        let index_node = self.create_expression_node_for_instance(
+                                        let index_node = self.create_expression_node_for_instance_with_context(
                                             index,
                                             inst_prefix,
                                             port_mapping,
                                             child_module,
+                                            parent_module_for_signals,
+                                            parent_prefix,
                                         );
                                         let const_idx =
                                             self.create_constant_node(element_idx as u64, 32);
@@ -6777,11 +6783,13 @@ impl<'a> MirToSirConverter<'a> {
                                         );
 
                                         // Create value node (RHS)
-                                        let value_node = self.create_expression_node_for_instance(
+                                        let value_node = self.create_expression_node_for_instance_with_context(
                                             &assign.rhs,
                                             inst_prefix,
                                             port_mapping,
                                             child_module,
+                                            parent_module_for_signals,
+                                            parent_prefix,
                                         );
 
                                         // Create current value node (keep current value if condition false)
@@ -6803,11 +6811,13 @@ impl<'a> MirToSirConverter<'a> {
 
                     if lhs == target {
                         // Direct assignment to target - create node for RHS
-                        return self.create_expression_node_for_instance(
+                        return self.create_expression_node_for_instance_with_context(
                             &assign.rhs,
                             inst_prefix,
                             port_mapping,
                             child_module,
+                            parent_module_for_signals,
+                            parent_prefix,
                         );
                     }
                 }
@@ -6819,6 +6829,8 @@ impl<'a> MirToSirConverter<'a> {
                         port_mapping,
                         child_module,
                         target,
+                        parent_module_for_signals,
+                        parent_prefix,
                     );
                 }
                 _ => {}
@@ -6837,6 +6849,8 @@ impl<'a> MirToSirConverter<'a> {
         port_mapping: &HashMap<String, Expression>,
         child_module: &Module,
         target: &str,
+        parent_module_for_signals: Option<&Module>,
+        parent_prefix: &str,
     ) -> usize {
         // Get values from then and else branches
         let then_value = self.find_assignment_in_branch_for_instance(
@@ -6845,6 +6859,8 @@ impl<'a> MirToSirConverter<'a> {
             port_mapping,
             child_module,
             target,
+            parent_module_for_signals,
+            parent_prefix,
         );
 
         let else_value = if let Some(else_block) = &if_stmt.else_block {
@@ -6854,6 +6870,8 @@ impl<'a> MirToSirConverter<'a> {
                 port_mapping,
                 child_module,
                 target,
+                parent_module_for_signals,
+                parent_prefix,
             )
         } else {
             None
@@ -6863,32 +6881,38 @@ impl<'a> MirToSirConverter<'a> {
         match (then_value, else_value) {
             (Some(then_val), Some(else_val)) => {
                 // Both branches assign: mux(cond, then, else)
-                let condition = self.create_expression_node_for_instance(
+                let condition = self.create_expression_node_for_instance_with_context(
                     &if_stmt.condition,
                     inst_prefix,
                     port_mapping,
                     child_module,
+                    parent_module_for_signals,
+                    parent_prefix,
                 );
                 self.create_mux_node(condition, then_val, else_val)
             }
             (Some(then_val), None) => {
                 // Only then assigns: mux(cond, then, keep)
-                let condition = self.create_expression_node_for_instance(
+                let condition = self.create_expression_node_for_instance_with_context(
                     &if_stmt.condition,
                     inst_prefix,
                     port_mapping,
                     child_module,
+                    parent_module_for_signals,
+                    parent_prefix,
                 );
                 let keep_val = self.create_signal_ref(target);
                 self.create_mux_node(condition, then_val, keep_val)
             }
             (None, Some(else_val)) => {
                 // Only else assigns: mux(cond, keep, else)
-                let condition = self.create_expression_node_for_instance(
+                let condition = self.create_expression_node_for_instance_with_context(
                     &if_stmt.condition,
                     inst_prefix,
                     port_mapping,
                     child_module,
+                    parent_module_for_signals,
+                    parent_prefix,
                 );
                 let keep_val = self.create_signal_ref(target);
                 self.create_mux_node(condition, keep_val, else_val)
@@ -6908,6 +6932,8 @@ impl<'a> MirToSirConverter<'a> {
         port_mapping: &HashMap<String, Expression>,
         child_module: &Module,
         target: &str,
+        parent_module_for_signals: Option<&Module>,
+        parent_prefix: &str,
     ) -> Option<usize> {
         for stmt in statements {
             match stmt {
@@ -6954,11 +6980,13 @@ impl<'a> MirToSirConverter<'a> {
 
                         if matches {
                             // Found assignment for this target!
-                            return Some(self.create_expression_node_for_instance(
+                            return Some(self.create_expression_node_for_instance_with_context(
                                 &assign.rhs,
                                 inst_prefix,
                                 port_mapping,
                                 child_module,
+                                parent_module_for_signals,
+                                parent_prefix,
                             ));
                         }
                     }
@@ -6971,6 +6999,8 @@ impl<'a> MirToSirConverter<'a> {
                         port_mapping,
                         child_module,
                         target,
+                        parent_module_for_signals,
+                        parent_prefix,
                     ));
                 }
                 Statement::Block(block) => {
@@ -6981,6 +7011,8 @@ impl<'a> MirToSirConverter<'a> {
                         port_mapping,
                         child_module,
                         target,
+                        parent_module_for_signals,
+                        parent_prefix,
                     ) {
                         return Some(result);
                     }
@@ -7317,9 +7349,6 @@ impl<'a> MirToSirConverter<'a> {
                                     // No parent module - we're at top level, look up in self.mir
                                     // BUG #124: At top level, there's no parent prefix so no stored mapping needed
                                     let top_level_mapping = HashMap::new();
-                                    println!(
-                                        "🎨🎨🎨   -> No parent_module, using self.mir for context"
-                                    );
                                     return self.create_expression_node_for_instance_with_context(
                                         parent_expr,
                                         "", // No instance prefix at top level

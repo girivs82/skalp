@@ -1,6 +1,7 @@
 use crate::clock_manager::ClockManager;
 use crate::simulator::{SimulationConfig, SimulationError, SimulationResult, Simulator};
 use indexmap::IndexMap;
+use skalp_mir::name_registry::NameRegistry;
 use skalp_sir::SirModule;
 use std::time::Duration;
 use tokio::time::timeout;
@@ -34,6 +35,8 @@ pub struct Testbench {
     results: Vec<TestResult>,
     clock_manager: ClockManager,
     auto_clock: bool,
+    /// Name registry for resolving user-facing signal names to internal names
+    name_registry: NameRegistry,
 }
 
 impl Testbench {
@@ -46,7 +49,16 @@ impl Testbench {
             results: Vec::new(),
             clock_manager: ClockManager::new(),
             auto_clock: true, // Enable auto-clocking by default
+            name_registry: NameRegistry::new(),
         })
+    }
+
+    /// Resolve a user-facing signal path to the internal signal name
+    fn resolve_path(&self, path: &str) -> String {
+        self.name_registry
+            .resolve(path)
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| path.to_string())
     }
 
     pub fn with_auto_clock(mut self, enabled: bool) -> Self {
@@ -55,9 +67,26 @@ impl Testbench {
     }
 
     pub async fn load_module(&mut self, module: &SirModule) -> SimulationResult<()> {
+        // Store the name registry for path resolution
+        self.name_registry = module.name_registry.clone();
+
         // Register clocks from the module
+        // Use the name registry to find original names since internal names like "_s0"
+        // don't contain "clk" or "clock"
         for input in &module.inputs {
-            if input.name.contains("clk") || input.name.contains("clock") {
+            // Try to find the original user-facing name for this input
+            let original_name = self.name_registry
+                .reverse_resolve(&input.name)
+                .unwrap_or(&input.name);
+
+            // Check if the original name suggests this is a clock signal
+            let is_clock = original_name.contains("clk")
+                || original_name.contains("clock")
+                || input.name.contains("clk")
+                || input.name.contains("clock");
+
+            if is_clock {
+                // Register using the internal name (used in set_input calls)
                 self.clock_manager.add_clock(input.name.clone(), 10_000); // 10ns period
             }
         }
@@ -110,9 +139,10 @@ impl Testbench {
                 current_cycle += 1;
             }
 
-            // Apply inputs
+            // Apply inputs (resolve user-facing names to internal names)
             for (name, value) in &vector.inputs {
-                self.simulator.set_input(name, value.clone()).await?;
+                let internal_name = self.resolve_path(name);
+                self.simulator.set_input(&internal_name, value.clone()).await?;
             }
 
             // Step twice to ensure clock edge if auto-clocking
@@ -135,12 +165,13 @@ impl Testbench {
                 current_cycle += 1;
             }
 
-            // Check outputs if expected values are provided
+            // Check outputs if expected values are provided (resolve user-facing names)
             if let Some(expected_outputs) = &vector.expected_outputs {
                 let mut mismatches = Vec::new();
 
                 for (name, expected) in expected_outputs {
-                    match self.simulator.get_output(name).await {
+                    let internal_name = self.resolve_path(name);
+                    match self.simulator.get_output(&internal_name).await {
                         Ok(actual) => {
                             if actual != *expected {
                                 mismatches.push(SignalMismatch {

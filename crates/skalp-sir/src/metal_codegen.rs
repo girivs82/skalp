@@ -1003,15 +1003,56 @@ impl<'a> MetalShaderGenerator<'a> {
             "// This makes the kernel idempotent - running it multiple times is safe\n",
         );
 
-        // Add debug to verify kernel execution
-        self.write_indented("// DEBUG: Sequential update kernel executing\n");
-
-        // Save old register values for proper simultaneous update semantics
         // Sort state elements by name for consistent ordering
-        // BUG #182: Now read from current_registers (the frozen pre-edge values)
         let mut sorted_states: Vec<_> = sir.state_elements.iter().collect();
         sorted_states.sort_by_key(|(name, _)| *name);
-        for (state_name, state_elem) in sorted_states {
+
+        // CRITICAL: Initialize next_registers from current_registers
+        // This ensures values are preserved when edge conditions are not met
+        // (e.g., falling edge step for a rising-edge FF)
+        self.write_indented("\n// Initialize next_registers from current (preserve on wrong edge)\n");
+        for (state_name, state_elem) in &sorted_states {
+            let sanitized = self.sanitize_name(state_name);
+            let state_sir_type = self.get_signal_sir_type(sir, state_name);
+            let is_array = matches!(state_sir_type, Some(SirType::Array(_, _)));
+            let is_wide = state_elem.width > 128;
+
+            if is_array {
+                // Array copy
+                if let Some(SirType::Array(elem_type, size)) = state_sir_type {
+                    let elem_width = elem_type.width();
+                    if elem_width > 32 {
+                        let inner_size = elem_width.div_ceil(32);
+                        self.write_indented(&format!(
+                            "for (uint i = 0; i < {}; i++) for (uint j = 0; j < {}; j++) next_registers->{}[i][j] = current_registers->{}[i][j];\n",
+                            size, inner_size, sanitized, sanitized
+                        ));
+                    } else {
+                        self.write_indented(&format!(
+                            "for (uint i = 0; i < {}; i++) next_registers->{}[i] = current_registers->{}[i];\n",
+                            size, sanitized, sanitized
+                        ));
+                    }
+                }
+            } else if is_wide {
+                // Wide register (array of uint)
+                let array_size = state_elem.width.div_ceil(32);
+                self.write_indented(&format!(
+                    "for (uint i = 0; i < {}; i++) next_registers->{}[i] = current_registers->{}[i];\n",
+                    array_size, sanitized, sanitized
+                ));
+            } else {
+                // Scalar register
+                self.write_indented(&format!(
+                    "next_registers->{} = current_registers->{};\n",
+                    sanitized, sanitized
+                ));
+            }
+        }
+
+        // Save old register values for proper simultaneous update semantics
+        self.write_indented("\n// Capture old values for simultaneous update semantics\n");
+        for (state_name, state_elem) in &sorted_states {
             let sanitized = self.sanitize_name(state_name);
 
             // Check if this is an array - arrays don't need old value capture
@@ -1024,8 +1065,6 @@ impl<'a> MetalShaderGenerator<'a> {
                 // Only scalar types (<=128 bits) can use direct initialization
                 // BUG #182 FIX: Read from current_registers (frozen pre-edge values)
                 // BUG #184 FIX: Use uint for <=32 bit signals to match Registers struct alignment
-                // The Registers struct uses force_4byte_align=true which maps all <=32-bit signals
-                // to uint. The old value capture must use the same type to avoid truncation.
                 let base_type = if state_elem.width <= 32 {
                     "uint".to_string()
                 } else {
@@ -1133,13 +1172,21 @@ impl<'a> MetalShaderGenerator<'a> {
             }
         }
 
-        self.write_indented("\n// Main simulation loop\n");
+        // Detect if we have falling edge or DDR flip-flops
+        let has_falling_edge_ffs = sir.sequential_nodes.iter().any(|node| {
+            matches!(&node.kind, SirNodeKind::FlipFlop { clock_edge }
+                if matches!(clock_edge, ClockEdge::Falling | ClockEdge::Both))
+        });
+
+        self.write_indented("\n// Main simulation loop - one iteration = one complete clock cycle\n");
         self.write_indented("for (uint cycle = 0; cycle < num_cycles; cycle++) {\n");
         self.indent += 1;
 
-        // Phase 1: Write local registers to device memory for combinational to read
-        // (UMA makes this fast - shared memory, no copy)
-        self.write_indented("// Phase 1: Sync local registers to device memory\n");
+        // ===== RISING EDGE PHASE =====
+        self.write_indented("// ===== RISING EDGE PHASE =====\n");
+
+        // Sync local registers to device memory for combinational to read
+        self.write_indented("// Sync registers for combinational evaluation\n");
         for (state_name, state_elem) in &sorted_states {
             let sanitized = self.sanitize_name(state_name);
             let state_sir_type = self.get_signal_sir_type(sir, state_name);
@@ -1154,13 +1201,42 @@ impl<'a> MetalShaderGenerator<'a> {
             }
         }
 
-        // Phase 2: Evaluate all combinational logic
-        self.write_indented("\n// Phase 2: Evaluate combinational logic\n");
+        // Evaluate combinational logic (rising edge FFs see current state)
+        self.write_indented("\n// Evaluate combinational logic\n");
         self.generate_batched_combinational_logic(sir);
 
-        // Phase 3: Update local registers (rising edge)
-        self.write_indented("\n// Phase 3: Sequential update (rising edge)\n");
-        self.generate_batched_sequential_updates(sir);
+        // Update rising edge flip-flops (Rising and Both)
+        self.write_indented("\n// Update rising edge flip-flops\n");
+        self.generate_batched_sequential_updates(sir, Some(&ClockEdge::Rising));
+
+        // ===== FALLING EDGE PHASE (only if needed) =====
+        if has_falling_edge_ffs {
+            self.write_indented("\n// ===== FALLING EDGE PHASE =====\n");
+
+            // Sync registers again so falling edge FFs see updated values
+            self.write_indented("// Sync registers after rising edge updates\n");
+            for (state_name, state_elem) in &sorted_states {
+                let sanitized = self.sanitize_name(state_name);
+                let state_sir_type = self.get_signal_sir_type(sir, state_name);
+                let is_array = matches!(state_sir_type, Some(SirType::Array(_, _)));
+                let is_wide = state_elem.width > 128;
+
+                if !is_array && !is_wide {
+                    self.write_indented(&format!(
+                        "registers->{} = local_{};\n",
+                        sanitized, sanitized
+                    ));
+                }
+            }
+
+            // Re-evaluate combinational logic (falling edge FFs see post-rising state)
+            self.write_indented("\n// Re-evaluate combinational logic for falling edge\n");
+            self.generate_batched_combinational_logic(sir);
+
+            // Update falling edge flip-flops (Falling and Both)
+            self.write_indented("\n// Update falling edge flip-flops\n");
+            self.generate_batched_sequential_updates(sir, Some(&ClockEdge::Falling));
+        }
 
         self.indent -= 1;
         self.write_indented("}\n\n");
@@ -1206,12 +1282,22 @@ impl<'a> MetalShaderGenerator<'a> {
         for output in &sir.outputs {
             let output_width = self.get_signal_width_from_sir(sir, &output.name);
             let is_wide = output_width > 128;
+            let state_sir_type = self.get_signal_sir_type(sir, &output.name);
+            let is_array = matches!(state_sir_type, Some(SirType::Array(_, _)));
 
             if sir.state_elements.contains_key(&output.name) {
-                // Output IS a state element - use local copy directly
-                if !is_wide {
+                // Output IS a state element
+                if !is_wide && !is_array {
+                    // Scalar state elements have local copies
                     self.write_indented(&format!(
                         "signals->{} = local_{};\n",
+                        self.sanitize_name(&output.name),
+                        self.sanitize_name(&output.name)
+                    ));
+                } else if is_array || is_wide {
+                    // Arrays and wide state elements - copy from registers
+                    self.write_indented(&format!(
+                        "signals->{} = registers->{};\n",
                         self.sanitize_name(&output.name),
                         self.sanitize_name(&output.name)
                     ));
@@ -1256,14 +1342,29 @@ impl<'a> MetalShaderGenerator<'a> {
             SirNodeKind::Concat => self.generate_concat(sir, node),
             SirNodeKind::SignalRef { signal } => {
                 // Handle SignalRef specially for batched mode
-                // - State elements use local_* variables
+                // - Scalar state elements use local_* variables
+                // - Array/wide state elements use registers->* (no local copy)
                 // - Input signals use inputs->*
                 // - Other signals use signals->*
                 if !node.outputs.is_empty() {
                     let output = &node.outputs[0].signal_id;
                     let is_input = sir.inputs.iter().any(|i| i.name == *signal);
-                    let source = if sir.state_elements.contains_key(signal) {
+
+                    // Check if this is an array or wide state element
+                    let is_state = sir.state_elements.contains_key(signal);
+                    let state_sir_type = self.get_signal_sir_type(sir, signal);
+                    let is_array = matches!(state_sir_type, Some(SirType::Array(_, _)));
+                    let is_wide = sir.state_elements
+                        .get(signal)
+                        .map(|s| s.width > 128)
+                        .unwrap_or(false);
+
+                    let source = if is_state && !is_array && !is_wide {
+                        // Scalar state elements have local copies
                         format!("local_{}", self.sanitize_name(signal))
+                    } else if is_state {
+                        // Arrays and wide state elements don't have local copies
+                        format!("registers->{}", self.sanitize_name(signal))
                     } else if is_input {
                         format!("inputs->{}", self.sanitize_name(signal))
                     } else {
@@ -1287,7 +1388,12 @@ impl<'a> MetalShaderGenerator<'a> {
     }
 
     /// Generate sequential updates for batched kernel using local variables
-    fn generate_batched_sequential_updates(&mut self, sir: &SirModule) {
+    ///
+    /// `edge_filter` controls which flip-flops are updated:
+    /// - None: update all flip-flops (legacy behavior)
+    /// - Some(ClockEdge::Rising): update Rising and Both edge FFs
+    /// - Some(ClockEdge::Falling): update Falling and Both edge FFs
+    fn generate_batched_sequential_updates(&mut self, sir: &SirModule, edge_filter: Option<&ClockEdge>) {
         // Sort sequential nodes by output name for consistency
         let mut sorted_seq_nodes: Vec<_> = sir.sequential_nodes.iter().collect();
         sorted_seq_nodes.sort_by(|a, b| {
@@ -1298,24 +1404,93 @@ impl<'a> MetalShaderGenerator<'a> {
 
         for node in sorted_seq_nodes {
             if let SirNodeKind::FlipFlop { clock_edge } = &node.kind {
-                self.generate_batched_flipflop_update(sir, node, clock_edge);
+                // Check if this FF should be updated based on edge filter
+                let should_update = match edge_filter {
+                    None => true, // No filter, update all
+                    Some(ClockEdge::Rising) => matches!(clock_edge, ClockEdge::Rising | ClockEdge::Both),
+                    Some(ClockEdge::Falling) => matches!(clock_edge, ClockEdge::Falling | ClockEdge::Both),
+                    Some(ClockEdge::Both) => true, // Both means update all
+                };
+
+                if should_update {
+                    self.generate_batched_flipflop_update_unconditional(sir, node);
+                }
             }
         }
     }
 
-    /// Generate flip-flop update for batched kernel
-    /// In batched mode, each loop iteration represents a complete clock cycle,
-    /// so we update registers unconditionally (no edge detection needed).
-    fn generate_batched_flipflop_update(
+    /// Generate unconditional flip-flop update for batched kernel
+    /// Used when edge filtering is done at the call site (multi-edge support)
+    fn generate_batched_flipflop_update_unconditional(
         &mut self,
         sir: &SirModule,
         node: &SirNode,
-        _edge: &ClockEdge,
     ) {
         if node.inputs.len() < 2 || node.outputs.is_empty() {
             return;
         }
 
+        let data_signal = &node.inputs[1].signal_id;
+        let output_signal = &node.outputs[0].signal_id;
+
+        let sanitized_output = self.sanitize_name(output_signal);
+        let sanitized_data = self.sanitize_name(data_signal);
+        let output_width = self.get_signal_width_from_sir(sir, output_signal);
+        let data_width = self.get_signal_width_from_sir(sir, data_signal);
+
+        // Check if output is an array or wide register (no local copy)
+        let state_sir_type = self.get_signal_sir_type(sir, output_signal);
+        let is_array = matches!(state_sir_type, Some(SirType::Array(_, _)));
+        let is_wide = output_width > 128;
+
+        let needs_vector_extraction = data_width > 32 && output_width <= 32;
+
+        let mask = if output_width < 32 {
+            format!(" & 0x{:X}", (1u64 << output_width) - 1)
+        } else {
+            String::new()
+        };
+
+        // Arrays and wide registers don't have local copies, write directly to registers
+        let target = if is_array || is_wide {
+            format!("registers->{}", sanitized_output)
+        } else {
+            format!("local_{}", sanitized_output)
+        };
+
+        if needs_vector_extraction {
+            self.write_indented(&format!(
+                "{} = signals->{}[0]{};\n",
+                target,
+                sanitized_data,
+                mask
+            ));
+        } else {
+            self.write_indented(&format!(
+                "{} = signals->{}{};\n",
+                target,
+                sanitized_data,
+                mask
+            ));
+        }
+    }
+
+    /// Generate flip-flop update for batched kernel
+    /// Respects the clock edge defined in Skalp code:
+    /// - Rising: update when clock == 1
+    /// - Falling: update when clock == 0
+    /// - Both (DDR): update unconditionally
+    fn generate_batched_flipflop_update(
+        &mut self,
+        sir: &SirModule,
+        node: &SirNode,
+        edge: &ClockEdge,
+    ) {
+        if node.inputs.len() < 2 || node.outputs.is_empty() {
+            return;
+        }
+
+        let clock_signal = &node.inputs[0].signal_id;
         let data_signal = &node.inputs[1].signal_id;
         let output_signal = &node.outputs[0].signal_id;
 
@@ -1335,23 +1510,39 @@ impl<'a> MetalShaderGenerator<'a> {
             String::new()
         };
 
-        // In batched mode, each iteration = one clock cycle
-        // Update register unconditionally (rising edge happens every iteration)
-        if needs_vector_extraction {
-            // Vector/array to scalar - extract first element
-            self.write_indented(&format!(
-                "local_{} = signals->{}[0]{}; // vector->scalar\n",
+        // Generate edge condition based on clock edge type
+        // This ensures flip-flops only update on the correct clock edge
+        let edge_condition = if let Some(clock_input) = sir.inputs.iter().find(|i| i.name == *clock_signal) {
+            match edge {
+                ClockEdge::Rising => Some(format!("inputs->{} == 1", self.sanitize_name(&clock_input.name))),
+                ClockEdge::Falling => Some(format!("inputs->{} == 0", self.sanitize_name(&clock_input.name))),
+                ClockEdge::Both => None, // DDR: update on both edges (unconditional)
+            }
+        } else {
+            None // Clock signal not found in inputs, update unconditionally
+        };
+
+        // Generate the update with optional edge condition
+        let update_stmt = if needs_vector_extraction {
+            format!(
+                "local_{} = signals->{}[0]{};\n",
                 sanitized_output,
                 sanitized_data,
                 mask
-            ));
+            )
         } else {
-            self.write_indented(&format!(
+            format!(
                 "local_{} = signals->{}{};\n",
                 sanitized_output,
                 sanitized_data,
                 mask
-            ));
+            )
+        };
+
+        if let Some(condition) = edge_condition {
+            self.write_indented(&format!("if ({}) {{ {} }}\n", condition, update_stmt.trim()));
+        } else {
+            self.write_indented(&update_stmt);
         }
     }
 

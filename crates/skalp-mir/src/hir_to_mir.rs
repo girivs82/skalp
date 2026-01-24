@@ -1206,28 +1206,8 @@ impl<'hir> HirToMir<'hir> {
                             std::mem::discriminant(&a.rhs)
                         );
                     }
-                    // BUG #117r DEBUG: Log impl block assignments being processed
-                    if module.name == "DabBatteryController" {
-                        println!("📍 IMPL_ASSIGN_LOOP: module='{}', {} assignments", module.name, impl_block.assignments.len());
-                    }
                     for (idx, hir_assign) in impl_block.assignments.iter().enumerate() {
                         let assignment_start = Instant::now();
-                        // BUG #117r DEBUG: Log each assignment
-                        if module.name == "DabBatteryController" {
-                            // More detailed debug for DabBatteryController
-                            let lhs_desc = match &hir_assign.lhs {
-                                hir::HirLValue::Variable(v) => format!("Variable({:?})", v),
-                                hir::HirLValue::Signal(s) => format!("Signal({:?})", s),
-                                hir::HirLValue::Port(p) => format!("Port({:?})", p),
-                                _ => format!("{:?}", std::mem::discriminant(&hir_assign.lhs)),
-                            };
-                            let rhs_desc = match &hir_assign.rhs {
-                                hir::HirExpression::StructLiteral(sl) => format!("StructLiteral('{}')", sl.type_name),
-                                hir::HirExpression::Signal(s) => format!("Signal({:?})", s),
-                                _ => format!("{:?}", std::mem::discriminant(&hir_assign.rhs)),
-                            };
-                            println!("   -> assign[{}]: LHS={}, RHS={}", idx, lhs_desc, rhs_desc);
-                        }
                         trace!(
                             "🟢🟢🟢 FOR_LOOP_ENTRY: Processing assignment {}/{} 🟢🟢🟢",
                             idx + 1,
@@ -3978,9 +3958,6 @@ impl<'hir> HirToMir<'hir> {
         &mut self,
         assign: &hir::HirAssignment,
     ) -> Vec<ContinuousAssign> {
-        // BUG #117r DEBUG: Log ALL assignments to see what's being processed
-        eprintln!("📍 CONT_ASSIGN: LHS={:?}, RHS={:?}",
-            std::mem::discriminant(&assign.lhs), std::mem::discriminant(&assign.rhs));
         trace!(
             "[TRAIT_DEBUG] convert_continuous_assignment_expanded: type={:?}",
             assign.assignment_type
@@ -4001,9 +3978,6 @@ impl<'hir> HirToMir<'hir> {
         if let (hir::HirLValue::Variable(var_id), hir::HirExpression::StructLiteral(struct_lit)) =
             (&assign.lhs, &assign.rhs)
         {
-            // BUG #117r DEBUG: Log ALL struct literal assignments to entities
-            println!("📍 STRUCT_LIT_ASSIGN: var={:?}, type='{}', {} fields",
-                var_id, struct_lit.type_name, struct_lit.fields.len());
             // Check if this type_name matches an entity
             if let Some(hir) = self.hir.as_ref() {
                 // BUG #207 FIX: When struct_lit has generic_args, construct the specialized entity name
@@ -4582,6 +4556,7 @@ impl<'hir> HirToMir<'hir> {
         &mut self,
         assign: &hir::HirAssignment,
     ) -> Option<Vec<ContinuousAssign>> {
+        // DEBUG: Check RHS type first
         // Check if LHS is a flattened port or signal
         let (lhs_hir_id, lhs_is_signal, lhs_fields) = match &assign.lhs {
             hir::HirLValue::Signal(id) => {

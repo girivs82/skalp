@@ -2826,6 +2826,7 @@ impl HirBuilderContext {
                         | SyntaxKind::ConcatExpr // BUG FIX: Support concat expressions in assignments (e.g., result = {high, low})
                         | SyntaxKind::ReplicateExpr // BUG #182 FIX: Support replication expressions in assignments (e.g., result = {8{1'b1}})
                         | SyntaxKind::TernaryExpr // BUG #180 FIX: Support ternary expressions in assignments (e.g., result = cond ? a : b)
+                        | SyntaxKind::StructLiteral // BUG FIX: Support struct literal assignments (e.g., faults = FaultFlags { ov: x, ... })
                 )
             })
             .collect();

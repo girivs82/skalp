@@ -55,21 +55,33 @@ mod gpu_simulation_tests {
             .await
             .expect("Failed to load SIR module");
 
+        // Helper to resolve user-facing names to internal names
+        let resolve = |name: &str| -> String {
+            sir.name_registry
+                .resolve(name)
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| name.to_string())
+        };
+
         // Set initial inputs - reset high, clock low
         simulator
-            .set_input("rst", vec![1])
+            .set_input(&resolve("rst"), vec![1])
             .await
             .expect("Failed to set reset");
         simulator
-            .set_input("clk", vec![0])
+            .set_input(&resolve("clk"), vec![0])
             .await
             .expect("Failed to set clock");
+
+        // Resolve clock and reset names for use in loops
+        let clk_name = resolve("clk");
+        let rst_name = resolve("rst");
 
         // Run for a few cycles with reset high, toggling clock
         for i in 0..5 {
             // Toggle clock
             simulator
-                .set_input("clk", vec![(i % 2) as u8])
+                .set_input(&clk_name, vec![(i % 2) as u8])
                 .await
                 .expect("Failed to set clock");
 
@@ -81,7 +93,7 @@ mod gpu_simulation_tests {
 
         // Release reset and continue toggling clock
         simulator
-            .set_input("rst", vec![0])
+            .set_input(&rst_name, vec![0])
             .await
             .expect("Failed to clear reset");
 
@@ -89,7 +101,7 @@ mod gpu_simulation_tests {
         for i in 0..20 {
             // Toggle clock
             simulator
-                .set_input("clk", vec![((i + 5) % 2) as u8])
+                .set_input(&clk_name, vec![((i + 5) % 2) as u8])
                 .await
                 .expect("Failed to set clock");
 

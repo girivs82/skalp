@@ -602,7 +602,9 @@ impl UnifiedSimulator {
             SimulatorBackend::BehavioralGpu(runtime) => {
                 // Convert u64 to bytes (little-endian)
                 let bytes = value.to_le_bytes().to_vec();
-                let _ = runtime.set_input(&internal_name, &bytes).await;
+                if let Err(e) = runtime.set_input(&internal_name, &bytes).await {
+                    eprintln!("❌ set_input FAILED for '{}' (internal: '{}'): {}", name, internal_name, e);
+                }
             }
             SimulatorBackend::GateLevelCpu(sim) => {
                 // Convert u64 to bool vector

@@ -1041,7 +1041,7 @@ impl SimulationRuntime for GpuRuntime {
 
     async fn get_output(&self, name: &str) -> SimulationResult<Vec<u8>> {
         if let Some(module) = &self.module {
-            // Read from output_buffer which contains outputs from BEFORE sequential update
+            // First try to read from output_buffer
             if let Some(output_buffer) = &self.output_buffer {
                 let output_ptr = output_buffer.contents() as *const u8;
                 let mut offset = 0usize;
@@ -1080,9 +1080,52 @@ impl SimulationRuntime for GpuRuntime {
                     offset += metal_size;
                 }
             }
+
+            // Not found in outputs, try to read from register buffer
+            // This allows reading internal state (registers/flip-flops) for debugging/testing
+            if let Some(register_buffer) = &self.register_buffer {
+                // Registers are sorted alphabetically in the Metal struct
+                let mut sorted_states: Vec<_> = module.state_elements.iter().collect();
+                sorted_states.sort_by_key(|(n, _)| *n);
+
+                let register_ptr = register_buffer.contents() as *const u8;
+                let mut offset = 0usize;
+
+                for (reg_name, state_elem) in sorted_states.iter() {
+                    let width = state_elem.width;
+                    let metal_size = self.get_metal_type_size(width);
+                    let metal_align = self.get_metal_type_alignment(width);
+
+                    // Align offset to the required alignment boundary
+                    let remainder = offset % metal_align;
+                    if remainder != 0 {
+                        offset += metal_align - remainder;
+                    }
+
+                    let bytes_needed = width.div_ceil(8);
+                    if *reg_name == name {
+                        let mut value = vec![0u8; bytes_needed];
+                        unsafe {
+                            std::ptr::copy_nonoverlapping(
+                                register_ptr.add(offset),
+                                value.as_mut_ptr(),
+                                bytes_needed.min(metal_size),
+                            );
+                        }
+                        if std::env::var("SKALP_DEBUG_OUTPUT").is_ok() {
+                            eprintln!(
+                                "[DEBUG get_output] REGISTER name='{}' width={} metal_size={} bytes_needed={} offset={} value={:?}",
+                                name, width, metal_size, bytes_needed, offset, value
+                            );
+                        }
+                        return Ok(value);
+                    }
+                    offset += metal_size;
+                }
+            }
         }
         Err(SimulationError::GpuError(format!(
-            "Output {} not found",
+            "Output/register {} not found",
             name
         )))
     }
