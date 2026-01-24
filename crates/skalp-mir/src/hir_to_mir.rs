@@ -16123,6 +16123,50 @@ impl<'hir> HirToMir<'hir> {
                         }
                     }
                 }
+
+                // BUG #224 FIX: Also search module_hirs for type aliases from imported modules
+                // Type aliases like MilliVolts, MilliAmps are defined in types.sk and need to be
+                // resolved when used in struct field types (e.g., ProtectionThresholds.v_ov_soft).
+                // Clone the type to avoid borrow conflicts with convert_type
+                let mut found_type: Option<hir::HirType> = None;
+                for module_hir in self.module_hirs.values() {
+                    // Check user-defined types in imported modules
+                    for user_type in &module_hir.user_defined_types {
+                        if user_type.name == *name {
+                            found_type = Some(user_type.type_def.clone());
+                            break;
+                        }
+                    }
+                    if found_type.is_some() {
+                        break;
+                    }
+
+                    // Check type aliases in imported modules
+                    for type_alias in &module_hir.type_aliases {
+                        if type_alias.name == *name {
+                            found_type = Some(type_alias.target_type.clone());
+                            break;
+                        }
+                    }
+                    if found_type.is_some() {
+                        break;
+                    }
+
+                    // Check distinct types in imported modules
+                    for distinct_type in &module_hir.distinct_types {
+                        if distinct_type.name == *name {
+                            found_type = Some(distinct_type.base_type.clone());
+                            break;
+                        }
+                    }
+                    if found_type.is_some() {
+                        break;
+                    }
+                }
+                if let Some(ty) = found_type {
+                    return self.convert_type(&ty);
+                }
+
                 // If type not found, default to Bit(1) as fallback
                 // This maintains backward compatibility for unresolved types
                 DataType::Bit(1)
