@@ -21,10 +21,20 @@ use crate::mir::{
 use crate::signal_naming::FIELD_SEPARATOR;
 use skalp_frontend::span::SourceSpan;
 
-// Stack growth constants for deeply nested types (matching hir_to_mir.rs)
-// BUG FIX #213: Prevent stack overflow when flattening large designs
-const STACK_RED_ZONE: usize = 256 * 1024;
-const STACK_GROW_SIZE: usize = 8 * 1024 * 1024;
+// Work item for iterative port flattening
+struct PortWorkItem {
+    name: String,
+    port_type: DataType,
+    field_path: Vec<String>,
+}
+
+// Work item for iterative signal flattening
+struct SignalWorkItem {
+    name: String,
+    signal_type: DataType,
+    initial: Option<Value>,
+    field_path: Vec<String>,
+}
 
 /// Information about a flattened field
 #[derive(Debug, Clone)]
@@ -133,7 +143,7 @@ impl TypeFlattener {
     ) -> (Vec<Port>, Vec<FlattenedField>) {
         let mut ports = Vec::new();
         let mut fields = Vec::new();
-        self.flatten_port_recursive(
+        self.flatten_port_iterative(
             base_name,
             port_type,
             direction,
@@ -190,7 +200,7 @@ impl TypeFlattener {
     ) -> (Vec<Signal>, Vec<FlattenedField>) {
         let mut signals = Vec::new();
         let mut fields = Vec::new();
-        self.flatten_signal_recursive(
+        self.flatten_signal_iterative(
             base_name,
             signal_type,
             initial,
@@ -298,9 +308,10 @@ impl TypeFlattener {
     // Private helper methods
     // ========================================================================
 
-    /// Recursively flatten a port into scalar components
+    /// Iteratively flatten a port into scalar components using explicit work stack
+    /// (Rewritten from recursion to avoid stack overflow on deeply nested types)
     #[allow(clippy::too_many_arguments)]
-    fn flatten_port_recursive(
+    fn flatten_port_iterative(
         &mut self,
         name: &str,
         port_type: &DataType,
@@ -311,155 +322,123 @@ impl TypeFlattener {
         ports: &mut Vec<Port>,
         fields: &mut Vec<FlattenedField>,
     ) {
-        match port_type {
-            DataType::Struct(struct_type) => {
-                // Recursively flatten each struct field (with stack growth)
-                // Use double underscore to avoid collision with user-defined names
-                for field in &struct_type.fields {
-                    let field_name = format!("{}{}{}", name, FIELD_SEPARATOR, field.name);
-                    let mut new_path = field_path.clone();
-                    new_path.push(field.name.clone());
-                    stacker::maybe_grow(STACK_RED_ZONE, STACK_GROW_SIZE, || {
-                        self.flatten_port_recursive(
-                            &field_name,
-                            &field.field_type,
-                            direction,
-                            physical_constraints,
-                            span.clone(),
-                            new_path,
-                            ports,
-                            fields,
-                        );
-                    });
-                }
-            }
-            DataType::Vec2(element_type)
-            | DataType::Vec3(element_type)
-            | DataType::Vec4(element_type) => {
-                // Expand vector types into components
-                // Use double underscore to avoid collision with user-defined names
-                let components = match port_type {
-                    DataType::Vec2(_) => vec!["x", "y"],
-                    DataType::Vec3(_) => vec!["x", "y", "z"],
-                    DataType::Vec4(_) => vec!["x", "y", "z", "w"],
-                    _ => unreachable!(),
-                };
+        // Use explicit work stack instead of call stack
+        let mut work_stack = vec![PortWorkItem {
+            name: name.to_string(),
+            port_type: port_type.clone(),
+            field_path,
+        }];
 
-                for component in components {
-                    let comp_name = format!("{}{}{}", name, FIELD_SEPARATOR, component);
-                    let mut new_path = field_path.clone();
-                    new_path.push(component.to_string());
-                    stacker::maybe_grow(STACK_RED_ZONE, STACK_GROW_SIZE, || {
-                        self.flatten_port_recursive(
-                            &comp_name,
-                            element_type,
-                            direction,
-                            physical_constraints,
-                            span.clone(),
-                            new_path,
-                            ports,
-                            fields,
-                        );
-                    });
-                }
-            }
-            DataType::Array(element_type, size) => {
-                // NEW: Preserve arrays of scalar types for synthesis flexibility
-                // Arrays of scalar types become packed arrays in SystemVerilog,
-                // allowing synthesis tools to choose optimal implementation
-                // (MUX trees, distributed RAM, block RAM, etc.)
-                if Self::should_preserve_array(element_type) {
-                    // Keep array intact - create port with array type
-                    self.create_leaf_port(
-                        name,
-                        port_type,
-                        direction,
-                        physical_constraints,
-                        span,
-                        field_path,
-                        ports,
-                        fields,
-                    );
-                } else {
-                    // Arrays of composite types (structs, vectors) still get flattened
-                    // Example: [Vec3; 4] → elem_0_x, elem_0_y, elem_0_z, elem_1_x, ...
-                    for i in 0..*size {
-                        let elem_name = format!("{}_{}", name, i);
-                        let mut new_path = field_path.clone();
-                        new_path.push(i.to_string());
-                        stacker::maybe_grow(STACK_RED_ZONE, STACK_GROW_SIZE, || {
-                            self.flatten_port_recursive(
-                                &elem_name,
-                                element_type,
-                                direction,
-                                physical_constraints,
-                                span.clone(),
-                                new_path,
-                                ports,
-                                fields,
-                            );
+        while let Some(work) = work_stack.pop() {
+            match &work.port_type {
+                DataType::Struct(struct_type) => {
+                    // Push all struct fields onto work stack (in reverse order to maintain order)
+                    for field in struct_type.fields.iter().rev() {
+                        let field_name = format!("{}{}{}", work.name, FIELD_SEPARATOR, field.name);
+                        let mut new_path = work.field_path.clone();
+                        new_path.push(field.name.clone());
+                        work_stack.push(PortWorkItem {
+                            name: field_name,
+                            port_type: field.field_type.clone(),
+                            field_path: new_path,
                         });
                     }
                 }
-            }
-            DataType::Enum(enum_type) => {
-                // Enums expand to their base type
-                stacker::maybe_grow(STACK_RED_ZONE, STACK_GROW_SIZE, || {
-                    self.flatten_port_recursive(
-                        name,
-                        &enum_type.base_type,
-                        direction,
-                        physical_constraints,
-                        span,
-                        field_path,
-                        ports,
-                        fields,
-                    );
-                });
-            }
-            DataType::Union(union_type) => {
-                // Unions expand to largest field
-                // For now, just use the first field type
-                // TODO: Proper union handling with tag field
-                if let Some(first_field) = union_type.fields.first() {
-                    stacker::maybe_grow(STACK_RED_ZONE, STACK_GROW_SIZE, || {
-                        self.flatten_port_recursive(
-                            name,
-                            &first_field.field_type,
+                DataType::Vec2(element_type)
+                | DataType::Vec3(element_type)
+                | DataType::Vec4(element_type) => {
+                    // Expand vector types into components
+                    let components: Vec<&str> = match &work.port_type {
+                        DataType::Vec2(_) => vec!["x", "y"],
+                        DataType::Vec3(_) => vec!["x", "y", "z"],
+                        DataType::Vec4(_) => vec!["x", "y", "z", "w"],
+                        _ => unreachable!(),
+                    };
+
+                    // Push in reverse order to maintain component order
+                    for component in components.into_iter().rev() {
+                        let comp_name = format!("{}{}{}", work.name, FIELD_SEPARATOR, component);
+                        let mut new_path = work.field_path.clone();
+                        new_path.push(component.to_string());
+                        work_stack.push(PortWorkItem {
+                            name: comp_name,
+                            port_type: (**element_type).clone(),
+                            field_path: new_path,
+                        });
+                    }
+                }
+                DataType::Array(element_type, size) => {
+                    // Preserve arrays of scalar types for synthesis flexibility
+                    if Self::should_preserve_array(element_type) {
+                        // Keep array intact - create port with array type
+                        self.create_leaf_port(
+                            &work.name,
+                            &work.port_type,
                             direction,
                             physical_constraints,
-                            span,
-                            field_path,
+                            span.clone(),
+                            work.field_path,
                             ports,
                             fields,
                         );
+                    } else {
+                        // Arrays of composite types get flattened
+                        // Push in reverse order to maintain index order
+                        for i in (0..*size).rev() {
+                            let elem_name = format!("{}_{}", work.name, i);
+                            let mut new_path = work.field_path.clone();
+                            new_path.push(i.to_string());
+                            work_stack.push(PortWorkItem {
+                                name: elem_name,
+                                port_type: (**element_type).clone(),
+                                field_path: new_path,
+                            });
+                        }
+                    }
+                }
+                DataType::Enum(enum_type) => {
+                    // Enums expand to their base type
+                    work_stack.push(PortWorkItem {
+                        name: work.name,
+                        port_type: enum_type.base_type.clone(),
+                        field_path: work.field_path,
                     });
-                } else {
-                    // Empty union - treat as 1-bit
+                }
+                DataType::Union(union_type) => {
+                    // Unions expand to largest field (first field for now)
+                    if let Some(first_field) = union_type.fields.first() {
+                        work_stack.push(PortWorkItem {
+                            name: work.name,
+                            port_type: first_field.field_type.clone(),
+                            field_path: work.field_path,
+                        });
+                    } else {
+                        // Empty union - treat as 1-bit
+                        self.create_leaf_port(
+                            &work.name,
+                            &DataType::Bit(1),
+                            direction,
+                            physical_constraints,
+                            span.clone(),
+                            work.field_path,
+                            ports,
+                            fields,
+                        );
+                    }
+                }
+                _ => {
+                    // Leaf scalar type - create actual port
                     self.create_leaf_port(
-                        name,
-                        &DataType::Bit(1),
+                        &work.name,
+                        &work.port_type,
                         direction,
                         physical_constraints,
-                        span,
-                        field_path,
+                        span.clone(),
+                        work.field_path,
                         ports,
                         fields,
                     );
                 }
-            }
-            _ => {
-                // Leaf scalar type - create actual port
-                self.create_leaf_port(
-                    name,
-                    port_type,
-                    direction,
-                    physical_constraints,
-                    span,
-                    field_path,
-                    ports,
-                    fields,
-                );
             }
         }
     }
@@ -498,9 +477,10 @@ impl TypeFlattener {
         });
     }
 
-    /// Recursively flatten a signal into scalar components
+    /// Iteratively flatten a signal into scalar components using explicit work stack
+    /// (Rewritten from recursion to avoid stack overflow on deeply nested types)
     #[allow(clippy::too_many_arguments)]
-    fn flatten_signal_recursive(
+    fn flatten_signal_iterative(
         &mut self,
         name: &str,
         signal_type: &DataType,
@@ -511,154 +491,129 @@ impl TypeFlattener {
         signals: &mut Vec<Signal>,
         fields: &mut Vec<FlattenedField>,
     ) {
-        match signal_type {
-            DataType::Struct(struct_type) => {
-                // Recursively flatten each struct field (with stack growth)
-                // Use double underscore to avoid collision with user-defined names
-                for field in &struct_type.fields {
-                    let field_name = format!("{}{}{}", name, FIELD_SEPARATOR, field.name);
-                    let mut new_path = field_path.clone();
-                    new_path.push(field.name.clone());
-                    stacker::maybe_grow(STACK_RED_ZONE, STACK_GROW_SIZE, || {
-                        self.flatten_signal_recursive(
-                            &field_name,
-                            &field.field_type,
-                            None, // Don't propagate initial value for struct fields
-                            clock_domain,
-                            span.clone(),
-                            new_path,
-                            signals,
-                            fields,
-                        );
-                    });
-                }
-            }
-            DataType::Vec2(element_type)
-            | DataType::Vec3(element_type)
-            | DataType::Vec4(element_type) => {
-                // Expand vector types into components
-                // Use double underscore to avoid collision with user-defined names
-                let components = match signal_type {
-                    DataType::Vec2(_) => vec!["x", "y"],
-                    DataType::Vec3(_) => vec!["x", "y", "z"],
-                    DataType::Vec4(_) => vec!["x", "y", "z", "w"],
-                    _ => unreachable!(),
-                };
+        // Use explicit work stack instead of call stack
+        let mut work_stack = vec![SignalWorkItem {
+            name: name.to_string(),
+            signal_type: signal_type.clone(),
+            initial,
+            field_path,
+        }];
 
-                for component in components {
-                    let comp_name = format!("{}{}{}", name, FIELD_SEPARATOR, component);
-                    let mut new_path = field_path.clone();
-                    new_path.push(component.to_string());
-                    stacker::maybe_grow(STACK_RED_ZONE, STACK_GROW_SIZE, || {
-                        self.flatten_signal_recursive(
-                            &comp_name,
-                            element_type,
-                            None,
-                            clock_domain,
-                            span.clone(),
-                            new_path,
-                            signals,
-                            fields,
-                        );
-                    });
-                }
-            }
-            DataType::Array(element_type, size) => {
-                // NEW: Preserve arrays of scalar types for synthesis flexibility
-                // Arrays of scalar types become packed arrays in SystemVerilog,
-                // allowing synthesis tools to choose optimal implementation
-                let should_preserve = Self::should_preserve_array(element_type);
-                if should_preserve {
-                    // Keep array intact - create signal with array type
-                    self.create_leaf_signal(
-                        name,
-                        signal_type,
-                        initial,
-                        clock_domain,
-                        span,
-                        field_path,
-                        signals,
-                        fields,
-                    );
-                } else {
-                    // Arrays of composite types still get flattened
-                    for i in 0..*size {
-                        let elem_name = format!("{}_{}", name, i);
-                        let mut new_path = field_path.clone();
-                        new_path.push(i.to_string());
-                        stacker::maybe_grow(STACK_RED_ZONE, STACK_GROW_SIZE, || {
-                            self.flatten_signal_recursive(
-                                &elem_name,
-                                element_type,
-                                None,
-                                clock_domain,
-                                span.clone(),
-                                new_path,
-                                signals,
-                                fields,
-                            );
+        while let Some(work) = work_stack.pop() {
+            match &work.signal_type {
+                DataType::Struct(struct_type) => {
+                    // Push all struct fields onto work stack (in reverse order to maintain order)
+                    for field in struct_type.fields.iter().rev() {
+                        let field_name = format!("{}{}{}", work.name, FIELD_SEPARATOR, field.name);
+                        let mut new_path = work.field_path.clone();
+                        new_path.push(field.name.clone());
+                        work_stack.push(SignalWorkItem {
+                            name: field_name,
+                            signal_type: field.field_type.clone(),
+                            initial: None, // Don't propagate initial value for struct fields
+                            field_path: new_path,
                         });
                     }
                 }
-            }
-            DataType::Enum(enum_type) => {
-                // Enums expand to their base type
-                stacker::maybe_grow(STACK_RED_ZONE, STACK_GROW_SIZE, || {
-                    self.flatten_signal_recursive(
-                        name,
-                        &enum_type.base_type,
-                        initial,
-                        clock_domain,
-                        span,
-                        field_path,
-                        signals,
-                        fields,
-                    );
-                });
-            }
-            DataType::Union(union_type) => {
-                // Unions expand to largest field
-                // For now, just use the first field type
-                // TODO: Proper union handling with tag field
-                if let Some(first_field) = union_type.fields.first() {
-                    stacker::maybe_grow(STACK_RED_ZONE, STACK_GROW_SIZE, || {
-                        self.flatten_signal_recursive(
-                            name,
-                            &first_field.field_type,
-                            initial,
+                DataType::Vec2(element_type)
+                | DataType::Vec3(element_type)
+                | DataType::Vec4(element_type) => {
+                    // Expand vector types into components
+                    let components: Vec<&str> = match &work.signal_type {
+                        DataType::Vec2(_) => vec!["x", "y"],
+                        DataType::Vec3(_) => vec!["x", "y", "z"],
+                        DataType::Vec4(_) => vec!["x", "y", "z", "w"],
+                        _ => unreachable!(),
+                    };
+
+                    // Push in reverse order to maintain component order
+                    for component in components.into_iter().rev() {
+                        let comp_name = format!("{}{}{}", work.name, FIELD_SEPARATOR, component);
+                        let mut new_path = work.field_path.clone();
+                        new_path.push(component.to_string());
+                        work_stack.push(SignalWorkItem {
+                            name: comp_name,
+                            signal_type: (**element_type).clone(),
+                            initial: None,
+                            field_path: new_path,
+                        });
+                    }
+                }
+                DataType::Array(element_type, size) => {
+                    // Preserve arrays of scalar types for synthesis flexibility
+                    if Self::should_preserve_array(element_type) {
+                        // Keep array intact - create signal with array type
+                        self.create_leaf_signal(
+                            &work.name,
+                            &work.signal_type,
+                            work.initial,
                             clock_domain,
-                            span,
-                            field_path,
+                            span.clone(),
+                            work.field_path,
                             signals,
                             fields,
                         );
+                    } else {
+                        // Arrays of composite types get flattened
+                        // Push in reverse order to maintain index order
+                        for i in (0..*size).rev() {
+                            let elem_name = format!("{}_{}", work.name, i);
+                            let mut new_path = work.field_path.clone();
+                            new_path.push(i.to_string());
+                            work_stack.push(SignalWorkItem {
+                                name: elem_name,
+                                signal_type: (**element_type).clone(),
+                                initial: None,
+                                field_path: new_path,
+                            });
+                        }
+                    }
+                }
+                DataType::Enum(enum_type) => {
+                    // Enums expand to their base type
+                    work_stack.push(SignalWorkItem {
+                        name: work.name,
+                        signal_type: enum_type.base_type.clone(),
+                        initial: work.initial,
+                        field_path: work.field_path,
                     });
-                } else {
-                    // Empty union - treat as 1-bit
+                }
+                DataType::Union(union_type) => {
+                    // Unions expand to largest field (first field for now)
+                    if let Some(first_field) = union_type.fields.first() {
+                        work_stack.push(SignalWorkItem {
+                            name: work.name,
+                            signal_type: first_field.field_type.clone(),
+                            initial: work.initial,
+                            field_path: work.field_path,
+                        });
+                    } else {
+                        // Empty union - treat as 1-bit
+                        self.create_leaf_signal(
+                            &work.name,
+                            &DataType::Bit(1),
+                            work.initial,
+                            clock_domain,
+                            span.clone(),
+                            work.field_path,
+                            signals,
+                            fields,
+                        );
+                    }
+                }
+                _ => {
+                    // Leaf scalar type - create actual signal
                     self.create_leaf_signal(
-                        name,
-                        &DataType::Bit(1),
-                        initial,
+                        &work.name,
+                        &work.signal_type,
+                        work.initial,
                         clock_domain,
-                        span,
-                        field_path,
+                        span.clone(),
+                        work.field_path,
                         signals,
                         fields,
                     );
                 }
-            }
-            _ => {
-                // Leaf scalar type - create actual signal
-                self.create_leaf_signal(
-                    name,
-                    signal_type,
-                    initial,
-                    clock_domain,
-                    span,
-                    field_path,
-                    signals,
-                    fields,
-                );
             }
         }
     }

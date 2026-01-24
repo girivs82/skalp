@@ -1479,13 +1479,170 @@ impl<'a> MetalShaderGenerator<'a> {
                         self.indent -= 1;
                         self.write_indented("}\n");
                     } else {
-                        self.write_indented(&format!(
-                            "signals->{} = {} {} {};\n",
-                            self.sanitize_name(output),
-                            left_expr,
-                            op_str,
-                            right_expr
-                        ));
+                        // BUG FIX #213: Vector comparison operations need special handling
+                        // Metal's comparison operators on vector types (uint2, uint4) return
+                        // vector booleans (bool2, bool4), but we need a scalar result.
+                        // For 33-64 bit comparisons, convert to ulong for proper numeric comparison.
+                        // For 65-128 bit comparisons, convert to uint4 and compare element-wise.
+                        let is_comparison = matches!(
+                            op,
+                            BinaryOperation::Lt
+                                | BinaryOperation::Lte
+                                | BinaryOperation::Gt
+                                | BinaryOperation::Gte
+                                | BinaryOperation::Eq
+                                | BinaryOperation::Neq
+                        );
+                        let left_is_vector = left_width > 32;
+                        let right_is_vector = right_width > 32;
+
+                        if is_comparison && (left_is_vector || right_is_vector) {
+                            // Vector comparison - need to handle properly
+                            let max_width = left_width.max(right_width);
+
+                            if max_width <= 64 {
+                                // 33-64 bit: convert to ulong for proper comparison
+                                self.write_indented(&format!(
+                                    "// BUG #213: Use ulong for {}-bit comparison\n",
+                                    max_width
+                                ));
+
+                                let left_ulong = if left_width <= 32 {
+                                    format!("(ulong)signals->{}", self.sanitize_name(left))
+                                } else {
+                                    format!(
+                                        "((ulong)signals->{}[0] | ((ulong)signals->{}[1] << 32))",
+                                        self.sanitize_name(left),
+                                        self.sanitize_name(left)
+                                    )
+                                };
+
+                                let right_ulong = if right_width <= 32 {
+                                    format!("(ulong)signals->{}", self.sanitize_name(right))
+                                } else {
+                                    format!(
+                                        "((ulong)signals->{}[0] | ((ulong)signals->{}[1] << 32))",
+                                        self.sanitize_name(right),
+                                        self.sanitize_name(right)
+                                    )
+                                };
+
+                                self.write_indented(&format!(
+                                    "signals->{} = (uint)({} {} {});\n",
+                                    self.sanitize_name(output),
+                                    left_ulong,
+                                    op_str,
+                                    right_ulong
+                                ));
+                            } else if max_width <= 128 {
+                                // 65-128 bit: element-wise comparison with proper semantics
+                                // For Eq: all elements must be equal
+                                // For Neq: any element differs
+                                // For Lt/Gt/Lte/Gte: compare from MSB to LSB
+                                self.write_indented(&format!(
+                                    "// BUG #213: Element-wise comparison for {}-bit values\n",
+                                    max_width
+                                ));
+
+                                let num_elems = max_width.div_ceil(32);
+
+                                match op {
+                                    BinaryOperation::Eq => {
+                                        // All elements must match
+                                        self.write_indented(&format!(
+                                            "signals->{} = (uint)all({} == {});\n",
+                                            self.sanitize_name(output),
+                                            left_expr,
+                                            right_expr
+                                        ));
+                                    }
+                                    BinaryOperation::Neq => {
+                                        // Any element differs
+                                        self.write_indented(&format!(
+                                            "signals->{} = (uint)any({} != {});\n",
+                                            self.sanitize_name(output),
+                                            left_expr,
+                                            right_expr
+                                        ));
+                                    }
+                                    BinaryOperation::Lt
+                                    | BinaryOperation::Lte
+                                    | BinaryOperation::Gt
+                                    | BinaryOperation::Gte => {
+                                        // Lexicographic comparison from MSB to LSB
+                                        // Generate: (a[3] < b[3]) || (a[3] == b[3] && ((a[2] < b[2]) || ...))
+                                        let strict_op = match op {
+                                            BinaryOperation::Lt | BinaryOperation::Lte => "<",
+                                            BinaryOperation::Gt | BinaryOperation::Gte => ">",
+                                            _ => unreachable!(),
+                                        };
+                                        let eq_allowed = matches!(
+                                            op,
+                                            BinaryOperation::Lte | BinaryOperation::Gte
+                                        );
+
+                                        self.write_indented("{\n");
+                                        self.indent += 1;
+                                        self.write_indented("bool _result = false;\n");
+                                        self.write_indented("bool _eq_so_far = true;\n");
+
+                                        // Compare from highest element to lowest
+                                        for i in (0..num_elems).rev() {
+                                            self.write_indented(&format!(
+                                                "if (_eq_so_far && {}[{}] {} {}[{}]) _result = true;\n",
+                                                left_expr, i, strict_op, right_expr, i
+                                            ));
+                                            self.write_indented(&format!(
+                                                "if (_eq_so_far && {}[{}] != {}[{}]) _eq_so_far = false;\n",
+                                                left_expr, i, right_expr, i
+                                            ));
+                                        }
+
+                                        if eq_allowed {
+                                            self.write_indented(
+                                                "if (_eq_so_far) _result = true; // Equal case\n",
+                                            );
+                                        }
+
+                                        self.write_indented(&format!(
+                                            "signals->{} = (uint)_result;\n",
+                                            self.sanitize_name(output)
+                                        ));
+                                        self.indent -= 1;
+                                        self.write_indented("}\n");
+                                    }
+                                    _ => {
+                                        // Fallback for other comparison types
+                                        self.write_indented(&format!(
+                                            "signals->{} = (uint)all({} {} {});\n",
+                                            self.sanitize_name(output),
+                                            left_expr,
+                                            op_str,
+                                            right_expr
+                                        ));
+                                    }
+                                }
+                            } else {
+                                // >128 bit: handled by the element-wise loop above (output_width > 128)
+                                // This case shouldn't be reached, but provide a fallback
+                                self.write_indented(&format!(
+                                    "signals->{} = {} {} {};\n",
+                                    self.sanitize_name(output),
+                                    left_expr,
+                                    op_str,
+                                    right_expr
+                                ));
+                            }
+                        } else {
+                            // Scalar operation or non-comparison - direct assignment
+                            self.write_indented(&format!(
+                                "signals->{} = {} {} {};\n",
+                                self.sanitize_name(output),
+                                left_expr,
+                                op_str,
+                                right_expr
+                            ));
+                        }
                     }
                 }
             }

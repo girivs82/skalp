@@ -352,13 +352,6 @@ impl<'hir> HirToMir<'hir> {
 
     /// Transform HIR to MIR
     pub fn transform(&mut self, hir: &'hir Hir) -> Mir {
-        use std::io::Write;
-        let _ = writeln!(
-            std::io::stderr(),
-            "[DEBUG TRANSFORM X7] entities={}, funcs={}",
-            hir.entities.len(),
-            hir.functions.len()
-        );
         use std::time::Instant;
         let transform_start = Instant::now();
 
@@ -5367,17 +5360,290 @@ impl<'hir> HirToMir<'hir> {
 
     /// Convert HIR expression to MIR
     ///
-    /// This wrapper ensures we have enough stack space for deeply recursive
-    /// expression conversion (e.g., complex stdlib imports with many nested calls).
+    /// ITERATIVE IMPLEMENTATION: Uses explicit work stack to avoid stack overflow
+    /// on deeply nested expressions (e.g., long chains of binary operations).
     fn convert_expression(
         &mut self,
         expr: &hir::HirExpression,
         depth: usize,
     ) -> Option<Expression> {
-        // Use stacker to grow the stack when needed for deep recursion
-        stacker::maybe_grow(STACK_RED_ZONE, STACK_GROW_SIZE, || {
-            self.convert_expression_impl(expr, depth)
-        })
+        // Work item for iterative expression conversion
+        enum ExprWork<'a> {
+            // Convert this expression (result goes on result_stack)
+            Convert(&'a hir::HirExpression),
+            // Build binary expression: pop right, pop left, combine
+            BuildBinary {
+                op: hir::HirBinaryOp,
+                left_expr: &'a hir::HirExpression, // for op conversion
+            },
+            // Build unary expression: pop operand, wrap
+            BuildUnary { op: hir::HirUnaryOp },
+            // Build concat: pop N elements, wrap in Concat
+            BuildConcat { count: usize },
+            // Build conditional: pop else, pop then, pop cond, wrap
+            BuildConditional,
+            // Build cast: pop inner, wrap
+            BuildCast { target_type: DataType },
+            // Build replicate: pop count, pop value, wrap
+            BuildReplicate,
+            // Build index: pop index, pop base, wrap
+            BuildIndex,
+            // Build range: pop low, pop high, pop base, wrap
+            BuildRange,
+        }
+
+        let mut work_stack: Vec<ExprWork> = vec![ExprWork::Convert(expr)];
+        let mut result_stack: Vec<Option<Expression>> = Vec::new();
+
+        while let Some(work) = work_stack.pop() {
+            match work {
+                ExprWork::Convert(e) => {
+                    match e {
+                        // Leaf expressions and complex expressions - use impl directly
+                        hir::HirExpression::Literal(_)
+                        | hir::HirExpression::Signal(_)
+                        | hir::HirExpression::Port(_)
+                        | hir::HirExpression::Variable(_)
+                        | hir::HirExpression::Constant(_)
+                        | hir::HirExpression::GenericParam(_)
+                        | hir::HirExpression::Call(_)
+                        | hir::HirExpression::StructLiteral(_)
+                        | hir::HirExpression::TupleLiteral(_)
+                        | hir::HirExpression::ArrayLiteral(_)
+                        | hir::HirExpression::Block { .. }
+                        | hir::HirExpression::Match(_)
+                        | hir::HirExpression::If(_)
+                        | hir::HirExpression::FieldAccess { .. }
+                        | hir::HirExpression::EnumVariant { .. }
+                        | hir::HirExpression::AssociatedConstant { .. } => {
+                            // Use the impl for leaf and complex expressions
+                            result_stack.push(self.convert_expression_impl(e, depth));
+                        }
+
+                        // Binary - process iteratively
+                        hir::HirExpression::Binary(bin) => {
+                            // Push continuation first, then operands (right, then left for LIFO order)
+                            work_stack.push(ExprWork::BuildBinary {
+                                op: bin.op.clone(),
+                                left_expr: &bin.left,
+                            });
+                            work_stack.push(ExprWork::Convert(&bin.right));
+                            work_stack.push(ExprWork::Convert(&bin.left));
+                        }
+
+                        // Unary - process iteratively
+                        hir::HirExpression::Unary(unary) => {
+                            work_stack.push(ExprWork::BuildUnary {
+                                op: unary.op.clone(),
+                            });
+                            work_stack.push(ExprWork::Convert(&unary.operand));
+                        }
+
+                        // Concat - process iteratively
+                        hir::HirExpression::Concat(exprs) => {
+                            work_stack.push(ExprWork::BuildConcat { count: exprs.len() });
+                            for e in exprs.iter().rev() {
+                                work_stack.push(ExprWork::Convert(e));
+                            }
+                        }
+
+                        // Ternary (conditional) - process iteratively
+                        hir::HirExpression::Ternary {
+                            condition,
+                            true_expr,
+                            false_expr,
+                        } => {
+                            work_stack.push(ExprWork::BuildConditional);
+                            work_stack.push(ExprWork::Convert(false_expr));
+                            work_stack.push(ExprWork::Convert(true_expr));
+                            work_stack.push(ExprWork::Convert(condition));
+                        }
+
+                        // Cast - process iteratively
+                        hir::HirExpression::Cast(cast) => {
+                            let target_type = self.convert_type(&cast.target_type);
+                            work_stack.push(ExprWork::BuildCast { target_type });
+                            work_stack.push(ExprWork::Convert(&cast.expr));
+                        }
+
+                        // ArrayRepeat - process iteratively (converts to Replicate in MIR)
+                        hir::HirExpression::ArrayRepeat { value, count } => {
+                            // Push continuation then value and count expressions
+                            work_stack.push(ExprWork::BuildReplicate);
+                            work_stack.push(ExprWork::Convert(count));
+                            work_stack.push(ExprWork::Convert(value));
+                        }
+
+                        // Index - process iteratively
+                        hir::HirExpression::Index(base, index) => {
+                            work_stack.push(ExprWork::BuildIndex);
+                            work_stack.push(ExprWork::Convert(index));
+                            work_stack.push(ExprWork::Convert(base));
+                        }
+
+                        // Range - process iteratively
+                        hir::HirExpression::Range(base, high, low) => {
+                            work_stack.push(ExprWork::BuildRange);
+                            work_stack.push(ExprWork::Convert(low));
+                            work_stack.push(ExprWork::Convert(high));
+                            work_stack.push(ExprWork::Convert(base));
+                        }
+                    }
+                }
+
+                ExprWork::BuildBinary { op, left_expr } => {
+                    let right = result_stack.pop().flatten();
+                    let left = result_stack.pop().flatten();
+                    if let (Some(left), Some(right)) = (left, right) {
+                        let mir_op = self.convert_binary_op(&op, left_expr);
+                        let ty = left.ty.clone(); // Inherit type from left operand
+                        result_stack.push(Some(Expression::new(
+                            ExpressionKind::Binary {
+                                op: mir_op,
+                                left: Box::new(left),
+                                right: Box::new(right),
+                            },
+                            ty,
+                        )));
+                    } else {
+                        result_stack.push(None);
+                    }
+                }
+
+                ExprWork::BuildUnary { op } => {
+                    let operand = result_stack.pop().flatten();
+                    if let Some(operand) = operand {
+                        let mir_op = self.convert_unary_op(&op);
+                        let ty = operand.ty.clone();
+                        result_stack.push(Some(Expression::new(
+                            ExpressionKind::Unary {
+                                op: mir_op,
+                                operand: Box::new(operand),
+                            },
+                            ty,
+                        )));
+                    } else {
+                        result_stack.push(None);
+                    }
+                }
+
+                ExprWork::BuildConcat { count } => {
+                    let start = result_stack.len().saturating_sub(count);
+                    let elements: Vec<Expression> =
+                        result_stack.drain(start..).filter_map(|x| x).collect();
+                    if elements.len() == count {
+                        result_stack.push(Some(Expression::with_unknown_type(
+                            ExpressionKind::Concat(elements),
+                        )));
+                    } else {
+                        result_stack.push(None);
+                    }
+                }
+
+                ExprWork::BuildConditional => {
+                    let else_expr = result_stack.pop().flatten();
+                    let then_expr = result_stack.pop().flatten();
+                    let cond_expr = result_stack.pop().flatten();
+                    if let (Some(cond_expr), Some(then_expr), Some(else_expr)) =
+                        (cond_expr, then_expr, else_expr)
+                    {
+                        let ty = then_expr.ty.clone();
+                        result_stack.push(Some(Expression::new(
+                            ExpressionKind::Conditional {
+                                cond: Box::new(cond_expr),
+                                then_expr: Box::new(then_expr),
+                                else_expr: Box::new(else_expr),
+                            },
+                            ty,
+                        )));
+                    } else {
+                        result_stack.push(None);
+                    }
+                }
+
+                ExprWork::BuildCast { target_type } => {
+                    let inner = result_stack.pop().flatten();
+                    if let Some(inner) = inner {
+                        // Convert DataType to Type (simplified)
+                        let ty = match &target_type {
+                            DataType::Bit(w) => Type::Bit(Width::Fixed(*w as u32)),
+                            DataType::Logic(w) => Type::Logic(Width::Fixed(*w as u32)),
+                            DataType::Int(w) => Type::Int(Width::Fixed(*w as u32)),
+                            DataType::Nat(w) => Type::Nat(Width::Fixed(*w as u32)),
+                            DataType::Bool => Type::Bool,
+                            _ => Type::Unknown, // Float types etc
+                        };
+                        result_stack.push(Some(Expression::new(
+                            ExpressionKind::Cast {
+                                expr: Box::new(inner),
+                                target_type: target_type.clone(),
+                            },
+                            ty,
+                        )));
+                    } else {
+                        result_stack.push(None);
+                    }
+                }
+
+                ExprWork::BuildReplicate => {
+                    let count_expr = result_stack.pop().flatten();
+                    let value_expr = result_stack.pop().flatten();
+                    if let (Some(value_expr), Some(count_expr)) = (value_expr, count_expr) {
+                        result_stack.push(Some(Expression::with_unknown_type(
+                            ExpressionKind::Replicate {
+                                value: Box::new(value_expr),
+                                count: Box::new(count_expr),
+                            },
+                        )));
+                    } else {
+                        result_stack.push(None);
+                    }
+                }
+
+                ExprWork::BuildIndex => {
+                    let index = result_stack.pop().flatten();
+                    let base = result_stack.pop().flatten();
+                    if let (Some(base), Some(index)) = (base, index) {
+                        // Convert to bit select
+                        if let ExpressionKind::Ref(lvalue) = base.kind {
+                            result_stack.push(Some(Expression::with_unknown_type(
+                                ExpressionKind::Ref(LValue::BitSelect {
+                                    base: Box::new(lvalue),
+                                    index: Box::new(index),
+                                }),
+                            )));
+                        } else {
+                            result_stack.push(None);
+                        }
+                    } else {
+                        result_stack.push(None);
+                    }
+                }
+
+                ExprWork::BuildRange => {
+                    let low = result_stack.pop().flatten();
+                    let high = result_stack.pop().flatten();
+                    let base = result_stack.pop().flatten();
+                    if let (Some(base), Some(high), Some(low)) = (base, high, low) {
+                        if let ExpressionKind::Ref(lvalue) = base.kind {
+                            result_stack.push(Some(Expression::with_unknown_type(
+                                ExpressionKind::Ref(LValue::RangeSelect {
+                                    base: Box::new(lvalue),
+                                    high: Box::new(high),
+                                    low: Box::new(low),
+                                }),
+                            )));
+                        } else {
+                            result_stack.push(None);
+                        }
+                    } else {
+                        result_stack.push(None);
+                    }
+                }
+            }
+        }
+
+        result_stack.pop().flatten()
     }
 
     /// Implementation of HIR expression to MIR conversion
@@ -5944,11 +6210,6 @@ impl<'hir> HirToMir<'hir> {
                 Some(Expression::new(ExpressionKind::Unary { op, operand }, ty))
             }
             hir::HirExpression::Call(call) => {
-                eprintln!(
-                    "[DEBUG CALL] Entering Call arm for function='{}', args={}",
-                    call.function,
-                    call.args.len()
-                );
                 trace!(
                     "🔥🔥🔥 CALL ARM MATCHED: function='{}' 🔥🔥🔥",
                     call.function
@@ -11290,100 +11551,142 @@ impl<'hir> HirToMir<'hir> {
 
     /// Infer the type of a HIR expression from context (BUG #76 FIX - full Option A)
     ///
-    /// This wrapper ensures we have enough stack space for deeply recursive type inference.
-    fn infer_hir_expression_type(&self, expr: &hir::HirExpression, depth: usize) -> Type {
-        // Use stacker to grow the stack when needed for deep recursion
-        stacker::maybe_grow(STACK_RED_ZONE, STACK_GROW_SIZE, || {
-            self.infer_hir_expression_type_impl(expr, depth)
-        })
-    }
-
-    /// Implementation of HIR expression type inference
-    fn infer_hir_expression_type_impl(&self, expr: &hir::HirExpression, depth: usize) -> Type {
-        // Guard against stack overflow on deeply nested expressions
-        if depth > MAX_EXPRESSION_RECURSION_DEPTH {
-            panic!(
-                "Expression recursion depth exceeded {} - likely infinite recursion in nested concat/tuple expressions",
-                MAX_EXPRESSION_RECURSION_DEPTH
-            );
+    /// ITERATIVE IMPLEMENTATION: Uses explicit work stack to avoid stack overflow
+    /// on deeply nested expressions.
+    fn infer_hir_expression_type(&self, expr: &hir::HirExpression, _depth: usize) -> Type {
+        // Work item for iterative type inference
+        enum TypeWorkItem<'a> {
+            // Infer type for this expression
+            Infer(&'a hir::HirExpression),
+            // Build tuple type from accumulated element types (for Concat)
+            BuildTuple(usize), // number of elements to pop
         }
 
-        match expr {
-            hir::HirExpression::Literal(lit) => self.infer_literal_type(lit),
+        let mut work_stack: Vec<TypeWorkItem> = vec![TypeWorkItem::Infer(expr)];
+        let mut result_stack: Vec<Type> = Vec::new();
 
-            hir::HirExpression::Signal(id) => {
-                // Look up signal type in HIR
-                if let Some(hir) = self.hir {
-                    for impl_block in &hir.implementations {
-                        if let Some(signal) = impl_block.signals.iter().find(|s| s.id == *id) {
-                            return self.hir_type_to_type(&signal.signal_type);
+        while let Some(work) = work_stack.pop() {
+            match work {
+                TypeWorkItem::Infer(expr) => {
+                    match expr {
+                        hir::HirExpression::Literal(lit) => {
+                            result_stack.push(self.infer_literal_type(lit));
+                        }
+
+                        hir::HirExpression::Signal(id) => {
+                            let ty = if let Some(hir) = self.hir {
+                                let mut found = Type::Unknown;
+                                for impl_block in &hir.implementations {
+                                    if let Some(signal) =
+                                        impl_block.signals.iter().find(|s| s.id == *id)
+                                    {
+                                        found = self.hir_type_to_type(&signal.signal_type);
+                                        break;
+                                    }
+                                }
+                                found
+                            } else {
+                                Type::Unknown
+                            };
+                            result_stack.push(ty);
+                        }
+
+                        hir::HirExpression::Port(id) => {
+                            let ty = if let Some(hir) = self.hir {
+                                let mut found = Type::Unknown;
+                                for entity in &hir.entities {
+                                    if let Some(port) = entity.ports.iter().find(|p| p.id == *id) {
+                                        found = self.hir_type_to_type(&port.port_type);
+                                        break;
+                                    }
+                                }
+                                found
+                            } else {
+                                Type::Unknown
+                            };
+                            result_stack.push(ty);
+                        }
+
+                        hir::HirExpression::Variable(id) => {
+                            // Look up variable type - check multiple sources
+                            let ty = {
+                                // 1. Context-aware map
+                                if let Some(context) = self.get_current_context() {
+                                    let key = (Some(context), *id);
+                                    if let Some(&mir_id) = self.context_variable_map.get(&key) {
+                                        if let Some(hir_type) = self.mir_variable_types.get(&mir_id)
+                                        {
+                                            self.hir_type_to_type(hir_type)
+                                        } else {
+                                            Type::Unknown
+                                        }
+                                    } else if let Some((_, _, hir_type)) =
+                                        self.dynamic_variables.get(id)
+                                    {
+                                        self.hir_type_to_type(hir_type)
+                                    } else if let Some(&mir_id) = self.variable_map.get(id) {
+                                        if let Some(hir_type) = self.mir_variable_types.get(&mir_id)
+                                        {
+                                            self.hir_type_to_type(hir_type)
+                                        } else {
+                                            Type::Unknown
+                                        }
+                                    } else {
+                                        Type::Unknown
+                                    }
+                                } else if let Some((_, _, hir_type)) =
+                                    self.dynamic_variables.get(id)
+                                {
+                                    self.hir_type_to_type(hir_type)
+                                } else if let Some(&mir_id) = self.variable_map.get(id) {
+                                    if let Some(hir_type) = self.mir_variable_types.get(&mir_id) {
+                                        self.hir_type_to_type(hir_type)
+                                    } else {
+                                        Type::Unknown
+                                    }
+                                } else {
+                                    Type::Unknown
+                                }
+                            };
+                            result_stack.push(ty);
+                        }
+
+                        hir::HirExpression::Binary(bin) => {
+                            // Type depends on operation - usually inherits from left operand
+                            // Push left operand for processing (result will be on result_stack)
+                            work_stack.push(TypeWorkItem::Infer(&bin.left));
+                        }
+
+                        hir::HirExpression::Concat(exprs) => {
+                            // Concat creates a tuple type
+                            // First push the continuation to build the tuple
+                            work_stack.push(TypeWorkItem::BuildTuple(exprs.len()));
+                            // Then push all elements (in reverse order so they're processed in order)
+                            for e in exprs.iter().rev() {
+                                work_stack.push(TypeWorkItem::Infer(e));
+                            }
+                        }
+
+                        hir::HirExpression::Call(call) => {
+                            result_stack.push(self.infer_function_return_type(&call.function));
+                        }
+
+                        _ => {
+                            result_stack.push(Type::Unknown);
                         }
                     }
                 }
-                Type::Unknown
-            }
 
-            hir::HirExpression::Port(id) => {
-                // Look up port type in HIR
-                if let Some(hir) = self.hir {
-                    for entity in &hir.entities {
-                        if let Some(port) = entity.ports.iter().find(|p| p.id == *id) {
-                            return self.hir_type_to_type(&port.port_type);
-                        }
-                    }
+                TypeWorkItem::BuildTuple(count) => {
+                    // Pop 'count' types from result_stack and build a tuple
+                    let start = result_stack.len().saturating_sub(count);
+                    let element_types: Vec<Type> = result_stack.drain(start..).collect();
+                    result_stack.push(Type::Tuple(element_types));
                 }
-                Type::Unknown
             }
-
-            hir::HirExpression::Variable(id) => {
-                // Look up variable type - check multiple sources
-                // 1. Context-aware map
-                if let Some(context) = self.get_current_context() {
-                    let key = (Some(context), *id);
-                    if let Some(&mir_id) = self.context_variable_map.get(&key) {
-                        if let Some(hir_type) = self.mir_variable_types.get(&mir_id) {
-                            return self.hir_type_to_type(hir_type);
-                        }
-                    }
-                }
-
-                // 2. Dynamic variables
-                if let Some((_, _, hir_type)) = self.dynamic_variables.get(id) {
-                    return self.hir_type_to_type(hir_type);
-                }
-
-                // 3. Variable map + type map
-                if let Some(&mir_id) = self.variable_map.get(id) {
-                    if let Some(hir_type) = self.mir_variable_types.get(&mir_id) {
-                        return self.hir_type_to_type(hir_type);
-                    }
-                }
-
-                Type::Unknown
-            }
-
-            hir::HirExpression::Binary(bin) => {
-                // Type depends on operation - usually inherits from operands
-
-                self.infer_hir_expression_type(&bin.left, depth + 1) // Simplified - proper inference would consider operation
-            }
-
-            hir::HirExpression::Concat(exprs) => {
-                // Concat creates a tuple type
-                let element_types: Vec<Type> = exprs
-                    .iter()
-                    .map(|e| self.infer_hir_expression_type(e, depth + 1))
-                    .collect();
-                Type::Tuple(element_types)
-            }
-
-            hir::HirExpression::Call(call) => {
-                // Look up function return type
-                self.infer_function_return_type(&call.function)
-            }
-
-            _ => Type::Unknown,
         }
+
+        result_stack.pop().unwrap_or(Type::Unknown)
     }
 
     fn infer_literal_type(&self, lit: &hir::HirLiteral) -> Type {
