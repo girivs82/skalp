@@ -427,7 +427,24 @@ impl CpuRuntime {
         let operand_val = Self::bytes_to_u64(operand);
 
         let result_val = match op {
-            UnaryOperation::Not => !operand_val,
+            UnaryOperation::Not => {
+                // For proper NOT semantics, we need to mask to the actual bit width
+                // Since we only have byte count, we mask to byte-aligned width
+                // Special case: for 1-byte values that are 0 or 1 (boolean/1-bit signals),
+                // use logical NOT to avoid 0xFE result from bitwise NOT of 1
+                if operand.len() == 1 && operand_val <= 1 {
+                    // Boolean value - logical NOT
+                    if operand_val == 0 { 1 } else { 0 }
+                } else {
+                    // Multi-bit value - bitwise NOT with proper masking
+                    let mask = if operand.len() >= 8 {
+                        u64::MAX
+                    } else {
+                        (1u64 << (operand.len() * 8)) - 1
+                    };
+                    (!operand_val) & mask
+                }
+            }
             UnaryOperation::Neg => {
                 // Check if this is likely an FP type based on size (2, 4, or 8 bytes)
                 // For FP types, perform proper IEEE 754 negation
