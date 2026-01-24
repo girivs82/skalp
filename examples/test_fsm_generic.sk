@@ -1,0 +1,146 @@
+// Generic FSM Test Design
+// Tests state machine transitions, boolean NOT operations, mux conditions
+// This is a generic test to verify skalp compiler/simulator functionality
+
+struct FaultFlags {
+    error_a: bit
+    error_b: bit
+    timeout: bit
+}
+
+enum State {
+    Idle,
+    WaitReady,
+    Active,
+    Done,
+    Error
+}
+
+entity GenericFsm {
+    in clk: clock
+    in rst: reset
+    in enable: bit
+    in ready: bit
+    in error_input: bit
+    in data_valid: bit
+    in counter_threshold: nat[8]
+
+    out state: State
+    out active_out: bit
+    out done_out: bit
+    out error_out: bit
+    out counter_match: bit
+    out not_enable: bit
+    out faults: FaultFlags
+}
+
+impl GenericFsm {
+    // State register
+    signal state_reg: State = State::Idle
+
+    // Fault latching
+    signal fault_a_latch: bit = 0
+    signal fault_b_latch: bit = 0
+    signal timeout_latch: bit = 0
+
+    // Internal counter
+    signal counter: nat[8] = 0
+
+    // Timeout counter
+    signal timeout_counter: nat[16] = 0
+
+    // Any fault flag (combined)
+    signal any_fault: bit = fault_a_latch | fault_b_latch | timeout_latch
+
+    // NOT operation test - critical for BUG #117r
+    signal enable_inverted: bit = !enable
+
+    // Counter comparison
+    signal counter_equals: bit = if counter == counter_threshold { 1 } else { 0 }
+
+    on(clk.rise) {
+        if (rst) {
+            state_reg = State::Idle
+            fault_a_latch = 0
+            fault_b_latch = 0
+            timeout_latch = 0
+            counter = 0
+            timeout_counter = 0
+        } else {
+            // Fault latching - once set, stays set until reset
+            if (error_input) {
+                fault_a_latch = 1
+            }
+
+            // Timeout detection (when not in Idle, Done, or Error)
+            match state_reg {
+                State::WaitReady => {
+                    timeout_counter = timeout_counter + 1
+                    if (timeout_counter > 1000) {
+                        timeout_latch = 1
+                    }
+                }
+                State::Active => {
+                    timeout_counter = timeout_counter + 1
+                    if (timeout_counter > 1000) {
+                        timeout_latch = 1
+                    }
+                }
+                _ => {
+                    // Reset timeout in other states
+                }
+            }
+
+            // Counter increment
+            counter = counter + 1
+
+            // State machine
+            match state_reg {
+                State::Idle => {
+                    timeout_counter = 0
+                    if (enable && !any_fault) {
+                        state_reg = State::WaitReady
+                    }
+                }
+                State::WaitReady => {
+                    if (any_fault) {
+                        state_reg = State::Error
+                    } else if (ready) {
+                        if (!error_input) {
+                            state_reg = State::Active
+                        } else {
+                            state_reg = State::Error
+                        }
+                    }
+                }
+                State::Active => {
+                    if (any_fault) {
+                        state_reg = State::Error
+                    } else if (data_valid) {
+                        state_reg = State::Done
+                    }
+                }
+                State::Done => {
+                    if (!enable) {
+                        state_reg = State::Idle
+                    }
+                }
+                State::Error => {
+                    // Stay in error until reset
+                }
+            }
+        }
+    }
+
+    // Output assignments
+    state = state_reg
+    active_out = if state_reg == State::Active { 1 } else { 0 }
+    done_out = if state_reg == State::Done { 1 } else { 0 }
+    error_out = if state_reg == State::Error { 1 } else { 0 }
+    counter_match = counter_equals
+    not_enable = enable_inverted
+
+    faults.error_a = fault_a_latch
+    faults.error_b = fault_b_latch
+    faults.timeout = timeout_latch
+}

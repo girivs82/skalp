@@ -4,6 +4,7 @@
 //! to the mid-level MIR suitable for code generation
 
 use crate::mir::*;
+use crate::signal_naming::FIELD_SEPARATOR;
 use crate::type_flattening::{FlattenedField as TypeFlattenedField, TypeFlattener};
 use crate::{ExpressionKind, Type};
 use indexmap::IndexMap;
@@ -1141,13 +1142,13 @@ impl<'hir> HirToMir<'hir> {
 
                                     // Map each flattened field with its full path
                                     // For scalar ports: "result" -> signal_id
-                                    // For struct ports: "gates_high_a" -> signal_id, "gates_low_a" -> signal_id, ...
+                                    // For struct ports: "gates__high_a" -> signal_id, "gates__low_a" -> signal_id, ...
                                     for field in &flattened_fields {
-                                        // Build the key: port_name + field_path joined by "_"
+                                        // Build the key: port_name + field_path joined by FIELD_SEPARATOR
                                         let key = if field.field_path.is_empty() {
                                             port.name.clone()
                                         } else {
-                                            format!("{}_{}", port.name, field.field_path.join("_"))
+                                            format!("{}{}{}", port.name, FIELD_SEPARATOR, field.field_path.join(FIELD_SEPARATOR))
                                         };
                                         output_ports.insert(key, SignalId(field.id));
                                     }
@@ -3789,12 +3790,12 @@ impl<'hir> HirToMir<'hir> {
 
         for lhs_field in &lhs_fields {
             // Extract the field suffix for this LHS field
-            // For rd_data_x, we want "x"
-            // For rd_data_position_x, we want "position_x"
-            let field_suffix = lhs_field.field_path.join("_");
+            // For rd_data__x, we want "x"
+            // For rd_data__position__x, we want "position__x"
+            let field_suffix = lhs_field.field_path.join(FIELD_SEPARATOR);
 
             // Build multiplexer by iterating from last index to first
-            // Result: (index == 0) ? mem_0_x : (index == 1) ? mem_1_x : ... : mem_7_x
+            // Result: (index == 0) ? mem_0__x : (index == 1) ? mem_1__x : ... : mem_7__x
             let mut sorted_indices: Vec<_> = array_by_index.keys().collect();
             sorted_indices.sort_by_key(|s| s.parse::<usize>().unwrap_or(0));
 
@@ -3809,7 +3810,7 @@ impl<'hir> HirToMir<'hir> {
                     // Get the field suffix (everything after array index)
                     let array_field_suffix: Vec<String> =
                         f.field_path.iter().skip(1).cloned().collect();
-                    let array_field_suffix_str = array_field_suffix.join("_");
+                    let array_field_suffix_str = array_field_suffix.join(FIELD_SEPARATOR);
 
                     // BUG #31 FIX: When LHS field_path is empty ([]), it means we're working with
                     // an already-flattened leaf port (e.g., rd_data_value). In this case, we should
@@ -4126,8 +4127,8 @@ impl<'hir> HirToMir<'hir> {
 
                                 if let Some(expanded_conns) = expanded_opt {
                                     // BUG #117r FIX: Use the flattened RHS signals directly
-                                    // Remove the original unexpanded connection
-                                    connections.remove(&port.name);
+                                    // Remove the original unexpanded connection (shift_remove preserves order)
+                                    connections.shift_remove(&port.name);
 
                                     // Add all expanded connections
                                     for (port_field_name, rhs_expr) in &expanded_conns {
@@ -4168,12 +4169,12 @@ impl<'hir> HirToMir<'hir> {
 
                                     // Map each flattened field with its full path for field access resolution
                                     // For scalar ports: "result" -> signal_id
-                                    // For struct ports: "gates_high_a" -> signal_id, "gates_low_a" -> signal_id, ...
+                                    // For struct ports: "gates__high_a" -> signal_id, "gates__low_a" -> signal_id, ...
                                     for field in &flattened_fields {
                                         let key = if field.field_path.is_empty() {
                                             port.name.clone()
                                         } else {
-                                            format!("{}_{}", port.name, field.field_path.join("_"))
+                                            format!("{}{}{}", port.name, FIELD_SEPARATOR, field.field_path.join(FIELD_SEPARATOR))
                                         };
                                         output_ports.insert(key.clone(), SignalId(field.id));
 
@@ -4182,7 +4183,7 @@ impl<'hir> HirToMir<'hir> {
                                         let flattened_port_name = if field.field_path.is_empty() {
                                             port.name.clone()
                                         } else {
-                                            format!("{}_{}", port.name, field.field_path.join("_"))
+                                            format!("{}{}{}", port.name, FIELD_SEPARATOR, field.field_path.join(FIELD_SEPARATOR))
                                         };
                                         connections.insert(
                                             flattened_port_name,
@@ -4634,8 +4635,8 @@ impl<'hir> HirToMir<'hir> {
         for field in &lhs_fields {
             // The field_path contains the path from the struct root to this field
             // For a single-level struct like FaultFlags { ov, uv, ... }, field_path = ["ov"], ["uv"], ...
-            // Join the path with underscores for matching
-            let field_key = field.field_path.join("_");
+            // Join the path with FIELD_SEPARATOR for matching
+            let field_key = field.field_path.join(FIELD_SEPARATOR);
             if !field_key.is_empty() {
                 field_map.insert(field_key, field);
             }
@@ -4849,11 +4850,11 @@ impl<'hir> HirToMir<'hir> {
         let mut connections = Vec::new();
         for rhs_field in &rhs_fields {
             // Build port name: base_port_name + field_path
-            // For example: rd_data + ["x"] = rd_data_x
+            // For example: rd_data + ["x"] = rd_data__x
             let port_field_name = if rhs_field.field_path.is_empty() {
                 base_port_name.to_string()
             } else {
-                format!("{}_{}", base_port_name, rhs_field.field_path.join("_"))
+                format!("{}{}{}", base_port_name, FIELD_SEPARATOR, rhs_field.field_path.join(FIELD_SEPARATOR))
             };
 
             // Create expression referencing the flattened RHS field
@@ -16726,10 +16727,10 @@ impl<'hir> HirToMir<'hir> {
                     // Example: inner.result where inner is an instance of entity Inner
                     // BUG FIX: Use full field path for struct-typed port lookups
                     // For nested access like instance.gates.high_a, field_path = ["gates", "high_a"]
-                    // and we need to look up "gates_high_a" in output_ports
+                    // and we need to look up "gates__high_a" in output_ports
                     if let Some(output_ports) = self.instance_outputs_by_name.get(param_name) {
-                        // Join the field path with underscores for the lookup key
-                        let lookup_key = field_path.join("_");
+                        // Join the field path with FIELD_SEPARATOR for the lookup key
+                        let lookup_key = field_path.join(FIELD_SEPARATOR);
                         if let Some(&signal_id) = output_ports.get(&lookup_key) {
                             return Some(Expression::with_unknown_type(ExpressionKind::Ref(
                                 LValue::Signal(signal_id),

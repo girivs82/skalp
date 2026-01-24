@@ -1497,16 +1497,20 @@ impl<'a> MetalShaderGenerator<'a> {
             let input = &node.inputs[0].signal_id;
             let output = &node.outputs[0].signal_id;
 
-            // BUG FIX: Check if input is float type - floats can't use bitwise NOT (~)
+            // BUG FIX #117r: Check input type - logical NOT for booleans/floats, bitwise for multi-bit
             let input_type = self.get_signal_type_from_sir(sir, input);
             let input_is_float = input_type.as_ref().is_some_and(|t| t.is_float());
+            let input_width = self.get_signal_width_from_sir(sir, input);
 
             let op_str = match op {
                 UnaryOperation::Not => {
-                    if input_is_float {
-                        "!" // Logical NOT for floats (0.0/1.0 boolean values)
+                    if input_is_float || input_width == 1 {
+                        // BUG FIX #117r: Use logical NOT for single-bit values
+                        // Bitwise ~0 = 0xFFFFFFFF (truthy), ~1 = 0xFFFFFFFE (still truthy!)
+                        // Logical !0 = 1, !1 = 0 (correct boolean semantics)
+                        "!"
                     } else {
-                        "~" // Bitwise NOT for integers
+                        "~" // Bitwise NOT for multi-bit integers
                     }
                 }
                 UnaryOperation::Neg => "-",

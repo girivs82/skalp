@@ -25,6 +25,7 @@ pub mod timing;
 pub mod transform;
 
 // Shared utility modules for consistent transformations
+pub mod name_registry;
 pub mod signal_naming;
 pub mod type_flattening;
 pub mod type_width;
@@ -45,6 +46,7 @@ pub use mir::{
 };
 pub use mir_validation::{validate_mir, ValidationError};
 pub use monomorphize::Monomorphizer;
+pub use name_registry::{NameEntry, NameKind, NameRegistry, NameResolver, ResolvedName};
 pub use optimize::{ConstantFolding, DeadCodeElimination, OptimizationPass};
 pub use ssa_conversion::apply_ssa_conversion;
 

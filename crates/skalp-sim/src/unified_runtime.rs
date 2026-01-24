@@ -77,6 +77,7 @@ use crate::simulator::SimulationRuntime;
 use indexmap::IndexMap;
 use skalp_lir::gate_netlist::GateNetlist;
 use skalp_lir::synth::PipelineAnnotations;
+use skalp_mir::name_registry::NameRegistry;
 use skalp_sir::SirModule;
 use std::collections::VecDeque;
 use std::path::Path;
@@ -216,6 +217,10 @@ pub struct UnifiedSimulator {
     behavioral_input_names: Vec<String>,
     /// Behavioral output port names (stored when loading behavioral module)
     behavioral_output_names: Vec<String>,
+    /// Name registry for resolving user-facing paths to internal names
+    /// Users can use hierarchical paths (e.g., "bms.connected") which get
+    /// resolved to collision-proof internal names (e.g., "_s0")
+    name_registry: NameRegistry,
 }
 
 /// Internal backend enum to hold the actual simulator
@@ -254,12 +259,41 @@ impl UnifiedSimulator {
             latency_adjustments: IndexMap::new(),
             behavioral_input_names: Vec::new(),
             behavioral_output_names: Vec::new(),
+            name_registry: NameRegistry::new(),
         })
     }
 
     /// Check if this simulator is in NCL (async) mode
     pub fn is_ncl_mode(&self) -> bool {
         self.config.circuit_mode == CircuitMode::Ncl
+    }
+
+    /// Resolve a user-facing signal path to its internal name
+    ///
+    /// Users can use hierarchical paths like "bms.connected" which get
+    /// resolved to collision-proof internal names like "_s0".
+    /// If no mapping exists, the original name is returned (for backward compatibility).
+    ///
+    /// # Arguments
+    /// * `path` - User-facing signal path (e.g., "bms.connected" or "state_reg")
+    ///
+    /// # Returns
+    /// The internal signal name to use for actual lookups
+    fn resolve_path(&self, path: &str) -> String {
+        let resolved = self.name_registry
+            .resolve(path)
+            .map(|s| s.to_string());
+
+        if resolved.is_none() {
+            eprintln!("⚠️  PATH RESOLUTION FAILED: '{}' not found in registry, using as-is", path);
+        }
+
+        let result = resolved.unwrap_or_else(|| path.to_string());
+        // Debug for key signals
+        if path == "enable" || path == "rst" || path == "state" {
+            println!("🔍 RESOLVE_PATH: '{}' → '{}'", path, result);
+        }
+        result
     }
 
     /// Load pipeline annotations from a TOML file
@@ -456,6 +490,9 @@ impl UnifiedSimulator {
         self.behavioral_input_names = module.inputs.iter().map(|p| p.name.clone()).collect();
         self.behavioral_output_names = module.outputs.iter().map(|p| p.name.clone()).collect();
 
+        // Store name registry for path resolution
+        self.name_registry = module.name_registry.clone();
+
         let use_gpu = match self.config.hw_accel {
             HwAccel::Cpu => false,
             HwAccel::Gpu => true,
@@ -536,8 +573,14 @@ impl UnifiedSimulator {
 
     /// Set an input value (as u64)
     ///
+    /// Accepts user-facing hierarchical paths (e.g., "bms.connected") which are
+    /// automatically resolved to internal signal names.
+    ///
     /// For NCL mode, this sets the dual-rail encoded value (use set_ncl_input for more control)
     pub async fn set_input(&mut self, name: &str, value: u64) {
+        // Resolve user-facing path to internal name
+        let internal_name = self.resolve_path(name);
+
         match &mut self.backend {
             SimulatorBackend::Uninitialized => {
                 eprintln!("Warning: set_input called before loading design");
@@ -545,22 +588,22 @@ impl UnifiedSimulator {
             SimulatorBackend::BehavioralCpu(runtime) => {
                 // Convert u64 to bytes (little-endian)
                 let bytes = value.to_le_bytes().to_vec();
-                let _ = runtime.set_input(name, &bytes).await;
+                let _ = runtime.set_input(&internal_name, &bytes).await;
             }
             #[cfg(target_os = "macos")]
             SimulatorBackend::BehavioralGpu(runtime) => {
                 // Convert u64 to bytes (little-endian)
                 let bytes = value.to_le_bytes().to_vec();
-                let _ = runtime.set_input(name, &bytes).await;
+                let _ = runtime.set_input(&internal_name, &bytes).await;
             }
             SimulatorBackend::GateLevelCpu(sim) => {
                 // Convert u64 to bool vector
                 let bits: Vec<bool> = (0..64).map(|i| (value >> i) & 1 == 1).collect();
-                sim.set_input(name, &bits);
+                sim.set_input(&internal_name, &bits);
             }
             #[cfg(target_os = "macos")]
             SimulatorBackend::GateLevelGpu(runtime) => {
-                runtime.set_input_u64(name, value);
+                runtime.set_input_u64(&internal_name, value);
             }
             SimulatorBackend::NclCpu(ncl_sim) => {
                 // For NCL, infer width from value (up to 64 bits)
@@ -569,7 +612,7 @@ impl UnifiedSimulator {
                 } else {
                     64 - value.leading_zeros() as usize
                 };
-                ncl_sim.set_dual_rail_value(name, value, width.max(1));
+                ncl_sim.set_dual_rail_value(&internal_name, value, width.max(1));
             }
             #[cfg(target_os = "macos")]
             SimulatorBackend::NclGpu(runtime) => {
@@ -579,16 +622,17 @@ impl UnifiedSimulator {
                 } else {
                     64 - value.leading_zeros() as usize
                 };
-                runtime.set_dual_rail_value(name, value, width.max(1));
+                runtime.set_dual_rail_value(&internal_name, value, width.max(1));
             }
         }
     }
 
     /// Check if an NCL signal exists (for debugging)
     pub fn has_ncl_signal(&self, name: &str) -> bool {
+        let internal_name = self.resolve_path(name);
         match &self.backend {
             #[cfg(target_os = "macos")]
-            SimulatorBackend::NclGpu(runtime) => runtime.has_signal(name),
+            SimulatorBackend::NclGpu(runtime) => runtime.has_signal(&internal_name),
             _ => false,
         }
     }
@@ -802,15 +846,19 @@ impl UnifiedSimulator {
     ///
     /// This bypasses any latency adjustment and returns the actual
     /// current output value from the simulation backend.
+    /// Accepts user-facing hierarchical paths which are resolved to internal names.
     ///
     /// For NCL mode, this returns the value if all bits are valid DATA,
     /// otherwise returns None.
     pub async fn get_output_raw(&self, name: &str) -> Option<u64> {
+        // Resolve user-facing path to internal name
+        let internal_name = self.resolve_path(name);
+
         match &self.backend {
             SimulatorBackend::Uninitialized => None,
             SimulatorBackend::BehavioralCpu(runtime) => {
                 // Get bytes from behavioral runtime and convert to u64
-                runtime.get_output(name).await.ok().map(|bytes| {
+                runtime.get_output(&internal_name).await.ok().map(|bytes| {
                     let mut value = 0u64;
                     for (i, &byte) in bytes.iter().take(8).enumerate() {
                         value |= (byte as u64) << (i * 8);
@@ -821,7 +869,7 @@ impl UnifiedSimulator {
             #[cfg(target_os = "macos")]
             SimulatorBackend::BehavioralGpu(runtime) => {
                 // Get bytes from behavioral runtime and convert to u64
-                runtime.get_output(name).await.ok().map(|bytes| {
+                runtime.get_output(&internal_name).await.ok().map(|bytes| {
                     let mut value = 0u64;
                     for (i, &byte) in bytes.iter().take(8).enumerate() {
                         value |= (byte as u64) << (i * 8);
@@ -829,7 +877,7 @@ impl UnifiedSimulator {
                     value
                 })
             }
-            SimulatorBackend::GateLevelCpu(sim) => sim.get_output(name).map(|bits| {
+            SimulatorBackend::GateLevelCpu(sim) => sim.get_output(&internal_name).map(|bits| {
                 bits.iter()
                     .enumerate()
                     .filter(|(_, &b)| b)
@@ -837,12 +885,12 @@ impl UnifiedSimulator {
                     .sum()
             }),
             #[cfg(target_os = "macos")]
-            SimulatorBackend::GateLevelGpu(runtime) => runtime.get_output_u64(name),
+            SimulatorBackend::GateLevelGpu(runtime) => runtime.get_output_u64(&internal_name),
             SimulatorBackend::NclCpu(ncl_sim) => {
                 // For NCL, we need to determine width somehow
                 // Try common widths and return first valid result
                 for width in [64, 32, 16, 8, 4, 2, 1] {
-                    if let Some(value) = ncl_sim.get_dual_rail_value(name, width) {
+                    if let Some(value) = ncl_sim.get_dual_rail_value(&internal_name, width) {
                         return Some(value);
                     }
                 }
@@ -852,7 +900,7 @@ impl UnifiedSimulator {
             SimulatorBackend::NclGpu(runtime) => {
                 // For NCL, try common widths and return first valid result
                 for width in [64, 32, 16, 8, 4, 2, 1] {
-                    if let Some(value) = runtime.get_dual_rail_value(name, width) {
+                    if let Some(value) = runtime.get_dual_rail_value(&internal_name, width) {
                         return Some(value);
                     }
                 }
@@ -1244,9 +1292,10 @@ impl UnifiedSimulator {
     ///
     /// This is useful for behavioral simulation where outputs may be wider than 64 bits.
     /// For gate-level simulation, the u64 value is converted to 8 bytes (little-endian).
+    /// Accepts user-facing hierarchical paths which are resolved to internal names.
     ///
     /// # Arguments
-    /// * `name` - The output port name
+    /// * `name` - The output port name (can be hierarchical path like "bms.connected")
     ///
     /// # Returns
     /// The output value as bytes (little-endian), or None if the output doesn't exist
@@ -1259,11 +1308,14 @@ impl UnifiedSimulator {
     /// }
     /// ```
     pub async fn get_output_bytes(&self, name: &str) -> Option<Vec<u8>> {
+        // Resolve user-facing path to internal name
+        let internal_name = self.resolve_path(name);
+
         match &self.backend {
             SimulatorBackend::Uninitialized => None,
-            SimulatorBackend::BehavioralCpu(runtime) => runtime.get_output(name).await.ok(),
+            SimulatorBackend::BehavioralCpu(runtime) => runtime.get_output(&internal_name).await.ok(),
             #[cfg(target_os = "macos")]
-            SimulatorBackend::BehavioralGpu(runtime) => runtime.get_output(name).await.ok(),
+            SimulatorBackend::BehavioralGpu(runtime) => runtime.get_output(&internal_name).await.ok(),
             // For non-behavioral backends, get u64 and convert to bytes
             _ => self
                 .get_output_raw(name)

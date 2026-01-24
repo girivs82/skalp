@@ -10,10 +10,10 @@ use skalp_mir::{
 };
 use std::collections::HashMap;
 
-// Disable verbose debug output for performance
-macro_rules! eprintln {
-    ($($arg:tt)*) => {{}};
-}
+// Temporarily enable debug output for BUG #117r investigation
+// macro_rules! eprintln {
+//     ($($arg:tt)*) => {{}};
+// }
 
 /// Convert MIR to SIR with full hierarchical elaboration
 /// This function takes the entire Mir (all modules) and elaborates the first module
@@ -35,18 +35,18 @@ pub fn convert_mir_to_sir_with_hierarchy(mir: &Mir, top_module: &Module) -> SirM
         "🌟 MIR TO SIR: Starting hierarchical conversion for module '{}'",
         top_module.name
     );
-    eprintln!("📊 Available modules in MIR:");
+    println!("📊 Available modules in MIR:");
     for m in &mir.modules {
-        eprintln!(
+        println!(
             "   - {} (ID={:?}): {} signals",
             m.name,
             m.id,
             m.signals.len()
         );
         if m.name.contains("AsyncFifo_8") {
-            eprintln!("      🔍 AsyncFifo_8 signals:");
+            println!("      🔍 AsyncFifo_8 signals:");
             for _sig in m.signals.iter().take(15) {
-                eprintln!("         - {}: {:?}", _sig.name, _sig.signal_type);
+                println!("         - {}: {:?}", _sig.name, _sig.signal_type);
             }
         }
     }
@@ -67,6 +67,12 @@ pub fn convert_mir_to_sir_with_hierarchy(mir: &Mir, top_module: &Module) -> SirM
     converter.convert_ports();
     converter.convert_signals();
     converter.convert_variables(); // Convert MIR variables (let bindings) to SIR signals
+
+    // DEBUG: Print name mappings
+    println!("📜 MIR_TO_INTERNAL_NAME mappings:");
+    for (mir_name, internal_name) in &converter.mir_to_internal_name {
+        println!("   {} → {}", mir_name, internal_name);
+    }
 
     // CRITICAL: Flatten hierarchical instances BEFORE converting top-level logic
     // This ensures that instance output signals are driven before the top-level
@@ -637,7 +643,7 @@ impl<'a> MirToSirConverter<'a> {
         // CRITICAL FIX: Convert continuous assignments BEFORE processes
         // This ensures that when sequential processes reference combinational signals,
         // those signals already exist with their driver nodes
-        eprintln!(
+        println!(
             "📡 CONTINUOUS ASSIGNMENTS: Processing {} assignments",
             self.mir.assignments.len()
         );
@@ -673,7 +679,7 @@ impl<'a> MirToSirConverter<'a> {
                         "      🔄 SEQUENTIAL: Processing {} statements",
                         process.body.statements.len()
                     );
-                    eprintln!("SEQUENTIAL PROCESS FOUND!"); // Force stderr output
+                    println!("SEQUENTIAL PROCESS FOUND!"); // Force stderr output
                     if let SensitivityList::Edge(edges) = &process.sensitivity {
                         if let Some(edge_sens) = edges.first() {
                             let edge = match edge_sens.edge {
@@ -684,7 +690,7 @@ impl<'a> MirToSirConverter<'a> {
                             };
                             let signal_name = self.lvalue_to_string(&edge_sens.signal);
                             println!("         Clock: {}, edge: {:?}", signal_name, edge);
-                            eprintln!("CALLING convert_sequential_block"); // Force stderr output
+                            println!("CALLING convert_sequential_block"); // Force stderr output
                             self.convert_sequential_block(
                                 &process.body.statements,
                                 &signal_name,
@@ -701,7 +707,7 @@ impl<'a> MirToSirConverter<'a> {
     }
 
     fn convert_combinational_block(&mut self, statements: &[Statement]) {
-        eprintln!(
+        println!(
             "🔧 COMBINATIONAL BLOCK: Processing {} statements",
             statements.len()
         );
@@ -713,7 +719,7 @@ impl<'a> MirToSirConverter<'a> {
             match stmt {
                 Statement::Assignment(assign) => {
                     let target = self.lvalue_to_string(&assign.lhs);
-                    eprintln!("   📝 ASSIGNMENT: {} <= expression", target);
+                    println!("   📝 ASSIGNMENT: {} <= expression", target);
 
                     // Create expression with current local context
                     let node_id =
@@ -725,22 +731,22 @@ impl<'a> MirToSirConverter<'a> {
                     self.connect_node_to_signal(node_id, &target);
                 }
                 Statement::Block(block) => {
-                    eprintln!("   📦 BLOCK: Recursing into nested block");
+                    println!("   📦 BLOCK: Recursing into nested block");
                     self.convert_combinational_block(&block.statements);
                 }
                 Statement::If(if_stmt) => {
-                    eprintln!("   🔀 IF: Converting if statement to mux");
+                    println!("   🔀 IF: Converting if statement to mux");
                     // Convert if statement to mux
                     self.convert_if_to_mux(if_stmt);
                 }
                 Statement::Case(case_stmt) => {
-                    eprintln!("   📋 CASE: Converting case statement to mux tree");
+                    println!("   📋 CASE: Converting case statement to mux tree");
                     // Convert case statement to mux tree
                     self.convert_case_to_mux_tree(case_stmt);
                 }
                 Statement::ResolvedConditional(resolved) => {
                     let target = self.lvalue_to_string(&resolved.target);
-                    eprintln!(
+                    println!(
                         "   🔄 RESOLVED CONDITIONAL: {} <= priority mux (WITH CONTEXT)",
                         target
                     );
@@ -755,12 +761,12 @@ impl<'a> MirToSirConverter<'a> {
                     self.connect_node_to_signal(mux_node, &target);
                 }
                 _ => {
-                    eprintln!("   ❓ OTHER: Statement type not handled");
+                    println!("   ❓ OTHER: Statement type not handled");
                 }
             }
         }
 
-        eprintln!(
+        println!(
             "🏁 COMBINATIONAL BLOCK: Processed {} statements with shared context",
             statements.len()
         );
@@ -776,27 +782,27 @@ impl<'a> MirToSirConverter<'a> {
 
         // Process ALL statements sequentially
         // This handles ResolvedConditional statements with proper dependency tracking
-        eprintln!(
+        println!(
             "🔍 SEQUENTIAL BLOCK: Processing {} statements",
             statements.len()
         );
         for stmt in statements.iter() {
-            eprintln!("   Statement: {:?}", std::mem::discriminant(stmt));
+            println!("   Statement: {:?}", std::mem::discriminant(stmt));
             match stmt {
                 Statement::Assignment(assign) => {
-                    eprintln!(
+                    println!(
                         "      Assignment target: {}",
                         self.lvalue_to_string(&assign.lhs)
                     );
                     // Check if this is an array write (BitSelect with non-constant index)
-                    eprintln!(
+                    println!(
                         "DEBUG: Assignment lhs type: {:?}",
                         std::mem::discriminant(&assign.lhs)
                     );
                     if let LValue::BitSelect { base, index } = &assign.lhs {
-                        eprintln!("DEBUG: BitSelect found, checking if index is constant...");
+                        println!("DEBUG: BitSelect found, checking if index is constant...");
                         let is_const = self.evaluate_constant_expression(index);
-                        eprintln!("DEBUG: Index constant check: {:?}", is_const);
+                        println!("DEBUG: Index constant check: {:?}", is_const);
                         if is_const.is_none() {
                             // Dynamic array write: array[index] <= value
                             let array_name = self.lvalue_to_string(base);
@@ -852,16 +858,16 @@ impl<'a> MirToSirConverter<'a> {
                     }
                 }
                 Statement::ResolvedConditional(resolved) => {
-                    eprintln!(
+                    println!(
                         "      ResolvedConditional target: {}",
                         self.lvalue_to_string(&resolved.target)
                     );
-                    eprintln!(
+                    println!(
                         "      ResolvedConditional has {} branches",
                         resolved.resolved.cases.len()
                     );
                     // Check if this is an array write (BitSelect with non-constant index)
-                    eprintln!(
+                    println!(
                         "DEBUG: ResolvedConditional target type: {:?}",
                         std::mem::discriminant(&resolved.target)
                     );
@@ -924,7 +930,7 @@ impl<'a> MirToSirConverter<'a> {
                     self.convert_if_in_sequential(if_stmt, clock, edge.clone());
                 }
                 Statement::Case(case_stmt) => {
-                    eprintln!("   📋 CASE: Converting case statement in sequential context with {} items", case_stmt.items.len());
+                    println!("   📋 CASE: Converting case statement in sequential context with {} items", case_stmt.items.len());
                     self.convert_case_in_sequential(case_stmt, clock, edge.clone());
                 }
                 _ => {
@@ -1499,6 +1505,9 @@ impl<'a> MirToSirConverter<'a> {
         // CRITICAL FIX: Exclude array write targets since they're already handled
         targets.retain(|target| !array_names.contains(target));
 
+        // BUG FIX: Filter out output ports - they should only be driven by continuous assignments
+        targets.retain(|target| !self.is_output_port(target));
+
         println!("   📋 COLLECTED TARGETS (after filtering): {:?}", targets);
         println!(
             "   📋 AVAILABLE MIR SIGNALS: {:?}",
@@ -1517,10 +1526,15 @@ impl<'a> MirToSirConverter<'a> {
         // Sort targets for deterministic ordering
         let mut sorted_targets: Vec<_> = targets.into_iter().collect();
         sorted_targets.sort();
+        println!("   🎯 CONVERT_IF_IN_SEQ: Processing {} targets: {:?}", sorted_targets.len(), sorted_targets);
         for target in sorted_targets {
+            println!("   🎯 Processing target: '{}'", target);
             let final_value = self.synthesize_conditional_assignment(if_stmt, &target);
+            println!("   🎯 Final mux value for '{}': node_{}", target, final_value);
             let ff_node = self.create_flipflop_with_input(final_value, clock, edge.clone());
+            println!("   🎯 Created FF node_{} for target '{}'", ff_node, target);
             self.connect_node_to_signal(ff_node, &target);
+            println!("   🎯 Connected FF node_{} to signal '{}'", ff_node, target);
         }
     }
 
@@ -1532,15 +1546,15 @@ impl<'a> MirToSirConverter<'a> {
         clock: &str,
         edge: ClockEdge,
     ) {
-        eprintln!(
+        println!(
             "   🎯 CASE_IN_SEQ: Converting case statement with {} items",
             case_stmt.items.len()
         );
-        eprintln!("      📋 Case expression: {:?}", case_stmt.expr);
+        println!("      📋 Case expression: {:?}", case_stmt.expr);
 
         // Create expression node for the case expression (e.g., state_reg)
         let case_expr_node = self.create_expression_node(&case_stmt.expr);
-        eprintln!("      📝 Created case expression node: {}", case_expr_node);
+        println!("      📝 Created case expression node: {}", case_expr_node);
 
         // BUG FIX: Handle nested if statements within case arms properly
         // We need to collect ALL targets assigned in any case arm (including nested if)
@@ -1556,8 +1570,17 @@ impl<'a> MirToSirConverter<'a> {
             self.collect_all_targets_from_statements(&default_block.statements, &mut all_targets);
         }
 
-        eprintln!(
-            "      📊 Found {} signals assigned in case: {:?}",
+        println!(
+            "      📊 Found {} signals assigned in case (before filtering): {:?}",
+            all_targets.len(),
+            all_targets.iter().collect::<Vec<_>>()
+        );
+
+        // BUG FIX: Filter out output ports - they should only be driven by continuous assignments
+        all_targets.retain(|target| !self.is_output_port(target));
+
+        println!(
+            "      📊 After filtering output ports: {} signals: {:?}",
             all_targets.len(),
             all_targets.iter().collect::<Vec<_>>()
         );
@@ -1683,12 +1706,12 @@ impl<'a> MirToSirConverter<'a> {
                     let assign_target = self.lvalue_to_string(&assign.lhs);
                     if assign_target == target {
                         // Direct assignment to our target
-                        eprintln!("         📝 Direct assignment to '{}': rhs={:?}", target, assign.rhs.kind);
+                        println!("         📝 Direct assignment to '{}': rhs={:?}", target, assign.rhs.kind);
                         current_value = self.create_expression_node(&assign.rhs);
                     }
                 }
                 Statement::If(if_stmt) => {
-                    eprintln!("         🔀 Nested IF for target '{}': cond={:?}", target, if_stmt.condition.kind);
+                    println!("         🔀 Nested IF for target '{}': cond={:?}", target, if_stmt.condition.kind);
                     // Build condition node
                     let condition = self.create_expression_node(&if_stmt.condition);
 
@@ -1711,7 +1734,7 @@ impl<'a> MirToSirConverter<'a> {
                     };
 
                     // Create mux: condition ? then_value : else_value
-                    eprintln!("         🔀 Creating MUX: cond={}, then={}, else={}", condition, then_value, else_value);
+                    println!("         🔀 Creating MUX: cond={}, then={}, else={}", condition, then_value, else_value);
                     current_value = self.create_mux_node(condition, then_value, else_value);
                 }
                 Statement::Block(block) => {
@@ -2079,8 +2102,11 @@ impl<'a> MirToSirConverter<'a> {
 
     fn is_output_port(&self, signal_name: &str) -> bool {
         // Check if this is an output port that should only have continuous assignments
+        // BUG FIX: signal_name is the internal name (e.g., "_s16"), but port.name is the MIR name (e.g., "state")
+        // We need to translate the port name to internal name for comparison
         self.mir.ports.iter().any(|port| {
-            port.name == signal_name && matches!(port.direction, skalp_mir::PortDirection::Output)
+            let port_internal_name = self.translate_to_internal_name(&port.name);
+            port_internal_name == signal_name && matches!(port.direction, skalp_mir::PortDirection::Output)
         })
     }
 
@@ -2282,10 +2308,20 @@ impl<'a> MirToSirConverter<'a> {
 
     /// Find assignment to a specific target in a block
     fn find_target_in_block(&mut self, statements: &[Statement], target: &str) -> Option<usize> {
-        for stmt in statements {
+        println!("         🔎 find_target_in_block: looking for '{}' in {} statements", target, statements.len());
+        for (idx, stmt) in statements.iter().enumerate() {
+            let stmt_type = match stmt {
+                Statement::Assignment(_) => "Assignment",
+                Statement::If(_) => "If",
+                Statement::Block(_) => "Block",
+                Statement::Case(_) => "Case",
+                _ => "Other",
+            };
+            println!("            [{}] stmt_type={}", idx, stmt_type);
             match stmt {
                 Statement::Assignment(assign) => {
                     let assign_target = self.lvalue_to_string(&assign.lhs);
+                    println!("            [{}] Assignment: lhs='{}', target='{}', match={}", idx, assign_target, target, assign_target == target);
                     if assign_target == target {
                         return Some(self.create_expression_node(&assign.rhs));
                     }
@@ -2296,15 +2332,23 @@ impl<'a> MirToSirConverter<'a> {
                     }
                 }
                 Statement::If(nested_if) => {
+                    println!("            [{}] Processing nested If for target '{}'", idx, target);
                     // Recurse into nested if - synthesize it as a conditional
                     let result = self.synthesize_conditional_assignment(nested_if, target);
+                    println!("            [{}] synthesize_conditional_assignment returned node_{}", idx, result);
                     // Check if the result is not just a keep-value SignalRef
+                    let node_kind = self.sir.combinational_nodes.iter().find(|n| n.id == result).map(|n| format!("{:?}", n.kind));
+                    println!("            [{}] result node kind: {:?}", idx, node_kind);
                     let is_keep_value = self.sir.combinational_nodes.iter().any(|n| {
                         n.id == result
                             && matches!(n.kind, SirNodeKind::SignalRef { ref signal } if signal == target)
                     });
+                    println!("            [{}] is_keep_value={}", idx, is_keep_value);
                     if !is_keep_value {
+                        println!("            [{}] ✅ Returning result={} for target '{}'", idx, result, target);
                         return Some(result);
+                    } else {
+                        println!("            [{}] ❌ Result is keep-value, continuing search", idx);
                     }
                 }
                 Statement::Case(nested_case) => {
@@ -2468,12 +2512,12 @@ impl<'a> MirToSirConverter<'a> {
                 self.create_mux_node(cond_node, then_node, else_node)
             }
             ExpressionKind::Concat(exprs) => {
-                eprintln!(
+                println!(
                     "[BUG #71 CONCAT] Creating Concat with {} parts",
                     exprs.len()
                 );
                 for _expr_part in exprs.iter() {
-                    eprintln!(
+                    println!(
                         "[BUG #71 CONCAT]   Part: {:?}",
                         std::mem::discriminant(&_expr_part.kind)
                     );
@@ -2483,7 +2527,7 @@ impl<'a> MirToSirConverter<'a> {
                     .map(|e| self.create_expression_with_local_context(e, local_context))
                     .collect();
                 let concat_node = self.create_concat_node(part_nodes);
-                eprintln!("[BUG #71 CONCAT] Created Concat node_{}", concat_node);
+                println!("[BUG #71 CONCAT] Created Concat node_{}", concat_node);
                 concat_node
             }
             ExpressionKind::Replicate { count, value } => {
@@ -2553,7 +2597,7 @@ impl<'a> MirToSirConverter<'a> {
             } => {
                 // For named field access, fall back to base expression
                 // This would need type information to determine field offsets
-                eprintln!(
+                println!(
                     "    ⚠️ FieldAccess on field '{}' - falling back to base",
                     _field
                 );
@@ -2906,7 +2950,7 @@ impl<'a> MirToSirConverter<'a> {
                 }
 
                 // Not found anywhere - use fallback
-                eprintln!(
+                println!(
                     "⚠️  Signal ID {} not found in any module! Using fallback name",
                     sig_id.0
                 );
@@ -3024,7 +3068,7 @@ impl<'a> MirToSirConverter<'a> {
                 then_expr,
                 else_expr,
             } => {
-                eprintln!("⚠️ CONDITIONAL: target_width={:?}", target_width);
+                println!("⚠️ CONDITIONAL: target_width={:?}", target_width);
                 let cond_node = self.create_expression_node(cond);
                 // Propagate width hint to both branches
                 let then_node = self.create_expression_node_with_width(then_expr, target_width);
@@ -3032,7 +3076,7 @@ impl<'a> MirToSirConverter<'a> {
                 self.create_mux_node(cond_node, then_node, else_node)
             }
             ExpressionKind::Concat(parts) => {
-                eprintln!("🔍 [BUG #76] Converting Concat with type: {:?}", expr.ty);
+                println!("🔍 [BUG #76] Converting Concat with type: {:?}", expr.ty);
 
                 // Extract element widths from tuple type
                 let part_widths: Vec<Option<usize>> =
@@ -3047,7 +3091,7 @@ impl<'a> MirToSirConverter<'a> {
                     .iter()
                     .zip(part_widths.iter())
                     .map(|(p, width)| {
-                        eprintln!("  Part: inferred_width={:?}, type={:?}", width, p.ty);
+                        println!("  Part: inferred_width={:?}, type={:?}", width, p.ty);
                         self.create_expression_node_with_width(p, *width)
                     })
                     .collect();
@@ -3061,7 +3105,7 @@ impl<'a> MirToSirConverter<'a> {
                         if let Some(target_width) = target_opt {
                             let actual_width = self.get_node_output_width(node);
                             if actual_width > target_width {
-                                eprintln!(
+                                println!(
                                     "  ✂️ BUG #214: Truncating element from {} to {} bits",
                                     actual_width, target_width
                                 );
@@ -3076,7 +3120,7 @@ impl<'a> MirToSirConverter<'a> {
                     })
                     .collect();
 
-                eprintln!("  → Created {} SIR nodes for concat", truncated_nodes.len());
+                println!("  → Created {} SIR nodes for concat", truncated_nodes.len());
                 self.create_concat_node_with_width(truncated_nodes, target_width)
             }
             ExpressionKind::Cast { expr, .. } => {
@@ -3172,7 +3216,7 @@ impl<'a> MirToSirConverter<'a> {
                 field: _field,
             } => {
                 // For named field access, fall back to base expression
-                eprintln!(
+                println!(
                     "    ⚠️ FieldAccess on field '{}' - falling back to base",
                     _field
                 );
@@ -3332,7 +3376,7 @@ impl<'a> MirToSirConverter<'a> {
                 }
 
                 // Still not found - generate a warning and use fallback name
-                eprintln!(
+                println!(
                     "⚠️ WARNING: Signal {:?} not found in any module! Using fallback name",
                     sig_id
                 );
@@ -3360,7 +3404,7 @@ impl<'a> MirToSirConverter<'a> {
                 // original port name and use it as a signal reference.
                 for child_module in &self.mir_design.modules {
                     if let Some(port) = child_module.ports.iter().find(|p| p.id == *port_id) {
-                        eprintln!(
+                        println!(
                             "🔧 BUG FIX: Port {:?} found in child module '{}' as '{}', using as signal",
                             port_id, child_module.name, port.name
                         );
@@ -3370,7 +3414,7 @@ impl<'a> MirToSirConverter<'a> {
                 }
 
                 // Still not found - this is a bug in the MIR, but provide graceful fallback
-                eprintln!(
+                println!(
                     "⚠️ WARNING: Port {:?} not found in any module! Creating fallback constant(0)",
                     port_id
                 );
@@ -3515,11 +3559,11 @@ impl<'a> MirToSirConverter<'a> {
 
         // BUG DEBUG #65: Log signal names being looked up
         if bin_op.is_float_op() {
-            eprintln!(
+            println!(
                 "  🔍 Looking up types: left='{}', right='{}'",
                 left_signal.signal_id, right_signal.signal_id
             );
-            eprintln!(
+            println!(
                 "  🔍 Type results: left_type={:?} (width={}), right_type={:?} (width={})",
                 left_type,
                 left_type.width(),
@@ -3527,7 +3571,7 @@ impl<'a> MirToSirConverter<'a> {
                 right_type.width()
             );
             if left_type.width() > 256 || right_type.width() > 256 {
-                eprintln!(
+                println!(
                     "  ❌ BUG #71: Signal with width > 256 found! left='{}' ({}), right='{}' ({})",
                     left_signal.signal_id,
                     left_type.width(),
@@ -3577,7 +3621,7 @@ impl<'a> MirToSirConverter<'a> {
             // m-bit × n-bit = (m+n)-bit (hardware correct semantics)
             // Truncation happens at assignment to typed targets (tuples, typed variables)
             let width = left_type.width() + right_type.width();
-            eprintln!(
+            println!(
                 "🔧 BUG #214: Mul full precision: {}×{} → {} bits",
                 left_type.width(),
                 right_type.width(),
@@ -3594,7 +3638,7 @@ impl<'a> MirToSirConverter<'a> {
 
         // BUG DEBUG #65: Check if FP operations have correct output width
         if bin_op.is_float_op() {
-            eprintln!(
+            println!(
                 "🔧 BUG #65 DEBUG: FP BinaryOp node_{} ({:?}): left_type={:?} (width={}), right_type={:?} (width={}), output_type={:?} (width={})",
                 node_id,
                 bin_op,
@@ -3714,14 +3758,14 @@ impl<'a> MirToSirConverter<'a> {
 
         let (sir_type, width) = if true_is_float && !false_is_float {
             // True branch is Float32, false branch is Bits - prefer Float32
-            eprintln!(
+            println!(
                 "[BUG #181 FIX] Mux: preferring Float32 (true) over Bits({}) (false)",
                 false_width
             );
             (true_type.clone(), true_width)
         } else if false_is_float && !true_is_float {
             // False branch is Float32, true branch is Bits - prefer Float32
-            eprintln!(
+            println!(
                 "[BUG #181 FIX] Mux: preferring Float32 (false) over Bits({}) (true)",
                 true_width
             );
@@ -3744,7 +3788,7 @@ impl<'a> MirToSirConverter<'a> {
         let mut actual_false_val = false_val;
 
         if true_width != false_width {
-            eprintln!(
+            println!(
                 "[BUG #125] Mux width mismatch: true={}, false={}, target={}",
                 true_width, false_width, width
             );
@@ -3752,7 +3796,7 @@ impl<'a> MirToSirConverter<'a> {
             // BUG FIX #181: When preferring Float32, slice wider Bits branch to 32 bits
             if true_is_float && false_width > width {
                 // Slice the false branch (Bits) to match Float32 width
-                eprintln!(
+                println!(
                     "[BUG #181 FIX] Slicing false branch from {} to {} bits for Float32 mux",
                     false_width, width
                 );
@@ -3761,7 +3805,7 @@ impl<'a> MirToSirConverter<'a> {
                 actual_false_signal = self.node_to_signal_ref(sliced_false);
             } else if false_is_float && true_width > width {
                 // Slice the true branch (Bits) to match Float32 width
-                eprintln!(
+                println!(
                     "[BUG #181 FIX] Slicing true branch from {} to {} bits for Float32 mux",
                     true_width, width
                 );
@@ -3774,7 +3818,7 @@ impl<'a> MirToSirConverter<'a> {
                 if false_width < true_width {
                     // false branch is narrower - check if it's a zero constant
                     if let Some(zero_value) = self.is_zero_constant_node(actual_false_val) {
-                        eprintln!("[BUG #125] Replacing narrow zero constant (width={}) with wide zero (width={})",
+                        println!("[BUG #125] Replacing narrow zero constant (width={}) with wide zero (width={})",
                                  false_width, width);
                         // Create a new zero constant with the correct width
                         let wide_zero = self.create_constant_node(zero_value, width);
@@ -3783,7 +3827,7 @@ impl<'a> MirToSirConverter<'a> {
                 } else if true_width < false_width {
                     // true branch is narrower - check if it's a zero constant
                     if let Some(zero_value) = self.is_zero_constant_node(actual_true_val) {
-                        eprintln!("[BUG #125] Replacing narrow zero constant (width={}) with wide zero (width={})",
+                        println!("[BUG #125] Replacing narrow zero constant (width={}) with wide zero (width={})",
                                  true_width, width);
                         // Create a new zero constant with the correct width
                         let wide_zero = self.create_constant_node(zero_value, width);
@@ -3860,14 +3904,14 @@ impl<'a> MirToSirConverter<'a> {
             parts.iter().map(|&p| self.node_to_signal_ref(p)).collect();
 
         // Calculate total width as sum of input widths
-        eprintln!(
+        println!(
             "🔍 CONCAT DEBUG node_{}: {} parts",
             node_id,
             part_signals.len()
         );
         for s in part_signals.iter() {
             let _width = self.get_signal_width(&s.signal_id);
-            eprintln!("  Part signal='{}', width={}", s.signal_id, _width);
+            println!("  Part signal='{}', width={}", s.signal_id, _width);
         }
 
         let sum_width: usize = part_signals
@@ -3883,7 +3927,7 @@ impl<'a> MirToSirConverter<'a> {
                 width == 32 // All elements are 32-bit (typical tuple element width)
             });
 
-        eprintln!(
+        println!(
             "  Sum width: {}, is_tuple_concat: {}",
             sum_width, is_tuple_concat
         );
@@ -3904,7 +3948,7 @@ impl<'a> MirToSirConverter<'a> {
 
         if let Some(target) = target_width {
             if target != sum_width {
-                eprintln!(
+                println!(
                     "🔧 CONCAT WIDTH FIX: node_{} sum={} → target={} (diff={}, needs_slice={})",
                     node_id,
                     sum_width,
@@ -3915,7 +3959,7 @@ impl<'a> MirToSirConverter<'a> {
             }
         } else if sum_width > 256 {
             // BUG FIX #73: Auto-decomposition for Metal backend compatibility
-            eprintln!(
+            println!(
                 "🔧 BUG FIX #73: Auto-decompose {}-bit Concat (no target width, exceeds Metal 256-bit limit)",
                 sum_width
             );
@@ -3957,7 +4001,7 @@ impl<'a> MirToSirConverter<'a> {
         if needs_slice && !is_tuple_concat {
             if let Some(target) = target_width {
                 // Explicit target width provided - slice to that width
-                eprintln!(
+                println!(
                     "  ✂️ BUG FIX #71e: Creating Slice node to extract bits [0:{}] from {}-bit Concat",
                     target - 1,
                     concat_width
@@ -3967,7 +4011,7 @@ impl<'a> MirToSirConverter<'a> {
             } else {
                 // BUG FIX #73: No target width, but concat > 256 bits
                 // Don't create a slice (would lose data) - Metal backend will decompose
-                eprintln!(
+                println!(
                     "  ⚠️ BUG FIX #73: {}-bit Concat created without target width - Metal backend will decompose",
                     concat_width
                 );
@@ -3979,7 +4023,7 @@ impl<'a> MirToSirConverter<'a> {
     }
 
     fn create_slice_node(&mut self, base: usize, start: usize, end: usize) -> usize {
-        eprintln!(
+        println!(
             "✂️ SLICE: Creating slice node from base={} with [{}:{}]",
             base, start, end
         );
@@ -4019,13 +4063,13 @@ impl<'a> MirToSirConverter<'a> {
             span: None,
         };
 
-        eprintln!("   🔗 Adding slice node {} to combinational_nodes", node_id);
+        println!("   🔗 Adding slice node {} to combinational_nodes", node_id);
         self.sir.combinational_nodes.push(node);
         node_id
     }
 
     fn create_array_read_node(&mut self, array: usize, index: usize) -> usize {
-        eprintln!(
+        println!(
             "📚 ARRAY READ: Creating array read node from array={}, index={}",
             array, index
         );
@@ -4042,7 +4086,7 @@ impl<'a> MirToSirConverter<'a> {
                 ((**elem_type).clone(), width)
             }
             _ => {
-                eprintln!(
+                println!(
                     "⚠️  WARNING: Array read from non-array type {:?}, defaulting to 8-bit",
                     array_type
                 );
@@ -4075,7 +4119,7 @@ impl<'a> MirToSirConverter<'a> {
             span: None,
         };
 
-        eprintln!(
+        println!(
             "   🔗 Adding array read node {} to combinational_nodes",
             node_id
         );
@@ -4084,7 +4128,7 @@ impl<'a> MirToSirConverter<'a> {
     }
 
     fn create_array_write_node(&mut self, old_array: usize, index: usize, value: usize) -> usize {
-        eprintln!(
+        println!(
             "✍️ ARRAY WRITE: Creating array write node from old_array={}, index={}, value={}",
             old_array, index, value
         );
@@ -4125,7 +4169,7 @@ impl<'a> MirToSirConverter<'a> {
             span: None,
         };
 
-        eprintln!(
+        println!(
             "   🔗 Adding array write node {} to combinational_nodes",
             node_id
         );
@@ -4306,14 +4350,14 @@ impl<'a> MirToSirConverter<'a> {
     fn convert_case_to_mux_tree(&mut self, case_stmt: &skalp_mir::CaseStatement) {
         // BUG #117r FIX: Implement case/match statement to mux tree conversion
         // This enables state machines with match statements to generate proper transitions
-        eprintln!(
+        println!(
             "🎯 CASE_TO_MUX: Converting case statement with {} items",
             case_stmt.items.len()
         );
 
         // Create expression node for the case expression (e.g., state_reg)
         let case_expr_node = self.create_expression_node(&case_stmt.expr);
-        eprintln!("   📝 Created case expression node: {}", case_expr_node);
+        println!("   📝 Created case expression node: {}", case_expr_node);
 
         // Collect all signals assigned in any case arm or default
         let mut all_assignments: HashMap<String, Vec<(Vec<&Expression>, &Expression)>> =
@@ -4338,14 +4382,14 @@ impl<'a> MirToSirConverter<'a> {
             self.extract_assignments_from_block_ref(&default_block.statements, &mut default_assignments);
         }
 
-        eprintln!(
+        println!(
             "   📊 Found {} signals assigned in case arms",
             all_assignments.len()
         );
 
         // For each signal, build a mux tree
         for (signal_name, case_arms) in &all_assignments {
-            eprintln!("   🔧 Building mux tree for signal: {}", signal_name);
+            println!("   🔧 Building mux tree for signal: {}", signal_name);
 
             // Start with default value
             let mut current_mux = if let Some(default_expr) = default_assignments.get(signal_name) {
@@ -4400,7 +4444,7 @@ impl<'a> MirToSirConverter<'a> {
 
             // Connect final mux to signal
             self.connect_node_to_signal(current_mux, signal_name);
-            eprintln!(
+            println!(
                 "   ✅ Connected mux node {} to signal '{}'",
                 current_mux, signal_name
             );
@@ -4409,7 +4453,7 @@ impl<'a> MirToSirConverter<'a> {
         // Handle signals that only appear in default (not in any case arm)
         for (signal_name, default_expr) in &default_assignments {
             if !all_assignments.contains_key(signal_name) {
-                eprintln!(
+                println!(
                     "   📌 Signal '{}' only in default, creating direct assignment",
                     signal_name
                 );
@@ -4444,7 +4488,7 @@ impl<'a> MirToSirConverter<'a> {
     fn connect_node_to_signal(&mut self, node_id: usize, signal_name: &str) {
         // Translate MIR name to internal name for SIR lookups
         let internal_name = self.translate_to_internal_name(signal_name);
-        eprintln!("🔗 CONNECT: Node {} -> Signal '{}' (internal: '{}')", node_id, signal_name, internal_name);
+        println!("🔗 CONNECT: Node {} -> Signal '{}' (internal: '{}')", node_id, signal_name, internal_name);
 
         // BUG FIX #8: Get the node's output width BEFORE modifying the signal
         // The node was created with the correct expression width (e.g., 96 bits for concat of 3x32-bit values)
@@ -4456,36 +4500,59 @@ impl<'a> MirToSirConverter<'a> {
             .chain(self.sir.sequential_nodes.iter())
             .find(|n| n.id == node_id)
         {
-            eprintln!("   🔍 Node {} has {} outputs", node_id, node.outputs.len());
+            println!("   🔍 Node {} has {} outputs", node_id, node.outputs.len());
             // Get the width of the node's output signal (node_X_out)
             if !node.outputs.is_empty() {
                 let output_signal_name = &node.outputs[0].signal_id;
                 let width = self.get_signal_width(output_signal_name);
-                eprintln!(
+                println!(
                     "   🔍 Node {} output signal '{}' has width {}",
                     node_id, output_signal_name, width
                 );
                 Some(width)
             } else {
-                eprintln!("   ⚠️  Node {} has no outputs!", node_id);
+                println!("   ⚠️  Node {} has no outputs!", node_id);
                 None
             }
         } else {
-            eprintln!("   ❌ Node {} not found!", node_id);
+            println!("   ❌ Node {} not found!", node_id);
             None
         };
 
-        eprintln!("   🔍 node_output_width = {:?}", node_output_width);
+        println!("   🔍 node_output_width = {:?}", node_output_width);
 
         // Update signal to have this node as driver (using internal name for SIR lookup)
+        // First check if the new node is a flip-flop (for state elements)
+        let new_node_is_flipflop = self
+            .sir
+            .sequential_nodes
+            .iter()
+            .any(|n| n.id == node_id && matches!(n.kind, SirNodeKind::FlipFlop { .. }));
+
+        // Track the old driver that needs to have this signal removed from its outputs
+        let mut old_driver_to_update: Option<usize> = None;
+
         if let Some(signal) = self.sir.signals.iter_mut().find(|s| s.name == internal_name) {
-            if let Some(_existing_driver) = signal.driver_node {
-                eprintln!(
-                    "   ⚠️  WARNING: Signal '{}' already driven by node {} (NOT overwriting with node {})",
-                    internal_name, _existing_driver, node_id
-                );
-                // Don't overwrite - keep the first driver
-                return;
+            if let Some(existing_driver) = signal.driver_node {
+                // BUG FIX #117r: Allow flip-flops to overwrite continuous assignment drivers for state elements
+                // This happens when a signal has an initialization value (continuous assign) but is also
+                // assigned in sequential logic (needs flip-flop). The flip-flop should be the driver.
+                if new_node_is_flipflop && signal.is_state {
+                    println!(
+                        "   🔄 BUG #117r FIX: Signal '{}' is state element - flip-flop node {} overwrites node {}",
+                        internal_name, node_id, existing_driver
+                    );
+                    // Remember to remove the signal from the old driver's outputs
+                    old_driver_to_update = Some(existing_driver);
+                    // Continue to set the flip-flop as driver
+                } else {
+                    println!(
+                        "   ⚠️  WARNING: Signal '{}' already driven by node {} (NOT overwriting with node {})",
+                        internal_name, existing_driver, node_id
+                    );
+                    // Don't overwrite - keep the first driver
+                    return;
+                }
             }
 
             // BUG FIX #8: DISABLED - was corrupting signal widths
@@ -4497,7 +4564,7 @@ impl<'a> MirToSirConverter<'a> {
             // If a node outputs different width than declared, that's a bug in node creation.
             if let Some(output_width) = node_output_width {
                 if signal.width != output_width {
-                    eprintln!(
+                    println!(
                         "   ⚠️  BUG #117: Signal '{}' width mismatch: declared {} bits, node wants {} bits (keeping declared)",
                         internal_name, signal.width, output_width
                     );
@@ -4505,12 +4572,33 @@ impl<'a> MirToSirConverter<'a> {
             }
 
             signal.driver_node = Some(node_id);
-            eprintln!(
+            println!(
                 "   ✅ Signal '{}' now driven by node {}",
                 internal_name, node_id
             );
         } else {
-            eprintln!("   ❌ Signal '{}' (mir: '{}') not found!", internal_name, signal_name);
+            println!("   ❌ Signal '{}' (mir: '{}') not found!", internal_name, signal_name);
+        }
+
+        // BUG FIX #117r: Remove signal from old driver's outputs when flip-flop takes over
+        // This prevents the old initialization node from overwriting the flip-flop's value each cycle
+        if let Some(old_driver_id) = old_driver_to_update {
+            if let Some(old_node) = self
+                .sir
+                .combinational_nodes
+                .iter_mut()
+                .find(|n| n.id == old_driver_id)
+            {
+                let before_count = old_node.outputs.len();
+                old_node.outputs.retain(|o| o.signal_id != internal_name);
+                let after_count = old_node.outputs.len();
+                if before_count > after_count {
+                    println!(
+                        "   🗑️  BUG #117r: Removed '{}' from old driver node {} outputs",
+                        internal_name, old_driver_id
+                    );
+                }
+            }
         }
 
         // Update node to output to this signal (using internal name)
@@ -4530,7 +4618,7 @@ impl<'a> MirToSirConverter<'a> {
                     signal_id: internal_name.clone(),
                     bit_range: None,
                 };
-                eprintln!(
+                println!(
                     "   🔄 SEQUENTIAL: Replaced output with state signal '{}'",
                     internal_name
                 );
@@ -4541,9 +4629,9 @@ impl<'a> MirToSirConverter<'a> {
                         signal_id: internal_name.clone(),
                         bit_range: None,
                     });
-                    eprintln!("   ✅ Added '{}' to node {} outputs", internal_name, node_id);
+                    println!("   ✅ Added '{}' to node {} outputs", internal_name, node_id);
                 } else {
-                    eprintln!(
+                    println!(
                         "   ⚠️  Signal '{}' already in node {} outputs (skipping duplicate)",
                         internal_name, node_id
                     );
@@ -4753,7 +4841,7 @@ impl<'a> MirToSirConverter<'a> {
                 {
                     // Get the element type from the first field (assume all fields have same type)
                     let elem_type = self.convert_type(&struct_type.fields[0].field_type);
-                    eprintln!(
+                    println!(
                         "🔧 Metal Backend Fix: Converting struct '{}' to SirType::Vec2({:?})",
                         struct_type.name, elem_type
                     );
@@ -4762,7 +4850,7 @@ impl<'a> MirToSirConverter<'a> {
                     && struct_type.fields.len() >= 3
                 {
                     let elem_type = self.convert_type(&struct_type.fields[0].field_type);
-                    eprintln!(
+                    println!(
                         "🔧 Metal Backend Fix: Converting struct '{}' to SirType::Vec3({:?})",
                         struct_type.name, elem_type
                     );
@@ -4771,7 +4859,7 @@ impl<'a> MirToSirConverter<'a> {
                     && struct_type.fields.len() >= 4
                 {
                     let elem_type = self.convert_type(&struct_type.fields[0].field_type);
-                    eprintln!(
+                    println!(
                         "🔧 Metal Backend Fix: Converting struct '{}' to SirType::Vec4({:?})",
                         struct_type.name, elem_type
                     );
@@ -4788,7 +4876,7 @@ impl<'a> MirToSirConverter<'a> {
                     })
                     .sum();
 
-                eprintln!(
+                println!(
                     "🔧 BUG FIX #65: Converting struct '{}' with {} fields to Bits({})",
                     struct_type.name,
                     struct_type.fields.len(),
@@ -4799,7 +4887,7 @@ impl<'a> MirToSirConverter<'a> {
             }
             // Enum, Union are not yet supported for simulation
             DataType::Enum(_) | DataType::Union(_) => {
-                eprintln!("Warning: Enum/Union types not yet supported in SIR, treating as 1-bit");
+                println!("Warning: Enum/Union types not yet supported in SIR, treating as 1-bit");
                 SirType::Bits(1)
             }
             // NCL dual-rail type - physical width is 2x logical width
@@ -4881,13 +4969,13 @@ impl<'a> MirToSirConverter<'a> {
                 .iter()
                 .find(|m| m.id == instance.module)
                 .unwrap_or_else(|| {
-                    eprintln!(
+                    println!(
                         "❌ ERROR: Module {:?} not found for instance '{}'",
                         instance.module, instance.name
                     );
-                    eprintln!("Available modules:");
+                    println!("Available modules:");
                     for _m in &self.mir_design.modules {
-                        eprintln!("   - {:?}: {}", _m.id, _m.name);
+                        println!("   - {:?}: {}", _m.id, _m.name);
                     }
                     let location = instance
                         .span
@@ -5498,7 +5586,7 @@ impl<'a> MirToSirConverter<'a> {
         // This can happen when trait implementations create entity instances that
         // indirectly reference back to the original entity
         if self.elaborated_instances.contains(inst_prefix) {
-            eprintln!(
+            println!(
                 "⚠️  WARNING: Skipping circular elaboration of '{}' (already elaborated)",
                 inst_prefix
             );
@@ -5604,7 +5692,7 @@ impl<'a> MirToSirConverter<'a> {
                 });
 
                 if is_register {
-                    eprintln!("            ✅ Adding to state_elements: {}", internal_name);
+                    println!("            ✅ Adding to state_elements: {}", internal_name);
                     self.sir.state_elements.insert(
                         internal_name.clone(),
                         StateElement {
@@ -5776,7 +5864,7 @@ impl<'a> MirToSirConverter<'a> {
             }
         }
 
-        eprintln!(
+        println!(
             "         📊 After elaborating '{}': total {} state_elements",
             inst_prefix,
             self.sir.state_elements.len()
@@ -5925,7 +6013,7 @@ impl<'a> MirToSirConverter<'a> {
                                 {
                                     if !current_field.is_empty() {
                                         // Parent is already flattened - replace the field
-                                        eprintln!("         Parent ALREADY flattened with base '{}', idx '{}', field '{}', replacing with '{}'", base, idx, current_field, suffix);
+                                        println!("         Parent ALREADY flattened with base '{}', idx '{}', field '{}', replacing with '{}'", base, idx, current_field, suffix);
                                         // Reconstruct with new field
                                         if idx.is_empty() {
                                             format!("{}_{}", base, suffix)
@@ -5972,7 +6060,7 @@ impl<'a> MirToSirConverter<'a> {
                                 None
                             }
                         } else if let LValue::Port(parent_port_id) = lval {
-                            eprintln!("         Parent is LValue::Port({:?})", parent_port_id);
+                            println!("         Parent is LValue::Port({:?})", parent_port_id);
                             // Find parent port in MIR module
                             let orig_port_opt =
                                 self.mir.ports.iter().find(|p| p.id == *parent_port_id);
@@ -6263,15 +6351,15 @@ impl<'a> MirToSirConverter<'a> {
                     // Get clock signal name, mapping through ports if needed
                     // BUG FIX #210: Use context-aware version to properly resolve multi-level hierarchy
                     let clock_lvalue = &edge_sens.signal;
-                    eprintln!(
+                    println!(
                         "🕐 CLOCK MAPPING: Attempting to map clock_lvalue={:?} for instance '{}'",
                         clock_lvalue, inst_prefix
                     );
-                    eprintln!(
+                    println!(
                         "   port_mapping keys: {:?}",
                         port_mapping.keys().collect::<Vec<_>>()
                     );
-                    eprintln!(
+                    println!(
                         "   parent_module: {:?}, parent_prefix: '{}'",
                         parent_module_for_signals.map(|m| &m.name),
                         parent_prefix
@@ -6285,10 +6373,10 @@ impl<'a> MirToSirConverter<'a> {
                         parent_module_for_signals,
                         parent_prefix,
                     ) {
-                        eprintln!("   ✅ Mapped to: {}", sig_name);
+                        println!("   ✅ Mapped to: {}", sig_name);
                         sig_name
                     } else {
-                        eprintln!("   ❌ MAPPING FAILED! Defaulting to 'clk'");
+                        println!("   ❌ MAPPING FAILED! Defaulting to 'clk'");
                         "clk".to_string()
                     };
                     // Translate MIR clock name to internal name for SIR
@@ -6653,7 +6741,7 @@ impl<'a> MirToSirConverter<'a> {
                                     // Extract the element index from the flattened name
                                     // e.g., "input_fifo.mem_3_x" → 3
                                     if let Some(element_idx) = self.extract_element_index(target) {
-                                        eprintln!(
+                                        println!(
                                             "🔍 BUG#26 FIX: Array assignment {}[index] <= value, target={}, element_idx={}",
                                             stripped_base, target, element_idx
                                         );
@@ -6667,7 +6755,7 @@ impl<'a> MirToSirConverter<'a> {
                                         );
                                         let const_idx =
                                             self.create_constant_node(element_idx as u64, 32);
-                                        eprintln!(
+                                        println!(
                                             "   🔢 Created constant node {} with value {} for target={}",
                                             const_idx, element_idx, target
                                         );
@@ -7355,7 +7443,7 @@ impl<'a> MirToSirConverter<'a> {
                         ) {
                             self.get_or_create_signal_driver(&sig_name)
                         } else {
-                            eprintln!(
+                            println!(
                                 "🎨🎨🎨   -> FALLBACK: port {:?} not found, creating Constant(0,1)",
                                 port_id
                             );
@@ -7375,7 +7463,7 @@ impl<'a> MirToSirConverter<'a> {
                             self.get_or_create_signal_driver(&sig_name)
                         } else {
                             // Fallback: create a zero constant
-                            eprintln!("🎨🎨🎨   -> FALLBACK: lvalue {:?} not found, creating Constant(0,1)", lvalue);
+                            println!("🎨🎨🎨   -> FALLBACK: lvalue {:?} not found, creating Constant(0,1)", lvalue);
                             self.create_constant_node(0, 1)
                         }
                     }
@@ -7633,7 +7721,7 @@ impl<'a> MirToSirConverter<'a> {
                 field: _field,
             } => {
                 // For named field access, fall back to base expression
-                eprintln!(
+                println!(
                     "    ⚠️ FieldAccess on field '{}' - falling back to base (inst)",
                     _field
                 );
@@ -7665,7 +7753,7 @@ impl<'a> MirToSirConverter<'a> {
                 self.create_constant_node(0, 1)
             }
         };
-        eprintln!(
+        println!(
             "🔧 create_expression_node_for_instance: returning node {}",
             result
         );
@@ -7780,13 +7868,13 @@ impl<'a> MirToSirConverter<'a> {
         parent_module_for_signals: Option<&Module>,
         parent_prefix: &str,
     ) -> Option<String> {
-        eprintln!(
+        println!(
             "🔍🔍🔍 GET_SIGNAL_FROM_LVALUE: lvalue={:?}, inst_prefix='{}'",
             lvalue, inst_prefix
         );
         match lvalue {
             LValue::Signal(sig_id) => {
-                eprintln!("🔍🔍🔍   -> LValue::Signal({})", sig_id.0);
+                println!("🔍🔍🔍   -> LValue::Signal({})", sig_id.0);
                 // LValue::Signal should only match signals, not ports
                 // (ports have their own LValue::Port variant)
                 // First try child module
@@ -7799,7 +7887,7 @@ impl<'a> MirToSirConverter<'a> {
                     } else {
                         format!("{}.{}", inst_prefix, signal.name)
                     };
-                    eprintln!("🔍🔍🔍   -> Found in child module: '{}'", result);
+                    println!("🔍🔍🔍   -> Found in child module: '{}'", result);
                     return Some(result);
                 }
                 // BUG #186 FIX: If not found in child module, try parent module
@@ -7814,11 +7902,11 @@ impl<'a> MirToSirConverter<'a> {
                         } else {
                             format!("{}.{}", parent_prefix, signal.name)
                         };
-                        eprintln!("🔍🔍🔍   -> Found in parent module: '{}'", result);
+                        println!("🔍🔍🔍   -> Found in parent module: '{}'", result);
                         return Some(result);
                     }
                 }
-                eprintln!(
+                println!(
                     "🔍🔍🔍   -> Signal {} NOT FOUND in child or parent module",
                     sig_id.0
                 );
@@ -8151,7 +8239,7 @@ impl<'a> MirToSirConverter<'a> {
             if self.are_flattened_siblings(signal_name, &other_signal.name)
                 && self.is_signal_sequential_in_module(other_signal.id, module)
             {
-                eprintln!(
+                println!(
                     "      ⚠️ SIBLING DETECTED: '{}' is sequential, so '{}' should be too!",
                     other_signal.name, signal_name
                 );

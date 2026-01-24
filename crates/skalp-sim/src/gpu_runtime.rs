@@ -338,7 +338,9 @@ impl GpuRuntime {
                 let mut input_offset = 0usize;
 
                 for input in &module.inputs {
-                    if input.name.contains("clk") || input.name.contains("clock") {
+                    // BUG FIX #117r: Check against registered clocks, not name matching
+                    let is_clock = self.clock_manager.clocks.contains_key(&input.name);
+                    if is_clock {
                         // Read current clock value from input buffer
                         let current_value = unsafe { *ptr.add(input_offset) } != 0;
                         // Update clock manager so previous_value = current_value
@@ -523,7 +525,9 @@ impl GpuRuntime {
             // Previously this always read from offset 0, causing only the first clock to be detected
             let mut input_offset = 0usize;
             for input in &module.inputs {
-                if input.name.contains("clk") || input.name.contains("clock") {
+                // BUG FIX #117r: Check if this input is a registered clock (not just name matching)
+                let is_clock = self.clock_manager.clocks.contains_key(&input.name);
+                if is_clock {
                     // Check if this clock has changed
                     if let Some(input_buffer) = &self.input_buffer {
                         let ptr = input_buffer.contents() as *const u32;
@@ -714,17 +718,28 @@ impl SimulationRuntime for GpuRuntime {
     async fn initialize(&mut self, module: &SirModule) -> SimulationResult<()> {
         self.module = Some(module.clone());
 
-        // Register clocks from the module
-        for name in module.clock_domains.keys() {
+        // Register clocks from the module's clock_domains (uses internal names via name registry)
+        for mir_name in module.clock_domains.keys() {
+            // Translate MIR name to internal SIR name using name registry
+            let internal_name = module
+                .name_registry
+                .resolve(mir_name)
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| mir_name.clone());
             // Default to 10ns period (100MHz)
-            self.clock_manager.add_clock(name.clone(), 10_000);
+            self.clock_manager.add_clock(internal_name, 10_000);
         }
 
-        // Also check for clock inputs
-        for input in &module.inputs {
-            if input.name.contains("clk") || input.name.contains("clock") {
-                // Just add it, the clock manager will handle duplicates
-                self.clock_manager.add_clock(input.name.clone(), 10_000);
+        // Also identify clocks from sequential nodes' clock inputs (metadata-based)
+        // This catches any clocks not in clock_domains (e.g., from flip-flop synthesis)
+        for node in &module.sequential_nodes {
+            if let skalp_sir::SirNodeKind::FlipFlop { .. } = &node.kind {
+                if let Some(clock_input) = node.inputs.first() {
+                    let clock_name = &clock_input.signal_id;
+                    if !self.clock_manager.clocks.contains_key(clock_name) {
+                        self.clock_manager.add_clock(clock_name.clone(), 10_000);
+                    }
+                }
             }
         }
 
@@ -803,6 +818,7 @@ impl SimulationRuntime for GpuRuntime {
             eprintln!("=== PHASE 1: Combinational (old state) ===");
             self.debug_print_state("before phase 1 comb");
         }
+
         self.execute_combinational().await?;
 
         // Sequential: state machines update based on old signals
@@ -923,8 +939,9 @@ impl SimulationRuntime for GpuRuntime {
     }
 
     async fn set_input(&mut self, name: &str, value: &[u8]) -> SimulationResult<()> {
-        // Update clock manager for clock signals
-        if name.contains("clk") || name.contains("clock") {
+        // BUG FIX #117r: Update clock manager for clock signals
+        // Check against registered clocks (not string matching) since internal names like "_s0" don't contain "clk"
+        if self.clock_manager.clocks.contains_key(name) {
             let clock_value = value[0] != 0;
             self.clock_manager.set_clock(name, clock_value);
         }

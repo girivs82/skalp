@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use skalp_frontend::hir::PipelineConfig;
 use skalp_frontend::SourceSpan;
+use skalp_mir::NameRegistry;
 use std::collections::{HashMap, HashSet};
 
 /// Implementation style hint for RTL synthesis
@@ -38,6 +39,10 @@ pub struct SirModule {
     /// Source location for error reporting
     #[serde(skip_serializing_if = "Option::is_none")]
     pub span: Option<SourceSpan>,
+    /// Name registry mapping hierarchical paths to internal names
+    /// Used by simulators/testbenches to resolve user-provided signal names
+    #[serde(default)]
+    pub name_registry: NameRegistry,
 }
 
 /// Type information for SIR signals and ports
@@ -324,6 +329,7 @@ pub enum ClockEdge {
 impl SirModule {
     pub fn new(name: String) -> Self {
         SirModule {
+            name_registry: NameRegistry::for_module(&name),
             name,
             inputs: Vec::new(),
             outputs: Vec::new(),

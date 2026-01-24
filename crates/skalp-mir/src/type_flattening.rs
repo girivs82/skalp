@@ -18,6 +18,7 @@ use crate::mir::{
     Assignment, AssignmentKind, ClockDomainId, DataType, Expression, ExpressionKind, LValue, Port,
     PortDirection, PortId, Signal, SignalId, StructType, Value,
 };
+use crate::signal_naming::FIELD_SEPARATOR;
 use skalp_frontend::span::SourceSpan;
 
 // Stack growth constants for deeply nested types (matching hir_to_mir.rs)
@@ -219,7 +220,7 @@ impl TypeFlattener {
         if field_chain.is_empty() {
             base_name.to_string()
         } else {
-            format!("{}_{}", base_name, field_chain.join("_"))
+            format!("{}{}{}", base_name, FIELD_SEPARATOR, field_chain.join(FIELD_SEPARATOR))
         }
     }
 
@@ -255,20 +256,20 @@ impl TypeFlattener {
 
         // Create assignment for each flattened field
         for field_info in flattened_fields {
-            let field_path_str = field_info.field_path.join("_");
+            let field_path_str = field_info.field_path.join(FIELD_SEPARATOR);
 
             // Create LHS for this field
             let lhs_field_name = if field_path_str.is_empty() {
                 lhs_base.clone()
             } else {
-                format!("{}_{}", lhs_base, field_path_str)
+                format!("{}{}{}", lhs_base, FIELD_SEPARATOR, field_path_str)
             };
 
             // Create RHS for this field
             let rhs_field_name = if field_path_str.is_empty() {
                 rhs_base.clone()
             } else {
-                format!("{}_{}", rhs_base, field_path_str)
+                format!("{}{}{}", rhs_base, FIELD_SEPARATOR, field_path_str)
             };
 
             // Create the field assignment
@@ -313,8 +314,9 @@ impl TypeFlattener {
         match port_type {
             DataType::Struct(struct_type) => {
                 // Recursively flatten each struct field (with stack growth)
+                // Use double underscore to avoid collision with user-defined names
                 for field in &struct_type.fields {
-                    let field_name = format!("{}_{}", name, field.name);
+                    let field_name = format!("{}{}{}", name, FIELD_SEPARATOR, field.name);
                     let mut new_path = field_path.clone();
                     new_path.push(field.name.clone());
                     stacker::maybe_grow(STACK_RED_ZONE, STACK_GROW_SIZE, || {
@@ -335,6 +337,7 @@ impl TypeFlattener {
             | DataType::Vec3(element_type)
             | DataType::Vec4(element_type) => {
                 // Expand vector types into components
+                // Use double underscore to avoid collision with user-defined names
                 let components = match port_type {
                     DataType::Vec2(_) => vec!["x", "y"],
                     DataType::Vec3(_) => vec!["x", "y", "z"],
@@ -343,7 +346,7 @@ impl TypeFlattener {
                 };
 
                 for component in components {
-                    let comp_name = format!("{}_{}", name, component);
+                    let comp_name = format!("{}{}{}", name, FIELD_SEPARATOR, component);
                     let mut new_path = field_path.clone();
                     new_path.push(component.to_string());
                     stacker::maybe_grow(STACK_RED_ZONE, STACK_GROW_SIZE, || {
@@ -511,8 +514,9 @@ impl TypeFlattener {
         match signal_type {
             DataType::Struct(struct_type) => {
                 // Recursively flatten each struct field (with stack growth)
+                // Use double underscore to avoid collision with user-defined names
                 for field in &struct_type.fields {
-                    let field_name = format!("{}_{}", name, field.name);
+                    let field_name = format!("{}{}{}", name, FIELD_SEPARATOR, field.name);
                     let mut new_path = field_path.clone();
                     new_path.push(field.name.clone());
                     stacker::maybe_grow(STACK_RED_ZONE, STACK_GROW_SIZE, || {
@@ -533,6 +537,7 @@ impl TypeFlattener {
             | DataType::Vec3(element_type)
             | DataType::Vec4(element_type) => {
                 // Expand vector types into components
+                // Use double underscore to avoid collision with user-defined names
                 let components = match signal_type {
                     DataType::Vec2(_) => vec!["x", "y"],
                     DataType::Vec3(_) => vec!["x", "y", "z"],
@@ -541,7 +546,7 @@ impl TypeFlattener {
                 };
 
                 for component in components {
-                    let comp_name = format!("{}_{}", name, component);
+                    let comp_name = format!("{}{}{}", name, FIELD_SEPARATOR, component);
                     let mut new_path = field_path.clone();
                     new_path.push(component.to_string());
                     stacker::maybe_grow(STACK_RED_ZONE, STACK_GROW_SIZE, || {
@@ -771,8 +776,9 @@ mod tests {
         );
 
         assert_eq!(ports.len(), 2);
-        assert_eq!(ports[0].name, "pos_x");
-        assert_eq!(ports[1].name, "pos_y");
+        // Double underscore separator to avoid collision with user-defined names
+        assert_eq!(ports[0].name, "pos__x");
+        assert_eq!(ports[1].name, "pos__y");
         assert_eq!(fields.len(), 2);
         assert_eq!(fields[0].field_path, vec!["x"]);
         assert_eq!(fields[1].field_path, vec!["y"]);
@@ -790,9 +796,10 @@ mod tests {
         );
 
         assert_eq!(signals.len(), 3);
-        assert_eq!(signals[0].name, "velocity_x");
-        assert_eq!(signals[1].name, "velocity_y");
-        assert_eq!(signals[2].name, "velocity_z");
+        // Double underscore separator to avoid collision with user-defined names
+        assert_eq!(signals[0].name, "velocity__x");
+        assert_eq!(signals[1].name, "velocity__y");
+        assert_eq!(signals[2].name, "velocity__z");
         assert_eq!(fields.len(), 3);
     }
 
@@ -800,7 +807,8 @@ mod tests {
     fn test_field_path() {
         let path =
             TypeFlattener::get_field_path("vertex", &["position".to_string(), "x".to_string()]);
-        assert_eq!(path, "vertex_position_x");
+        // Double underscore separator to avoid collision with user-defined names
+        assert_eq!(path, "vertex__position__x");
 
         let path2 = TypeFlattener::get_field_path("data", &[]);
         assert_eq!(path2, "data");

@@ -141,18 +141,32 @@ impl CpuRuntime {
             SirNodeKind::SignalRef { signal } => {
                 // SignalRef reads directly from the named signal, not from inputs list
                 // First check signals map, then inputs, then state
-                self.signals
-                    .get(signal)
-                    .or_else(|| self.inputs.get(signal))
-                    .or_else(|| self.state.get(signal))
-                    .cloned()
-                    .unwrap_or_else(|| {
-                        eprintln!(
-                            "WARNING: SignalRef couldn't find signal '{}', defaulting to 0",
-                            signal
-                        );
-                        vec![0u8]
-                    })
+                let source;
+                let value = if let Some(v) = self.signals.get(signal) {
+                    source = "signals";
+                    v.clone()
+                } else if let Some(v) = self.inputs.get(signal) {
+                    source = "inputs";
+                    v.clone()
+                } else if let Some(v) = self.state.get(signal) {
+                    source = "state";
+                    v.clone()
+                } else {
+                    source = "default";
+                    eprintln!(
+                        "WARNING: SignalRef couldn't find signal '{}', defaulting to 0",
+                        signal
+                    );
+                    vec![0u8]
+                };
+                // Debug for key signals
+                if signal == "_s1" {
+                    // Also show what's currently in inputs for verification
+                    let inputs_val = self.inputs.get("_s1").map(|v| v[0]).unwrap_or(255);
+                    let val_u8 = if !value.is_empty() { value[0] } else { 0 };
+                    println!("📖 SignalRef {}: source={}, value={}, inputs[_s1]={}", signal, source, val_u8, inputs_val);
+                }
+                value
             }
 
             SirNodeKind::BinaryOp(op) => {
@@ -175,11 +189,19 @@ impl CpuRuntime {
                 // Mux: inputs = [condition, true_value, false_value]
                 if input_values.len() >= 3 {
                     let cond = input_values[0][0] != 0;
-                    if cond {
+                    let result = if cond {
                         input_values[1].clone()
                     } else {
                         input_values[2].clone()
+                    };
+                    // Debug for key state machine nodes (state_reg mux chain: 47 -> 84 -> 86)
+                    if node.id == 47 || (node.id >= 84 && node.id <= 87) {
+                        println!("🔀 MUX node_{}: cond_in='{}' cond_val={} → select {}, true={:?}, false={:?} → result={:?}",
+                            node.id, node.inputs[0].signal_id, input_values[0][0],
+                            if cond { "TRUE" } else { "FALSE" },
+                            input_values[1], input_values[2], result);
                     }
+                    result
                 } else {
                     vec![0u8]
                 }
@@ -800,6 +822,12 @@ impl CpuRuntime {
                 // Track this clock for later update (don't update yet!)
                 clock_updates.insert(clock_signal.clone(), current_clock);
 
+                // Debug: show flip-flop evaluation
+                if let Some(output) = node.outputs.first() {
+                    println!("⚡ FF node_{}: clk='{}' prev={} curr={} edge={} d_in='{}' q_out='{}'",
+                        node.id, clock_signal, prev_clock, current_clock, edge_detected, d_input, output.signal_id);
+                }
+
                 if edge_detected {
                     // Get the D input value
                     let d_value = self
@@ -810,6 +838,17 @@ impl CpuRuntime {
                         .cloned()
                         .unwrap_or_else(|| vec![0u8]);
 
+                    let source = if self.signals.contains_key(d_input) {
+                        "signals"
+                    } else if self.inputs.contains_key(d_input) {
+                        "inputs"
+                    } else if self.state.contains_key(d_input) {
+                        "state"
+                    } else {
+                        "default"
+                    };
+                    println!("   📥 FF node_{}: d_input '{}' from {} = {:?}", node.id, d_input, source, d_value);
+
                     // Write to the output (which is the register)
                     // Truncate to the correct width
                     if let Some(output) = node.outputs.first() {
@@ -819,6 +858,7 @@ impl CpuRuntime {
                             } else {
                                 d_value.clone()
                             };
+                        println!("   📤 FF node_{}: writing to '{}' = {:?}", node.id, output.signal_id, truncated);
                         self.next_state.insert(output.signal_id.clone(), truncated);
                     }
                 }
@@ -833,6 +873,11 @@ impl CpuRuntime {
         // Swap state buffers
         std::mem::swap(&mut self.state, &mut self.next_state);
         self.next_state.clear();
+
+        // Debug: show state after swap
+        if let Some(s16_val) = self.state.get("_s16") {
+            println!("   📊 STATE['_s16'] after swap = {:?}", s16_val);
+        }
 
         // Update signals map with new state values so combinational logic can see them
         for (name, value) in &self.state {
@@ -1034,9 +1079,20 @@ impl SimulationRuntime for CpuRuntime {
 
     async fn set_input(&mut self, name: &str, value: &[u8]) -> SimulationResult<()> {
         if self.inputs.contains_key(name) {
+            // Debug for key inputs
+            if name == "_s2" || name == "_s1" {
+                println!("✅ SET_INPUT '{}' = {:?}", name, value);
+            }
             self.inputs.insert(name.to_string(), value.to_vec());
+            // Verify the value was stored
+            if name == "_s2" || name == "_s1" {
+                if let Some(stored) = self.inputs.get(name) {
+                    println!("   VERIFIED '{}' = {:?}", name, stored);
+                }
+            }
             Ok(())
         } else {
+            println!("❌ SET_INPUT '{}' NOT FOUND in inputs. Available: {:?}", name, self.inputs.keys().collect::<Vec<_>>());
             Err(SimulationError::InvalidInput(format!(
                 "Input {} not found",
                 name
