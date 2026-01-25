@@ -625,21 +625,34 @@ impl Testbench {
     /// Apply pending inputs and run for N cycles on a specific clock signal
     pub async fn clock_signal(&mut self, clock_name: &str, cycles: usize) -> &mut Self {
         // Apply all pending inputs
+        // DEBUG: Show pending inputs
+        if !self.pending_inputs.is_empty() {
+            eprintln!("[DEBUG clock_signal] Applying {} pending inputs: {:?}",
+                self.pending_inputs.len(), self.pending_inputs.keys().collect::<Vec<_>>());
+        }
         for (signal, value) in self.pending_inputs.drain() {
+            eprintln!("[DEBUG clock_signal] Setting {} = {}", signal, value);
             self.sim.set_input(&signal, value).await;
         }
 
-        // PERF: Use batched GPU execution for moderate cycle counts (100-10000)
+        // PERF: Use batched GPU execution for cycle counts >= BATCH_MIN
         // This provides speedup by eliminating per-cycle CPU<->GPU sync
-        // For very large counts, use step-by-step to avoid GPU kernel timeouts
+        // Large counts are chunked to avoid GPU kernel timeouts
         const BATCH_MIN: usize = 100;
-        const BATCH_MAX: usize = 10000;
+        const BATCH_CHUNK: usize = 100_000; // Process in 100K cycle chunks
 
-        if cycles >= BATCH_MIN && cycles <= BATCH_MAX {
+        if cycles >= BATCH_MIN {
             // Set clock high initially (batched kernel handles toggling internally)
             self.sim.set_input(clock_name, 1).await;
-            self.sim.run_batched(cycles as u64).await;
-            self.cycle_count += cycles as u64;
+
+            // Process in chunks to avoid GPU timeouts while maintaining batch efficiency
+            let mut remaining = cycles;
+            while remaining > 0 {
+                let chunk_size = remaining.min(BATCH_CHUNK);
+                self.sim.run_batched(chunk_size as u64).await;
+                self.cycle_count += chunk_size as u64;
+                remaining -= chunk_size;
+            }
         } else {
             // Run clock cycles step-by-step for small counts
             for _ in 0..cycles {
