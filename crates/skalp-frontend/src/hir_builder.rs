@@ -3462,16 +3462,11 @@ impl HirBuilderContext {
         //
         // Solution: Find the expression node that is a DIRECT CHILD of the IfStmt node (not nested deeper).
         // We look for expression nodes BEFORE the first BlockStmt (the then-block).
-        println!("[build_if_statement] Starting - node children:");
-        for child in node.children() {
-            println!("  child: {:?}", child.kind());
-        }
         let condition = {
             let mut found_condition = None;
             for child in node.children() {
                 // Stop when we hit the then-block
                 if child.kind() == SyntaxKind::BlockStmt {
-                    println!("[build_if_statement] Found BlockStmt, stopping condition search");
                     break;
                 }
                 // Capture any expression node (prefer complex over simple)
@@ -3492,30 +3487,15 @@ impl HirBuilderContext {
                     SyntaxKind::IdentExpr | SyntaxKind::LiteralExpr
                 );
 
-                println!(
-                    "[build_if_statement] Checking child {:?} - is_complex={}, is_simple={}",
-                    child.kind(),
-                    is_complex,
-                    is_simple
-                );
                 if is_complex || (is_simple && found_condition.is_none()) {
-                    println!("[build_if_statement] ✓ Selected as condition candidate");
                     found_condition = Some(child);
                 }
             }
             if found_condition.is_none() {
-                println!("[build_if_statement] ❌ No condition expression found!");
                 return None;
             }
             let cond_node = found_condition.unwrap();
-            println!(
-                "[build_if_statement] Building expression for condition {:?}",
-                cond_node.kind()
-            );
             let result = self.build_expression(&cond_node);
-            if result.is_none() {
-                println!("[build_if_statement] ❌ build_expression returned None for condition!");
-            }
             result?
         };
 
@@ -6487,6 +6467,7 @@ impl HirBuilderContext {
     fn build_binary_expr(&mut self, node: &SyntaxNode) -> Option<HirExpression> {
         // Debug: Show all children before filtering
         let node_text = node.text().to_string();
+
         if node_text.contains("swap?a_exp_eff") || node_text.contains("swap ? a_exp_eff") {
             println!(
                 "[BUILD_BINARY_DEBUG] BinaryExpr text: {}, all children: {:?}",
@@ -6718,6 +6699,8 @@ impl HirBuilderContext {
                             .collect();
 
                         // Parser bug: If we have [(IdentExpr, "x"), (IndexExpr, "[i]")], use the IndexExpr
+                        // BUG #220 FIX: Also handle [(IdentExpr, "base"), (FieldExpr, ".field")]
+                        // which should be combined into a FieldAccess
                         let right_node = if binary_expr_children.len() >= 2 {
                             if binary_expr_children[1].kind() == SyntaxKind::IndexExpr
                                 && matches!(
@@ -6728,6 +6711,15 @@ impl HirBuilderContext {
                                 )
                             {
                                 &binary_expr_children[1]
+                            } else if binary_expr_children[1].kind() == SyntaxKind::FieldExpr
+                                && matches!(
+                                    binary_expr_children[0].kind(),
+                                    SyntaxKind::IdentExpr | SyntaxKind::PathExpr
+                                )
+                            {
+                                // BUG #220 FIX: Use the FieldExpr - build_expression on it will
+                                // find the preceding sibling IdentExpr and create proper FieldAccess
+                                &binary_expr_children[1]
                             } else {
                                 binary_expr_children.first()?
                             }
@@ -6737,7 +6729,11 @@ impl HirBuilderContext {
 
                         if let Some(op_tok) = op_token {
                             let op = self.token_to_binary_op(op_tok.kind())?;
-                            let right = Box::new(self.build_expression(right_node)?);
+                            println!("[BUG220_CHAIN] Building right operand from {:?}, text='{}'",
+                                right_node.kind(), right_node.text());
+                            let right_expr = self.build_expression(right_node)?;
+                            println!("[BUG220_CHAIN] Right operand built: {:?}", std::mem::discriminant(&right_expr));
+                            let right = Box::new(right_expr);
 
                             if let Some(left_expr) = result_expr {
                                 // Chain: (previous result) op right
@@ -7005,6 +7001,7 @@ impl HirBuilderContext {
 
                         // BUG FIX #191: Check if first child is IdentExpr/FieldExpr/PathExpr
                         // followed by IndexExpr (e.g., data[0]). If so, combine them properly.
+                        // BUG FIX #220: Also handle IdentExpr followed by FieldExpr (e.g., foo.bar)
                         let right_expr = if binary_expr_children.len() >= 2
                             && matches!(
                                 binary_expr_children[0].kind(),
@@ -7017,6 +7014,16 @@ impl HirBuilderContext {
                             // Build the IdentExpr as base, then use it with the IndexExpr
                             let base = self.build_expression(&binary_expr_children[0])?;
                             self.build_index_expr_with_base(&binary_expr_children[1], base)?
+                        } else if binary_expr_children.len() >= 2
+                            && matches!(
+                                binary_expr_children[0].kind(),
+                                SyntaxKind::IdentExpr | SyntaxKind::PathExpr
+                            )
+                            && binary_expr_children[1].kind() == SyntaxKind::FieldExpr
+                        {
+                            // BUG FIX #220: Use the FieldExpr - build_expression on it will
+                            // find the preceding sibling IdentExpr and create proper FieldAccess
+                            self.build_expression(&binary_expr_children[1])?
                         } else if let Some(right_node) = binary_expr_children.first() {
                             self.build_expression(right_node)?
                         } else {
@@ -11448,7 +11455,42 @@ impl HirBuilderContext {
                                 }
                             }
 
-                            // TODO: Handle other parametric types (vec, fixed, etc.)
+                            // BUG #228 FIX: Handle fixed<WIDTH, FRAC, SIGNED> parametric type
+                            if type_name == "fixed" {
+                                // Extract width, frac, signed arguments
+                                let args: Vec<_> = arg_list.children()
+                                    .filter(|c| c.kind() == SyntaxKind::Arg ||
+                                                matches!(self.build_expression(c), Some(_)))
+                                    .collect();
+
+                                let mut arg_exprs: Vec<HirExpression> = Vec::new();
+                                for arg_child in arg_list.children() {
+                                    if arg_child.kind() == SyntaxKind::Arg {
+                                        if let Some(expr_node) = arg_child.children().next() {
+                                            if let Some(expr) = self.build_expression(&expr_node) {
+                                                arg_exprs.push(expr);
+                                            }
+                                        }
+                                    } else if let Some(expr) = self.build_expression(&arg_child) {
+                                        // Direct expression without Arg wrapper
+                                        arg_exprs.push(expr);
+                                    }
+                                }
+
+                                if arg_exprs.len() >= 3 {
+                                    trace!(
+                                        "[TYPE_PARAMETRIC] fixed<...> args: width={:?}, frac={:?}, signed={:?}",
+                                        arg_exprs[0], arg_exprs[1], arg_exprs[2]
+                                    );
+                                    return HirType::FixedParametric {
+                                        width: Box::new(arg_exprs[0].clone()),
+                                        frac: Box::new(arg_exprs[1].clone()),
+                                        signed: Box::new(arg_exprs[2].clone()),
+                                    };
+                                }
+                            }
+
+                            // TODO: Handle other parametric types (vec, etc.)
                             // For now, fall through to Custom type handling
                         }
 
