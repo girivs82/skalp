@@ -2301,6 +2301,72 @@ pub fn lower_mir_hierarchical(mir: &Mir) -> HierarchicalMirToLirResult {
     result
 }
 
+/// Lower entire MIR hierarchy with explicit top module selection
+///
+/// Same as `lower_mir_hierarchical` but allows specifying the top module name.
+/// If `top_name` is None, falls back to automatic top module detection.
+pub fn lower_mir_hierarchical_with_top(mir: &Mir, top_name: Option<&str>) -> HierarchicalMirToLirResult {
+    // If no specific top module requested, use automatic detection
+    if top_name.is_none() {
+        return lower_mir_hierarchical(mir);
+    }
+
+    let requested_top = top_name.unwrap();
+
+    // Build module lookup by ID and by name
+    let module_map: IndexMap<ModuleId, &Module> = mir.modules.iter().map(|m| (m.id, m)).collect();
+    let module_by_name: IndexMap<&str, &Module> =
+        mir.modules.iter().map(|m| (m.name.as_str(), m)).collect();
+
+    // Find the requested top module
+    let top_module = mir
+        .modules
+        .iter()
+        .find(|m| m.name == requested_top)
+        .unwrap_or_else(|| {
+            panic!(
+                "Requested top module '{}' not found. Available modules: {:?}",
+                requested_top,
+                mir.modules.iter().map(|m| &m.name).collect::<Vec<_>>()
+            )
+        });
+
+    trace!(
+        "[HIER_LIR] Using explicitly requested top module: '{}' (id={}, {} instances)",
+        top_module.name,
+        top_module.id.0,
+        top_module.instances.len()
+    );
+
+    let mut result = HierarchicalMirToLirResult {
+        instances: IndexMap::new(),
+        top_module: top_module.name.clone(),
+        hierarchy: IndexMap::new(),
+    };
+
+    // Create LIR cache to avoid redundant NCL expansion for same module types
+    let mut lir_cache: HashMap<LirCacheKey, MirToLirResult> = HashMap::new();
+
+    // Recursively elaborate instances
+    elaborate_instance(
+        &module_map,
+        &module_by_name,
+        top_module,
+        "top",
+        &IndexMap::new(),
+        false,
+        &mut result,
+        &mut lir_cache,
+    );
+
+    trace!(
+        "[HIER_LIR] LIR cache: {} unique module/async combinations cached",
+        lir_cache.len()
+    );
+
+    result
+}
+
 /// Lower entire MIR hierarchy for optimize-first NCL synthesis
 ///
 /// This is the standard approach for async (NCL) circuits.

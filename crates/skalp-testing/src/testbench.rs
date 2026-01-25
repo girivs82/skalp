@@ -128,7 +128,36 @@ impl Testbench {
             ..Default::default()
         };
 
-        Self::from_source_gate_level_with_library(source_path, config, library_name).await
+        Self::from_source_gate_level_with_library(source_path, config, library_name, None).await
+    }
+
+    /// Create a gate-level synchronous testbench with explicit top module
+    ///
+    /// Same as `gate_level()` but allows specifying which module to use as top.
+    pub async fn gate_level_with_top(source_path: &str, top_module: &str) -> Result<Self> {
+        Self::gate_level_with_top_and_library(source_path, top_module, "generic_asic").await
+    }
+
+    /// Create a gate-level synchronous testbench with explicit top module and library
+    pub async fn gate_level_with_top_and_library(
+        source_path: &str,
+        top_module: &str,
+        library_name: &str,
+    ) -> Result<Self> {
+        let use_gpu = std::env::var("SKALP_SIM_MODE")
+            .map(|v| v.to_lowercase() != "cpu")
+            .unwrap_or(true);
+
+        let config = UnifiedSimConfig {
+            level: SimLevel::GateLevel,
+            circuit_mode: CircuitMode::Sync,
+            hw_accel: if use_gpu { HwAccel::Auto } else { HwAccel::Cpu },
+            max_cycles: 1_000_000,
+            capture_waveforms: true,
+            ..Default::default()
+        };
+
+        Self::from_source_gate_level_with_library(source_path, config, library_name, Some(top_module)).await
     }
 
     /// Create an NCL (asynchronous) testbench from source
@@ -337,25 +366,28 @@ impl Testbench {
 
     #[allow(dead_code)]
     async fn from_source_gate_level(source_path: &str, config: UnifiedSimConfig) -> Result<Self> {
-        Self::from_source_gate_level_with_library(source_path, config, "generic_asic").await
+        Self::from_source_gate_level_with_library(source_path, config, "generic_asic", None).await
     }
 
     async fn from_source_gate_level_with_library(
         source_path: &str,
         config: UnifiedSimConfig,
         library_name: &str,
+        top_module_name: Option<&str>,
     ) -> Result<Self> {
         use skalp_frontend::parse_and_build_hir_from_file;
         use skalp_lir::{
-            get_stdlib_library, lower_mir_hierarchical, lower_mir_module_to_lir,
+            get_stdlib_library, lower_mir_hierarchical_with_top, lower_mir_module_to_lir,
             map_hierarchical_to_gates, map_lir_to_gates_optimized,
         };
         use std::time::Instant;
 
         let start_total = Instant::now();
         eprintln!(
-            "⏱️  [TESTBENCH] Starting gate-level compilation of '{}' with library '{}'",
-            source_path, library_name
+            "⏱️  [TESTBENCH] Starting gate-level compilation of '{}' with library '{}'{}",
+            source_path,
+            library_name,
+            top_module_name.map(|t| format!(" (top: {})", t)).unwrap_or_default()
         );
 
         let path = Path::new(source_path);
@@ -382,8 +414,8 @@ impl Testbench {
         let has_hierarchy =
             mir.modules.len() > 1 || mir.modules.iter().any(|m| !m.instances.is_empty());
 
-        let netlist = if has_hierarchy {
-            let hier_lir = lower_mir_hierarchical(&mir);
+        let netlist = if has_hierarchy || top_module_name.is_some() {
+            let hier_lir = lower_mir_hierarchical_with_top(&mir, top_module_name);
             let hier_netlist = map_hierarchical_to_gates(&hier_lir, &library);
             hier_netlist.flatten()
         } else {

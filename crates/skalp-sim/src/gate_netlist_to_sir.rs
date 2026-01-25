@@ -128,9 +128,20 @@ impl GateNetlistToSirConverter {
                 })
                 .unwrap_or(SirDetectionMode::Continuous);
 
+            // For top-level I/O ports from flattened hierarchical netlists,
+            // strip the "top." prefix so users can use clean names like "enable"
+            // instead of "top.enable"
+            let signal_name = if (net.is_input || net.is_output || net.is_clock || net.is_reset)
+                && net.name.starts_with("top.")
+            {
+                net.name.strip_prefix("top.").unwrap().to_string()
+            } else {
+                net.name.clone()
+            };
+
             let signal = SirSignal {
                 id: signal_id,
-                name: net.name.clone(),
+                name: signal_name,
                 width: 1, // Gate-level nets are typically single-bit
                 signal_type,
                 initial_value: None,

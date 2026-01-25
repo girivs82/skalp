@@ -65,8 +65,9 @@ pub use mir_to_lir::{lower_mir_module_to_word_lir, MirToWordLirResult};
 
 // Hierarchical MIR to LIR transformation
 pub use mir_to_lir::{
-    lower_mir_hierarchical, lower_mir_hierarchical_for_optimize_first, HierarchicalMirToLirResult,
-    InstanceLirResult, PortConnectionInfo,
+    lower_mir_hierarchical, lower_mir_hierarchical_for_optimize_first,
+    lower_mir_hierarchical_with_top, HierarchicalMirToLirResult, InstanceLirResult,
+    PortConnectionInfo,
 };
 
 // Gate-level netlist (output of technology mapping)
