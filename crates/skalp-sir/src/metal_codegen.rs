@@ -1311,11 +1311,43 @@ impl<'a> MetalShaderGenerator<'a> {
                         if let Some(driver_node) = sir.combinational_nodes.iter().find(|n| n.id == driver_node_id) {
                             if let Some(driver_output) = driver_node.outputs.first() {
                                 if !is_wide {
-                                    self.write_indented(&format!(
-                                        "signals->{} = signals->{};\n",
-                                        self.sanitize_name(&output.name),
-                                        self.sanitize_name(&driver_output.signal_id)
-                                    ));
+                                    // BUG FIX #221: Check if source and destination widths match
+                                    // If they don't, we need to extract or mask appropriately
+                                    let source_width = self.get_signal_width_from_sir(sir, &driver_output.signal_id);
+                                    let (_, source_metal_array, _) = self.get_metal_type_safe(&driver_output.signal_id, source_width);
+                                    let (_, output_metal_array, _) = self.get_metal_type_safe(&output.name, output_width);
+
+                                    // Check if source is a vector type (uint2, uint3, uint4)
+                                    let source_is_vector = source_metal_array.is_none() && source_width > 32 && source_width <= 128;
+                                    let output_is_scalar = output_metal_array.is_none() && output_width <= 32;
+
+                                    if source_is_vector && output_is_scalar {
+                                        // Source is uint2/uint3/uint4 but output is uint - extract first component
+                                        self.write_indented(&format!(
+                                            "// BUG FIX #221: Extract first component from vector\n",
+                                        ));
+                                        self.write_indented(&format!(
+                                            "signals->{} = signals->{}.x;\n",
+                                            self.sanitize_name(&output.name),
+                                            self.sanitize_name(&driver_output.signal_id)
+                                        ));
+                                    } else if source_width > output_width && source_width <= 32 && output_width <= 32 {
+                                        // Both are scalars but source is wider - mask
+                                        let mask = (1u64 << output_width) - 1;
+                                        self.write_indented(&format!(
+                                            "signals->{} = signals->{} & 0x{:x};\n",
+                                            self.sanitize_name(&output.name),
+                                            self.sanitize_name(&driver_output.signal_id),
+                                            mask
+                                        ));
+                                    } else {
+                                        // Same width or output is wider - direct assignment
+                                        self.write_indented(&format!(
+                                            "signals->{} = signals->{};\n",
+                                            self.sanitize_name(&output.name),
+                                            self.sanitize_name(&driver_output.signal_id)
+                                        ));
+                                    }
                                 }
                             }
                         }
@@ -1384,6 +1416,66 @@ impl<'a> MetalShaderGenerator<'a> {
             SirNodeKind::Memory { .. } => {}   // Memory, handled separately
             SirNodeKind::ClockGate => {}       // Clock gating, handled separately
             SirNodeKind::Reset => {}           // Reset logic, handled separately
+        }
+
+        // BUG FIX #219: Handle nodes with multiple outputs in batched kernel
+        // Copy first output to all additional outputs (same as generate_node_computation_v2)
+        // This is critical for struct output port binding where node 590 drives both
+        // _s78 (output port faults__oc) and _s105 (internal signal prot_faults__oc)
+        if node.outputs.len() > 1 {
+            let first_output = &node.outputs[0].signal_id;
+            for additional_output in &node.outputs[1..] {
+                let output_width =
+                    self.get_signal_width_from_sir(sir, &additional_output.signal_id);
+                let source_width = self.get_signal_width_from_sir(sir, first_output);
+
+                // Use fallback width for intermediate signals like node_XXX_out
+                let source_width = if source_width == 32
+                    && first_output.starts_with("node_")
+                    && first_output.ends_with("_out")
+                {
+                    output_width
+                } else {
+                    source_width
+                };
+
+                let both_wide = output_width > 128 && source_width > 128;
+
+                if both_wide {
+                    // Both are wide bit types - use element-wise copy
+                    let array_size = output_width.div_ceil(32);
+                    self.write_indented(&format!(
+                        "for (uint i = 0; i < {}; i++) {{ signals->{}[i] = signals->{}[i]; }}\n",
+                        array_size,
+                        self.sanitize_name(&additional_output.signal_id),
+                        self.sanitize_name(first_output)
+                    ));
+                } else {
+                    // BUG FIX #221: Check for Metal type compatibility
+                    // Source might be a vector (uint2) while output is scalar (uint)
+                    let (_, source_metal_array, _) = self.get_metal_type_safe(first_output, source_width);
+                    let (_, output_metal_array, _) = self.get_metal_type_safe(&additional_output.signal_id, output_width);
+
+                    let source_is_vector = source_metal_array.is_none() && source_width > 32 && source_width <= 128;
+                    let output_is_scalar = output_metal_array.is_none() && output_width <= 32;
+
+                    if source_is_vector && output_is_scalar {
+                        // Extract first component from vector
+                        self.write_indented(&format!(
+                            "signals->{} = signals->{}.x;\n",
+                            self.sanitize_name(&additional_output.signal_id),
+                            self.sanitize_name(first_output)
+                        ));
+                    } else {
+                        // Scalar copy
+                        self.write_indented(&format!(
+                            "signals->{} = signals->{};\n",
+                            self.sanitize_name(&additional_output.signal_id),
+                            self.sanitize_name(first_output)
+                        ));
+                    }
+                }
+            }
         }
     }
 
@@ -2109,6 +2201,62 @@ impl<'a> MetalShaderGenerator<'a> {
                             } else {
                                 // >128 bit: handled by the element-wise loop above (output_width > 128)
                                 // This case shouldn't be reached, but provide a fallback
+                                self.write_indented(&format!(
+                                    "signals->{} = {} {} {};\n",
+                                    self.sanitize_name(output),
+                                    left_expr,
+                                    op_str,
+                                    right_expr
+                                ));
+                            }
+                        } else if *op == BinaryOperation::Mul && output_width > left_width.max(right_width) {
+                            // BUG FIX #229: Full-precision multiply requires wider arithmetic
+                            // Metal's uint * uint only gives 32 bits. For full m×n → (m+n) bit precision,
+                            // we need to cast operands to a wider type before multiplication.
+
+                            if output_width <= 64 {
+                                // 33-64 bit result: use ulong multiplication
+                                self.write_indented(&format!(
+                                    "// BUG #229: Full-precision multiply {}×{} → {} bits\n",
+                                    left_width, right_width, output_width
+                                ));
+
+                                // Cast both operands to ulong for full precision
+                                let left_ulong = if left_width <= 32 {
+                                    format!("(ulong)signals->{}", self.sanitize_name(left))
+                                } else {
+                                    format!(
+                                        "((ulong)signals->{}[0] | ((ulong)signals->{}[1] << 32))",
+                                        self.sanitize_name(left),
+                                        self.sanitize_name(left)
+                                    )
+                                };
+
+                                let right_ulong = if right_width <= 32 {
+                                    format!("(ulong)signals->{}", self.sanitize_name(right))
+                                } else {
+                                    format!(
+                                        "((ulong)signals->{}[0] | ((ulong)signals->{}[1] << 32))",
+                                        self.sanitize_name(right),
+                                        self.sanitize_name(right)
+                                    )
+                                };
+
+                                // Multiply and store result in uint2
+                                self.write_indented(&format!(
+                                    "{{ ulong _mul_result = {} * {}; signals->{}[0] = (uint)_mul_result; signals->{}[1] = (uint)(_mul_result >> 32); }}\n",
+                                    left_ulong,
+                                    right_ulong,
+                                    self.sanitize_name(output),
+                                    self.sanitize_name(output)
+                                ));
+                            } else {
+                                // >64 bit result: would need more complex multi-word multiplication
+                                // For now, fall back to truncated multiplication with a warning
+                                self.write_indented(&format!(
+                                    "// WARNING: Full-precision multiply {}×{} → {} bits not fully implemented (truncated)\n",
+                                    left_width, right_width, output_width
+                                ));
                                 self.write_indented(&format!(
                                     "signals->{} = {} {} {};\n",
                                     self.sanitize_name(output),
