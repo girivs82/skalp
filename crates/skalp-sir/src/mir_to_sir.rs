@@ -1570,7 +1570,22 @@ impl<'a> MirToSirConverter<'a> {
             !is_output || is_state_element
         });
 
+        // BUG #227 FIX: Filter out variables (let bindings) - they should remain combinational
+        // Variables inside sequential blocks are temporary values computed each cycle, not state.
+        // We'll handle them separately with continuous assignments, not flip-flops.
+        let variable_targets: Vec<String> = targets.iter()
+            .filter(|target| {
+                // Check if this is NOT a state element (variables are never state elements)
+                !self.sir.state_elements.contains_key(*target)
+            })
+            .cloned()
+            .collect();
+
+        // Remove variables from flip-flop creation
+        targets.retain(|target| self.sir.state_elements.contains_key(target));
+
         println!("   📋 COLLECTED TARGETS (after filtering): {:?}", targets);
+        println!("   📋 VARIABLE TARGETS (will be combinational): {:?}", variable_targets);
         println!(
             "   📋 AVAILABLE MIR SIGNALS: {:?}",
             self.mir
@@ -1588,7 +1603,7 @@ impl<'a> MirToSirConverter<'a> {
         // Sort targets for deterministic ordering
         let mut sorted_targets: Vec<_> = targets.into_iter().collect();
         sorted_targets.sort();
-        println!("   🎯 CONVERT_IF_IN_SEQ: Processing {} targets: {:?}", sorted_targets.len(), sorted_targets);
+        println!("   🎯 CONVERT_IF_IN_SEQ: Processing {} state element targets: {:?}", sorted_targets.len(), sorted_targets);
         for target in sorted_targets {
             println!("   🎯 Processing target: '{}'", target);
             // BUG #226 FIX: Use sequential default if present
@@ -1599,6 +1614,17 @@ impl<'a> MirToSirConverter<'a> {
             println!("   🎯 Created FF node_{} for target '{}'", ff_node, target);
             self.connect_node_to_signal(ff_node, &target);
             println!("   🎯 Connected FF node_{} to signal '{}'", ff_node, target);
+        }
+
+        // BUG #227 FIX: Handle variable targets as combinational assignments
+        // Variables (let bindings) inside sequential blocks are just temporary values,
+        // not state that needs to be registered.
+        for target in variable_targets {
+            println!("   🔧 BUG #227: Processing variable target '{}' as combinational", target);
+            let final_value = self.synthesize_conditional_assignment_with_default(if_stmt, &target, None);
+            println!("   🔧 BUG #227: Final mux value for variable '{}': node_{}", target, final_value);
+            self.connect_node_to_signal(final_value, &target);
+            println!("   🔧 BUG #227: Connected combinational node_{} to variable '{}'", final_value, target);
         }
     }
 
