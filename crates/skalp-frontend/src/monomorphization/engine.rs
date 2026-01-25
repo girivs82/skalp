@@ -180,6 +180,17 @@ impl<'hir> MonomorphizationEngine<'hir> {
                 });
 
                 if let Some(entity) = entity {
+                    // BUG #232 FIX: Skip specializing "pass-through" instantiations.
+                    // These are instantiations from struct literals within generic entities
+                    // (like `Foo::<PERIOD>` where PERIOD is the outer entity's generic param).
+                    // They have empty const_args because the value isn't known yet.
+                    // They'll be properly instantiated when the outer generic is specialized.
+                    let has_const_generics = entity.generics.iter().any(|g| {
+                        matches!(g.param_type, crate::hir::HirGenericType::Const(_))
+                    });
+                    if has_const_generics && instantiation.const_args.is_empty() {
+                        continue;
+                    }
                     // Generate unique entity ID for specialized version
                     let specialized_id = crate::hir::EntityId(next_entity_id);
                     next_entity_id += 1;
@@ -818,8 +829,9 @@ impl<'hir> MonomorphizationEngine<'hir> {
             // collide with global constants (like MODE_SYSTOLIC). If we register all constants
             // from all impl blocks, entity-specific constants can overwrite global constants.
             // Entity-specific constants should only be used when processing that entity.
+            // BUG #232: Global impl now uses EntityId::GLOBAL_IMPL
             for impl_block in &hir.implementations {
-                if impl_block.entity == crate::hir::EntityId(0) {
+                if impl_block.entity == crate::hir::EntityId::GLOBAL_IMPL {
                     eval.register_constants(&impl_block.constants);
                 }
             }

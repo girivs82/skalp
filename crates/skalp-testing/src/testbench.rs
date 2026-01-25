@@ -559,17 +559,33 @@ impl Testbench {
             .map(|s| s.to_string());
 
         let top_module = if let Some(explicit_name) = explicit_top {
-            // BUG #230 FIX: When multiple modules have the same name (generic vs monomorphized),
-            // prefer the one with signals/processes (the monomorphized version)
+            // BUG #230 + #232 FIX: When looking for a top module by name, also consider
+            // specialized versions (e.g., "TriangularCarrier" should match "TriangularCarrier_1000").
+            // Collect both exact matches and specialized versions.
+            let prefix = format!("{}_", explicit_name);
             let candidates: Vec<_> = mir.modules
                 .iter()
-                .filter(|m| m.name == explicit_name)
+                .filter(|m| m.name == explicit_name || m.name.starts_with(&prefix))
                 .collect();
+
             if candidates.is_empty() {
                 anyhow::bail!("Top module '{}' not found", explicit_name);
             }
-            // Prefer module with most signals (monomorphized versions have actual content)
-            *candidates.iter().max_by_key(|m| m.signals.len() + m.processes.len()).unwrap()
+
+            // BUG #232: Prefer specialized versions (with suffix) over generic templates (exact match).
+            // Specialized versions have concrete const values, while generic templates don't.
+            // Among specialized versions, prefer the one with most signals.
+            let specialized: Vec<_> = candidates.iter()
+                .filter(|m| m.name.starts_with(&prefix))
+                .collect();
+
+            if !specialized.is_empty() {
+                // Use the specialized version with most signals
+                **specialized.iter().max_by_key(|m| m.signals.len() + m.processes.len()).unwrap()
+            } else {
+                // No specialized version, use the exact match with most signals
+                *candidates.iter().max_by_key(|m| m.signals.len() + m.processes.len()).unwrap()
+            }
         } else if let Some(ref basename) = source_basename {
             let pascal_basename: String = basename
                 .split('_')

@@ -182,13 +182,13 @@ impl<'hir> InstantiationCollector<'hir> {
             }
         }
 
-        // BUG #179 FIX: Only register constants from GLOBAL impl blocks (EntityId(0))
+        // BUG #179 FIX: Only register constants from GLOBAL impl blocks.
         // Entity-specific constants (like W, E, M in impl FpAdd<F>) have IDs that may
         // collide with global constants. Entity-specific constants should only be used
         // when processing that entity.
-        // Global constants (like IEEE754_32, MODE_SYSTOLIC) are stored in impl with EntityId(0)
+        // BUG #232: Global constants use EntityId::GLOBAL_IMPL
         for implementation in &hir.implementations {
-            if implementation.entity == crate::hir::EntityId(0)
+            if implementation.entity == crate::hir::EntityId::GLOBAL_IMPL
                 && !implementation.constants.is_empty()
             {
                 evaluator.register_constants(&implementation.constants);
@@ -228,6 +228,89 @@ impl<'hir> InstantiationCollector<'hir> {
                 for stmt in &method_impl.body {
                     self.collect_from_statement(stmt);
                 }
+            }
+        }
+
+        // BUG #232 FIX: Create default instantiations for generic entities whose all
+        // const generics have default values. This ensures that when a generic entity
+        // is used as a top module (not instantiated via struct literal), it still gets
+        // monomorphized with its default values.
+        for entity in &hir.entities {
+            // Skip if entity has no generics
+            if entity.generics.is_empty() {
+                continue;
+            }
+
+            // Check if this entity already has an instantiation with POPULATED const_args
+            // Instantiations created from struct literals within generic entities may have
+            // empty const_args (when using pass-through generic params like `Foo<PERIOD>`).
+            // We should still create a default instantiation in that case.
+            let has_concrete_instantiation = self.instantiations.iter().any(|inst| {
+                inst.entity_id == entity.id && !inst.const_args.is_empty()
+            });
+            if has_concrete_instantiation {
+                continue;
+            }
+
+            // Check if all const generics have default values
+            let const_generics: Vec<_> = entity.generics.iter()
+                .filter(|g| matches!(g.param_type, HirGenericType::Const(_)))
+                .collect();
+
+            if const_generics.is_empty() {
+                continue;
+            }
+
+            let all_have_defaults = const_generics.iter().all(|g| g.default_value.is_some());
+            if !all_have_defaults {
+                continue;
+            }
+
+            // Build instantiation with default values
+            let mut type_args = IndexMap::new();
+            let mut const_args = IndexMap::new();
+            let mut intent_args = IndexMap::new();
+
+            for generic in &entity.generics {
+                match &generic.param_type {
+                    HirGenericType::Const(_const_type) => {
+                        if let Some(ref default) = generic.default_value {
+                            if let Ok(value) = self.evaluator.eval(default) {
+                                const_args.insert(generic.name.clone(), value);
+                            }
+                        }
+                    }
+                    HirGenericType::Type => {
+                        if let Some(ref default) = generic.default_value {
+                            if let Some(ty) = self.extract_type_from_expr(default) {
+                                type_args.insert(generic.name.clone(), ty);
+                            }
+                        }
+                    }
+                    HirGenericType::Intent => {
+                        if let Some(ref default) = generic.default_value {
+                            let intent_name = self.extract_intent_name(default);
+                            let intent_value = IntentValue {
+                                name: intent_name,
+                                fields: IndexMap::new(),
+                            };
+                            intent_args.insert(generic.name.clone(), intent_value);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+
+            // Only create instantiation if we successfully evaluated all const args
+            if const_args.len() == const_generics.len() {
+                let instantiation = Instantiation {
+                    entity_name: entity.name.clone(),
+                    entity_id: entity.id,
+                    type_args,
+                    const_args,
+                    intent_args,
+                };
+                self.instantiations.insert(instantiation);
             }
         }
 
@@ -506,12 +589,22 @@ impl<'hir> InstantiationCollector<'hir> {
             let provided_positionally = i < struct_lit.generic_args.len();
 
             if !provided_positionally {
+                eprintln!("[BUG #232 DEBUG] Generic '{}' not provided positionally, checking for default", generic.name);
                 match &generic.param_type {
                     HirGenericType::Const(_const_type) => {
                         if let Some(ref default) = generic.default_value {
-                            if let Ok(value) = self.evaluator.eval(default) {
-                                const_args.entry(generic.name.clone()).or_insert(value);
+                            eprintln!("[BUG #232 DEBUG]   Has default expr: {:?}", default);
+                            match self.evaluator.eval(default) {
+                                Ok(value) => {
+                                    eprintln!("[BUG #232 DEBUG]   Evaluated to: {:?}", value);
+                                    const_args.entry(generic.name.clone()).or_insert(value);
+                                }
+                                Err(e) => {
+                                    eprintln!("[BUG #232 DEBUG]   Evaluation FAILED: {:?}", e);
+                                }
                             }
+                        } else {
+                            eprintln!("[BUG #232 DEBUG]   No default value");
                         }
                     }
                     HirGenericType::Intent => {

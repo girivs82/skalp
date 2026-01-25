@@ -280,7 +280,7 @@ fn rebuild_instances_with_imports(hir: &Hir, file_path: &Path) -> Result<Hir> {
     if let Some(global_impl) = final_hir
         .implementations
         .iter()
-        .find(|i| i.entity == hir::EntityId(0))
+        .find(|i| i.entity == hir::EntityId::GLOBAL_IMPL)
     {
         imported_constants = global_impl.constants.clone();
     }
@@ -308,7 +308,7 @@ fn rebuild_instances_with_imports(hir: &Hir, file_path: &Path) -> Result<Hir> {
         if let Some(global_impl) = final_hir
             .implementations
             .iter_mut()
-            .find(|i| i.entity == hir::EntityId(0))
+            .find(|i| i.entity == hir::EntityId::GLOBAL_IMPL)
         {
             // Merge imported constants with any constants from the rebuilt HIR
             // Add imported constants that aren't already present
@@ -324,7 +324,7 @@ fn rebuild_instances_with_imports(hir: &Hir, file_path: &Path) -> Result<Hir> {
         } else {
             // No global implementation block exists - create one with the imported constants
             final_hir.implementations.push(hir::HirImplementation {
-                entity: hir::EntityId(0),
+                entity: hir::EntityId::GLOBAL_IMPL,
                 signals: Vec::new(),
                 variables: Vec::new(),
                 constants: imported_constants,
@@ -1318,7 +1318,7 @@ fn merge_symbol(target: &mut Hir, source: &Hir, symbol_name: &str) -> Result<()>
             // Create one if it doesn't exist
             if target.implementations.is_empty() {
                 target.implementations.push(hir::HirImplementation {
-                    entity: hir::EntityId(0), // Dummy entity ID for global scope
+                    entity: hir::EntityId::GLOBAL_IMPL, // Dummy entity ID for global scope
                     signals: Vec::new(),
                     variables: Vec::new(),
                     constants: Vec::new(),
@@ -1366,7 +1366,7 @@ fn merge_symbol(target: &mut Hir, source: &Hir, symbol_name: &str) -> Result<()>
             // Create one if it doesn't exist
             if target.implementations.is_empty() {
                 target.implementations.push(hir::HirImplementation {
-                    entity: hir::EntityId(0), // Dummy entity ID for global scope
+                    entity: hir::EntityId::GLOBAL_IMPL, // Dummy entity ID for global scope
                     signals: Vec::new(),
                     variables: Vec::new(),
                     constants: Vec::new(),
@@ -1516,7 +1516,7 @@ fn merge_symbol_with_rename(
             // Create one if it doesn't exist
             if target.implementations.is_empty() {
                 target.implementations.push(hir::HirImplementation {
-                    entity: hir::EntityId(0), // Dummy entity ID for global scope
+                    entity: hir::EntityId::GLOBAL_IMPL, // Dummy entity ID for global scope
                     signals: Vec::new(),
                     variables: Vec::new(),
                     constants: Vec::new(),
@@ -1859,12 +1859,12 @@ fn merge_all_symbols(target: &mut Hir, source: &Hir) -> Result<()> {
     // constants from the "global" implementation block (EntityId(0)) which are effectively public
     for impl_block in &source.implementations {
         // Only merge constants from the global scope (entity ID 0)
-        if impl_block.entity == hir::EntityId(0) {
+        if impl_block.entity == hir::EntityId::GLOBAL_IMPL {
             for constant in &impl_block.constants {
                 // Create global implementation block if it doesn't exist
                 if target.implementations.is_empty() {
                     target.implementations.push(hir::HirImplementation {
-                        entity: hir::EntityId(0),
+                        entity: hir::EntityId::GLOBAL_IMPL,
                         signals: Vec::new(),
                         variables: Vec::new(),
                         constants: Vec::new(),
@@ -1902,7 +1902,7 @@ fn merge_all_symbols(target: &mut Hir, source: &Hir) -> Result<()> {
     // This is critical for glob imports of stdlib functions with their return types
     for impl_block in &source.implementations {
         // Only merge functions from the global scope (entity ID 0)
-        if impl_block.entity == hir::EntityId(0) {
+        if impl_block.entity == hir::EntityId::GLOBAL_IMPL {
             for function in &impl_block.functions {
                 eprintln!(
                     "📦 BUG #67 FIX: Merging glob-imported function '{}' with return type: {:?}",
@@ -1911,7 +1911,7 @@ fn merge_all_symbols(target: &mut Hir, source: &Hir) -> Result<()> {
                 // Create global implementation block if it doesn't exist
                 if target.implementations.is_empty() {
                     target.implementations.push(hir::HirImplementation {
-                        entity: hir::EntityId(0),
+                        entity: hir::EntityId::GLOBAL_IMPL,
                         signals: Vec::new(),
                         variables: Vec::new(),
                         constants: Vec::new(),

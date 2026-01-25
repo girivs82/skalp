@@ -697,7 +697,7 @@ impl ModuleResolver {
         let is_glob = matches!(import.path, HirImportPath::Glob { .. });
 
         for impl_block in &source.implementations {
-            if impl_block.entity == crate::hir::EntityId(0) {
+            if impl_block.entity == crate::hir::EntityId::GLOBAL_IMPL {
                 for constant in &impl_block.constants {
                     // For glob imports, include all constants
                     // For specific imports, only include if the constant name is in the import list
@@ -707,10 +707,10 @@ impl ModuleResolver {
                             || !target
                                 .implementations
                                 .iter()
-                                .any(|i| i.entity == crate::hir::EntityId(0))
+                                .any(|i| i.entity == crate::hir::EntityId::GLOBAL_IMPL)
                         {
                             target.implementations.push(crate::hir::HirImplementation {
-                                entity: crate::hir::EntityId(0),
+                                entity: crate::hir::EntityId::GLOBAL_IMPL,
                                 signals: Vec::new(),
                                 variables: Vec::new(),
                                 constants: Vec::new(),
@@ -728,7 +728,7 @@ impl ModuleResolver {
                         if let Some(global_impl) = target
                             .implementations
                             .iter_mut()
-                            .find(|i| i.entity == crate::hir::EntityId(0))
+                            .find(|i| i.entity == crate::hir::EntityId::GLOBAL_IMPL)
                         {
                             if !global_impl
                                 .constants

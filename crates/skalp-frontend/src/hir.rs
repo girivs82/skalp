@@ -2094,6 +2094,12 @@ pub enum HirVerificationMethod {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct EntityId(pub u32);
 
+impl EntityId {
+    /// BUG #232: Sentinel value for global impl (module-level constants).
+    /// Using u32::MAX avoids collision with real entity IDs which start at 0.
+    pub const GLOBAL_IMPL: EntityId = EntityId(u32::MAX);
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct PortId(pub u32);
 

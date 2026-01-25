@@ -599,13 +599,22 @@ impl HirBuilderContext {
                     if let Some(constant) = self.build_constant(&child) {
                         // Store constant in HIR for later use
                         // Top-level constants are added to a special "global" implementation
-                        // For now, we'll create a default impl if none exists
-                        if hir.implementations.is_empty() {
+                        // BUG #232 FIX: Use EntityId::GLOBAL_IMPL to avoid collision with EntityId(0)
+                        // which is assigned to the first parsed entity
+
+                        // Find or create global impl by EntityId, not by position
+                        let global_impl = hir.implementations.iter_mut()
+                            .find(|i| i.entity == EntityId::GLOBAL_IMPL);
+
+                        if let Some(impl_block) = global_impl {
+                            impl_block.constants.push(constant);
+                        } else {
+                            // Create global impl if it doesn't exist
                             hir.implementations.push(HirImplementation {
-                                entity: EntityId(0), // Dummy entity ID for global scope
+                                entity: EntityId::GLOBAL_IMPL,
                                 signals: Vec::new(),
                                 variables: Vec::new(),
-                                constants: Vec::new(),
+                                constants: vec![constant],
                                 functions: Vec::new(),
                                 event_blocks: Vec::new(),
                                 assignments: Vec::new(),
@@ -614,10 +623,6 @@ impl HirBuilderContext {
                                 formal_blocks: Vec::new(),
                                 statements: Vec::new(),
                             });
-                        }
-                        // Add constant to the first implementation (global scope)
-                        if let Some(impl_block) = hir.implementations.first_mut() {
-                            impl_block.constants.push(constant);
                         }
                     }
                 }
@@ -12716,16 +12721,11 @@ impl HirBuilderContext {
 
             let param_type = self.extract_hir_type(node);
 
-            // Extract default value if present (e.g., const WIDTH: nat = 8)
-            // The parser structure is: GenericParam -> TypeAnnotation, LiteralExpr
-            // If there's a second child, it's the default value
-            let default_value = node.children().nth(1).and_then(|child| {
-                if child.kind() == SyntaxKind::LiteralExpr {
-                    self.build_expression(&child)
-                } else {
-                    None
-                }
-            });
+            // BUG #232 FIX: Extract default value if present (e.g., const WIDTH: nat = 8)
+            // Previously, this only handled LiteralExpr, but default values can be
+            // identifiers (like PWM_PERIOD_100K) or other expressions.
+            // Use find_initial_value_expr which handles all expression types.
+            let default_value = self.find_initial_value_expr(node);
 
             Some(HirGeneric {
                 name,
