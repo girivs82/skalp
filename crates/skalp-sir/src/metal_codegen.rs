@@ -2214,11 +2214,16 @@ impl<'a> MetalShaderGenerator<'a> {
                             // Metal's uint * uint only gives 32 bits. For full m×n → (m+n) bit precision,
                             // we need to cast operands to a wider type before multiplication.
 
+                            // Check actual signal storage width - the signal might be declared narrower
+                            // than the computed full-precision width
+                            let signal_storage_width = self.get_signal_width_from_sir(sir, output);
+                            let needs_wide_storage = signal_storage_width > 32;
+
                             if output_width <= 64 {
                                 // 33-64 bit result: use ulong multiplication
                                 self.write_indented(&format!(
-                                    "// BUG #229: Full-precision multiply {}×{} → {} bits\n",
-                                    left_width, right_width, output_width
+                                    "// BUG #229: Full-precision multiply {}×{} → {} bits (signal: {} bits)\n",
+                                    left_width, right_width, output_width, signal_storage_width
                                 ));
 
                                 // Cast both operands to ulong for full precision
@@ -2242,14 +2247,25 @@ impl<'a> MetalShaderGenerator<'a> {
                                     )
                                 };
 
-                                // Multiply and store result in uint2
-                                self.write_indented(&format!(
-                                    "{{ ulong _mul_result = {} * {}; signals->{}[0] = (uint)_mul_result; signals->{}[1] = (uint)(_mul_result >> 32); }}\n",
-                                    left_ulong,
-                                    right_ulong,
-                                    self.sanitize_name(output),
-                                    self.sanitize_name(output)
-                                ));
+                                if needs_wide_storage {
+                                    // Output is uint2 - store both halves
+                                    self.write_indented(&format!(
+                                        "{{ ulong _mul_result = {} * {}; signals->{}[0] = (uint)_mul_result; signals->{}[1] = (uint)(_mul_result >> 32); }}\n",
+                                        left_ulong,
+                                        right_ulong,
+                                        self.sanitize_name(output),
+                                        self.sanitize_name(output)
+                                    ));
+                                } else {
+                                    // Output is scalar uint - truncate to lower 32 bits
+                                    // This handles cases where assignment target is narrower than full precision
+                                    self.write_indented(&format!(
+                                        "signals->{} = (uint)({} * {});\n",
+                                        self.sanitize_name(output),
+                                        left_ulong,
+                                        right_ulong
+                                    ));
+                                }
                             } else {
                                 // >64 bit result: would need more complex multi-word multiplication
                                 // For now, fall back to truncated multiplication with a warning
