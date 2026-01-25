@@ -559,10 +559,17 @@ impl Testbench {
             .map(|s| s.to_string());
 
         let top_module = if let Some(explicit_name) = explicit_top {
-            mir.modules
+            // BUG #230 FIX: When multiple modules have the same name (generic vs monomorphized),
+            // prefer the one with signals/processes (the monomorphized version)
+            let candidates: Vec<_> = mir.modules
                 .iter()
-                .find(|m| m.name == explicit_name)
-                .ok_or_else(|| anyhow::anyhow!("Top module '{}' not found", explicit_name))?
+                .filter(|m| m.name == explicit_name)
+                .collect();
+            if candidates.is_empty() {
+                anyhow::bail!("Top module '{}' not found", explicit_name);
+            }
+            // Prefer module with most signals (monomorphized versions have actual content)
+            *candidates.iter().max_by_key(|m| m.signals.len() + m.processes.len()).unwrap()
         } else if let Some(ref basename) = source_basename {
             let pascal_basename: String = basename
                 .split('_')

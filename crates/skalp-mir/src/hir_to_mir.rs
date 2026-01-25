@@ -715,8 +715,6 @@ impl<'hir> HirToMir<'hir> {
                 );
             }
             // BUG #117r DEBUG: Log impl block processing
-            eprintln!("📍 SECOND_PASS: entity='{}', entity_id={:?}, {} instances, {} assignments",
-                impl_entity_name, impl_block.entity, impl_block.instances.len(), impl_block.assignments.len());
             if let Some(&module_id) = self.entity_map.get(&impl_block.entity) {
                 // Set current entity for generic parameter resolution
                 self.current_entity_id = Some(impl_block.entity);

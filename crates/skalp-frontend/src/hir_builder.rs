@@ -2107,6 +2107,7 @@ impl HirBuilderContext {
         // Assignments inside on() blocks should be non-blocking (generates <=)
         self.push_context(BuilderContext::EventBlock);
         let mut statements = Vec::new();
+
         if let Some(block) = node.first_child_of_kind(SyntaxKind::BlockStmt) {
             statements = self.build_statements(&block);
         }
