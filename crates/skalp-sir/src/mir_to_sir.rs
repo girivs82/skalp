@@ -6273,6 +6273,32 @@ impl<'a> MirToSirConverter<'a> {
                     is_state: false, // Input ports are not registers
                     span: None,
                 });
+
+                // BUG #236 FIX: Connect the parent's expression to the child's input port signal
+                // When a child module's input port is connected to a parent signal (e.g., clear: clear_faults),
+                // we need to create a driver that routes the parent's signal to the child's input.
+                // Without this, the child's input port signal remains undriven (always 0).
+                if let Some(parent_expr) = instance.connections.get(&port.name) {
+                    println!(
+                        "         🔌 BUG #236 FIX: Creating driver for child input port '{}' from parent expr",
+                        port.name
+                    );
+                    // Create a node for the parent expression
+                    let parent_node = self.create_expression_node_for_instance_with_context(
+                        parent_expr,
+                        parent_prefix,
+                        &HashMap::new(), // No nested port mapping needed at this level
+                        parent_module_for_signals.unwrap_or(self.mir),
+                        Some(self.mir),
+                        "",
+                    );
+                    // Connect it to the child's input port signal
+                    self.connect_node_to_signal(parent_node, &internal_name);
+                    println!(
+                        "         ✅ Connected parent node {} to child input '{}'",
+                        parent_node, internal_name
+                    );
+                }
             }
         }
 
@@ -7881,6 +7907,21 @@ impl<'a> MirToSirConverter<'a> {
 
                         if let Some(ref name) = port_name {
                             println!("🎨🎨🎨   -> Port name: '{}', looking in port_mapping", name);
+
+                            // BUG #236 FIX PART 2: For child input ports, use the SIR signal we created
+                            // instead of following port_mapping to the parent's signal.
+                            // The external name format is "{inst_prefix}.{port_name}"
+                            if !inst_prefix.is_empty() {
+                                let child_port_external_name = format!("{}.{}", inst_prefix.trim_end_matches('.'), name);
+                                if let Some(internal_name) = self.mir_to_internal_name.get(&child_port_external_name).cloned() {
+                                    println!(
+                                        "🎨🎨🎨   -> BUG #236 FIX: Found child input port SIR signal '{}' for '{}', using it instead of port_mapping",
+                                        internal_name, child_port_external_name
+                                    );
+                                    return self.get_or_create_signal_driver(&internal_name);
+                                }
+                            }
+
                             if let Some(parent_expr) = port_mapping.get(name) {
                                 println!(
                                     "🎨🎨🎨   -> Found mapping for '{}': {:?}",

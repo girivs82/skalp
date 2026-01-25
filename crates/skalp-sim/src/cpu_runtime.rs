@@ -524,7 +524,8 @@ impl CpuRuntime {
         let mut result = vec![0u8; byte_size];
 
         // For values > 64 bits, work with byte arrays directly
-        if low < 64 && value.len() <= 8 {
+        // BUG #236b FIX: Also check width <= 64 - if width > 64, the result won't fit in a u64
+        if low < 64 && value.len() <= 8 && width <= 64 {
             // Fast path for u64 values
             let value_as_u64 = Self::bytes_to_u64(value);
             let mask = if width >= 64 {
