@@ -164,6 +164,9 @@ struct MirToSirConverter<'a> {
     /// Maps MIR signal/port names to their internal names (_s0, _s1, etc.)
     /// This is populated during convert_ports/convert_signals and used during expression conversion
     mir_to_internal_name: HashMap<String, String>,
+    /// BUG #226 FIX: Stores default values from unconditional assignments in a sequential block
+    /// These are used by conditional handlers (if/case) when their branches don't override the target.
+    sequential_defaults: HashMap<String, usize>,
 }
 
 impl<'a> MirToSirConverter<'a> {
@@ -183,6 +186,7 @@ impl<'a> MirToSirConverter<'a> {
             elaborated_instances: std::collections::HashSet::new(),
             instance_parent_module_ids: HashMap::new(),
             mir_to_internal_name: HashMap::new(),
+            sequential_defaults: HashMap::new(),
         }
     }
 
@@ -780,6 +784,41 @@ impl<'a> MirToSirConverter<'a> {
             edge
         );
 
+        // BUG #226 FIX: Clear any previous defaults from earlier sequential blocks
+        // These will be populated with unconditional assignments that precede conditionals.
+        self.sequential_defaults.clear();
+
+        // First pass: Collect targets that have both unconditional and conditional assignments
+        let mut targets_with_conditionals: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
+        for stmt in statements.iter() {
+            match stmt {
+                Statement::If(if_stmt) => {
+                    self.collect_targets_from_if(if_stmt, &mut targets_with_conditionals);
+                }
+                Statement::Case(case_stmt) => {
+                    for item in &case_stmt.items {
+                        self.collect_all_targets_from_statements(
+                            &item.block.statements,
+                            &mut targets_with_conditionals,
+                        );
+                    }
+                    if let Some(default_block) = &case_stmt.default {
+                        self.collect_all_targets_from_statements(
+                            &default_block.statements,
+                            &mut targets_with_conditionals,
+                        );
+                    }
+                }
+                _ => {}
+            }
+        }
+        println!(
+            "🔍 BUG #226: Found {} targets with conditional assignments: {:?}",
+            targets_with_conditionals.len(),
+            targets_with_conditionals
+        );
+
         // Process ALL statements sequentially
         // This handles ResolvedConditional statements with proper dependency tracking
         println!(
@@ -852,9 +891,21 @@ impl<'a> MirToSirConverter<'a> {
                         let value =
                             self.create_expression_node_with_width(&assign.rhs, Some(target_width));
 
-                        // Create flip-flop
-                        let ff_node = self.create_flipflop_with_input(value, clock, edge.clone());
-                        self.connect_node_to_signal(ff_node, &target);
+                        // BUG #226 FIX: If this target also has a conditional assignment later,
+                        // store this value as the default instead of creating a flip-flop now.
+                        // The conditional handler will use this as the default when its branches
+                        // don't explicitly assign to this target.
+                        if targets_with_conditionals.contains(&target) {
+                            println!(
+                                "   📝 BUG #226: Storing default value node_{} for target '{}' (has conditional later)",
+                                value, target
+                            );
+                            self.sequential_defaults.insert(target.clone(), value);
+                        } else {
+                            // Create flip-flop directly (no conditional overrides this)
+                            let ff_node = self.create_flipflop_with_input(value, clock, edge.clone());
+                            self.connect_node_to_signal(ff_node, &target);
+                        }
                     }
                 }
                 Statement::ResolvedConditional(resolved) => {
@@ -1233,9 +1284,14 @@ impl<'a> MirToSirConverter<'a> {
                 Statement::If(if_stmt) => {
                     // If this if-statement assigns to our target, create conditional logic
                     if self.if_assigns_to_target(if_stmt, target) {
-                        // Always use the new dependency-aware approach
-                        result_value =
-                            Some(self.synthesize_conditional_assignment(if_stmt, target));
+                        // BUG #226 FIX: Pass prior assignment value as default
+                        // This ensures that unconditional assignments before the if-statement
+                        // are used as the default when a branch doesn't assign to the target.
+                        result_value = Some(self.synthesize_conditional_assignment_with_default(
+                            if_stmt,
+                            target,
+                            result_value,
+                        ));
                     }
                 }
                 Statement::ResolvedConditional(resolved) => {
@@ -1535,7 +1591,9 @@ impl<'a> MirToSirConverter<'a> {
         println!("   🎯 CONVERT_IF_IN_SEQ: Processing {} targets: {:?}", sorted_targets.len(), sorted_targets);
         for target in sorted_targets {
             println!("   🎯 Processing target: '{}'", target);
-            let final_value = self.synthesize_conditional_assignment(if_stmt, &target);
+            // BUG #226 FIX: Use sequential default if present
+            let default_value = self.sequential_defaults.get(&target).copied();
+            let final_value = self.synthesize_conditional_assignment_with_default(if_stmt, &target, default_value);
             println!("   🎯 Final mux value for '{}': node_{}", target, final_value);
             let ff_node = self.create_flipflop_with_input(final_value, clock, edge.clone());
             println!("   🎯 Created FF node_{} for target '{}'", ff_node, target);
@@ -1600,8 +1658,17 @@ impl<'a> MirToSirConverter<'a> {
         for target in &all_targets {
             println!("      🔧 Building mux tree for signal: {}", target);
 
-            // Start with current value (state holding when no assignment matches)
-            let mut current_value = self.get_or_create_signal_driver(target);
+            // BUG #226 FIX: Start with the default from an unconditional assignment if present,
+            // otherwise use the current signal value (state holding when no assignment matches)
+            let mut current_value = if let Some(&default_val) = self.sequential_defaults.get(target) {
+                println!(
+                    "         📝 BUG #226: Using sequential default node_{} for '{}'",
+                    default_val, target
+                );
+                default_val
+            } else {
+                self.get_or_create_signal_driver(target)
+            };
 
             // Build mux from last case to first (priority order)
             // For each case arm, build the value expression considering nested if statements
@@ -2209,12 +2276,12 @@ impl<'a> MirToSirConverter<'a> {
         );
         let mut cases = Vec::new();
 
-        // Process then branch with local context
+        // BUG #226 FIX: Pass default_value to branch processing so nested ifs can use it
         let then_value =
-            self.process_branch_with_dependencies(&if_stmt.then_block.statements, target);
+            self.process_branch_with_dependencies_and_default(&if_stmt.then_block.statements, target, default_value);
         println!("         DEBUG: then_value = {:?}", then_value);
         let else_value = if let Some(else_block) = &if_stmt.else_block {
-            let result = self.process_branch_with_dependencies(&else_block.statements, target);
+            let result = self.process_branch_with_dependencies_and_default(&else_block.statements, target, default_value);
             println!("         DEBUG: else_value = {:?}", result);
             result
         } else {
@@ -2411,8 +2478,9 @@ impl<'a> MirToSirConverter<'a> {
         let mut found_target = false;
 
         for item in case_stmt.items.iter() {
-            // BUG #222 FIX: Use find_target_in_block_with_default to properly handle nested conditionals
-            let arm_value = self.find_target_in_block(&item.block.statements, target);
+            // BUG #226 FIX: Use find_target_in_block_with_default to properly handle nested conditionals
+            // Pass the default value so nested ifs can use it as the "keep" value
+            let arm_value = self.find_target_in_block_with_default(&item.block.statements, target, default_value);
             if arm_value.is_some() {
                 found_target = true;
             }
@@ -2421,7 +2489,7 @@ impl<'a> MirToSirConverter<'a> {
 
         // Get default block value
         let default_block_value = if let Some(default_block) = &case_stmt.default {
-            let val = self.find_target_in_block(&default_block.statements, target);
+            let val = self.find_target_in_block_with_default(&default_block.statements, target, default_value);
             if val.is_some() {
                 found_target = true;
             }
@@ -2533,10 +2601,76 @@ impl<'a> MirToSirConverter<'a> {
         None
     }
 
+    /// BUG #226 FIX: Find assignment to a specific target in a block, with a default value
+    /// for nested conditionals that don't assign in all branches.
+    fn find_target_in_block_with_default(
+        &mut self,
+        statements: &[Statement],
+        target: &str,
+        default_value: Option<usize>,
+    ) -> Option<usize> {
+        println!(
+            "         🔎 find_target_in_block_with_default: looking for '{}' in {} statements, default={:?}",
+            target, statements.len(), default_value
+        );
+        for (idx, stmt) in statements.iter().enumerate() {
+            match stmt {
+                Statement::Assignment(assign) => {
+                    let assign_target = self.lvalue_to_string(&assign.lhs);
+                    if assign_target == target {
+                        return Some(self.create_expression_node(&assign.rhs));
+                    }
+                }
+                Statement::Block(block) => {
+                    if let Some(val) = self.find_target_in_block_with_default(&block.statements, target, default_value) {
+                        return Some(val);
+                    }
+                }
+                Statement::If(nested_if) => {
+                    println!("            [{}] Processing nested If with default for target '{}'", idx, target);
+                    // BUG #226 FIX: Pass the default value to nested conditionals
+                    let result = self.synthesize_conditional_assignment_with_default(
+                        nested_if,
+                        target,
+                        default_value,
+                    );
+                    // Check if the result is not just a keep-value SignalRef
+                    let is_keep_value = self.sir.combinational_nodes.iter().any(|n| {
+                        n.id == result
+                            && matches!(n.kind, SirNodeKind::SignalRef { ref signal } if signal == target)
+                    });
+                    if !is_keep_value {
+                        println!("            [{}] ✅ Returning result={} for target '{}' (with default)", idx, result, target);
+                        return Some(result);
+                    }
+                }
+                Statement::Case(nested_case) => {
+                    // BUG #226 FIX: Pass the default value to nested case statements
+                    if let Some(val) = self.synthesize_case_for_target_with_default(nested_case, target, default_value) {
+                        return Some(val);
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+
     fn process_branch_with_dependencies(
         &mut self,
         statements: &[Statement],
         target: &str,
+    ) -> Option<usize> {
+        // BUG #226 FIX: Forward to the version with initial default = None
+        self.process_branch_with_dependencies_and_default(statements, target, None)
+    }
+
+    /// BUG #226 FIX: Process a branch with an initial default value that can be overridden
+    fn process_branch_with_dependencies_and_default(
+        &mut self,
+        statements: &[Statement],
+        target: &str,
+        initial_default: Option<usize>,
     ) -> Option<usize> {
         // BUG #222 FIX: Sequential assignment order handling
         //
@@ -2556,7 +2690,8 @@ impl<'a> MirToSirConverter<'a> {
         // statements that might override, build muxes that use the default
         // when conditions aren't met.
 
-        let mut current_default: Option<usize> = None;
+        // BUG #226 FIX: Start with the initial default from the outer context
+        let mut current_default: Option<usize> = initial_default;
         let mut conditional_results = Vec::new();
 
         for stmt in statements {
