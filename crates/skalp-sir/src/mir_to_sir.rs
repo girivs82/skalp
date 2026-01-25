@@ -2791,6 +2791,15 @@ impl<'a> MirToSirConverter<'a> {
                         current_default,
                     );
                     conditional_results.push(nested_result);
+
+                    // BUG #235 FIX: Update current_default for subsequent if statements
+                    // When there are multiple independent if statements for the same target,
+                    // each subsequent if should use the previous if's result as its default.
+                    // This ensures proper "last-write-wins" semantics:
+                    //   if cond1 { target = val1 }  // produces result1
+                    //   if cond2 { target = val2 }  // should use result1 as default, not original target
+                    // Final value: cond2 ? val2 : (cond1 ? val1 : original_target)
+                    current_default = Some(nested_result);
                 }
                 Statement::Block(block) => {
                     // CRITICAL FIX: Recurse into nested blocks (same bug as Bug #19)
