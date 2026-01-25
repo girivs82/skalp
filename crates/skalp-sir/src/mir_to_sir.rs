@@ -1849,6 +1849,54 @@ impl<'a> MirToSirConverter<'a> {
                         current_value,
                     );
                 }
+                Statement::Case(case_stmt) => {
+                    // BUG #233 FIX: Handle Case/match statements in value building
+                    // Build a cascaded mux for each case arm
+                    let selector = self.create_expression_node(&case_stmt.expr);
+
+                    // Start with default value (current_value or default block)
+                    let default_value = if let Some(default_block) = &case_stmt.default {
+                        self.build_value_from_statements_for_target(
+                            &default_block.statements,
+                            target,
+                            current_value,
+                        )
+                    } else {
+                        current_value
+                    };
+
+                    // Build cascaded mux: for each arm, check if selector matches pattern
+                    // The result is: arm1_match ? arm1_val : (arm2_match ? arm2_val : ... : default)
+                    let mut result = default_value;
+
+                    // Process arms in reverse order to build the mux chain correctly
+                    for item in case_stmt.items.iter().rev() {
+                        // Get the value for this arm
+                        let arm_value = self.build_value_from_statements_for_target(
+                            &item.block.statements,
+                            target,
+                            current_value,  // Each arm starts with current_value as fallback
+                        );
+
+                        // Build condition: selector == pattern
+                        // Handle multiple patterns with OR
+                        let mut arm_condition: Option<usize> = None;
+                        for value in &item.values {
+                            let pattern_node = self.create_expression_node(value);
+                            let eq_node = self.create_binary_op_node(&skalp_mir::BinaryOp::Equal, selector, pattern_node);
+                            arm_condition = Some(match arm_condition {
+                                Some(prev) => self.create_binary_op_node(&skalp_mir::BinaryOp::Or, prev, eq_node),
+                                None => eq_node,
+                            });
+                        }
+
+                        if let Some(cond) = arm_condition {
+                            result = self.create_mux_node(cond, arm_value, result);
+                        }
+                    }
+
+                    current_value = result;
+                }
                 _ => {
                     // Skip other statement types for now
                 }
@@ -2639,7 +2687,7 @@ impl<'a> MirToSirConverter<'a> {
             "         🔎 find_target_in_block_with_default: looking for '{}' in {} statements, default={:?}",
             target, statements.len(), default_value
         );
-        for (idx, stmt) in statements.iter().enumerate() {
+        for stmt in statements.iter() {
             match stmt {
                 Statement::Assignment(assign) => {
                     let assign_target = self.lvalue_to_string(&assign.lhs);
@@ -2653,7 +2701,6 @@ impl<'a> MirToSirConverter<'a> {
                     }
                 }
                 Statement::If(nested_if) => {
-                    println!("            [{}] Processing nested If with default for target '{}'", idx, target);
                     // BUG #226 FIX: Pass the default value to nested conditionals
                     let result = self.synthesize_conditional_assignment_with_default(
                         nested_if,
@@ -2666,7 +2713,6 @@ impl<'a> MirToSirConverter<'a> {
                             && matches!(n.kind, SirNodeKind::SignalRef { ref signal } if signal == target)
                     });
                     if !is_keep_value {
-                        println!("            [{}] ✅ Returning result={} for target '{}' (with default)", idx, result, target);
                         return Some(result);
                     }
                 }
@@ -2729,10 +2775,6 @@ impl<'a> MirToSirConverter<'a> {
                     // Later conditionals can still override this.
                     if assign_target == target {
                         let value = self.create_expression_node(&assign.rhs);
-                        println!(
-                            "         📝 BUG #222 FIX: Direct assignment to '{}' sets default to node_{}",
-                            target, value
-                        );
                         current_default = Some(value);
                     }
                 }
@@ -3278,11 +3320,34 @@ impl<'a> MirToSirConverter<'a> {
     }
 
     fn lvalue_to_string(&self, lvalue: &LValue) -> String {
-        let mir_name = match lvalue {
+        match lvalue {
             LValue::Port(port_id) => {
-                self.mir.ports.iter().find(|p| p.id == *port_id)
-                    .map(|p| p.name.clone())
-                    .unwrap_or_else(|| format!("port_{}", port_id.0))
+                // BUG #233 FIX: Translate port names to internal names
+                // Previously, this returned the MIR port name without translation,
+                // causing target comparisons to fail when searching for internal names.
+
+                // First try current module's ports
+                if let Some(port) = self.mir.ports.iter().find(|p| p.id == *port_id) {
+                    return self.translate_to_internal_name(&port.name);
+                }
+
+                // BUG #233 FIX: Search child modules for the port (same as signal handling)
+                for child_module in &self.mir_design.modules {
+                    if let Some(port) = child_module.ports.iter().find(|p| p.id == *port_id) {
+                        // Find instance of this module in current module
+                        for instance in &self.mir.instances {
+                            if instance.module == child_module.id {
+                                let hier_name = format!("{}.{}", instance.name, port.name);
+                                return self.translate_to_internal_name(&hier_name);
+                            }
+                        }
+                        // No instance found, return translated port name
+                        return self.translate_to_internal_name(&port.name);
+                    }
+                }
+
+                // Not found anywhere - use fallback (this shouldn't happen)
+                format!("port_{}", port_id.0)
             }
             LValue::Signal(sig_id) => {
                 // First try current module
@@ -3310,7 +3375,7 @@ impl<'a> MirToSirConverter<'a> {
                     "⚠️  Signal ID {} not found in any module! Using fallback name",
                     sig_id.0
                 );
-                return format!("signal_{}", sig_id.0);
+                format!("signal_{}", sig_id.0)
             }
             LValue::Variable(var_id) => {
                 let mir_name = self
@@ -3320,28 +3385,25 @@ impl<'a> MirToSirConverter<'a> {
                     .find(|v| v.id == *var_id)
                     .map(|v| format!("{}_{}", v.name, var_id.0)) // BUG FIX #86: Unique name
                     .unwrap_or_else(|| format!("var_{}", var_id.0));
-                return self.translate_to_internal_name(&mir_name);
+                self.translate_to_internal_name(&mir_name)
             }
             LValue::BitSelect { base, .. } => {
                 // For bit select, use the base signal name (already translated)
-                return self.lvalue_to_string(base);
+                self.lvalue_to_string(base)
             }
             LValue::RangeSelect { base, .. } => {
                 // For range select, use the base signal name (already translated)
-                return self.lvalue_to_string(base);
+                self.lvalue_to_string(base)
             }
             LValue::Concat(parts) => {
                 // For concat, create a synthetic name
                 if let Some(first) = parts.first() {
-                    return format!("concat_{}", self.lvalue_to_string(first));
+                    format!("concat_{}", self.lvalue_to_string(first))
                 } else {
-                    return "concat".to_string();
+                    "concat".to_string()
                 }
             }
-        };
-
-        // Translate the MIR name to internal name
-        self.translate_to_internal_name(&mir_name)
+        }
     }
 
     /// Extract bit width from a Type (BUG #76 FIX - full Option A)
