@@ -4041,9 +4041,18 @@ impl<'hir> HirToMir<'hir> {
                         };
 
                         // Convert connections from the struct literal fields
+                        // BUG #225 FIX: Expand struct-typed input port connections
                         let mut connections = IndexMap::new();
                         for field_init in &struct_lit.fields {
-                            if let Some(expr) = self.convert_expression(&field_init.value, 0) {
+                            // First try to expand the connection (for struct-typed input ports)
+                            if let Some(expanded_conns) = self.expand_instance_connection(&field_init.name, &field_init.value) {
+                                // BUG #225: Insert all expanded connections for struct input
+                                eprintln!("📍 BUG#225: Expanded input connection '{}' to {} fields", field_init.name, expanded_conns.len());
+                                for (port_field_name, rhs_expr) in expanded_conns {
+                                    connections.insert(port_field_name, rhs_expr);
+                                }
+                            } else if let Some(expr) = self.convert_expression(&field_init.value, 0) {
+                                // Fallback: direct conversion
                                 connections.insert(field_init.name.clone(), expr);
                             }
                         }
@@ -4798,12 +4807,33 @@ impl<'hir> HirToMir<'hir> {
         base_port_name: &str,
         rhs_expr: &hir::HirExpression,
     ) -> Option<Vec<(String, Expression)>> {
-        // Get the base signal/port from RHS
-        let (base_hir_id, is_signal) = match rhs_expr {
-            hir::HirExpression::Signal(id) => (id.0, true),
-            hir::HirExpression::Port(id) => (id.0, false),
+        // BUG #225 FIX: Handle FieldAccess expressions like config.protection
+        // Extract the base signal/port and any field path prefix
+        let (base_hir_id, is_signal, field_prefix) = match rhs_expr {
+            hir::HirExpression::Signal(id) => (id.0, true, Vec::new()),
+            hir::HirExpression::Port(id) => (id.0, false, Vec::new()),
+            hir::HirExpression::FieldAccess { base, field } => {
+                // Walk up the FieldAccess chain to find the root signal/port
+                let mut field_path = vec![field.clone()];
+                let mut current = base.as_ref();
+                loop {
+                    match current {
+                        hir::HirExpression::FieldAccess { base: inner_base, field: inner_field } => {
+                            field_path.insert(0, inner_field.clone());
+                            current = inner_base.as_ref();
+                        }
+                        hir::HirExpression::Signal(id) => {
+                            break (id.0, true, field_path);
+                        }
+                        hir::HirExpression::Port(id) => {
+                            break (id.0, false, field_path);
+                        }
+                        _ => return None, // Can't handle other expressions
+                    }
+                }
+            }
             _ => {
-                return None; // Complex expression (like FieldAccess), can't expand
+                return None; // Complex expression, can't expand
             }
         };
 
@@ -4815,14 +4845,31 @@ impl<'hir> HirToMir<'hir> {
         };
 
         // Create connections for each flattened field
+        // If we have a field prefix (from FieldAccess), only include fields that match the prefix
         let mut connections = Vec::new();
         for rhs_field in &rhs_fields {
-            // Build port name: base_port_name + field_path
-            // For example: rd_data + ["x"] = rd_data__x
-            let port_field_name = if rhs_field.field_path.is_empty() {
+            // Check if this field matches the prefix (for FieldAccess)
+            if !field_prefix.is_empty() {
+                // Field path must start with the prefix
+                if rhs_field.field_path.len() < field_prefix.len() {
+                    continue; // This field's path is shorter than the prefix, skip
+                }
+                if rhs_field.field_path[..field_prefix.len()] != field_prefix[..] {
+                    continue; // Field path doesn't match prefix, skip
+                }
+            }
+
+            // Build port name: base_port_name + remaining field path (after prefix)
+            let remaining_path = if field_prefix.is_empty() {
+                rhs_field.field_path.clone()
+            } else {
+                rhs_field.field_path[field_prefix.len()..].to_vec()
+            };
+
+            let port_field_name = if remaining_path.is_empty() {
                 base_port_name.to_string()
             } else {
-                format!("{}{}{}", base_port_name, FIELD_SEPARATOR, rhs_field.field_path.join(FIELD_SEPARATOR))
+                format!("{}{}{}", base_port_name, FIELD_SEPARATOR, remaining_path.join(FIELD_SEPARATOR))
             };
 
             // Create expression referencing the flattened RHS field
@@ -4839,7 +4886,11 @@ impl<'hir> HirToMir<'hir> {
             connections.push((port_field_name, rhs_field_expr));
         }
 
-        Some(connections)
+        if connections.is_empty() {
+            None
+        } else {
+            Some(connections)
+        }
     }
 
     /// Convert HIR if statement to MIR

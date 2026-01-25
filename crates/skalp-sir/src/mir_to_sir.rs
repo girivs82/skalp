@@ -6249,6 +6249,7 @@ impl<'a> MirToSirConverter<'a> {
                     let parent_flattened_expr = if let ExpressionKind::Ref(lval) = &parent_expr.kind
                     {
                         println!("         Parent is ExpressionKind::Ref, lval={:?}", std::mem::discriminant(lval));
+                        println!("         LValue details: {:?}", lval);
                         if let LValue::Signal(parent_sig_id) = lval {
                             println!("         Parent is LValue::Signal({:?}), mir has {} signals", parent_sig_id, self.mir.signals.len());
                             // Find parent signal in MIR module
@@ -6326,6 +6327,7 @@ impl<'a> MirToSirConverter<'a> {
 
                             if let Some(orig_port) = orig_port_opt {
                                 // Same fix as for signals - check if already flattened
+                                // BUG #225 FIX: Use double underscores for struct field flattening (consistent with signals)
                                 let parent_flattened_name =
                                     if let Some((base, idx, current_field)) =
                                         self.parse_flattened_name(&orig_port.name)
@@ -6333,22 +6335,38 @@ impl<'a> MirToSirConverter<'a> {
                                         if !current_field.is_empty() {
                                             // Port is already flattened - replace the field
                                             if idx.is_empty() {
-                                                format!("{}_{}", base, suffix)
+                                                format!("{}__{}", base, suffix)
                                             } else {
-                                                format!("{}_{}_{}", base, idx, suffix)
+                                                format!("{}__{}_{}", base, idx, suffix)
                                             }
                                         } else {
-                                            format!("{}_{}", orig_port.name, suffix)
+                                            format!("{}__{}", orig_port.name, suffix)
                                         }
                                     } else {
-                                        format!("{}_{}", orig_port.name, suffix)
+                                        format!("{}__{}", orig_port.name, suffix)
                                     };
 
+                                println!(
+                                    "         Looking for flattened PORT: '{}' in {} MIR ports",
+                                    parent_flattened_name, self.mir.ports.len()
+                                );
+                                // BUG #225 DEBUG: List all ports that start with the base name
+                                if parent_flattened_name.contains("config") || parent_flattened_name.contains("protection") {
+                                    let matching: Vec<_> = self.mir.ports.iter()
+                                        .filter(|p| p.name.contains("protection") || p.name.contains("thresholds"))
+                                        .map(|p| (&p.id, &p.name))
+                                        .collect();
+                                    println!("         MIR ports containing 'protection' or 'thresholds': {:?}", matching);
+                                }
                                 let parent_flattened_port_opt = self
                                     .mir
                                     .ports
                                     .iter()
                                     .find(|p| p.name == parent_flattened_name);
+                                println!(
+                                    "         Found flattened PORT: {:?}",
+                                    parent_flattened_port_opt.map(|p| (&p.id, &p.name))
+                                );
 
                                 parent_flattened_port_opt.map(|p| {
                                     Expression::with_unknown_type(ExpressionKind::Ref(
@@ -6358,7 +6376,101 @@ impl<'a> MirToSirConverter<'a> {
                             } else {
                                 None
                             }
+                        } else if let LValue::RangeSelect { base: base_lval, high: _, low: _ } = lval {
+                            // BUG #225 FIX: Handle RangeSelect (struct field passed to submodule)
+                            // MIR represents config.protection as RangeSelect(config, [512:257])
+                            // We need to find the flattened parent port that matches the child field
+                            println!("         Parent is LValue::RangeSelect, base={:?}", base_lval);
+
+                            // Get the base port name
+                            let base_port_name = if let LValue::Port(port_id) = base_lval.as_ref() {
+                                self.mir.ports.iter().find(|p| p.id == *port_id).map(|p| p.name.clone())
+                            } else {
+                                None
+                            };
+
+                            if let Some(base_name) = base_port_name {
+                                // The suffix is the child field name (e.g., "v_ov_soft" from "thresholds__v_ov_soft")
+                                // We need to find a parent port that ends with this suffix
+                                // Pattern: {base}__{something}__{suffix}
+                                let suffix_with_double = format!("__{}", suffix.trim_start_matches('_'));
+                                println!("         Looking for parent port matching '{}__*{}' pattern", base_name, suffix_with_double);
+
+                                // Search for a matching flattened port
+                                let parent_flattened_port_opt = self.mir.ports.iter()
+                                    .find(|p| p.name.starts_with(&format!("{}", base_name)) && p.name.ends_with(&suffix_with_double));
+
+                                if let Some(p) = parent_flattened_port_opt {
+                                    println!("         Found matching PORT: {:?}", (&p.id, &p.name));
+                                    Some(Expression::with_unknown_type(ExpressionKind::Ref(LValue::Port(p.id))))
+                                } else {
+                                    // Try signals too
+                                    let parent_flattened_sig_opt = self.mir.signals.iter()
+                                        .find(|s| s.name.starts_with(&base_name) && s.name.ends_with(&suffix_with_double));
+
+                                    if let Some(s) = parent_flattened_sig_opt {
+                                        println!("         Found matching SIGNAL: {:?}", (&s.id, &s.name));
+                                        Some(Expression::with_unknown_type(ExpressionKind::Ref(LValue::Signal(s.id))))
+                                    } else {
+                                        println!("         NOT FOUND matching pattern in MIR ports or signals");
+                                        None
+                                    }
+                                }
+                            } else {
+                                println!("         Could not get base port name from RangeSelect");
+                                None
+                            }
                         } else {
+                            None
+                        }
+                    } else if let ExpressionKind::FieldAccess { base, field: field_name } = &parent_expr.kind {
+                        // BUG #225 FIX: Handle field accesses like config.protection
+                        // Recursively resolve the base expression to get the base port/signal name
+                        println!("         Parent is ExpressionKind::FieldAccess with field '{}'", field_name);
+
+                        fn resolve_expr_to_base_name(expr: &Expression, mir: &skalp_mir::Module) -> Option<String> {
+                            match &expr.kind {
+                                ExpressionKind::Ref(LValue::Port(port_id)) => {
+                                    mir.ports.iter().find(|p| p.id == *port_id).map(|p| p.name.clone())
+                                }
+                                ExpressionKind::Ref(LValue::Signal(sig_id)) => {
+                                    mir.signals.iter().find(|s| s.id == *sig_id).map(|s| s.name.clone())
+                                }
+                                ExpressionKind::FieldAccess { base: inner_base, field: fname } => {
+                                    resolve_expr_to_base_name(inner_base, mir).map(|base| format!("{}__{}", base, fname))
+                                }
+                                _ => None,
+                            }
+                        }
+
+                        if let Some(base_name) = resolve_expr_to_base_name(base, self.mir) {
+                            // Construct the full flattened name: base__field__suffix
+                            // The suffix already has the leading underscore stripped, so we need field + suffix
+                            let parent_flattened_name = format!("{}__{}__{}", base_name, field_name, suffix);
+                            println!("         Looking for flattened field access: '{}' in {} MIR ports", parent_flattened_name, self.mir.ports.len());
+
+                            // First try to find it as a port
+                            let parent_flattened_port_opt = self.mir.ports.iter()
+                                .find(|p| p.name == parent_flattened_name);
+
+                            if let Some(p) = parent_flattened_port_opt {
+                                println!("         Found as PORT: {:?}", (&p.id, &p.name));
+                                Some(Expression::with_unknown_type(ExpressionKind::Ref(LValue::Port(p.id))))
+                            } else {
+                                // Try as a signal
+                                let parent_flattened_sig_opt = self.mir.signals.iter()
+                                    .find(|s| s.name == parent_flattened_name);
+
+                                if let Some(s) = parent_flattened_sig_opt {
+                                    println!("         Found as SIGNAL: {:?}", (&s.id, &s.name));
+                                    Some(Expression::with_unknown_type(ExpressionKind::Ref(LValue::Signal(s.id))))
+                                } else {
+                                    println!("         NOT FOUND in MIR ports or signals");
+                                    None
+                                }
+                            }
+                        } else {
+                            println!("         Could not resolve base expression");
                             None
                         }
                     } else {
