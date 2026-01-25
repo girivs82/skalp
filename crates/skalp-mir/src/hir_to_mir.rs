@@ -721,6 +721,33 @@ impl<'hir> HirToMir<'hir> {
 
                 // Skip implementations for entities that are not used (0 instances) and are not the first entity
                 if let Some(entity) = hir.entities.iter().find(|e| e.id == impl_block.entity) {
+                    // Check if this is a generic entity (has generics, including those with defaults)
+                    let has_generics = !entity.generics.is_empty()
+                        && entity
+                            .generics
+                            .iter()
+                            .any(|g| !matches!(g.param_type, hir::HirGenericType::ClockDomain));
+
+                    // BUG #231 FIX: If this entity has generics, check if a monomorphized version exists.
+                    // A monomorphized version is another entity with:
+                    //   1. Same or similar name (starts with base name, possibly with suffix like "_10")
+                    //   2. Different EntityId
+                    //   3. Empty generics (fully specialized)
+                    // If a monomorphized version exists, skip the generic entity's impl to avoid
+                    // port ID mismatches (generic uses PortId(6), monomorphized uses PortId(49)).
+                    if has_generics {
+                        let base_name = &entity.name;
+                        let has_monomorphized_version = hir.entities.iter().any(|e| {
+                            e.id != entity.id
+                                && (e.name == *base_name || e.name.starts_with(&format!("{}_", base_name)))
+                                && e.generics.is_empty() // Monomorphized entities have no generics
+                        });
+
+                        if has_monomorphized_version {
+                            continue;
+                        }
+                    }
+
                     // Check if this is a generic entity (has unresolved generics)
                     let has_unresolved_generics = entity.generics.iter().any(|g| {
                         g.default_value.is_none()

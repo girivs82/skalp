@@ -266,6 +266,22 @@ impl<'hir> MonomorphizationEngine<'hir> {
                                 Self::collect_port_ids_from_expr(arg, &mut impl_port_ids_used);
                             }
                         }
+                        // BUG #231 FIX: Also collect port IDs from event_block triggers
+                        // Event blocks like `on(clk.rise)` reference port IDs that need remapping
+                        for event_block in &impl_block.event_blocks {
+                            for trigger in &event_block.triggers {
+                                if let crate::hir::HirEventSignal::Port(port_id) = &trigger.signal {
+                                    impl_port_ids_used.push(*port_id);
+                                }
+                            }
+                            // Also collect from statements within the event block
+                            for stmt in &event_block.statements {
+                                Self::collect_port_ids_from_statement(
+                                    stmt,
+                                    &mut impl_port_ids_used,
+                                );
+                            }
+                        }
                         impl_port_ids_used.sort_by_key(|id| id.0);
                         impl_port_ids_used.dedup();
 
@@ -1996,6 +2012,43 @@ impl<'hir> MonomorphizationEngine<'hir> {
             HirExpression::ArrayRepeat { count, value } => {
                 Self::collect_port_ids_from_expr(count, port_ids);
                 Self::collect_port_ids_from_expr(value, port_ids);
+            }
+            _ => {}
+        }
+    }
+
+    /// BUG #231 FIX: Collect port IDs referenced in a statement
+    fn collect_port_ids_from_statement(
+        stmt: &crate::hir::HirStatement,
+        port_ids: &mut Vec<crate::hir::PortId>,
+    ) {
+        use crate::hir::HirStatement;
+        match stmt {
+            HirStatement::Assignment(assign) => {
+                Self::collect_port_ids_from_lvalue(&assign.lhs, port_ids);
+                Self::collect_port_ids_from_expr(&assign.rhs, port_ids);
+            }
+            HirStatement::If(if_stmt) => {
+                Self::collect_port_ids_from_expr(&if_stmt.condition, port_ids);
+                for s in &if_stmt.then_statements {
+                    Self::collect_port_ids_from_statement(s, port_ids);
+                }
+                if let Some(else_stmts) = &if_stmt.else_statements {
+                    for s in else_stmts {
+                        Self::collect_port_ids_from_statement(s, port_ids);
+                    }
+                }
+            }
+            HirStatement::Match(match_stmt) => {
+                Self::collect_port_ids_from_expr(&match_stmt.expr, port_ids);
+                for arm in &match_stmt.arms {
+                    for s in &arm.statements {
+                        Self::collect_port_ids_from_statement(s, port_ids);
+                    }
+                }
+            }
+            HirStatement::Let(let_stmt) => {
+                Self::collect_port_ids_from_expr(&let_stmt.value, port_ids);
             }
             _ => {}
         }

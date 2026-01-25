@@ -3279,13 +3279,11 @@ impl<'a> MirToSirConverter<'a> {
 
     fn lvalue_to_string(&self, lvalue: &LValue) -> String {
         let mir_name = match lvalue {
-            LValue::Port(port_id) => self
-                .mir
-                .ports
-                .iter()
-                .find(|p| p.id == *port_id)
-                .map(|p| p.name.clone())
-                .unwrap_or_else(|| format!("port_{}", port_id.0)),
+            LValue::Port(port_id) => {
+                self.mir.ports.iter().find(|p| p.id == *port_id)
+                    .map(|p| p.name.clone())
+                    .unwrap_or_else(|| format!("port_{}", port_id.0))
+            }
             LValue::Signal(sig_id) => {
                 // First try current module
                 if let Some(signal) = self.mir.signals.iter().find(|s| s.id == *sig_id) {
