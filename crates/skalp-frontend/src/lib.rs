@@ -1332,23 +1332,14 @@ fn merge_symbol(target: &mut Hir, source: &Hir, symbol_name: &str) -> Result<()>
                 });
             }
             // Add constant to the first implementation (global scope)
-            // BUG #179 FIX: Remap constant ID to avoid collisions with existing constants
-            // When modules are merged, constants from different modules may have the same IDs.
-            // We need to assign new unique IDs to avoid collisions.
-            let next_const_id = target
-                .implementations
-                .iter()
-                .flat_map(|i| i.constants.iter())
-                .map(|c| c.id.0)
-                .max()
-                .unwrap_or(0)
-                + 1;
-
-            let mut remapped_constant = constant.clone();
-            remapped_constant.id = hir::ConstantId(next_const_id);
-
+            // BUG #234 FIX: Preserve original constant ID instead of remapping.
+            // The hash-based ID generation (using qualified names like "global::CONST_NAME")
+            // already ensures uniqueness. Remapping IDs breaks expression references
+            // because HirExpression::Constant(id) still has the original ID.
+            // The previous BUG #179 FIX that remapped IDs was incomplete - it didn't
+            // update expression references, causing "constant not found" errors.
             if let Some(impl_block) = target.implementations.first_mut() {
-                impl_block.constants.push(remapped_constant);
+                impl_block.constants.push(constant.clone());
             }
             return Ok(());
         }
@@ -1878,21 +1869,10 @@ fn merge_all_symbols(target: &mut Hir, source: &Hir) -> Result<()> {
                     });
                 }
                 // Add constant to the first implementation (global scope)
-                // BUG #179 FIX: Remap constant ID to avoid collisions during glob import
-                let next_const_id = target
-                    .implementations
-                    .iter()
-                    .flat_map(|i| i.constants.iter())
-                    .map(|c| c.id.0)
-                    .max()
-                    .unwrap_or(0)
-                    + 1;
-
-                let mut remapped_constant = constant.clone();
-                remapped_constant.id = hir::ConstantId(next_const_id);
-
+                // BUG #234 FIX: Preserve original constant ID instead of remapping.
+                // See comment in merge_symbol() for full explanation.
                 if let Some(impl_block) = target.implementations.first_mut() {
-                    impl_block.constants.push(remapped_constant);
+                    impl_block.constants.push(constant.clone());
                 }
             }
         }

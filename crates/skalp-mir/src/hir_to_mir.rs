@@ -4293,6 +4293,19 @@ impl<'hir> HirToMir<'hir> {
                         cast.target_type
                     )
                 }
+                hir::HirExpression::Match(match_expr) => {
+                    // BUG #234 DEBUG: Show match expression details
+                    let arm_descs: Vec<String> = match_expr.arms.iter().enumerate().map(|(i, arm)| {
+                        format!("  arm[{}]: pattern={:?}, expr_type={:?}",
+                            i, arm.pattern, std::mem::discriminant(&arm.expr))
+                    }).collect();
+                    format!(
+                        "Match expression with {} arms, scrutinee={:?}:\n{}",
+                        match_expr.arms.len(),
+                        std::mem::discriminant(&*match_expr.expr),
+                        arm_descs.join("\n")
+                    )
+                }
                 _ => format!(
                     "expression of type {:?}",
                     std::mem::discriminant(&assign.rhs)
@@ -8302,11 +8315,6 @@ impl<'hir> HirToMir<'hir> {
                         }
                     } else {
                         // Regular enum pattern - resolve to the enum variant value
-                        trace!(
-                            "[DEBUG] Calling resolve_enum_variant_value for {}::{}",
-                            enum_name,
-                            variant
-                        );
                         if let Some(variant_value) =
                             self.resolve_enum_variant_value(enum_name, variant)
                         {
@@ -8318,11 +8326,6 @@ impl<'hir> HirToMir<'hir> {
                                 right,
                             }))
                         } else {
-                            trace!(
-                                "[DEBUG] Match: failed to resolve enum variant {}::{}",
-                                enum_name,
-                                variant
-                            );
                             None
                         }
                     }
