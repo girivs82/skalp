@@ -25,7 +25,7 @@
 use crate::{Counterexample, FormalError, FormalResult, TraceStep};
 use rayon::prelude::*;
 use rand::Rng;
-use skalp_lir::{GateNetlist, Lir, LirNode, LirOp, LirSignalId};
+use skalp_lir::{CellFunction, GateNetlist, Lir, LirNode, LirOp, LirSignalId};
 use skalp_mir::Type;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -288,6 +288,224 @@ impl LirToAig {
         }
 
         self.aig
+    }
+
+    /// Convert LIR to sequential AIG with Latch nodes for BMC
+    ///
+    /// This creates an AIG where registers become Latch nodes with:
+    /// - Current state from latch outputs
+    /// - Next state from the D input logic
+    /// - Reset value as init
+    pub fn convert_sequential(mut self, lir: &Lir) -> Aig {
+        // First pass: find all registers (sequential nodes)
+        let mut register_nodes: Vec<(usize, &LirNode)> = Vec::new();
+        for (idx, node) in lir.nodes.iter().enumerate() {
+            if matches!(node.op, LirOp::Reg { .. }) {
+                register_nodes.push((idx, node));
+            }
+        }
+
+        // Add primary inputs (excluding clock)
+        for &input_id in &lir.inputs {
+            let signal = &lir.signals[input_id.0 as usize];
+            if signal.name.contains("clk") || signal.name.contains("clock") {
+                continue; // Skip clocks in sequential AIG
+            }
+            for bit in 0..signal.width {
+                let name = if signal.width == 1 {
+                    signal.name.clone()
+                } else {
+                    format!("{}[{}]", signal.name, bit)
+                };
+                let lit = self.aig.add_input(name);
+                self.signal_map.insert((input_id.0, bit), lit);
+            }
+        }
+
+        // Create placeholder inputs for register current values
+        let mut reg_current_map: HashMap<(u32, u32), AigLit> = HashMap::new();
+        for (_, node) in &register_nodes {
+            if let LirOp::Reg { width, .. } = &node.op {
+                let output_signal = &lir.signals[node.output.0 as usize];
+                for bit in 0..*width {
+                    let name = if *width == 1 {
+                        format!("__reg_cur_{}", output_signal.name)
+                    } else {
+                        format!("__reg_cur_{}[{}]", output_signal.name, bit)
+                    };
+                    let lit = self.aig.add_input(name);
+                    reg_current_map.insert((node.output.0, bit), lit);
+                    // Also add to signal_map so register reads use current value
+                    self.signal_map.insert((node.output.0, bit), lit);
+                }
+            }
+        }
+
+        // Process all combinational nodes in topological order
+        // (nodes that produce signals must be processed before nodes that consume them)
+        let sorted_indices = self.topological_sort_lir_nodes(lir);
+
+        for idx in sorted_indices {
+            let node = &lir.nodes[idx];
+            if !matches!(node.op, LirOp::Reg { .. }) {
+                self.convert_node(node, lir);
+            }
+        }
+
+        // Now create Latch nodes for registers
+        for (_, node) in &register_nodes {
+            if let LirOp::Reg { width, reset_value, has_reset, .. } = &node.op {
+                let output_signal = &lir.signals[node.output.0 as usize];
+                let d_input = node.inputs.get(0).copied().unwrap_or(LirSignalId(0));
+                let reset_val = reset_value.unwrap_or(0);
+
+                for bit in 0..*width {
+                    let latch_name = if *width == 1 {
+                        output_signal.name.clone()
+                    } else {
+                        format!("{}[{}]", output_signal.name, bit)
+                    };
+
+                    // Get D input (next state)
+                    let d_lit = self.get_input_bit(d_input, bit);
+
+                    // Handle reset: if has_reset, apply rst ? reset_val : d
+                    let next_lit = if *has_reset {
+                        if let Some(rst_id) = node.reset {
+                            let rst_lit = self.get_input_bit(rst_id, 0);
+                            let reset_bit = (reset_val >> bit) & 1 != 0;
+                            // MUX: rst ? reset_bit : d
+                            if reset_bit {
+                                // rst | (!rst & d) = rst | d
+                                self.aig.add_or(rst_lit, d_lit)
+                            } else {
+                                // !rst & d
+                                self.aig.add_and(rst_lit.invert(), d_lit)
+                            }
+                        } else {
+                            d_lit
+                        }
+                    } else {
+                        d_lit
+                    };
+
+                    // Init value from reset_value
+                    let init_value = (reset_val >> bit) & 1 != 0;
+
+                    // Create latch
+                    let latch_lit = self.aig.add_latch(latch_name, next_lit, init_value);
+
+                    // Update signal_map to use latch output
+                    self.signal_map.insert((node.output.0, bit), latch_lit);
+                }
+            }
+        }
+
+        // Add primary outputs
+        for &output_id in &lir.outputs {
+            let signal = &lir.signals[output_id.0 as usize];
+            for bit in 0..signal.width {
+                let name = if signal.width == 1 {
+                    signal.name.clone()
+                } else {
+                    format!("{}[{}]", signal.name, bit)
+                };
+                let lit = self
+                    .signal_map
+                    .get(&(output_id.0, bit))
+                    .copied()
+                    .unwrap_or_else(|| self.aig.false_lit());
+                self.aig.add_output(name, lit);
+            }
+        }
+
+        self.aig
+    }
+
+    /// Topologically sort LIR nodes so producers come before consumers
+    fn topological_sort_lir_nodes(&self, lir: &Lir) -> Vec<usize> {
+        use std::collections::HashSet;
+
+        // Build a map from signal ID to the node that produces it
+        // IMPORTANT: Skip register nodes - their outputs are already in signal_map
+        // from the register_current_map initialization, so combinational nodes
+        // should not depend on register nodes
+        let mut signal_producer: HashMap<u32, usize> = HashMap::new();
+        for (idx, node) in lir.nodes.iter().enumerate() {
+            // Skip registers - their outputs don't create dependencies
+            if matches!(node.op, LirOp::Reg { .. }) {
+                continue;
+            }
+            signal_producer.insert(node.output.0, idx);
+        }
+
+        // Build adjacency list: node -> nodes it depends on
+        let mut dependencies: Vec<HashSet<usize>> = vec![HashSet::new(); lir.nodes.len()];
+        for (idx, node) in lir.nodes.iter().enumerate() {
+            for &input_id in &node.inputs {
+                if let Some(&producer_idx) = signal_producer.get(&input_id.0) {
+                    if producer_idx != idx {
+                        dependencies[idx].insert(producer_idx);
+                    }
+                }
+            }
+            // Also add clock/reset dependencies
+            if let Some(clk) = node.clock {
+                if let Some(&producer_idx) = signal_producer.get(&clk.0) {
+                    if producer_idx != idx {
+                        dependencies[idx].insert(producer_idx);
+                    }
+                }
+            }
+            if let Some(rst) = node.reset {
+                if let Some(&producer_idx) = signal_producer.get(&rst.0) {
+                    if producer_idx != idx {
+                        dependencies[idx].insert(producer_idx);
+                    }
+                }
+            }
+        }
+
+        // Kahn's algorithm for topological sort
+        let mut in_degree: Vec<usize> = dependencies.iter()
+            .map(|deps| deps.len())
+            .collect();
+
+        // Build reverse adjacency: node -> nodes that depend on it
+        let mut dependents: Vec<Vec<usize>> = vec![Vec::new(); lir.nodes.len()];
+        for (idx, deps) in dependencies.iter().enumerate() {
+            for &dep in deps {
+                dependents[dep].push(idx);
+            }
+        }
+
+        // Start with nodes that have no dependencies
+        let mut queue: std::collections::VecDeque<usize> = in_degree.iter()
+            .enumerate()
+            .filter(|(_, &d)| d == 0)
+            .map(|(i, _)| i)
+            .collect();
+
+        let mut sorted = Vec::with_capacity(lir.nodes.len());
+
+        while let Some(node_idx) = queue.pop_front() {
+            sorted.push(node_idx);
+            for &dependent in &dependents[node_idx] {
+                in_degree[dependent] -= 1;
+                if in_degree[dependent] == 0 {
+                    queue.push_back(dependent);
+                }
+            }
+        }
+
+        // If not all nodes were sorted, there's a cycle - just return original order
+        if sorted.len() != lir.nodes.len() {
+            log::warn!("[LIR_TOPO_SORT] Cycle detected (sorted {} of {}), using original order",
+                      sorted.len(), lir.nodes.len());
+            (0..lir.nodes.len()).collect()
+        } else {
+            sorted
+        }
     }
 
     fn get_input_bit(&self, signal_id: LirSignalId, bit: u32) -> AigLit {
@@ -1224,25 +1442,88 @@ impl GateNetlistToAig {
             };
 
             // Handle reset: if cell has reset input, next_state = rst ? 0 : D
+            // But SKIP this if the D input is already driven by a MUX with rst as selector,
+            // because that means sync reset is handled by the MUX
+            let mut reset_value_from_mux: Option<bool> = None;
+
+            // First, check if D is driven by a MUX with rst as selector (even without cell.reset)
+            // This handles the case where MUX-based reset is used instead of DFFR
+            if let Some(&d_net) = d_input {
+                // Find if D is driven by a MUX where selector contains "rst"
+                if let Some(mux_cell) = netlist.cells.iter().find(|driver| {
+                    let outputs_match = driver.outputs.iter().any(|o| o.0 == d_net.0);
+                    let is_mux = matches!(driver.function, Some(CellFunction::Mux2));
+                    let sel_is_rst = if let Some(&sel_net) = driver.inputs.first() {
+                        let sel_net_name = &netlist.nets[sel_net.0 as usize].name;
+                        sel_net_name.contains("rst")
+                    } else {
+                        false
+                    };
+                    outputs_match && is_mux && sel_is_rst
+                }) {
+                    // MUX inputs: [sel, d0 (when sel=0), d1 (when sel=1)]
+                    // When rst=1 (sel=1), we use d1 - that's the reset value
+                    // d1 is inputs[2] in MUX2
+                    if let Some(&reset_net) = mux_cell.inputs.get(2) {
+                        // Check if reset_net is driven by TIE cell
+                        let reset_val = netlist.cells.iter().find(|c| {
+                            c.outputs.iter().any(|o| o.0 == reset_net.0)
+                        }).and_then(|driver| {
+                            if driver.cell_type.contains("TIE_HIGH") || driver.cell_type.contains("TIEHI") {
+                                Some(true)
+                            } else if driver.cell_type.contains("TIE_LOW") || driver.cell_type.contains("TIELO") {
+                                Some(false)
+                            } else {
+                                None
+                            }
+                        });
+                        reset_value_from_mux = reset_val;
+                    }
+                }
+            }
+
             let next_lit = if let Some(rst_net) = cell.reset {
-                // Get the reset signal - convert to AIG input if not already in net_map
-                let rst_lit = self.net_map.get(&rst_net.0).copied().unwrap_or_else(|| {
-                    let rst_net_obj = &netlist.nets[rst_net.0 as usize];
-                    // Create input for reset signal
-                    let lit = self.aig.add_input(rst_net_obj.name.clone());
-                    self.net_map.insert(rst_net.0, lit);
-                    lit
-                });
-                // DFFR: when reset is active, output is 0
-                // next = rst ? 0 : D = !rst AND D
-                self.aig.add_and(rst_lit.invert(), d_lit)
+                // Check if D input is driven by a MUX with rst as selector
+                let d_has_reset_mux = if let Some(&d_net) = d_input {
+                    // Find the cell driving the D input
+                    netlist.cells.iter().any(|driver| {
+                        let outputs_match = driver.outputs.iter().any(|o| o.0 == d_net.0);
+                        let is_mux = matches!(driver.function, Some(CellFunction::Mux2));
+                        let sel_is_rst = driver.inputs.first().map(|s| s.0) == Some(rst_net.0);
+                        outputs_match && is_mux && sel_is_rst
+                    })
+                } else {
+                    false
+                };
+
+                if d_has_reset_mux {
+                    // MUX on D already handles reset - don't apply !rst AND D
+                    d_lit
+                } else {
+                    // Get the reset signal - convert to AIG input if not already in net_map
+                    let rst_lit = self.net_map.get(&rst_net.0).copied().unwrap_or_else(|| {
+                        let rst_net_obj = &netlist.nets[rst_net.0 as usize];
+                        // Create input for reset signal
+                        let lit = self.aig.add_input(rst_net_obj.name.clone());
+                        self.net_map.insert(rst_net.0, lit);
+                        lit
+                    });
+                    // DFFR: when reset is active, output is 0
+                    // next = rst ? 0 : D = !rst AND D
+                    self.aig.add_and(rst_lit.invert(), d_lit)
+                }
             } else {
                 // No reset - just use D input
                 d_lit
             };
 
-            // Create latch (init to false)
-            let latch_lit = self.aig.add_latch(latch_name.clone(), next_lit, false);
+            // Determine init value:
+            // - If we found a MUX with a reset value, use that
+            // - Otherwise, default to false
+            let init_value = reset_value_from_mux.unwrap_or(false);
+
+            // Create latch with proper init value
+            let latch_lit = self.aig.add_latch(latch_name.clone(), next_lit, init_value);
 
             // Update net_map to use latch output
             self.net_map.insert(out_net.0, latch_lit);
@@ -1508,6 +1789,12 @@ fn is_internal_signal(name: &str) -> bool {
     // DFF outputs should ALWAYS be kept for sequential equivalence checking
     if name.ends_with("_dff_out") {
         return false;
+    }
+
+    // Register/DFF current state pseudo-inputs are internal
+    // They represent latch state, not primary inputs
+    if name.starts_with("__reg_cur_") || name.starts_with("__dff_cur_") {
+        return true;
     }
 
     // Temporary signals generated by compiler (e.g., _t63, _t290[30])
@@ -2721,9 +3008,9 @@ impl Default for SequentialEquivalenceChecker {
 
 use skalp_mir::{
     Assignment, AssignmentKind, BinaryOp, Block, CaseStatement, ContinuousAssign,
-    DataType, Expression, ExpressionKind, IfStatement, LValue, Module, Port, PortDirection,
-    PortId, Process, ProcessKind, ReduceOp, Signal, SignalId, Statement, UnaryOp, Value,
-    VariableId,
+    DataType, Expression, ExpressionKind, IfStatement, LValue, Mir, Module, ModuleId,
+    ModuleInstance, Port, PortDirection, PortId, Process, ProcessKind, ReduceOp, Signal,
+    SignalId, Statement, UnaryOp, Value, VariableId,
 };
 
 /// Signal reference in MIR (either port or signal)
@@ -2741,6 +3028,8 @@ pub enum MirSignalRef {
 pub struct MirToAig<'a> {
     /// The module being converted
     module: &'a Module,
+    /// Full MIR design (for hierarchical flattening)
+    mir: Option<&'a Mir>,
     /// The AIG being built
     pub aig: Aig,
     /// Map from (MirSignalRef, bit_index) to current AigLit
@@ -2755,6 +3044,24 @@ impl<'a> MirToAig<'a> {
     pub fn new(module: &'a Module) -> Self {
         let mut converter = Self {
             module,
+            mir: None,
+            aig: Aig::new(),
+            signal_map: HashMap::new(),
+            name_to_ref: HashMap::new(),
+            register_outputs: Vec::new(),
+        };
+        converter.build_name_map();
+        converter
+    }
+
+    /// Create a new MIR-to-AIG converter with full hierarchy access
+    ///
+    /// When the full MIR is provided, `convert_sequential` will flatten child
+    /// entity instances, processing their registers as part of the top-level AIG.
+    pub fn new_with_mir(mir: &'a Mir, top_module: &'a Module) -> Self {
+        let mut converter = Self {
+            module: top_module,
+            mir: Some(mir),
             aig: Aig::new(),
             signal_map: HashMap::new(),
             name_to_ref: HashMap::new(),
@@ -2889,10 +3196,14 @@ impl<'a> MirToAig<'a> {
         // Store computed next-state values separately
         let mut next_state_map: HashMap<(MirSignalRef, u32), AigLit> = HashMap::new();
 
+        // Collect reset values from sequential processes
+        let mut reset_values: HashMap<(MirSignalRef, u32), u64> = HashMap::new();
         for process in &self.module.processes {
             if matches!(process.kind, ProcessKind::Sequential) {
                 // Convert sequential body - assignments go to next-state
                 self.convert_sequential_process_for_bmc(process, &mut next_state_map);
+                // Collect reset values
+                self.collect_reset_values(&process.body, &mut reset_values);
             }
         }
 
@@ -2920,8 +3231,14 @@ impl<'a> MirToAig<'a> {
                             .unwrap_or_else(|| self.aig.false_lit())
                     });
 
-                // Create latch (init to false)
-                let latch_lit = self.aig.add_latch(latch_name, next_lit, false);
+                // Get reset value (default to false if not specified)
+                let init_value = reset_values
+                    .get(&(*sig_ref, bit))
+                    .map(|&v| v != 0)
+                    .unwrap_or(false);
+
+                // Create latch with proper init value
+                let latch_lit = self.aig.add_latch(latch_name, next_lit, init_value);
 
                 // Update signal_map to point to latch output
                 self.signal_map.insert((*sig_ref, bit), latch_lit);
@@ -3434,6 +3751,121 @@ impl<'a> MirToAig<'a> {
                     self.collect_register_signals(inner_block, registers);
                 }
                 _ => {}
+            }
+        }
+    }
+
+    /// Extract reset values from sequential process bodies
+    /// Looks for pattern: if rst { signal = value }
+    fn collect_reset_values(
+        &self,
+        block: &Block,
+        reset_values: &mut HashMap<(MirSignalRef, u32), u64>,
+    ) {
+        for stmt in &block.statements {
+            if let Statement::If(if_stmt) = stmt {
+                // Check if condition is a reset signal (named "rst" or similar)
+                if self.is_reset_condition(&if_stmt.condition) {
+                    // Collect constant assignments from the then block
+                    self.collect_reset_assignments(&if_stmt.then_block, reset_values);
+                }
+                // Recurse into else block (might have nested if rst)
+                if let Some(else_block) = &if_stmt.else_block {
+                    self.collect_reset_values(else_block, reset_values);
+                }
+            }
+        }
+    }
+
+    /// Check if expression is a reset condition (references "rst" signal)
+    fn is_reset_condition(&self, expr: &Expression) -> bool {
+        match &expr.kind {
+            ExpressionKind::Ref(lvalue) => {
+                // Check if lvalue references a port/signal named "rst"
+                match lvalue {
+                    LValue::Port(id) => {
+                        self.find_port(*id).map(|p| p.name == "rst").unwrap_or(false)
+                    }
+                    LValue::Signal(id) => {
+                        self.find_signal(*id).map(|s| s.name == "rst").unwrap_or(false)
+                    }
+                    _ => false,
+                }
+            }
+            ExpressionKind::FieldAccess { base, field } => {
+                // Handle patterns like clk.rst or rst.field
+                field == "rst" || self.is_reset_condition(base)
+            }
+            _ => false,
+        }
+    }
+
+    /// Collect constant assignments from a reset block
+    fn collect_reset_assignments(
+        &self,
+        block: &Block,
+        reset_values: &mut HashMap<(MirSignalRef, u32), u64>,
+    ) {
+        for stmt in &block.statements {
+            match stmt {
+                Statement::Assignment(assign) => {
+                    if let Some(sig_ref) = self.lvalue_to_ref(&assign.lhs) {
+                        // Try to extract constant value from RHS
+                        if let Some(value) = self.try_extract_reset_constant(&assign.rhs) {
+                            let width = self.get_signal_ref_width(sig_ref);
+                            for bit in 0..width {
+                                let bit_val = (value >> bit) & 1;
+                                reset_values.insert((sig_ref, bit), bit_val);
+                            }
+                        }
+                    }
+                }
+                Statement::If(inner_if) => {
+                    // Recurse into nested ifs
+                    self.collect_reset_assignments(&inner_if.then_block, reset_values);
+                    if let Some(else_block) = &inner_if.else_block {
+                        self.collect_reset_assignments(else_block, reset_values);
+                    }
+                }
+                Statement::Block(inner_block) => {
+                    self.collect_reset_assignments(inner_block, reset_values);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Try to extract a constant integer value from an expression (for reset values)
+    fn try_extract_reset_constant(&self, expr: &Expression) -> Option<u64> {
+        match &expr.kind {
+            ExpressionKind::Literal(val) => {
+                match val {
+                    Value::Integer(n) => Some(*n as u64),
+                    Value::BitVector { value, .. } => Some(*value),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// Get the width of a signal reference
+    fn get_signal_ref_width(&self, sig_ref: MirSignalRef) -> u32 {
+        match sig_ref {
+            MirSignalRef::Port(id) => {
+                self.find_port(id)
+                    .map(|p| self.get_type_width(&p.port_type) as u32)
+                    .unwrap_or(1)
+            }
+            MirSignalRef::Signal(id) => {
+                self.find_signal(id)
+                    .map(|s| self.get_type_width(&s.signal_type) as u32)
+                    .unwrap_or(1)
+            }
+            MirSignalRef::Variable(id) => {
+                self.find_variable(id)
+                    .map(|v| self.get_type_width(&v.var_type) as u32)
+                    .unwrap_or(1)
             }
         }
     }
@@ -3968,7 +4400,9 @@ impl<'a> MirToAig<'a> {
             ExpressionKind::Binary { op, left, right } => {
                 let left_lits = self.convert_expression(left);
                 let right_lits = self.convert_expression(right);
-                self.convert_binary_op(*op, &left_lits, &right_lits)
+                // Determine signedness from operand types for comparison operations
+                let signed = self.is_signed_type(&left.ty) || self.is_signed_type(&right.ty);
+                self.convert_binary_op(*op, &left_lits, &right_lits, signed)
             }
 
             ExpressionKind::Unary { op, operand } => {
@@ -4261,11 +4695,28 @@ impl<'a> MirToAig<'a> {
         }
     }
 
+    /// Check if a frontend type is signed
+    fn is_signed_type(&self, ty: &Type) -> bool {
+        match ty {
+            Type::Bit(_) => false,   // bit[n] is unsigned
+            Type::Int(_) => true,    // int[n] is signed
+            Type::Nat(_) => false,   // nat[n] is unsigned
+            Type::Bool => false,     // bool is unsigned
+            Type::Logic(_) => false, // logic[n] is unsigned
+            Type::Fixed { .. } => true, // fixed-point is typically signed
+            // Array element signedness determines array signedness
+            Type::Array { element_type, .. } => self.is_signed_type(element_type),
+            // Struct, Tuple, Enum, etc. - default to unsigned for comparisons
+            _ => false,
+        }
+    }
+
     fn convert_binary_op(
         &mut self,
         op: BinaryOp,
         left: &[AigLit],
         right: &[AigLit],
+        signed: bool,
     ) -> Vec<AigLit> {
         let max_width = left.len().max(right.len());
 
@@ -4315,18 +4766,18 @@ impl<'a> MirToAig<'a> {
                 vec![self.build_equality(left, right).invert()]
             }
             BinaryOp::Less => {
-                vec![self.build_less_than(left, right, false)]
+                vec![self.build_less_than(left, right, signed)]
             }
             BinaryOp::LessEqual => {
-                let lt = self.build_less_than(left, right, false);
+                let lt = self.build_less_than(left, right, signed);
                 let eq = self.build_equality(left, right);
                 vec![self.aig.add_or(lt, eq)]
             }
             BinaryOp::Greater => {
-                vec![self.build_less_than(right, left, false)]
+                vec![self.build_less_than(right, left, signed)]
             }
             BinaryOp::GreaterEqual => {
-                let gt = self.build_less_than(right, left, false);
+                let gt = self.build_less_than(right, left, signed);
                 let eq = self.build_equality(left, right);
                 vec![self.aig.add_or(gt, eq)]
             }
@@ -4451,16 +4902,23 @@ impl<'a> MirToAig<'a> {
             return self.aig.false_lit();
         }
 
-        // a < b using subtraction: check if a - b has negative result (MSB = 1)
-        // For unsigned: check if borrow out is 1
-        // Simplified: bit-by-bit comparison from MSB
+        // For signed comparison, flip the MSBs (sign bits) to convert to unsigned comparison
+        // Signed: a < b iff (a ^ 0x80...) < (b ^ 0x80...) (unsigned)
+        // This works because flipping the sign bit maps signed range to unsigned range correctly
+        let msb_idx = width - 1;
 
         let mut less = self.aig.false_lit();
         let mut equal = self.aig.true_lit();
 
         for i in (0..width).rev() {
-            let a_bit = a.get(i).copied().unwrap_or_else(|| self.aig.false_lit());
-            let b_bit = b.get(i).copied().unwrap_or_else(|| self.aig.false_lit());
+            let mut a_bit = a.get(i).copied().unwrap_or_else(|| self.aig.false_lit());
+            let mut b_bit = b.get(i).copied().unwrap_or_else(|| self.aig.false_lit());
+
+            // For signed comparison, flip the MSB (sign bit)
+            if signed && i == msb_idx {
+                a_bit = a_bit.invert();
+                b_bit = b_bit.invert();
+            }
 
             // At this bit: a < b if (a=0 and b=1) OR (a==b so far and less from previous bits)
             let a_lt_b_here = self.aig.add_and(a_bit.invert(), b_bit);
@@ -4677,6 +5135,46 @@ impl BoundedModelChecker {
 
         // Run BMC
         let result = self.check_sequential_aig_equivalence(&mir_aig, &gate_aig, bound)?;
+
+        Ok(BmcEquivalenceResult {
+            time_ms: start.elapsed().as_millis() as u64,
+            ..result
+        })
+    }
+
+    /// Check bounded equivalence between LIR and GateNetlist
+    ///
+    /// Uses LIR (which is already hierarchically flattened) instead of MIR
+    /// for proper equivalence checking of designs with child entity instances.
+    pub fn check_lir_vs_gates_bmc(
+        &self,
+        lir: &Lir,
+        netlist: &GateNetlist,
+        bound: usize,
+    ) -> FormalResult<BmcEquivalenceResult> {
+        let start = std::time::Instant::now();
+
+        // Convert LIR to sequential AIG (with latches)
+        let lir_aig = LirToAig::new().convert_sequential(lir);
+
+        // Convert GateNetlist to sequential AIG (with latches)
+        let gate_aig = GateNetlistToAig::new().convert_sequential(netlist);
+
+        println!(
+            "BMC: LIR has {} inputs, {} outputs, {} latches",
+            lir_aig.inputs.len(),
+            lir_aig.outputs.len(),
+            lir_aig.latches.len()
+        );
+        println!(
+            "BMC: Gate has {} inputs, {} outputs, {} latches",
+            gate_aig.inputs.len(),
+            gate_aig.outputs.len(),
+            gate_aig.latches.len()
+        );
+
+        // Run BMC
+        let result = self.check_sequential_aig_equivalence(&lir_aig, &gate_aig, bound)?;
 
         Ok(BmcEquivalenceResult {
             time_ms: start.elapsed().as_millis() as u64,
@@ -4938,6 +5436,32 @@ impl BoundedModelChecker {
             values.insert(latch_id, val);
         }
 
+        // Build mapping from latch names to their __reg_cur_ / __dff_cur_ INPUT nodes
+        // This is needed because in sequential AIGs, the current state is read from
+        // INPUT nodes (e.g., __reg_cur_foo), not directly from LATCH outputs
+        let mut latch_name_to_cur_input: HashMap<String, u32> = HashMap::new();
+        for (idx, node) in aig.nodes.iter().enumerate() {
+            if let AigNode::Input { name } = node {
+                if let Some(latch_name) = name.strip_prefix("__reg_cur_") {
+                    latch_name_to_cur_input.insert(latch_name.to_string(), idx as u32);
+                } else if let Some(latch_name) = name.strip_prefix("__dff_cur_") {
+                    latch_name_to_cur_input.insert(latch_name.to_string(), idx as u32);
+                }
+            }
+        }
+
+        // Set __reg_cur_ / __dff_cur_ INPUT nodes with corresponding latch state values
+        for &latch_id in &aig.latches {
+            if let AigNode::Latch { name, .. } = &aig.nodes[latch_id.0 as usize] {
+                if let Some(latch_val) = latch_state.get(&latch_id.0) {
+                    // Find the corresponding current-state INPUT node
+                    if let Some(&input_id) = latch_name_to_cur_input.get(name) {
+                        values.insert(input_id, *latch_val);
+                    }
+                }
+            }
+        }
+
         // Evaluate all nodes in order
         for (idx, node) in aig.nodes.iter().enumerate() {
             let idx = idx as u32;
@@ -5031,7 +5555,8 @@ impl BoundedModelChecker {
         };
 
         // Miter output: any output differs at any cycle
-        let mut miter_clauses: Vec<Var> = Vec::new();
+        // Each entry is (diff_var, cycle, output_name)
+        let mut miter_clauses: Vec<(Var, usize, String)> = Vec::new();
 
         for cycle in 0..k {
             // Create shared input variables for this cycle
@@ -5062,7 +5587,7 @@ impl BoundedModelChecker {
             }
 
             // Create miter for outputs at this cycle
-            for (i1, i2, _name) in matched_outputs {
+            for (i1, i2, name) in matched_outputs {
                 let out1_lit = aig1.outputs[*i1];
                 let out2_lit = aig2.outputs[*i2];
 
@@ -5093,14 +5618,14 @@ impl BoundedModelChecker {
                 formula.add_clause(&[Lit::positive(diff_var), !lit1, lit2]);
                 formula.add_clause(&[Lit::positive(diff_var), lit1, !lit2]);
 
-                miter_clauses.push(diff_var);
+                miter_clauses.push((diff_var, cycle, name.clone()));
             }
         }
 
         // At least one output must differ (for SAT to find counterexample)
         if !miter_clauses.is_empty() {
             let clause: Vec<Lit> = miter_clauses.iter()
-                .map(|&v| Lit::positive(v))
+                .map(|(v, _, _)| Lit::positive(*v))
                 .collect();
             formula.add_clause(&clause);
         }
@@ -5116,7 +5641,35 @@ impl BoundedModelChecker {
         match solver.solve() {
             Ok(true) => {
                 // SAT = counterexample found = designs differ
-                Ok((false, Some(k), None))
+                // Extract which output(s) differ from the model
+                let model = solver.model().unwrap_or_default();
+                let model_set: std::collections::HashSet<Lit> = model.iter().copied().collect();
+                let mut differing_outputs: Vec<(usize, String)> = Vec::new();
+
+                for (diff_var, cycle, name) in &miter_clauses {
+                    // Check if this diff variable is true in the model
+                    // diff_var being true means the outputs differ at this cycle
+                    if model_set.contains(&Lit::positive(*diff_var)) {
+                        differing_outputs.push((*cycle, name.clone()));
+                    }
+                }
+
+                // Report the first differing output
+                let (mismatch_cycle, mismatch_output) = if let Some((c, n)) = differing_outputs.first() {
+                    (Some(*c), Some(n.clone()))
+                } else {
+                    (Some(k), None)
+                };
+
+                // Log all differing outputs for debugging
+                if !differing_outputs.is_empty() {
+                    log::debug!("SAT counterexample - differing outputs:");
+                    for (c, n) in &differing_outputs {
+                        log::debug!("  cycle {}: {}", c, n);
+                    }
+                }
+
+                Ok((false, mismatch_cycle, mismatch_output))
             }
             Ok(false) => {
                 // UNSAT = no counterexample = equivalent up to this bound
