@@ -1785,6 +1785,21 @@ impl<'a> MirToAig<'a> {
         }
     }
 
+    /// Find a port by its ID
+    fn find_port(&self, id: PortId) -> Option<&Port> {
+        self.module.ports.iter().find(|p| p.id == id)
+    }
+
+    /// Find a signal by its ID
+    fn find_signal(&self, id: SignalId) -> Option<&Signal> {
+        self.module.signals.iter().find(|s| s.id == id)
+    }
+
+    /// Find a variable by its ID
+    fn find_variable(&self, id: VariableId) -> Option<&skalp_mir::Variable> {
+        self.module.variables.iter().find(|v| v.id == id)
+    }
+
     /// Convert MIR module to AIG
     pub fn convert(mut self) -> Aig {
         // Add primary inputs (input ports)
@@ -2179,16 +2194,25 @@ impl<'a> MirToAig<'a> {
     fn get_signal_width(&self, sig_ref: MirSignalRef) -> u32 {
         match sig_ref {
             MirSignalRef::Port(id) => {
-                let port = &self.module.ports[id.0 as usize];
-                self.get_type_width(&port.port_type) as u32
+                if let Some(port) = self.find_port(id) {
+                    self.get_type_width(&port.port_type) as u32
+                } else {
+                    1 // Default width if not found
+                }
             }
             MirSignalRef::Signal(id) => {
-                let signal = &self.module.signals[id.0 as usize];
-                self.get_type_width(&signal.signal_type) as u32
+                if let Some(signal) = self.find_signal(id) {
+                    self.get_type_width(&signal.signal_type) as u32
+                } else {
+                    1
+                }
             }
             MirSignalRef::Variable(id) => {
-                let var = &self.module.variables[id.0 as usize];
-                self.get_type_width(&var.var_type) as u32
+                if let Some(var) = self.find_variable(id) {
+                    self.get_type_width(&var.var_type) as u32
+                } else {
+                    1
+                }
             }
         }
     }
@@ -2196,8 +2220,11 @@ impl<'a> MirToAig<'a> {
     fn get_signal_lits(&self, lvalue: &LValue) -> Vec<AigLit> {
         match lvalue {
             LValue::Port(id) => {
-                let port = &self.module.ports[id.0 as usize];
-                let width = self.get_type_width(&port.port_type);
+                let width = if let Some(port) = self.find_port(*id) {
+                    self.get_type_width(&port.port_type)
+                } else {
+                    return vec![];
+                };
                 (0..width)
                     .map(|bit| {
                         self.signal_map
@@ -2208,8 +2235,11 @@ impl<'a> MirToAig<'a> {
                     .collect()
             }
             LValue::Signal(id) => {
-                let signal = &self.module.signals[id.0 as usize];
-                let width = self.get_type_width(&signal.signal_type);
+                let width = if let Some(signal) = self.find_signal(*id) {
+                    self.get_type_width(&signal.signal_type)
+                } else {
+                    return vec![];
+                };
                 (0..width)
                     .map(|bit| {
                         self.signal_map
@@ -2220,8 +2250,11 @@ impl<'a> MirToAig<'a> {
                     .collect()
             }
             LValue::Variable(id) => {
-                let var = &self.module.variables[id.0 as usize];
-                let width = self.get_type_width(&var.var_type);
+                let width = if let Some(var) = self.find_variable(*id) {
+                    self.get_type_width(&var.var_type)
+                } else {
+                    return vec![];
+                };
                 (0..width)
                     .map(|bit| {
                         self.signal_map
@@ -2303,16 +2336,25 @@ impl<'a> MirToAig<'a> {
     fn get_lvalue_width(&self, lvalue: &LValue) -> usize {
         match lvalue {
             LValue::Port(id) => {
-                let port = &self.module.ports[id.0 as usize];
-                self.get_type_width(&port.port_type)
+                if let Some(port) = self.find_port(*id) {
+                    self.get_type_width(&port.port_type)
+                } else {
+                    1
+                }
             }
             LValue::Signal(id) => {
-                let signal = &self.module.signals[id.0 as usize];
-                self.get_type_width(&signal.signal_type)
+                if let Some(signal) = self.find_signal(*id) {
+                    self.get_type_width(&signal.signal_type)
+                } else {
+                    1
+                }
             }
             LValue::Variable(id) => {
-                let var = &self.module.variables[id.0 as usize];
-                self.get_type_width(&var.var_type)
+                if let Some(var) = self.find_variable(*id) {
+                    self.get_type_width(&var.var_type)
+                } else {
+                    1
+                }
             }
             LValue::BitSelect { .. } => 1,
             LValue::RangeSelect { high, low, .. } => {
@@ -2471,8 +2513,11 @@ impl<'a> MirToAig<'a> {
     fn convert_lvalue_ref(&self, lvalue: &LValue) -> Vec<AigLit> {
         match lvalue {
             LValue::Port(id) => {
-                let port = &self.module.ports[id.0 as usize];
-                let width = self.get_type_width(&port.port_type);
+                let width = if let Some(port) = self.find_port(*id) {
+                    self.get_type_width(&port.port_type)
+                } else {
+                    return vec![];
+                };
                 (0..width)
                     .map(|bit| {
                         self.signal_map
@@ -2483,8 +2528,11 @@ impl<'a> MirToAig<'a> {
                     .collect()
             }
             LValue::Signal(id) => {
-                let signal = &self.module.signals[id.0 as usize];
-                let width = self.get_type_width(&signal.signal_type);
+                let width = if let Some(signal) = self.find_signal(*id) {
+                    self.get_type_width(&signal.signal_type)
+                } else {
+                    return vec![];
+                };
                 (0..width)
                     .map(|bit| {
                         self.signal_map
@@ -2495,8 +2543,11 @@ impl<'a> MirToAig<'a> {
                     .collect()
             }
             LValue::Variable(id) => {
-                let var = &self.module.variables[id.0 as usize];
-                let width = self.get_type_width(&var.var_type);
+                let width = if let Some(var) = self.find_variable(*id) {
+                    self.get_type_width(&var.var_type)
+                } else {
+                    return vec![];
+                };
                 (0..width)
                     .map(|bit| {
                         self.signal_map
