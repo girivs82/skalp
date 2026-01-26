@@ -194,12 +194,128 @@ async fn test_timer_reset_on_state_change() {
 
 // ============================================================================
 // Gate-Level Tests - verify synthesized RTL matches behavioral simulation
-// NOTE: These tests are WIP - hierarchical gate-level simulation needs debugging
 // ============================================================================
+
+/// Debug test to understand gate-level netlist structure
+#[tokio::test]
+#[ignore = "Debug test for gate-level investigation"]
+async fn test_debug_gate_level_structure() {
+    use skalp_frontend::parse_and_build_hir_from_file;
+    use skalp_lir::{get_stdlib_library, lower_mir_hierarchical_with_top, map_hierarchical_to_gates};
+    use skalp_mir::MirCompiler;
+    use std::path::Path;
+
+    let path = Path::new(BATTERY_DCDC_PATH);
+    let hir = parse_and_build_hir_from_file(path).expect("HIR parse failed");
+
+    let compiler = MirCompiler::new();
+    let mir = compiler.compile_to_mir(&hir).expect("MIR compile failed");
+
+    let library = get_stdlib_library("generic_asic").expect("Library load failed");
+
+    let hier_lir = lower_mir_hierarchical_with_top(&mir, Some(TOP_MODULE));
+    let hier_netlist = map_hierarchical_to_gates(&hier_lir, &library);
+
+    // Check per-instance netlists before flatten
+    println!("\n=== Per-instance netlist stats (before flatten) ===");
+    for (path, inst) in &hier_netlist.instances {
+        let seq_count = inst.netlist.cells.iter().filter(|c| c.is_sequential()).count();
+        let total = inst.netlist.cells.len();
+        if seq_count > 0 {
+            println!("  {}: {} cells, {} sequential", path, total, seq_count);
+        }
+    }
+
+    let netlist = hier_netlist.flatten();
+
+    println!("\n=== Flattened netlist stats ===");
+    println!("Total cells: {}", netlist.cells.len());
+
+    let seq_count = netlist.cells.iter().filter(|c| c.is_sequential()).count();
+    println!("Sequential cells: {}", seq_count);
+
+    // Show first few sequential cells
+    let seq_cells: Vec<_> = netlist.cells.iter().filter(|c| c.is_sequential()).take(5).collect();
+    for cell in &seq_cells {
+        println!("  {} (type: {}, clock: {:?})", cell.path, cell.cell_type, cell.clock);
+    }
+
+    // Check cell types
+    let dff_count = netlist.cells.iter()
+        .filter(|c| c.cell_type.to_lowercase().contains("dff"))
+        .count();
+    println!("DFF-type cells: {}", dff_count);
+
+    // Check what net GateNetId(0) is
+    println!("\n=== Checking clock net ===");
+    if let Some(net0) = netlist.nets.get(0) {
+        println!("Net 0: name='{}', is_clock={}, is_reset={}", net0.name, net0.is_clock, net0.is_reset);
+    }
+
+    // Find the actual clock net
+    let clock_nets: Vec<_> = netlist.nets.iter().filter(|n| n.is_clock).collect();
+    println!("Clock nets found: {}", clock_nets.len());
+    for net in &clock_nets {
+        println!("  {} (id={:?})", net.name, net.id);
+    }
+
+    // Check netlist.clocks
+    println!("netlist.clocks: {:?}", netlist.clocks);
+
+    // Check if all clock nets are really different or should have been merged
+    println!("\n=== Unique clock net count: {} ===", clock_nets.len());
+
+    // Check a sample of sequential cells' clock fields
+    println!("\n=== Sample sequential cell clocks ===");
+    let sample_seq: Vec<_> = netlist.cells.iter()
+        .filter(|c| c.is_sequential() && c.path.contains("DabBatteryController"))
+        .take(10)
+        .collect();
+    for cell in &sample_seq {
+        println!("  {} clock={:?}", cell.path, cell.clock);
+        if let Some(clk_id) = cell.clock {
+            if let Some(clk_net) = netlist.nets.get(clk_id.0 as usize) {
+                println!("    -> net name: {}", clk_net.name);
+            }
+        }
+    }
+
+    assert!(seq_count > 0, "Should have sequential cells in gate netlist");
+
+    // Write gate-level Verilog to file for debugging
+    let verilog = netlist.to_verilog();
+    std::fs::write("/tmp/battery_dcdc_gates.v", &verilog).expect("Failed to write Verilog");
+    println!("\n=== Gate-level Verilog written to /tmp/battery_dcdc_gates.v ===");
+
+    // Now convert to SIR and check
+    use skalp_sim::convert_gate_netlist_to_sir;
+    let sir_result = convert_gate_netlist_to_sir(&netlist);
+
+    println!("\n=== SIR Structure ===");
+    println!("Comb blocks: {}", sir_result.sir.top_module.comb_blocks.len());
+    println!("Seq blocks: {}", sir_result.sir.top_module.seq_blocks.len());
+
+    for (i, seq_block) in sir_result.sir.top_module.seq_blocks.iter().enumerate() {
+        println!("\nSeq block {}:", i);
+        println!("  clock signal id: {:?}", seq_block.clock);
+        println!("  operations count: {}", seq_block.operations.len());
+        println!("  reset: {:?}", seq_block.reset);
+
+        // Find the clock signal name
+        if let Some(clk_sig) = sir_result.sir.top_module.signals.iter()
+            .find(|s| s.id == seq_block.clock)
+        {
+            println!("  clock signal name: {}", clk_sig.name);
+        }
+    }
+}
 
 /// Gate-level test: basic initialization and reset
 #[tokio::test]
-#[ignore = "Gate-level hierarchical simulation WIP - state machine not transitioning"]
+#[cfg_attr(
+    not(target_os = "macos"),
+    ignore = "GPU simulation only available on macOS"
+)]
 async fn test_battery_dcdc_init_gate_level() {
     let mut tb = Testbench::gate_level_with_top(BATTERY_DCDC_PATH, TOP_MODULE)
         .await
@@ -222,14 +338,36 @@ async fn test_battery_dcdc_init_gate_level() {
 
 /// Gate-level test: state machine transition from Init to WaitBms
 #[tokio::test]
-#[ignore = "Gate-level hierarchical simulation WIP - state machine not transitioning"]
+#[cfg_attr(
+    not(target_os = "macos"),
+    ignore = "GPU simulation only available on macOS"
+)]
 async fn test_state_transition_init_to_waitbms_gate_level() {
     let mut tb = Testbench::gate_level_with_top(BATTERY_DCDC_PATH, TOP_MODULE)
         .await
         .expect("Failed to create gate-level testbench for battery DCDC");
 
-    // Apply reset
+    // Apply reset and set all inputs BEFORE releasing reset
     tb.set("rst", 1u8);
+
+    // Clear all fault inputs while in reset
+    tb.set("hw_ov", 0u8);
+    tb.set("hw_uv", 0u8);
+    tb.set("hw_oc", 0u8);
+    tb.set("hw_ot", 0u8);
+    tb.set("desat", 0u8);
+
+    // Initialize lockstep signals to prevent false mismatch detection
+    tb.set("lockstep_rx_valid", 0u8);  // No lockstep data yet
+    tb.set("lockstep_rx_state", 0u8);
+    tb.set("lockstep_rx_enable", 0u8);
+    tb.set("lockstep_rx_faults", 0u8);
+
+    // Set BMS data - NOT connected yet to prevent WaitBms->Precharge transition
+    tb.set("bms.connected", 0u8);  // Will be connected later in test
+    tb.set("bms.fault", 0u8);
+    tb.set("bms_rx_valid", 1u8); // Set valid to prevent watchdog timeout
+
     tb.clock(5).await;
     tb.set("rst", 0u8);
     tb.clock(1).await;
@@ -238,17 +376,6 @@ async fn test_state_transition_init_to_waitbms_gate_level() {
     let state: u8 = tb.get_as("state").await;
     assert_eq!(state, 0, "Gate-level: Should be in Init state initially");
 
-    // Clear all fault inputs
-    tb.set("hw_ov", 0u8);
-    tb.set("hw_uv", 0u8);
-    tb.set("hw_oc", 0u8);
-    tb.set("hw_ot", 0u8);
-    tb.set("desat", 0u8);
-
-    // Set BMS data to indicate no fault
-    tb.set("bms.connected", 1u8);
-    tb.set("bms.fault", 0u8);
-    tb.set("bms_rx_valid", 1u8); // Set valid to prevent watchdog timeout
     tb.clock(1).await;
 
     // Debug: check fault outputs before enable
@@ -266,8 +393,8 @@ async fn test_state_transition_init_to_waitbms_gate_level() {
     // Enable the controller - should transition to WaitBms
     tb.set("enable", 1u8);
 
-    // Gate-level may need more cycles for propagation
-    tb.clock(5).await;
+    // Single clock cycle for state transition
+    tb.clock(1).await;
 
     // Debug: check fault outputs after enable
     println!("\n=== Fault outputs after enable ===");

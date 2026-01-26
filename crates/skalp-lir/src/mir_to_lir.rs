@@ -19,7 +19,7 @@ use crate::ncl_expand::{expand_to_ncl, NclConfig};
 use indexmap::IndexMap;
 use skalp_mir::mir::{
     AssignmentKind, BinaryOp, Block, CaseStatement, ContinuousAssign, DataType, EdgeType, Expression,
-    ExpressionKind, LValue, Module, PortDirection, PortId, Process, ProcessKind, ReduceOp,
+    ExpressionKind, IfStatement, LValue, Module, PortDirection, PortId, Process, ProcessKind, ReduceOp,
     SafetyContext, SensitivityList, SignalId, Statement, UnaryOp, Value, Variable, VariableId,
 };
 use std::collections::HashMap;
@@ -655,7 +655,7 @@ impl MirToLirTransform {
                 // When detected, skip the mux and use integrated synchronous reset
                 let is_reset_condition = self.is_reset_signal_reference(&if_stmt.condition);
 
-                // Collect assignments from each branch
+                // Collect assignments from each branch (direct only, not nested)
                 let then_assigns = Self::collect_assignments(&if_stmt.then_block);
                 let else_assigns = if let Some(ref else_block) = if_stmt.else_block {
                     Self::collect_assignments(else_block)
@@ -663,37 +663,143 @@ impl MirToLirTransform {
                     Vec::new()
                 };
 
-                // Get all target lvalues
+                // BUG #238 FIX: Get ALL targets including those in nested ifs
+                // This ensures we handle targets assigned in sibling nested branches
+                let all_then_assigns = Self::collect_all_assignments_recursive(&if_stmt.then_block);
+                let all_else_assigns = if let Some(ref else_block) = if_stmt.else_block {
+                    Self::collect_all_assignments_recursive(else_block)
+                } else {
+                    Vec::new()
+                };
+
+                // Get all unique target lvalues (including nested)
                 let mut all_targets: Vec<LValue> = Vec::new();
-                for (lv, _) in &then_assigns {
+                for (lv, _) in &all_then_assigns {
                     if !all_targets.contains(lv) {
                         all_targets.push(lv.clone());
                     }
                 }
-                for (lv, _) in &else_assigns {
+                for (lv, _) in &all_else_assigns {
                     if !all_targets.contains(lv) {
                         all_targets.push(lv.clone());
                     }
                 }
+
+                // Track which targets we handle at this level
+                let mut handled_targets: Vec<LValue> = Vec::new();
 
                 for target in &all_targets {
                     let target_signal = self.get_lvalue_signal(target);
                     let target_width = self.get_lvalue_width(target);
 
-                    // Get then and else expressions
+                    // Get then and else expressions (direct assignments only)
                     let then_expr = Self::find_assignment_expr(&then_assigns, target);
                     let else_expr = Self::find_assignment_expr(&else_assigns, target);
 
-                    // Check if else branch has nested ifs for this target
-                    // If so, skip this target at this level - the nested ifs will handle it
-                    let else_has_nested_ifs = if let Some(ref else_block) = if_stmt.else_block {
+                    // BUG #238 FIX: Check if we should handle this target here
+                    // We must handle it here if:
+                    // 1. Target is directly assigned in then or else branch, OR
+                    // 2. Target is assigned in nested ifs in BOTH branches (to avoid multi-driver)
+                    let then_has_nested = Self::block_has_nested_if_for_target(&if_stmt.then_block, target);
+                    let else_has_nested = if let Some(ref else_block) = if_stmt.else_block {
                         Self::block_has_nested_if_for_target(else_block, target)
                     } else {
                         false
                     };
 
-                    // Skip targets that are handled by nested ifs to avoid duplicate registers
-                    if else_has_nested_ifs {
+                    let directly_assigned = then_expr.is_some() || else_expr.is_some();
+                    let in_sibling_nested = then_has_nested && else_has_nested;
+                    let in_only_else_nested = !then_has_nested && else_has_nested && then_expr.is_none();
+
+                    // Skip if only in nested else ifs - let them handle it
+                    // (But only if not directly assigned in then branch!)
+                    if in_only_else_nested {
+                        continue;
+                    }
+
+                    // If in sibling nested ifs, we MUST handle here to avoid multi-driver
+                    // Collect all conditional paths and build a combined mux chain
+                    if in_sibling_nested && !directly_assigned {
+                        handled_targets.push(target.clone());
+
+                        // Collect all conditional paths through the entire if tree
+                        let mut paths = Vec::new();
+
+                        // Paths from then branch
+                        let then_paths = Self::collect_conditional_paths_for_target(
+                            &if_stmt.then_block,
+                            target,
+                            Some(&if_stmt.condition),
+                        );
+                        paths.extend(then_paths);
+
+                        // Paths from else branch
+                        if let Some(ref else_block) = if_stmt.else_block {
+                            let negated_cond = Expression {
+                                kind: ExpressionKind::Unary {
+                                    op: UnaryOp::Not,
+                                    operand: Box::new(if_stmt.condition.clone()),
+                                },
+                                ty: skalp_frontend::types::Type::Bool,
+                            span: None,
+                            };
+                            let else_paths = Self::collect_conditional_paths_for_target(
+                                else_block,
+                                target,
+                                Some(&negated_cond),
+                            );
+                            paths.extend(else_paths);
+                        }
+
+                        // Build priority mux chain: first matching condition wins
+                        // Start with feedback (keep current value) as the default
+                        let mut current_value = target_signal;
+
+                        // Process paths in reverse order so earlier paths have higher priority
+                        for (condition, expr) in paths.into_iter().rev() {
+                            let expr_signal = self.transform_expression(&expr, target_width);
+
+                            if let Some(cond) = condition {
+                                let cond_signal = self.transform_expression(&cond, 1);
+                                let mux_out = self.alloc_temp_signal(target_width);
+                                self.lir.add_node(
+                                    LirOp::Mux2 { width: target_width },
+                                    vec![cond_signal, current_value, expr_signal],
+                                    mux_out,
+                                    format!("{}.mux", self.hierarchy_path),
+                                );
+                                current_value = mux_out;
+                            } else {
+                                // Unconditional - this becomes the new base value
+                                current_value = expr_signal;
+                            }
+                        }
+
+                        // Create ONE register for this target
+                        let reg_op = LirOp::Reg {
+                            width: target_width,
+                            has_enable: false,
+                            has_reset: reset_signal.is_some(),
+                            reset_value: Some(0),
+                        };
+
+                        if let Some(clk) = clock_signal {
+                            self.lir.add_seq_node(
+                                reg_op,
+                                vec![current_value],
+                                target_signal,
+                                format!("{}.reg", self.hierarchy_path),
+                                clk,
+                                reset_signal,
+                            );
+                        } else {
+                            self.lir.add_node(
+                                reg_op,
+                                vec![current_value],
+                                target_signal,
+                                format!("{}.reg", self.hierarchy_path),
+                            );
+                        }
                         continue;
                     }
 
@@ -701,16 +807,50 @@ impl MirToLirTransform {
                     // - Condition is reset signal
                     // - Then branch (reset case) is a constant
                     // - There's an else branch with the actual next value
-                    let sdff_pattern = if is_reset_condition && else_expr.is_some() {
+                    let sdff_pattern = if is_reset_condition && (else_expr.is_some() || else_has_nested) {
                         then_expr.and_then(Self::try_extract_constant)
                     } else {
                         None
                     };
 
                     if let Some(reset_value) = sdff_pattern {
+                        handled_targets.push(target.clone());
+
                         // SDFF pattern detected: skip mux, use integrated sync reset
-                        // The register's internal reset will handle the reset behavior
-                        let else_signal = if let Some(expr) = else_expr {
+                        // For nested else ifs, we need to collect all paths from else branch
+                        let else_signal = if else_has_nested {
+                            // Collect paths from else branch and build mux chain
+                            if let Some(ref else_block) = if_stmt.else_block {
+                                let else_paths = Self::collect_conditional_paths_for_target(
+                                    else_block,
+                                    target,
+                                    None,
+                                );
+
+                                let mut current_value = target_signal; // Feedback as default
+
+                                for (condition, expr) in else_paths.into_iter().rev() {
+                                    let expr_signal = self.transform_expression(&expr, target_width);
+
+                                    if let Some(cond) = condition {
+                                        let cond_signal = self.transform_expression(&cond, 1);
+                                        let mux_out = self.alloc_temp_signal(target_width);
+                                        self.lir.add_node(
+                                            LirOp::Mux2 { width: target_width },
+                                            vec![cond_signal, current_value, expr_signal],
+                                            mux_out,
+                                            format!("{}.mux", self.hierarchy_path),
+                                        );
+                                        current_value = mux_out;
+                                    } else {
+                                        current_value = expr_signal;
+                                    }
+                                }
+                                current_value
+                            } else {
+                                target_signal
+                            }
+                        } else if let Some(expr) = else_expr {
                             self.transform_expression(expr, target_width)
                         } else {
                             target_signal // Feedback: keep current value
@@ -741,7 +881,9 @@ impl MirToLirTransform {
                                 format!("{}.reg", self.hierarchy_path),
                             );
                         }
-                    } else {
+                    } else if directly_assigned {
+                        handled_targets.push(target.clone());
+
                         // Standard pattern: create mux + register
                         let cond_signal = self.transform_expression(&if_stmt.condition, 1);
 
@@ -797,17 +939,28 @@ impl MirToLirTransform {
                     }
                 }
 
-                // Recursively process nested if statements in then and else blocks
-                // This handles targets that are assigned inside nested conditionals
+                // BUG #238 FIX: Recursively process nested if statements, but SKIP targets
+                // that we've already handled at this level to avoid multi-driver
+                // We need a different approach: process nested ifs but track handled targets
                 for stmt in &if_stmt.then_block.statements {
-                    if let Statement::If(_) = stmt {
-                        self.transform_sequential_statement(stmt, clock_signal, reset_signal);
+                    if let Statement::If(nested_if) = stmt {
+                        self.transform_sequential_if_excluding_targets(
+                            nested_if,
+                            clock_signal,
+                            reset_signal,
+                            &handled_targets,
+                        );
                     }
                 }
                 if let Some(ref else_block) = if_stmt.else_block {
                     for stmt in &else_block.statements {
-                        if let Statement::If(_) = stmt {
-                            self.transform_sequential_statement(stmt, clock_signal, reset_signal);
+                        if let Statement::If(nested_if) = stmt {
+                            self.transform_sequential_if_excluding_targets(
+                                nested_if,
+                                clock_signal,
+                                reset_signal,
+                                &handled_targets,
+                            );
                         }
                     }
                 }
@@ -1025,7 +1178,7 @@ impl MirToLirTransform {
         assigns
     }
 
-    /// Check if a block contains nested if statements that assign to a target
+    /// Check if a block contains nested if/case statements that assign to a target
     /// This is used to determine if SDFF pattern can be safely applied
     fn block_has_nested_if_for_target(block: &Block, target: &LValue) -> bool {
         for stmt in &block.statements {
@@ -1039,6 +1192,21 @@ impl MirToLirTransform {
                     if let Some(ref else_block) = if_stmt.else_block {
                         let else_assigns = Self::collect_all_assignments_recursive(else_block);
                         if else_assigns.iter().any(|(lv, _)| lv == target) {
+                            return true;
+                        }
+                    }
+                }
+                Statement::Case(case_stmt) => {
+                    // BUG #238 FIX: Check if case statement assigns to target
+                    for item in &case_stmt.items {
+                        let arm_assigns = Self::collect_all_assignments_recursive(&item.block);
+                        if arm_assigns.iter().any(|(lv, _)| lv == target) {
+                            return true;
+                        }
+                    }
+                    if let Some(ref default_block) = case_stmt.default {
+                        let default_assigns = Self::collect_all_assignments_recursive(default_block);
+                        if default_assigns.iter().any(|(lv, _)| lv == target) {
                             return true;
                         }
                     }
@@ -1085,6 +1253,274 @@ impl MirToLirTransform {
             }
         }
         assigns
+    }
+
+    /// BUG #238 FIX: Collect all conditional paths for a specific target through nested ifs
+    /// Returns a list of (condition, expression) pairs in priority order (first match wins)
+    fn collect_conditional_paths_for_target(
+        block: &Block,
+        target: &LValue,
+        outer_condition: Option<&Expression>,
+    ) -> Vec<(Option<Expression>, Expression)> {
+        let mut paths = Vec::new();
+
+        for stmt in &block.statements {
+            match stmt {
+                Statement::Assignment(assign)
+                    if matches!(assign.kind, AssignmentKind::NonBlocking) && &assign.lhs == target =>
+                {
+                    // Direct assignment to target - add as a path
+                    paths.push((outer_condition.cloned(), assign.rhs.clone()));
+                }
+                Statement::If(if_stmt) => {
+                    // Build the combined condition for the then branch
+                    let then_condition = if let Some(outer) = outer_condition {
+                        Some(Expression {
+                            kind: ExpressionKind::Binary {
+                                op: BinaryOp::And,
+                                left: Box::new(outer.clone()),
+                                right: Box::new(if_stmt.condition.clone()),
+                            },
+                            ty: skalp_frontend::types::Type::Bool,
+                            span: None,
+                        })
+                    } else {
+                        Some(if_stmt.condition.clone())
+                    };
+
+                    // Collect paths from then branch
+                    paths.extend(Self::collect_conditional_paths_for_target(
+                        &if_stmt.then_block,
+                        target,
+                        then_condition.as_ref(),
+                    ));
+
+                    // Build the combined condition for the else branch
+                    if let Some(ref else_block) = if_stmt.else_block {
+                        let negated_condition = Expression {
+                            kind: ExpressionKind::Unary {
+                                op: UnaryOp::Not,
+                                operand: Box::new(if_stmt.condition.clone()),
+                            },
+                            ty: skalp_frontend::types::Type::Bool,
+                            span: None,
+                        };
+
+                        let else_condition = if let Some(outer) = outer_condition {
+                            Some(Expression {
+                                kind: ExpressionKind::Binary {
+                                    op: BinaryOp::And,
+                                    left: Box::new(outer.clone()),
+                                    right: Box::new(negated_condition),
+                                },
+                                ty: skalp_frontend::types::Type::Bool,
+                            span: None,
+                            })
+                        } else {
+                            Some(negated_condition)
+                        };
+
+                        paths.extend(Self::collect_conditional_paths_for_target(
+                            else_block,
+                            target,
+                            else_condition.as_ref(),
+                        ));
+                    }
+                }
+                Statement::Block(inner_block) => {
+                    paths.extend(Self::collect_conditional_paths_for_target(
+                        inner_block,
+                        target,
+                        outer_condition,
+                    ));
+                }
+                Statement::Case(case_stmt) => {
+                    // BUG #238 FIX: Handle case statements in path collection
+                    // For each case arm, build condition (outer AND case_expr == arm_value)
+                    for item in &case_stmt.items {
+                        for value in &item.values {
+                            // Build equality condition: case_expr == value
+                            let eq_condition = Expression {
+                                kind: ExpressionKind::Binary {
+                                    op: BinaryOp::Equal,
+                                    left: Box::new(case_stmt.expr.clone()),
+                                    right: Box::new(value.clone()),
+                                },
+                                ty: skalp_frontend::types::Type::Bool,
+                                span: None,
+                            };
+
+                            // Combine with outer condition
+                            let combined_condition = if let Some(outer) = outer_condition {
+                                Some(Expression {
+                                    kind: ExpressionKind::Binary {
+                                        op: BinaryOp::And,
+                                        left: Box::new(outer.clone()),
+                                        right: Box::new(eq_condition),
+                                    },
+                                    ty: skalp_frontend::types::Type::Bool,
+                                    span: None,
+                                })
+                            } else {
+                                Some(eq_condition)
+                            };
+
+                            // Collect paths from this arm
+                            paths.extend(Self::collect_conditional_paths_for_target(
+                                &item.block,
+                                target,
+                                combined_condition.as_ref(),
+                            ));
+                        }
+                    }
+
+                    // Handle default block - it matches when no other arm matches
+                    // For simplicity, we'll treat default as having the outer condition
+                    // (proper implementation would negate all arm conditions)
+                    if let Some(ref default_block) = case_stmt.default {
+                        paths.extend(Self::collect_conditional_paths_for_target(
+                            default_block,
+                            target,
+                            outer_condition,
+                        ));
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        paths
+    }
+
+    /// BUG #238 FIX: Process a nested if statement while excluding targets already handled
+    fn transform_sequential_if_excluding_targets(
+        &mut self,
+        if_stmt: &IfStatement,
+        clock_signal: Option<LirSignalId>,
+        reset_signal: Option<LirSignalId>,
+        excluded_targets: &[LValue],
+    ) {
+        // Collect assignments from each branch (direct only)
+        let then_assigns = Self::collect_assignments(&if_stmt.then_block);
+        let else_assigns = if let Some(ref else_block) = if_stmt.else_block {
+            Self::collect_assignments(else_block)
+        } else {
+            Vec::new()
+        };
+
+        // Get all target lvalues (excluding already-handled ones)
+        let mut all_targets: Vec<LValue> = Vec::new();
+        for (lv, _) in &then_assigns {
+            if !all_targets.contains(lv) && !excluded_targets.contains(lv) {
+                all_targets.push(lv.clone());
+            }
+        }
+        for (lv, _) in &else_assigns {
+            if !all_targets.contains(lv) && !excluded_targets.contains(lv) {
+                all_targets.push(lv.clone());
+            }
+        }
+
+        // Track new handled targets at this level
+        let mut newly_handled: Vec<LValue> = Vec::new();
+
+        for target in &all_targets {
+            let target_signal = self.get_lvalue_signal(target);
+            let target_width = self.get_lvalue_width(target);
+
+            let then_expr = Self::find_assignment_expr(&then_assigns, target);
+            let else_expr = Self::find_assignment_expr(&else_assigns, target);
+
+            // Check for nested ifs
+            let else_has_nested = if let Some(ref else_block) = if_stmt.else_block {
+                Self::block_has_nested_if_for_target(else_block, target)
+            } else {
+                false
+            };
+
+            // Skip if only in nested else (will be handled by recursion)
+            if else_has_nested && then_expr.is_none() && else_expr.is_none() {
+                continue;
+            }
+
+            newly_handled.push(target.clone());
+
+            // Standard pattern: create mux + register
+            let cond_signal = self.transform_expression(&if_stmt.condition, 1);
+
+            let then_signal = if let Some(expr) = then_expr {
+                self.transform_expression(expr, target_width)
+            } else {
+                target_signal
+            };
+
+            let else_signal = if let Some(expr) = else_expr {
+                self.transform_expression(expr, target_width)
+            } else {
+                target_signal
+            };
+
+            let mux_out = self.alloc_temp_signal(target_width);
+            self.lir.add_node(
+                LirOp::Mux2 { width: target_width },
+                vec![cond_signal, else_signal, then_signal],
+                mux_out,
+                format!("{}.mux", self.hierarchy_path),
+            );
+
+            let reg_op = LirOp::Reg {
+                width: target_width,
+                has_enable: false,
+                has_reset: reset_signal.is_some(),
+                reset_value: Some(0),
+            };
+
+            if let Some(clk) = clock_signal {
+                self.lir.add_seq_node(
+                    reg_op,
+                    vec![mux_out],
+                    target_signal,
+                    format!("{}.reg", self.hierarchy_path),
+                    clk,
+                    reset_signal,
+                );
+            } else {
+                self.lir.add_node(
+                    reg_op,
+                    vec![mux_out],
+                    target_signal,
+                    format!("{}.reg", self.hierarchy_path),
+                );
+            }
+        }
+
+        // Combine excluded targets with newly handled ones for recursion
+        let mut combined_excluded = excluded_targets.to_vec();
+        combined_excluded.extend(newly_handled);
+
+        // Recurse into nested ifs
+        for stmt in &if_stmt.then_block.statements {
+            if let Statement::If(nested_if) = stmt {
+                self.transform_sequential_if_excluding_targets(
+                    nested_if,
+                    clock_signal,
+                    reset_signal,
+                    &combined_excluded,
+                );
+            }
+        }
+        if let Some(ref else_block) = if_stmt.else_block {
+            for stmt in &else_block.statements {
+                if let Statement::If(nested_if) = stmt {
+                    self.transform_sequential_if_excluding_targets(
+                        nested_if,
+                        clock_signal,
+                        reset_signal,
+                        &combined_excluded,
+                    );
+                }
+            }
+        }
     }
 
     /// Find expression for a target LValue in assignments
