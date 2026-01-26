@@ -812,7 +812,6 @@ impl MirToLirTransform {
                     } else {
                         None
                     };
-
                     if let Some(reset_value) = sdff_pattern {
                         handled_targets.push(target.clone());
 
@@ -1211,6 +1210,13 @@ impl MirToLirTransform {
                         }
                     }
                 }
+                Statement::ResolvedConditional(rc) => {
+                    // ResolvedConditional is a synthesis-resolved if-else-if chain
+                    // If it targets our signal, it counts as nested conditional logic
+                    if &rc.target == target {
+                        return true;
+                    }
+                }
                 Statement::Block(inner_block) => {
                     if Self::block_has_nested_if_for_target(inner_block, target) {
                         return true;
@@ -1384,6 +1390,28 @@ impl MirToLirTransform {
                             outer_condition,
                         ));
                     }
+                }
+                Statement::ResolvedConditional(rc) if &rc.target == target => {
+                    // ResolvedConditional is a priority mux for the target
+                    // Add each case condition-value pair
+                    for case in &rc.resolved.cases {
+                        let combined_condition = if let Some(outer) = outer_condition {
+                            Some(Expression {
+                                kind: ExpressionKind::Binary {
+                                    op: BinaryOp::And,
+                                    left: Box::new(outer.clone()),
+                                    right: Box::new(case.condition.clone()),
+                                },
+                                ty: skalp_frontend::types::Type::Bool,
+                                span: None,
+                            })
+                        } else {
+                            Some(case.condition.clone())
+                        };
+                        paths.push((combined_condition, case.value.clone()));
+                    }
+                    // Add default as the fallback (with outer condition if present)
+                    paths.push((outer_condition.cloned(), rc.resolved.default.clone()));
                 }
                 _ => {}
             }
@@ -2590,6 +2618,277 @@ pub enum PortConnectionInfo {
     Range(String, usize, usize),
     /// Connected to a single bit of a signal (signal_name, bit_index)
     BitSelect(String, usize),
+}
+
+impl HierarchicalMirToLirResult {
+    /// Flatten the hierarchical LIR into a single LIR with all instances inlined
+    ///
+    /// This creates a new LIR where:
+    /// - All signals are prefixed with their instance path
+    /// - Port connections between instances are resolved
+    /// - The result has all registers from all instances
+    pub fn flatten(&self) -> Lir {
+        use std::collections::HashMap;
+
+        let mut flat_lir = Lir::new(self.top_module.clone());
+        let mut signal_id_map: HashMap<(String, LirSignalId), LirSignalId> = HashMap::new();
+
+        // Map from signal name to its flattened signal ID (for port connection resolution)
+        let mut name_to_signal: HashMap<String, LirSignalId> = HashMap::new();
+
+        // Process instances in dependency order (parents before children)
+        let instance_order = self.get_topological_order();
+
+        // First pass: create all signals with prefixed names
+        for inst_path in &instance_order {
+            if let Some(inst) = self.instances.get(inst_path) {
+                let lir = &inst.lir_result.lir;
+                let prefix = if inst_path == "top" {
+                    "".to_string()
+                } else {
+                    format!("{}.", inst_path)
+                };
+
+                // Create signals with prefixed names
+                for (old_id, signal) in lir.signals.iter().enumerate() {
+                    let new_name = format!("{}{}", prefix, signal.name);
+                    let new_id = flat_lir.add_signal(new_name.clone(), signal.width);
+                    signal_id_map.insert((inst_path.clone(), LirSignalId(old_id as u32)), new_id);
+                    name_to_signal.insert(new_name, new_id);
+                }
+            }
+        }
+
+        // Second pass: add inputs/outputs (only from top instance)
+        if let Some(top_inst) = self.instances.get("top") {
+            let lir = &top_inst.lir_result.lir;
+            for &input_id in &lir.inputs {
+                if let Some(&new_id) = signal_id_map.get(&("top".to_string(), input_id)) {
+                    flat_lir.inputs.push(new_id);
+                }
+            }
+            for &output_id in &lir.outputs {
+                if let Some(&new_id) = signal_id_map.get(&("top".to_string(), output_id)) {
+                    flat_lir.outputs.push(new_id);
+                }
+            }
+            // Copy clocks
+            for &clk_id in &lir.clocks {
+                if let Some(&new_id) = signal_id_map.get(&("top".to_string(), clk_id)) {
+                    flat_lir.clocks.push(new_id);
+                }
+            }
+        }
+
+        // Build port aliasing map: child port signal -> parent signal (for input ports)
+        // When a child uses an input port, we should actually read from the parent's signal
+        let mut port_alias_map: HashMap<(String, LirSignalId), LirSignalId> = HashMap::new();
+
+        for inst_path in &instance_order {
+            if inst_path == "top" {
+                continue; // Top has no port connections from parent
+            }
+
+            if let Some(inst) = self.instances.get(inst_path) {
+                let lir = &inst.lir_result.lir;
+
+                // Find parent path
+                let parent_path = if let Some(dot_pos) = inst_path.rfind('.') {
+                    &inst_path[..dot_pos]
+                } else {
+                    "top"
+                };
+
+                // Process port connections
+                for (port_name, conn_info) in &inst.port_connections {
+                    // Find the signal ID in child's LIR for this port
+                    let port_signal_id = lir.signals.iter().enumerate()
+                        .find(|(_, s)| s.name == *port_name)
+                        .map(|(idx, _)| LirSignalId(idx as u32));
+
+                    if let Some(child_port_id) = port_signal_id {
+                        // Check if this is an input port (in child's inputs list)
+                        let is_input = lir.inputs.contains(&child_port_id);
+
+                        if is_input {
+                            // For input ports, alias child's port to parent's signal
+                            let parent_signal_name = match conn_info {
+                                PortConnectionInfo::Signal(name) => {
+                                    let parent_prefix = if parent_path == "top" {
+                                        "".to_string()
+                                    } else {
+                                        format!("{}.", parent_path)
+                                    };
+                                    format!("{}{}", parent_prefix, name)
+                                }
+                                _ => continue, // Skip constants and other types for now
+                            };
+
+                            if let Some(&parent_sig) = name_to_signal.get(&parent_signal_name) {
+                                port_alias_map.insert((inst_path.clone(), child_port_id), parent_sig);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Third pass: add all nodes with remapped signal IDs
+        for inst_path in &instance_order {
+            if let Some(inst) = self.instances.get(inst_path) {
+                let lir = &inst.lir_result.lir;
+
+                // Remap and add each node
+                for node in &lir.nodes {
+                    let new_inputs: Vec<LirSignalId> = node.inputs.iter()
+                        .map(|&old_id| {
+                            // Check if this input is aliased (port connection)
+                            if let Some(&aliased) = port_alias_map.get(&(inst_path.clone(), old_id)) {
+                                aliased
+                            } else {
+                                signal_id_map.get(&(inst_path.clone(), old_id))
+                                    .copied()
+                                    .unwrap_or(LirSignalId(0))
+                            }
+                        })
+                        .collect();
+
+                    let new_output = signal_id_map.get(&(inst_path.clone(), node.output))
+                        .copied()
+                        .unwrap_or(LirSignalId(0));
+
+                    let new_clock = node.clock.and_then(|clk| {
+                        // Clocks are usually connected from parent, check alias first
+                        if let Some(&aliased) = port_alias_map.get(&(inst_path.clone(), clk)) {
+                            Some(aliased)
+                        } else {
+                            signal_id_map.get(&(inst_path.clone(), clk)).copied()
+                        }
+                    });
+
+                    let new_reset = node.reset.and_then(|rst| {
+                        // Resets are usually connected from parent, check alias first
+                        if let Some(&aliased) = port_alias_map.get(&(inst_path.clone(), rst)) {
+                            Some(aliased)
+                        } else {
+                            signal_id_map.get(&(inst_path.clone(), rst)).copied()
+                        }
+                    });
+
+                    let prefix = if inst_path == "top" {
+                        "".to_string()
+                    } else {
+                        format!("{}.", inst_path)
+                    };
+
+                    let new_node = crate::lir::LirNode {
+                        id: crate::lir::LirNodeId(flat_lir.nodes.len() as u32),
+                        op: node.op.clone(),
+                        inputs: new_inputs,
+                        output: new_output,
+                        path: format!("{}{}", prefix, node.path),
+                        clock: new_clock,
+                        reset: new_reset,
+                    };
+
+                    flat_lir.nodes.push(new_node);
+                }
+            }
+        }
+
+        // Fourth pass: wire output ports from child to parent signals
+        for inst_path in &instance_order {
+            if inst_path == "top" {
+                continue;
+            }
+
+            if let Some(inst) = self.instances.get(inst_path) {
+                let lir = &inst.lir_result.lir;
+
+                // Find parent path
+                let parent_path = if let Some(dot_pos) = inst_path.rfind('.') {
+                    &inst_path[..dot_pos]
+                } else {
+                    "top"
+                };
+
+                for (port_name, conn_info) in &inst.port_connections {
+                    // Find the signal ID in child's LIR for this port
+                    let port_signal_id = lir.signals.iter().enumerate()
+                        .find(|(_, s)| s.name == *port_name)
+                        .map(|(idx, _)| LirSignalId(idx as u32));
+
+                    if let Some(child_port_id) = port_signal_id {
+                        // Check if this is an output port (in child's outputs list)
+                        let is_output = lir.outputs.contains(&child_port_id);
+
+                        if is_output {
+                            let parent_signal_name = match conn_info {
+                                PortConnectionInfo::Signal(name) => {
+                                    let parent_prefix = if parent_path == "top" {
+                                        "".to_string()
+                                    } else {
+                                        format!("{}.", parent_path)
+                                    };
+                                    format!("{}{}", parent_prefix, name)
+                                }
+                                _ => continue,
+                            };
+
+                            // Get the flattened child output signal
+                            let child_flat_id = signal_id_map.get(&(inst_path.clone(), child_port_id));
+                            let parent_flat_id = name_to_signal.get(&parent_signal_name);
+
+                            if let (Some(&child_id), Some(&parent_id)) = (child_flat_id, parent_flat_id) {
+                                // Add a buffer node to wire child output to parent signal
+                                let child_width = flat_lir.signals[child_id.0 as usize].width;
+                                let wire_node = crate::lir::LirNode {
+                                    id: crate::lir::LirNodeId(flat_lir.nodes.len() as u32),
+                                    op: LirOp::Buf { width: child_width },
+                                    inputs: vec![child_id],
+                                    output: parent_id,
+                                    path: format!("{}.{}_conn", inst_path, port_name),
+                                    clock: None,
+                                    reset: None,
+                                };
+                                flat_lir.nodes.push(wire_node);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        flat_lir
+    }
+
+    /// Get instances in topological order (parents before children)
+    fn get_topological_order(&self) -> Vec<String> {
+        let mut order = Vec::new();
+        let mut visited = std::collections::HashSet::new();
+
+        fn visit(
+            path: &str,
+            hierarchy: &IndexMap<String, Vec<String>>,
+            visited: &mut std::collections::HashSet<String>,
+            order: &mut Vec<String>,
+        ) {
+            if visited.contains(path) {
+                return;
+            }
+            visited.insert(path.to_string());
+            order.push(path.to_string());
+
+            if let Some(children) = hierarchy.get(path) {
+                for child in children {
+                    visit(child, hierarchy, visited, order);
+                }
+            }
+        }
+
+        visit("top", &self.hierarchy, &mut visited, &mut order);
+        order
+    }
 }
 
 /// Load a compiled IP and create a minimal LIR for it
