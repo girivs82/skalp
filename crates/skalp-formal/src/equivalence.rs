@@ -4469,8 +4469,9 @@ impl<'a> MirToAig<'a> {
         };
 
         // Get all signals assigned in then/else branches
-        let mut then_assigns: HashMap<MirSignalRef, Vec<AigLit>> = HashMap::new();
-        let mut else_assigns: HashMap<MirSignalRef, Vec<AigLit>> = HashMap::new();
+        // Use (MirSignalRef, bit) as key to properly track bit positions
+        let mut then_assigns: HashMap<(MirSignalRef, u32), AigLit> = HashMap::new();
+        let mut else_assigns: HashMap<(MirSignalRef, u32), AigLit> = HashMap::new();
 
         // Save current state
         let saved_state = self.signal_map.clone();
@@ -4479,10 +4480,7 @@ impl<'a> MirToAig<'a> {
         self.convert_block(&if_stmt.then_block, conditions);
         for (key, lit) in &self.signal_map {
             if saved_state.get(key) != Some(lit) {
-                then_assigns
-                    .entry(key.0)
-                    .or_insert_with(Vec::new)
-                    .push(*lit);
+                then_assigns.insert(*key, *lit);
             }
         }
 
@@ -4493,50 +4491,43 @@ impl<'a> MirToAig<'a> {
         }
         for (key, lit) in &self.signal_map {
             if saved_state.get(key) != Some(lit) {
-                else_assigns
-                    .entry(key.0)
-                    .or_insert_with(Vec::new)
-                    .push(*lit);
+                else_assigns.insert(*key, *lit);
             }
         }
 
-        // Build muxes for all modified signals
+        // Build muxes for all modified signal bits
         self.signal_map = saved_state;
-        let all_refs: std::collections::HashSet<_> = then_assigns
+        let all_keys: std::collections::HashSet<_> = then_assigns
             .keys()
             .chain(else_assigns.keys())
             .cloned()
             .collect();
 
-        for sig_ref in all_refs {
-            let width = self.get_signal_width(sig_ref);
-            for bit in 0..width {
-                let then_lit = then_assigns
-                    .get(&sig_ref)
-                    .and_then(|v| v.get(bit as usize))
-                    .copied()
-                    .unwrap_or_else(|| {
-                        self.signal_map
-                            .get(&(sig_ref, bit))
-                            .copied()
-                            .unwrap_or_else(|| self.aig.false_lit())
-                    });
-                let else_lit = else_assigns
-                    .get(&sig_ref)
-                    .and_then(|v| v.get(bit as usize))
-                    .copied()
-                    .unwrap_or_else(|| {
-                        self.signal_map
-                            .get(&(sig_ref, bit))
-                            .copied()
-                            .unwrap_or_else(|| self.aig.false_lit())
-                    });
+        for key in all_keys {
+            let (sig_ref, bit) = key;
+            let then_lit = then_assigns
+                .get(&key)
+                .copied()
+                .unwrap_or_else(|| {
+                    self.signal_map
+                        .get(&key)
+                        .copied()
+                        .unwrap_or_else(|| self.aig.false_lit())
+                });
+            let else_lit = else_assigns
+                .get(&key)
+                .copied()
+                .unwrap_or_else(|| {
+                    self.signal_map
+                        .get(&key)
+                        .copied()
+                        .unwrap_or_else(|| self.aig.false_lit())
+                });
 
-                // MUX: cond ? then_lit : else_lit
-                // add_mux(sel, a, b) returns sel ? b : a, so pass (cond, else_lit, then_lit)
-                let mux_result = self.aig.add_mux(cond, else_lit, then_lit);
-                self.signal_map.insert((sig_ref, bit), mux_result);
-            }
+            // MUX: cond ? then_lit : else_lit
+            // add_mux(sel, a, b) returns sel ? b : a, so pass (cond, else_lit, then_lit)
+            let mux_result = self.aig.add_mux(cond, else_lit, then_lit);
+            self.signal_map.insert((sig_ref, bit), mux_result);
         }
     }
 
@@ -4546,23 +4537,21 @@ impl<'a> MirToAig<'a> {
         conditions: &HashMap<MirSignalRef, Vec<AigLit>>,
     ) {
         let selector_lits = self.convert_expression(&case_stmt.expr);
-        let selector_width = selector_lits.len();
+        let _selector_width = selector_lits.len();
 
         // Build a priority mux chain for case items
         // Start with default value (or current value)
         let saved_state = self.signal_map.clone();
 
-        // First, collect all assignments from default case
-        let mut result_map: HashMap<MirSignalRef, Vec<AigLit>> = HashMap::new();
+        // Use (MirSignalRef, bit) as key to properly track bit positions
+        let mut result_map: HashMap<(MirSignalRef, u32), AigLit> = HashMap::new();
 
+        // First, collect all assignments from default case
         if let Some(default_block) = &case_stmt.default {
             self.convert_block(default_block, conditions);
             for (key, lit) in &self.signal_map {
                 if saved_state.get(key) != Some(lit) {
-                    result_map
-                        .entry(key.0)
-                        .or_insert_with(Vec::new)
-                        .push(*lit);
+                    result_map.insert(*key, *lit);
                 }
             }
         }
@@ -4586,8 +4575,7 @@ impl<'a> MirToAig<'a> {
             for (key, lit) in &self.signal_map {
                 if saved_state.get(key) != Some(lit) {
                     let current = result_map
-                        .get(&key.0)
-                        .and_then(|v| v.get((key.1) as usize))
+                        .get(key)
                         .copied()
                         .unwrap_or_else(|| {
                             saved_state
@@ -4599,25 +4587,15 @@ impl<'a> MirToAig<'a> {
                     // We want: item_cond ? *lit : current
                     // So call add_mux(item_cond, current, *lit)
                     let muxed = self.aig.add_mux(item_cond, current, *lit);
-                    result_map
-                        .entry(key.0)
-                        .or_insert_with(Vec::new);
-                    // Ensure vector is long enough
-                    let vec = result_map.get_mut(&key.0).unwrap();
-                    while vec.len() <= key.1 as usize {
-                        vec.push(self.aig.false_lit());
-                    }
-                    vec[key.1 as usize] = muxed;
+                    result_map.insert(*key, muxed);
                 }
             }
         }
 
         // Apply final results
         self.signal_map = saved_state;
-        for (sig_ref, lits) in result_map {
-            for (bit, lit) in lits.iter().enumerate() {
-                self.signal_map.insert((sig_ref, bit as u32), *lit);
-            }
+        for (key, lit) in result_map {
+            self.signal_map.insert(key, lit);
         }
     }
 
