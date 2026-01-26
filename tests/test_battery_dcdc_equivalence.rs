@@ -334,3 +334,278 @@ fn test_battery_dcdc_bmc_equivalence() {
         }
     }
 }
+
+/// Debug test to investigate lockstep_tx.fault mismatch
+#[test]
+fn test_debug_lockstep_fault_mismatch() {
+    use skalp_formal::{MirToAig, GateNetlistToAig, Aig, AigNode};
+    use std::collections::HashMap;
+
+    let path = Path::new(BATTERY_DCDC_PATH);
+    let hir = parse_and_build_hir_from_file(path).expect("HIR parse failed");
+
+    let compiler = MirCompiler::new();
+    let mir = compiler.compile_to_mir(&hir).expect("MIR compile failed");
+
+    let library = get_stdlib_library("generic_asic").expect("Library load failed");
+
+    let top_module = mir.modules.iter()
+        .find(|m| m.name == TOP_MODULE)
+        .expect("Top module not found");
+
+    let hier_lir = lower_mir_hierarchical_with_top(&mir, Some(TOP_MODULE));
+    let hier_netlist = map_hierarchical_to_gates(&hier_lir, &library);
+    let netlist = hier_netlist.flatten();
+
+    // Convert both to sequential AIGs
+    let mir_aig = MirToAig::new(top_module).convert_sequential();
+    let gate_aig = GateNetlistToAig::new().convert_sequential(&netlist);
+
+    println!("=== Debugging lockstep_tx.fault Mismatch ===\n");
+
+    // Find the lockstep_tx.fault output in both AIGs
+    println!("--- MIR AIG Outputs containing 'lockstep' or 'fault' ---");
+    for (idx, (lit, name)) in mir_aig.outputs.iter().zip(mir_aig.output_names.iter()).enumerate() {
+        if name.contains("lockstep") || name.contains("fault") {
+            println!("  [{}] {} -> node {} (inv={})", idx, name, lit.node.0, lit.inverted);
+        }
+    }
+
+    println!("\n--- Gate AIG Outputs containing 'lockstep' or 'fault' ---");
+    for (idx, (lit, name)) in gate_aig.outputs.iter().zip(gate_aig.output_names.iter()).enumerate() {
+        if name.contains("lockstep") || name.contains("fault") {
+            println!("  [{}] {} -> node {} (inv={})", idx, name, lit.node.0, lit.inverted);
+        }
+    }
+
+    // Trace back the logic for lockstep_tx__fault in both
+    fn trace_aig_node(aig: &Aig, node_id: u32, depth: usize, max_depth: usize) {
+        if depth > max_depth {
+            println!("{}...", "  ".repeat(depth));
+            return;
+        }
+        let node = &aig.nodes[node_id as usize];
+        let indent = "  ".repeat(depth);
+        match node {
+            AigNode::False => println!("{}[{}] FALSE", indent, node_id),
+            AigNode::Input { name } => println!("{}[{}] INPUT: {}", indent, node_id, name),
+            AigNode::And { left, right } => {
+                println!("{}[{}] AND", indent, node_id);
+                println!("{}  left: node {} (inv={})", indent, left.node.0, left.inverted);
+                trace_aig_node(aig, left.node.0, depth + 1, max_depth);
+                println!("{}  right: node {} (inv={})", indent, right.node.0, right.inverted);
+                trace_aig_node(aig, right.node.0, depth + 1, max_depth);
+            }
+            AigNode::Latch { name, next, init } => {
+                println!("{}[{}] LATCH: {} (init={})", indent, node_id, name, init);
+                println!("{}  next: node {} (inv={})", indent, next.node.0, next.inverted);
+            }
+        }
+    }
+
+    // Find the specific lockstep_tx__fault output
+    let mir_fault_output = mir_aig.output_names.iter()
+        .position(|n| n.contains("lockstep_tx") && n.contains("fault"));
+    let gate_fault_output = gate_aig.output_names.iter()
+        .position(|n| n.contains("lockstep_tx") && n.contains("fault"));
+
+    if let Some(idx) = mir_fault_output {
+        println!("\n--- MIR AIG: {} Logic Tree (depth 4) ---", mir_aig.output_names[idx]);
+        let lit = mir_aig.outputs[idx];
+        println!("Output is node {} with inversion={}", lit.node.0, lit.inverted);
+        trace_aig_node(&mir_aig, lit.node.0, 0, 4);
+    }
+
+    if let Some(idx) = gate_fault_output {
+        println!("\n--- Gate AIG: {} Logic Tree (depth 4) ---", gate_aig.output_names[idx]);
+        let lit = gate_aig.outputs[idx];
+        println!("Output is node {} with inversion={}", lit.node.0, lit.inverted);
+        trace_aig_node(&gate_aig, lit.node.0, 0, 4);
+    }
+
+    // Simulate both AIGs with all inputs = 0 to see output values
+    println!("\n--- Simulation with all inputs = 0 ---");
+
+    fn simulate_aig_zero_inputs(aig: &Aig) -> HashMap<u32, bool> {
+        let mut values: HashMap<u32, bool> = HashMap::new();
+        values.insert(0, false); // Node 0 is always false
+
+        for (idx, node) in aig.nodes.iter().enumerate() {
+            match node {
+                AigNode::False => { values.insert(idx as u32, false); }
+                AigNode::Input { .. } => { values.insert(idx as u32, false); } // All inputs = 0
+                AigNode::Latch { init, .. } => { values.insert(idx as u32, *init); }
+                AigNode::And { left, right } => {
+                    let l = values.get(&left.node.0).copied().unwrap_or(false);
+                    let l = if left.inverted { !l } else { l };
+                    let r = values.get(&right.node.0).copied().unwrap_or(false);
+                    let r = if right.inverted { !r } else { r };
+                    values.insert(idx as u32, l && r);
+                }
+            }
+        }
+        values
+    }
+
+    let mir_values = simulate_aig_zero_inputs(&mir_aig);
+    let gate_values = simulate_aig_zero_inputs(&gate_aig);
+
+    println!("\nMIR outputs (all inputs=0, latches=init):");
+    for (lit, name) in mir_aig.outputs.iter().zip(mir_aig.output_names.iter()) {
+        if name.contains("lockstep") || name.contains("fault") {
+            let v = mir_values.get(&lit.node.0).copied().unwrap_or(false);
+            let v = if lit.inverted { !v } else { v };
+            println!("  {} = {}", name, v);
+        }
+    }
+
+    println!("\nGate outputs (all inputs=0, latches=init):");
+    for (lit, name) in gate_aig.outputs.iter().zip(gate_aig.output_names.iter()) {
+        if name.contains("lockstep") || name.contains("fault") {
+            let v = gate_values.get(&lit.node.0).copied().unwrap_or(false);
+            let v = if lit.inverted { !v } else { v };
+            println!("  {} = {}", name, v);
+        }
+    }
+
+    // Find what drives lockstep_tx__fault in the gate netlist
+    println!("\n--- Investigating lockstep_tx__fault in GateNetlist ---");
+
+    // Find the net for lockstep_tx__fault
+    let fault_net = netlist.nets.iter()
+        .find(|n| n.name.contains("lockstep_tx__fault") && !n.name.contains("unknown"));
+
+    if let Some(net) = fault_net {
+        println!("Found net: {} (id={}, is_output={}, is_input={})",
+            net.name, net.id.0, net.is_output, net.is_input);
+
+        // Find cells that drive this net (have it as output)
+        let driving_cells: Vec<_> = netlist.cells.iter()
+            .filter(|c| c.outputs.iter().any(|o| o.0 == net.id.0))
+            .collect();
+
+        println!("Cells driving this net: {}", driving_cells.len());
+        for cell in driving_cells.iter().take(5) {
+            println!("  Cell: {} (function: {:?})", cell.cell_type, cell.function);
+            println!("    Path: {}", cell.path);
+            println!("    Inputs: {:?}", cell.inputs.iter()
+                .map(|i| &netlist.nets[i.0 as usize].name)
+                .collect::<Vec<_>>());
+            println!("    Outputs: {:?}", cell.outputs.iter()
+                .map(|o| &netlist.nets[o.0 as usize].name)
+                .collect::<Vec<_>>());
+            if cell.clock.is_some() {
+                println!("    Has clock: sequential cell");
+            }
+        }
+    } else {
+        println!("Net lockstep_tx__fault not found directly");
+
+        // List all nets containing lockstep_tx
+        println!("\nNets containing 'lockstep_tx':");
+        for net in netlist.nets.iter() {
+            if net.name.contains("lockstep_tx") {
+                println!("  {} (id={}, is_output={}, is_input={})",
+                    net.name, net.id.0, net.is_output, net.is_input);
+            }
+        }
+    }
+
+    // Also trace _t31
+    println!("\n--- Investigating _t31 ---");
+    let t31_net = netlist.nets.iter().find(|n| n.name == "top._t31");
+    if let Some(net) = t31_net {
+        println!("Found net: {} (id={}, is_output={}, is_input={})",
+            net.name, net.id.0, net.is_output, net.is_input);
+
+        let driving_cells: Vec<_> = netlist.cells.iter()
+            .filter(|c| c.outputs.iter().any(|o| o.0 == net.id.0))
+            .collect();
+
+        println!("Cells driving _t31: {}", driving_cells.len());
+        for cell in driving_cells.iter().take(5) {
+            println!("  Cell: {} (function: {:?})", cell.cell_type, cell.function);
+            println!("    Path: {}", cell.path);
+            println!("    Inputs: {:?}", cell.inputs.iter()
+                .map(|i| &netlist.nets[i.0 as usize].name)
+                .collect::<Vec<_>>());
+            println!("    Outputs: {:?}", cell.outputs.iter()
+                .map(|o| &netlist.nets[o.0 as usize].name)
+                .collect::<Vec<_>>());
+        }
+    } else {
+        println!("_t31 net not found");
+    }
+
+    // Trace faults__bms_timeout
+    println!("\n--- Investigating faults__bms_timeout ---");
+    let bms_timeout_net = netlist.nets.iter().find(|n| n.name.contains("faults__bms_timeout") && !n.name.contains("unknown"));
+    if let Some(net) = bms_timeout_net {
+        println!("Found net: {} (id={}, is_output={}, is_input={})",
+            net.name, net.id.0, net.is_output, net.is_input);
+
+        let driving_cells: Vec<_> = netlist.cells.iter()
+            .filter(|c| c.outputs.iter().any(|o| o.0 == net.id.0))
+            .collect();
+
+        println!("Cells driving this net: {}", driving_cells.len());
+        for cell in driving_cells.iter().take(5) {
+            println!("  Cell: {} (function: {:?})", cell.cell_type, cell.function);
+            println!("    Path: {}", cell.path);
+            println!("    Inputs: {:?}", cell.inputs.iter()
+                .map(|i| &netlist.nets[i.0 as usize].name)
+                .collect::<Vec<_>>());
+            println!("    Outputs: {:?}", cell.outputs.iter()
+                .map(|o| &netlist.nets[o.0 as usize].name)
+                .collect::<Vec<_>>());
+        }
+    }
+
+    // Check what unknown inputs remain
+    println!("\n--- Unknown inputs in Gate AIG ---");
+    let unknown_count = gate_aig.input_names.iter()
+        .filter(|n| n.contains("unknown"))
+        .count();
+    println!("Total unknown inputs: {}", unknown_count);
+    println!("Sample unknown inputs:");
+    for name in gate_aig.input_names.iter().filter(|n| n.contains("unknown")).take(10) {
+        println!("  {}", name);
+    }
+
+    // Trace _t0 to see what cell type drives it
+    println!("\n--- Investigating _t0 ---");
+    let t0_net = netlist.nets.iter().find(|n| n.name == "top._t0[1]");
+    if let Some(net) = t0_net {
+        println!("Found net: {} (id={})", net.name, net.id.0);
+        let driving_cells: Vec<_> = netlist.cells.iter()
+            .filter(|c| c.outputs.iter().any(|o| o.0 == net.id.0))
+            .collect();
+        println!("Cells driving this net: {}", driving_cells.len());
+        for cell in driving_cells.iter().take(3) {
+            println!("  Cell type: {} (function: {:?})", cell.cell_type, cell.function);
+            println!("    Path: {}", cell.path);
+        }
+    }
+
+    // Get unique cell types that produce unknown outputs
+    println!("\n--- Cell types producing unknown outputs ---");
+    let unknown_nets: std::collections::HashSet<_> = gate_aig.input_names.iter()
+        .filter(|n| n.contains("unknown"))
+        .map(|n| n.replace("_unknown", ""))
+        .collect();
+
+    let mut unknown_cell_types: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for net_name in unknown_nets.iter().take(100) {
+        if let Some(net) = netlist.nets.iter().find(|n| &n.name == net_name) {
+            for cell in netlist.cells.iter() {
+                if cell.outputs.iter().any(|o| o.0 == net.id.0) {
+                    let key = format!("{:?}", cell.function);
+                    *unknown_cell_types.entry(key).or_insert(0) += 1;
+                }
+            }
+        }
+    }
+    for (func, count) in unknown_cell_types.iter().take(10) {
+        println!("  {}: {} occurrences", func, count);
+    }
+}

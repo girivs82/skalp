@@ -833,13 +833,185 @@ impl GateNetlistToAig {
                 }
             }
 
-            // For unknown cell types, treat output as an input
+            // For unknown cell types, try to infer from cell_type name
             // Note: Sequential cells are handled above via is_sequential() check
             _ => {
-                if let Some(out) = output_net {
-                    let net = &netlist.nets[out.0 as usize];
-                    let lit = self.aig.add_input(format!("{}_unknown", net.name));
-                    self.set_net(out, lit);
+                // Try to infer cell function from cell_type name
+                let cell_type_upper = cell.cell_type.to_uppercase();
+                let inputs: Vec<_> = cell.inputs.iter().map(|&id| self.get_net(id)).collect();
+
+                let handled = if cell_type_upper.starts_with("BUF") || cell_type_upper.contains("BUFFER") {
+                    // Buffer: output = input
+                    if !inputs.is_empty() {
+                        if let Some(out) = output_net {
+                            self.set_net(out, inputs[0]);
+                        }
+                        true
+                    } else {
+                        false
+                    }
+                } else if cell_type_upper.starts_with("INV") || cell_type_upper.starts_with("NOT") {
+                    // Inverter: output = !input
+                    if !inputs.is_empty() {
+                        if let Some(out) = output_net {
+                            self.set_net(out, inputs[0].invert());
+                        }
+                        true
+                    } else {
+                        false
+                    }
+                } else if cell_type_upper.starts_with("AND") {
+                    // AND gate
+                    if inputs.len() >= 2 {
+                        let mut result = inputs[0];
+                        for &inp in &inputs[1..] {
+                            result = self.aig.add_and(result, inp);
+                        }
+                        if let Some(out) = output_net {
+                            self.set_net(out, result);
+                        }
+                        true
+                    } else {
+                        false
+                    }
+                } else if cell_type_upper.starts_with("OR") && !cell_type_upper.starts_with("ORN") {
+                    // OR gate (not ORNOR)
+                    if inputs.len() >= 2 {
+                        let mut result = inputs[0];
+                        for &inp in &inputs[1..] {
+                            result = self.aig.add_or(result, inp);
+                        }
+                        if let Some(out) = output_net {
+                            self.set_net(out, result);
+                        }
+                        true
+                    } else {
+                        false
+                    }
+                } else if cell_type_upper.starts_with("NAND") {
+                    // NAND gate
+                    if inputs.len() >= 2 {
+                        let mut result = inputs[0];
+                        for &inp in &inputs[1..] {
+                            result = self.aig.add_and(result, inp);
+                        }
+                        if let Some(out) = output_net {
+                            self.set_net(out, result.invert());
+                        }
+                        true
+                    } else {
+                        false
+                    }
+                } else if cell_type_upper.starts_with("NOR") {
+                    // NOR gate
+                    if inputs.len() >= 2 {
+                        let mut result = inputs[0];
+                        for &inp in &inputs[1..] {
+                            result = self.aig.add_or(result, inp);
+                        }
+                        if let Some(out) = output_net {
+                            self.set_net(out, result.invert());
+                        }
+                        true
+                    } else {
+                        false
+                    }
+                } else if cell_type_upper.starts_with("XOR") {
+                    // XOR gate
+                    if inputs.len() >= 2 {
+                        let result = self.aig.add_xor(inputs[0], inputs[1]);
+                        if let Some(out) = output_net {
+                            self.set_net(out, result);
+                        }
+                        true
+                    } else {
+                        false
+                    }
+                } else if cell_type_upper.starts_with("XNOR") {
+                    // XNOR gate
+                    if inputs.len() >= 2 {
+                        let result = self.aig.add_xor(inputs[0], inputs[1]).invert();
+                        if let Some(out) = output_net {
+                            self.set_net(out, result);
+                        }
+                        true
+                    } else {
+                        false
+                    }
+                } else if cell_type_upper.starts_with("MUX") {
+                    // MUX: inputs = [sel, d0, d1]
+                    if inputs.len() >= 3 {
+                        let result = self.aig.add_mux(inputs[0], inputs[1], inputs[2]);
+                        if let Some(out) = output_net {
+                            self.set_net(out, result);
+                        }
+                        true
+                    } else {
+                        false
+                    }
+                } else if cell_type_upper.contains("TIE0") || cell_type_upper.contains("TIELOW") || cell_type_upper.contains("TIE_LOW") {
+                    // Tie to 0
+                    if let Some(out) = output_net {
+                        self.set_net(out, self.aig.false_lit());
+                    }
+                    true
+                } else if cell_type_upper.contains("TIE1") || cell_type_upper.contains("TIEHIGH") || cell_type_upper.contains("TIE_HIGH") {
+                    // Tie to 1
+                    if let Some(out) = output_net {
+                        self.set_net(out, self.aig.true_lit());
+                    }
+                    true
+                } else if cell_type_upper.contains("FULLADDER") || cell_type_upper.contains("FA_") {
+                    // Full adder: sum = a XOR b XOR cin, cout = (a AND b) OR (cin AND (a XOR b))
+                    // Outputs are typically [sum, carry] or [cout, sum]
+                    if inputs.len() >= 3 && cell.outputs.len() >= 2 {
+                        let a = inputs[0];
+                        let b = inputs[1];
+                        let cin = inputs[2];
+
+                        // a XOR b
+                        let a_xor_b = self.aig.add_xor(a, b);
+                        // sum = a XOR b XOR cin
+                        let sum = self.aig.add_xor(a_xor_b, cin);
+                        // cout = (a AND b) OR (cin AND (a XOR b))
+                        let a_and_b = self.aig.add_and(a, b);
+                        let cin_and_axorb = self.aig.add_and(cin, a_xor_b);
+                        let cout = self.aig.add_or(a_and_b, cin_and_axorb);
+
+                        // Output order varies - try common orderings
+                        if cell.outputs.len() >= 2 {
+                            self.set_net(cell.outputs[0], sum);
+                            self.set_net(cell.outputs[1], cout);
+                        }
+                        true
+                    } else {
+                        false
+                    }
+                } else if cell_type_upper.contains("HALFADDER") || cell_type_upper.contains("HA_") {
+                    // Half adder: sum = a XOR b, cout = a AND b
+                    if inputs.len() >= 2 && cell.outputs.len() >= 2 {
+                        let a = inputs[0];
+                        let b = inputs[1];
+
+                        let sum = self.aig.add_xor(a, b);
+                        let cout = self.aig.add_and(a, b);
+
+                        self.set_net(cell.outputs[0], sum);
+                        self.set_net(cell.outputs[1], cout);
+                        true
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                };
+
+                if !handled {
+                    if let Some(out) = output_net {
+                        let net = &netlist.nets[out.0 as usize];
+                        let lit = self.aig.add_input(format!("{}_unknown", net.name));
+                        self.set_net(out, lit);
+                    }
                 }
             }
         }
