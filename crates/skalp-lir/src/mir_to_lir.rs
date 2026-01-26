@@ -2342,8 +2342,11 @@ impl MirToLirTransform {
     /// Infer whether an expression is signed (uses int type)
     fn infer_expression_is_signed(&self, expr: &Expression) -> bool {
         match &expr.kind {
-            // Integer literals can be treated as signed
-            ExpressionKind::Literal(Value::Integer(_)) => true,
+            // BUG FIX: Integer literals should NOT automatically be signed.
+            // They should adopt the signedness of the context (typically unsigned).
+            // This was causing unsigned comparisons like `nat[4] < 10` to use
+            // signed comparison, giving wrong results when MSB is set.
+            ExpressionKind::Literal(Value::Integer(_)) => false,
             ExpressionKind::Ref(lvalue) => self.is_lvalue_signed(lvalue),
             ExpressionKind::Binary { left, right, .. } => {
                 // If either operand is signed, treat as signed comparison

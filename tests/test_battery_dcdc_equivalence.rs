@@ -609,3 +609,475 @@ fn test_debug_lockstep_fault_mismatch() {
         println!("  {}: {} occurrences", func, count);
     }
 }
+
+/// Debug test to investigate cycle 1 lockstep_fault mismatch
+#[test]
+fn test_debug_cycle1_lockstep_fault() {
+    use skalp_formal::{MirToAig, GateNetlistToAig, Aig, AigNode, AigLit, normalize_port_name};
+    use std::collections::HashMap;
+
+    let path = Path::new(BATTERY_DCDC_PATH);
+    let hir = parse_and_build_hir_from_file(path).expect("HIR parse failed");
+
+    let compiler = MirCompiler::new();
+    let mir = compiler.compile_to_mir(&hir).expect("MIR compile failed");
+
+    let library = get_stdlib_library("generic_asic").expect("Library load failed");
+
+    let top_module = mir.modules.iter()
+        .find(|m| m.name == TOP_MODULE)
+        .expect("Top module not found");
+
+    let hier_lir = lower_mir_hierarchical_with_top(&mir, Some(TOP_MODULE));
+    let hier_netlist = map_hierarchical_to_gates(&hier_lir, &library);
+    let netlist = hier_netlist.flatten();
+
+    // Convert both to sequential AIGs
+    let mir_aig = MirToAig::new(top_module).convert_sequential();
+    let gate_aig = GateNetlistToAig::new().convert_sequential(&netlist);
+
+    println!("=== Debugging Cycle 1 lockstep_fault Mismatch ===\n");
+    println!("MIR AIG: {} inputs, {} outputs, {} latches",
+             mir_aig.inputs.len(), mir_aig.outputs.len(), mir_aig.latches.len());
+    println!("Gate AIG: {} inputs, {} outputs, {} latches",
+             gate_aig.inputs.len(), gate_aig.outputs.len(), gate_aig.latches.len());
+
+    // Find the lockstep_fault output in both AIGs
+    let mir_lockstep_fault_idx = mir_aig.output_names.iter()
+        .position(|n| n == "lockstep_fault" || n.contains("lockstep_fault"));
+    let gate_lockstep_fault_idx = gate_aig.output_names.iter()
+        .position(|n| n == "lockstep_fault" || n.contains("lockstep_fault"));
+
+    println!("\nMIR lockstep_fault output idx: {:?}", mir_lockstep_fault_idx);
+    println!("Gate lockstep_fault output idx: {:?}", gate_lockstep_fault_idx);
+
+    // Find lockstep_fault in outputs
+    println!("\n--- MIR outputs containing 'lockstep_fault' ---");
+    for (i, name) in mir_aig.output_names.iter().enumerate() {
+        if name.contains("lockstep_fault") {
+            println!("  [{}] {}", i, name);
+        }
+    }
+    println!("\n--- Gate outputs containing 'lockstep_fault' ---");
+    for (i, name) in gate_aig.output_names.iter().enumerate() {
+        if name.contains("lockstep_fault") {
+            println!("  [{}] {}", i, name);
+        }
+    }
+
+    // Find lockstep_fault LATCH in both AIGs and trace back their next-state logic
+    fn describe_node(aig: &Aig, node_id: u32, depth: usize) -> String {
+        if depth > 3 {
+            return "...".to_string();
+        }
+        match &aig.nodes[node_id as usize] {
+            AigNode::False => "FALSE".to_string(),
+            AigNode::Input { name } => format!("INPUT({})", name),
+            AigNode::And { left, right } => {
+                let l = describe_node(aig, left.node.0, depth + 1);
+                let r = describe_node(aig, right.node.0, depth + 1);
+                format!("AND({}{}inv, {}{}inv)",
+                        l, if left.inverted { "+" } else { "-" },
+                        r, if right.inverted { "+" } else { "-" })
+            }
+            AigNode::Latch { name, .. } => format!("LATCH({})", name),
+        }
+    }
+
+    println!("\n--- MIR latches containing 'lockstep' ---");
+    for &latch_id in &mir_aig.latches {
+        if let AigNode::Latch { name, next, init } = &mir_aig.nodes[latch_id.0 as usize] {
+            if name.contains("lockstep_fault") {
+                println!("  [{}] {} (init={}) next=node {} inv={}",
+                         latch_id.0, name, init, next.node.0, next.inverted);
+                let next_desc = describe_node(&mir_aig, next.node.0, 0);
+                println!("    next-state logic: {}", next_desc);
+            }
+        }
+    }
+    println!("\n--- Gate latches containing 'lockstep' ---");
+    for &latch_id in &gate_aig.latches {
+        if let AigNode::Latch { name, next, init } = &gate_aig.nodes[latch_id.0 as usize] {
+            if name.contains("lockstep_fault") {
+                println!("  [{}] {} (init={}) next=node {} inv={}",
+                         latch_id.0, name, init, next.node.0, next.inverted);
+                let next_desc = describe_node(&gate_aig, next.node.0, 0);
+                println!("    next-state logic: {}", next_desc);
+            }
+        }
+    }
+
+    // Trace the lockstep_fault DFF in the gate netlist
+    println!("\n--- DFF cell for lockstep_fault in gate netlist ---");
+    for cell in netlist.cells.iter() {
+        if cell.is_sequential() {
+            if let Some(out) = cell.outputs.first() {
+                let out_net = &netlist.nets[out.0 as usize];
+                if out_net.name.contains("lockstep_fault") {
+                    println!("Found DFF cell for lockstep_fault:");
+                    println!("  Cell type: {} (function: {:?})", cell.cell_type, cell.function);
+                    println!("  Path: {}", cell.path);
+                    if let Some(clk) = cell.clock {
+                        let clk_net = &netlist.nets[clk.0 as usize];
+                        println!("  Clock: {} (net id={})", clk_net.name, clk.0);
+                    }
+                    if let Some(rst) = cell.reset {
+                        let rst_net = &netlist.nets[rst.0 as usize];
+                        println!("  Reset: {} (net id={})", rst_net.name, rst.0);
+                    }
+                    println!("  Inputs (D):");
+                    for (i, inp) in cell.inputs.iter().enumerate() {
+                        let inp_net = &netlist.nets[inp.0 as usize];
+                        println!("    [{i}] {} (net id={})", inp_net.name, inp.0);
+
+                        // Find what drives this input net - trace recursively
+                        fn trace_drivers(netlist: &skalp_lir::GateNetlist, net_id: u32, depth: usize) {
+                            if depth > 3 { return; }
+                            let indent = "        ".repeat(depth);
+                            for cell in netlist.cells.iter() {
+                                if cell.outputs.iter().any(|o| o.0 == net_id) {
+                                    println!("{}driven by: {} ({:?})", indent, cell.cell_type, cell.function);
+                                    if cell.inputs.len() <= 3 {
+                                        for (j, inp) in cell.inputs.iter().enumerate() {
+                                            let inp_net = &netlist.nets[inp.0 as usize];
+                                            println!("{}  input[{}]: {}", indent, j, inp_net.name);
+                                            trace_drivers(netlist, inp.0, depth + 1);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        trace_drivers(&netlist, inp.0, 1);
+                    }
+                    println!("  Outputs (Q):");
+                    for (i, outp) in cell.outputs.iter().enumerate() {
+                        let out_net = &netlist.nets[outp.0 as usize];
+                        println!("    [{i}] {} (net id={})", out_net.name, outp.0);
+                    }
+                }
+            }
+        }
+    }
+
+    // Match primary inputs
+    fn match_inputs(aig1: &Aig, aig2: &Aig) -> (Vec<String>, HashMap<String, u32>, HashMap<String, u32>) {
+        let mut matched = Vec::new();
+        let mut aig1_map: HashMap<String, u32> = HashMap::new();
+        let mut aig2_map: HashMap<String, u32> = HashMap::new();
+
+        for (idx, node) in aig1.nodes.iter().enumerate() {
+            if let AigNode::Input { name } = node {
+                let normalized = normalize_port_name(name);
+                aig1_map.insert(normalized.key(), idx as u32);
+            }
+        }
+
+        for (idx, node) in aig2.nodes.iter().enumerate() {
+            if let AigNode::Input { name } = node {
+                let normalized = normalize_port_name(name);
+                aig2_map.insert(normalized.key(), idx as u32);
+            }
+        }
+
+        for key in aig1_map.keys() {
+            if aig2_map.contains_key(key) {
+                matched.push(key.clone());
+            }
+        }
+
+        (matched, aig1_map, aig2_map)
+    }
+
+    let (matched_inputs, mir_input_map, gate_input_map) = match_inputs(&mir_aig, &gate_aig);
+    println!("\n{} matched inputs", matched_inputs.len());
+
+    // Simulate function
+    fn simulate_aig(
+        aig: &Aig,
+        inputs: &HashMap<String, bool>,
+        latch_state: &HashMap<u32, bool>,
+        input_map: &HashMap<String, u32>,
+    ) -> (HashMap<u32, bool>, HashMap<u32, bool>) {  // (all_values, next_latch_state)
+        let mut values: HashMap<u32, bool> = HashMap::new();
+        values.insert(0, false);
+
+        // Set inputs
+        for (key, &val) in inputs {
+            if let Some(&node_id) = input_map.get(key) {
+                values.insert(node_id, val);
+            }
+        }
+
+        // Set latch outputs
+        for (&latch_id, &val) in latch_state {
+            values.insert(latch_id, val);
+        }
+
+        // Evaluate
+        for (idx, node) in aig.nodes.iter().enumerate() {
+            let idx = idx as u32;
+            match node {
+                AigNode::False => { values.insert(idx, false); }
+                AigNode::Input { name } => {
+                    if !values.contains_key(&idx) {
+                        let normalized = normalize_port_name(name);
+                        if let Some(&val) = inputs.get(&normalized.key()) {
+                            values.insert(idx, val);
+                        } else {
+                            values.insert(idx, false);
+                        }
+                    }
+                }
+                AigNode::And { left, right } => {
+                    let l = values.get(&left.node.0).copied().unwrap_or(false);
+                    let r = values.get(&right.node.0).copied().unwrap_or(false);
+                    let l = if left.inverted { !l } else { l };
+                    let r = if right.inverted { !r } else { r };
+                    values.insert(idx, l && r);
+                }
+                AigNode::Latch { .. } => {
+                    if !values.contains_key(&idx) {
+                        values.insert(idx, false);
+                    }
+                }
+            }
+        }
+
+        // Compute next latch state
+        let mut next_state: HashMap<u32, bool> = HashMap::new();
+        for &latch_id in &aig.latches {
+            if let AigNode::Latch { next, .. } = &aig.nodes[latch_id.0 as usize] {
+                let val = values.get(&next.node.0).copied().unwrap_or(false);
+                let val = if next.inverted { !val } else { val };
+                next_state.insert(latch_id.0, val);
+            }
+        }
+
+        (values, next_state)
+    }
+
+    fn get_initial_state(aig: &Aig) -> HashMap<u32, bool> {
+        let mut state = HashMap::new();
+        for &latch_id in &aig.latches {
+            if let AigNode::Latch { init, .. } = &aig.nodes[latch_id.0 as usize] {
+                state.insert(latch_id.0, *init);
+            }
+        }
+        state
+    }
+
+    // Find a specific input pattern that causes mismatch
+    // Try all zeros first
+    let mut test_inputs: HashMap<String, bool> = HashMap::new();
+    for key in &matched_inputs {
+        test_inputs.insert(key.clone(), false);
+    }
+
+    // Simulate cycle 0
+    println!("\n=== Cycle 0 (all inputs = false) ===");
+    let mir_state0 = get_initial_state(&mir_aig);
+    let gate_state0 = get_initial_state(&gate_aig);
+
+    let (mir_vals0, mir_next0) = simulate_aig(&mir_aig, &test_inputs, &mir_state0, &mir_input_map);
+    let (gate_vals0, gate_next0) = simulate_aig(&gate_aig, &test_inputs, &gate_state0, &gate_input_map);
+
+    // Print lockstep-related latch values after cycle 0
+    println!("\nMIR latch values after cycle 0:");
+    for &latch_id in &mir_aig.latches {
+        if let AigNode::Latch { name, .. } = &mir_aig.nodes[latch_id.0 as usize] {
+            if name.contains("lockstep") {
+                let curr = mir_state0.get(&latch_id.0).copied().unwrap_or(false);
+                let next = mir_next0.get(&latch_id.0).copied().unwrap_or(false);
+                println!("  {} : curr={} next={}", name, curr, next);
+            }
+        }
+    }
+
+    println!("\nGate latch values after cycle 0:");
+    for &latch_id in &gate_aig.latches {
+        if let AigNode::Latch { name, .. } = &gate_aig.nodes[latch_id.0 as usize] {
+            if name.contains("lockstep") {
+                let curr = gate_state0.get(&latch_id.0).copied().unwrap_or(false);
+                let next = gate_next0.get(&latch_id.0).copied().unwrap_or(false);
+                println!("  {} : curr={} next={}", name, curr, next);
+            }
+        }
+    }
+
+    // Simulate cycle 1
+    println!("\n=== Cycle 1 ===");
+    let (mir_vals1, mir_next1) = simulate_aig(&mir_aig, &test_inputs, &mir_next0, &mir_input_map);
+    let (gate_vals1, gate_next1) = simulate_aig(&gate_aig, &test_inputs, &gate_next0, &gate_input_map);
+
+    println!("\nMIR latch values after cycle 1:");
+    for &latch_id in &mir_aig.latches {
+        if let AigNode::Latch { name, .. } = &mir_aig.nodes[latch_id.0 as usize] {
+            if name.contains("lockstep") {
+                let curr = mir_next0.get(&latch_id.0).copied().unwrap_or(false);
+                let next = mir_next1.get(&latch_id.0).copied().unwrap_or(false);
+                println!("  {} : curr={} next={}", name, curr, next);
+            }
+        }
+    }
+
+    println!("\nGate latch values after cycle 1:");
+    for &latch_id in &gate_aig.latches {
+        if let AigNode::Latch { name, .. } = &gate_aig.nodes[latch_id.0 as usize] {
+            if name.contains("lockstep") {
+                let curr = gate_next0.get(&latch_id.0).copied().unwrap_or(false);
+                let next = gate_next1.get(&latch_id.0).copied().unwrap_or(false);
+                println!("  {} : curr={} next={}", name, curr, next);
+            }
+        }
+    }
+
+    // Check output values at cycle 1
+    println!("\n=== Output values at cycle 1 ===");
+    for (i, name) in mir_aig.output_names.iter().enumerate() {
+        if name.contains("lockstep_fault") {
+            let lit = mir_aig.outputs[i];
+            let val = mir_vals1.get(&lit.node.0).copied().unwrap_or(false);
+            let val = if lit.inverted { !val } else { val };
+            println!("MIR  {} = {}", name, val);
+        }
+    }
+    for (i, name) in gate_aig.output_names.iter().enumerate() {
+        if name.contains("lockstep_fault") {
+            let lit = gate_aig.outputs[i];
+            let val = gate_vals1.get(&lit.node.0).copied().unwrap_or(false);
+            let val = if lit.inverted { !val } else { val };
+            println!("Gate {} = {}", name, val);
+        }
+    }
+
+    // Try random inputs to find a mismatch
+    println!("\n=== Searching for inputs that cause mismatch ===");
+    let mut rng = rand::thread_rng();
+    use rand::Rng;
+
+    for trial in 0..1000 {
+        // Generate random inputs
+        let mut inputs: HashMap<String, bool> = HashMap::new();
+        for key in &matched_inputs {
+            inputs.insert(key.clone(), rng.gen());
+        }
+
+        // Debug: Print cycle 0 inputs for first few trials
+        if trial < 3 {
+            println!("\n--- Trial {} Cycle 0 inputs ---", trial);
+            println!("  rst = {}", inputs.get("rst").copied().unwrap_or(false));
+            println!("  lockstep_rx_valid = {}", inputs.get("lockstep_rx_valid").copied().unwrap_or(false));
+        }
+
+        // Simulate both AIGs
+        let mir_state0 = get_initial_state(&mir_aig);
+        let gate_state0 = get_initial_state(&gate_aig);
+
+        let (_, mir_next0) = simulate_aig(&mir_aig, &inputs, &mir_state0, &mir_input_map);
+        let (_, gate_next0) = simulate_aig(&gate_aig, &inputs, &gate_state0, &gate_input_map);
+
+        // Debug: show lockstep-related next states after cycle 0 for first few trials
+        if trial < 3 {
+            println!("\n  MIR next states after cycle 0:");
+            for &latch_id in &mir_aig.latches {
+                if let AigNode::Latch { name, .. } = &mir_aig.nodes[latch_id.0 as usize] {
+                    if name.contains("lockstep") {
+                        let next = mir_next0.get(&latch_id.0).copied().unwrap_or(false);
+                        println!("    {} = {}", name, next);
+                    }
+                }
+            }
+            println!("  Gate next states after cycle 0:");
+            for &latch_id in &gate_aig.latches {
+                if let AigNode::Latch { name, .. } = &gate_aig.nodes[latch_id.0 as usize] {
+                    if name.contains("lockstep") {
+                        let next = gate_next0.get(&latch_id.0).copied().unwrap_or(false);
+                        println!("    {} = {}", name, next);
+                    }
+                }
+            }
+        }
+
+        // Check outputs at cycle 0
+        let (mir_vals0, _) = simulate_aig(&mir_aig, &inputs, &mir_state0, &mir_input_map);
+        let (gate_vals0, _) = simulate_aig(&gate_aig, &inputs, &gate_state0, &gate_input_map);
+
+        // Generate new random inputs for cycle 1
+        let mut inputs1: HashMap<String, bool> = HashMap::new();
+        for key in &matched_inputs {
+            inputs1.insert(key.clone(), rng.gen());
+        }
+
+        let (mir_vals1, _) = simulate_aig(&mir_aig, &inputs1, &mir_next0, &mir_input_map);
+        let (gate_vals1, _) = simulate_aig(&gate_aig, &inputs1, &gate_next0, &gate_input_map);
+
+        // Check for lockstep_fault mismatch
+        for (i, name) in mir_aig.output_names.iter().enumerate() {
+            if name.contains("lockstep_fault") {
+                let mir_lit = mir_aig.outputs[i];
+                let mir_val = mir_vals1.get(&mir_lit.node.0).copied().unwrap_or(false);
+                let mir_val = if mir_lit.inverted { !mir_val } else { mir_val };
+
+                // Find matching gate output
+                for (j, gname) in gate_aig.output_names.iter().enumerate() {
+                    let mir_norm = normalize_port_name(name);
+                    let gate_norm = normalize_port_name(gname);
+                    if mir_norm.key() == gate_norm.key() {
+                        let gate_lit = gate_aig.outputs[j];
+                        let gate_val = gate_vals1.get(&gate_lit.node.0).copied().unwrap_or(false);
+                        let gate_val = if gate_lit.inverted { !gate_val } else { gate_val };
+
+                        if mir_val != gate_val {
+                            println!("\nFound mismatch at trial {} on cycle 1!", trial);
+                            println!("Output: {} (MIR) vs {} (Gate)", name, gname);
+                            println!("MIR value: {}, Gate value: {}", mir_val, gate_val);
+
+                            // Print cycle 0 inputs that led to differing states
+                            println!("\nCycle 0 inputs (that caused differing states):");
+                            println!("  rst = {}", inputs.get("rst").copied().unwrap_or(false));
+                            println!("  lockstep_rx_valid = {}", inputs.get("lockstep_rx_valid").copied().unwrap_or(false));
+                            for (k, v) in &inputs {
+                                if k.contains("lockstep") && !k.contains("lockstep_rx_valid") {
+                                    println!("  {} = {}", k, v);
+                                }
+                            }
+
+                            // Print relevant latch states
+                            println!("\nMIR lockstep latch states after cycle 0 -> entering cycle 1:");
+                            for &latch_id in &mir_aig.latches {
+                                if let AigNode::Latch { name, .. } = &mir_aig.nodes[latch_id.0 as usize] {
+                                    if name.contains("lockstep") {
+                                        let val = mir_next0.get(&latch_id.0).copied().unwrap_or(false);
+                                        println!("  {} = {}", name, val);
+                                    }
+                                }
+                            }
+
+                            println!("\nGate lockstep latch states after cycle 0 -> entering cycle 1:");
+                            for &latch_id in &gate_aig.latches {
+                                if let AigNode::Latch { name, .. } = &gate_aig.nodes[latch_id.0 as usize] {
+                                    if name.contains("lockstep") {
+                                        let val = gate_next0.get(&latch_id.0).copied().unwrap_or(false);
+                                        println!("  {} = {}", name, val);
+                                    }
+                                }
+                            }
+
+                            // Print the relevant cycle 1 inputs
+                            println!("\nCycle 1 inputs (lockstep-related):");
+                            for (k, v) in &inputs1 {
+                                if k.contains("lockstep") || k.contains("rst") || k.contains("clk") {
+                                    println!("  {} = {}", k, v);
+                                }
+                            }
+
+                            return; // Found it!
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    println!("No mismatch found in 1000 random trials");
+}
