@@ -775,6 +775,255 @@ impl LirToAig {
                 self.set_output_bit(node.output, 0, borrow.invert());
             }
 
+            // Signed comparisons - use MSB XOR to adjust for sign
+            LirOp::Slt { width } => {
+                // Signed a < b: flip MSB of both, then do unsigned comparison
+                let a = node.inputs[0];
+                let b = node.inputs[1];
+                let mut borrow = self.aig.false_lit();
+
+                for bit in 0..*width {
+                    let mut a_lit = self.get_input_bit(a, bit);
+                    let mut b_lit = self.get_input_bit(b, bit);
+
+                    // Flip MSB to convert signed to unsigned comparison
+                    if bit == width - 1 {
+                        a_lit = a_lit.invert();
+                        b_lit = b_lit.invert();
+                    }
+
+                    let not_a_and_b = self.aig.add_and(a_lit.invert(), b_lit);
+                    let a_xor_b = self.aig.add_xor(a_lit, b_lit);
+                    let borrow_and_eq = self.aig.add_and(borrow, a_xor_b.invert());
+                    borrow = self.aig.add_or(not_a_and_b, borrow_and_eq);
+                }
+
+                self.set_output_bit(node.output, 0, borrow);
+            }
+
+            LirOp::Sle { width } => {
+                // Signed a <= b is !(a > b) = !(b < a)
+                let a = node.inputs[0];
+                let b = node.inputs[1];
+                let mut borrow = self.aig.false_lit();
+
+                // Compute b < a (with sign bit flip)
+                for bit in 0..*width {
+                    let mut a_lit = self.get_input_bit(a, bit);
+                    let mut b_lit = self.get_input_bit(b, bit);
+
+                    if bit == width - 1 {
+                        a_lit = a_lit.invert();
+                        b_lit = b_lit.invert();
+                    }
+
+                    let not_b_and_a = self.aig.add_and(b_lit.invert(), a_lit);
+                    let a_xor_b = self.aig.add_xor(a_lit, b_lit);
+                    let borrow_and_eq = self.aig.add_and(borrow, a_xor_b.invert());
+                    borrow = self.aig.add_or(not_b_and_a, borrow_and_eq);
+                }
+
+                // a <= b = !(b < a)
+                self.set_output_bit(node.output, 0, borrow.invert());
+            }
+
+            LirOp::Sgt { width } => {
+                // Signed a > b is b < a
+                let a = node.inputs[0];
+                let b = node.inputs[1];
+                let mut borrow = self.aig.false_lit();
+
+                for bit in 0..*width {
+                    let mut a_lit = self.get_input_bit(a, bit);
+                    let mut b_lit = self.get_input_bit(b, bit);
+
+                    if bit == width - 1 {
+                        a_lit = a_lit.invert();
+                        b_lit = b_lit.invert();
+                    }
+
+                    let not_b_and_a = self.aig.add_and(b_lit.invert(), a_lit);
+                    let a_xor_b = self.aig.add_xor(a_lit, b_lit);
+                    let borrow_and_eq = self.aig.add_and(borrow, a_xor_b.invert());
+                    borrow = self.aig.add_or(not_b_and_a, borrow_and_eq);
+                }
+
+                self.set_output_bit(node.output, 0, borrow);
+            }
+
+            LirOp::Sge { width } => {
+                // Signed a >= b is !(a < b)
+                let a = node.inputs[0];
+                let b = node.inputs[1];
+                let mut borrow = self.aig.false_lit();
+
+                for bit in 0..*width {
+                    let mut a_lit = self.get_input_bit(a, bit);
+                    let mut b_lit = self.get_input_bit(b, bit);
+
+                    if bit == width - 1 {
+                        a_lit = a_lit.invert();
+                        b_lit = b_lit.invert();
+                    }
+
+                    let not_a_and_b = self.aig.add_and(a_lit.invert(), b_lit);
+                    let a_xor_b = self.aig.add_xor(a_lit, b_lit);
+                    let borrow_and_eq = self.aig.add_and(borrow, a_xor_b.invert());
+                    borrow = self.aig.add_or(not_a_and_b, borrow_and_eq);
+                }
+
+                // a >= b = !(a < b)
+                self.set_output_bit(node.output, 0, borrow.invert());
+            }
+
+            // Shift operations
+            LirOp::Shl { width } => {
+                // Left shift: shift in zeros from right
+                let data = node.inputs[0];
+                let amount = node.inputs[1];
+                // For variable shift, we need a barrel shifter (mux tree)
+                // This is a simplified implementation using muxes for each shift amount
+                let mut current: Vec<AigLit> = (0..*width)
+                    .map(|bit| self.get_input_bit(data, bit))
+                    .collect();
+
+                // Build barrel shifter - each stage shifts by 2^i if amount bit is set
+                for stage in 0..(*width as f32).log2().ceil() as u32 {
+                    let shift_bit = self.get_input_bit(amount, stage);
+                    let shift_amount = 1u32 << stage;
+                    let mut next = vec![self.aig.false_lit(); *width as usize];
+
+                    for bit in 0..*width {
+                        let orig = current[bit as usize];
+                        let shifted = if bit >= shift_amount {
+                            current[(bit - shift_amount) as usize]
+                        } else {
+                            self.aig.false_lit() // Shift in zero
+                        };
+                        // MUX: if shift_bit then shifted else orig
+                        next[bit as usize] = self.aig.add_mux(shift_bit, orig, shifted);
+                    }
+                    current = next;
+                }
+
+                for bit in 0..*width {
+                    self.set_output_bit(node.output, bit, current[bit as usize]);
+                }
+            }
+
+            LirOp::Shr { width } => {
+                // Logical right shift: shift in zeros from left
+                let data = node.inputs[0];
+                let amount = node.inputs[1];
+                let mut current: Vec<AigLit> = (0..*width)
+                    .map(|bit| self.get_input_bit(data, bit))
+                    .collect();
+
+                for stage in 0..(*width as f32).log2().ceil() as u32 {
+                    let shift_bit = self.get_input_bit(amount, stage);
+                    let shift_amount = 1u32 << stage;
+                    let mut next = vec![self.aig.false_lit(); *width as usize];
+
+                    for bit in 0..*width {
+                        let orig = current[bit as usize];
+                        let shifted = if bit + shift_amount < *width {
+                            current[(bit + shift_amount) as usize]
+                        } else {
+                            self.aig.false_lit() // Shift in zero
+                        };
+                        next[bit as usize] = self.aig.add_mux(shift_bit, orig, shifted);
+                    }
+                    current = next;
+                }
+
+                for bit in 0..*width {
+                    self.set_output_bit(node.output, bit, current[bit as usize]);
+                }
+            }
+
+            LirOp::Sar { width } => {
+                // Arithmetic right shift: shift in sign bit from left
+                let data = node.inputs[0];
+                let amount = node.inputs[1];
+                let sign_bit = self.get_input_bit(data, width - 1);
+                let mut current: Vec<AigLit> = (0..*width)
+                    .map(|bit| self.get_input_bit(data, bit))
+                    .collect();
+
+                for stage in 0..(*width as f32).log2().ceil() as u32 {
+                    let shift_bit = self.get_input_bit(amount, stage);
+                    let shift_amount = 1u32 << stage;
+                    let mut next = vec![self.aig.false_lit(); *width as usize];
+
+                    for bit in 0..*width {
+                        let orig = current[bit as usize];
+                        let shifted = if bit + shift_amount < *width {
+                            current[(bit + shift_amount) as usize]
+                        } else {
+                            sign_bit // Shift in sign bit
+                        };
+                        next[bit as usize] = self.aig.add_mux(shift_bit, orig, shifted);
+                    }
+                    current = next;
+                }
+
+                for bit in 0..*width {
+                    self.set_output_bit(node.output, bit, current[bit as usize]);
+                }
+            }
+
+            // Multiplication (simplified - creates many AND/ADD gates)
+            LirOp::Mul { width, result_width } => {
+                let a = node.inputs[0];
+                let b = node.inputs[1];
+
+                // Initialize result to zero
+                let mut result: Vec<AigLit> = vec![self.aig.false_lit(); *result_width as usize];
+
+                // Grade-school multiplication: for each bit of b, add shifted a if bit is set
+                for i in 0..*width {
+                    let b_bit = self.get_input_bit(b, i);
+
+                    // Add a << i to result, gated by b[i]
+                    let mut carry = self.aig.false_lit();
+                    for j in 0..*width {
+                        let out_idx = (i + j) as usize;
+                        if out_idx < *result_width as usize {
+                            let a_bit = self.get_input_bit(a, j);
+                            // Gated a bit: a[j] & b[i]
+                            let gated = self.aig.add_and(a_bit, b_bit);
+
+                            // Full adder: result[out_idx] + gated + carry
+                            let sum_ab = self.aig.add_xor(result[out_idx], gated);
+                            let sum = self.aig.add_xor(sum_ab, carry);
+
+                            let ab = self.aig.add_and(result[out_idx], gated);
+                            let ac = self.aig.add_and(result[out_idx], carry);
+                            let bc = self.aig.add_and(gated, carry);
+                            let ab_or_ac = self.aig.add_or(ab, ac);
+                            carry = self.aig.add_or(ab_or_ac, bc);
+
+                            result[out_idx] = sum;
+                        }
+                    }
+                    // Propagate remaining carry
+                    let mut idx = (i + *width) as usize;
+                    while idx < *result_width as usize {
+                        let sum = self.aig.add_xor(result[idx], carry);
+                        carry = self.aig.add_and(result[idx], carry);
+                        result[idx] = sum;
+                        if carry == self.aig.false_lit() {
+                            break;
+                        }
+                        idx += 1;
+                    }
+                }
+
+                for bit in 0..*result_width {
+                    self.set_output_bit(node.output, bit, result[bit as usize]);
+                }
+            }
+
             LirOp::RedAnd { width } => {
                 let input = node.inputs[0];
                 let mut result = self.aig.true_lit();
