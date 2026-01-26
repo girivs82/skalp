@@ -7,13 +7,21 @@
 //! - SMT-based bounded model checking
 //! - Property verification
 //! - Assertion generation
+//! - Combinational equivalence checking (CEC)
 
 pub mod assertions;
 pub mod bmc;
+pub mod equivalence;
 pub mod model_checker;
 pub mod property;
 pub mod smt;
 pub mod temporal;
+
+// Re-export equivalence checking types
+pub use equivalence::{
+    Aig, AigLit, AigNode, AigNodeId, EquivalenceChecker, EquivalenceResult, GateNetlistToAig,
+    LirToAig,
+};
 
 use skalp_frontend::ast::Item;
 use skalp_lir::Lir;

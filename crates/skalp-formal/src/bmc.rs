@@ -127,10 +127,11 @@ impl BoundedModelChecker {
         // This is a simplified implementation
         ts.initial_state = "true".to_string();
 
-        // Add state variables for each state output net
-        for net in &design.nets {
-            if net.is_state_output {
-                ts.state_vars.push(net.name.clone());
+        // Add state variables for each sequential node output
+        for node in &design.nodes {
+            if node.op.is_sequential() {
+                let signal = &design.signals[node.output.0 as usize];
+                ts.state_vars.push(signal.name.clone());
             }
         }
 
