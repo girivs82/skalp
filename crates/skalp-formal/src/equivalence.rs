@@ -606,8 +606,9 @@ impl LirToAig {
             LirOp::Mux2 { width } => {
                 // Mux2 inputs: [sel, else_value, then_value]
                 // Based on mir_to_lir.rs input ordering
-                // add_mux(sel, then, else) returns sel ? then : else
-                // So we need add_mux(sel, b_lit, a_lit) for sel ? then_value : else_value
+                // add_mux(sel, a, b) returns sel ? b : a
+                // We want: sel ? then_value : else_value
+                // So call add_mux(sel, else_value, then_value)
                 let sel = node.inputs[0];
                 let a = node.inputs[1];  // else_value (when sel=0)
                 let b = node.inputs[2];  // then_value (when sel=1)
@@ -615,7 +616,7 @@ impl LirToAig {
                 for bit in 0..*width {
                     let a_lit = self.get_input_bit(a, bit);  // else_value
                     let b_lit = self.get_input_bit(b, bit);  // then_value
-                    let result = self.aig.add_mux(sel_lit, b_lit, a_lit);
+                    let result = self.aig.add_mux(sel_lit, a_lit, b_lit);
                     self.set_output_bit(node.output, bit, result);
                 }
             }
@@ -1372,13 +1373,13 @@ impl GateNetlistToAig {
                 // Based on mir_to_lir.rs, inputs are [cond, else_value, then_value]
                 // So d0 = inputs[1] = else_value (value when sel=0)
                 //    d1 = inputs[2] = then_value (value when sel=1)
-                // Standard MUX: sel ? d1 : d0 (sel=1 gives d1, sel=0 gives d0)
-                // add_mux(sel, then, else) returns sel ? then : else
-                // So we need add_mux(sel, d1, d0) for sel ? d1 : d0
+                // We want: sel ? d1 : d0 (sel=1 gives d1, sel=0 gives d0)
+                // add_mux(sel, a, b) returns sel ? b : a
+                // So call add_mux(sel, d0, d1) for sel ? d1 : d0
                 let sel = self.get_net(cell.inputs[0]);
                 let d0 = self.get_net(cell.inputs[1]);  // else_value (when sel=0)
                 let d1 = self.get_net(cell.inputs[2]);  // then_value (when sel=1)
-                let result = self.aig.add_mux(sel, d1, d0);
+                let result = self.aig.add_mux(sel, d0, d1);
                 if let Some(out) = output_net {
                     self.set_net(out, result);
                 }
@@ -4596,6 +4597,7 @@ impl<'a> MirToAig<'a> {
                         });
                     // add_mux(sel, a, b) returns sel ? b : a
                     // We want: item_cond ? *lit : current
+                    // So call add_mux(item_cond, current, *lit)
                     let muxed = self.aig.add_mux(item_cond, current, *lit);
                     result_map
                         .entry(key.0)
@@ -4648,7 +4650,10 @@ impl<'a> MirToAig<'a> {
         for i in 0..max_len {
             let then_bit = then_lits.get(i).copied().unwrap_or_else(|| self.aig.false_lit());
             let else_bit = else_lits.get(i).copied().unwrap_or_else(|| self.aig.false_lit());
-            result.push(self.aig.add_mux(cond, then_bit, else_bit));
+            // add_mux(sel, a, b) returns sel ? b : a
+            // We want cond ? then_bit : else_bit
+            // So call add_mux(cond, else_bit, then_bit)
+            result.push(self.aig.add_mux(cond, else_bit, then_bit));
         }
         result
     }
