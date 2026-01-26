@@ -21,8 +21,9 @@ pub mod temporal;
 // Re-export equivalence checking types
 pub use equivalence::{
     Aig, AigLit, AigNode, AigNodeId, EquivalenceChecker, EquivalenceResult, GateNetlistToAig,
-    LirToAig, MirEquivalenceChecker, MirSignalRef, MirToAig, RegisterInfo, RegisterMatchResult,
-    SequentialEquivalenceChecker, SequentialEquivalenceResult,
+    LirToAig, MirEquivalenceChecker, MirSignalRef, MirToAig, NormalizedPort, RegisterInfo,
+    RegisterMatchResult, SequentialEquivalenceChecker, SequentialEquivalenceResult,
+    build_miter_with_port_matching, normalize_port_name,
 };
 
 use skalp_frontend::ast::Item;

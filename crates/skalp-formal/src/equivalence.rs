@@ -23,8 +23,11 @@
 //! - This proves equivalence up to bound K (not full proof)
 
 use crate::{Counterexample, FormalError, FormalResult, TraceStep};
+use rayon::prelude::*;
+use rand::Rng;
 use skalp_lir::{GateNetlist, Lir, LirNode, LirOp, LirSignalId};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use varisat::{CnfFormula, ExtendFormula, Lit, Solver, Var};
 
 // ============================================================================
@@ -732,6 +735,16 @@ impl GateNetlistToAig {
 
         let output_net = cell.outputs.first().copied();
 
+        // Check if cell is sequential (has clock) - treat output as input for CEC
+        if cell.is_sequential() {
+            if let Some(out) = output_net {
+                let net = &netlist.nets[out.0 as usize];
+                let lit = self.aig.add_input(format!("{}_dff_out", net.name));
+                self.set_net(out, lit);
+            }
+            return;
+        }
+
         match &cell.function {
             Some(CellFunction::And2) | Some(CellFunction::And3) | Some(CellFunction::And4) => {
                 let inputs: Vec<_> = cell.inputs.iter().map(|&id| self.get_net(id)).collect();
@@ -820,17 +833,8 @@ impl GateNetlistToAig {
                 }
             }
 
-            // Sequential cells - treat as inputs for combinational equivalence
-            Some(CellFunction::Dff) | Some(CellFunction::DffR) | Some(CellFunction::DffE) | Some(CellFunction::DffRE) => {
-                // Output of DFF is treated as an input for combinational checking
-                if let Some(out) = output_net {
-                    let net = &netlist.nets[out.0 as usize];
-                    let lit = self.aig.add_input(format!("{}_dff_out", net.name));
-                    self.set_net(out, lit);
-                }
-            }
-
             // For unknown cell types, treat output as an input
+            // Note: Sequential cells are handled above via is_sequential() check
             _ => {
                 if let Some(out) = output_net {
                     let net = &netlist.nets[out.0 as usize];
@@ -984,6 +988,597 @@ fn copy_aig_structure(target: &mut Aig, source: &Aig, map: &mut HashMap<u32, Aig
             }
         }
     }
+}
+
+// ============================================================================
+// Port Name Normalization for Equivalence Checking
+// ============================================================================
+
+/// Normalized port name for matching between different representations
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct NormalizedPort {
+    /// Base name without hierarchy or bit index
+    pub base_name: String,
+    /// Bit index if this is a single bit of a multi-bit port
+    pub bit_index: Option<u32>,
+}
+
+impl NormalizedPort {
+    /// Create a canonical string key for matching
+    pub fn key(&self) -> String {
+        match self.bit_index {
+            Some(idx) => format!("{}[{}]", self.base_name, idx),
+            None => self.base_name.clone(),
+        }
+    }
+}
+
+/// Normalize a port name by stripping hierarchy prefixes and extracting bit index
+///
+/// Handles various naming conventions:
+/// - `port_name` -> (base="port_name", bit=None)
+/// - `port_name[3]` -> (base="port_name", bit=Some(3))
+/// - `top.port_name[3]` -> (base="port_name", bit=Some(3))
+/// - `inst.sub.port_name[3]` -> (base="port_name", bit=Some(3))
+/// - `port_name_3_dff_out` -> (base="port_name", bit=Some(3)) [DFF output]
+/// - `config__field__subfield[3]` -> (base="config.field.subfield", bit=Some(3)) [flattened struct]
+pub fn normalize_port_name(name: &str) -> NormalizedPort {
+    let mut working = name.to_string();
+
+    // Strip DFF output suffix if present
+    if let Some(stripped) = working.strip_suffix("_dff_out") {
+        working = stripped.to_string();
+    }
+
+    // Strip _unknown suffix (unmatched internal signals)
+    if let Some(stripped) = working.strip_suffix("_unknown") {
+        working = stripped.to_string();
+    }
+
+    // Strip hierarchy prefix like "top." or "inst.sub."
+    // Find the first component that looks like an actual port name (not "top", not an instance path)
+    if working.starts_with("top.") {
+        working = working[4..].to_string();
+    }
+
+    // Handle nested instance paths: strip everything up to and including the module name
+    // e.g., "top.DabBatteryController.Mul_23.sum_0_0" -> need to identify the port vs instance
+    // For now, just strip known instance prefixes
+    while working.contains('.') {
+        if let Some(dot_pos) = working.find('.') {
+            let before = &working[..dot_pos];
+            // If the part before dot looks like an instance/module name (not a port name)
+            // Instance names often contain capitals or underscores followed by numbers
+            // Port names are typically simple identifiers
+            // This is a heuristic - we keep struct field paths like "config.field"
+            if before.chars().any(|c| c.is_ascii_uppercase())
+                || before.starts_with("_t")
+                || before.starts_with("Mul_")
+                || before.starts_with("Add_")
+                || before.starts_with("Sub_")
+                || before.starts_with("And_")
+                || before.starts_with("Or_")
+                || before.starts_with("Xor_")
+                || before.starts_with("Greater_")
+                || before.starts_with("Less_")
+                || before.starts_with("Equal_")
+                || before.starts_with("Mux_")
+                || before.starts_with("LeftShift_")
+                || before.starts_with("RightShift_")
+            {
+                working = working[dot_pos + 1..].to_string();
+            } else {
+                // Looks like a port name with struct field, keep it
+                break;
+            }
+        } else {
+            break;
+        }
+    }
+
+    // Convert double underscore (netlist struct flattening) to dots
+    // config__voltage_loop__kp -> config.voltage_loop.kp
+    working = working.replace("__", ".");
+
+    // Extract bit index from bracket notation: port_name[3]
+    if let Some(bracket_start) = working.find('[') {
+        if let Some(bracket_end) = working.find(']') {
+            if bracket_end > bracket_start {
+                let base = &working[..bracket_start];
+                let idx_str = &working[bracket_start + 1..bracket_end];
+                if let Ok(idx) = idx_str.parse::<u32>() {
+                    return NormalizedPort {
+                        base_name: base.to_string(),
+                        bit_index: Some(idx),
+                    };
+                }
+            }
+        }
+    }
+
+    // Try underscore notation for bit index: port_name_3
+    // Only if the part after last underscore is a pure number (not part of a name)
+    if let Some(last_underscore) = working.rfind('_') {
+        let suffix = &working[last_underscore + 1..];
+        // Make sure suffix is purely numeric and the base isn't empty
+        if !suffix.is_empty() && suffix.chars().all(|c| c.is_ascii_digit()) {
+            if let Ok(idx) = suffix.parse::<u32>() {
+                let base = &working[..last_underscore];
+                if !base.is_empty() && !base.ends_with('_') {
+                    return NormalizedPort {
+                        base_name: base.to_string(),
+                        bit_index: Some(idx),
+                    };
+                }
+            }
+        }
+    }
+
+    // No bit index found
+    NormalizedPort {
+        base_name: working,
+        bit_index: None,
+    }
+}
+
+/// Check if a signal name represents an internal/temporary signal that should be ignored
+/// in equivalence checking (only primary I/O should be compared)
+fn is_internal_signal(name: &str) -> bool {
+    // DFF outputs should ALWAYS be kept for sequential equivalence checking
+    if name.ends_with("_dff_out") {
+        return false;
+    }
+
+    // Temporary signals generated by compiler (e.g., _t63, _t290[30])
+    // Match _t followed by digits
+    if name.starts_with("_t") {
+        let rest = &name[2..];
+        if rest.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false) {
+            return true;
+        }
+    }
+    if name.contains("._t") {
+        return true;
+    }
+
+    // Internal computation signals (can be at start or after hierarchy)
+    // These are internal arithmetic operation intermediates
+    if name.starts_with("sum_") || name.contains(".sum_")
+        || name.starts_with("pp_") || name.contains(".pp_")
+        || name.starts_with("zero_") || name.contains(".zero_")
+        || name.starts_with("carry_") || name.contains(".carry_")
+        || name.starts_with("partial_") || name.contains(".partial_")
+    {
+        return true;
+    }
+
+    // Comparator internals
+    if name.starts_with("lt_") || name.contains(".lt_")
+        || name.starts_with("eq_") || name.contains(".eq_")
+        || name.starts_with("not_a_") || name.contains(".not_a_")
+        || name.contains("_combined")
+        || name.contains("_bit[")
+        || name.contains("_and_prev_")
+    {
+        return true;
+    }
+
+    // Shift internals
+    if name.contains(".stage") || name.starts_with("stage") {
+        return true;
+    }
+
+    // Hierarchical internal signals (anything with . that's not a struct field)
+    // But allow top-level struct fields (e.g., config.field, bms.soc)
+    // and flattened paths with DFF outputs
+    let parts: Vec<&str> = name.split('.').collect();
+    if parts.len() > 2 {
+        // Deep hierarchy = internal signal (unless it ends with _dff_out, already handled above)
+        return true;
+    }
+
+    // Latch internals
+    if name.contains("_latch.") {
+        return true;
+    }
+
+    // Unknown signals (unmatched cell outputs)
+    if name.ends_with("_unknown") {
+        return true;
+    }
+
+    false
+}
+
+/// Build a miter circuit with intelligent port matching
+///
+/// This handles the case where MIR and GateNetlist use different naming conventions:
+/// - MIR uses simple names: `port_name[bit]`
+/// - GateNetlist uses hierarchical names: `top.port_name[bit]`
+///
+/// Only ports that match in both designs are compared.
+pub fn build_miter_with_port_matching(aig1: &Aig, aig2: &Aig) -> FormalResult<Aig> {
+    let mut miter = Aig::new();
+
+    // Map from old node IDs to new ones for both AIGs
+    let mut map1: HashMap<u32, AigLit> = HashMap::new();
+    let mut map2: HashMap<u32, AigLit> = HashMap::new();
+
+    // Node 0 (false) maps to node 0
+    map1.insert(0, miter.false_lit());
+    map2.insert(0, miter.false_lit());
+
+    // Collect inputs from both AIGs with normalized names
+    // Filter out internal signals - only primary I/O should be compared
+    let mut aig1_inputs: HashMap<String, (u32, String)> = HashMap::new(); // normalized_key -> (node_idx, original_name)
+    let mut aig2_inputs: HashMap<String, (u32, String)> = HashMap::new();
+
+    for (idx, node) in aig1.nodes.iter().enumerate() {
+        if let AigNode::Input { name } = node {
+            // Skip internal signals
+            if is_internal_signal(name) {
+                continue;
+            }
+            let normalized = normalize_port_name(name);
+            aig1_inputs.insert(normalized.key(), (idx as u32, name.clone()));
+        }
+    }
+
+    for (idx, node) in aig2.nodes.iter().enumerate() {
+        if let AigNode::Input { name } = node {
+            // Skip internal signals
+            if is_internal_signal(name) {
+                continue;
+            }
+            let normalized = normalize_port_name(name);
+            aig2_inputs.insert(normalized.key(), (idx as u32, name.clone()));
+        }
+    }
+
+    // Create shared inputs for ports that exist in both designs
+    let mut shared_input_map: HashMap<String, AigLit> = HashMap::new();
+    let mut aig1_only_inputs: Vec<String> = Vec::new();
+    let mut aig2_only_inputs: Vec<String> = Vec::new();
+
+    for (key, (idx1, name1)) in &aig1_inputs {
+        if let Some((idx2, _name2)) = aig2_inputs.get(key) {
+            // Port exists in both - create shared input
+            let lit = miter.add_input(name1.clone());
+            map1.insert(*idx1, lit);
+            map2.insert(*idx2, lit);
+            shared_input_map.insert(key.clone(), lit);
+        } else {
+            // Port only in AIG1 - create input but it won't be compared
+            let lit = miter.add_input(name1.clone());
+            map1.insert(*idx1, lit);
+            aig1_only_inputs.push(format!("{} -> {}", name1, key));
+        }
+    }
+
+    // Create inputs for ports only in AIG2
+    for (key, (idx2, name2)) in &aig2_inputs {
+        if !aig1_inputs.contains_key(key) {
+            let lit = miter.add_input(name2.clone());
+            map2.insert(*idx2, lit);
+            aig2_only_inputs.push(format!("{} -> {}", name2, key));
+        }
+    }
+
+    // Log input matching statistics
+    log::debug!(
+        "Miter input matching: {} shared, {} AIG1-only, {} AIG2-only",
+        shared_input_map.len(),
+        aig1_only_inputs.len(),
+        aig2_only_inputs.len()
+    );
+
+    // Copy AND gates from both AIGs
+    copy_aig_structure(&mut miter, aig1, &mut map1);
+    copy_aig_structure(&mut miter, aig2, &mut map2);
+
+    // Collect outputs with normalized names
+    let mut aig1_outputs: Vec<(String, AigLit)> = Vec::new();
+    let mut aig2_outputs_map: HashMap<String, AigLit> = HashMap::new();
+
+    for (i, output) in aig1.outputs.iter().enumerate() {
+        let name = aig1.output_names.get(i).cloned().unwrap_or_else(|| format!("out_{}", i));
+        let normalized = normalize_port_name(&name);
+        let lit = remap_lit(*output, &map1);
+        aig1_outputs.push((normalized.key(), lit));
+    }
+
+    for (i, output) in aig2.outputs.iter().enumerate() {
+        let name = aig2.output_names.get(i).cloned().unwrap_or_else(|| format!("out_{}", i));
+        let normalized = normalize_port_name(&name);
+        let lit = remap_lit(*output, &map2);
+        aig2_outputs_map.insert(normalized.key(), lit);
+    }
+
+    // Build miter: XOR only matching outputs
+    let mut miter_output = miter.false_lit();
+    let mut matched_outputs = 0;
+    let mut unmatched_outputs = Vec::new();
+
+    for (key, lit1) in &aig1_outputs {
+        if let Some(lit2) = aig2_outputs_map.get(key) {
+            let diff = miter.add_xor(*lit1, *lit2);
+            miter_output = miter.add_or(miter_output, diff);
+            matched_outputs += 1;
+        } else {
+            unmatched_outputs.push(key.clone());
+        }
+    }
+
+    if matched_outputs == 0 {
+        return Err(FormalError::PropertyFailed(format!(
+            "No matching outputs found between designs. AIG1 outputs: {:?}, AIG2 outputs: {:?}",
+            aig1_outputs.iter().map(|(k, _)| k).collect::<Vec<_>>(),
+            aig2_outputs_map.keys().collect::<Vec<_>>()
+        )));
+    }
+
+    log::debug!(
+        "Miter output matching: {} matched, {} unmatched",
+        matched_outputs,
+        unmatched_outputs.len()
+    );
+
+    miter.add_output("miter".to_string(), miter_output);
+
+    Ok(miter)
+}
+
+// ============================================================================
+// Fast Simulation-Based Equivalence Pre-Check
+// ============================================================================
+
+/// Evaluate an AIG with given input values using bit-parallel simulation
+fn simulate_aig(aig: &Aig, input_values: &HashMap<u32, bool>) -> HashMap<u32, bool> {
+    let mut values: HashMap<u32, bool> = HashMap::new();
+
+    // Node 0 is always false
+    values.insert(0, false);
+
+    // Process nodes in order (they should be topologically sorted)
+    for (idx, node) in aig.nodes.iter().enumerate() {
+        let idx = idx as u32;
+        match node {
+            AigNode::False => {
+                values.insert(idx, false);
+            }
+            AigNode::Input { .. } => {
+                let val = input_values.get(&idx).copied().unwrap_or(false);
+                values.insert(idx, val);
+            }
+            AigNode::And { left, right } => {
+                let left_val = values.get(&left.node.0).copied().unwrap_or(false);
+                let right_val = values.get(&right.node.0).copied().unwrap_or(false);
+                let left_val = if left.inverted { !left_val } else { left_val };
+                let right_val = if right.inverted { !right_val } else { right_val };
+                values.insert(idx, left_val && right_val);
+            }
+            AigNode::Latch { .. } => {
+                // Treat latch as input for combinational simulation
+                let val = input_values.get(&idx).copied().unwrap_or(false);
+                values.insert(idx, val);
+            }
+        }
+    }
+
+    values
+}
+
+/// Get output values from simulated AIG
+fn get_output_values(aig: &Aig, values: &HashMap<u32, bool>) -> Vec<bool> {
+    aig.outputs.iter().map(|out| {
+        let val = values.get(&out.node.0).copied().unwrap_or(false);
+        if out.inverted { !val } else { val }
+    }).collect()
+}
+
+/// Quick random simulation to find easy counterexamples
+/// Returns Some(counterexample) if found, None if simulation passes
+pub fn simulation_based_check(
+    aig1: &Aig,
+    aig2: &Aig,
+    num_vectors: usize,
+) -> Option<HashMap<String, String>> {
+    let mut rng = rand::thread_rng();
+
+    // Build input name to node ID maps for both AIGs
+    let mut aig1_input_nodes: Vec<(u32, String)> = Vec::new();
+    let mut aig2_input_map: HashMap<String, u32> = HashMap::new();
+
+    for (idx, node) in aig1.nodes.iter().enumerate() {
+        if let AigNode::Input { name } = node {
+            // Filter out internal signals
+            if is_internal_signal(name) {
+                continue;
+            }
+            aig1_input_nodes.push((idx as u32, name.clone()));
+        }
+    }
+
+    let mut aig2_dff_count = 0;
+    let mut aig2_dff_filtered = 0;
+    let mut aig2_dff_samples: Vec<String> = Vec::new();
+    for (idx, node) in aig2.nodes.iter().enumerate() {
+        if let AigNode::Input { name } = node {
+            // Track DFF outputs for debugging
+            if name.ends_with("_dff_out") {
+                aig2_dff_count += 1;
+                if is_internal_signal(name) {
+                    aig2_dff_filtered += 1;
+                    if aig2_dff_samples.len() < 5 {
+                        aig2_dff_samples.push(name.clone());
+                    }
+                }
+            }
+
+            // Filter out internal signals - only keep primary I/O
+            if is_internal_signal(name) {
+                continue;
+            }
+            let normalized = normalize_port_name(name);
+            aig2_input_map.insert(normalized.key(), idx as u32);
+        }
+    }
+    if aig2_dff_filtered > 0 {
+        log::debug!(
+            "AIG2 DFF outputs: {} total, {} filtered out",
+            aig2_dff_count, aig2_dff_filtered
+        );
+    }
+
+    // Build output matching
+    let mut output_pairs: Vec<(usize, usize)> = Vec::new();
+    for (i, _) in aig1.outputs.iter().enumerate() {
+        let name = aig1.output_names.get(i).cloned().unwrap_or_else(|| format!("out_{}", i));
+        let normalized = normalize_port_name(&name);
+
+        for (j, _) in aig2.outputs.iter().enumerate() {
+            let name2 = aig2.output_names.get(j).cloned().unwrap_or_else(|| format!("out_{}", j));
+            let normalized2 = normalize_port_name(&name2);
+            if normalized.key() == normalized2.key() {
+                output_pairs.push((i, j));
+                break;
+            }
+        }
+    }
+
+    // Debug: count how many inputs/outputs match
+    let matched_inputs: usize = aig1_input_nodes.iter()
+        .filter(|(_, name)| {
+            let normalized = normalize_port_name(name);
+            aig2_input_map.contains_key(&normalized.key())
+        }).count();
+
+    log::debug!(
+        "Simulation check: {} MIR inputs, {} Gate inputs, {} matched",
+        aig1_input_nodes.len(),
+        aig2_input_map.len(),
+        matched_inputs
+    );
+    log::debug!(
+        "  {} MIR outputs, {} Gate outputs, {} matched",
+        aig1.outputs.len(),
+        aig2.outputs.len(),
+        output_pairs.len()
+    );
+
+    // Check for unmatched inputs
+    let aig1_keys: std::collections::HashSet<_> = aig1_input_nodes.iter()
+        .map(|(_, name)| normalize_port_name(name).key())
+        .collect();
+    let unmatched_aig2_count = aig2_input_map.keys()
+        .filter(|key| !aig1_keys.contains(*key))
+        .count();
+
+    if unmatched_aig2_count > 0 {
+        log::warn!(
+            "{} GateNetlist inputs have no MIR correspondence (likely internal submodule registers)",
+            unmatched_aig2_count
+        );
+    }
+
+    if output_pairs.is_empty() {
+        return None; // No matching outputs to compare
+    }
+
+    // Build reverse map: AIG2 node ID -> normalized key
+    let mut aig2_idx_to_key: HashMap<u32, String> = HashMap::new();
+    for (key, &idx) in &aig2_input_map {
+        aig2_idx_to_key.insert(idx, key.clone());
+    }
+
+    // Collect all AIG2 input node IDs
+    let mut aig2_input_nodes: Vec<(u32, String)> = Vec::new();
+    for (idx, node) in aig2.nodes.iter().enumerate() {
+        if let AigNode::Input { name } = node {
+            if !is_internal_signal(name) {
+                aig2_input_nodes.push((idx as u32, name.clone()));
+            }
+        }
+    }
+
+    // Run random simulations
+    for _ in 0..num_vectors {
+        // Generate random input values
+        let mut input_values1: HashMap<u32, bool> = HashMap::new();
+        let mut input_values2: HashMap<u32, bool> = HashMap::new();
+        let mut assignments: HashMap<String, String> = HashMap::new();
+
+        // First, generate random values for all AIG2 inputs
+        for (idx, name) in &aig2_input_nodes {
+            let val: bool = rng.gen();
+            input_values2.insert(*idx, val);
+        }
+
+        // Then, set AIG1 inputs and override matching AIG2 inputs with same value
+        for (idx, name) in &aig1_input_nodes {
+            let val: bool = rng.gen();
+            input_values1.insert(*idx, val);
+            assignments.insert(name.clone(), if val { "1" } else { "0" }.to_string());
+
+            // Find corresponding input in AIG2 and set to same value
+            let normalized = normalize_port_name(name);
+            if let Some(&idx2) = aig2_input_map.get(&normalized.key()) {
+                input_values2.insert(idx2, val);
+            }
+        }
+
+        // Simulate both AIGs
+        let values1 = simulate_aig(aig1, &input_values1);
+        let values2 = simulate_aig(aig2, &input_values2);
+
+        let outputs1 = get_output_values(aig1, &values1);
+        let outputs2 = get_output_values(aig2, &values2);
+
+        // Check if any matched output differs
+        for &(i, j) in &output_pairs {
+            if outputs1.get(i) != outputs2.get(j) {
+                // Found counterexample
+                log::debug!(
+                    "Output mismatch: {} (MIR={}, Gate={})",
+                    aig1.output_names.get(i).cloned().unwrap_or_else(|| format!("out_{}", i)),
+                    outputs1.get(i).copied().unwrap_or(false) as u8,
+                    outputs2.get(j).copied().unwrap_or(false) as u8
+                );
+                return Some(assignments);
+            }
+        }
+    }
+
+    None // No counterexample found
+}
+
+/// Fast parallel equivalence check using simulation + parallel SAT
+pub fn fast_equivalence_check(aig1: &Aig, aig2: &Aig) -> FormalResult<EquivalenceResult> {
+    let start = std::time::Instant::now();
+
+    // Phase 1: Quick random simulation (very fast)
+    log::info!("Phase 1: Random simulation check (1000 vectors)...");
+    if let Some(ce_assignments) = simulation_based_check(aig1, aig2, 1000) {
+        log::info!("Counterexample found by simulation in {}ms", start.elapsed().as_millis());
+        return Ok(EquivalenceResult {
+            equivalent: false,
+            counterexample: Some(Counterexample {
+                length: 1,
+                trace: vec![TraceStep {
+                    step: 0,
+                    assignments: ce_assignments,
+                }],
+            }),
+            conflicts: 0,
+            decisions: 0,
+            time_ms: start.elapsed().as_millis() as u64,
+        });
+    }
+    log::info!("Simulation passed, proceeding to SAT...");
+
+    // Phase 2: Full SAT check
+    let miter = build_miter_with_port_matching(aig1, aig2)?;
+    check_equivalence_sat(&miter)
 }
 
 // ============================================================================
@@ -1163,6 +1758,10 @@ impl EquivalenceChecker {
     }
 
     /// Check equivalence between LIR (behavioral) and GateNetlist (structural)
+    ///
+    /// Uses intelligent port matching to handle different naming conventions:
+    /// - LIR uses simple names: `port_name` or `port_name[bit]`
+    /// - Flattened GateNetlist uses hierarchical names: `top.port_name[bit]`
     pub fn check_synthesis_equivalence(
         &self,
         lir: &Lir,
@@ -1171,7 +1770,21 @@ impl EquivalenceChecker {
         let aig_lir = LirToAig::new().convert(lir);
         let aig_netlist = GateNetlistToAig::new().convert(netlist);
 
-        let miter = build_miter(&aig_lir, &aig_netlist)?;
+        log::info!(
+            "LIR-AIG: {} inputs, {} outputs, {} AND gates",
+            aig_lir.inputs.len(),
+            aig_lir.outputs.len(),
+            aig_lir.and_count()
+        );
+        log::info!(
+            "Gate-AIG: {} inputs, {} outputs, {} AND gates",
+            aig_netlist.inputs.len(),
+            aig_netlist.outputs.len(),
+            aig_netlist.and_count()
+        );
+
+        // Use port matching to handle LIR vs flattened netlist naming differences
+        let miter = build_miter_with_port_matching(&aig_lir, &aig_netlist)?;
         check_equivalence_sat(&miter)
     }
 
@@ -1801,7 +2414,30 @@ impl<'a> MirToAig<'a> {
     }
 
     /// Convert MIR module to AIG
-    pub fn convert(mut self) -> Aig {
+    pub fn convert(self) -> Aig {
+        self.convert_internal(false)
+    }
+
+    /// Convert MIR module to AIG for combinational equivalence checking
+    ///
+    /// This treats register outputs as primary inputs, matching how GateNetlistToAig
+    /// handles DFF cells. This is essential for proper sequential design equivalence.
+    pub fn convert_for_cec(self) -> Aig {
+        self.convert_internal(true)
+    }
+
+    fn convert_internal(mut self, registers_as_inputs: bool) -> Aig {
+        // First pass: detect all registers (signals assigned in sequential processes)
+        let mut register_signals: Vec<(MirSignalRef, String, u32)> = Vec::new();
+
+        if registers_as_inputs {
+            for process in &self.module.processes {
+                if matches!(process.kind, ProcessKind::Sequential) {
+                    self.collect_register_signals(&process.body, &mut register_signals);
+                }
+            }
+        }
+
         // Add primary inputs (input ports)
         for port in &self.module.ports {
             if port.direction == PortDirection::Input {
@@ -1815,6 +2451,22 @@ impl<'a> MirToAig<'a> {
                     let lit = self.aig.add_input(name);
                     self.signal_map
                         .insert((MirSignalRef::Port(port.id), bit as u32), lit);
+                }
+            }
+        }
+
+        // Add register outputs as inputs (for CEC mode)
+        // This makes MIR-AIG compatible with GateNetlist-AIG where DFF Q outputs are inputs
+        if registers_as_inputs {
+            for (sig_ref, name, width) in &register_signals {
+                for bit in 0..*width {
+                    let input_name = if *width == 1 {
+                        format!("{}_dff_out", name)
+                    } else {
+                        format!("{}[{}]_dff_out", name, bit)
+                    };
+                    let lit = self.aig.add_input(input_name);
+                    self.signal_map.insert((*sig_ref, bit), lit);
                 }
             }
         }
@@ -1879,6 +2531,68 @@ impl<'a> MirToAig<'a> {
             DataType::Array(elem, size) => self.get_type_width(elem) * size,
             DataType::Ncl(w) => w * 2, // Dual-rail
             _ => 32, // Default fallback
+        }
+    }
+
+    /// Collect all signals assigned in a block (used for register detection)
+    fn collect_register_signals(
+        &self,
+        block: &Block,
+        registers: &mut Vec<(MirSignalRef, String, u32)>,
+    ) {
+        for stmt in &block.statements {
+            match stmt {
+                Statement::Assignment(assign) => {
+                    if let Some((sig_ref, name, width)) = self.lvalue_to_ref_with_info(&assign.lhs) {
+                        // Check if already in the list
+                        if !registers.iter().any(|(r, _, _)| *r == sig_ref) {
+                            registers.push((sig_ref, name, width));
+                        }
+                    }
+                }
+                Statement::If(if_stmt) => {
+                    self.collect_register_signals(&if_stmt.then_block, registers);
+                    if let Some(else_block) = &if_stmt.else_block {
+                        self.collect_register_signals(else_block, registers);
+                    }
+                }
+                Statement::Case(case_stmt) => {
+                    for item in &case_stmt.items {
+                        self.collect_register_signals(&item.block, registers);
+                    }
+                    if let Some(default) = &case_stmt.default {
+                        self.collect_register_signals(default, registers);
+                    }
+                }
+                Statement::Block(inner_block) => {
+                    self.collect_register_signals(inner_block, registers);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Get signal reference with name and width info
+    fn lvalue_to_ref_with_info(&self, lvalue: &LValue) -> Option<(MirSignalRef, String, u32)> {
+        match lvalue {
+            LValue::Port(id) => {
+                let port = self.find_port(*id)?;
+                let width = self.get_type_width(&port.port_type) as u32;
+                Some((MirSignalRef::Port(*id), port.name.clone(), width))
+            }
+            LValue::Signal(id) => {
+                let signal = self.find_signal(*id)?;
+                let width = self.get_type_width(&signal.signal_type) as u32;
+                Some((MirSignalRef::Signal(*id), signal.name.clone(), width))
+            }
+            LValue::Variable(id) => {
+                let var = self.find_variable(*id)?;
+                let width = self.get_type_width(&var.var_type) as u32;
+                Some((MirSignalRef::Variable(*id), var.name.clone(), width))
+            }
+            LValue::BitSelect { base, .. } => self.lvalue_to_ref_with_info(base),
+            LValue::RangeSelect { base, .. } => self.lvalue_to_ref_with_info(base),
+            LValue::Concat(_) => None,
         }
     }
 
@@ -2849,7 +3563,20 @@ impl MirEquivalenceChecker {
 
     /// Check equivalence between MIR module and synthesized gate netlist
     ///
-    /// This is the key verification: RTL intent vs synthesized gates
+    /// This is the key verification: RTL intent vs synthesized gates.
+    ///
+    /// For sequential designs, this uses combinational equivalence checking (CEC):
+    /// - Register outputs are treated as free inputs in both representations
+    /// - This verifies that the combinational logic (next-state functions) matches
+    /// - MIR register outputs get `_dff_out` suffix to match GateNetlist naming
+    ///
+    /// Uses intelligent port matching to handle different naming conventions:
+    /// - MIR uses simple names: `port_name[bit]`
+    /// - GateNetlist uses hierarchical names: `top.port_name[bit]`
+    ///
+    /// Uses a two-phase approach for speed:
+    /// 1. Fast random simulation to find easy counterexamples
+    /// 2. Full SAT-based proof if simulation passes
     pub fn check_mir_vs_gates(
         &self,
         module: &Module,
@@ -2857,15 +3584,30 @@ impl MirEquivalenceChecker {
     ) -> FormalResult<EquivalenceResult> {
         let start = std::time::Instant::now();
 
-        // Convert MIR to AIG
-        let mir_aig = MirToAig::new(module).convert();
+        // Convert MIR to AIG using CEC mode (registers as inputs)
+        // This matches how GateNetlistToAig treats DFF outputs
+        log::info!("Converting MIR to AIG (CEC mode)...");
+        let mir_aig = MirToAig::new(module).convert_for_cec();
 
         // Convert gate netlist to AIG
+        log::info!("Converting GateNetlist to AIG...");
         let gate_aig = GateNetlistToAig::new().convert(netlist);
 
-        // Check equivalence
-        let checker = EquivalenceChecker::new();
-        let mut result = checker.check_aig_equivalence(&mir_aig, &gate_aig)?;
+        log::info!(
+            "MIR-AIG: {} inputs, {} outputs, {} AND gates",
+            mir_aig.inputs.len(),
+            mir_aig.outputs.len(),
+            mir_aig.and_count()
+        );
+        log::info!(
+            "Gate-AIG: {} inputs, {} outputs, {} AND gates",
+            gate_aig.inputs.len(),
+            gate_aig.outputs.len(),
+            gate_aig.and_count()
+        );
+
+        // Use fast equivalence check (simulation first, then SAT)
+        let mut result = fast_equivalence_check(&mir_aig, &gate_aig)?;
         result.time_ms = start.elapsed().as_millis() as u64;
 
         Ok(result)
