@@ -18,7 +18,7 @@ use crate::lir::{Lir, LirOp, LirSafetyInfo, LirSignalId, LirStats};
 use crate::ncl_expand::{expand_to_ncl, NclConfig};
 use indexmap::IndexMap;
 use skalp_mir::mir::{
-    AssignmentKind, BinaryOp, Block, ContinuousAssign, DataType, EdgeType, Expression,
+    AssignmentKind, BinaryOp, Block, CaseStatement, ContinuousAssign, DataType, EdgeType, Expression,
     ExpressionKind, LValue, Module, PortDirection, PortId, Process, ProcessKind, ReduceOp,
     SafetyContext, SensitivityList, SignalId, Statement, UnaryOp, Value, Variable, VariableId,
 };
@@ -546,8 +546,63 @@ impl MirToLirTransform {
         clock_signal: Option<LirSignalId>,
         reset_signal: Option<LirSignalId>,
     ) {
+        // BUG #237 FIX: Collect leading assignments (before any if/case) as defaults
+        // These serve as implicit defaults for conditionals that don't assign to a target
+        // Key is the LValue converted to a comparable form
+        let mut sequential_defaults: Vec<(LValue, Expression)> = Vec::new();
+        let mut past_leading_section = false;
+
         for stmt in &block.statements {
-            self.transform_sequential_statement(stmt, clock_signal, reset_signal);
+            match stmt {
+                Statement::Assignment(assign) if !past_leading_section => {
+                    if matches!(assign.kind, AssignmentKind::NonBlocking) {
+                        // Track this as a default value for this target
+                        // Remove any previous default for this target
+                        sequential_defaults.retain(|(lv, _)| lv != &assign.lhs);
+                        sequential_defaults.push((assign.lhs.clone(), assign.rhs.clone()));
+                    }
+                }
+                Statement::If(_) | Statement::Case(_) => {
+                    // We've hit a conditional - mark end of leading section
+                    past_leading_section = true;
+                }
+                _ => {}
+            }
+        }
+
+        // Now process statements with the context
+        for stmt in &block.statements {
+            self.transform_sequential_statement_with_defaults(
+                stmt,
+                clock_signal,
+                reset_signal,
+                &sequential_defaults,
+            );
+        }
+    }
+
+    /// Transform a sequential statement with context of preceding defaults
+    fn transform_sequential_statement_with_defaults(
+        &mut self,
+        stmt: &Statement,
+        clock_signal: Option<LirSignalId>,
+        reset_signal: Option<LirSignalId>,
+        sequential_defaults: &[(LValue, Expression)],
+    ) {
+        match stmt {
+            Statement::Case(case_stmt) => {
+                // BUG #237 FIX: Pass sequential defaults to case handler
+                self.transform_sequential_case_with_defaults(
+                    case_stmt,
+                    clock_signal,
+                    reset_signal,
+                    sequential_defaults,
+                );
+            }
+            _ => {
+                // Other statements use the original handler
+                self.transform_sequential_statement(stmt, clock_signal, reset_signal);
+            }
         }
     }
 
@@ -760,8 +815,184 @@ impl MirToLirTransform {
             Statement::Block(block) => {
                 self.transform_sequential_block(block, clock_signal, reset_signal);
             }
+            Statement::Case(case_stmt) => {
+                // BUG #237 FIX: Handle Case/Match statements in LIR lowering
+                // Convert case statement to chain of muxes for state machine synthesis
+                // Note: When called from transform_sequential_statement_with_defaults,
+                // that version handles defaults. This is a fallback for direct calls.
+                self.transform_sequential_case_with_defaults(
+                    case_stmt,
+                    clock_signal,
+                    reset_signal,
+                    &[],
+                );
+            }
             _ => {
                 self.transform_combinational_statement(stmt);
+            }
+        }
+    }
+
+    /// Transform a Case statement in sequential context with preceding defaults
+    /// Creates a mux chain for state machine transitions
+    fn transform_sequential_case_with_defaults(
+        &mut self,
+        case_stmt: &CaseStatement,
+        clock_signal: Option<LirSignalId>,
+        reset_signal: Option<LirSignalId>,
+        sequential_defaults: &[(LValue, Expression)],
+    ) {
+        // Transform the case expression (e.g., state_reg)
+        let case_expr_width = self.infer_expression_width(&case_stmt.expr);
+        let case_expr_signal = self.transform_expression(&case_stmt.expr, case_expr_width);
+
+        // Collect all assignments from all case arms and default
+        let mut all_targets: Vec<LValue> = Vec::new();
+        let mut case_arms_assignments: Vec<(Vec<Expression>, Vec<(LValue, Expression)>)> = Vec::new();
+
+        for item in &case_stmt.items {
+            let assigns = Self::collect_assignments(&item.block);
+            for (lv, _) in &assigns {
+                if !all_targets.contains(lv) {
+                    all_targets.push(lv.clone());
+                }
+            }
+            case_arms_assignments.push((item.values.clone(), assigns));
+        }
+
+        let default_assigns = if let Some(ref default_block) = case_stmt.default {
+            let assigns = Self::collect_assignments(default_block);
+            for (lv, _) in &assigns {
+                if !all_targets.contains(lv) {
+                    all_targets.push(lv.clone());
+                }
+            }
+            assigns
+        } else {
+            Vec::new()
+        };
+
+        // BUG #237 FIX: Also include targets from sequential_defaults that might not
+        // appear in case arms but have a leading assignment
+        for (lv, _) in sequential_defaults.iter() {
+            if !all_targets.contains(lv) {
+                all_targets.push(lv.clone());
+            }
+        }
+
+        // For each target signal, build a mux chain
+        for target in &all_targets {
+            let target_signal = self.get_lvalue_signal(target);
+            let target_width = self.get_lvalue_width(target);
+
+            // BUG #237 FIX: Determine default value with priority:
+            // 1. Explicit default block assignment
+            // 2. Sequential default (assignment before the case)
+            // 3. Feedback (keep current value)
+            let default_signal = if let Some(expr) = Self::find_assignment_expr(&default_assigns, target) {
+                self.transform_expression(expr, target_width)
+            } else if let Some(expr) = Self::find_assignment_expr(sequential_defaults, target) {
+                self.transform_expression(expr, target_width)
+            } else {
+                target_signal // Feedback: keep current value
+            };
+
+            // Build mux chain from last case to first (so first has priority)
+            let mut current_result = default_signal;
+
+            for (case_values, assigns) in case_arms_assignments.iter().rev() {
+                // Get the expression for this target in this arm (or use current as feedback)
+                let arm_signal = if let Some(expr) = Self::find_assignment_expr(assigns, target) {
+                    self.transform_expression(expr, target_width)
+                } else {
+                    current_result // Not assigned in this arm, use previous result
+                };
+
+                // Build condition: case_expr == value (for each value in values list)
+                if case_values.is_empty() {
+                    continue;
+                }
+
+                let condition = if case_values.len() == 1 {
+                    // Single value match: case_expr == value
+                    let val_signal = self.transform_expression(&case_values[0], case_expr_width);
+                    let eq_out = self.alloc_temp_signal(1);
+                    self.lir.add_node(
+                        LirOp::Eq { width: case_expr_width },
+                        vec![case_expr_signal, val_signal],
+                        eq_out,
+                        format!("{}.case_eq", self.hierarchy_path),
+                    );
+                    eq_out
+                } else {
+                    // Multiple values: OR of all comparisons
+                    let mut or_result = {
+                        let val_signal = self.transform_expression(&case_values[0], case_expr_width);
+                        let eq_out = self.alloc_temp_signal(1);
+                        self.lir.add_node(
+                            LirOp::Eq { width: case_expr_width },
+                            vec![case_expr_signal, val_signal],
+                            eq_out,
+                            format!("{}.case_eq", self.hierarchy_path),
+                        );
+                        eq_out
+                    };
+                    for value in &case_values[1..] {
+                        let val_signal = self.transform_expression(value, case_expr_width);
+                        let eq_out = self.alloc_temp_signal(1);
+                        self.lir.add_node(
+                            LirOp::Eq { width: case_expr_width },
+                            vec![case_expr_signal, val_signal],
+                            eq_out,
+                            format!("{}.case_eq", self.hierarchy_path),
+                        );
+                        let or_out = self.alloc_temp_signal(1);
+                        self.lir.add_node(
+                            LirOp::Or { width: 1 },
+                            vec![or_result, eq_out],
+                            or_out,
+                            format!("{}.case_or", self.hierarchy_path),
+                        );
+                        or_result = or_out;
+                    }
+                    or_result
+                };
+
+                // Create mux: if condition then arm_signal else current_result
+                let mux_out = self.alloc_temp_signal(target_width);
+                self.lir.add_node(
+                    LirOp::Mux2 { width: target_width },
+                    vec![condition, current_result, arm_signal],
+                    mux_out,
+                    format!("{}.case_mux", self.hierarchy_path),
+                );
+                current_result = mux_out;
+            }
+
+            // Create register for the final mux result
+            let reg_op = LirOp::Reg {
+                width: target_width,
+                has_enable: false,
+                has_reset: reset_signal.is_some(),
+                reset_value: Some(0),
+            };
+
+            if let Some(clk) = clock_signal {
+                self.lir.add_seq_node(
+                    reg_op,
+                    vec![current_result],
+                    target_signal,
+                    format!("{}.case_reg", self.hierarchy_path),
+                    clk,
+                    reset_signal,
+                );
+            } else {
+                self.lir.add_node(
+                    reg_op,
+                    vec![current_result],
+                    target_signal,
+                    format!("{}.case_reg", self.hierarchy_path),
+                );
             }
         }
     }
@@ -778,6 +1009,15 @@ impl MirToLirTransform {
                 }
                 Statement::Block(inner_block) => {
                     assigns.extend(Self::collect_assignments(inner_block));
+                }
+                Statement::Case(case_stmt) => {
+                    // Collect assignments from all case arms
+                    for item in &case_stmt.items {
+                        assigns.extend(Self::collect_assignments(&item.block));
+                    }
+                    if let Some(ref default_block) = case_stmt.default {
+                        assigns.extend(Self::collect_assignments(default_block));
+                    }
                 }
                 _ => {}
             }
@@ -814,7 +1054,7 @@ impl MirToLirTransform {
         false
     }
 
-    /// Recursively collect all assignments from a block, including those in nested ifs
+    /// Recursively collect all assignments from a block, including those in nested ifs/cases
     fn collect_all_assignments_recursive(block: &Block) -> Vec<(LValue, Expression)> {
         let mut assigns = Vec::new();
         for stmt in &block.statements {
@@ -831,6 +1071,14 @@ impl MirToLirTransform {
                     assigns.extend(Self::collect_all_assignments_recursive(&if_stmt.then_block));
                     if let Some(ref else_block) = if_stmt.else_block {
                         assigns.extend(Self::collect_all_assignments_recursive(else_block));
+                    }
+                }
+                Statement::Case(case_stmt) => {
+                    for item in &case_stmt.items {
+                        assigns.extend(Self::collect_all_assignments_recursive(&item.block));
+                    }
+                    if let Some(ref default_block) = case_stmt.default {
+                        assigns.extend(Self::collect_all_assignments_recursive(default_block));
                     }
                 }
                 _ => {}
