@@ -45,6 +45,14 @@ impl LibraryCellInfo {
                 .collect(),
         }
     }
+
+    /// Apply library cell metadata to a gate cell
+    ///
+    /// Sets function and failure_modes from library info.
+    fn apply_to_cell(&self, cell: &mut Cell) {
+        cell.function = Some(self.function.clone());
+        cell.failure_modes = self.failure_modes.clone();
+    }
 }
 
 /// Convert a library failure mode to a cell failure mode
@@ -767,7 +775,7 @@ impl<'a> TechMapper<'a> {
                 vec![y],
             );
             gate_cell.source_op = Some(format!("{:?}", function));
-            gate_cell.failure_modes = cell_info.failure_modes.clone();
+            cell_info.apply_to_cell(&mut gate_cell);
             self.add_cell(gate_cell);
         }
 
@@ -804,7 +812,7 @@ impl<'a> TechMapper<'a> {
                 vec![y],
             );
             gate_cell.source_op = Some(format!("{:?}", function));
-            gate_cell.failure_modes = cell_info.failure_modes.clone();
+            cell_info.apply_to_cell(&mut gate_cell);
             self.add_cell(gate_cell);
         }
 
@@ -839,7 +847,7 @@ impl<'a> TechMapper<'a> {
 
             let mut cell = Cell::new_comb(
                 CellId(0),
-                adder_info.name,
+                adder_info.name.clone(),
                 self.library.name.clone(),
                 adder_info.fit,
                 path.to_string(),
@@ -847,7 +855,7 @@ impl<'a> TechMapper<'a> {
                 outputs.to_vec(),
             );
             cell.source_op = Some("Adder".to_string());
-            cell.failure_modes = adder_info.failure_modes;
+            adder_info.apply_to_cell(&mut cell);
             self.add_cell(cell);
             self.stats.direct_mappings += 1;
             return;
@@ -889,7 +897,7 @@ impl<'a> TechMapper<'a> {
                     vec![sum, cout],
                 );
                 cell.source_op = Some("FullAdder".to_string());
-                cell.failure_modes = fa_info.failure_modes.clone();
+                fa_info.apply_to_cell(&mut cell);
                 self.add_cell(cell);
             } else {
                 // Half adder for first bit
@@ -903,7 +911,7 @@ impl<'a> TechMapper<'a> {
                     vec![sum, cout],
                 );
                 cell.source_op = Some("HalfAdder".to_string());
-                cell.failure_modes = ha_info.failure_modes.clone();
+                ha_info.apply_to_cell(&mut cell);
                 self.add_cell(cell);
             }
 
@@ -960,7 +968,7 @@ impl<'a> TechMapper<'a> {
                     vec![ab_xor],
                 );
                 xor1_cell.source_op = Some("XOR".to_string());
-                xor1_cell.failure_modes = xor_info.failure_modes.clone();
+                xor_info.apply_to_cell(&mut xor1_cell);
                 self.add_cell(xor1_cell);
 
                 // Second XOR: (a XOR b) XOR cin = sum
@@ -974,7 +982,7 @@ impl<'a> TechMapper<'a> {
                     vec![sum],
                 );
                 xor2_cell.source_op = Some("XOR".to_string());
-                xor2_cell.failure_modes = xor_info.failure_modes.clone();
+                xor_info.apply_to_cell(&mut xor2_cell);
                 self.add_cell(xor2_cell);
 
                 // Carry cell: cout = (a & b) | ((a | b) & cin)
@@ -988,7 +996,7 @@ impl<'a> TechMapper<'a> {
                     vec![cout],
                 );
                 carry_cell.source_op = Some("Carry".to_string());
-                carry_cell.failure_modes = carry_info.failure_modes.clone();
+                carry_info.apply_to_cell(&mut carry_cell);
                 self.add_cell(carry_cell);
             } else {
                 // Half adder for first bit: XOR for sum, AND for carry
@@ -1002,7 +1010,7 @@ impl<'a> TechMapper<'a> {
                     vec![sum],
                 );
                 xor_cell.source_op = Some("XOR".to_string());
-                xor_cell.failure_modes = xor_info.failure_modes.clone();
+                xor_info.apply_to_cell(&mut xor_cell);
                 self.add_cell(xor_cell);
 
                 // For the first bit, carry = a & b
@@ -1017,7 +1025,7 @@ impl<'a> TechMapper<'a> {
                     vec![cout],
                 );
                 and_cell.source_op = Some("AND".to_string());
-                and_cell.failure_modes = and_info.failure_modes.clone();
+                and_info.apply_to_cell(&mut and_cell);
                 self.add_cell(and_cell);
             }
 
@@ -1064,8 +1072,7 @@ impl<'a> TechMapper<'a> {
                 vec![not_b],
             );
             cell.source_op = Some("Inverter".to_string());
-            cell.function = Some(inv_info.function.clone());
-            cell.failure_modes = inv_info.failure_modes.clone();
+            inv_info.apply_to_cell(&mut cell);
             self.add_cell(cell);
             inv_b.push(not_b);
         }
@@ -1110,8 +1117,7 @@ impl<'a> TechMapper<'a> {
                 vec![diff, cout],
             );
             cell.source_op = Some("FullAdder".to_string());
-            cell.function = Some(fa_info.function.clone());
-            cell.failure_modes = fa_info.failure_modes.clone();
+            fa_info.apply_to_cell(&mut cell);
             self.add_cell(cell);
 
             carry_net = cout;
@@ -1269,7 +1275,7 @@ impl<'a> TechMapper<'a> {
                         vec![new_sum, new_carry],
                     );
                     cell.source_op = Some("FullAdder".to_string());
-                    cell.failure_modes = fa_info.failure_modes.clone();
+                    fa_info.apply_to_cell(&mut cell);
                     self.add_cell(cell);
                 } else {
                     // Half adder for first bit (no carry in)
@@ -1283,7 +1289,7 @@ impl<'a> TechMapper<'a> {
                         vec![new_sum, new_carry],
                     );
                     cell.source_op = Some("HalfAdder".to_string());
-                    cell.failure_modes = ha_info.failure_modes.clone();
+                    ha_info.apply_to_cell(&mut cell);
                     self.add_cell(cell);
                 }
 
@@ -1351,7 +1357,7 @@ impl<'a> TechMapper<'a> {
                 vec![y],
             );
             cell.source_op = Some("Mux2".to_string());
-            cell.failure_modes = mux_info.failure_modes.clone();
+            mux_info.apply_to_cell(&mut cell);
             self.add_cell(cell);
         }
 
@@ -1462,7 +1468,7 @@ impl<'a> TechMapper<'a> {
                     vec![mux_out],
                 );
                 cell.source_op = Some(if left { "Shl" } else { "Shr" }.to_string());
-                cell.failure_modes = mux_info.failure_modes.clone();
+                mux_info.apply_to_cell(&mut cell);
                 self.add_cell(cell);
 
                 next_stage.push(mux_out);
@@ -1489,7 +1495,7 @@ impl<'a> TechMapper<'a> {
                     vec![dst],
                 );
                 cell.source_op = Some("Buffer".to_string());
-                cell.failure_modes = buf_info.failure_modes.clone();
+                buf_info.apply_to_cell(&mut cell);
                 self.add_cell(cell);
             }
         }
@@ -1544,7 +1550,7 @@ impl<'a> TechMapper<'a> {
                 vec![dst],
             );
             cell.source_op = Some("RangeSelect".to_string());
-            cell.failure_modes = buf_info.failure_modes.clone();
+            buf_info.apply_to_cell(&mut cell);
             self.add_cell(cell);
         }
 
@@ -1607,7 +1613,7 @@ impl<'a> TechMapper<'a> {
                     vec![dst],
                 );
                 cell.source_op = Some("Concat".to_string());
-                cell.failure_modes = buf_info.failure_modes.clone();
+                buf_info.apply_to_cell(&mut cell);
                 self.add_cell(cell);
 
                 out_bit += 1;
@@ -1661,7 +1667,7 @@ impl<'a> TechMapper<'a> {
                 vec![dst],
             );
             cell.source_op = Some("ZeroExtend".to_string());
-            cell.failure_modes = buf_info.failure_modes.clone();
+            buf_info.apply_to_cell(&mut cell);
             self.add_cell(cell);
         }
 
@@ -1746,7 +1752,7 @@ impl<'a> TechMapper<'a> {
                 vec![dst],
             );
             cell.source_op = Some("SignExtend".to_string());
-            cell.failure_modes = buf_info.failure_modes.clone();
+            buf_info.apply_to_cell(&mut cell);
             self.add_cell(cell);
         }
 
@@ -1770,7 +1776,7 @@ impl<'a> TechMapper<'a> {
                 vec![dst],
             );
             cell.source_op = Some("SignExtend".to_string());
-            cell.failure_modes = buf_info.failure_modes.clone();
+            buf_info.apply_to_cell(&mut cell);
             self.add_cell(cell);
         }
 
@@ -1970,7 +1976,7 @@ impl<'a> TechMapper<'a> {
                     vec![mux_out],
                 );
                 cell.source_op = Some("BitSelect".to_string());
-                cell.failure_modes = mux_info.failure_modes.clone();
+                mux_info.apply_to_cell(&mut cell);
                 self.add_cell(cell);
 
                 next_stage.push(mux_out);
@@ -2022,7 +2028,7 @@ impl<'a> TechMapper<'a> {
                 vec![xnor_out],
             );
             cell.source_op = Some("XNOR2".to_string());
-            cell.failure_modes = xnor_info.failure_modes.clone();
+            xnor_info.apply_to_cell(&mut cell);
             self.add_cell(cell);
             xnor_outs.push(xnor_out);
         }
@@ -2037,7 +2043,7 @@ impl<'a> TechMapper<'a> {
             let y = outputs.first().copied().unwrap_or(GateNetId(0));
             let mut cell = Cell::new_comb(
                 CellId(0),
-                inv_info.name,
+                inv_info.name.clone(),
                 self.library.name.clone(),
                 inv_info.fit,
                 format!("{}.ne_inv", path),
@@ -2045,7 +2051,7 @@ impl<'a> TechMapper<'a> {
                 vec![y],
             );
             cell.source_op = Some("Inverter".to_string());
-            cell.failure_modes = inv_info.failure_modes;
+            inv_info.apply_to_cell(&mut cell);
             self.add_cell(cell);
         } else {
             // Connect eq_out to output (add buffer if needed)
@@ -2055,7 +2061,7 @@ impl<'a> TechMapper<'a> {
 
                 let mut cell = Cell::new_comb(
                     CellId(0),
-                    buf_info.name,
+                    buf_info.name.clone(),
                     self.library.name.clone(),
                     buf_info.fit,
                     format!("{}.eq_buf", path),
@@ -2063,7 +2069,7 @@ impl<'a> TechMapper<'a> {
                     vec![y],
                 );
                 cell.source_op = Some("Buffer".to_string());
-                cell.failure_modes = buf_info.failure_modes;
+                buf_info.apply_to_cell(&mut cell);
                 self.add_cell(cell);
             }
         }
@@ -2486,7 +2492,7 @@ impl<'a> TechMapper<'a> {
                 reset,
             );
             cell.source_op = Some("Register".to_string());
-            cell.failure_modes = dff_info.failure_modes.clone();
+            dff_info.apply_to_cell(&mut cell);
             self.add_cell(cell);
         }
 
@@ -2554,7 +2560,7 @@ impl<'a> TechMapper<'a> {
 
             let mut cell = Cell::new_comb(
                 CellId(0),
-                buf_info.name,
+                buf_info.name.clone(),
                 self.library.name.clone(),
                 buf_info.fit,
                 format!("{}.reduce_buf", path),
@@ -2562,7 +2568,7 @@ impl<'a> TechMapper<'a> {
                 vec![y],
             );
             cell.source_op = Some("Buffer".to_string());
-            cell.failure_modes = buf_info.failure_modes;
+            buf_info.apply_to_cell(&mut cell);
             self.add_cell(cell);
         }
 
@@ -2609,7 +2615,7 @@ impl<'a> TechMapper<'a> {
                         vec![out],
                     );
                     cell.source_op = Some(cell_info.name.clone());
-                    cell.failure_modes = cell_info.failure_modes.clone();
+                    cell_info.apply_to_cell(&mut cell);
                     self.add_cell(cell);
                     next_level.push(out);
                 } else {
