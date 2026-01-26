@@ -20,7 +20,8 @@ pub mod temporal;
 // Re-export equivalence checking types
 pub use equivalence::{
     Aig, AigLit, AigNode, AigNodeId, EquivalenceChecker, EquivalenceResult, GateNetlistToAig,
-    LirToAig,
+    LirToAig, RegisterInfo, RegisterMatchResult, SequentialEquivalenceChecker,
+    SequentialEquivalenceResult,
 };
 
 use skalp_frontend::ast::Item;
