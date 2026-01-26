@@ -641,12 +641,20 @@ impl HirBuilderContext {
                     }
                 }
                 SyntaxKind::TypeAlias => {
-                    if let Some(type_alias) = self.build_type_alias(&child) {
+                    if let Some(mut type_alias) = self.build_type_alias(&child) {
+                        // BUG FIX: Apply pending visibility (from preceding Visibility node)
+                        // The visibility check inside build_type_alias may not work if the
+                        // syntax tree has a separate Visibility node preceding TypeAlias
+                        type_alias.visibility = pending_visibility;
+                        pending_visibility = HirVisibility::Private; // Reset after use
                         hir.type_aliases.push(type_alias);
                     }
                 }
                 SyntaxKind::DistinctTypeDecl => {
-                    if let Some(distinct_type) = self.build_distinct_type(&child) {
+                    if let Some(mut distinct_type) = self.build_distinct_type(&child) {
+                        // BUG FIX: Apply pending visibility (from preceding Visibility node)
+                        distinct_type.visibility = pending_visibility;
+                        pending_visibility = HirVisibility::Private; // Reset after use
                         // Register distinct type in user_types for type lookup
                         // Store as HirType::Custom so trait resolution can work
                         println!(
