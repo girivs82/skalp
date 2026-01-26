@@ -604,14 +604,18 @@ impl LirToAig {
             }
 
             LirOp::Mux2 { width } => {
+                // Mux2 inputs: [sel, else_value, then_value]
+                // Based on mir_to_lir.rs input ordering
+                // add_mux(sel, then, else) returns sel ? then : else
+                // So we need add_mux(sel, b_lit, a_lit) for sel ? then_value : else_value
                 let sel = node.inputs[0];
-                let a = node.inputs[1];
-                let b = node.inputs[2];
+                let a = node.inputs[1];  // else_value (when sel=0)
+                let b = node.inputs[2];  // then_value (when sel=1)
                 let sel_lit = self.get_input_bit(sel, 0);
                 for bit in 0..*width {
-                    let a_lit = self.get_input_bit(a, bit);
-                    let b_lit = self.get_input_bit(b, bit);
-                    let result = self.aig.add_mux(sel_lit, a_lit, b_lit);
+                    let a_lit = self.get_input_bit(a, bit);  // else_value
+                    let b_lit = self.get_input_bit(b, bit);  // then_value
+                    let result = self.aig.add_mux(sel_lit, b_lit, a_lit);
                     self.set_output_bit(node.output, bit, result);
                 }
             }
@@ -1123,6 +1127,8 @@ impl LirToAig {
             _ => {
                 let output_signal = &lir.signals[node.output.0 as usize];
                 let width = node.op.output_width();
+                println!("WARNING: Unimplemented LirOp {:?} for signal '{}' (width={})",
+                    node.op, output_signal.name, width);
                 for bit in 0..width {
                     let name = format!("{}[{}]_unimpl", output_signal.name, bit);
                     let lit = self.aig.add_input(name);
@@ -1362,13 +1368,17 @@ impl GateNetlistToAig {
             }
 
             Some(CellFunction::Mux2) => {
-                // Mux2 inputs: [sel, d0, d1], output = sel ? d1 : d0
-                // Tech mapper creates cells with this ordering (see tech_mapper.rs map_mux2)
+                // Mux2 inputs: [sel, d0, d1]
+                // Based on mir_to_lir.rs, inputs are [cond, else_value, then_value]
+                // So d0 = inputs[1] = else_value (value when sel=0)
+                //    d1 = inputs[2] = then_value (value when sel=1)
+                // Standard MUX: sel ? d1 : d0 (sel=1 gives d1, sel=0 gives d0)
+                // add_mux(sel, then, else) returns sel ? then : else
+                // So we need add_mux(sel, d1, d0) for sel ? d1 : d0
                 let sel = self.get_net(cell.inputs[0]);
-                let d0 = self.get_net(cell.inputs[1]);
-                let d1 = self.get_net(cell.inputs[2]);
-                // add_mux(sel, a, b) returns sel ? b : a, so pass (sel, d0, d1) for sel ? d1 : d0
-                let result = self.aig.add_mux(sel, d0, d1);
+                let d0 = self.get_net(cell.inputs[1]);  // else_value (when sel=0)
+                let d1 = self.get_net(cell.inputs[2]);  // then_value (when sel=1)
+                let result = self.aig.add_mux(sel, d1, d0);
                 if let Some(out) = output_net {
                     self.set_net(out, result);
                 }
@@ -1697,8 +1707,72 @@ impl GateNetlistToAig {
 
             // First, check if D is driven by a MUX with rst as selector (even without cell.reset)
             // This handles the case where MUX-based reset is used instead of DFFR
+            println!("🔒 [DFF] Processing DFF '{}', cell.reset={:?}, d_input={:?}, inputs={:?}",
+                latch_name, cell.reset, d_input,
+                cell.inputs.iter().map(|i| (i.0, &netlist.nets[i.0 as usize].name)).collect::<Vec<_>>());
             if let Some(&d_net) = d_input {
+                println!("🔒 [DFF]   D input net: {} (id={})", netlist.nets[d_net.0 as usize].name, d_net.0);
                 // Find if D is driven by a MUX where selector contains "rst"
+                // First find any MUX driving D
+                let driving_mux = netlist.cells.iter().find(|driver| {
+                    let outputs_match = driver.outputs.iter().any(|o| o.0 == d_net.0);
+                    let is_mux = matches!(driver.function, Some(CellFunction::Mux2));
+                    outputs_match && is_mux
+                });
+
+                // Debug: show what cell drives D for limit_reg
+                if latch_name.contains("limit_reg[0]") {
+                    if let Some(driver) = netlist.cells.iter().find(|c| c.outputs.iter().any(|o| o.0 == d_net.0)) {
+                        println!("🔒 [DFF]   D is driven by cell_type='{}', function={:?}", driver.cell_type, driver.function);
+                        for (i, &inp) in driver.inputs.iter().enumerate() {
+                            let inp_name = &netlist.nets[inp.0 as usize].name;
+                            let in_net_map = self.net_map.contains_key(&inp.0);
+                            println!("🔒 [DFF]     input[{}]: {} (id={}, in_net_map={})", i, inp_name, inp.0, in_net_map);
+                        }
+                    } else {
+                        println!("🔒 [DFF]   D has no driver cell found!");
+                    }
+                }
+                if let Some(mux) = driving_mux {
+                    if let Some(&sel_net) = mux.inputs.first() {
+                        let sel_name = &netlist.nets[sel_net.0 as usize].name;
+                        println!("🔒 [DFF]   D is driven by MUX, selector net: {} (id={})", sel_name, sel_net.0);
+                    }
+                    // Debug: show all MUX inputs for limit_reg
+                    if latch_name.contains("limit_reg[0]") || latch_name.contains("limit_reg[7]") {
+                        println!("🔒 [DFF]   MUX cell_type: {}, function: {:?}", mux.cell_type, mux.function);
+                        for (i, &inp) in mux.inputs.iter().enumerate() {
+                            let inp_name = &netlist.nets[inp.0 as usize].name;
+                            let in_net_map = self.net_map.contains_key(&inp.0);
+                            println!("🔒 [DFF]     MUX input[{}]: {} (id={}, in_net_map={})", i, inp_name, inp.0, in_net_map);
+                            // For input[1] (normal/retain logic), trace what drives it recursively
+                            if i == 1 {
+                                fn trace_driver(netlist: &GateNetlist, net_id: u32, depth: usize, net_map: &std::collections::HashMap<u32, AigLit>) {
+                                    if depth > 3 { return; }
+                                    let indent = "  ".repeat(depth);
+                                    let net_name = &netlist.nets[net_id as usize].name;
+                                    if let Some(driver) = netlist.cells.iter().find(|c| c.outputs.iter().any(|o| o.0 == net_id)) {
+                                        let in_map = net_map.contains_key(&net_id);
+                                        println!("🔒 [DFF]       {}{} (id={}) <- cell_type='{}', function={:?}, in_net_map={}",
+                                                 indent, net_name, net_id, driver.cell_type, driver.function, in_map);
+                                        for (j, &inp2) in driver.inputs.iter().enumerate() {
+                                            let inp2_name = &netlist.nets[inp2.0 as usize].name;
+                                            println!("🔒 [DFF]       {}  input[{}]: {} (id={})", indent, j, inp2_name, inp2.0);
+                                            // Recurse for non-trivial inputs
+                                            if depth < 2 && !inp2_name.contains("limit_reg") {
+                                                trace_driver(netlist, inp2.0, depth + 1, net_map);
+                                            }
+                                        }
+                                    } else {
+                                        let in_map = net_map.contains_key(&net_id);
+                                        println!("🔒 [DFF]       {}{} (id={}) has no driver cell, in_net_map={}", indent, net_name, net_id, in_map);
+                                    }
+                                }
+                                trace_driver(netlist, inp.0, 0, &self.net_map);
+                            }
+                        }
+                    }
+                }
                 if let Some(mux_cell) = netlist.cells.iter().find(|driver| {
                     let outputs_match = driver.outputs.iter().any(|o| o.0 == d_net.0);
                     let is_mux = matches!(driver.function, Some(CellFunction::Mux2));
@@ -1713,6 +1787,7 @@ impl GateNetlistToAig {
                     // MUX inputs: [sel, d0 (when sel=0), d1 (when sel=1)]
                     // When rst=1 (sel=1), we use d1 - that's the reset value
                     // d1 is inputs[2] in MUX2
+                    println!("🔒 [DFF]   Found MUX-based reset for '{}'", latch_name);
                     if let Some(&reset_net) = mux_cell.inputs.get(2) {
                         // Check if reset_net is driven by TIE cell
                         let reset_val = netlist.cells.iter().find(|c| {
@@ -1729,38 +1804,158 @@ impl GateNetlistToAig {
                         reset_value_from_mux = reset_val;
                     }
                 }
+            } else {
+                println!("🔒 [DFF]   WARNING: No D input found for '{}'!", latch_name);
             }
 
             let next_lit = if let Some(rst_net) = cell.reset {
-                // Check if D input is driven by a MUX with rst as selector
+                // Check if D input is driven by a MUX that handles reset
+                // Multiple detection strategies:
+                // 1. MUX where one data input is a constant (TIE cell)
+                // 2. MUX where selector is derived from the same reset net
                 let d_has_reset_mux = if let Some(&d_net) = d_input {
-                    // Find the cell driving the D input
-                    netlist.cells.iter().any(|driver| {
+                    // Find if D is driven by a MUX
+                    let result = netlist.cells.iter().any(|driver| {
                         let outputs_match = driver.outputs.iter().any(|o| o.0 == d_net.0);
                         let is_mux = matches!(driver.function, Some(CellFunction::Mux2));
-                        let sel_is_rst = driver.inputs.first().map(|s| s.0) == Some(rst_net.0);
-                        outputs_match && is_mux && sel_is_rst
-                    })
+                        if !outputs_match || !is_mux {
+                            return false;
+                        }
+
+                        // Strategy 1: Check if any data input is a TIE cell
+                        let has_tie_input = driver.inputs.iter().skip(1).any(|&data_net| {
+                            netlist.cells.iter().any(|c| {
+                                c.outputs.iter().any(|o| o.0 == data_net.0)
+                                    && (c.cell_type.contains("TIE") || c.cell_type.contains("TIEHI") || c.cell_type.contains("TIELO"))
+                            })
+                        });
+
+                        // Strategy 2: Check if selector is derived from the reset net
+                        // Trace back through multiple levels of combinational logic
+                        // The MUX selector is inputs[0]
+                        let selector_related_to_reset = if !driver.inputs.is_empty() {
+                            let sel_net = driver.inputs[0];
+                            // BFS to trace back through combinational logic to find if it derives from rst
+                            let mut visited = std::collections::HashSet::new();
+                            let mut queue = std::collections::VecDeque::new();
+                            queue.push_back(sel_net.0);
+                            let mut found_rst = false;
+                            let max_depth = 10; // Limit depth to avoid infinite loops
+                            let mut depth = 0;
+
+                            // Debug for specific latches
+                            let debug_bfs = latch_name.contains("oc_hard_cmp.state") || latch_name.contains("oc_soft_cmp.state");
+
+                            if debug_bfs {
+                                println!("🔒 [DFF]     BFS: Starting from sel_net id={}, looking for rst_net id={}", sel_net.0, rst_net.0);
+                            }
+
+                            while !queue.is_empty() && depth < max_depth && !found_rst {
+                                let level_size = queue.len();
+                                for _ in 0..level_size {
+                                    if let Some(current_net) = queue.pop_front() {
+                                        if visited.contains(&current_net) {
+                                            continue;
+                                        }
+                                        visited.insert(current_net);
+
+                                        if debug_bfs {
+                                            let net_name = &netlist.nets[current_net as usize].name;
+                                            println!("🔒 [DFF]     BFS depth {}: visiting net {} (id={})", depth, net_name, current_net);
+                                        }
+
+                                        // Direct match with reset net
+                                        if current_net == rst_net.0 {
+                                            found_rst = true;
+                                            break;
+                                        }
+
+                                        // Find the cell that drives this net and add its inputs to queue
+                                        let mut found_driver = false;
+                                        for c in &netlist.cells {
+                                            if c.outputs.iter().any(|o| o.0 == current_net) {
+                                                found_driver = true;
+                                                // Don't trace through sequential elements
+                                                if matches!(c.function, Some(CellFunction::Dff) | Some(CellFunction::DffR)) {
+                                                    if debug_bfs {
+                                                        println!("🔒 [DFF]     BFS: net {} driven by DFF, stopping", current_net);
+                                                    }
+                                                    continue;
+                                                }
+                                                if debug_bfs {
+                                                    println!("🔒 [DFF]     BFS: net {} driven by cell type {:?}, adding {} inputs",
+                                                             current_net, c.function, c.inputs.len());
+                                                }
+                                                for &input_net in &c.inputs {
+                                                    if !visited.contains(&input_net.0) {
+                                                        queue.push_back(input_net.0);
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        if debug_bfs && !found_driver {
+                                            println!("🔒 [DFF]     BFS: net {} has no driver (primary input?)", current_net);
+                                        }
+                                    }
+                                }
+                                depth += 1;
+                            }
+                            if debug_bfs {
+                                println!("🔒 [DFF]     BFS: finished, found_rst={}, visited {} nets", found_rst, visited.len());
+                            }
+                            found_rst
+                        } else {
+                            false
+                        };
+
+                        // Debug output for investigation
+                        if latch_name.contains("oc_hard_cmp") || latch_name.contains("oc_soft_cmp") || latch_name.contains("limit_reg") {
+                            let sel_net_name = if !driver.inputs.is_empty() {
+                                &netlist.nets[driver.inputs[0].0 as usize].name
+                            } else {
+                                "N/A"
+                            };
+                            let rst_net_name = &netlist.nets[rst_net.0 as usize].name;
+                            println!("🔒 [DFF]     MUX selector: {}, rst_net: {}, selector_related_to_reset: {}",
+                                     sel_net_name, rst_net_name, selector_related_to_reset);
+                            for (i, &data_net) in driver.inputs.iter().skip(1).enumerate() {
+                                let net_name = &netlist.nets[data_net.0 as usize].name;
+                                let is_tie = netlist.cells.iter().any(|c| {
+                                    c.outputs.iter().any(|o| o.0 == data_net.0)
+                                        && (c.cell_type.contains("TIE") || c.cell_type.contains("TIEHI") || c.cell_type.contains("TIELO"))
+                                });
+                                println!("🔒 [DFF]     MUX data[{}]: {} (is_tie={})", i, net_name, is_tie);
+                            }
+                            println!("🔒 [DFF]     has_tie_input={}, selector_related_to_reset={}", has_tie_input, selector_related_to_reset);
+                        }
+
+                        has_tie_input || selector_related_to_reset
+                    });
+                    result
                 } else {
                     false
                 };
 
+                // Always apply !rst AND D to match LIR-to-AIG behavior
+                // This ensures consistent AIG literal inversion flags between LIR and Gate AIGs
+                // (The MUX uses add_or which returns inverted literals, while add_and doesn't)
+                let rst_lit = self.net_map.get(&rst_net.0).copied().unwrap_or_else(|| {
+                    let rst_net_obj = &netlist.nets[rst_net.0 as usize];
+                    // Create input for reset signal
+                    let lit = self.aig.add_input(rst_net_obj.name.clone());
+                    self.net_map.insert(rst_net.0, lit);
+                    lit
+                });
                 if d_has_reset_mux {
-                    // MUX on D already handles reset - don't apply !rst AND D
-                    d_lit
+                    // MUX on D already handles reset, but we still apply !rst AND D
+                    // for consistency with LIR-to-AIG (and it's logically equivalent)
+                    println!("🔒 [DFF]   ✓ Detected MUX-based reset for '{}', applying !rst AND d for AIG consistency", latch_name);
                 } else {
-                    // Get the reset signal - convert to AIG input if not already in net_map
-                    let rst_lit = self.net_map.get(&rst_net.0).copied().unwrap_or_else(|| {
-                        let rst_net_obj = &netlist.nets[rst_net.0 as usize];
-                        // Create input for reset signal
-                        let lit = self.aig.add_input(rst_net_obj.name.clone());
-                        self.net_map.insert(rst_net.0, lit);
-                        lit
-                    });
                     // DFFR: when reset is active, output is 0
-                    // next = rst ? 0 : D = !rst AND D
-                    self.aig.add_and(rst_lit.invert(), d_lit)
+                    println!("🔒 [DFF]   Applying explicit reset for '{}': !rst AND d", latch_name);
                 }
+                // next = rst ? 0 : D = !rst AND D
+                self.aig.add_and(rst_lit.invert(), d_lit)
             } else {
                 // No reset - just use D input
                 d_lit
@@ -5422,6 +5617,45 @@ impl BoundedModelChecker {
             gate_aig.latches.len()
         );
 
+        // Debug: Compare latch init values
+        println!("BMC: Checking latch init values...");
+        let lir_inits: std::collections::HashMap<String, bool> = lir_aig.latches.iter().filter_map(|&id| {
+            if let AigNode::Latch { name, init, .. } = &lir_aig.nodes[id.0 as usize] {
+                Some((normalize_port_name(name).key(), *init))
+            } else {
+                None
+            }
+        }).collect();
+
+        let gate_inits: std::collections::HashMap<String, bool> = gate_aig.latches.iter().filter_map(|&id| {
+            if let AigNode::Latch { name, init, .. } = &gate_aig.nodes[id.0 as usize] {
+                Some((normalize_port_name(name).key(), *init))
+            } else {
+                None
+            }
+        }).collect();
+
+        let mut init_mismatches = Vec::new();
+        for (name, &lir_init) in &lir_inits {
+            if let Some(&gate_init) = gate_inits.get(name) {
+                if lir_init != gate_init {
+                    init_mismatches.push((name.clone(), lir_init, gate_init));
+                }
+            }
+        }
+
+        if !init_mismatches.is_empty() {
+            println!("BMC: WARNING - {} latches have different init values:", init_mismatches.len());
+            for (name, lir_init, gate_init) in init_mismatches.iter().take(10) {
+                println!("  {} : LIR={}, Gate={}", name, lir_init, gate_init);
+            }
+            if init_mismatches.len() > 10 {
+                println!("  ... and {} more", init_mismatches.len() - 10);
+            }
+        } else {
+            println!("BMC: All latch init values match");
+        }
+
         // Run BMC
         let result = self.check_sequential_aig_equivalence(&lir_aig, &gate_aig, bound)?;
 
@@ -5469,9 +5703,147 @@ impl BoundedModelChecker {
 
         // For each cycle, simulate both designs and check output equivalence
         // We use simulation first for speed, then SAT for proof
+
+        // First test: all inputs set to false (simplest case)
+        println!("BMC: Testing with all inputs = false...");
+        let all_zeros_result = self.simulate_trace_with_detailed_debug(
+            aig1, aig2,
+            &matched_inputs, &aig1_input_map, &aig2_input_map,
+            &matched_outputs,
+            bound,
+            |_| false, // All inputs false
+        );
+        if let Some((cycle, output_name)) = all_zeros_result {
+            println!("BMC: All-zeros mismatch at cycle {} on output '{}'", cycle, output_name);
+        } else {
+            println!("BMC: All-zeros simulation OK");
+        }
+
+        // Second test: all inputs set to true
+        println!("BMC: Testing with all inputs = true...");
+        let all_ones_result = self.simulate_trace_with_inputs(
+            aig1, aig2,
+            &matched_inputs, &aig1_input_map, &aig2_input_map,
+            &matched_outputs,
+            bound,
+            |_| true, // All inputs true
+        );
+        if let Some((cycle, output_name)) = all_ones_result {
+            println!("BMC: All-ones mismatch at cycle {} on output '{}'", cycle, output_name);
+        } else {
+            println!("BMC: All-ones simulation OK");
+        }
+
+        // Third test: only rst input is true
+        println!("BMC: Testing with only rst = true...");
+        let rst_only_result = self.simulate_trace_with_inputs(
+            aig1, aig2,
+            &matched_inputs, &aig1_input_map, &aig2_input_map,
+            &matched_outputs,
+            bound,
+            |key| key == "rst",
+        );
+        if let Some((cycle, output_name)) = rst_only_result {
+            println!("BMC: rst-only mismatch at cycle {} on output '{}'", cycle, output_name);
+        } else {
+            println!("BMC: rst-only simulation OK");
+        }
+
+        // Fourth test: Set ADC values to specific patterns
+        // Test with adc_vbat high (to trigger voltage comparison)
+        println!("BMC: Testing with adc_vbat[15:8] = 0xFF (high voltage)...");
+        let high_voltage_result = self.simulate_trace_with_inputs(
+            aig1, aig2,
+            &matched_inputs, &aig1_input_map, &aig2_input_map,
+            &matched_outputs,
+            bound,
+            |key| {
+                // Set high bits of adc_vbat to trigger OV comparison
+                if key.starts_with("adc_vbat[") {
+                    // Extract bit index and check if it's in the high byte
+                    if let Some(idx_str) = key.strip_prefix("adc_vbat[").and_then(|s| s.strip_suffix("]")) {
+                        if let Ok(idx) = idx_str.parse::<u32>() {
+                            return idx >= 8; // High byte set to 1s
+                        }
+                    }
+                }
+                false
+            },
+        );
+        if let Some((cycle, output_name)) = high_voltage_result {
+            println!("BMC: High-voltage mismatch at cycle {} on output '{}'", cycle, output_name);
+        } else {
+            println!("BMC: High-voltage simulation OK");
+        }
+
+        // Fifth test: Set current to non-zero pattern
+        println!("BMC: Testing with adc_ipri[15:8] = 0xFF (high current)...");
+        let high_current_result = self.simulate_trace_with_inputs(
+            aig1, aig2,
+            &matched_inputs, &aig1_input_map, &aig2_input_map,
+            &matched_outputs,
+            bound,
+            |key| {
+                if key.starts_with("adc_ipri[") {
+                    if let Some(idx_str) = key.strip_prefix("adc_ipri[").and_then(|s| s.strip_suffix("]")) {
+                        if let Ok(idx) = idx_str.parse::<u32>() {
+                            return idx >= 8;
+                        }
+                    }
+                }
+                false
+            },
+        );
+        if let Some((cycle, output_name)) = high_current_result {
+            println!("BMC: High-current mismatch at cycle {} on output '{}'", cycle, output_name);
+        } else {
+            println!("BMC: High-current simulation OK");
+        }
+
+        // Quick simulation check with deterministic patterns (based on input index)
+        println!("BMC: Phase 1 - Deterministic pattern simulation...");
+
+        // Test pattern: each bit position cycling through different values
+        for seed in 0u64..100 {
+            let sim_result = self.simulate_trace_with_inputs(
+                aig1, aig2,
+                &matched_inputs, &aig1_input_map, &aig2_input_map,
+                &matched_outputs,
+                bound,
+                |key| {
+                    // Use hash of key + seed to determine value
+                    let hash = key.as_bytes().iter().fold(seed, |acc, &b| acc.wrapping_mul(31).wrapping_add(b as u64));
+                    hash % 2 == 0
+                },
+            );
+            if let Some((cycle, output_name)) = sim_result {
+                println!(
+                    "BMC: Deterministic pattern found mismatch at cycle {} on output '{}' (seed {})",
+                    cycle, output_name, seed
+                );
+
+                // Now try to minimize by finding which inputs are needed
+                println!("Failing pattern for seed {}:", seed);
+                let mut failing_keys: Vec<_> = matched_inputs.iter()
+                    .filter(|key| {
+                        let hash = key.as_bytes().iter().fold(seed, |acc, &b| acc.wrapping_mul(31).wrapping_add(b as u64));
+                        hash % 2 == 0
+                    })
+                    .collect();
+                failing_keys.sort();
+                for k in failing_keys.iter().take(30) {
+                    println!("  {} = true", k);
+                }
+                if failing_keys.len() > 30 {
+                    println!("  ... and {} more", failing_keys.len() - 30);
+                }
+                break;
+            }
+        }
+
         let mut rng = rand::thread_rng();
 
-        // Quick simulation check first (1000 random traces)
+        // Quick simulation check (1000 random traces)
         println!("BMC: Phase 1 - Random simulation ({} traces)...", 1000);
         for trace in 0..1000 {
             let sim_result = self.simulate_bmc_trace(
@@ -5637,11 +6009,257 @@ impl BoundedModelChecker {
                 let o1 = outputs1.get(*i1).copied().unwrap_or(false);
                 let o2 = outputs2.get(*i2).copied().unwrap_or(false);
                 if o1 != o2 {
+                    // Print debug info about the mismatch
+                    println!("\n--- Mismatch debug at cycle {} ---", cycle);
+                    println!("Output '{}': LIR={}, Gate={}", name, o1, o2);
+
+                    // Print latch states that differ
+                    println!("Latch state differences (current state, cycle {}):", cycle);
+                    for (&lid1, &val1) in &state1 {
+                        if let AigNode::Latch { name: lname, .. } = &aig1.nodes[lid1 as usize] {
+                            let norm_key = normalize_port_name(lname).key();
+                            // Find corresponding latch in aig2
+                            for (&lid2, &val2) in &state2 {
+                                if let AigNode::Latch { name: lname2, .. } = &aig2.nodes[lid2 as usize] {
+                                    if normalize_port_name(lname2).key() == norm_key && val1 != val2 {
+                                        println!("  {} : LIR={}, Gate={}", norm_key, val1, val2);
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Print latch next-state differences (what will be state at cycle+1)
+                    println!("Latch next-state differences:");
+                    for (&lid1, &val1) in &next_state1 {
+                        if let AigNode::Latch { name: lname, .. } = &aig1.nodes[lid1 as usize] {
+                            let norm_key = normalize_port_name(lname).key();
+                            for (&lid2, &val2) in &next_state2 {
+                                if let AigNode::Latch { name: lname2, .. } = &aig2.nodes[lid2 as usize] {
+                                    if normalize_port_name(lname2).key() == norm_key && val1 != val2 {
+                                        println!("  {} : LIR={}, Gate={}", norm_key, val1, val2);
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Try to find minimal failing input set
+                    println!("Searching for minimal failing input set...");
+                    let failing_inputs: Vec<String> = input_values.iter()
+                        .filter(|(_, &v)| v)
+                        .map(|(k, _)| k.clone())
+                        .collect();
+
+                    // Try removing each input one at a time
+                    let mut required_inputs: Vec<String> = Vec::new();
+                    for candidate in &failing_inputs {
+                        // Test without this input
+                        let mut test_values = input_values.clone();
+                        test_values.insert(candidate.clone(), false);
+
+                        let (test_out1, _) = self.simulate_aig_cycle(
+                            aig1, &test_values, &state1, aig1_input_map
+                        );
+                        let (test_out2, _) = self.simulate_aig_cycle(
+                            aig2, &test_values, &state2, aig2_input_map
+                        );
+
+                        let test_o1 = test_out1.get(*i1).copied().unwrap_or(false);
+                        let test_o2 = test_out2.get(*i2).copied().unwrap_or(false);
+
+                        if test_o1 == test_o2 {
+                            // This input is required for the mismatch
+                            required_inputs.push(candidate.clone());
+                        }
+                    }
+
+                    println!("Required inputs for mismatch ({}):", required_inputs.len());
+                    required_inputs.sort();
+                    for k in &required_inputs {
+                        println!("  {}", k);
+                    }
                     return Some((cycle, name.clone()));
                 }
             }
 
             // Update state for next cycle
+            state1 = next_state1;
+            state2 = next_state2;
+        }
+
+        None
+    }
+
+    /// Simulate a BMC trace with specified input pattern
+    fn simulate_trace_with_inputs<F>(
+        &self,
+        aig1: &Aig,
+        aig2: &Aig,
+        matched_inputs: &[String],
+        aig1_input_map: &HashMap<String, u32>,
+        aig2_input_map: &HashMap<String, u32>,
+        matched_outputs: &[(usize, usize, String)],
+        bound: usize,
+        input_fn: F,
+    ) -> Option<(usize, String)>
+    where
+        F: Fn(&str) -> bool,
+    {
+        let mut state1 = self.get_initial_latch_state(aig1);
+        let mut state2 = self.get_initial_latch_state(aig2);
+
+        for cycle in 0..bound {
+            let mut input_values: HashMap<String, bool> = HashMap::new();
+            for key in matched_inputs {
+                input_values.insert(key.clone(), input_fn(key));
+            }
+
+            let (outputs1, next_state1) = self.simulate_aig_cycle(
+                aig1, &input_values, &state1, aig1_input_map
+            );
+            let (outputs2, next_state2) = self.simulate_aig_cycle(
+                aig2, &input_values, &state2, aig2_input_map
+            );
+
+            for (i1, i2, name) in matched_outputs {
+                let o1 = outputs1.get(*i1).copied().unwrap_or(false);
+                let o2 = outputs2.get(*i2).copied().unwrap_or(false);
+                if o1 != o2 {
+                    return Some((cycle, name.clone()));
+                }
+            }
+
+            state1 = next_state1;
+            state2 = next_state2;
+        }
+
+        None
+    }
+
+    /// Simulate a BMC trace with detailed debug output for each cycle
+    fn simulate_trace_with_detailed_debug<F>(
+        &self,
+        aig1: &Aig,
+        aig2: &Aig,
+        matched_inputs: &[String],
+        aig1_input_map: &HashMap<String, u32>,
+        aig2_input_map: &HashMap<String, u32>,
+        matched_outputs: &[(usize, usize, String)],
+        bound: usize,
+        input_fn: F,
+    ) -> Option<(usize, String)>
+    where
+        F: Fn(&str) -> bool,
+    {
+        let mut state1 = self.get_initial_latch_state(aig1);
+        let mut state2 = self.get_initial_latch_state(aig2);
+
+        // Build latch name maps for both AIGs
+        let lir_latch_names: HashMap<u32, String> = aig1.latches.iter()
+            .filter_map(|&id| {
+                if let AigNode::Latch { name, init, .. } = &aig1.nodes[id.0 as usize] {
+                    // Debug: print init values for latches containing "state" or "limit_reg"
+                    let key = normalize_port_name(name).key();
+                    if key.contains("state") || key.contains("limit_reg") {
+                        println!("  LIR latch '{}' init={}", key, init);
+                    }
+                    Some((id.0, key))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        let gate_latch_names: HashMap<u32, String> = aig2.latches.iter()
+            .filter_map(|&id| {
+                if let AigNode::Latch { name, init, .. } = &aig2.nodes[id.0 as usize] {
+                    // Debug: print init values for latches containing "state" or "limit_reg"
+                    let key = normalize_port_name(name).key();
+                    if key.contains("state") || key.contains("limit_reg") {
+                        println!("  Gate latch '{}' init={}", key, init);
+                    }
+                    Some((id.0, key))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        // Build reverse maps: name -> latch_id
+        let lir_name_to_latch: HashMap<String, u32> = lir_latch_names.iter()
+            .map(|(&id, name)| (name.clone(), id))
+            .collect();
+        let gate_name_to_latch: HashMap<String, u32> = gate_latch_names.iter()
+            .map(|(&id, name)| (name.clone(), id))
+            .collect();
+
+        for cycle in 0..bound {
+            let mut input_values: HashMap<String, bool> = HashMap::new();
+            for key in matched_inputs {
+                input_values.insert(key.clone(), input_fn(key));
+            }
+
+            // Print state differences at start of cycle
+            let mut state_diffs: Vec<(String, bool, bool)> = Vec::new();
+            for (name, &lir_id) in &lir_name_to_latch {
+                if let Some(&gate_id) = gate_name_to_latch.get(name) {
+                    let lir_val = state1.get(&lir_id).copied().unwrap_or(false);
+                    let gate_val = state2.get(&gate_id).copied().unwrap_or(false);
+                    if lir_val != gate_val {
+                        state_diffs.push((name.clone(), lir_val, gate_val));
+                    }
+                }
+            }
+
+            if !state_diffs.is_empty() {
+                println!("  Cycle {}: {} latch state differences:", cycle, state_diffs.len());
+                state_diffs.sort_by(|a, b| a.0.cmp(&b.0));
+                for (name, lir_val, gate_val) in state_diffs.iter().take(10) {
+                    println!("    {} : LIR={}, Gate={}", name, lir_val, gate_val);
+                }
+                if state_diffs.len() > 10 {
+                    println!("    ... and {} more", state_diffs.len() - 10);
+                }
+            }
+
+            let (outputs1, next_state1) = self.simulate_aig_cycle(
+                aig1, &input_values, &state1, aig1_input_map
+            );
+            let (outputs2, next_state2) = self.simulate_aig_cycle(
+                aig2, &input_values, &state2, aig2_input_map
+            );
+
+            // Check for output mismatches
+            for (i1, i2, name) in matched_outputs {
+                let o1 = outputs1.get(*i1).copied().unwrap_or(false);
+                let o2 = outputs2.get(*i2).copied().unwrap_or(false);
+                if o1 != o2 {
+                    println!("  Cycle {}: Output mismatch on '{}': LIR={}, Gate={}", cycle, name, o1, o2);
+
+                    // Print next-state differences that will cause future divergence
+                    let mut next_diffs: Vec<(String, bool, bool)> = Vec::new();
+                    for (lname, &lir_id) in &lir_name_to_latch {
+                        if let Some(&gate_id) = gate_name_to_latch.get(lname) {
+                            let lir_next = next_state1.get(&lir_id).copied().unwrap_or(false);
+                            let gate_next = next_state2.get(&gate_id).copied().unwrap_or(false);
+                            if lir_next != gate_next {
+                                next_diffs.push((lname.clone(), lir_next, gate_next));
+                            }
+                        }
+                    }
+                    if !next_diffs.is_empty() {
+                        println!("  Next-state differences ({}):", next_diffs.len());
+                        next_diffs.sort_by(|a, b| a.0.cmp(&b.0));
+                        for (lname, lir_next, gate_next) in next_diffs.iter().take(15) {
+                            println!("    {} : LIR={}, Gate={}", lname, lir_next, gate_next);
+                        }
+                    }
+
+                    return Some((cycle, name.clone()));
+                }
+            }
+
             state1 = next_state1;
             state2 = next_state2;
         }
