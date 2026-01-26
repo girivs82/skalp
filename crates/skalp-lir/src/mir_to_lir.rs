@@ -2803,7 +2803,21 @@ impl HierarchicalMirToLirResult {
 
                 // Process port connections
                 for (port_name, conn_info) in &inst.port_connections {
+                    // Get the parent signal base name from connection info
+                    let (parent_signal_base, is_signal_conn) = match conn_info {
+                        PortConnectionInfo::Signal(name) => (name.clone(), true),
+                        PortConnectionInfo::Constant(_) => (String::new(), false),
+                        _ => continue,
+                    };
+
+                    let parent_prefix = if parent_path == "top" {
+                        "".to_string()
+                    } else {
+                        format!("{}.", parent_path)
+                    };
+
                     // Find the signal ID in child's LIR for this port
+                    // First try exact match
                     let port_signal_id = lir.signals.iter().enumerate()
                         .find(|(_, s)| s.name == *port_name)
                         .map(|(idx, _)| LirSignalId(idx as u32));
@@ -2814,43 +2828,66 @@ impl HierarchicalMirToLirResult {
 
                         if is_input {
                             // For input ports, alias child's port to parent's signal
-                            match conn_info {
-                                PortConnectionInfo::Signal(name) => {
-                                    let parent_prefix = if parent_path == "top" {
-                                        "".to_string()
-                                    } else {
-                                        format!("{}.", parent_path)
-                                    };
-                                    let parent_signal_name = format!("{}{}", parent_prefix, name);
+                            if is_signal_conn {
+                                let parent_signal_name = format!("{}{}", parent_prefix, parent_signal_base);
 
-                                    if let Some(&parent_sig) = name_to_signal.get(&parent_signal_name) {
-                                        port_alias_map.insert((inst_path.clone(), child_port_id), parent_sig);
+                                if let Some(&parent_sig) = name_to_signal.get(&parent_signal_name) {
+                                    port_alias_map.insert((inst_path.clone(), child_port_id), parent_sig);
 
-                                        // Also update name_to_signal so that child instances looking up
-                                        // this port by name will find the aliased signal, not the original
-                                        let child_port_name = format!("{}.{}", inst_path, port_name);
-                                        name_to_signal.insert(child_port_name, parent_sig);
-                                    }
+                                    // Also update name_to_signal so that child instances looking up
+                                    // this port by name will find the aliased signal, not the original
+                                    let child_port_name = format!("{}.{}", inst_path, port_name);
+                                    name_to_signal.insert(child_port_name, parent_sig);
                                 }
-                                PortConnectionInfo::Constant(value) => {
-                                    // Create a constant node for the port
-                                    let child_port_flat_id = signal_id_map.get(&(inst_path.clone(), child_port_id))
-                                        .copied()
-                                        .unwrap_or(LirSignalId(0));
-                                    let child_width = lir.signals[child_port_id.0 as usize].width;
+                            } else if let PortConnectionInfo::Constant(value) = conn_info {
+                                // Create a constant node for the port
+                                let child_port_flat_id = signal_id_map.get(&(inst_path.clone(), child_port_id))
+                                    .copied()
+                                    .unwrap_or(LirSignalId(0));
+                                let child_width = lir.signals[child_port_id.0 as usize].width;
 
-                                    let const_node = crate::lir::LirNode {
-                                        id: crate::lir::LirNodeId(flat_lir.nodes.len() as u32),
-                                        op: LirOp::Constant { width: child_width, value: *value },
-                                        inputs: vec![],
-                                        output: child_port_flat_id,
-                                        path: format!("{}.{}_const", inst_path, port_name),
-                                        clock: None,
-                                        reset: None,
-                                    };
-                                    flat_lir.nodes.push(const_node);
-                                }
-                                _ => continue, // Skip other types for now
+                                let const_node = crate::lir::LirNode {
+                                    id: crate::lir::LirNodeId(flat_lir.nodes.len() as u32),
+                                    op: LirOp::Constant { width: child_width, value: *value },
+                                    inputs: vec![],
+                                    output: child_port_flat_id,
+                                    path: format!("{}.{}_const", inst_path, port_name),
+                                    clock: None,
+                                    reset: None,
+                                };
+                                flat_lir.nodes.push(const_node);
+                            }
+                        }
+                    } else if is_signal_conn {
+                        // No exact match - this might be a struct port that was flattened
+                        // Look for signals that start with "{port_name}__" (struct field pattern)
+                        let struct_prefix = format!("{}__", port_name);
+                        let flattened_signals: Vec<(usize, &crate::lir::LirSignal)> = lir.signals.iter()
+                            .enumerate()
+                            .filter(|(_, s)| s.name.starts_with(&struct_prefix))
+                            .collect();
+
+                        for (idx, child_sig) in flattened_signals {
+                            let child_port_id = LirSignalId(idx as u32);
+
+                            // Check if this is an input port
+                            if !lir.inputs.contains(&child_port_id) {
+                                continue;
+                            }
+
+                            // Extract the field suffix (e.g., "primary__high_a" from "gates__primary__high_a")
+                            let field_suffix = &child_sig.name[struct_prefix.len()..];
+
+                            // Construct parent signal name with same field suffix
+                            let parent_signal_name = format!("{}{}__{}",
+                                parent_prefix, parent_signal_base, field_suffix);
+
+                            if let Some(&parent_sig) = name_to_signal.get(&parent_signal_name) {
+                                port_alias_map.insert((inst_path.clone(), child_port_id), parent_sig);
+
+                                // Also update name_to_signal for child lookups
+                                let child_port_name = format!("{}.{}__{}", inst_path, port_name, field_suffix);
+                                name_to_signal.insert(child_port_name, parent_sig);
                             }
                         }
                     }
@@ -2938,7 +2975,20 @@ impl HierarchicalMirToLirResult {
                 };
 
                 for (port_name, conn_info) in &inst.port_connections {
+                    // Get the parent signal name from connection info
+                    let parent_signal_base = match conn_info {
+                        PortConnectionInfo::Signal(name) => name.clone(),
+                        _ => continue,
+                    };
+
+                    let parent_prefix = if parent_path == "top" {
+                        "".to_string()
+                    } else {
+                        format!("{}.", parent_path)
+                    };
+
                     // Find the signal ID in child's LIR for this port
+                    // First try exact match
                     let port_signal_id = lir.signals.iter().enumerate()
                         .find(|(_, s)| s.name == *port_name)
                         .map(|(idx, _)| LirSignalId(idx as u32));
@@ -2948,17 +2998,7 @@ impl HierarchicalMirToLirResult {
                         let is_output = lir.outputs.contains(&child_port_id);
 
                         if is_output {
-                            let parent_signal_name = match conn_info {
-                                PortConnectionInfo::Signal(name) => {
-                                    let parent_prefix = if parent_path == "top" {
-                                        "".to_string()
-                                    } else {
-                                        format!("{}.", parent_path)
-                                    };
-                                    format!("{}{}", parent_prefix, name)
-                                }
-                                _ => continue,
-                            };
+                            let parent_signal_name = format!("{}{}", parent_prefix, parent_signal_base);
 
                             // Get the flattened child output signal
                             let child_flat_id = signal_id_map.get(&(inst_path.clone(), child_port_id));
@@ -2973,6 +3013,49 @@ impl HierarchicalMirToLirResult {
                                     inputs: vec![child_id],
                                     output: parent_id,
                                     path: format!("{}.{}_conn", inst_path, port_name),
+                                    clock: None,
+                                    reset: None,
+                                };
+                                flat_lir.nodes.push(wire_node);
+                            }
+                        }
+                    } else {
+                        // No exact match - this might be a struct port that was flattened
+                        // Look for signals that start with "{port_name}__" (struct field pattern)
+                        let struct_prefix = format!("{}__", port_name);
+                        let flattened_signals: Vec<(usize, &crate::lir::LirSignal)> = lir.signals.iter()
+                            .enumerate()
+                            .filter(|(_, s)| s.name.starts_with(&struct_prefix))
+                            .collect();
+
+                        for (idx, child_sig) in flattened_signals {
+                            let child_port_id = LirSignalId(idx as u32);
+
+                            // Check if this is an output port
+                            if !lir.outputs.contains(&child_port_id) {
+                                continue;
+                            }
+
+                            // Extract the field suffix (e.g., "primary__high_a" from "gates__primary__high_a")
+                            let field_suffix = &child_sig.name[struct_prefix.len()..];
+
+                            // Construct parent signal name with same field suffix
+                            let parent_signal_name = format!("{}{}__{}",
+                                parent_prefix, parent_signal_base, field_suffix);
+
+                            // Get the flattened child output signal
+                            let child_flat_id = signal_id_map.get(&(inst_path.clone(), child_port_id));
+                            let parent_flat_id = name_to_signal.get(&parent_signal_name);
+
+                            if let (Some(&child_id), Some(&parent_id)) = (child_flat_id, parent_flat_id) {
+                                // Add a buffer node to wire child output to parent signal
+                                let child_width = flat_lir.signals[child_id.0 as usize].width;
+                                let wire_node = crate::lir::LirNode {
+                                    id: crate::lir::LirNodeId(flat_lir.nodes.len() as u32),
+                                    op: LirOp::Buf { width: child_width },
+                                    inputs: vec![child_id],
+                                    output: parent_id,
+                                    path: format!("{}.{}__{}_conn", inst_path, port_name, field_suffix),
                                     clock: None,
                                     reset: None,
                                 };
@@ -3667,6 +3750,89 @@ pub fn lower_mir_hierarchical_for_optimize_first(mir: &Mir) -> (HierarchicalMirT
     (result, has_async)
 }
 
+/// Result of finding the best module for elaboration
+struct BestModuleResult<'a> {
+    /// The module to use for elaboration (may be monomorphized)
+    module: &'a Module,
+    /// The original generic module (for name lookups when IDs don't match)
+    /// None if the module wasn't switched to a monomorphized version
+    generic_module: Option<&'a Module>,
+}
+
+/// Find the best module to use for elaboration.
+///
+/// If the referenced module is a generic template (0 instances, 0 signals, 0 processes),
+/// this function looks for a monomorphized version of the same module and returns that
+/// instead. Monomorphized modules have names like `ModuleName_param1_param2`.
+///
+/// This fixes the issue where instances reference generic module IDs but the actual
+/// implementation (with child instances) is in the monomorphized version.
+///
+/// Returns both the module to use AND the original generic module (for name lookups)
+fn find_best_module<'a>(
+    module: &'a Module,
+    module_map: &'a IndexMap<ModuleId, &'a Module>,
+) -> BestModuleResult<'a> {
+    // Check if this module looks like a generic template (no implementation)
+    let is_generic_template = module.instances.is_empty()
+        && module.signals.is_empty()
+        && module.processes.is_empty();
+
+    if is_generic_template {
+        // Look for a monomorphized version
+        // Monomorphized names follow the pattern: ModuleName_param1_param2
+        let base_name = &module.name;
+        let prefix = format!("{}_", base_name);
+
+        // Find all monomorphized versions of this module
+        let monomorphized: Vec<_> = module_map
+            .values()
+            .filter(|m| m.name.starts_with(&prefix))
+            .collect();
+
+        if let Some(&mono_mod) = monomorphized.first() {
+            trace!(
+                "[ELABORATE] Using monomorphized module '{}' instead of generic '{}'",
+                mono_mod.name,
+                module.name
+            );
+            return BestModuleResult {
+                module: mono_mod,
+                generic_module: Some(module), // Keep the generic for name lookups
+            };
+        }
+    } else {
+        // Module is already monomorphized (has implementation) - try to find its generic version
+        // for fallback name lookups. Monomorphized names follow pattern: GenericName_param1_param2
+        // Try to extract the generic name by finding the first underscore followed by digits
+        if let Some(underscore_pos) = module.name.rfind('_') {
+            let suffix = &module.name[underscore_pos + 1..];
+            // Check if the suffix looks like parameters (all digits or digits separated by underscores)
+            if suffix.chars().all(|c| c.is_ascii_digit() || c == '_') && !suffix.is_empty() {
+                let base_name = &module.name[..underscore_pos];
+                // Try to find the generic module with this base name
+                let generic = module_map.values().find(|m| m.name == base_name);
+                if let Some(&generic_mod) = generic {
+                    trace!(
+                        "[ELABORATE] Found generic module '{}' for monomorphized '{}'",
+                        generic_mod.name,
+                        module.name
+                    );
+                    return BestModuleResult {
+                        module,
+                        generic_module: Some(generic_mod),
+                    };
+                }
+            }
+        }
+    }
+
+    BestModuleResult {
+        module,
+        generic_module: None,
+    }
+}
+
 /// Recursively elaborate a module instance for optimize-first flow
 ///
 /// This always passes is_async_context = false to skip NCL expansion,
@@ -3676,12 +3842,17 @@ pub fn lower_mir_hierarchical_for_optimize_first(mir: &Mir) -> (HierarchicalMirT
 fn elaborate_instance_for_optimize_first(
     module_map: &IndexMap<ModuleId, &Module>,
     _module_by_name: &IndexMap<&str, &Module>,
-    module: &Module,
+    module_arg: &Module,
     instance_path: &str,
     parent_connections: &IndexMap<String, PortConnectionInfo>,
     result: &mut HierarchicalMirToLirResult,
     lir_cache: &mut HashMap<String, MirToLirResult>,
 ) {
+    // Find the best module to use (prefer monomorphized over generic template)
+    let best = find_best_module(module_arg, module_map);
+    let module = best.module;
+    let generic_module = best.generic_module;
+
     // Use skip_ncl to completely skip NCL expansion for optimize-first flow
     let lir_result = if let Some(ref vendor_config) = module.vendor_ip_config {
         trace!(
@@ -3742,7 +3913,8 @@ fn elaborate_instance_for_optimize_first(
 
         if let Some(child_mod) = module_map.get(&inst.module).copied() {
             // Use the same connection extraction as the regular elaborate_instance
-            let child_connections = extract_connection_info(&inst.connections, module, &inst.name);
+            // Pass the generic module for fallback name lookups if we're using a monomorphized module
+            let child_connections = extract_connection_info(&inst.connections, module, generic_module, &inst.name);
 
             // Recurse with optimize-first flow
             elaborate_instance_for_optimize_first(
@@ -3788,13 +3960,18 @@ fn elaborate_instance_for_optimize_first(
 fn elaborate_instance(
     module_map: &IndexMap<ModuleId, &Module>,
     _module_by_name: &IndexMap<&str, &Module>,
-    module: &Module,
+    module_arg: &Module,
     instance_path: &str,
     parent_connections: &IndexMap<String, PortConnectionInfo>,
     is_async_context: bool,
     result: &mut HierarchicalMirToLirResult,
     lir_cache: &mut HashMap<LirCacheKey, MirToLirResult>,
 ) {
+    // Find the best module to use (prefer monomorphized over generic template)
+    let best = find_best_module(module_arg, module_map);
+    let module = best.module;
+    let generic_module = best.generic_module;
+
     // Compute effective async status: module's own flag OR inherited from parent
     let effective_is_async = module.is_async || is_async_context;
 
@@ -3855,7 +4032,6 @@ fn elaborate_instance(
         instance_path,
         module.instances.len()
     );
-
     // Process child instances
     for inst in &module.instances {
         trace!(
@@ -3877,7 +4053,7 @@ fn elaborate_instance(
             for (port_name, expr) in &inst.connections {
                 trace!("[ELABORATE]     {} -> {:?}", port_name, expr.kind);
             }
-            let child_connections = extract_connection_info(&inst.connections, module, &inst.name);
+            let child_connections = extract_connection_info(&inst.connections, module, generic_module, &inst.name);
 
             // Recursively elaborate child, propagating async context
             // If parent is async (by declaration or inheritance), children inherit it
@@ -3916,12 +4092,40 @@ fn elaborate_instance(
 /// Extract connection information from port connections
 /// Uses the parent module to look up actual signal/port names by ID
 /// BUG #168 FIX: Also resolves variable references to their constant values when possible
+///
+/// The `fallback_module` parameter is used when the parent module is a monomorphized version
+/// but the port IDs in expressions reference the original generic module. When a port ID
+/// isn't found in parent_module, we try fallback_module if provided.
 fn extract_connection_info(
     connections: &IndexMap<String, Expression>,
     parent_module: &Module,
+    fallback_module: Option<&Module>,
     instance_name: &str,
 ) -> IndexMap<String, PortConnectionInfo> {
     let mut result = IndexMap::new();
+
+    // Helper: Look up lvalue name in parent_module, falling back to fallback_module if needed
+    // This handles cases where the parent_module is monomorphized but the lvalue IDs
+    // reference the original generic module
+    let lvalue_to_name_with_fallback = |lvalue: &LValue| -> String {
+        let name = lvalue_to_name_with_module(lvalue, parent_module);
+        // If we got a fallback name like "port_X" or "signal_X", try the fallback module
+        if (name.starts_with("port_") || name.starts_with("signal_"))
+            && fallback_module.is_some()
+        {
+            let fallback_name = lvalue_to_name_with_module(lvalue, fallback_module.unwrap());
+            // Use the fallback name if it's not also a synthetic name
+            if !fallback_name.starts_with("port_") && !fallback_name.starts_with("signal_") {
+                trace!(
+                    "[EXTRACT_CONN] Used fallback module for lvalue, got '{}' instead of '{}'",
+                    fallback_name,
+                    name
+                );
+                return fallback_name;
+            }
+        }
+        name
+    };
 
     // Sort port names for deterministic iteration order (HashMap is non-deterministic)
     let mut sorted_port_names: Vec<_> = connections.keys().collect();
@@ -3940,14 +4144,14 @@ fn extract_connection_info(
                 match lvalue {
                     LValue::RangeSelect { base, high, low } => {
                         // Range connection like b[4:0]
-                        let base_name = lvalue_to_name_with_module(base, parent_module);
+                        let base_name = lvalue_to_name_with_fallback(base);
                         let high_val = extract_const_index(high).unwrap_or(0);
                         let low_val = extract_const_index(low).unwrap_or(0);
                         PortConnectionInfo::Range(base_name, high_val, low_val)
                     }
                     LValue::BitSelect { base, index } => {
                         // Single bit connection like op[0]
-                        let base_name = lvalue_to_name_with_module(base, parent_module);
+                        let base_name = lvalue_to_name_with_fallback(base);
                         let bit_idx = extract_const_index(index).unwrap_or(0);
                         PortConnectionInfo::BitSelect(base_name, bit_idx)
                     }
@@ -3964,13 +4168,13 @@ fn extract_connection_info(
                             PortConnectionInfo::Constant(const_val)
                         } else {
                             // Fall back to signal reference
-                            let signal_name = lvalue_to_name_with_module(lvalue, parent_module);
+                            let signal_name = lvalue_to_name_with_fallback(lvalue);
                             PortConnectionInfo::Signal(signal_name)
                         }
                     }
                     _ => {
                         // Simple signal reference
-                        let signal_name = lvalue_to_name_with_module(lvalue, parent_module);
+                        let signal_name = lvalue_to_name_with_fallback(lvalue);
                         PortConnectionInfo::Signal(signal_name)
                     }
                 }
@@ -3998,7 +4202,7 @@ fn extract_connection_info(
                         // not just convert to a string "var_12[15:0]" which doesn't exist as a signal
                         match lvalue {
                             LValue::RangeSelect { base, high, low } => {
-                                let base_name = lvalue_to_name_with_module(base, parent_module);
+                                let base_name = lvalue_to_name_with_fallback(base);
                                 let high_val = extract_const_index(high).unwrap_or(0);
                                 let low_val = extract_const_index(low).unwrap_or(0);
                                 trace!(
@@ -4010,7 +4214,7 @@ fn extract_connection_info(
                                 PortConnectionInfo::Range(base_name, high_val, low_val)
                             }
                             LValue::BitSelect { base, index } => {
-                                let base_name = lvalue_to_name_with_module(base, parent_module);
+                                let base_name = lvalue_to_name_with_fallback(base);
                                 let bit_idx = extract_const_index(index).unwrap_or(0);
                                 trace!(
                                     "[EXTRACT_CONN] BUG #200 FIX: Cast->BitSelect: {}[{}]",
@@ -4020,7 +4224,7 @@ fn extract_connection_info(
                                 PortConnectionInfo::BitSelect(base_name, bit_idx)
                             }
                             _ => {
-                                let signal_name = lvalue_to_name_with_module(lvalue, parent_module);
+                                let signal_name = lvalue_to_name_with_fallback(lvalue);
                                 trace!(
                                     "[EXTRACT_CONN] BUG #190 FIX: Unwrapped Cast to signal '{}'",
                                     signal_name
