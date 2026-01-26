@@ -185,6 +185,57 @@ impl MirToLirTransform {
             self.transform_process(process);
         }
 
+        // Phase 4b: Synthesize instance port connection expressions
+        // When a module has instances with port connections that are expressions
+        // (not simple signal references), we need to synthesize those expressions
+        // into LIR nodes. This creates signals that can be referenced during flattening.
+        for inst in &module.instances {
+            for (port_name, expr) in &inst.connections {
+                // Check if this is a complex expression that needs synthesis
+                let needs_synthesis = match &expr.kind {
+                    ExpressionKind::Ref(_) => false, // Simple reference, no synthesis needed
+                    ExpressionKind::Literal(_) => false, // Constant, handled separately
+                    // Cast expressions that wrap simple Refs don't need synthesis
+                    ExpressionKind::Cast { expr: inner, .. } => {
+                        !matches!(inner.kind, ExpressionKind::Ref(_))
+                    }
+                    _ => true, // Complex expression needs synthesis
+                };
+
+                if needs_synthesis {
+                    // Infer the width from the expression
+                    let port_width = self.infer_expression_width(expr);
+
+                    // Synthesize the expression into LIR nodes
+                    let expr_signal = self.transform_expression(expr, port_width);
+
+                    // Create a named signal for this expression so it can be found during flattening
+                    // The naming convention is: inst_name__port__{port_name}
+                    let synth_signal_name = format!("{}__port__{}", inst.name, port_name);
+                    let synth_signal_id = self.lir.add_signal(synth_signal_name.clone(), port_width);
+
+                    // Add a buffer to connect the expression result to the named signal
+                    let buf_node = crate::lir::LirNode {
+                        id: crate::lir::LirNodeId(self.lir.nodes.len() as u32),
+                        op: LirOp::Buf { width: port_width },
+                        inputs: vec![expr_signal],
+                        output: synth_signal_id,
+                        path: format!("{}.{}_conn", inst.name, port_name),
+                        clock: None,
+                        reset: None,
+                    };
+                    self.lir.nodes.push(buf_node);
+
+                    trace!(
+                        "[SYNTH_PORT] Synthesized expression for {}:{} -> signal '{}'",
+                        inst.name,
+                        port_name,
+                        synth_signal_name
+                    );
+                }
+            }
+        }
+
         // Phase 5: Populate clock and reset nets
         self.lir.clocks = std::mem::take(&mut self.clock_signals);
         self.lir.resets = std::mem::take(&mut self.reset_signals);
@@ -260,6 +311,57 @@ impl MirToLirTransform {
         // Phase 4: Transform processes
         for process in &module.processes {
             self.transform_process(process);
+        }
+
+        // Phase 4b: Synthesize instance port connection expressions
+        // When a module has instances with port connections that are expressions
+        // (not simple signal references), we need to synthesize those expressions
+        // into LIR nodes. This creates signals that can be referenced during flattening.
+        for inst in &module.instances {
+            for (port_name, expr) in &inst.connections {
+                // Check if this is a complex expression that needs synthesis
+                let needs_synthesis = match &expr.kind {
+                    ExpressionKind::Ref(_) => false, // Simple reference, no synthesis needed
+                    ExpressionKind::Literal(_) => false, // Constant, handled separately
+                    // Cast expressions that wrap simple Refs don't need synthesis
+                    ExpressionKind::Cast { expr: inner, .. } => {
+                        !matches!(inner.kind, ExpressionKind::Ref(_))
+                    }
+                    _ => true, // Complex expression needs synthesis
+                };
+
+                if needs_synthesis {
+                    // Infer the width from the expression
+                    let port_width = self.infer_expression_width(expr);
+
+                    // Synthesize the expression into LIR nodes
+                    let expr_signal = self.transform_expression(expr, port_width);
+
+                    // Create a named signal for this expression so it can be found during flattening
+                    // The naming convention is: inst_name__port__{port_name}
+                    let synth_signal_name = format!("{}__port__{}", inst.name, port_name);
+                    let synth_signal_id = self.lir.add_signal(synth_signal_name.clone(), port_width);
+
+                    // Add a buffer to connect the expression result to the named signal
+                    let buf_node = crate::lir::LirNode {
+                        id: crate::lir::LirNodeId(self.lir.nodes.len() as u32),
+                        op: LirOp::Buf { width: port_width },
+                        inputs: vec![expr_signal],
+                        output: synth_signal_id,
+                        path: format!("{}.{}_conn", inst.name, port_name),
+                        clock: None,
+                        reset: None,
+                    };
+                    self.lir.nodes.push(buf_node);
+
+                    trace!(
+                        "[SYNTH_PORT] Synthesized expression for {}:{} -> signal '{}'",
+                        inst.name,
+                        port_name,
+                        synth_signal_name
+                    );
+                }
+            }
         }
 
         // Phase 5: Populate clock and reset nets
@@ -2712,20 +2814,43 @@ impl HierarchicalMirToLirResult {
 
                         if is_input {
                             // For input ports, alias child's port to parent's signal
-                            let parent_signal_name = match conn_info {
+                            match conn_info {
                                 PortConnectionInfo::Signal(name) => {
                                     let parent_prefix = if parent_path == "top" {
                                         "".to_string()
                                     } else {
                                         format!("{}.", parent_path)
                                     };
-                                    format!("{}{}", parent_prefix, name)
-                                }
-                                _ => continue, // Skip constants and other types for now
-                            };
+                                    let parent_signal_name = format!("{}{}", parent_prefix, name);
 
-                            if let Some(&parent_sig) = name_to_signal.get(&parent_signal_name) {
-                                port_alias_map.insert((inst_path.clone(), child_port_id), parent_sig);
+                                    if let Some(&parent_sig) = name_to_signal.get(&parent_signal_name) {
+                                        port_alias_map.insert((inst_path.clone(), child_port_id), parent_sig);
+
+                                        // Also update name_to_signal so that child instances looking up
+                                        // this port by name will find the aliased signal, not the original
+                                        let child_port_name = format!("{}.{}", inst_path, port_name);
+                                        name_to_signal.insert(child_port_name, parent_sig);
+                                    }
+                                }
+                                PortConnectionInfo::Constant(value) => {
+                                    // Create a constant node for the port
+                                    let child_port_flat_id = signal_id_map.get(&(inst_path.clone(), child_port_id))
+                                        .copied()
+                                        .unwrap_or(LirSignalId(0));
+                                    let child_width = lir.signals[child_port_id.0 as usize].width;
+
+                                    let const_node = crate::lir::LirNode {
+                                        id: crate::lir::LirNodeId(flat_lir.nodes.len() as u32),
+                                        op: LirOp::Constant { width: child_width, value: *value },
+                                        inputs: vec![],
+                                        output: child_port_flat_id,
+                                        path: format!("{}.{}_const", inst_path, port_name),
+                                        clock: None,
+                                        reset: None,
+                                    };
+                                    flat_lir.nodes.push(const_node);
+                                }
+                                _ => continue, // Skip other types for now
                             }
                         }
                     }
@@ -3617,7 +3742,7 @@ fn elaborate_instance_for_optimize_first(
 
         if let Some(child_mod) = module_map.get(&inst.module).copied() {
             // Use the same connection extraction as the regular elaborate_instance
-            let child_connections = extract_connection_info(&inst.connections, module);
+            let child_connections = extract_connection_info(&inst.connections, module, &inst.name);
 
             // Recurse with optimize-first flow
             elaborate_instance_for_optimize_first(
@@ -3752,7 +3877,7 @@ fn elaborate_instance(
             for (port_name, expr) in &inst.connections {
                 trace!("[ELABORATE]     {} -> {:?}", port_name, expr.kind);
             }
-            let child_connections = extract_connection_info(&inst.connections, module);
+            let child_connections = extract_connection_info(&inst.connections, module, &inst.name);
 
             // Recursively elaborate child, propagating async context
             // If parent is async (by declaration or inheritance), children inherit it
@@ -3794,6 +3919,7 @@ fn elaborate_instance(
 fn extract_connection_info(
     connections: &IndexMap<String, Expression>,
     parent_module: &Module,
+    instance_name: &str,
 ) -> IndexMap<String, PortConnectionInfo> {
     let mut result = IndexMap::new();
 
@@ -3912,23 +4038,28 @@ fn extract_connection_info(
                         PortConnectionInfo::Constant(const_val)
                     }
                     _ => {
-                        // Complex inner expression - still need to create synthetic signal
+                        // Complex inner expression - use the synthesized signal from Phase 4b
+                        let synth_signal_name = format!("{}__port__{}", instance_name, port_name);
                         trace!(
-                            "[EXTRACT_CONN] BUG #190: Cast inner is complex: {:?}",
-                            inner_expr.kind
+                            "[EXTRACT_CONN] Complex cast inner for port '{}': {:?} -> synth signal '{}'",
+                            port_name,
+                            inner_expr.kind,
+                            synth_signal_name
                         );
-                        PortConnectionInfo::Signal(format!("expr_{}", port_name))
+                        PortConnectionInfo::Signal(synth_signal_name)
                     }
                 }
             }
             _ => {
-                // Complex expression - treat as signal
+                // Complex expression - use the synthesized signal from Phase 4b
+                let synth_signal_name = format!("{}__port__{}", instance_name, port_name);
                 trace!(
-                    "[EXTRACT_CONN] Complex expression for port '{}': {:?}",
+                    "[EXTRACT_CONN] Complex expression for port '{}': {:?} -> synth signal '{}'",
                     port_name,
-                    expr.kind
+                    expr.kind,
+                    synth_signal_name
                 );
-                PortConnectionInfo::Signal(format!("expr_{}", port_name))
+                PortConnectionInfo::Signal(synth_signal_name)
             }
         };
         result.insert(port_name.clone(), info);
