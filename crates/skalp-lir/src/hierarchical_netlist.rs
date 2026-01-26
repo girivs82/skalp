@@ -257,6 +257,23 @@ impl HierarchicalNetlist {
         // This ensures fanout and driver info is accurate after buffer removal
         result.rebuild_net_connectivity();
 
+        // Phase 7: Populate clocks and resets arrays from nets marked with is_clock/is_reset
+        // The gate_netlist_to_sir converter uses these to set up sequential blocks
+        for (idx, net) in result.nets.iter().enumerate() {
+            let net_id = GateNetId(idx as u32);
+            if net.is_clock && !result.clocks.contains(&net_id) {
+                result.clocks.push(net_id);
+            }
+            if net.is_reset && !result.resets.contains(&net_id) {
+                result.resets.push(net_id);
+            }
+        }
+        trace!(
+            "[FLATTEN] Populated {} clock nets and {} reset nets",
+            result.clocks.len(),
+            result.resets.len()
+        );
+
         result.update_stats();
         result
     }

@@ -96,15 +96,12 @@ impl GateNetlistToSirConverter {
             let signal_id = SirSignalId(self.next_signal_id);
             self.next_signal_id += 1;
 
-            let signal_type = if net.is_clock {
-                SirSignalType::Port {
-                    direction: SirPortDirection::Input,
-                }
-            } else if net.is_reset {
-                SirSignalType::Port {
-                    direction: SirPortDirection::Input,
-                }
-            } else if net.is_input {
+            // Determine signal type:
+            // - Clock/reset nets are Input ports ONLY if they are top-level inputs
+            // - Internal clocks (from submodule port connections) should be wires
+            //   that are driven by connection buffers
+            let signal_type = if net.is_input {
+                // Top-level input (may or may not be clock/reset)
                 SirSignalType::Port {
                     direction: SirPortDirection::Input,
                 }
@@ -113,6 +110,7 @@ impl GateNetlistToSirConverter {
                     direction: SirPortDirection::Output,
                 }
             } else {
+                // Internal wire (including internal clocks from submodules)
                 SirSignalType::Wire
             };
 
@@ -604,10 +602,10 @@ impl GateNetlistToSirConverter {
             "FP32GE" | "FP32_GE" | "FPGE32" => PrimitiveType::Fp32Ge,
 
             // Sequential - D Flip-Flops
-            "DFF" | "DFFRQ" => PrimitiveType::DffP, // Rising edge, async reset
+            "DFF" | "DFFR" | "DFFRQ" => PrimitiveType::DffP, // Rising edge, with reset
             "DFFN" | "DFFRN" => PrimitiveType::DffN, // Active-low reset
             "DFFNEG" => PrimitiveType::DffNeg,      // Falling edge
-            "DFFE" => PrimitiveType::DffE,          // With enable
+            "DFFE" | "DFFER" => PrimitiveType::DffE, // With enable (and optional reset)
             "DFFAR" => PrimitiveType::DffAR,        // Async reset
             "DFFAS" => PrimitiveType::DffAS,        // Async set
             "DFFSCAN" => PrimitiveType::DffScan,    // Scan chain

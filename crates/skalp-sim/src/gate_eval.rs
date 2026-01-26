@@ -192,17 +192,22 @@ pub fn evaluate_primitive(ptype: &PrimitiveType, inputs: &[bool]) -> Vec<bool> {
         | PrimitiveType::DffNeg
         | PrimitiveType::DffAR
         | PrimitiveType::DffAS => {
-            // DFF inputs: [clk, d] - clock is at index 0, data at index 1
+            // DFF inputs: [d] - data input only
+            // Clock is associated with the sequential block, not the primitive inputs
             // On clock edge, sample D input and store to Q output
             // Sequential behavior is handled by SequentialBlock processing
-            let d = inputs.get(1).copied().unwrap_or(false);
+            let d = inputs.first().copied().unwrap_or(false);
             vec![d]
         }
 
         PrimitiveType::DffE => {
-            // inputs: [clk, d, en, rst]
-            let d = inputs.get(1).copied().unwrap_or(false);
-            vec![d]
+            // inputs: [d, en] - data and enable
+            // Clock is associated with the sequential block
+            let d = inputs.first().copied().unwrap_or(false);
+            let en = inputs.get(1).copied().unwrap_or(true); // default enable to true
+            // Note: enable logic is often handled at the block level, but if enabled=false,
+            // the DFF should retain its current value (not modeled here as we don't have state)
+            if en { vec![d] } else { vec![false] } // Simplified: returns d if enabled
         }
 
         PrimitiveType::DffScan => {
