@@ -26,6 +26,7 @@ use crate::{Counterexample, FormalError, FormalResult, TraceStep};
 use rayon::prelude::*;
 use rand::Rng;
 use skalp_lir::{GateNetlist, Lir, LirNode, LirOp, LirSignalId};
+use skalp_mir::Type;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use varisat::{CnfFormula, ExtendFormula, Lit, Solver, Var};
@@ -1101,7 +1102,7 @@ impl GateNetlistToAig {
         }
 
         // Now create Latch nodes for each DFF
-        // The D input is the next-state logic
+        // The D input is the next-state logic, with reset handling
         for (cell_idx, out_net, latch_name) in &dff_cells {
             let cell = &netlist.cells[*cell_idx];
 
@@ -1113,11 +1114,29 @@ impl GateNetlistToAig {
                 !net.name.contains("clk") && !net.name.contains("clock")
             });
 
-            let next_lit = if let Some(&d_net) = d_input {
+            let d_lit = if let Some(&d_net) = d_input {
                 self.net_map.get(&d_net.0).copied().unwrap_or_else(|| self.aig.false_lit())
             } else {
                 // No D input found, latch holds its value
                 self.net_map.get(&out_net.0).copied().unwrap_or_else(|| self.aig.false_lit())
+            };
+
+            // Handle reset: if cell has reset input, next_state = rst ? 0 : D
+            let next_lit = if let Some(rst_net) = cell.reset {
+                // Get the reset signal - convert to AIG input if not already in net_map
+                let rst_lit = self.net_map.get(&rst_net.0).copied().unwrap_or_else(|| {
+                    let rst_net_obj = &netlist.nets[rst_net.0 as usize];
+                    // Create input for reset signal
+                    let lit = self.aig.add_input(rst_net_obj.name.clone());
+                    self.net_map.insert(rst_net.0, lit);
+                    lit
+                });
+                // DFFR: when reset is active, output is 0
+                // next = rst ? 0 : D = !rst AND D
+                self.aig.add_and(rst_lit.invert(), d_lit)
+            } else {
+                // No reset - just use D input
+                d_lit
             };
 
             // Create latch (init to false)
@@ -2705,6 +2724,13 @@ impl<'a> MirToAig<'a> {
             }
         }
 
+        // Populate register_outputs so convert_statement_for_bmc can identify register assignments
+        for (sig_ref, _, _) in &register_signals {
+            if !self.register_outputs.contains(sig_ref) {
+                self.register_outputs.push(*sig_ref);
+            }
+        }
+
         // Add primary inputs (input ports)
         for port in &self.module.ports {
             if port.direction == PortDirection::Input {
@@ -2831,25 +2857,23 @@ impl<'a> MirToAig<'a> {
     ) {
         // Convert the process body, but capture assignments to registers
         // as next-state values instead of updating signal_map directly
-        self.convert_block_for_bmc(&process.body, &HashMap::new(), next_state_map);
+        self.convert_block_for_bmc(&process.body, next_state_map);
     }
 
     /// Convert a block for BMC - separates register assignments as next-state
     fn convert_block_for_bmc(
         &mut self,
         block: &Block,
-        conditions: &HashMap<MirSignalRef, Vec<AigLit>>,
         next_state_map: &mut HashMap<(MirSignalRef, u32), AigLit>,
     ) {
         for stmt in &block.statements {
-            self.convert_statement_for_bmc(stmt, conditions, next_state_map);
+            self.convert_statement_for_bmc(stmt, next_state_map);
         }
     }
 
     fn convert_statement_for_bmc(
         &mut self,
         stmt: &Statement,
-        conditions: &HashMap<MirSignalRef, Vec<AigLit>>,
         next_state_map: &mut HashMap<(MirSignalRef, u32), AigLit>,
     ) {
         match stmt {
@@ -2866,43 +2890,182 @@ impl<'a> MirToAig<'a> {
                         return;
                     }
                 }
-                // Not a register - normal assignment
-                self.convert_assignment(assign, conditions);
+                // Not a register - normal assignment (update signal_map)
+                self.convert_assignment(assign, &HashMap::new());
             }
             Statement::If(if_stmt) => {
-                // For conditionals, we need to handle register updates with muxing
+                // For conditionals with register assignments, we need proper MUXing:
+                // 1. Save current next_state_map values for all registers
+                // 2. Process then branch -> get then_updates
+                // 3. Restore to saved state
+                // 4. Process else branch -> get else_updates
+                // 5. For each register, create MUX: cond ? then_value : else_value
+
                 let cond_lits = self.convert_expression(&if_stmt.condition);
                 let cond = cond_lits.first().copied().unwrap_or_else(|| self.aig.false_lit());
 
-                // Convert then branch
-                self.convert_block_for_bmc(&if_stmt.then_block, conditions, next_state_map);
+                // Save current state of next_state_map
+                let saved_state = next_state_map.clone();
 
-                // Convert else branch
+                // Process then branch
+                self.convert_block_for_bmc(&if_stmt.then_block, next_state_map);
+                let then_state = next_state_map.clone();
+
+                // Restore to saved state for else branch
+                *next_state_map = saved_state.clone();
+
+                // Process else branch (or keep saved state if no else)
                 if let Some(else_block) = &if_stmt.else_block {
-                    self.convert_block_for_bmc(else_block, conditions, next_state_map);
+                    self.convert_block_for_bmc(else_block, next_state_map);
+                }
+                let else_state = next_state_map.clone();
+
+                // Merge: for each register bit, create MUX if values differ
+                // Collect all keys from both then and else states
+                let mut all_keys: std::collections::HashSet<(MirSignalRef, u32)> =
+                    std::collections::HashSet::new();
+                for key in then_state.keys() {
+                    all_keys.insert(*key);
+                }
+                for key in else_state.keys() {
+                    all_keys.insert(*key);
                 }
 
-                // Note: For proper conditional handling, we'd need to track which
-                // register bits are assigned in each branch and create muxes.
-                // This is simplified - full implementation would track per-branch updates.
+                for key in all_keys {
+                    let then_val = then_state.get(&key).copied();
+                    let else_val = else_state.get(&key).copied();
+                    let saved_val = saved_state.get(&key).copied();
+
+                    // Get current register value from signal_map as fallback
+                    // This is what the register holds if neither branch updates it
+                    let current_reg_val = self.signal_map.get(&key).copied()
+                        .unwrap_or_else(|| self.aig.false_lit());
+
+                    // Determine the final value based on which branches updated it
+                    let final_val = match (then_val, else_val) {
+                        (Some(t), Some(e)) => {
+                            // Both branches updated this register - create MUX
+                            if t == e {
+                                t // Same value, no MUX needed
+                            } else {
+                                self.aig.add_mux(cond, e, t) // cond ? t : e (note: add_mux is sel ? b : a)
+                            }
+                        }
+                        (Some(t), None) => {
+                            // Only then branch updated - MUX with else value
+                            // Else value is saved_val if it was already computed, otherwise current register
+                            let else_default = saved_val.unwrap_or(current_reg_val);
+                            if t == else_default {
+                                t
+                            } else {
+                                self.aig.add_mux(cond, else_default, t)
+                            }
+                        }
+                        (None, Some(e)) => {
+                            // Only else branch updated - MUX with then value
+                            // Then value is saved_val if it was already computed, otherwise current register
+                            let then_default = saved_val.unwrap_or(current_reg_val);
+                            if e == then_default {
+                                e
+                            } else {
+                                self.aig.add_mux(cond, e, then_default)
+                            }
+                        }
+                        (None, None) => {
+                            // Neither branch updated - keep saved value or current register
+                            saved_val.unwrap_or(current_reg_val)
+                        }
+                    };
+
+                    next_state_map.insert(key, final_val);
+                }
             }
             Statement::Case(case_stmt) => {
-                // Similar simplification for case statements
+                // For case statements, we need to handle each arm with proper MUXing
+                // Similar to nested if-else
+                let selector_lits = self.convert_expression(&case_stmt.expr);
+
+                // Save initial state
+                let initial_state = next_state_map.clone();
+
+                // Collect updates from each case item
+                let mut case_updates: Vec<(AigLit, HashMap<(MirSignalRef, u32), AigLit>)> =
+                    Vec::new();
+
                 for item in &case_stmt.items {
-                    self.convert_block_for_bmc(&item.block, conditions, next_state_map);
+                    // Compute condition for this case item
+                    let item_cond = self.compute_case_item_condition(&item.values, &selector_lits);
+
+                    // Reset to initial state
+                    *next_state_map = initial_state.clone();
+
+                    // Process this case arm
+                    self.convert_block_for_bmc(&item.block, next_state_map);
+
+                    case_updates.push((item_cond, next_state_map.clone()));
                 }
-                if let Some(default) = &case_stmt.default {
-                    self.convert_block_for_bmc(default, conditions, next_state_map);
+
+                // Process default case if present
+                let default_state = if let Some(default) = &case_stmt.default {
+                    *next_state_map = initial_state.clone();
+                    self.convert_block_for_bmc(default, next_state_map);
+                    next_state_map.clone()
+                } else {
+                    initial_state.clone()
+                };
+
+                // Merge all case arms: chain of MUXes
+                // Start with default, then overlay each case in reverse order
+                *next_state_map = default_state;
+
+                for (item_cond, item_state) in case_updates.into_iter().rev() {
+                    // For each register bit, create MUX: item_cond ? item_value : current_value
+                    for (key, item_val) in &item_state {
+                        let current_val = next_state_map
+                            .get(key)
+                            .copied()
+                            .unwrap_or_else(|| initial_state.get(key).copied().unwrap_or_else(|| self.aig.false_lit()));
+
+                        if *item_val != current_val {
+                            let muxed = self.aig.add_mux(item_cond, current_val, *item_val);
+                            next_state_map.insert(*key, muxed);
+                        }
+                    }
                 }
             }
             Statement::Block(inner_block) => {
-                self.convert_block_for_bmc(inner_block, conditions, next_state_map);
+                self.convert_block_for_bmc(inner_block, next_state_map);
             }
             _ => {
                 // Other statements handled normally
-                self.convert_statement(stmt, conditions);
+                self.convert_statement(stmt, &HashMap::new());
             }
         }
+    }
+
+    /// Compute the condition for a case item (pattern match)
+    fn compute_case_item_condition(
+        &mut self,
+        patterns: &[Expression],
+        selector_lits: &[AigLit],
+    ) -> AigLit {
+        // OR together all pattern conditions
+        let mut result = self.aig.false_lit();
+
+        for pattern in patterns {
+            let pattern_lits = self.convert_expression(pattern);
+            // Check equality: all bits must match
+            let mut match_cond = self.aig.true_lit();
+            for (bit, pattern_lit) in pattern_lits.iter().enumerate() {
+                if bit < selector_lits.len() {
+                    let eq = self.aig.add_xnor(selector_lits[bit], *pattern_lit);
+                    match_cond = self.aig.add_and(match_cond, eq);
+                }
+            }
+            result = self.aig.add_or(result, match_cond);
+        }
+
+        result
     }
 
     fn convert_internal(mut self, registers_as_inputs: bool) -> Aig {
@@ -3009,7 +3172,99 @@ impl<'a> MirToAig<'a> {
             DataType::Vec4(elem) => self.get_type_width(elem) * 4,
             DataType::Array(elem, size) => self.get_type_width(elem) * size,
             DataType::Ncl(w) => w * 2, // Dual-rail
+            DataType::Struct(struct_type) => {
+                // Sum of all field widths
+                struct_type.fields.iter()
+                    .map(|f| self.get_type_width(&f.field_type))
+                    .sum()
+            }
+            DataType::Enum(enum_type) => {
+                // Use the enum's explicit base type if available
+                self.get_type_width(&enum_type.base_type)
+            }
             _ => 32, // Default fallback
+        }
+    }
+
+    /// Try to get the MIR StructType from an expression that references a port or signal
+    fn get_mir_struct_type_from_expr(&self, expr: &Expression) -> Option<skalp_mir::StructType> {
+        // Check if the expression is a reference to a port or signal
+        if let ExpressionKind::Ref(lvalue) = &expr.kind {
+            match lvalue {
+                LValue::Port(id) => {
+                    if let Some(port) = self.find_port(*id) {
+                        if let DataType::Struct(struct_type) = &port.port_type {
+                            return Some((**struct_type).clone());
+                        }
+                    }
+                }
+                LValue::Signal(id) => {
+                    if let Some(signal) = self.find_signal(*id) {
+                        if let DataType::Struct(struct_type) = &signal.signal_type {
+                            return Some((**struct_type).clone());
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+
+    /// Get the bit offset and width of a field within a MIR struct
+    fn get_struct_field_offset(&self, struct_type: &skalp_mir::StructType, field_name: &str) -> (usize, usize) {
+        let mut offset = 0;
+        for field in &struct_type.fields {
+            let width = self.get_type_width(&field.field_type);
+            if field.name == field_name {
+                return (offset, width);
+            }
+            offset += width;
+        }
+        // Field not found - return (0, 0) or could panic
+        (0, 0)
+    }
+
+    /// Get the bit offset and width of a field within a frontend struct
+    fn get_frontend_struct_field_offset(&self, struct_type: &skalp_frontend::types::StructType, field_name: &str) -> (usize, usize) {
+        let mut offset = 0;
+        for field in &struct_type.fields {
+            let width = self.get_frontend_type_width(&field.field_type);
+            if field.name == field_name {
+                return (offset, width);
+            }
+            offset += width;
+        }
+        // Field not found - return (0, 0)
+        (0, 0)
+    }
+
+    /// Get the width of a frontend Type
+    fn get_frontend_type_width(&self, ty: &Type) -> usize {
+        match ty {
+            Type::Bit(width) | Type::Logic(width) | Type::Int(width) | Type::Nat(width) => {
+                match width {
+                    skalp_frontend::types::Width::Fixed(w) => *w as usize,
+                    _ => 32, // Default for parameterized/unknown widths
+                }
+            }
+            Type::Bool => 1,
+            Type::Clock(_) | Type::Reset(_) | Type::Event => 1,
+            Type::Fixed { integer_bits, fractional_bits } => (*integer_bits + *fractional_bits) as usize,
+            Type::Array { element_type, size } => self.get_frontend_type_width(element_type) * (*size as usize),
+            Type::Struct(struct_type) => {
+                struct_type.fields.iter()
+                    .map(|f| self.get_frontend_type_width(&f.field_type))
+                    .sum()
+            }
+            Type::Tuple(element_types) => {
+                element_types.iter().map(|t| self.get_frontend_type_width(t)).sum()
+            }
+            Type::Enum(enum_type) => {
+                let variant_count = enum_type.variants.len();
+                if variant_count <= 1 { 1 } else { (variant_count as f64).log2().ceil() as usize }
+            }
+            _ => 32, // Default for unknown types
         }
     }
 
@@ -3269,7 +3524,8 @@ impl<'a> MirToAig<'a> {
                     });
 
                 // MUX: cond ? then_lit : else_lit
-                let mux_result = self.aig.add_mux(cond, then_lit, else_lit);
+                // add_mux(sel, a, b) returns sel ? b : a, so pass (cond, else_lit, then_lit)
+                let mux_result = self.aig.add_mux(cond, else_lit, then_lit);
                 self.signal_map.insert((sig_ref, bit), mux_result);
             }
         }
@@ -3330,7 +3586,9 @@ impl<'a> MirToAig<'a> {
                                 .copied()
                                 .unwrap_or_else(|| self.aig.false_lit())
                         });
-                    let muxed = self.aig.add_mux(item_cond, *lit, current);
+                    // add_mux(sel, a, b) returns sel ? b : a
+                    // We want: item_cond ? *lit : current
+                    let muxed = self.aig.add_mux(item_cond, current, *lit);
                     result_map
                         .entry(key.0)
                         .or_insert_with(Vec::new);
@@ -3648,6 +3906,83 @@ impl<'a> MirToAig<'a> {
                     }
                     _ => vec![self.aig.false_lit()], // Unknown function
                 }
+            }
+
+            ExpressionKind::FieldAccess { base, field } => {
+                // Handle struct field access
+                // Get all bits from base expression
+                let base_lits = self.convert_expression(base);
+
+                // Try to find the MIR DataType struct from the base expression
+                // This gives us correct type widths including enum base types
+                let mir_struct = self.get_mir_struct_type_from_expr(base);
+
+                if let Some(struct_type) = mir_struct {
+                    // Use MIR struct type for accurate field offsets
+                    let (offset, width) = self.get_struct_field_offset(&struct_type, field);
+                    let end = (offset + width).min(base_lits.len());
+                    if offset < base_lits.len() {
+                        base_lits[offset..end].to_vec()
+                    } else {
+                        vec![self.aig.false_lit()]
+                    }
+                } else if let Type::Struct(struct_type) = &base.ty {
+                    // Fall back to frontend type (may have wrong enum widths)
+                    let (offset, width) = self.get_frontend_struct_field_offset(struct_type, field);
+                    let end = (offset + width).min(base_lits.len());
+                    if offset < base_lits.len() {
+                        base_lits[offset..end].to_vec()
+                    } else {
+                        vec![self.aig.false_lit()]
+                    }
+                } else {
+                    // If not a struct type, try to treat base bits directly
+                    base_lits
+                }
+            }
+
+            ExpressionKind::TupleFieldAccess { base, index } => {
+                // Handle tuple field access
+                let base_lits = self.convert_expression(base);
+
+                // If the base is a Tuple type, extract the element at the given index
+                if let Type::Tuple(element_types) = &base.ty {
+                    if *index < element_types.len() {
+                        let mut offset = 0;
+                        for (i, elem_type) in element_types.iter().enumerate() {
+                            let elem_width = self.get_frontend_type_width(elem_type);
+                            if i == *index {
+                                let end = (offset + elem_width).min(base_lits.len());
+                                if offset < base_lits.len() {
+                                    return base_lits[offset..end].to_vec();
+                                } else {
+                                    return vec![self.aig.false_lit()];
+                                }
+                            }
+                            offset += elem_width;
+                        }
+                    }
+                }
+                // Also handle if tuples are lowered to structs
+                if let Type::Struct(struct_type) = &base.ty {
+                    if *index < struct_type.fields.len() {
+                        let mut offset = 0;
+                        for (i, field) in struct_type.fields.iter().enumerate() {
+                            let field_width = self.get_frontend_type_width(&field.field_type);
+                            if i == *index {
+                                let end = (offset + field_width).min(base_lits.len());
+                                if offset < base_lits.len() {
+                                    return base_lits[offset..end].to_vec();
+                                } else {
+                                    return vec![self.aig.false_lit()];
+                                }
+                            }
+                            offset += field_width;
+                        }
+                    }
+                }
+                // Fallback: return all bits
+                base_lits
             }
 
             _ => vec![self.aig.false_lit()],
