@@ -731,6 +731,77 @@ impl GateNetlistToAig {
         self.net_map.insert(net_id.0, lit);
     }
 
+    /// Topologically sort combinational cells based on their input/output dependencies.
+    /// Returns cell indices in order such that when processing a cell, all its inputs
+    /// (from other cells' outputs) have already been processed.
+    fn topological_sort_cells(&self, netlist: &GateNetlist) -> Vec<usize> {
+        use std::collections::{HashMap, HashSet, VecDeque};
+
+        // Build a map from output net -> cell index
+        let mut net_to_cell: HashMap<u32, usize> = HashMap::new();
+        for (idx, cell) in netlist.cells.iter().enumerate() {
+            for &out in &cell.outputs {
+                net_to_cell.insert(out.0, idx);
+            }
+        }
+
+        // Build dependency graph: cell -> cells it depends on
+        let mut dependencies: HashMap<usize, HashSet<usize>> = HashMap::new();
+        let mut reverse_deps: HashMap<usize, HashSet<usize>> = HashMap::new();
+
+        for (idx, cell) in netlist.cells.iter().enumerate() {
+            dependencies.entry(idx).or_default();
+            for &inp in &cell.inputs {
+                if let Some(&dep_idx) = net_to_cell.get(&inp.0) {
+                    if dep_idx != idx {
+                        dependencies.entry(idx).or_default().insert(dep_idx);
+                        reverse_deps.entry(dep_idx).or_default().insert(idx);
+                    }
+                }
+            }
+        }
+
+        // Kahn's algorithm for topological sort
+        let mut in_degree: HashMap<usize, usize> = HashMap::new();
+        for (idx, _) in netlist.cells.iter().enumerate() {
+            in_degree.insert(idx, dependencies.get(&idx).map(|s| s.len()).unwrap_or(0));
+        }
+
+        let mut queue: VecDeque<usize> = VecDeque::new();
+        for (&idx, &deg) in &in_degree {
+            if deg == 0 {
+                queue.push_back(idx);
+            }
+        }
+
+        let mut result: Vec<usize> = Vec::with_capacity(netlist.cells.len());
+        while let Some(idx) = queue.pop_front() {
+            result.push(idx);
+            if let Some(dependents) = reverse_deps.get(&idx) {
+                for &dep in dependents {
+                    if let Some(deg) = in_degree.get_mut(&dep) {
+                        *deg = deg.saturating_sub(1);
+                        if *deg == 0 {
+                            queue.push_back(dep);
+                        }
+                    }
+                }
+            }
+        }
+
+        // If result doesn't contain all cells, there's a cycle - fall back to original order
+        if result.len() != netlist.cells.len() {
+            log::warn!(
+                "Topological sort found cycle, falling back to original order ({} of {} cells sorted)",
+                result.len(),
+                netlist.cells.len()
+            );
+            return (0..netlist.cells.len()).collect();
+        }
+
+        result
+    }
+
     fn convert_cell(&mut self, cell: &skalp_lir::Cell, netlist: &GateNetlist) {
         use skalp_lir::CellFunction;
 
@@ -825,9 +896,11 @@ impl GateNetlistToAig {
 
             Some(CellFunction::Mux2) => {
                 // Mux2 inputs: [sel, d0, d1], output = sel ? d1 : d0
+                // Tech mapper creates cells with this ordering (see tech_mapper.rs map_mux2)
                 let sel = self.get_net(cell.inputs[0]);
                 let d0 = self.get_net(cell.inputs[1]);
                 let d1 = self.get_net(cell.inputs[2]);
+                // add_mux(sel, a, b) returns sel ? b : a, so pass (sel, d0, d1) for sel ? d1 : d0
                 let result = self.aig.add_mux(sel, d0, d1);
                 if let Some(out) = output_net {
                     self.set_net(out, result);
@@ -1092,8 +1165,37 @@ impl GateNetlistToAig {
             }
         }
 
-        // Process combinational cells
-        for (idx, cell) in netlist.cells.iter().enumerate() {
+        // Process combinational cells in topologically sorted order
+        // This ensures that when we process a cell, all its inputs are already in net_map
+        let sorted_cell_indices = self.topological_sort_cells(netlist);
+
+        // DEBUG: Log how many cells are being processed and their types
+        let mut tie_count = 0;
+        let mut mux_count = 0;
+        let mut first_tie_idx = None;
+        let mut first_mux_idx = None;
+        for (i, &idx) in sorted_cell_indices.iter().enumerate() {
+            let cell = &netlist.cells[idx];
+            if cell.cell_type.contains("TIE") {
+                tie_count += 1;
+                if first_tie_idx.is_none() {
+                    first_tie_idx = Some(i);
+                }
+            }
+            if cell.cell_type.contains("MUX") {
+                mux_count += 1;
+                if first_mux_idx.is_none() {
+                    first_mux_idx = Some(i);
+                }
+            }
+        }
+        log::debug!(
+            "[TOPO_SORT] {} TIE cells (first at position {:?}), {} MUX cells (first at position {:?}), total {} cells",
+            tie_count, first_tie_idx, mux_count, first_mux_idx, sorted_cell_indices.len()
+        );
+
+        for idx in sorted_cell_indices {
+            let cell = &netlist.cells[idx];
             // Skip DFFs - we handle them specially
             if cell.is_sequential() {
                 continue;
@@ -3036,6 +3138,36 @@ impl<'a> MirToAig<'a> {
             Statement::Block(inner_block) => {
                 self.convert_block_for_bmc(inner_block, next_state_map);
             }
+            Statement::ResolvedConditional(resolved) => {
+                // Handle resolved if-else-if chains (priority mux)
+                // Check if target is a register
+                if let Some(sig_ref) = self.lvalue_to_ref(&resolved.target) {
+                    if self.register_outputs.contains(&sig_ref) {
+                        // Build priority MUX: if cond1 then val1, else if cond2 then val2, ... else default
+                        let default_lits = self.convert_expression(&resolved.resolved.default);
+                        let mut result_lits = default_lits;
+
+                        // Process cases in reverse order (lowest priority first)
+                        // so that higher priority conditions override
+                        for case in resolved.resolved.cases.iter().rev() {
+                            let cond_lits = self.convert_expression(&case.condition);
+                            let cond = cond_lits.first().copied().unwrap_or_else(|| self.aig.false_lit());
+                            let value_lits = self.convert_expression(&case.value);
+
+                            // MUX: cond ? value : current_result
+                            result_lits = self.build_mux_vector(cond, &value_lits, &result_lits);
+                        }
+
+                        // Store as next-state
+                        for (bit, lit) in result_lits.iter().enumerate() {
+                            next_state_map.insert((sig_ref, bit as u32), *lit);
+                        }
+                        return;
+                    }
+                }
+                // Not a register - use normal conversion
+                self.convert_statement(stmt, &HashMap::new());
+            }
             _ => {
                 // Other statements handled normally
                 self.convert_statement(stmt, &HashMap::new());
@@ -3612,15 +3744,18 @@ impl<'a> MirToAig<'a> {
     }
 
     fn build_equality(&mut self, lhs: &[AigLit], rhs: &[AigLit]) -> AigLit {
-        let min_len = lhs.len().min(rhs.len());
-        if min_len == 0 {
+        let max_len = lhs.len().max(rhs.len());
+        if max_len == 0 {
             return self.aig.true_lit();
         }
 
         let mut result = self.aig.true_lit();
-        for i in 0..min_len {
+        for i in 0..max_len {
+            // Get bits, treating missing bits as 0 (zero-extension)
+            let lhs_bit = lhs.get(i).copied().unwrap_or_else(|| self.aig.false_lit());
+            let rhs_bit = rhs.get(i).copied().unwrap_or_else(|| self.aig.false_lit());
             // XNOR for bit equality
-            let xnor = self.aig.add_xnor(lhs[i], rhs[i]);
+            let xnor = self.aig.add_xnor(lhs_bit, rhs_bit);
             result = self.aig.add_and(result, xnor);
         }
         result
@@ -4631,7 +4766,7 @@ impl BoundedModelChecker {
             )?;
 
             if !sat_result.0 {
-                println!("BMC: SAT found mismatch at cycle {}", k);
+                println!("BMC: SAT found mismatch at cycle {} on output '{:?}'", k, sat_result.2);
                 return Ok(BmcEquivalenceResult {
                     equivalent: false,
                     bound: k,
