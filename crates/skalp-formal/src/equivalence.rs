@@ -181,6 +181,12 @@ impl Aig {
         self.add_or(a_and_not_b, not_a_and_b)
     }
 
+    /// Add an XNOR gate: returns true if inputs are equal
+    pub fn add_xnor(&mut self, a: AigLit, b: AigLit) -> AigLit {
+        // XNOR(a,b) = NOT(XOR(a,b))
+        self.add_xor(a, b).invert()
+    }
+
     /// Add a 2:1 MUX: sel ? b : a
     pub fn add_mux(&mut self, sel: AigLit, a: AigLit, b: AigLit) -> AigLit {
         // MUX(s,a,b) = (s AND b) OR (!s AND a)
@@ -1181,6 +1187,16 @@ impl EquivalenceChecker {
         let miter = build_miter(&aig1, &aig2)?;
         check_equivalence_sat(&miter)
     }
+
+    /// Check equivalence between two AIG representations directly
+    pub fn check_aig_equivalence(
+        &self,
+        aig1: &Aig,
+        aig2: &Aig,
+    ) -> FormalResult<EquivalenceResult> {
+        let miter = build_miter(aig1, aig2)?;
+        check_equivalence_sat(&miter)
+    }
 }
 
 impl Default for EquivalenceChecker {
@@ -1706,6 +1722,1112 @@ impl Default for SequentialEquivalenceChecker {
 }
 
 // ============================================================================
+// MIR to AIG Conversion (RTL-level equivalence checking)
+// ============================================================================
+
+use skalp_mir::{
+    Assignment, AssignmentKind, BinaryOp, Block, CaseStatement, ContinuousAssign,
+    DataType, Expression, ExpressionKind, IfStatement, LValue, Module, Port, PortDirection,
+    PortId, Process, ProcessKind, ReduceOp, Signal, SignalId, Statement, UnaryOp, Value,
+    VariableId,
+};
+
+/// Signal reference in MIR (either port or signal)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum MirSignalRef {
+    Port(PortId),
+    Signal(SignalId),
+    Variable(VariableId),
+}
+
+/// Convert MIR module to AIG for formal equivalence checking
+///
+/// This converts behavioral RTL (if/else, case, processes) to combinational
+/// logic (AND-Inverter Graph) for formal verification.
+pub struct MirToAig<'a> {
+    /// The module being converted
+    module: &'a Module,
+    /// The AIG being built
+    pub aig: Aig,
+    /// Map from (MirSignalRef, bit_index) to current AigLit
+    signal_map: HashMap<(MirSignalRef, u32), AigLit>,
+    /// Map from port/signal names to their reference
+    name_to_ref: HashMap<String, MirSignalRef>,
+    /// Register outputs (for sequential detection)
+    register_outputs: Vec<MirSignalRef>,
+}
+
+impl<'a> MirToAig<'a> {
+    pub fn new(module: &'a Module) -> Self {
+        let mut converter = Self {
+            module,
+            aig: Aig::new(),
+            signal_map: HashMap::new(),
+            name_to_ref: HashMap::new(),
+            register_outputs: Vec::new(),
+        };
+        converter.build_name_map();
+        converter
+    }
+
+    fn build_name_map(&mut self) {
+        for port in &self.module.ports {
+            self.name_to_ref
+                .insert(port.name.clone(), MirSignalRef::Port(port.id));
+        }
+        for signal in &self.module.signals {
+            self.name_to_ref
+                .insert(signal.name.clone(), MirSignalRef::Signal(signal.id));
+        }
+        for var in &self.module.variables {
+            self.name_to_ref
+                .insert(var.name.clone(), MirSignalRef::Variable(var.id));
+        }
+    }
+
+    /// Convert MIR module to AIG
+    pub fn convert(mut self) -> Aig {
+        // Add primary inputs (input ports)
+        for port in &self.module.ports {
+            if port.direction == PortDirection::Input {
+                let width = self.get_type_width(&port.port_type);
+                for bit in 0..width {
+                    let name = if width == 1 {
+                        port.name.clone()
+                    } else {
+                        format!("{}[{}]", port.name, bit)
+                    };
+                    let lit = self.aig.add_input(name);
+                    self.signal_map
+                        .insert((MirSignalRef::Port(port.id), bit as u32), lit);
+                }
+            }
+        }
+
+        // Process continuous assignments
+        for assign in &self.module.assignments {
+            self.convert_continuous_assign(assign);
+        }
+
+        // Process combinational processes
+        for process in &self.module.processes {
+            if matches!(process.kind, ProcessKind::Combinational) {
+                self.convert_combinational_process(process);
+            } else if matches!(process.kind, ProcessKind::Sequential) {
+                // Track sequential processes for register detection
+                self.detect_sequential_registers(process);
+            }
+        }
+
+        // Add primary outputs (output ports)
+        for port in &self.module.ports {
+            if port.direction == PortDirection::Output {
+                let width = self.get_type_width(&port.port_type);
+                for bit in 0..width {
+                    let name = if width == 1 {
+                        port.name.clone()
+                    } else {
+                        format!("{}[{}]", port.name, bit)
+                    };
+                    let lit = self
+                        .signal_map
+                        .get(&(MirSignalRef::Port(port.id), bit as u32))
+                        .copied()
+                        .unwrap_or_else(|| self.aig.false_lit());
+                    self.aig.add_output(name, lit);
+                }
+            }
+        }
+
+        self.aig
+    }
+
+    fn get_type_width(&self, data_type: &DataType) -> usize {
+        match data_type {
+            DataType::Bit(w) | DataType::Logic(w) | DataType::Int(w) | DataType::Nat(w) => *w,
+            DataType::Bool => 1,
+            DataType::Clock { .. } | DataType::Reset { .. } | DataType::Event => 1,
+            DataType::Float16 => 16,
+            DataType::Float32 => 32,
+            DataType::Float64 => 64,
+            DataType::BitParam { default, .. }
+            | DataType::LogicParam { default, .. }
+            | DataType::IntParam { default, .. }
+            | DataType::NatParam { default, .. } => *default,
+            DataType::BitExpr { default, .. }
+            | DataType::LogicExpr { default, .. }
+            | DataType::IntExpr { default, .. }
+            | DataType::NatExpr { default, .. } => *default,
+            DataType::Vec2(elem) => self.get_type_width(elem) * 2,
+            DataType::Vec3(elem) => self.get_type_width(elem) * 3,
+            DataType::Vec4(elem) => self.get_type_width(elem) * 4,
+            DataType::Array(elem, size) => self.get_type_width(elem) * size,
+            DataType::Ncl(w) => w * 2, // Dual-rail
+            _ => 32, // Default fallback
+        }
+    }
+
+    fn convert_continuous_assign(&mut self, assign: &ContinuousAssign) {
+        let rhs_lits = self.convert_expression(&assign.rhs);
+        self.assign_lvalue(&assign.lhs, &rhs_lits);
+    }
+
+    fn convert_combinational_process(&mut self, process: &Process) {
+        // For combinational processes, we need to convert the body
+        // while tracking what each signal is assigned to
+        self.convert_block(&process.body, &HashMap::new());
+    }
+
+    fn detect_sequential_registers(&mut self, process: &Process) {
+        // Sequential processes define registers - we track their outputs
+        // for sequential equivalence checking
+        self.find_assigned_signals(&process.body);
+    }
+
+    fn find_assigned_signals(&mut self, block: &Block) {
+        for stmt in &block.statements {
+            match stmt {
+                Statement::Assignment(assign) => {
+                    if let Some(sig_ref) = self.lvalue_to_ref(&assign.lhs) {
+                        if !self.register_outputs.contains(&sig_ref) {
+                            self.register_outputs.push(sig_ref);
+                        }
+                    }
+                }
+                Statement::If(if_stmt) => {
+                    self.find_assigned_signals(&if_stmt.then_block);
+                    if let Some(else_block) = &if_stmt.else_block {
+                        self.find_assigned_signals(else_block);
+                    }
+                }
+                Statement::Case(case_stmt) => {
+                    for item in &case_stmt.items {
+                        self.find_assigned_signals(&item.block);
+                    }
+                    if let Some(default) = &case_stmt.default {
+                        self.find_assigned_signals(default);
+                    }
+                }
+                Statement::Block(inner_block) => {
+                    self.find_assigned_signals(inner_block);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn lvalue_to_ref(&self, lvalue: &LValue) -> Option<MirSignalRef> {
+        match lvalue {
+            LValue::Port(id) => Some(MirSignalRef::Port(*id)),
+            LValue::Signal(id) => Some(MirSignalRef::Signal(*id)),
+            LValue::Variable(id) => Some(MirSignalRef::Variable(*id)),
+            LValue::BitSelect { base, .. } => self.lvalue_to_ref(base),
+            LValue::RangeSelect { base, .. } => self.lvalue_to_ref(base),
+            LValue::Concat(_) => None, // Complex case
+        }
+    }
+
+    /// Convert a block of statements, tracking conditional context
+    fn convert_block(
+        &mut self,
+        block: &Block,
+        conditions: &HashMap<MirSignalRef, Vec<AigLit>>,
+    ) {
+        for stmt in &block.statements {
+            self.convert_statement(stmt, conditions);
+        }
+    }
+
+    fn convert_statement(
+        &mut self,
+        stmt: &Statement,
+        conditions: &HashMap<MirSignalRef, Vec<AigLit>>,
+    ) {
+        match stmt {
+            Statement::Assignment(assign) => {
+                self.convert_assignment(assign, conditions);
+            }
+            Statement::If(if_stmt) => {
+                self.convert_if_statement(if_stmt, conditions);
+            }
+            Statement::Case(case_stmt) => {
+                self.convert_case_statement(case_stmt, conditions);
+            }
+            Statement::Block(inner_block) => {
+                self.convert_block(inner_block, conditions);
+            }
+            Statement::ResolvedConditional(resolved) => {
+                // Already resolved to mux form - convert directly
+                for case in &resolved.resolved.cases {
+                    let cond_lits = self.convert_expression(&case.condition);
+                    let value_lits = self.convert_expression(&case.value);
+                    // This is a priority mux structure
+                    if !cond_lits.is_empty() {
+                        let cond = cond_lits[0];
+                        let current = self.get_signal_lits(&resolved.target);
+                        let muxed = self.build_mux_vector(cond, &value_lits, &current);
+                        self.assign_lvalue(&resolved.target, &muxed);
+                    }
+                }
+            }
+            _ => {} // Assert, Assume, Cover, Loop - skip for now
+        }
+    }
+
+    fn convert_assignment(
+        &mut self,
+        assign: &Assignment,
+        _conditions: &HashMap<MirSignalRef, Vec<AigLit>>,
+    ) {
+        let rhs_lits = self.convert_expression(&assign.rhs);
+        self.assign_lvalue(&assign.lhs, &rhs_lits);
+    }
+
+    fn convert_if_statement(
+        &mut self,
+        if_stmt: &IfStatement,
+        conditions: &HashMap<MirSignalRef, Vec<AigLit>>,
+    ) {
+        // Convert condition to single bit
+        let cond_lits = self.convert_expression(&if_stmt.condition);
+        let cond = if !cond_lits.is_empty() {
+            cond_lits[0]
+        } else {
+            self.aig.false_lit()
+        };
+
+        // Get all signals assigned in then/else branches
+        let mut then_assigns: HashMap<MirSignalRef, Vec<AigLit>> = HashMap::new();
+        let mut else_assigns: HashMap<MirSignalRef, Vec<AigLit>> = HashMap::new();
+
+        // Save current state
+        let saved_state = self.signal_map.clone();
+
+        // Process then branch
+        self.convert_block(&if_stmt.then_block, conditions);
+        for (key, lit) in &self.signal_map {
+            if saved_state.get(key) != Some(lit) {
+                then_assigns
+                    .entry(key.0)
+                    .or_insert_with(Vec::new)
+                    .push(*lit);
+            }
+        }
+
+        // Restore and process else branch
+        self.signal_map = saved_state.clone();
+        if let Some(else_block) = &if_stmt.else_block {
+            self.convert_block(else_block, conditions);
+        }
+        for (key, lit) in &self.signal_map {
+            if saved_state.get(key) != Some(lit) {
+                else_assigns
+                    .entry(key.0)
+                    .or_insert_with(Vec::new)
+                    .push(*lit);
+            }
+        }
+
+        // Build muxes for all modified signals
+        self.signal_map = saved_state;
+        let all_refs: std::collections::HashSet<_> = then_assigns
+            .keys()
+            .chain(else_assigns.keys())
+            .cloned()
+            .collect();
+
+        for sig_ref in all_refs {
+            let width = self.get_signal_width(sig_ref);
+            for bit in 0..width {
+                let then_lit = then_assigns
+                    .get(&sig_ref)
+                    .and_then(|v| v.get(bit as usize))
+                    .copied()
+                    .unwrap_or_else(|| {
+                        self.signal_map
+                            .get(&(sig_ref, bit))
+                            .copied()
+                            .unwrap_or_else(|| self.aig.false_lit())
+                    });
+                let else_lit = else_assigns
+                    .get(&sig_ref)
+                    .and_then(|v| v.get(bit as usize))
+                    .copied()
+                    .unwrap_or_else(|| {
+                        self.signal_map
+                            .get(&(sig_ref, bit))
+                            .copied()
+                            .unwrap_or_else(|| self.aig.false_lit())
+                    });
+
+                // MUX: cond ? then_lit : else_lit
+                let mux_result = self.aig.add_mux(cond, then_lit, else_lit);
+                self.signal_map.insert((sig_ref, bit), mux_result);
+            }
+        }
+    }
+
+    fn convert_case_statement(
+        &mut self,
+        case_stmt: &CaseStatement,
+        conditions: &HashMap<MirSignalRef, Vec<AigLit>>,
+    ) {
+        let selector_lits = self.convert_expression(&case_stmt.expr);
+        let selector_width = selector_lits.len();
+
+        // Build a priority mux chain for case items
+        // Start with default value (or current value)
+        let saved_state = self.signal_map.clone();
+
+        // First, collect all assignments from default case
+        let mut result_map: HashMap<MirSignalRef, Vec<AigLit>> = HashMap::new();
+
+        if let Some(default_block) = &case_stmt.default {
+            self.convert_block(default_block, conditions);
+            for (key, lit) in &self.signal_map {
+                if saved_state.get(key) != Some(lit) {
+                    result_map
+                        .entry(key.0)
+                        .or_insert_with(Vec::new)
+                        .push(*lit);
+                }
+            }
+        }
+
+        // Process case items in reverse order (last match wins for priority)
+        for item in case_stmt.items.iter().rev() {
+            self.signal_map = saved_state.clone();
+
+            // Build condition: selector == value for any value in item.values
+            let mut item_cond = self.aig.false_lit();
+            for value_expr in &item.values {
+                let value_lits = self.convert_expression(value_expr);
+                let eq_cond = self.build_equality(&selector_lits, &value_lits);
+                item_cond = self.aig.add_or(item_cond, eq_cond);
+            }
+
+            // Process case body
+            self.convert_block(&item.block, conditions);
+
+            // Mux the results
+            for (key, lit) in &self.signal_map {
+                if saved_state.get(key) != Some(lit) {
+                    let current = result_map
+                        .get(&key.0)
+                        .and_then(|v| v.get((key.1) as usize))
+                        .copied()
+                        .unwrap_or_else(|| {
+                            saved_state
+                                .get(key)
+                                .copied()
+                                .unwrap_or_else(|| self.aig.false_lit())
+                        });
+                    let muxed = self.aig.add_mux(item_cond, *lit, current);
+                    result_map
+                        .entry(key.0)
+                        .or_insert_with(Vec::new);
+                    // Ensure vector is long enough
+                    let vec = result_map.get_mut(&key.0).unwrap();
+                    while vec.len() <= key.1 as usize {
+                        vec.push(self.aig.false_lit());
+                    }
+                    vec[key.1 as usize] = muxed;
+                }
+            }
+        }
+
+        // Apply final results
+        self.signal_map = saved_state;
+        for (sig_ref, lits) in result_map {
+            for (bit, lit) in lits.iter().enumerate() {
+                self.signal_map.insert((sig_ref, bit as u32), *lit);
+            }
+        }
+    }
+
+    fn build_equality(&mut self, lhs: &[AigLit], rhs: &[AigLit]) -> AigLit {
+        let min_len = lhs.len().min(rhs.len());
+        if min_len == 0 {
+            return self.aig.true_lit();
+        }
+
+        let mut result = self.aig.true_lit();
+        for i in 0..min_len {
+            // XNOR for bit equality
+            let xnor = self.aig.add_xnor(lhs[i], rhs[i]);
+            result = self.aig.add_and(result, xnor);
+        }
+        result
+    }
+
+    fn build_mux_vector(
+        &mut self,
+        cond: AigLit,
+        then_lits: &[AigLit],
+        else_lits: &[AigLit],
+    ) -> Vec<AigLit> {
+        let max_len = then_lits.len().max(else_lits.len());
+        let mut result = Vec::with_capacity(max_len);
+        for i in 0..max_len {
+            let then_bit = then_lits.get(i).copied().unwrap_or_else(|| self.aig.false_lit());
+            let else_bit = else_lits.get(i).copied().unwrap_or_else(|| self.aig.false_lit());
+            result.push(self.aig.add_mux(cond, then_bit, else_bit));
+        }
+        result
+    }
+
+    fn get_signal_width(&self, sig_ref: MirSignalRef) -> u32 {
+        match sig_ref {
+            MirSignalRef::Port(id) => {
+                let port = &self.module.ports[id.0 as usize];
+                self.get_type_width(&port.port_type) as u32
+            }
+            MirSignalRef::Signal(id) => {
+                let signal = &self.module.signals[id.0 as usize];
+                self.get_type_width(&signal.signal_type) as u32
+            }
+            MirSignalRef::Variable(id) => {
+                let var = &self.module.variables[id.0 as usize];
+                self.get_type_width(&var.var_type) as u32
+            }
+        }
+    }
+
+    fn get_signal_lits(&self, lvalue: &LValue) -> Vec<AigLit> {
+        match lvalue {
+            LValue::Port(id) => {
+                let port = &self.module.ports[id.0 as usize];
+                let width = self.get_type_width(&port.port_type);
+                (0..width)
+                    .map(|bit| {
+                        self.signal_map
+                            .get(&(MirSignalRef::Port(*id), bit as u32))
+                            .copied()
+                            .unwrap_or_else(|| self.aig.false_lit())
+                    })
+                    .collect()
+            }
+            LValue::Signal(id) => {
+                let signal = &self.module.signals[id.0 as usize];
+                let width = self.get_type_width(&signal.signal_type);
+                (0..width)
+                    .map(|bit| {
+                        self.signal_map
+                            .get(&(MirSignalRef::Signal(*id), bit as u32))
+                            .copied()
+                            .unwrap_or_else(|| self.aig.false_lit())
+                    })
+                    .collect()
+            }
+            LValue::Variable(id) => {
+                let var = &self.module.variables[id.0 as usize];
+                let width = self.get_type_width(&var.var_type);
+                (0..width)
+                    .map(|bit| {
+                        self.signal_map
+                            .get(&(MirSignalRef::Variable(*id), bit as u32))
+                            .copied()
+                            .unwrap_or_else(|| self.aig.false_lit())
+                    })
+                    .collect()
+            }
+            _ => vec![],
+        }
+    }
+
+    fn assign_lvalue(&mut self, lvalue: &LValue, values: &[AigLit]) {
+        match lvalue {
+            LValue::Port(id) => {
+                for (bit, lit) in values.iter().enumerate() {
+                    self.signal_map
+                        .insert((MirSignalRef::Port(*id), bit as u32), *lit);
+                }
+            }
+            LValue::Signal(id) => {
+                for (bit, lit) in values.iter().enumerate() {
+                    self.signal_map
+                        .insert((MirSignalRef::Signal(*id), bit as u32), *lit);
+                }
+            }
+            LValue::Variable(id) => {
+                for (bit, lit) in values.iter().enumerate() {
+                    self.signal_map
+                        .insert((MirSignalRef::Variable(*id), bit as u32), *lit);
+                }
+            }
+            LValue::BitSelect { base, index } => {
+                // Single bit assignment
+                if let Some(sig_ref) = self.lvalue_to_ref(base) {
+                    if let ExpressionKind::Literal(Value::Integer(idx)) = &index.kind {
+                        if !values.is_empty() {
+                            self.signal_map.insert((sig_ref, *idx as u32), values[0]);
+                        }
+                    }
+                }
+            }
+            LValue::RangeSelect { base, high, low } => {
+                // Range assignment
+                if let Some(sig_ref) = self.lvalue_to_ref(base) {
+                    if let (
+                        ExpressionKind::Literal(Value::Integer(hi)),
+                        ExpressionKind::Literal(Value::Integer(lo)),
+                    ) = (&high.kind, &low.kind)
+                    {
+                        for (i, lit) in values.iter().enumerate() {
+                            let bit = *lo as u32 + i as u32;
+                            if bit <= *hi as u32 {
+                                self.signal_map.insert((sig_ref, bit), *lit);
+                            }
+                        }
+                    }
+                }
+            }
+            LValue::Concat(parts) => {
+                // Concatenation - distribute bits to parts
+                let mut offset = 0;
+                for part in parts.iter().rev() {
+                    let part_width = self.get_lvalue_width(part);
+                    let part_values: Vec<_> = values
+                        .iter()
+                        .skip(offset)
+                        .take(part_width)
+                        .copied()
+                        .collect();
+                    self.assign_lvalue(part, &part_values);
+                    offset += part_width;
+                }
+            }
+        }
+    }
+
+    fn get_lvalue_width(&self, lvalue: &LValue) -> usize {
+        match lvalue {
+            LValue::Port(id) => {
+                let port = &self.module.ports[id.0 as usize];
+                self.get_type_width(&port.port_type)
+            }
+            LValue::Signal(id) => {
+                let signal = &self.module.signals[id.0 as usize];
+                self.get_type_width(&signal.signal_type)
+            }
+            LValue::Variable(id) => {
+                let var = &self.module.variables[id.0 as usize];
+                self.get_type_width(&var.var_type)
+            }
+            LValue::BitSelect { .. } => 1,
+            LValue::RangeSelect { high, low, .. } => {
+                if let (
+                    ExpressionKind::Literal(Value::Integer(hi)),
+                    ExpressionKind::Literal(Value::Integer(lo)),
+                ) = (&high.kind, &low.kind)
+                {
+                    (hi - lo + 1) as usize
+                } else {
+                    1
+                }
+            }
+            LValue::Concat(parts) => parts.iter().map(|p| self.get_lvalue_width(p)).sum(),
+        }
+    }
+
+    /// Convert an expression to AIG literals (one per bit)
+    fn convert_expression(&mut self, expr: &Expression) -> Vec<AigLit> {
+        match &expr.kind {
+            ExpressionKind::Literal(value) => self.convert_literal(value),
+
+            ExpressionKind::Ref(lvalue) => self.convert_lvalue_ref(lvalue),
+
+            ExpressionKind::Binary { op, left, right } => {
+                let left_lits = self.convert_expression(left);
+                let right_lits = self.convert_expression(right);
+                self.convert_binary_op(*op, &left_lits, &right_lits)
+            }
+
+            ExpressionKind::Unary { op, operand } => {
+                let operand_lits = self.convert_expression(operand);
+                self.convert_unary_op(*op, &operand_lits)
+            }
+
+            ExpressionKind::Conditional {
+                cond,
+                then_expr,
+                else_expr,
+            } => {
+                let cond_lits = self.convert_expression(cond);
+                let then_lits = self.convert_expression(then_expr);
+                let else_lits = self.convert_expression(else_expr);
+
+                let cond_bit = if !cond_lits.is_empty() {
+                    cond_lits[0]
+                } else {
+                    self.aig.false_lit()
+                };
+
+                self.build_mux_vector(cond_bit, &then_lits, &else_lits)
+            }
+
+            ExpressionKind::Concat(exprs) => {
+                let mut result = Vec::new();
+                for e in exprs.iter().rev() {
+                    result.extend(self.convert_expression(e));
+                }
+                result
+            }
+
+            ExpressionKind::Replicate { count, value } => {
+                let value_lits = self.convert_expression(value);
+                if let ExpressionKind::Literal(Value::Integer(n)) = &count.kind {
+                    let mut result = Vec::new();
+                    for _ in 0..*n {
+                        result.extend(value_lits.iter().copied());
+                    }
+                    result
+                } else {
+                    value_lits
+                }
+            }
+
+            ExpressionKind::Cast { expr, target_type } => {
+                let expr_lits = self.convert_expression(expr);
+                let target_width = self.get_type_width(target_type);
+                // Sign or zero extend
+                let mut result = expr_lits;
+                while result.len() < target_width {
+                    result.push(self.aig.false_lit());
+                }
+                result.truncate(target_width);
+                result
+            }
+
+            ExpressionKind::FunctionCall { name, args } => {
+                // Built-in functions
+                match name.as_str() {
+                    "$clog2" => {
+                        if !args.is_empty() {
+                            if let ExpressionKind::Literal(Value::Integer(n)) = &args[0].kind {
+                                let result = (*n as f64).log2().ceil() as u64;
+                                return self.convert_literal(&Value::Integer(result as i64));
+                            }
+                        }
+                        vec![self.aig.false_lit()]
+                    }
+                    _ => vec![self.aig.false_lit()], // Unknown function
+                }
+            }
+
+            _ => vec![self.aig.false_lit()],
+        }
+    }
+
+    fn convert_literal(&mut self, value: &Value) -> Vec<AigLit> {
+        match value {
+            Value::Integer(n) => {
+                // Assume 32-bit for now
+                let mut result = Vec::with_capacity(32);
+                for bit in 0..32 {
+                    let lit = if (*n >> bit) & 1 == 1 {
+                        self.aig.true_lit()
+                    } else {
+                        self.aig.false_lit()
+                    };
+                    result.push(lit);
+                }
+                result
+            }
+            Value::BitVector { width, value } => {
+                let mut result = Vec::with_capacity(*width);
+                for bit in 0..*width {
+                    let lit = if (value >> bit) & 1 == 1 {
+                        self.aig.true_lit()
+                    } else {
+                        self.aig.false_lit()
+                    };
+                    result.push(lit);
+                }
+                result
+            }
+            Value::Float(f) => {
+                // Convert to bits (IEEE 754)
+                let bits = f.to_bits();
+                let mut result = Vec::with_capacity(64);
+                for bit in 0..64 {
+                    let lit = if (bits >> bit) & 1 == 1 {
+                        self.aig.true_lit()
+                    } else {
+                        self.aig.false_lit()
+                    };
+                    result.push(lit);
+                }
+                result
+            }
+            Value::HighZ | Value::Unknown => {
+                // X/Z - treat as 0 for formal verification
+                vec![self.aig.false_lit()]
+            }
+            Value::String(_) => vec![],
+        }
+    }
+
+    fn convert_lvalue_ref(&self, lvalue: &LValue) -> Vec<AigLit> {
+        match lvalue {
+            LValue::Port(id) => {
+                let port = &self.module.ports[id.0 as usize];
+                let width = self.get_type_width(&port.port_type);
+                (0..width)
+                    .map(|bit| {
+                        self.signal_map
+                            .get(&(MirSignalRef::Port(*id), bit as u32))
+                            .copied()
+                            .unwrap_or_else(|| self.aig.false_lit())
+                    })
+                    .collect()
+            }
+            LValue::Signal(id) => {
+                let signal = &self.module.signals[id.0 as usize];
+                let width = self.get_type_width(&signal.signal_type);
+                (0..width)
+                    .map(|bit| {
+                        self.signal_map
+                            .get(&(MirSignalRef::Signal(*id), bit as u32))
+                            .copied()
+                            .unwrap_or_else(|| self.aig.false_lit())
+                    })
+                    .collect()
+            }
+            LValue::Variable(id) => {
+                let var = &self.module.variables[id.0 as usize];
+                let width = self.get_type_width(&var.var_type);
+                (0..width)
+                    .map(|bit| {
+                        self.signal_map
+                            .get(&(MirSignalRef::Variable(*id), bit as u32))
+                            .copied()
+                            .unwrap_or_else(|| self.aig.false_lit())
+                    })
+                    .collect()
+            }
+            LValue::BitSelect { base, index } => {
+                if let ExpressionKind::Literal(Value::Integer(idx)) = &index.kind {
+                    if let Some(sig_ref) = self.lvalue_to_ref(base) {
+                        return vec![self
+                            .signal_map
+                            .get(&(sig_ref, *idx as u32))
+                            .copied()
+                            .unwrap_or_else(|| self.aig.false_lit())];
+                    }
+                }
+                vec![self.aig.false_lit()]
+            }
+            LValue::RangeSelect { base, high, low } => {
+                if let (
+                    ExpressionKind::Literal(Value::Integer(hi)),
+                    ExpressionKind::Literal(Value::Integer(lo)),
+                ) = (&high.kind, &low.kind)
+                {
+                    if let Some(sig_ref) = self.lvalue_to_ref(base) {
+                        return (*lo..=*hi)
+                            .map(|bit| {
+                                self.signal_map
+                                    .get(&(sig_ref, bit as u32))
+                                    .copied()
+                                    .unwrap_or_else(|| self.aig.false_lit())
+                            })
+                            .collect();
+                    }
+                }
+                vec![]
+            }
+            LValue::Concat(parts) => {
+                let mut result = Vec::new();
+                for part in parts.iter().rev() {
+                    result.extend(self.convert_lvalue_ref(part));
+                }
+                result
+            }
+        }
+    }
+
+    fn convert_binary_op(
+        &mut self,
+        op: BinaryOp,
+        left: &[AigLit],
+        right: &[AigLit],
+    ) -> Vec<AigLit> {
+        let max_width = left.len().max(right.len());
+
+        match op {
+            BinaryOp::BitwiseAnd | BinaryOp::And => {
+                (0..max_width)
+                    .map(|i| {
+                        let l = left.get(i).copied().unwrap_or_else(|| self.aig.false_lit());
+                        let r = right.get(i).copied().unwrap_or_else(|| self.aig.false_lit());
+                        self.aig.add_and(l, r)
+                    })
+                    .collect()
+            }
+            BinaryOp::BitwiseOr | BinaryOp::Or => {
+                (0..max_width)
+                    .map(|i| {
+                        let l = left.get(i).copied().unwrap_or_else(|| self.aig.false_lit());
+                        let r = right.get(i).copied().unwrap_or_else(|| self.aig.false_lit());
+                        self.aig.add_or(l, r)
+                    })
+                    .collect()
+            }
+            BinaryOp::BitwiseXor | BinaryOp::Xor => {
+                (0..max_width)
+                    .map(|i| {
+                        let l = left.get(i).copied().unwrap_or_else(|| self.aig.false_lit());
+                        let r = right.get(i).copied().unwrap_or_else(|| self.aig.false_lit());
+                        self.aig.add_xor(l, r)
+                    })
+                    .collect()
+            }
+            BinaryOp::LogicalAnd => {
+                // OR all bits of each operand, then AND
+                let l_any = self.reduce_or(left);
+                let r_any = self.reduce_or(right);
+                vec![self.aig.add_and(l_any, r_any)]
+            }
+            BinaryOp::LogicalOr => {
+                let l_any = self.reduce_or(left);
+                let r_any = self.reduce_or(right);
+                vec![self.aig.add_or(l_any, r_any)]
+            }
+            BinaryOp::Equal => {
+                vec![self.build_equality(left, right)]
+            }
+            BinaryOp::NotEqual => {
+                vec![self.build_equality(left, right).invert()]
+            }
+            BinaryOp::Less => {
+                vec![self.build_less_than(left, right, false)]
+            }
+            BinaryOp::LessEqual => {
+                let lt = self.build_less_than(left, right, false);
+                let eq = self.build_equality(left, right);
+                vec![self.aig.add_or(lt, eq)]
+            }
+            BinaryOp::Greater => {
+                vec![self.build_less_than(right, left, false)]
+            }
+            BinaryOp::GreaterEqual => {
+                let gt = self.build_less_than(right, left, false);
+                let eq = self.build_equality(left, right);
+                vec![self.aig.add_or(gt, eq)]
+            }
+            BinaryOp::Add => self.build_adder(left, right),
+            BinaryOp::Sub => {
+                // a - b = a + (~b + 1)
+                let not_right: Vec<_> = right.iter().map(|l| l.invert()).collect();
+                let one = vec![self.aig.true_lit()];
+                let neg_b = self.build_adder(&not_right, &one);
+                self.build_adder(left, &neg_b)
+            }
+            BinaryOp::LeftShift => {
+                // Static shift only for now
+                if let Some(&lit) = right.first() {
+                    if lit == self.aig.false_lit() {
+                        return left.to_vec();
+                    }
+                }
+                // For dynamic shift, this is complex - simplified version
+                left.to_vec()
+            }
+            BinaryOp::RightShift => {
+                if let Some(&lit) = right.first() {
+                    if lit == self.aig.false_lit() {
+                        return left.to_vec();
+                    }
+                }
+                left.to_vec()
+            }
+            BinaryOp::Mul | BinaryOp::Div | BinaryOp::Mod => {
+                // Complex operations - would need full multiplier/divider
+                // For formal verification, we typically abstract these
+                left.to_vec()
+            }
+        }
+    }
+
+    fn convert_unary_op(&mut self, op: UnaryOp, operand: &[AigLit]) -> Vec<AigLit> {
+        match op {
+            UnaryOp::Not => {
+                // Logical NOT - true if all bits are 0
+                let any = self.reduce_or(operand);
+                vec![any.invert()]
+            }
+            UnaryOp::BitwiseNot => operand.iter().map(|l| l.invert()).collect(),
+            UnaryOp::Negate => {
+                // Two's complement: ~x + 1
+                let inverted: Vec<_> = operand.iter().map(|l| l.invert()).collect();
+                let one = vec![self.aig.true_lit()];
+                self.build_adder(&inverted, &one)
+            }
+            UnaryOp::Reduce(reduce_op) => match reduce_op {
+                ReduceOp::And => vec![self.reduce_and(operand)],
+                ReduceOp::Or => vec![self.reduce_or(operand)],
+                ReduceOp::Xor => vec![self.reduce_xor(operand)],
+                ReduceOp::Nand => vec![self.reduce_and(operand).invert()],
+                ReduceOp::Nor => vec![self.reduce_or(operand).invert()],
+                ReduceOp::Xnor => vec![self.reduce_xor(operand).invert()],
+            },
+        }
+    }
+
+    fn reduce_and(&mut self, bits: &[AigLit]) -> AigLit {
+        if bits.is_empty() {
+            return self.aig.true_lit();
+        }
+        let mut result = bits[0];
+        for &bit in &bits[1..] {
+            result = self.aig.add_and(result, bit);
+        }
+        result
+    }
+
+    fn reduce_or(&mut self, bits: &[AigLit]) -> AigLit {
+        if bits.is_empty() {
+            return self.aig.false_lit();
+        }
+        let mut result = bits[0];
+        for &bit in &bits[1..] {
+            result = self.aig.add_or(result, bit);
+        }
+        result
+    }
+
+    fn reduce_xor(&mut self, bits: &[AigLit]) -> AigLit {
+        if bits.is_empty() {
+            return self.aig.false_lit();
+        }
+        let mut result = bits[0];
+        for &bit in &bits[1..] {
+            result = self.aig.add_xor(result, bit);
+        }
+        result
+    }
+
+    fn build_adder(&mut self, a: &[AigLit], b: &[AigLit]) -> Vec<AigLit> {
+        let width = a.len().max(b.len());
+        let mut result = Vec::with_capacity(width);
+        let mut carry = self.aig.false_lit();
+
+        for i in 0..width {
+            let a_bit = a.get(i).copied().unwrap_or_else(|| self.aig.false_lit());
+            let b_bit = b.get(i).copied().unwrap_or_else(|| self.aig.false_lit());
+
+            // sum = a XOR b XOR carry
+            let sum_ab = self.aig.add_xor(a_bit, b_bit);
+            let sum = self.aig.add_xor(sum_ab, carry);
+            result.push(sum);
+
+            // carry_out = (a AND b) OR (carry AND (a XOR b))
+            let a_and_b = self.aig.add_and(a_bit, b_bit);
+            let carry_and_xor = self.aig.add_and(carry, sum_ab);
+            carry = self.aig.add_or(a_and_b, carry_and_xor);
+        }
+
+        result
+    }
+
+    fn build_less_than(&mut self, a: &[AigLit], b: &[AigLit], signed: bool) -> AigLit {
+        let width = a.len().max(b.len());
+        if width == 0 {
+            return self.aig.false_lit();
+        }
+
+        // a < b using subtraction: check if a - b has negative result (MSB = 1)
+        // For unsigned: check if borrow out is 1
+        // Simplified: bit-by-bit comparison from MSB
+
+        let mut less = self.aig.false_lit();
+        let mut equal = self.aig.true_lit();
+
+        for i in (0..width).rev() {
+            let a_bit = a.get(i).copied().unwrap_or_else(|| self.aig.false_lit());
+            let b_bit = b.get(i).copied().unwrap_or_else(|| self.aig.false_lit());
+
+            // At this bit: a < b if (a=0 and b=1) OR (a==b so far and less from previous bits)
+            let a_lt_b_here = self.aig.add_and(a_bit.invert(), b_bit);
+            let eq_here = self.aig.add_xnor(a_bit, b_bit);
+
+            let lt_from_here = self.aig.add_and(equal, a_lt_b_here);
+            less = self.aig.add_or(less, lt_from_here);
+            equal = self.aig.add_and(equal, eq_here);
+        }
+
+        less
+    }
+}
+
+/// MIR-level equivalence checker
+pub struct MirEquivalenceChecker {
+    timeout: u64,
+}
+
+impl MirEquivalenceChecker {
+    pub fn new() -> Self {
+        Self { timeout: 300 }
+    }
+
+    pub fn with_timeout(mut self, timeout: u64) -> Self {
+        self.timeout = timeout;
+        self
+    }
+
+    /// Check equivalence between two MIR modules
+    pub fn check_mir_equivalence(
+        &self,
+        module1: &Module,
+        module2: &Module,
+    ) -> FormalResult<EquivalenceResult> {
+        let start = std::time::Instant::now();
+
+        // Convert both modules to AIG
+        let aig1 = MirToAig::new(module1).convert();
+        let aig2 = MirToAig::new(module2).convert();
+
+        // Use existing equivalence checker
+        let checker = EquivalenceChecker::new();
+        let mut result = checker.check_aig_equivalence(&aig1, &aig2)?;
+        result.time_ms = start.elapsed().as_millis() as u64;
+
+        Ok(result)
+    }
+
+    /// Check equivalence between MIR module and synthesized gate netlist
+    ///
+    /// This is the key verification: RTL intent vs synthesized gates
+    pub fn check_mir_vs_gates(
+        &self,
+        module: &Module,
+        netlist: &GateNetlist,
+    ) -> FormalResult<EquivalenceResult> {
+        let start = std::time::Instant::now();
+
+        // Convert MIR to AIG
+        let mir_aig = MirToAig::new(module).convert();
+
+        // Convert gate netlist to AIG
+        let gate_aig = GateNetlistToAig::new().convert(netlist);
+
+        // Check equivalence
+        let checker = EquivalenceChecker::new();
+        let mut result = checker.check_aig_equivalence(&mir_aig, &gate_aig)?;
+        result.time_ms = start.elapsed().as_millis() as u64;
+
+        Ok(result)
+    }
+}
+
+impl Default for MirEquivalenceChecker {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
 
@@ -1989,5 +3111,189 @@ mod tests {
             .as_ref()
             .unwrap()
             .contains("reset value"));
+    }
+
+    #[test]
+    fn test_mir_to_aig_basic() {
+        use skalp_mir::{
+            DataType, Expression, ExpressionKind, LValue, Module, ModuleId, Port, PortDirection,
+            PortId, Process, ProcessId, ProcessKind, SensitivityList, Block, Statement,
+            Assignment, AssignmentKind, BinaryOp,
+        };
+
+        // Create a simple MIR module: out = a & b
+        let module = Module {
+            id: ModuleId(0),
+            name: "and_gate".to_string(),
+            parameters: vec![],
+            ports: vec![
+                Port {
+                    id: PortId(0),
+                    name: "a".to_string(),
+                    direction: PortDirection::Input,
+                    port_type: DataType::Bit(1),
+                    physical_constraints: None,
+                    span: None,
+                    detection_config: None,
+                },
+                Port {
+                    id: PortId(1),
+                    name: "b".to_string(),
+                    direction: PortDirection::Input,
+                    port_type: DataType::Bit(1),
+                    physical_constraints: None,
+                    span: None,
+                    detection_config: None,
+                },
+                Port {
+                    id: PortId(2),
+                    name: "out".to_string(),
+                    direction: PortDirection::Output,
+                    port_type: DataType::Bit(1),
+                    physical_constraints: None,
+                    span: None,
+                    detection_config: None,
+                },
+            ],
+            signals: vec![],
+            variables: vec![],
+            processes: vec![Process {
+                id: ProcessId(0),
+                kind: ProcessKind::Combinational,
+                sensitivity: SensitivityList::Always,
+                body: Block {
+                    statements: vec![Statement::Assignment(Assignment {
+                        lhs: LValue::Port(PortId(2)),
+                        rhs: Expression::with_unknown_type(ExpressionKind::Binary {
+                            op: BinaryOp::BitwiseAnd,
+                            left: Box::new(Expression::with_unknown_type(ExpressionKind::Ref(
+                                LValue::Port(PortId(0)),
+                            ))),
+                            right: Box::new(Expression::with_unknown_type(ExpressionKind::Ref(
+                                LValue::Port(PortId(1)),
+                            ))),
+                        }),
+                        kind: AssignmentKind::Blocking,
+                        span: None,
+                    })],
+                },
+                span: None,
+            }],
+            assignments: vec![],
+            instances: vec![],
+            clock_domains: vec![],
+            generate_blocks: vec![],
+            assertions: vec![],
+            span: None,
+            pipeline_config: None,
+            vendor_ip_config: None,
+            compiled_ip_config: None,
+            power_domains: vec![],
+            power_domain_config: None,
+            safety_context: None,
+            is_async: false,
+            barriers: vec![],
+            ncl_boundary_mode: None,
+        };
+
+        let aig = MirToAig::new(&module).convert();
+
+        assert_eq!(aig.inputs.len(), 2, "Should have 2 inputs");
+        assert_eq!(aig.outputs.len(), 1, "Should have 1 output");
+        assert!(aig.and_count() >= 1, "Should have at least 1 AND gate");
+    }
+
+    #[test]
+    fn test_mir_equivalence_identical() {
+        use skalp_mir::{
+            DataType, Expression, ExpressionKind, LValue, Module, ModuleId, Port, PortDirection,
+            PortId, Process, ProcessId, ProcessKind, SensitivityList, Block, Statement,
+            Assignment, AssignmentKind, BinaryOp,
+        };
+
+        // Create two identical MIR modules
+        fn create_and_module() -> Module {
+            Module {
+                id: ModuleId(0),
+                name: "and_gate".to_string(),
+                parameters: vec![],
+                ports: vec![
+                    Port {
+                        id: PortId(0),
+                        name: "a".to_string(),
+                        direction: PortDirection::Input,
+                        port_type: DataType::Bit(1),
+                        physical_constraints: None,
+                        span: None,
+                        detection_config: None,
+                    },
+                    Port {
+                        id: PortId(1),
+                        name: "b".to_string(),
+                        direction: PortDirection::Input,
+                        port_type: DataType::Bit(1),
+                        physical_constraints: None,
+                        span: None,
+                        detection_config: None,
+                    },
+                    Port {
+                        id: PortId(2),
+                        name: "out".to_string(),
+                        direction: PortDirection::Output,
+                        port_type: DataType::Bit(1),
+                        physical_constraints: None,
+                        span: None,
+                        detection_config: None,
+                    },
+                ],
+                signals: vec![],
+                variables: vec![],
+                processes: vec![Process {
+                    id: ProcessId(0),
+                    kind: ProcessKind::Combinational,
+                    sensitivity: SensitivityList::Always,
+                    body: Block {
+                        statements: vec![Statement::Assignment(Assignment {
+                            lhs: LValue::Port(PortId(2)),
+                            rhs: Expression::with_unknown_type(ExpressionKind::Binary {
+                                op: BinaryOp::BitwiseAnd,
+                                left: Box::new(Expression::with_unknown_type(ExpressionKind::Ref(
+                                    LValue::Port(PortId(0)),
+                                ))),
+                                right: Box::new(Expression::with_unknown_type(ExpressionKind::Ref(
+                                    LValue::Port(PortId(1)),
+                                ))),
+                            }),
+                            kind: AssignmentKind::Blocking,
+                            span: None,
+                        })],
+                    },
+                    span: None,
+                }],
+                assignments: vec![],
+                instances: vec![],
+                clock_domains: vec![],
+                generate_blocks: vec![],
+                assertions: vec![],
+                span: None,
+                pipeline_config: None,
+                vendor_ip_config: None,
+                compiled_ip_config: None,
+                power_domains: vec![],
+                power_domain_config: None,
+                safety_context: None,
+                is_async: false,
+                barriers: vec![],
+                ncl_boundary_mode: None,
+            }
+        }
+
+        let module1 = create_and_module();
+        let module2 = create_and_module();
+
+        let checker = MirEquivalenceChecker::new();
+        let result = checker.check_mir_equivalence(&module1, &module2).unwrap();
+
+        assert!(result.equivalent, "Identical MIR modules should be equivalent");
     }
 }

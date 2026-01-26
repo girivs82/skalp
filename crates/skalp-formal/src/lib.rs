@@ -8,6 +8,7 @@
 //! - Property verification
 //! - Assertion generation
 //! - Combinational equivalence checking (CEC)
+//! - MIR (RTL) to gate-level equivalence checking
 
 pub mod assertions;
 pub mod bmc;
@@ -20,8 +21,8 @@ pub mod temporal;
 // Re-export equivalence checking types
 pub use equivalence::{
     Aig, AigLit, AigNode, AigNodeId, EquivalenceChecker, EquivalenceResult, GateNetlistToAig,
-    LirToAig, RegisterInfo, RegisterMatchResult, SequentialEquivalenceChecker,
-    SequentialEquivalenceResult,
+    LirToAig, MirEquivalenceChecker, MirSignalRef, MirToAig, RegisterInfo, RegisterMatchResult,
+    SequentialEquivalenceChecker, SequentialEquivalenceResult,
 };
 
 use skalp_frontend::ast::Item;

@@ -8,6 +8,7 @@ license = "MIT OR Apache-2.0"
 
 [dependencies]
 skalp-frontend = { path = "../skalp-frontend" }
+skalp-mir = { path = "../skalp-mir" }
 skalp-lir = { path = "../skalp-lir" }
 thiserror = "1.0"
 serde = { version = "1.0", features = ["derive"] }
