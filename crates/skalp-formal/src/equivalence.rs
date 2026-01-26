@@ -880,6 +880,94 @@ impl GateNetlistToAig {
         // Fourth level: select on i3
         self.aig.add_mux(i3, level3[0], level3[1])
     }
+
+    /// Convert GateNetlist to sequential AIG with proper Latch nodes
+    ///
+    /// This creates an AIG representation where:
+    /// - Primary inputs are inputs
+    /// - DFF cells become Latch nodes with D input as next-state
+    /// - Primary outputs are outputs
+    ///
+    /// This is needed for BMC (Bounded Model Checking) which unrolls
+    /// the sequential circuit over multiple cycles.
+    pub fn convert_sequential(mut self, netlist: &GateNetlist) -> Aig {
+        // Add primary inputs (excluding clock which is implicit)
+        for &input_id in &netlist.inputs {
+            let net = &netlist.nets[input_id.0 as usize];
+            // Skip clock signals for sequential AIG
+            if net.name.contains("clk") || net.name.contains("clock") {
+                continue;
+            }
+            let lit = self.aig.add_input(net.name.clone());
+            self.net_map.insert(input_id.0, lit);
+        }
+
+        // First pass: identify all DFF cells and create placeholder literals for their outputs
+        // We need this because the D input might reference other DFF outputs
+        let mut dff_cells: Vec<(usize, skalp_lir::GateNetId, String)> = Vec::new();
+
+        for (idx, cell) in netlist.cells.iter().enumerate() {
+            if cell.is_sequential() {
+                if let Some(out) = cell.outputs.first().copied() {
+                    let net = &netlist.nets[out.0 as usize];
+                    // Create temporary input for the current DFF output (latch state)
+                    let temp_name = format!("__dff_cur_{}", net.name);
+                    let temp_lit = self.aig.add_input(temp_name);
+                    self.net_map.insert(out.0, temp_lit);
+                    dff_cells.push((idx, out, net.name.clone()));
+                }
+            }
+        }
+
+        // Process combinational cells
+        for (idx, cell) in netlist.cells.iter().enumerate() {
+            // Skip DFFs - we handle them specially
+            if cell.is_sequential() {
+                continue;
+            }
+            self.convert_cell(cell, netlist);
+        }
+
+        // Now create Latch nodes for each DFF
+        // The D input is the next-state logic
+        for (cell_idx, out_net, latch_name) in &dff_cells {
+            let cell = &netlist.cells[*cell_idx];
+
+            // Find the D input (data input to the DFF)
+            // DFF typically has inputs: [D, clock] or [D, clock, enable, reset]
+            // The first non-clock input is usually D
+            let d_input = cell.inputs.iter().find(|&&inp| {
+                let net = &netlist.nets[inp.0 as usize];
+                !net.name.contains("clk") && !net.name.contains("clock")
+            });
+
+            let next_lit = if let Some(&d_net) = d_input {
+                self.net_map.get(&d_net.0).copied().unwrap_or_else(|| self.aig.false_lit())
+            } else {
+                // No D input found, latch holds its value
+                self.net_map.get(&out_net.0).copied().unwrap_or_else(|| self.aig.false_lit())
+            };
+
+            // Create latch (init to false)
+            let latch_lit = self.aig.add_latch(latch_name.clone(), next_lit, false);
+
+            // Update net_map to use latch output
+            self.net_map.insert(out_net.0, latch_lit);
+        }
+
+        // Add primary outputs
+        for &output_id in &netlist.outputs {
+            let net = &netlist.nets[output_id.0 as usize];
+            let lit = self
+                .net_map
+                .get(&output_id.0)
+                .copied()
+                .unwrap_or_else(|| self.aig.false_lit());
+            self.aig.add_output(net.name.clone(), lit);
+        }
+
+        self.aig
+    }
 }
 
 impl Default for GateNetlistToAig {
@@ -2426,6 +2514,225 @@ impl<'a> MirToAig<'a> {
         self.convert_internal(true)
     }
 
+    /// Convert MIR module to sequential AIG with proper Latch nodes
+    ///
+    /// This creates an AIG representation where:
+    /// - Primary inputs are inputs
+    /// - Registers become Latch nodes with next-state logic
+    /// - Primary outputs are outputs
+    ///
+    /// This is needed for BMC (Bounded Model Checking) which unrolls
+    /// the sequential circuit over multiple cycles.
+    pub fn convert_sequential(mut self) -> Aig {
+        // First pass: detect all registers (signals assigned in sequential processes)
+        let mut register_signals: Vec<(MirSignalRef, String, u32)> = Vec::new();
+
+        for process in &self.module.processes {
+            if matches!(process.kind, ProcessKind::Sequential) {
+                self.collect_register_signals(&process.body, &mut register_signals);
+            }
+        }
+
+        // Add primary inputs (input ports)
+        for port in &self.module.ports {
+            if port.direction == PortDirection::Input {
+                let width = self.get_type_width(&port.port_type);
+                for bit in 0..width {
+                    let name = if width == 1 {
+                        port.name.clone()
+                    } else {
+                        format!("{}[{}]", port.name, bit)
+                    };
+                    let lit = self.aig.add_input(name);
+                    self.signal_map
+                        .insert((MirSignalRef::Port(port.id), bit as u32), lit);
+                }
+            }
+        }
+
+        // For sequential conversion, we need to:
+        // 1. Create placeholder literals for register current values
+        // 2. Convert sequential process bodies to get next-state logic
+        // 3. Create Latch nodes connecting current to next
+
+        // Create temporary input nodes for register current values
+        // These will be replaced with proper latch outputs
+        let mut reg_current_lits: HashMap<(MirSignalRef, u32), AigLit> = HashMap::new();
+        for (sig_ref, name, width) in &register_signals {
+            for bit in 0..*width {
+                // Create a temporary input for the current register value
+                let temp_name = if *width == 1 {
+                    format!("__reg_cur_{}", name)
+                } else {
+                    format!("__reg_cur_{}[{}]", name, bit)
+                };
+                let lit = self.aig.add_input(temp_name);
+                reg_current_lits.insert((*sig_ref, bit), lit);
+                // Also add to signal_map so reading the register uses current value
+                self.signal_map.insert((*sig_ref, bit), lit);
+            }
+        }
+
+        // Process continuous assignments
+        for assign in &self.module.assignments {
+            self.convert_continuous_assign(assign);
+        }
+
+        // Process combinational processes
+        for process in &self.module.processes {
+            if matches!(process.kind, ProcessKind::Combinational) {
+                self.convert_combinational_process(process);
+            }
+        }
+
+        // Process sequential processes to compute next-state logic
+        // Store computed next-state values separately
+        let mut next_state_map: HashMap<(MirSignalRef, u32), AigLit> = HashMap::new();
+
+        for process in &self.module.processes {
+            if matches!(process.kind, ProcessKind::Sequential) {
+                // Convert sequential body - assignments go to next-state
+                self.convert_sequential_process_for_bmc(process, &mut next_state_map);
+            }
+        }
+
+        // Now create Latch nodes for each register
+        // We need to: remove the temp inputs, add latches properly
+        // For simplicity, we'll create latches with the computed next-state
+
+        for (sig_ref, name, width) in &register_signals {
+            for bit in 0..*width {
+                let latch_name = if *width == 1 {
+                    name.clone()
+                } else {
+                    format!("{}[{}]", name, bit)
+                };
+
+                // Get next-state logic (or false if not computed)
+                let next_lit = next_state_map
+                    .get(&(*sig_ref, bit))
+                    .copied()
+                    .unwrap_or_else(|| {
+                        // If no next-state computed, register holds its value
+                        reg_current_lits
+                            .get(&(*sig_ref, bit))
+                            .copied()
+                            .unwrap_or_else(|| self.aig.false_lit())
+                    });
+
+                // Create latch (init to false)
+                let latch_lit = self.aig.add_latch(latch_name, next_lit, false);
+
+                // Update signal_map to point to latch output
+                self.signal_map.insert((*sig_ref, bit), latch_lit);
+            }
+        }
+
+        // Add primary outputs (output ports)
+        for port in &self.module.ports {
+            if port.direction == PortDirection::Output {
+                let width = self.get_type_width(&port.port_type);
+                for bit in 0..width {
+                    let name = if width == 1 {
+                        port.name.clone()
+                    } else {
+                        format!("{}[{}]", port.name, bit)
+                    };
+                    let lit = self
+                        .signal_map
+                        .get(&(MirSignalRef::Port(port.id), bit as u32))
+                        .copied()
+                        .unwrap_or_else(|| self.aig.false_lit());
+                    self.aig.add_output(name, lit);
+                }
+            }
+        }
+
+        self.aig
+    }
+
+    /// Convert sequential process for BMC - stores next-state values separately
+    fn convert_sequential_process_for_bmc(
+        &mut self,
+        process: &Process,
+        next_state_map: &mut HashMap<(MirSignalRef, u32), AigLit>,
+    ) {
+        // Convert the process body, but capture assignments to registers
+        // as next-state values instead of updating signal_map directly
+        self.convert_block_for_bmc(&process.body, &HashMap::new(), next_state_map);
+    }
+
+    /// Convert a block for BMC - separates register assignments as next-state
+    fn convert_block_for_bmc(
+        &mut self,
+        block: &Block,
+        conditions: &HashMap<MirSignalRef, Vec<AigLit>>,
+        next_state_map: &mut HashMap<(MirSignalRef, u32), AigLit>,
+    ) {
+        for stmt in &block.statements {
+            self.convert_statement_for_bmc(stmt, conditions, next_state_map);
+        }
+    }
+
+    fn convert_statement_for_bmc(
+        &mut self,
+        stmt: &Statement,
+        conditions: &HashMap<MirSignalRef, Vec<AigLit>>,
+        next_state_map: &mut HashMap<(MirSignalRef, u32), AigLit>,
+    ) {
+        match stmt {
+            Statement::Assignment(assign) => {
+                // Check if this is a register assignment
+                if let Some(sig_ref) = self.lvalue_to_ref(&assign.lhs) {
+                    if self.register_outputs.contains(&sig_ref) {
+                        // This is a register - compute next-state value
+                        let rhs_lits = self.convert_expression(&assign.rhs);
+                        // Store as next-state
+                        for (bit, lit) in rhs_lits.iter().enumerate() {
+                            next_state_map.insert((sig_ref, bit as u32), *lit);
+                        }
+                        return;
+                    }
+                }
+                // Not a register - normal assignment
+                self.convert_assignment(assign, conditions);
+            }
+            Statement::If(if_stmt) => {
+                // For conditionals, we need to handle register updates with muxing
+                let cond_lits = self.convert_expression(&if_stmt.condition);
+                let cond = cond_lits.first().copied().unwrap_or_else(|| self.aig.false_lit());
+
+                // Convert then branch
+                self.convert_block_for_bmc(&if_stmt.then_block, conditions, next_state_map);
+
+                // Convert else branch
+                if let Some(else_block) = &if_stmt.else_block {
+                    self.convert_block_for_bmc(else_block, conditions, next_state_map);
+                }
+
+                // Note: For proper conditional handling, we'd need to track which
+                // register bits are assigned in each branch and create muxes.
+                // This is simplified - full implementation would track per-branch updates.
+            }
+            Statement::Case(case_stmt) => {
+                // Similar simplification for case statements
+                for item in &case_stmt.items {
+                    self.convert_block_for_bmc(&item.block, conditions, next_state_map);
+                }
+                if let Some(default) = &case_stmt.default {
+                    self.convert_block_for_bmc(default, conditions, next_state_map);
+                }
+            }
+            Statement::Block(inner_block) => {
+                self.convert_block_for_bmc(inner_block, conditions, next_state_map);
+            }
+            _ => {
+                // Other statements handled normally
+                self.convert_statement(stmt, conditions);
+            }
+        }
+    }
+
     fn convert_internal(mut self, registers_as_inputs: bool) -> Aig {
         // First pass: detect all registers (signals assigned in sequential processes)
         let mut register_signals: Vec<(MirSignalRef, String, u32)> = Vec::new();
@@ -3615,6 +3922,681 @@ impl MirEquivalenceChecker {
 }
 
 impl Default for MirEquivalenceChecker {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// ============================================================================
+// Bounded Model Checking (BMC) for Sequential Equivalence
+// ============================================================================
+
+/// Result of BMC equivalence checking
+#[derive(Debug, Clone)]
+pub struct BmcEquivalenceResult {
+    /// True if designs are equivalent up to bound K
+    pub equivalent: bool,
+    /// The bound K used for checking
+    pub bound: usize,
+    /// Cycle at which first mismatch was found (if any)
+    pub mismatch_cycle: Option<usize>,
+    /// Output that mismatched (if any)
+    pub mismatch_output: Option<String>,
+    /// Multi-cycle counterexample trace (if not equivalent)
+    pub counterexample: Option<BmcCounterexample>,
+    /// Total time in milliseconds
+    pub time_ms: u64,
+    /// Number of SAT solver calls
+    pub sat_calls: usize,
+}
+
+/// Multi-cycle counterexample from BMC
+#[derive(Debug, Clone)]
+pub struct BmcCounterexample {
+    /// Input assignments for each cycle
+    pub inputs_per_cycle: Vec<HashMap<String, bool>>,
+    /// Register state at each cycle (design 1)
+    pub state1_per_cycle: Vec<HashMap<String, bool>>,
+    /// Register state at each cycle (design 2)
+    pub state2_per_cycle: Vec<HashMap<String, bool>>,
+    /// Output values at each cycle (design 1)
+    pub outputs1_per_cycle: Vec<HashMap<String, bool>>,
+    /// Output values at each cycle (design 2)
+    pub outputs2_per_cycle: Vec<HashMap<String, bool>>,
+}
+
+/// Bounded Model Checker for sequential equivalence
+///
+/// Unlike CEC which requires register correspondence, BMC verifies
+/// that two designs produce the same outputs given the same inputs
+/// over K clock cycles, regardless of internal structure.
+///
+/// This handles post-optimization verification where:
+/// - Register retiming may have occurred
+/// - Logic sharing changed module boundaries
+/// - Different number of internal registers
+pub struct BoundedModelChecker {
+    /// Maximum bound for checking
+    pub max_bound: usize,
+    /// Timeout in seconds
+    pub timeout_secs: u64,
+}
+
+impl BoundedModelChecker {
+    pub fn new() -> Self {
+        Self {
+            max_bound: 20,
+            timeout_secs: 300,
+        }
+    }
+
+    pub fn with_bound(mut self, bound: usize) -> Self {
+        self.max_bound = bound;
+        self
+    }
+
+    pub fn with_timeout(mut self, timeout: u64) -> Self {
+        self.timeout_secs = timeout;
+        self
+    }
+
+    /// Check bounded equivalence between MIR and GateNetlist
+    ///
+    /// This is the key verification for post-optimization equivalence.
+    /// It doesn't require register correspondence - just verifies that
+    /// given the same primary inputs, both designs produce the same
+    /// primary outputs over K cycles.
+    pub fn check_mir_vs_gates_bmc(
+        &self,
+        module: &Module,
+        netlist: &GateNetlist,
+        bound: usize,
+    ) -> FormalResult<BmcEquivalenceResult> {
+        let start = std::time::Instant::now();
+
+        // Convert MIR to sequential AIG (with latches)
+        let mir_aig = MirToAig::new(module).convert_sequential();
+
+        // Convert GateNetlist to sequential AIG (with latches)
+        let gate_aig = GateNetlistToAig::new().convert_sequential(netlist);
+
+        println!(
+            "BMC: MIR has {} inputs, {} outputs, {} latches",
+            mir_aig.inputs.len(),
+            mir_aig.outputs.len(),
+            mir_aig.latches.len()
+        );
+        println!(
+            "BMC: Gate has {} inputs, {} outputs, {} latches",
+            gate_aig.inputs.len(),
+            gate_aig.outputs.len(),
+            gate_aig.latches.len()
+        );
+
+        // Run BMC
+        let result = self.check_sequential_aig_equivalence(&mir_aig, &gate_aig, bound)?;
+
+        Ok(BmcEquivalenceResult {
+            time_ms: start.elapsed().as_millis() as u64,
+            ..result
+        })
+    }
+
+    /// Check bounded equivalence between two sequential AIGs
+    pub fn check_sequential_aig_equivalence(
+        &self,
+        aig1: &Aig,
+        aig2: &Aig,
+        bound: usize,
+    ) -> FormalResult<BmcEquivalenceResult> {
+        let start = std::time::Instant::now();
+        let mut sat_calls = 0;
+
+        // Match primary inputs between designs
+        let (matched_inputs, aig1_input_map, aig2_input_map) =
+            self.match_primary_inputs(aig1, aig2);
+
+        // Match primary outputs between designs
+        let matched_outputs = self.match_primary_outputs(aig1, aig2);
+
+        if matched_inputs.is_empty() {
+            return Err(FormalError::PropertyFailed(
+                "No matching primary inputs between designs".to_string()
+            ));
+        }
+
+        if matched_outputs.is_empty() {
+            return Err(FormalError::PropertyFailed(
+                "No matching primary outputs between designs".to_string()
+            ));
+        }
+
+        println!(
+            "BMC: {} matched inputs, {} matched outputs, checking {} cycles",
+            matched_inputs.len(),
+            matched_outputs.len(),
+            bound
+        );
+
+        // For each cycle, simulate both designs and check output equivalence
+        // We use simulation first for speed, then SAT for proof
+        let mut rng = rand::thread_rng();
+
+        // Quick simulation check first (1000 random traces)
+        println!("BMC: Phase 1 - Random simulation ({} traces)...", 1000);
+        for trace in 0..1000 {
+            let sim_result = self.simulate_bmc_trace(
+                aig1, aig2,
+                &matched_inputs, &aig1_input_map, &aig2_input_map,
+                &matched_outputs,
+                bound,
+                &mut rng,
+            );
+
+            if let Some((cycle, output_name)) = sim_result {
+                println!(
+                    "BMC: Simulation found mismatch at cycle {} on output '{}' (trace {})",
+                    cycle, output_name, trace
+                );
+                return Ok(BmcEquivalenceResult {
+                    equivalent: false,
+                    bound,
+                    mismatch_cycle: Some(cycle),
+                    mismatch_output: Some(output_name),
+                    counterexample: None, // Could generate full trace if needed
+                    time_ms: start.elapsed().as_millis() as u64,
+                    sat_calls: 0,
+                });
+            }
+        }
+
+        println!("BMC: Phase 2 - SAT-based verification...");
+
+        // SAT-based BMC: unroll both designs and check equivalence
+        for k in 1..=bound {
+            sat_calls += 1;
+
+            let sat_result = self.check_cycle_equivalence_sat(
+                aig1, aig2,
+                &matched_inputs, &aig1_input_map, &aig2_input_map,
+                &matched_outputs,
+                k,
+            )?;
+
+            if !sat_result.0 {
+                println!("BMC: SAT found mismatch at cycle {}", k);
+                return Ok(BmcEquivalenceResult {
+                    equivalent: false,
+                    bound: k,
+                    mismatch_cycle: Some(sat_result.1.unwrap_or(k)),
+                    mismatch_output: sat_result.2,
+                    counterexample: None,
+                    time_ms: start.elapsed().as_millis() as u64,
+                    sat_calls,
+                });
+            }
+
+            if k % 5 == 0 {
+                println!("BMC: Verified equivalent up to cycle {}", k);
+            }
+        }
+
+        println!("BMC: Designs equivalent up to bound {}", bound);
+
+        Ok(BmcEquivalenceResult {
+            equivalent: true,
+            bound,
+            mismatch_cycle: None,
+            mismatch_output: None,
+            counterexample: None,
+            time_ms: start.elapsed().as_millis() as u64,
+            sat_calls,
+        })
+    }
+
+    /// Match primary inputs between two AIGs by normalized name
+    fn match_primary_inputs(
+        &self,
+        aig1: &Aig,
+        aig2: &Aig,
+    ) -> (Vec<String>, HashMap<String, u32>, HashMap<String, u32>) {
+        let mut matched = Vec::new();
+        let mut aig1_map: HashMap<String, u32> = HashMap::new();
+        let mut aig2_map: HashMap<String, u32> = HashMap::new();
+
+        // Build maps for both AIGs
+        for (idx, node) in aig1.nodes.iter().enumerate() {
+            if let AigNode::Input { name } = node {
+                if !is_internal_signal(name) {
+                    let normalized = normalize_port_name(name);
+                    aig1_map.insert(normalized.key(), idx as u32);
+                }
+            }
+        }
+
+        for (idx, node) in aig2.nodes.iter().enumerate() {
+            if let AigNode::Input { name } = node {
+                if !is_internal_signal(name) {
+                    let normalized = normalize_port_name(name);
+                    aig2_map.insert(normalized.key(), idx as u32);
+                }
+            }
+        }
+
+        // Find matches
+        for key in aig1_map.keys() {
+            if aig2_map.contains_key(key) {
+                matched.push(key.clone());
+            }
+        }
+
+        (matched, aig1_map, aig2_map)
+    }
+
+    /// Match primary outputs between two AIGs
+    fn match_primary_outputs(&self, aig1: &Aig, aig2: &Aig) -> Vec<(usize, usize, String)> {
+        let mut matched = Vec::new();
+
+        let aig2_outputs: HashMap<String, usize> = aig2.output_names.iter()
+            .enumerate()
+            .map(|(i, name)| (normalize_port_name(name).key(), i))
+            .collect();
+
+        for (i, name) in aig1.output_names.iter().enumerate() {
+            let key = normalize_port_name(name).key();
+            if let Some(&j) = aig2_outputs.get(&key) {
+                matched.push((i, j, key));
+            }
+        }
+
+        matched
+    }
+
+    /// Simulate a random BMC trace and check for mismatches
+    fn simulate_bmc_trace(
+        &self,
+        aig1: &Aig,
+        aig2: &Aig,
+        matched_inputs: &[String],
+        aig1_input_map: &HashMap<String, u32>,
+        aig2_input_map: &HashMap<String, u32>,
+        matched_outputs: &[(usize, usize, String)],
+        bound: usize,
+        rng: &mut impl rand::Rng,
+    ) -> Option<(usize, String)> {
+        // Initialize latch states to init values
+        let mut state1 = self.get_initial_latch_state(aig1);
+        let mut state2 = self.get_initial_latch_state(aig2);
+
+        for cycle in 0..bound {
+            // Generate random inputs for this cycle
+            let mut input_values: HashMap<String, bool> = HashMap::new();
+            for key in matched_inputs {
+                input_values.insert(key.clone(), rng.gen());
+            }
+
+            // Simulate both AIGs
+            let (outputs1, next_state1) = self.simulate_aig_cycle(
+                aig1, &input_values, &state1, aig1_input_map
+            );
+            let (outputs2, next_state2) = self.simulate_aig_cycle(
+                aig2, &input_values, &state2, aig2_input_map
+            );
+
+            // Check output equivalence
+            for (i1, i2, name) in matched_outputs {
+                let o1 = outputs1.get(*i1).copied().unwrap_or(false);
+                let o2 = outputs2.get(*i2).copied().unwrap_or(false);
+                if o1 != o2 {
+                    return Some((cycle, name.clone()));
+                }
+            }
+
+            // Update state for next cycle
+            state1 = next_state1;
+            state2 = next_state2;
+        }
+
+        None
+    }
+
+    /// Get initial latch state (all latches at their init values)
+    fn get_initial_latch_state(&self, aig: &Aig) -> HashMap<u32, bool> {
+        let mut state = HashMap::new();
+        for &latch_id in &aig.latches {
+            if let AigNode::Latch { init, .. } = &aig.nodes[latch_id.0 as usize] {
+                state.insert(latch_id.0, *init);
+            }
+        }
+        state
+    }
+
+    /// Simulate one cycle of an AIG
+    fn simulate_aig_cycle(
+        &self,
+        aig: &Aig,
+        inputs: &HashMap<String, bool>,
+        latch_state: &HashMap<u32, bool>,
+        input_map: &HashMap<String, u32>,
+    ) -> (Vec<bool>, HashMap<u32, bool>) {
+        let mut values: HashMap<u32, bool> = HashMap::new();
+
+        // Node 0 is false
+        values.insert(0, false);
+
+        // Set input values
+        for (key, &val) in inputs {
+            if let Some(&node_id) = input_map.get(key) {
+                values.insert(node_id, val);
+            }
+        }
+
+        // Set latch output values from current state
+        for (&latch_id, &val) in latch_state {
+            values.insert(latch_id, val);
+        }
+
+        // Evaluate all nodes in order
+        for (idx, node) in aig.nodes.iter().enumerate() {
+            let idx = idx as u32;
+            match node {
+                AigNode::False => {
+                    values.insert(idx, false);
+                }
+                AigNode::Input { name } => {
+                    // Already set from inputs or use default
+                    if !values.contains_key(&idx) {
+                        // Check if it's an internal signal that wasn't in matched inputs
+                        let normalized = normalize_port_name(name);
+                        if let Some(&val) = inputs.get(&normalized.key()) {
+                            values.insert(idx, val);
+                        } else {
+                            values.insert(idx, false);
+                        }
+                    }
+                }
+                AigNode::And { left, right } => {
+                    let l = values.get(&left.node.0).copied().unwrap_or(false);
+                    let r = values.get(&right.node.0).copied().unwrap_or(false);
+                    let l = if left.inverted { !l } else { l };
+                    let r = if right.inverted { !r } else { r };
+                    values.insert(idx, l && r);
+                }
+                AigNode::Latch { .. } => {
+                    // Latch output already set from latch_state
+                    if !values.contains_key(&idx) {
+                        values.insert(idx, false);
+                    }
+                }
+            }
+        }
+
+        // Get outputs
+        let outputs: Vec<bool> = aig.outputs.iter().map(|lit| {
+            let val = values.get(&lit.node.0).copied().unwrap_or(false);
+            if lit.inverted { !val } else { val }
+        }).collect();
+
+        // Compute next latch state
+        let mut next_state: HashMap<u32, bool> = HashMap::new();
+        for &latch_id in &aig.latches {
+            if let AigNode::Latch { next, .. } = &aig.nodes[latch_id.0 as usize] {
+                let val = values.get(&next.node.0).copied().unwrap_or(false);
+                let val = if next.inverted { !val } else { val };
+                next_state.insert(latch_id.0, val);
+            }
+        }
+
+        (outputs, next_state)
+    }
+
+    /// SAT-based check for equivalence up to cycle K
+    fn check_cycle_equivalence_sat(
+        &self,
+        aig1: &Aig,
+        aig2: &Aig,
+        matched_inputs: &[String],
+        aig1_input_map: &HashMap<String, u32>,
+        aig2_input_map: &HashMap<String, u32>,
+        matched_outputs: &[(usize, usize, String)],
+        k: usize,
+    ) -> FormalResult<(bool, Option<usize>, Option<String>)> {
+        use std::cell::Cell;
+
+        let mut formula = CnfFormula::new();
+        let var_counter = Cell::new(0u32);
+
+        // Helper to create new variable
+        let new_var = || {
+            let v = Var::from_index(var_counter.get() as usize);
+            var_counter.set(var_counter.get() + 1);
+            v
+        };
+
+        // Maps: (aig_id, node_id, cycle) -> Var
+        let mut node_vars: HashMap<(u8, u32, usize), Var> = HashMap::new();
+
+        // Helper to get or create variable for a node
+        let mut get_node_var = |aig_id: u8, node_id: u32, cycle: usize| -> Var {
+            let key = (aig_id, node_id, cycle);
+            if let Some(&v) = node_vars.get(&key) {
+                v
+            } else {
+                let v = new_var();
+                node_vars.insert(key, v);
+                v
+            }
+        };
+
+        // Miter output: any output differs at any cycle
+        let mut miter_clauses: Vec<Var> = Vec::new();
+
+        for cycle in 0..k {
+            // Create shared input variables for this cycle
+            let mut cycle_inputs: HashMap<String, Var> = HashMap::new();
+            for key in matched_inputs {
+                let v = new_var();
+                cycle_inputs.insert(key.clone(), v);
+            }
+
+            // Encode AIG1 for this cycle
+            self.encode_aig_cycle(
+                aig1, 1, cycle,
+                &cycle_inputs, aig1_input_map,
+                &mut formula, &mut get_node_var,
+            );
+
+            // Encode AIG2 for this cycle
+            self.encode_aig_cycle(
+                aig2, 2, cycle,
+                &cycle_inputs, aig2_input_map,
+                &mut formula, &mut get_node_var,
+            );
+
+            // Connect latch outputs at cycle+1 to latch inputs at cycle (if cycle > 0)
+            if cycle > 0 {
+                self.connect_latch_states(aig1, 1, cycle, &mut formula, &mut get_node_var);
+                self.connect_latch_states(aig2, 2, cycle, &mut formula, &mut get_node_var);
+            }
+
+            // Create miter for outputs at this cycle
+            for (i1, i2, _name) in matched_outputs {
+                let out1_lit = aig1.outputs[*i1];
+                let out2_lit = aig2.outputs[*i2];
+
+                let out1_var = get_node_var(1, out1_lit.node.0, cycle);
+                let out2_var = get_node_var(2, out2_lit.node.0, cycle);
+
+                // XOR the outputs (with inversions considered)
+                // diff = out1 XOR out2
+                let diff_var = new_var();
+
+                // Encode XOR
+                // diff = (out1 AND !out2) OR (!out1 AND out2)
+                let lit1 = if out1_lit.inverted {
+                    Lit::negative(out1_var)
+                } else {
+                    Lit::positive(out1_var)
+                };
+                let lit2 = if out2_lit.inverted {
+                    Lit::negative(out2_var)
+                } else {
+                    Lit::positive(out2_var)
+                };
+
+                // diff = lit1 XOR lit2
+                // CNF: (!diff OR !lit1 OR !lit2) AND (!diff OR lit1 OR lit2) AND (diff OR !lit1 OR lit2) AND (diff OR lit1 OR !lit2)
+                formula.add_clause(&[Lit::negative(diff_var), !lit1, !lit2]);
+                formula.add_clause(&[Lit::negative(diff_var), lit1, lit2]);
+                formula.add_clause(&[Lit::positive(diff_var), !lit1, lit2]);
+                formula.add_clause(&[Lit::positive(diff_var), lit1, !lit2]);
+
+                miter_clauses.push(diff_var);
+            }
+        }
+
+        // At least one output must differ (for SAT to find counterexample)
+        if !miter_clauses.is_empty() {
+            let clause: Vec<Lit> = miter_clauses.iter()
+                .map(|&v| Lit::positive(v))
+                .collect();
+            formula.add_clause(&clause);
+        }
+
+        // Initialize latches to their init values at cycle 0
+        self.constrain_initial_state(aig1, 1, &mut formula, &mut get_node_var);
+        self.constrain_initial_state(aig2, 2, &mut formula, &mut get_node_var);
+
+        // Solve
+        let mut solver = Solver::new();
+        solver.add_formula(&formula);
+
+        match solver.solve() {
+            Ok(true) => {
+                // SAT = counterexample found = designs differ
+                Ok((false, Some(k), None))
+            }
+            Ok(false) => {
+                // UNSAT = no counterexample = equivalent up to this bound
+                Ok((true, None, None))
+            }
+            Err(e) => {
+                Err(FormalError::SolverError(format!("SAT solver error: {:?}", e)))
+            }
+        }
+    }
+
+    /// Encode one cycle of an AIG as CNF
+    fn encode_aig_cycle(
+        &self,
+        aig: &Aig,
+        aig_id: u8,
+        cycle: usize,
+        inputs: &HashMap<String, Var>,
+        input_map: &HashMap<String, u32>,
+        formula: &mut CnfFormula,
+        get_var: &mut impl FnMut(u8, u32, usize) -> Var,
+    ) {
+        // Node 0 is always false
+        let false_var = get_var(aig_id, 0, cycle);
+        formula.add_clause(&[Lit::negative(false_var)]);
+
+        for (idx, node) in aig.nodes.iter().enumerate() {
+            let idx = idx as u32;
+            match node {
+                AigNode::False => {
+                    // Already handled
+                }
+                AigNode::Input { name } => {
+                    let normalized = normalize_port_name(name);
+                    if let Some(&input_var) = inputs.get(&normalized.key()) {
+                        let node_var = get_var(aig_id, idx, cycle);
+                        // node_var = input_var
+                        formula.add_clause(&[Lit::negative(node_var), Lit::positive(input_var)]);
+                        formula.add_clause(&[Lit::positive(node_var), Lit::negative(input_var)]);
+                    }
+                }
+                AigNode::And { left, right } => {
+                    let out_var = get_var(aig_id, idx, cycle);
+                    let left_var = get_var(aig_id, left.node.0, cycle);
+                    let right_var = get_var(aig_id, right.node.0, cycle);
+
+                    let left_lit = if left.inverted {
+                        Lit::negative(left_var)
+                    } else {
+                        Lit::positive(left_var)
+                    };
+                    let right_lit = if right.inverted {
+                        Lit::negative(right_var)
+                    } else {
+                        Lit::positive(right_var)
+                    };
+
+                    // out = left AND right
+                    // CNF: (!out OR left) AND (!out OR right) AND (out OR !left OR !right)
+                    formula.add_clause(&[Lit::negative(out_var), left_lit]);
+                    formula.add_clause(&[Lit::negative(out_var), right_lit]);
+                    formula.add_clause(&[Lit::positive(out_var), !left_lit, !right_lit]);
+                }
+                AigNode::Latch { .. } => {
+                    // Latch output at cycle is a free variable (set by initial state or previous cycle)
+                    // Just ensure the variable exists
+                    let _ = get_var(aig_id, idx, cycle);
+                }
+            }
+        }
+    }
+
+    /// Connect latch states between cycles
+    fn connect_latch_states(
+        &self,
+        aig: &Aig,
+        aig_id: u8,
+        cycle: usize,
+        formula: &mut CnfFormula,
+        get_var: &mut impl FnMut(u8, u32, usize) -> Var,
+    ) {
+        for &latch_id in &aig.latches {
+            if let AigNode::Latch { next, .. } = &aig.nodes[latch_id.0 as usize] {
+                // latch_output[cycle] = next[cycle-1]
+                let out_var = get_var(aig_id, latch_id.0, cycle);
+                let next_var = get_var(aig_id, next.node.0, cycle - 1);
+
+                let next_lit = if next.inverted {
+                    Lit::negative(next_var)
+                } else {
+                    Lit::positive(next_var)
+                };
+
+                // out_var = next_lit
+                formula.add_clause(&[Lit::negative(out_var), next_lit]);
+                formula.add_clause(&[Lit::positive(out_var), !next_lit]);
+            }
+        }
+    }
+
+    /// Constrain latches to initial values at cycle 0
+    fn constrain_initial_state(
+        &self,
+        aig: &Aig,
+        aig_id: u8,
+        formula: &mut CnfFormula,
+        get_var: &mut impl FnMut(u8, u32, usize) -> Var,
+    ) {
+        for &latch_id in &aig.latches {
+            if let AigNode::Latch { init, .. } = &aig.nodes[latch_id.0 as usize] {
+                let var = get_var(aig_id, latch_id.0, 0);
+                if *init {
+                    formula.add_clause(&[Lit::positive(var)]);
+                } else {
+                    formula.add_clause(&[Lit::negative(var)]);
+                }
+            }
+        }
+    }
+}
+
+impl Default for BoundedModelChecker {
     fn default() -> Self {
         Self::new()
     }

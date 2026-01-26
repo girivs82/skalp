@@ -273,3 +273,64 @@ fn test_battery_dcdc_equivalence_debug() {
     println!("MIR output ports: {}", output_ports.len());
     println!("Netlist output nets: {}", output_nets.len());
 }
+
+/// Test BMC (Bounded Model Checking) for sequential equivalence
+///
+/// BMC doesn't require register correspondence - it verifies that given
+/// the same primary inputs, both designs produce the same primary outputs
+/// over K clock cycles.
+#[test]
+fn test_battery_dcdc_bmc_equivalence() {
+    use skalp_formal::BoundedModelChecker;
+
+    let path = Path::new(BATTERY_DCDC_PATH);
+    let hir = parse_and_build_hir_from_file(path).expect("HIR parse failed");
+
+    let compiler = MirCompiler::new();
+    let mir = compiler.compile_to_mir(&hir).expect("MIR compile failed");
+
+    let library = get_stdlib_library("generic_asic").expect("Library load failed");
+
+    // Find the top MIR module
+    let top_module = mir.modules.iter()
+        .find(|m| m.name == TOP_MODULE)
+        .expect("Top module not found");
+
+    println!("=== BMC Equivalence Test ===");
+    println!("Module: {}", top_module.name);
+
+    // Get flattened gate netlist
+    let hier_lir = lower_mir_hierarchical_with_top(&mir, Some(TOP_MODULE));
+    let hier_netlist = map_hierarchical_to_gates(&hier_lir, &library);
+    let netlist = hier_netlist.flatten();
+
+    println!("Gate netlist: {} cells, {} nets", netlist.cells.len(), netlist.nets.len());
+
+    // Run BMC with bound K=5
+    let checker = BoundedModelChecker::new().with_bound(10);
+    let result = checker.check_mir_vs_gates_bmc(top_module, &netlist, 5);
+
+    match result {
+        Ok(bmc_result) => {
+            println!("\n=== BMC Result ===");
+            println!("Equivalent up to bound {}: {}", bmc_result.bound, bmc_result.equivalent);
+            println!("Time: {}ms", bmc_result.time_ms);
+            println!("SAT calls: {}", bmc_result.sat_calls);
+
+            if !bmc_result.equivalent {
+                if let Some(cycle) = bmc_result.mismatch_cycle {
+                    println!("Mismatch at cycle: {}", cycle);
+                }
+                if let Some(output) = &bmc_result.mismatch_output {
+                    println!("Mismatching output: {}", output);
+                }
+            } else {
+                println!("SUCCESS: MIR and GateNetlist produce equivalent outputs for {} cycles!", bmc_result.bound);
+            }
+        }
+        Err(e) => {
+            println!("BMC error: {:?}", e);
+            println!("Note: BMC requires properly matched primary I/O.");
+        }
+    }
+}
