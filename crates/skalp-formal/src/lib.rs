@@ -24,6 +24,8 @@ pub use equivalence::{
     LirToAig, MirEquivalenceChecker, MirSignalRef, MirToAig, NormalizedPort, RegisterInfo,
     RegisterMatchResult, SequentialEquivalenceChecker, SequentialEquivalenceResult,
     build_miter_with_port_matching, normalize_port_name,
+    // BMC (Bounded Model Checking) types
+    BoundedModelChecker, BmcEquivalenceResult, BmcCounterexample,
 };
 
 use skalp_frontend::ast::Item;
