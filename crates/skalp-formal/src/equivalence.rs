@@ -297,6 +297,21 @@ impl LirToAig {
     /// - Next state from the D input logic
     /// - Reset value as init
     pub fn convert_sequential(mut self, lir: &Lir) -> Aig {
+        // Validation: Check for invalid signal references
+        let num_signals = lir.signals.len() as u32;
+        for (idx, node) in lir.nodes.iter().enumerate() {
+            for &input_id in &node.inputs {
+                if input_id.0 >= num_signals {
+                    log::warn!("[LIR_AIG] ❌ Node {} ({:?}) references invalid signal {} (max={}), path={}",
+                        idx, std::mem::discriminant(&node.op), input_id.0, num_signals - 1, node.path);
+                }
+            }
+            if node.output.0 >= num_signals {
+                log::warn!("[LIR_AIG] ❌ Node {} ({:?}) has invalid output signal {} (max={}), path={}",
+                    idx, std::mem::discriminant(&node.op), node.output.0, num_signals - 1, node.path);
+            }
+        }
+
         // First pass: find all registers (sequential nodes)
         let mut register_nodes: Vec<(usize, &LirNode)> = Vec::new();
         for (idx, node) in lir.nodes.iter().enumerate() {
@@ -345,6 +360,23 @@ impl LirToAig {
         // (nodes that produce signals must be processed before nodes that consume them)
         let sorted_indices = self.topological_sort_lir_nodes(lir);
 
+        // Debug: Track which signals are accessed before being produced
+        let mut debug_produced: std::collections::HashSet<u32> = std::collections::HashSet::new();
+        // Mark inputs and register outputs as already produced
+        for &input_id in &lir.inputs {
+            let signal = &lir.signals[input_id.0 as usize];
+            for bit in 0..signal.width {
+                debug_produced.insert(input_id.0 * 100 + bit);
+            }
+        }
+        for (_, node) in &register_nodes {
+            if let LirOp::Reg { width, .. } = &node.op {
+                for bit in 0..*width {
+                    debug_produced.insert(node.output.0 * 100 + bit);
+                }
+            }
+        }
+
         for idx in sorted_indices {
             let node = &lir.nodes[idx];
             if !matches!(node.op, LirOp::Reg { .. }) {
@@ -359,6 +391,11 @@ impl LirToAig {
                 let d_input = node.inputs.get(0).copied().unwrap_or(LirSignalId(0));
                 let reset_val = reset_value.unwrap_or(0);
 
+                // Get the actual width of the D input signal for proper zero-extension
+                let d_input_width = lir.signals.get(d_input.0 as usize)
+                    .map(|s| s.width)
+                    .unwrap_or(*width);
+
                 for bit in 0..*width {
                     let latch_name = if *width == 1 {
                         output_signal.name.clone()
@@ -366,8 +403,13 @@ impl LirToAig {
                         format!("{}[{}]", output_signal.name, bit)
                     };
 
-                    // Get D input (next state)
-                    let d_lit = self.get_input_bit(d_input, bit);
+                    // Get D input (next state), zero-extending if input is narrower than register
+                    let d_lit = if bit < d_input_width {
+                        self.get_input_bit(d_input, bit)
+                    } else {
+                        // Zero-extend: bits beyond input width are 0
+                        self.aig.false_lit()
+                    };
 
                     // Handle reset: if has_reset, apply rst ? reset_val : d
                     let next_lit = if *has_reset {
@@ -513,10 +555,24 @@ impl LirToAig {
             .get(&(signal_id.0, bit))
             .copied()
             .unwrap_or_else(|| {
-                // Debug: log missing signal lookup
-                log::warn!("[LIR_AIG] ⚠️ Missing signal lookup: signal_id={}, bit={}", signal_id.0, bit);
+                // Only warn for signals that exist but with missing bits (width mismatch)
+                // Don't spam for invalid signal IDs
+                if signal_id.0 < 2000 {  // Reasonable limit for signal IDs
+                    log::warn!("[LIR_AIG] ⚠️ Missing signal lookup: signal_id={}, bit={} (signal_map has {} entries)",
+                        signal_id.0, bit, self.signal_map.len());
+                }
                 self.aig.false_lit()
             })
+    }
+
+    /// Get input bit with zero-extension for signals narrower than expected
+    fn get_input_bit_zext(&self, signal_id: LirSignalId, bit: u32, signal_width: u32) -> AigLit {
+        if bit >= signal_width {
+            // Beyond signal width - return 0 (zero-extend)
+            self.aig.false_lit()
+        } else {
+            self.get_input_bit(signal_id, bit)
+        }
     }
 
     fn set_output_bit(&mut self, signal_id: LirSignalId, bit: u32, lit: AigLit) {
@@ -1835,20 +1891,24 @@ impl GateNetlistToAig {
                     false
                 };
 
-                // Always apply !rst AND D to match LIR-to-AIG behavior
-                // This ensures consistent AIG literal inversion flags between LIR and Gate AIGs
-                // (The MUX uses add_or which returns inverted literals, while add_and doesn't)
-                let rst_lit = self.net_map.get(&rst_net.0).copied().unwrap_or_else(|| {
-                    let rst_net_obj = &netlist.nets[rst_net.0 as usize];
-                    // Create input for reset signal
-                    let lit = self.aig.add_input(rst_net_obj.name.clone());
-                    self.net_map.insert(rst_net.0, lit);
-                    lit
-                });
-                // next = rst ? 0 : D = !rst AND D
-                // This applies to both DFFR (explicit reset) and MUX-based reset
-                // for consistency with LIR-to-AIG
-                self.aig.add_and(rst_lit.invert(), d_lit)
+                // Only apply reset logic if D input doesn't already include a reset MUX
+                // If D = MUX(rst, data, reset_value), then D already handles reset and we
+                // should NOT apply !rst AND D, which would corrupt the reset_value to 0
+                if d_has_reset_mux {
+                    // D already includes reset logic via MUX - use D directly
+                    d_lit
+                } else {
+                    // D doesn't include reset MUX - we need to apply reset gate
+                    // next = rst ? 0 : D = !rst AND D
+                    let rst_lit = self.net_map.get(&rst_net.0).copied().unwrap_or_else(|| {
+                        let rst_net_obj = &netlist.nets[rst_net.0 as usize];
+                        // Create input for reset signal
+                        let lit = self.aig.add_input(rst_net_obj.name.clone());
+                        self.net_map.insert(rst_net.0, lit);
+                        lit
+                    });
+                    self.aig.add_and(rst_lit.invert(), d_lit)
+                }
             } else {
                 // No reset - just use D input
                 d_lit
@@ -5638,6 +5698,7 @@ impl BoundedModelChecker {
                     "BMC: Simulation found mismatch at cycle {} on output '{}' (trace {})",
                     cycle, output_name, trace
                 );
+
                 return Ok(BmcEquivalenceResult {
                     equivalent: false,
                     bound,
@@ -5768,12 +5829,16 @@ impl BoundedModelChecker {
         let mut state1 = self.get_initial_latch_state(aig1);
         let mut state2 = self.get_initial_latch_state(aig2);
 
+        // Store inputs for each cycle for debugging
+        let mut all_inputs: Vec<HashMap<String, bool>> = Vec::new();
+
         for cycle in 0..bound {
             // Generate random inputs for this cycle
             let mut input_values: HashMap<String, bool> = HashMap::new();
             for key in matched_inputs {
                 input_values.insert(key.clone(), rng.gen());
             }
+            all_inputs.push(input_values.clone());
 
             // Simulate both AIGs
             let (outputs1, next_state1) = self.simulate_aig_cycle(
@@ -5788,6 +5853,32 @@ impl BoundedModelChecker {
                 let o1 = outputs1.get(*i1).copied().unwrap_or(false);
                 let o2 = outputs2.get(*i2).copied().unwrap_or(false);
                 if o1 != o2 {
+                    // Debug: print inputs that led to mismatch
+                    if name.contains("tap_select") {
+                        println!("\n=== Input trace leading to {} mismatch at cycle {} ===", name, cycle);
+                        for (c, inputs) in all_inputs.iter().enumerate() {
+                            // Show key inputs: rst, enable, bms.connected (note: using normalized name with dots)
+                            let rst = inputs.get("rst").copied().unwrap_or(false);
+                            let enable = inputs.get("enable").copied().unwrap_or(false);
+                            let bms_connected = inputs.get("bms.connected").copied().unwrap_or(false);
+                            println!("  Cycle {}: rst={}, enable={}, bms.connected={}", c, rst, enable, bms_connected);
+
+                            // Show bms struct fields
+                            let mut bms_inputs: Vec<(&str, bool)> = inputs.iter()
+                                .filter(|(k, _)| k.starts_with("bms."))
+                                .map(|(k, &v)| (k.as_str(), v))
+                                .collect();
+                            bms_inputs.sort_by_key(|(k, _)| *k);
+                            if !bms_inputs.is_empty() {
+                                print!("    BMS inputs: ");
+                                for (k, v) in bms_inputs.iter().take(12) {
+                                    print!("{}={} ", k, v);
+                                }
+                                println!();
+                            }
+                        }
+                        println!("  Mismatch: LIR {}={}, Gate {}={}", name, o1, name, o2);
+                    }
                     return Some((cycle, name.clone()));
                 }
             }
@@ -5866,6 +5957,257 @@ impl BoundedModelChecker {
             aig1, aig2, matched_inputs, aig1_input_map, aig2_input_map,
             matched_outputs, bound, input_fn
         )
+    }
+
+    /// Debug trace a specific mismatch - shows latch values and related signals
+    fn debug_trace_mismatch(
+        &self,
+        aig1: &Aig,
+        aig2: &Aig,
+        matched_inputs: &[String],
+        aig1_input_map: &HashMap<String, u32>,
+        aig2_input_map: &HashMap<String, u32>,
+        matched_outputs: &[(usize, usize, String)],
+        bound: usize,
+        output_name: &str,
+    ) {
+        // Show initial latch states for tap_reg related latches
+        println!("\n--- LIR AIG latches containing 'tap' ---");
+        let mut lir_tap_reg_latch: Option<u32> = None;
+        for &latch_id in &aig1.latches {
+            if let AigNode::Latch { name, init, next, .. } = &aig1.nodes[latch_id.0 as usize] {
+                if name.contains("tap") {
+                    println!("  {} (id={}): init={}, next=node{}{}",
+                        name, latch_id.0, init, next.node.0, if next.inverted { "!" } else { "" });
+                    if name.contains("tap_reg") {
+                        lir_tap_reg_latch = Some(latch_id.0);
+                    }
+                }
+            }
+        }
+
+        println!("\n--- Gate AIG latches containing 'tap' ---");
+        let mut gate_tap_reg_latch: Option<u32> = None;
+        for &latch_id in &aig2.latches {
+            if let AigNode::Latch { name, init, next, .. } = &aig2.nodes[latch_id.0 as usize] {
+                if name.contains("tap") {
+                    println!("  {} (id={}): init={}, next=node{}{}",
+                        name, latch_id.0, init, next.node.0, if next.inverted { "!" } else { "" });
+                    if name.contains("tap_reg") || name.contains("tap") {
+                        gate_tap_reg_latch = Some(latch_id.0);
+                    }
+                }
+            }
+        }
+
+        // Trace the cone of influence for tap_reg - find all inputs that affect its next state
+        println!("\n--- LIR tap_reg inputs (cone of influence) ---");
+        if let Some(latch_id) = lir_tap_reg_latch {
+            if let AigNode::Latch { next, .. } = &aig1.nodes[latch_id as usize] {
+                let inputs = self.trace_input_cone(aig1, next.node.0, 50);
+                for (name, _) in inputs.iter().take(20) {
+                    if name.contains("bms") || name.contains("state") || name.contains("rst") || name.contains("cell") {
+                        println!("  {}", name);
+                    }
+                }
+            }
+        }
+
+        println!("\n--- Gate tap_reg inputs (cone of influence) ---");
+        if let Some(latch_id) = gate_tap_reg_latch {
+            if let AigNode::Latch { next, .. } = &aig2.nodes[latch_id as usize] {
+                let inputs = self.trace_input_cone(aig2, next.node.0, 50);
+                for (name, _) in inputs.iter().take(20) {
+                    if name.contains("bms") || name.contains("state") || name.contains("rst") || name.contains("cell") {
+                        println!("  {}", name);
+                    }
+                }
+            }
+        }
+
+        // Show state_reg latches
+        println!("\n--- LIR AIG latches containing 'state' ---");
+        for &latch_id in &aig1.latches {
+            if let AigNode::Latch { name, init, .. } = &aig1.nodes[latch_id.0 as usize] {
+                if name.contains("state") && !name.contains("__state_cur") {
+                    println!("  {} (id={}): init={}", name, latch_id.0, init);
+                }
+            }
+        }
+
+        println!("\n--- Gate AIG latches containing 'state' ---");
+        for &latch_id in &aig2.latches {
+            if let AigNode::Latch { name, init, .. } = &aig2.nodes[latch_id.0 as usize] {
+                if name.contains("state") && !name.contains("__state_cur") {
+                    println!("  {} (id={}): init={}", name, latch_id.0, init);
+                }
+            }
+        }
+
+        // Run simulation with the pattern that causes mismatch:
+        // Cycle 0: rst=0, enable=1, bms.connected=0
+        // Cycle 1: rst=0, enable=0, bms.connected=1
+        // Cycle 2: rst=1, enable=0, bms.connected=0
+        println!("\n--- Simulation with failing pattern ---");
+        let mut state1 = self.get_initial_latch_state(aig1);
+        let mut state2 = self.get_initial_latch_state(aig2);
+
+        // Find output indices for the mismatching output
+        let output_indices: Option<(usize, usize)> = matched_outputs.iter()
+            .find(|(_, _, name)| name == output_name)
+            .map(|(i1, i2, _)| (*i1, *i2));
+
+        // Fixed test patterns for each cycle
+        // Include all important inputs to ensure deterministic behavior
+        let test_patterns = vec![
+            // Cycle 0: enable=true to start state machine, no faults
+            vec![("rst", false), ("enable", true), ("bms.connected", false), ("bms.fault", false)],
+            // Cycle 1: bms.connected=true, state should be WaitBms
+            vec![("rst", false), ("enable", false), ("bms.connected", true), ("bms.fault", false)],
+            // Cycle 2: check tap_reg value (should be false since cell_count=0 < 12)
+            vec![("rst", false), ("enable", false), ("bms.connected", false), ("bms.fault", false)],
+            // Cycle 3
+            vec![("rst", false), ("enable", false), ("bms.connected", false), ("bms.fault", false)],
+            // Cycle 4
+            vec![("rst", false), ("enable", false), ("bms.connected", false), ("bms.fault", false)],
+        ];
+
+        for cycle in 0..bound {
+            let mut input_values: HashMap<String, bool> = HashMap::new();
+
+            // Set default values
+            for key in matched_inputs {
+                input_values.insert(key.clone(), false);
+            }
+
+            // Override with test pattern values
+            if cycle < test_patterns.len() {
+                for (key, val) in &test_patterns[cycle] {
+                    input_values.insert((*key).to_string(), *val);
+                }
+            }
+
+            let (outputs1, next_state1) = self.simulate_aig_cycle(
+                aig1, &input_values, &state1, aig1_input_map
+            );
+            let (outputs2, next_state2) = self.simulate_aig_cycle(
+                aig2, &input_values, &state2, aig2_input_map
+            );
+
+            // Show key inputs
+            let rst = input_values.get("rst").copied().unwrap_or(false);
+            let enable = input_values.get("enable").copied().unwrap_or(false);
+            let bms_connected = input_values.get("bms.connected").copied().unwrap_or(false);
+            println!("  Cycle {}: rst={}, enable={}, bms.connected={}", cycle, rst, enable, bms_connected);
+
+            // Show output value
+            if let Some((i1, i2)) = output_indices {
+                let o1 = outputs1.get(i1).copied().unwrap_or(false);
+                let o2 = outputs2.get(i2).copied().unwrap_or(false);
+                let match_status = if o1 == o2 { "✓" } else { "✗" };
+                println!("    Output: LIR {}={}, Gate {}={} {}",
+                    output_name, o1, output_name, o2, match_status);
+            }
+
+            // Show state_reg latch values (combine bits to show value)
+            let mut lir_state_bits: Vec<(String, bool)> = Vec::new();
+            let mut gate_state_bits: Vec<(String, bool)> = Vec::new();
+
+            for &latch_id in &aig1.latches {
+                if let AigNode::Latch { name, .. } = &aig1.nodes[latch_id.0 as usize] {
+                    if name.contains("state_reg") {
+                        if let Some(&val) = state1.get(&latch_id.0) {
+                            lir_state_bits.push((name.clone(), val));
+                        }
+                    }
+                }
+            }
+            for &latch_id in &aig2.latches {
+                if let AigNode::Latch { name, .. } = &aig2.nodes[latch_id.0 as usize] {
+                    if name.contains("state_reg") {
+                        if let Some(&val) = state2.get(&latch_id.0) {
+                            gate_state_bits.push((name.clone(), val));
+                        }
+                    }
+                }
+            }
+
+            // Sort by bit index and show
+            lir_state_bits.sort_by_key(|(n, _)| n.clone());
+            gate_state_bits.sort_by_key(|(n, _)| n.clone());
+
+            if !lir_state_bits.is_empty() {
+                let lir_state_val: u32 = lir_state_bits.iter().enumerate()
+                    .map(|(i, (_, v))| if *v { 1u32 << i } else { 0 })
+                    .sum();
+                println!("    LIR state_reg = {} ({:?})", lir_state_val, lir_state_bits.iter().map(|(_, v)| *v).collect::<Vec<_>>());
+            }
+            if !gate_state_bits.is_empty() {
+                let gate_state_val: u32 = gate_state_bits.iter().enumerate()
+                    .map(|(i, (_, v))| if *v { 1u32 << i } else { 0 })
+                    .sum();
+                println!("    Gate state_reg = {} ({:?})", gate_state_val, gate_state_bits.iter().map(|(_, v)| *v).collect::<Vec<_>>());
+            }
+
+            // Show tap_reg latch values
+            for &latch_id in &aig1.latches {
+                if let AigNode::Latch { name, .. } = &aig1.nodes[latch_id.0 as usize] {
+                    if name.contains("tap_reg") {
+                        if let Some(&val) = state1.get(&latch_id.0) {
+                            println!("    LIR latch '{}' = {}", name, val);
+                        }
+                    }
+                }
+            }
+            for &latch_id in &aig2.latches {
+                if let AigNode::Latch { name, .. } = &aig2.nodes[latch_id.0 as usize] {
+                    if name.contains("tap_reg") || (name.contains("tap") && !name.contains("state")) {
+                        if let Some(&val) = state2.get(&latch_id.0) {
+                            println!("    Gate latch '{}' = {}", name, val);
+                        }
+                    }
+                }
+            }
+
+            state1 = next_state1;
+            state2 = next_state2;
+        }
+    }
+
+    /// Trace the cone of influence for a node - find all primary inputs that affect it
+    fn trace_input_cone(&self, aig: &Aig, start_node: u32, max_depth: usize) -> Vec<(String, u32)> {
+        use std::collections::HashSet;
+        let mut inputs = Vec::new();
+        let mut visited = HashSet::new();
+        let mut worklist = vec![(start_node, 0usize)];
+
+        while let Some((node_id, depth)) = worklist.pop() {
+            if depth > max_depth || visited.contains(&node_id) || node_id == 0 {
+                continue;
+            }
+            visited.insert(node_id);
+
+            if let Some(node) = aig.nodes.get(node_id as usize) {
+                match node {
+                    AigNode::Input { name } => {
+                        inputs.push((name.clone(), node_id));
+                    }
+                    AigNode::And { left, right } => {
+                        worklist.push((left.node.0, depth + 1));
+                        worklist.push((right.node.0, depth + 1));
+                    }
+                    AigNode::Latch { name, .. } => {
+                        // Latch output is also an input to the cone
+                        inputs.push((format!("(latch){}", name), node_id));
+                    }
+                    AigNode::False => {}
+                }
+            }
+        }
+
+        inputs.sort_by(|a, b| a.0.cmp(&b.0));
+        inputs.dedup_by_key(|x| x.0.clone());
+        inputs
     }
 
     /// Get initial latch state (all latches at their init values)
