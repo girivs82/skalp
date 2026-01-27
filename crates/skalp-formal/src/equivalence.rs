@@ -2012,6 +2012,37 @@ impl NormalizedPort {
     }
 }
 
+/// Strip common hierarchy prefixes from a signal name
+/// e.g., "top.module.signal" -> "signal"
+fn strip_hierarchy_prefix(name: &str) -> String {
+    let mut working = name.to_string();
+
+    // Strip common top-level prefixes
+    for prefix in &["top.", "inst.", "dut."] {
+        if let Some(rest) = working.strip_prefix(prefix) {
+            working = rest.to_string();
+        }
+    }
+
+    // Strip module instance prefixes (names with uppercase or operation prefixes)
+    while working.contains('.') {
+        if let Some(dot_pos) = working.find('.') {
+            let before = &working[..dot_pos];
+            if before.chars().any(|c| c.is_ascii_uppercase())
+                || before.starts_with("inst_")
+            {
+                working = working[dot_pos + 1..].to_string();
+            } else {
+                break;
+            }
+        } else {
+            break;
+        }
+    }
+
+    working
+}
+
 /// Normalize a port name by stripping hierarchy prefixes and extracting bit index
 ///
 /// Handles various naming conventions:
@@ -2023,6 +2054,17 @@ impl NormalizedPort {
 /// - `config__field__subfield[3]` -> (base="config.field.subfield", bit=Some(3)) [flattened struct]
 pub fn normalize_port_name(name: &str) -> NormalizedPort {
     let mut working = name.to_string();
+
+    // Normalize register/DFF current state pseudo-inputs to the same prefix
+    // LIR uses __reg_cur_*, Gate uses __dff_cur_* - unify them
+    // Also strip hierarchy prefixes from the signal name part
+    if let Some(rest) = working.strip_prefix("__reg_cur_") {
+        let signal_name = strip_hierarchy_prefix(rest);
+        working = format!("__state_cur_{}", signal_name);
+    } else if let Some(rest) = working.strip_prefix("__dff_cur_") {
+        let signal_name = strip_hierarchy_prefix(rest);
+        working = format!("__state_cur_{}", signal_name);
+    }
 
     // Strip DFF output suffix if present
     if let Some(stripped) = working.strip_suffix("_dff_out") {
