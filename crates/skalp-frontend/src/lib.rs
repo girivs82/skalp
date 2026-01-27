@@ -143,7 +143,11 @@ pub fn parse_and_build_compilation_context(file_path: &Path) -> Result<Compilati
         .context("Failed to preload stdlib numeric modules")?;
 
     // Second pass: Rebuild instances now that all entities are available
-    hir = rebuild_instances_with_imports(&hir, file_path)
+    // BUG FIX: Rebuild instances for ALL loaded modules, not just the main file
+    // Previously, when cc_cv.sk was parsed, PiController wasn't available yet,
+    // so `let voltage_loop = PiController { ... }` failed to build as an instance.
+    // Now we rebuild instances for all modules after the merge.
+    hir = rebuild_instances_for_all_modules(&hir, file_path, &resolver)
         .context("Failed to rebuild instances with imports")?;
 
     // Monomorphize
@@ -255,7 +259,42 @@ fn rebuild_instances_with_imports(hir: &Hir, file_path: &Path) -> Result<Hir> {
     // Keep all entities from the merged HIR (including imports)
     // But use implementations from the rebuilt HIR (which now have correct instances)
     // ALSO replace main file entities with rebuilt ones (they have correct port types from pre-registered distinct types)
+    //
+    // CRITICAL: Entity IDs from rebuilt_hir may collide with IDs in hir!
+    // The parser assigns IDs starting from 0 for each fresh parse.
+    // We must remap rebuilt entity IDs to avoid collision.
     let mut final_hir = hir.clone();
+
+    // Find the maximum entity ID in hir to start remapping from
+    let max_existing_id = hir
+        .entities
+        .iter()
+        .map(|e| e.id.0)
+        .max()
+        .unwrap_or(0);
+
+    // Build a remapping table for rebuilt entity IDs
+    // Map each rebuilt entity ID to a new unique ID
+    let mut rebuilt_id_remap: std::collections::HashMap<hir::EntityId, hir::EntityId> =
+        std::collections::HashMap::new();
+    let mut next_new_id = max_existing_id + 1;
+    for entity in &rebuilt_hir.entities {
+        // Check if this entity should keep its ID (if it exists in hir with the same ID and name)
+        let keep_existing_id = hir
+            .entities
+            .iter()
+            .find(|e| e.name == entity.name)
+            .map(|e| e.id);
+
+        if let Some(existing_id) = keep_existing_id {
+            // Remap to the existing ID from hir
+            rebuilt_id_remap.insert(entity.id, existing_id);
+        } else {
+            // Assign a new unique ID
+            rebuilt_id_remap.insert(entity.id, hir::EntityId(next_new_id));
+            next_new_id += 1;
+        }
+    }
 
     // Replace main file entities with rebuilt entities (they have correct port types)
     // The rebuilt HIR has types resolved with pre-registered distinct types (e.g., Custom("fp32") instead of Float32)
@@ -267,13 +306,25 @@ fn rebuild_instances_with_imports(hir: &Hir, file_path: &Path) -> Result<Hir> {
     final_hir
         .entities
         .retain(|e| !rebuilt_entity_names.contains(&e.name));
-    final_hir.entities.extend(rebuilt_hir.entities.clone());
+
+    // Add rebuilt entities with remapped IDs
+    for mut entity in rebuilt_hir.entities.clone() {
+        if let Some(&new_id) = rebuilt_id_remap.get(&entity.id) {
+            entity.id = new_id;
+        }
+        final_hir.entities.push(entity);
+    }
 
     // CRITICAL FIX (Bug #22 & #34): Don't overwrite ALL implementations!
     // The merged HIR includes implementations from imported modules (like AsyncFifo).
     // It also includes imported constants in the global implementation block (EntityId(0)).
     // Only replace implementations for entities that were rebuilt (main file entities).
     // But preserve imported constants in the global implementation block.
+    //
+    // BUG FIX: Match implementations by entity NAME, not entity ID!
+    // Entity IDs from the rebuilt HIR start fresh at 0, which can collide with
+    // entity IDs from the original HIR. Matching by name ensures we replace
+    // the correct implementations.
 
     // Save the imported constants from the global implementation block before modifying
     let mut imported_constants = Vec::new();
@@ -285,22 +336,70 @@ fn rebuild_instances_with_imports(hir: &Hir, file_path: &Path) -> Result<Hir> {
         imported_constants = global_impl.constants.clone();
     }
 
-    // Find which entity IDs have implementations in the rebuilt HIR
-    let rebuilt_entity_ids: std::collections::HashSet<_> = rebuilt_hir
-        .implementations
+    // Build a map from entity ID to entity name for the rebuilt HIR
+    let rebuilt_entity_id_to_name: std::collections::HashMap<_, _> = rebuilt_hir
+        .entities
         .iter()
-        .map(|impl_block| impl_block.entity)
+        .map(|e| (e.id, e.name.clone()))
         .collect();
 
-    // Keep only imported implementations (those NOT rebuilt)
-    final_hir
+    // Find which entity NAMES have implementations in the rebuilt HIR
+    let rebuilt_entity_names_with_impls: std::collections::HashSet<_> = rebuilt_hir
         .implementations
-        .retain(|impl_block| !rebuilt_entity_ids.contains(&impl_block.entity));
+        .iter()
+        .filter_map(|impl_block| rebuilt_entity_id_to_name.get(&impl_block.entity).cloned())
+        .collect();
 
-    // Add the rebuilt implementations
-    final_hir
-        .implementations
-        .extend(rebuilt_hir.implementations);
+    // Build a map from entity ID to entity name for the original HIR
+    let original_entity_id_to_name: std::collections::HashMap<_, _> = hir
+        .entities
+        .iter()
+        .map(|e| (e.id, e.name.clone()))
+        .collect();
+
+    // Keep only imported implementations (those whose entity NAME was NOT rebuilt)
+    // Also keep global impl (EntityId::GLOBAL_IMPL)
+    final_hir.implementations.retain(|impl_block| {
+        if impl_block.entity == hir::EntityId::GLOBAL_IMPL {
+            // Global impl needs special handling below
+            return true;
+        }
+        // Look up the entity name for this implementation
+        if let Some(entity_name) = original_entity_id_to_name.get(&impl_block.entity) {
+            // Keep if this entity was NOT rebuilt
+            !rebuilt_entity_names_with_impls.contains(entity_name)
+        } else {
+            // Unknown entity ID - keep it to be safe
+            true
+        }
+    });
+
+    // Remap rebuilt implementations using the ID remap table
+    for mut impl_block in rebuilt_hir.implementations {
+        if impl_block.entity == hir::EntityId::GLOBAL_IMPL {
+            // Handle global impl separately below
+            continue;
+        }
+        // Remap implementation's entity ID
+        if let Some(&new_entity_id) = rebuilt_id_remap.get(&impl_block.entity) {
+            impl_block.entity = new_entity_id;
+
+            // Also remap instance entity IDs
+            for instance in &mut impl_block.instances {
+                if let Some(&new_inst_entity_id) = rebuilt_id_remap.get(&instance.entity) {
+                    instance.entity = new_inst_entity_id;
+                }
+            }
+
+            final_hir.implementations.push(impl_block);
+        } else {
+            // Entity not in remap table - this shouldn't happen for valid impls
+            eprintln!(
+                "[REBUILD_REMAP] Warning: No remap for impl entity {:?}",
+                impl_block.entity
+            );
+        }
+    }
 
     // BUG #34 FIX: Restore imported constants to the global implementation block
     if !imported_constants.is_empty() {
@@ -340,6 +439,135 @@ fn rebuild_instances_with_imports(hir: &Hir, file_path: &Path) -> Result<Hir> {
     }
 
     Ok(final_hir)
+}
+
+/// Rebuild instances for all modules, not just the main file
+/// BUG FIX: When cc_cv.sk is parsed initially, PiController isn't available yet,
+/// so `let voltage_loop = PiController { ... }` fails to build as an instance.
+/// This function rebuilds instances for all loaded modules after the merge.
+fn rebuild_instances_for_all_modules(
+    hir: &Hir,
+    main_file_path: &Path,
+    resolver: &ModuleResolver,
+) -> Result<Hir> {
+    use std::collections::HashSet;
+
+    // Start with the main file rebuild
+    let mut result_hir = rebuild_instances_with_imports(hir, main_file_path)
+        .context("Failed to rebuild main file instances")?;
+
+    // Collect all loaded module paths (excluding stdlib and main file)
+    let module_paths: Vec<PathBuf> = resolver
+        .loaded_modules()
+        .map(|(path, _)| path.clone())
+        .filter(|path| {
+            // Skip the main file (already processed)
+            path != main_file_path &&
+            // Skip stdlib modules - they don't have cross-module instance dependencies
+            !path.to_string_lossy().contains("skalp/lib") &&
+            !path.to_string_lossy().contains("stdlib")
+        })
+        .collect();
+
+    // For each module, rebuild its instances
+    for module_path in &module_paths {
+        // Rebuild this module's instances with full entity set
+        match rebuild_instances_with_imports(&result_hir, module_path) {
+            Ok(rebuilt) => {
+                // Build a map of entity name -> instances in rebuilt HIR
+                // Only update implementations that now have MORE instances
+                let mut rebuilt_instances_by_name: IndexMap<String, Vec<hir::HirInstance>> = IndexMap::new();
+                for rebuilt_impl in &rebuilt.implementations {
+                    // Find entity name - first try rebuilt.entities, then result_hir.entities
+                    let entity_name = rebuilt
+                        .entities
+                        .iter()
+                        .find(|e| e.id == rebuilt_impl.entity)
+                        .map(|e| e.name.clone())
+                        .or_else(|| {
+                            result_hir
+                                .entities
+                                .iter()
+                                .find(|e| e.id == rebuilt_impl.entity)
+                                .map(|e| e.name.clone())
+                        });
+
+                    if let Some(ref name) = entity_name {
+                        if !rebuilt_impl.instances.is_empty() {
+                            rebuilt_instances_by_name.insert(name.clone(), rebuilt_impl.instances.clone());
+                        }
+                    }
+                }
+
+                // Update implementations in result_hir
+                for (entity_name, rebuilt_instances) in &rebuilt_instances_by_name {
+                    // Find the entity ID in result_hir by name
+                    let result_entity_id = result_hir
+                        .entities
+                        .iter()
+                        .find(|e| &e.name == entity_name)
+                        .map(|e| e.id);
+
+                    if let Some(entity_id) = result_entity_id {
+                        // Find the implementation in result_hir by entity ID
+                        if let Some(existing_impl) = result_hir
+                            .implementations
+                            .iter_mut()
+                            .find(|i| i.entity == entity_id)
+                        {
+                            let old_count = existing_impl.instances.len();
+                            if rebuilt_instances.len() > old_count {
+                                // Need to remap instance entity IDs from rebuilt HIR to result HIR
+                                let mut remapped_instances = Vec::new();
+                                for inst in rebuilt_instances {
+                                    // Find the entity name for this instance
+                                    // IMPORTANT: The instance's entity ID points to a pre-registered entity,
+                                    // which is NOT in rebuilt.entities (only parsed entities are there).
+                                    // Pre-registered entities came from result_hir, so look there first.
+                                    let inst_entity_name = result_hir
+                                        .entities
+                                        .iter()
+                                        .find(|e| e.id == inst.entity)
+                                        .map(|e| e.name.clone())
+                                        .or_else(|| {
+                                            // Fallback to rebuilt.entities in case of local entity
+                                            rebuilt
+                                                .entities
+                                                .iter()
+                                                .find(|e| e.id == inst.entity)
+                                                .map(|e| e.name.clone())
+                                        });
+
+                                    if let Some(inst_ent_name) = inst_entity_name {
+                                        // Find the entity ID in result_hir
+                                        if let Some(result_inst_entity_id) = result_hir
+                                            .entities
+                                            .iter()
+                                            .find(|e| e.name == inst_ent_name)
+                                            .map(|e| e.id)
+                                        {
+                                            let mut remapped = inst.clone();
+                                            remapped.entity = result_inst_entity_id;
+                                            remapped_instances.push(remapped);
+                                        }
+                                    }
+                                }
+
+                                if !remapped_instances.is_empty() {
+                                    existing_impl.instances = remapped_instances;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            Err(_) => {
+                // Log but don't fail - some modules may not have implementations
+            }
+        }
+    }
+
+    Ok(result_hir)
 }
 
 /// Merge imported symbols from dependencies into HIR
