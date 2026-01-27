@@ -307,6 +307,44 @@ enum Commands {
         detailed: bool,
     },
 
+    /// Equivalence checking between RTL and gate-level netlist
+    ///
+    /// Verifies that the synthesized gate-level netlist is functionally
+    /// equivalent to the original RTL description using bounded model checking.
+    Ec {
+        /// Source file (.sk) containing the RTL design
+        source: PathBuf,
+
+        /// Gate-level netlist file (JSON format from synthesis)
+        /// If not provided, synthesis is run automatically
+        #[arg(short, long)]
+        netlist: Option<PathBuf>,
+
+        /// Output directory for equivalence reports
+        #[arg(short, long, default_value = "equiv")]
+        output: PathBuf,
+
+        /// BMC bound (number of cycles to check)
+        #[arg(short, long, default_value = "10")]
+        bound: usize,
+
+        /// Output format (text, json, html, all)
+        #[arg(long, default_value = "text")]
+        format: String,
+
+        /// Entity name to check (default: top-level entity)
+        #[arg(short, long)]
+        entity: Option<String>,
+
+        /// Run quick simulation-only check (faster but not exhaustive)
+        #[arg(long)]
+        quick: bool,
+
+        /// Verbose output showing internal AIG details
+        #[arg(long)]
+        verbose: bool,
+    },
+
     /// ISO 26262 FI-driven safety analysis
     ///
     /// Runs fault injection simulation to generate FMEA/FMEDA with MEASURED
@@ -650,6 +688,28 @@ fn main() -> Result<()> {
         } => {
             analyze_design(
                 &source, &output, fault_sim, cycles, gpu, max_faults, detailed,
+            )?;
+        }
+
+        Commands::Ec {
+            source,
+            netlist,
+            output,
+            bound,
+            format,
+            entity,
+            quick,
+            verbose,
+        } => {
+            run_equivalence_check(
+                &source,
+                netlist.as_ref(),
+                &output,
+                bound,
+                &format,
+                entity.as_deref(),
+                quick,
+                verbose,
             )?;
         }
 
@@ -2202,6 +2262,407 @@ fn run_cpu_fault_sim(sir: &skalp_sim::sir::Sir, cycles: u64, max_faults: usize) 
         "   Diagnostic Coverage: {:.2}%",
         results.diagnostic_coverage
     );
+}
+
+/// Equivalence checking between RTL (LIR) and gate-level netlist
+fn run_equivalence_check(
+    source: &Path,
+    netlist_path: Option<&PathBuf>,
+    output_dir: &Path,
+    bound: usize,
+    format: &str,
+    entity: Option<&str>,
+    quick: bool,
+    verbose: bool,
+) -> Result<()> {
+    use skalp_formal::BoundedModelChecker;
+    use skalp_frontend::parse_and_build_compilation_context;
+    use skalp_lir::{get_stdlib_library, lower_mir_module_to_lir, TechMapper};
+    use std::time::Instant;
+
+    let start_time = Instant::now();
+
+    println!("🔍 Equivalence Checking");
+    println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    println!("Source: {:?}", source);
+    println!("Bound:  {} cycles", bound);
+    println!();
+
+    // Create output directory
+    fs::create_dir_all(output_dir)?;
+
+    // Step 1: Parse and compile to MIR
+    println!("📖 Parsing source...");
+    let context = parse_and_build_compilation_context(source)
+        .context("Failed to parse source file")?;
+    let hir = context.main_hir;
+    let module_hirs = context.module_hirs;
+
+    println!("📐 Lowering to MIR...");
+    let compiler = skalp_mir::MirCompiler::new()
+        .with_optimization_level(skalp_mir::OptimizationLevel::None);
+    let mir = compiler
+        .compile_to_mir_with_modules(&hir, &module_hirs)
+        .map_err(|e| anyhow::anyhow!("Failed to compile to MIR: {}", e))?;
+
+    // Find the target entity
+    let target_entity = if let Some(name) = entity {
+        mir.modules
+            .iter()
+            .find(|m| m.name == name)
+            .ok_or_else(|| anyhow::anyhow!("Entity '{}' not found in design", name))?
+    } else {
+        mir.modules
+            .first()
+            .ok_or_else(|| anyhow::anyhow!("No modules found in design"))?
+    };
+
+    let input_count = target_entity.ports.iter()
+        .filter(|p| matches!(p.direction, skalp_mir::mir::PortDirection::Input))
+        .count();
+    let output_count = target_entity.ports.iter()
+        .filter(|p| matches!(p.direction, skalp_mir::mir::PortDirection::Output))
+        .count();
+    println!("   Entity: {}", target_entity.name);
+    println!("   Inputs: {}", input_count);
+    println!("   Outputs: {}", output_count);
+    println!("   Signals: {}", target_entity.signals.len());
+
+    // Step 2: Lower to LIR
+    println!();
+    println!("⚙️  Lowering to LIR...");
+    let lir_result = lower_mir_module_to_lir(target_entity);
+    println!("   Nodes: {}", lir_result.lir.nodes.len());
+    println!("   Signals: {}", lir_result.lir.signals.len());
+
+    // Step 3: Get or synthesize gate-level netlist
+    let gate_netlist = if let Some(path) = netlist_path {
+        println!();
+        println!("📂 Loading gate-level netlist from {:?}...", path);
+        let json = fs::read_to_string(path)
+            .context("Failed to read netlist file")?;
+        serde_json::from_str::<skalp_lir::GateNetlist>(&json)
+            .context("Failed to parse gate-level netlist JSON")?
+    } else {
+        println!();
+        println!("🔧 Synthesizing gate-level netlist...");
+        let library = get_stdlib_library("generic_asic")
+            .context("Failed to load technology library")?;
+        let mut mapper = TechMapper::new(&library);
+        let result = mapper.map(&lir_result.lir);
+        let netlist = result.netlist;
+        println!("   Cells: {}", netlist.cells.len());
+        println!("   Nets: {}", netlist.nets.len());
+        netlist
+    };
+
+    // Step 4: Run equivalence check
+    println!();
+    println!("🔬 Running equivalence check...");
+    println!("   Mode: {}", if quick { "simulation-only (quick)" } else { "BMC (exhaustive)" });
+
+    let checker = BoundedModelChecker::new();
+    let result = checker
+        .check_lir_vs_gates_bmc(&lir_result.lir, &gate_netlist, bound)
+        .map_err(|e| anyhow::anyhow!("Equivalence check failed: {:?}", e))?;
+
+    let total_time = start_time.elapsed();
+
+    // Step 5: Generate report
+    println!();
+    generate_ec_report(&result, &target_entity.name, output_dir, format, verbose, total_time)?;
+
+    // Print summary
+    println!();
+    println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    if result.equivalent {
+        println!("✅ PASS: Designs are equivalent up to {} cycles", result.bound);
+    } else {
+        println!("❌ FAIL: Mismatch detected!");
+        if let Some(cycle) = result.mismatch_cycle {
+            println!("   Cycle: {}", cycle);
+        }
+        if let Some(ref output) = result.mismatch_output {
+            println!("   Output: {}", output);
+        }
+    }
+    println!("   Time: {:.2}s", total_time.as_secs_f64());
+    println!("   SAT calls: {}", result.sat_calls);
+
+    if !result.equivalent {
+        // Return error for CI/scripting
+        anyhow::bail!("Equivalence check failed");
+    }
+
+    Ok(())
+}
+
+/// Generate equivalence checking report
+fn generate_ec_report(
+    result: &skalp_formal::BmcEquivalenceResult,
+    entity_name: &str,
+    output_dir: &Path,
+    format: &str,
+    verbose: bool,
+    total_time: std::time::Duration,
+) -> Result<()> {
+    let formats: Vec<&str> = if format == "all" {
+        vec!["text", "json", "html"]
+    } else {
+        format.split(',').collect()
+    };
+
+    for fmt in formats {
+        match fmt.trim() {
+            "text" => {
+                let report = generate_ec_text_report(result, entity_name, verbose, total_time);
+                let path = output_dir.join("ec_report.txt");
+                fs::write(&path, report)?;
+                println!("📄 Text report: {:?}", path);
+            }
+            "json" => {
+                let report = generate_ec_json_report(result, entity_name, total_time)?;
+                let path = output_dir.join("ec_report.json");
+                fs::write(&path, report)?;
+                println!("📄 JSON report: {:?}", path);
+            }
+            "html" => {
+                let report = generate_ec_html_report(result, entity_name, verbose, total_time);
+                let path = output_dir.join("ec_report.html");
+                fs::write(&path, report)?;
+                println!("📄 HTML report: {:?}", path);
+            }
+            _ => {
+                println!("⚠️  Unknown format '{}', skipping", fmt);
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Generate text-format equivalence checking report
+fn generate_ec_text_report(
+    result: &skalp_formal::BmcEquivalenceResult,
+    entity_name: &str,
+    verbose: bool,
+    total_time: std::time::Duration,
+) -> String {
+    let mut report = String::new();
+
+    report.push_str("================================================================================\n");
+    report.push_str("                     EQUIVALENCE CHECKING REPORT\n");
+    report.push_str("================================================================================\n\n");
+
+    report.push_str(&format!("Entity:      {}\n", entity_name));
+    report.push_str(&format!("Result:      {}\n", if result.equivalent { "EQUIVALENT" } else { "NOT EQUIVALENT" }));
+    report.push_str(&format!("Bound:       {} cycles\n", result.bound));
+    report.push_str(&format!("Total Time:  {:.3}s\n", total_time.as_secs_f64()));
+    report.push_str(&format!("SAT Calls:   {}\n", result.sat_calls));
+    report.push_str("\n");
+
+    if !result.equivalent {
+        report.push_str("--------------------------------------------------------------------------------\n");
+        report.push_str("FAILURE DETAILS\n");
+        report.push_str("--------------------------------------------------------------------------------\n\n");
+
+        if let Some(cycle) = result.mismatch_cycle {
+            report.push_str(&format!("Mismatch Cycle:  {}\n", cycle));
+        }
+        if let Some(ref output) = result.mismatch_output {
+            report.push_str(&format!("Failing Output:  {}\n", output));
+        }
+
+        if let Some(ref cex) = result.counterexample {
+            report.push_str("\nCounterexample Trace:\n");
+            for (cycle, inputs) in cex.inputs_per_cycle.iter().enumerate() {
+                report.push_str(&format!("\n  Cycle {}:\n", cycle));
+                report.push_str("    Inputs:\n");
+                let mut sorted_inputs: Vec<_> = inputs.iter().collect();
+                sorted_inputs.sort_by_key(|(k, _)| *k);
+                for (name, value) in sorted_inputs.iter().take(20) {
+                    report.push_str(&format!("      {} = {}\n", name, if **value { "1" } else { "0" }));
+                }
+                if sorted_inputs.len() > 20 {
+                    report.push_str(&format!("      ... and {} more inputs\n", sorted_inputs.len() - 20));
+                }
+                // Show output differences if available
+                if let (Some(out1), Some(out2)) = (
+                    cex.outputs1_per_cycle.get(cycle),
+                    cex.outputs2_per_cycle.get(cycle)
+                ) {
+                    report.push_str("    Output Differences:\n");
+                    for (name, val1) in out1 {
+                        if let Some(val2) = out2.get(name) {
+                            if val1 != val2 {
+                                report.push_str(&format!("      {}: RTL={} Gate={}\n",
+                                    name, if *val1 { "1" } else { "0" }, if *val2 { "1" } else { "0" }));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if verbose {
+        report.push_str("\n--------------------------------------------------------------------------------\n");
+        report.push_str("VERBOSE DETAILS\n");
+        report.push_str("--------------------------------------------------------------------------------\n\n");
+        report.push_str(&format!("BMC Internal Time: {}ms\n", result.time_ms));
+    }
+
+    report.push_str("\n================================================================================\n");
+
+    report
+}
+
+/// Generate JSON-format equivalence checking report
+fn generate_ec_json_report(
+    result: &skalp_formal::BmcEquivalenceResult,
+    entity_name: &str,
+    total_time: std::time::Duration,
+) -> Result<String> {
+    use serde_json::json;
+
+    let report = json!({
+        "entity": entity_name,
+        "result": if result.equivalent { "equivalent" } else { "not_equivalent" },
+        "equivalent": result.equivalent,
+        "bound": result.bound,
+        "mismatch_cycle": result.mismatch_cycle,
+        "mismatch_output": result.mismatch_output,
+        "sat_calls": result.sat_calls,
+        "time_ms": result.time_ms,
+        "total_time_ms": total_time.as_millis() as u64,
+        "counterexample": result.counterexample.as_ref().map(|cex| {
+            json!({
+                "inputs_per_cycle": cex.inputs_per_cycle,
+                "state1_per_cycle": cex.state1_per_cycle,
+                "state2_per_cycle": cex.state2_per_cycle,
+                "outputs1_per_cycle": cex.outputs1_per_cycle,
+                "outputs2_per_cycle": cex.outputs2_per_cycle,
+            })
+        }),
+    });
+
+    Ok(serde_json::to_string_pretty(&report)?)
+}
+
+/// Generate HTML-format equivalence checking report
+fn generate_ec_html_report(
+    result: &skalp_formal::BmcEquivalenceResult,
+    entity_name: &str,
+    verbose: bool,
+    total_time: std::time::Duration,
+) -> String {
+    let status_class = if result.equivalent { "pass" } else { "fail" };
+    let status_text = if result.equivalent { "EQUIVALENT" } else { "NOT EQUIVALENT" };
+    let status_icon = if result.equivalent { "✅" } else { "❌" };
+
+    let mut html = format!(r#"<!DOCTYPE html>
+<html>
+<head>
+    <title>Equivalence Check Report - {}</title>
+    <style>
+        body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; margin: 40px; background: #f5f5f5; }}
+        .container {{ max-width: 900px; margin: 0 auto; background: white; padding: 30px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }}
+        h1 {{ color: #333; border-bottom: 2px solid #eee; padding-bottom: 10px; }}
+        .status {{ padding: 20px; border-radius: 8px; margin: 20px 0; font-size: 1.2em; }}
+        .status.pass {{ background: #d4edda; color: #155724; border: 1px solid #c3e6cb; }}
+        .status.fail {{ background: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; }}
+        table {{ width: 100%; border-collapse: collapse; margin: 20px 0; }}
+        th, td {{ padding: 12px; text-align: left; border-bottom: 1px solid #ddd; }}
+        th {{ background: #f8f9fa; font-weight: 600; }}
+        .section {{ margin: 30px 0; }}
+        .section h2 {{ color: #495057; font-size: 1.1em; margin-bottom: 15px; }}
+        .trace {{ background: #f8f9fa; padding: 15px; border-radius: 4px; font-family: monospace; font-size: 0.9em; overflow-x: auto; }}
+        .footer {{ margin-top: 30px; padding-top: 20px; border-top: 1px solid #eee; color: #6c757d; font-size: 0.9em; }}
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Equivalence Checking Report</h1>
+
+        <div class="status {}">
+            {} {} - {}
+        </div>
+
+        <div class="section">
+            <h2>Summary</h2>
+            <table>
+                <tr><th>Entity</th><td>{}</td></tr>
+                <tr><th>Bound</th><td>{} cycles</td></tr>
+                <tr><th>Total Time</th><td>{:.3}s</td></tr>
+                <tr><th>SAT Calls</th><td>{}</td></tr>
+            </table>
+        </div>
+"#, entity_name, status_class, status_icon, status_text, entity_name,
+    entity_name, result.bound, total_time.as_secs_f64(), result.sat_calls);
+
+    if !result.equivalent {
+        html.push_str(r#"
+        <div class="section">
+            <h2>Failure Details</h2>
+            <table>
+"#);
+        if let Some(cycle) = result.mismatch_cycle {
+            html.push_str(&format!("                <tr><th>Mismatch Cycle</th><td>{}</td></tr>\n", cycle));
+        }
+        if let Some(ref output) = result.mismatch_output {
+            html.push_str(&format!("                <tr><th>Failing Output</th><td>{}</td></tr>\n", output));
+        }
+        html.push_str("            </table>\n        </div>\n");
+
+        if let Some(ref cex) = result.counterexample {
+            html.push_str(r#"
+        <div class="section">
+            <h2>Counterexample Trace</h2>
+            <div class="trace">
+"#);
+            for (cycle, inputs) in cex.inputs_per_cycle.iter().enumerate() {
+                html.push_str(&format!("<strong>Cycle {}:</strong><br>\n", cycle));
+                html.push_str("<em>Inputs:</em><br>\n");
+                let mut sorted_inputs: Vec<_> = inputs.iter().collect();
+                sorted_inputs.sort_by_key(|(k, _)| *k);
+                for (name, value) in sorted_inputs.iter().take(20) {
+                    html.push_str(&format!("&nbsp;&nbsp;{} = {}<br>\n", name, if **value { "1" } else { "0" }));
+                }
+                if sorted_inputs.len() > 20 {
+                    html.push_str(&format!("&nbsp;&nbsp;... and {} more inputs<br>\n", sorted_inputs.len() - 20));
+                }
+                // Show output differences
+                if let (Some(out1), Some(out2)) = (
+                    cex.outputs1_per_cycle.get(cycle),
+                    cex.outputs2_per_cycle.get(cycle)
+                ) {
+                    html.push_str("<em>Output Differences:</em><br>\n");
+                    for (name, val1) in out1 {
+                        if let Some(val2) = out2.get(name) {
+                            if val1 != val2 {
+                                html.push_str(&format!("&nbsp;&nbsp;{}: <span style='color:blue'>RTL={}</span> vs <span style='color:red'>Gate={}</span><br>\n",
+                                    name, if *val1 { "1" } else { "0" }, if *val2 { "1" } else { "0" }));
+                            }
+                        }
+                    }
+                }
+                html.push_str("<br>\n");
+            }
+            html.push_str("            </div>\n        </div>\n");
+        }
+    }
+
+    html.push_str(&format!(r#"
+        <div class="footer">
+            Generated by SKALP Equivalence Checker<br>
+            Report generated at: {}
+        </div>
+    </div>
+</body>
+</html>
+"#, chrono::Local::now().format("%Y-%m-%d %H:%M:%S")));
+
+    html
 }
 
 /// Synthesize design for FPGA target
