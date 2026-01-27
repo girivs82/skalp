@@ -2277,7 +2277,7 @@ fn run_equivalence_check(
 ) -> Result<()> {
     use skalp_formal::BoundedModelChecker;
     use skalp_frontend::parse_and_build_compilation_context;
-    use skalp_lir::{get_stdlib_library, lower_mir_module_to_lir, TechMapper};
+    use skalp_lir::{get_stdlib_library, lower_mir_hierarchical_with_top, map_hierarchical_to_gates};
     use std::time::Instant;
 
     let start_time = Instant::now();
@@ -2328,12 +2328,13 @@ fn run_equivalence_check(
     println!("   Outputs: {}", output_count);
     println!("   Signals: {}", target_entity.signals.len());
 
-    // Step 2: Lower to LIR
+    // Step 2: Lower to hierarchical LIR and flatten
     println!();
-    println!("⚙️  Lowering to LIR...");
-    let lir_result = lower_mir_module_to_lir(target_entity);
-    println!("   Nodes: {}", lir_result.lir.nodes.len());
-    println!("   Signals: {}", lir_result.lir.signals.len());
+    println!("⚙️  Lowering to LIR (hierarchical)...");
+    let hier_lir = lower_mir_hierarchical_with_top(&mir, Some(&target_entity.name));
+    let lir = hier_lir.flatten();
+    println!("   Nodes: {}", lir.nodes.len());
+    println!("   Signals: {}", lir.signals.len());
 
     // Step 3: Get or synthesize gate-level netlist
     let gate_netlist = if let Some(path) = netlist_path {
@@ -2345,12 +2346,11 @@ fn run_equivalence_check(
             .context("Failed to parse gate-level netlist JSON")?
     } else {
         println!();
-        println!("🔧 Synthesizing gate-level netlist...");
+        println!("🔧 Synthesizing gate-level netlist (hierarchical)...");
         let library = get_stdlib_library("generic_asic")
             .context("Failed to load technology library")?;
-        let mut mapper = TechMapper::new(&library);
-        let result = mapper.map(&lir_result.lir);
-        let netlist = result.netlist;
+        let hier_netlist = map_hierarchical_to_gates(&hier_lir, &library);
+        let netlist = hier_netlist.flatten();
         println!("   Cells: {}", netlist.cells.len());
         println!("   Nets: {}", netlist.nets.len());
         netlist
@@ -2363,7 +2363,7 @@ fn run_equivalence_check(
 
     let checker = BoundedModelChecker::new();
     let result = checker
-        .check_lir_vs_gates_bmc(&lir_result.lir, &gate_netlist, bound)
+        .check_lir_vs_gates_bmc(&lir, &gate_netlist, bound)
         .map_err(|e| anyhow::anyhow!("Equivalence check failed: {:?}", e))?;
 
     let total_time = start_time.elapsed();
