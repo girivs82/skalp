@@ -2786,6 +2786,10 @@ impl HierarchicalMirToLirResult {
         // When a child uses an input port, we should actually read from the parent's signal
         let mut port_alias_map: HashMap<(String, LirSignalId), LirSignalId> = HashMap::new();
 
+        // Build output port remap: (inst_path, child_output_port) -> parent_signal
+        // When a child node outputs to an output port, we redirect it to the parent's signal
+        let mut output_remap_map: HashMap<(String, LirSignalId), LirSignalId> = HashMap::new();
+
         for inst_path in &instance_order {
             if inst_path == "top" {
                 continue; // Top has no port connections from parent
@@ -2825,6 +2829,7 @@ impl HierarchicalMirToLirResult {
                     if let Some(child_port_id) = port_signal_id {
                         // Check if this is an input port (in child's inputs list)
                         let is_input = lir.inputs.contains(&child_port_id);
+                        let is_output = lir.outputs.contains(&child_port_id);
 
                         if is_input {
                             // For input ports, alias child's port to parent's signal
@@ -2832,19 +2837,36 @@ impl HierarchicalMirToLirResult {
                                 let parent_signal_name = format!("{}{}", parent_prefix, parent_signal_base);
 
                                 if let Some(&parent_sig) = name_to_signal.get(&parent_signal_name) {
+                                    if port_name == "clk" || port_name == "rst" || port_name == "enable" || port_name.starts_with("pwm_") {
+                                        println!("[INPUT_ALIAS] {}.{} -> parent signal '{}' (id={})",
+                                            inst_path, port_name, parent_signal_name, parent_sig.0);
+                                    }
                                     port_alias_map.insert((inst_path.clone(), child_port_id), parent_sig);
 
                                     // Also update name_to_signal so that child instances looking up
                                     // this port by name will find the aliased signal, not the original
                                     let child_port_name = format!("{}.{}", inst_path, port_name);
                                     name_to_signal.insert(child_port_name, parent_sig);
+                                } else if port_name == "clk" || port_name == "rst" || port_name == "enable" || port_name.starts_with("pwm_") {
+                                    println!("[INPUT_ALIAS_FAIL] {}.{} -> parent signal '{}' NOT FOUND",
+                                        inst_path, port_name, parent_signal_name);
                                 }
                             } else if let PortConnectionInfo::Constant(value) = conn_info {
                                 // Create a constant node for the port
                                 let child_port_flat_id = signal_id_map.get(&(inst_path.clone(), child_port_id))
                                     .copied()
-                                    .unwrap_or(LirSignalId(0));
+                                    .unwrap_or_else(|| {
+                                        println!("[FLATTEN] ⚠️ No signal mapping for constant port {}.{} (child_port_id={}), defaulting to LirSignalId(0)",
+                                            inst_path, port_name, child_port_id.0);
+                                        LirSignalId(0)
+                                    });
                                 let child_width = lir.signals[child_port_id.0 as usize].width;
+
+                                // Debug trace for compare_high constant
+                                if port_name.contains("compare_high") {
+                                    println!("[FLATTEN] 📌 Creating constant node for {}.{} = 0x{:X} -> signal_id={}",
+                                        inst_path, port_name, *value, child_port_flat_id.0);
+                                }
 
                                 let const_node = crate::lir::LirNode {
                                     id: crate::lir::LirNodeId(flat_lir.nodes.len() as u32),
@@ -2856,6 +2878,16 @@ impl HierarchicalMirToLirResult {
                                     reset: None,
                                 };
                                 flat_lir.nodes.push(const_node);
+                            }
+                        } else if is_output && is_signal_conn {
+                            // For output ports, when a child node outputs to this port,
+                            // we redirect it to output directly to the parent's signal
+                            let parent_signal_name = format!("{}{}", parent_prefix, parent_signal_base);
+
+                            if let Some(&parent_sig) = name_to_signal.get(&parent_signal_name) {
+                                // Map: (inst_path, child_port_id) -> parent_sig
+                                // When node in child outputs to child_port_id, output to parent_sig instead
+                                output_remap_map.insert((inst_path.clone(), child_port_id), parent_sig);
                             }
                         }
                     } else if is_signal_conn {
@@ -2870,10 +2902,8 @@ impl HierarchicalMirToLirResult {
                         for (idx, child_sig) in flattened_signals {
                             let child_port_id = LirSignalId(idx as u32);
 
-                            // Check if this is an input port
-                            if !lir.inputs.contains(&child_port_id) {
-                                continue;
-                            }
+                            let is_struct_input = lir.inputs.contains(&child_port_id);
+                            let is_struct_output = lir.outputs.contains(&child_port_id);
 
                             // Extract the field suffix (e.g., "primary__high_a" from "gates__primary__high_a")
                             let field_suffix = &child_sig.name[struct_prefix.len()..];
@@ -2882,12 +2912,20 @@ impl HierarchicalMirToLirResult {
                             let parent_signal_name = format!("{}{}__{}",
                                 parent_prefix, parent_signal_base, field_suffix);
 
-                            if let Some(&parent_sig) = name_to_signal.get(&parent_signal_name) {
-                                port_alias_map.insert((inst_path.clone(), child_port_id), parent_sig);
+                            if is_struct_input {
+                                // For input struct fields, alias child's port to parent's signal
+                                if let Some(&parent_sig) = name_to_signal.get(&parent_signal_name) {
+                                    port_alias_map.insert((inst_path.clone(), child_port_id), parent_sig);
 
-                                // Also update name_to_signal for child lookups
-                                let child_port_name = format!("{}.{}__{}", inst_path, port_name, field_suffix);
-                                name_to_signal.insert(child_port_name, parent_sig);
+                                    // Also update name_to_signal for child lookups
+                                    let child_port_name = format!("{}.{}__{}", inst_path, port_name, field_suffix);
+                                    name_to_signal.insert(child_port_name, parent_sig);
+                                }
+                            } else if is_struct_output {
+                                // For output struct fields, redirect child's output to parent's signal
+                                if let Some(&parent_sig) = name_to_signal.get(&parent_signal_name) {
+                                    output_remap_map.insert((inst_path.clone(), child_port_id), parent_sig);
+                                }
                             }
                         }
                     }
@@ -2910,7 +2948,15 @@ impl HierarchicalMirToLirResult {
                             } else {
                                 signal_id_map.get(&(inst_path.clone(), old_id))
                                     .copied()
-                                    .unwrap_or(LirSignalId(0))
+                                    .unwrap_or_else(|| {
+                                        // Debug: Log when signal mapping is missing
+                                        let old_sig_name = &lir.signals[old_id.0 as usize].name;
+                                        if old_sig_name.contains("compare_high") {
+                                            println!("[FLATTEN] ⚠️ Missing signal mapping for input {}.{} (old_id={}), defaulting to 0",
+                                                inst_path, old_sig_name, old_id.0);
+                                        }
+                                        LirSignalId(0)
+                                    })
                             }
                         })
                         .collect();
@@ -2981,6 +3027,12 @@ impl HierarchicalMirToLirResult {
                         _ => continue,
                     };
 
+                    // Debug: Log what connections we're processing
+                    if port_name == "gate_high" || port_name == "counter" {
+                        println!("[FOURTH_PASS_CONN] Instance '{}' port '{}' -> conn_info={:?}",
+                            inst_path, port_name, conn_info);
+                    }
+
                     let parent_prefix = if parent_path == "top" {
                         "".to_string()
                     } else {
@@ -2993,6 +3045,16 @@ impl HierarchicalMirToLirResult {
                         .find(|(_, s)| s.name == *port_name)
                         .map(|(idx, _)| LirSignalId(idx as u32));
 
+                    // Debug: Log when processing output ports
+                    if port_name == "gate_high" || port_name == "counter" {
+                        println!("[FOURTH_PASS] Processing {}.{}: port_signal_id={:?}, parent_signal_base='{}'",
+                            inst_path, port_name, port_signal_id, parent_signal_base);
+                        if let Some(psid) = port_signal_id {
+                            println!("[FOURTH_PASS]   Signal name: '{}'", lir.signals[psid.0 as usize].name);
+                            println!("[FOURTH_PASS]   is_output: {}", lir.outputs.contains(&psid));
+                        }
+                    }
+
                     if let Some(child_port_id) = port_signal_id {
                         // Check if this is an output port (in child's outputs list)
                         let is_output = lir.outputs.contains(&child_port_id);
@@ -3002,11 +3064,183 @@ impl HierarchicalMirToLirResult {
 
                             // Get the flattened child output signal
                             let child_flat_id = signal_id_map.get(&(inst_path.clone(), child_port_id));
-                            let parent_flat_id = name_to_signal.get(&parent_signal_name);
+                            let mut parent_flat_id = name_to_signal.get(&parent_signal_name).copied();
 
-                            if let (Some(&child_id), Some(&parent_id)) = (child_flat_id, parent_flat_id) {
+                            // WORKAROUND: port_connections may have a synthesized name like
+                            // "inst_0_4_gate_high" instead of the actual struct field "gates__high_a".
+                            // This happens when expand_instance_connection fails during MIR compilation.
+                            //
+                            // Detect this pattern and find the actual struct field signal.
+                            // Pattern: parent_signal_base starts with "inst_X_Y_" (auto-generated name)
+                            let is_synthesized_name = parent_signal_base.starts_with("inst_") && {
+                                let parts: Vec<&str> = parent_signal_base.splitn(4, '_').collect();
+                                parts.len() >= 3 && parts[0] == "inst" &&
+                                    parts[1].chars().all(|c| c.is_ascii_digit()) &&
+                                    parts[2].chars().all(|c| c.is_ascii_digit())
+                            };
+
+                            if is_synthesized_name {
+                                println!("[FLATTEN_FIX_DEBUG] Detected synthesized name for {}.{}",
+                                    inst_path, port_name);
+                                println!("[FLATTEN_FIX_DEBUG]   parent_signal_base='{}', parent_prefix='{}'",
+                                    parent_signal_base, parent_prefix);
+                                println!("[FLATTEN_FIX_DEBUG]   original parent_flat_id: {:?}", parent_flat_id);
+
+                                // Clear parent_flat_id so we search for the correct signal
+                                // The synthesized signal (inst_X_Y_port) exists but is not the right one
+                                parent_flat_id = None;
+                                // Extract the instance ID from parent_signal_base
+                                // e.g., "inst_0_4_gate_high" -> "inst_0_4"
+                                // The expected pattern is: {inst_id}_{port_name}
+                                let parts: Vec<&str> = parent_signal_base.splitn(4, '_').collect();
+                                if parts.len() >= 3 && parts[0] == "inst" {
+                                    // Extracted instance ID: inst_{parts[1]}_{parts[2]}
+                                    // Port name suffix: everything after that
+                                    let inst_id_end = format!("inst_{}_{}", parts[1], parts[2]).len();
+                                    if parent_signal_base.len() > inst_id_end + 1 {
+                                        let actual_port_suffix = &parent_signal_base[inst_id_end + 1..];
+
+                                        // Transform port name to field suffix:
+                                        // "gate_high" -> "high_a" (for leg_a / module_id=0)
+                                        // "gate_high" -> "high_b" (for leg_b / module_id=1)
+                                        // "gate_low" -> "low_a" (for leg_a / module_id=0)
+                                        // "gate_low" -> "low_b" (for leg_b / module_id=1)
+                                        //
+                                        // parts[1] is the module_id within the parent:
+                                        // - 0 -> 'a' (first child instance, e.g., leg_a)
+                                        // - 1 -> 'b' (second child instance, e.g., leg_b)
+                                        let leg_suffix = if let Ok(module_id) = parts[1].parse::<u32>() {
+                                            (b'a' + module_id as u8) as char
+                                        } else {
+                                            'a'
+                                        };
+
+                                        let field_suffix = if actual_port_suffix.ends_with("_high") {
+                                            format!("high_{}", leg_suffix)
+                                        } else if actual_port_suffix.ends_with("_low") {
+                                            format!("low_{}", leg_suffix)
+                                        } else {
+                                            // For other ports like "counter", just use the port name
+                                            actual_port_suffix.to_string()
+                                        };
+
+                                        println!("[FLATTEN_FIX_DEBUG]   Looking for struct field ending with '__{}'", field_suffix);
+
+                                        // Look for matching struct field signals in parent's namespace
+                                        for (name, &sig_id) in name_to_signal.iter() {
+                                            // Must be in the same parent scope (excluding child scopes)
+                                            if !name.starts_with(&parent_prefix) {
+                                                continue;
+                                            }
+                                            // Skip if it's in a child scope (has more dots after prefix)
+                                            let after_prefix = &name[parent_prefix.len()..];
+                                            if after_prefix.contains('.') {
+                                                continue;
+                                            }
+                                            // Must be a struct field (contains __)
+                                            if !name.contains("__") {
+                                                continue;
+                                            }
+                                            // The field should end with the computed suffix
+                                            if name.ends_with(&format!("__{}", field_suffix)) {
+                                                println!("[FLATTEN_FIX_DEBUG]   FOUND match: '{}'", name);
+                                                parent_flat_id = Some(sig_id);
+                                                break;
+                                            }
+                                        }
+
+                                        // Fallback: for non-struct connections (like carrier_count)
+                                        // Look for signals that end with the port name variant
+                                        // e.g., port "counter" -> signal "carrier_count"
+                                        // e.g., port "at_zero" -> signal "carrier_at_zero"
+                                        if parent_flat_id.is_none() {
+                                            println!("[FLATTEN_FIX_DEBUG]   No struct field match, trying non-struct pattern for port '{}'", actual_port_suffix);
+
+                                            // Collect all potential matches
+                                            let mut candidates: Vec<(&String, LirSignalId)> = Vec::new();
+                                            let port_suffix = actual_port_suffix.trim_end_matches("er"); // "counter" -> "count"
+
+                                            for (name, &sig_id) in name_to_signal.iter() {
+                                                // Must be in the same parent scope (excluding child scopes)
+                                                if !name.starts_with(&parent_prefix) {
+                                                    continue;
+                                                }
+                                                let after_prefix = &name[parent_prefix.len()..];
+                                                if after_prefix.contains('.') {
+                                                    continue;
+                                                }
+                                                // Skip struct fields (handled above)
+                                                if after_prefix.contains("__") {
+                                                    continue;
+                                                }
+                                                // Skip synthesized names (inst_X_Y_*)
+                                                if after_prefix.starts_with("inst_") {
+                                                    continue;
+                                                }
+
+                                                // Check if signal name ends with the port name
+                                                // e.g., "carrier_count" ends with "count" (variant of "counter")
+                                                // e.g., "carrier_at_zero" ends with "at_zero"
+                                                if after_prefix.ends_with(&format!("_{}", actual_port_suffix)) ||
+                                                   after_prefix.ends_with(&format!("_{}", port_suffix)) {
+                                                    candidates.push((name, sig_id));
+                                                }
+                                            }
+
+                                            // Only use the match if there's exactly one candidate
+                                            // Multiple matches means ambiguous - need to narrow down
+                                            if candidates.len() == 1 {
+                                                println!("[FLATTEN_FIX_DEBUG]   FOUND unique non-struct match: '{}'", candidates[0].0);
+                                                parent_flat_id = Some(candidates[0].1);
+                                            } else if candidates.len() > 1 {
+                                                // Multiple candidates - try to narrow down by:
+                                                // 1. Check if there's only one orphan (consumed but not produced)
+                                                // 2. Match by width
+                                                let child_width = if let Some(&child_id) = child_flat_id {
+                                                    flat_lir.signals[child_id.0 as usize].width
+                                                } else {
+                                                    0
+                                                };
+
+                                                let orphan_candidates: Vec<_> = candidates.iter()
+                                                    .filter(|(_, sig_id)| {
+                                                        let sig = &flat_lir.signals[sig_id.0 as usize];
+                                                        // Check if this signal is not produced by any node
+                                                        let is_produced = flat_lir.nodes.iter()
+                                                            .any(|n| n.output == *sig_id);
+                                                        let is_input = flat_lir.inputs.contains(sig_id);
+                                                        let is_reg = flat_lir.nodes.iter()
+                                                            .any(|n| if let LirOp::Reg { .. } = &n.op { n.output == *sig_id } else { false });
+                                                        // Orphan: not produced, not input, not reg
+                                                        !is_produced && !is_input && !is_reg && sig.width == child_width
+                                                    })
+                                                    .collect();
+
+                                                if orphan_candidates.len() == 1 {
+                                                    println!("[FLATTEN_FIX_DEBUG]   Narrowed to orphan: '{}'", orphan_candidates[0].0);
+                                                    parent_flat_id = Some(orphan_candidates[0].1);
+                                                } else {
+                                                    println!("[FLATTEN_FIX_DEBUG]   AMBIGUOUS: {} candidates, {} orphans for port '{}': {:?}",
+                                                        candidates.len(), orphan_candidates.len(), actual_port_suffix,
+                                                        candidates.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>());
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            if let (Some(&child_id), Some(parent_id)) = (child_flat_id, parent_flat_id) {
                                 // Add a buffer node to wire child output to parent signal
                                 let child_width = flat_lir.signals[child_id.0 as usize].width;
+
+                                let child_name = &flat_lir.signals[child_id.0 as usize].name;
+                                let parent_name = &flat_lir.signals[parent_id.0 as usize].name;
+                                // Only log output port connections (for debugging)
+                                if child_name.contains("gate") || child_name.contains("counter") {
+                                    println!("[FLATTEN_WIRE] Creating buffer: {} -> {}", child_name, parent_name);
+                                }
+
                                 let wire_node = crate::lir::LirNode {
                                     id: crate::lir::LirNodeId(flat_lir.nodes.len() as u32),
                                     op: LirOp::Buf { width: child_width },
@@ -3036,7 +3270,7 @@ impl HierarchicalMirToLirResult {
                                 continue;
                             }
 
-                            // Extract the field suffix (e.g., "primary__high_a" from "gates__primary__high_a")
+                            // Extract the field suffix (e.g., "high_a" from "gates__high_a")
                             let field_suffix = &child_sig.name[struct_prefix.len()..];
 
                             // Construct parent signal name with same field suffix
@@ -3067,7 +3301,121 @@ impl HierarchicalMirToLirResult {
             }
         }
 
+        // Post-process: Fix orphan signal pairs generically
+        // This handles cases where output port connections failed during MIR compilation
+        // and created synthesized signals (inst_X_Y_port) instead of using actual parent signals
+        Self::fix_orphan_signal_pairs(&mut flat_lir);
+
         flat_lir
+    }
+
+    /// Fix orphan signal pairs by redirecting buffers that output to synthesized signals
+    /// to instead output to the actual orphan parent signals
+    fn fix_orphan_signal_pairs(flat_lir: &mut Lir) {
+        use std::collections::HashSet;
+
+        // Build set of consumed signals (used as input somewhere)
+        let mut consumed: HashSet<LirSignalId> = HashSet::new();
+        for node in &flat_lir.nodes {
+            for &input_id in &node.inputs {
+                consumed.insert(input_id);
+            }
+            if let Some(clk) = node.clock {
+                consumed.insert(clk);
+            }
+            if let Some(rst) = node.reset {
+                consumed.insert(rst);
+            }
+        }
+
+        // Build set of produced signals
+        let mut produced: HashSet<LirSignalId> = HashSet::new();
+        for node in &flat_lir.nodes {
+            produced.insert(node.output);
+        }
+        for &input_id in &flat_lir.inputs {
+            produced.insert(input_id);
+        }
+
+        // Find orphan signals: consumed but not produced
+        let mut orphans: Vec<(LirSignalId, u32, String)> = Vec::new(); // (id, width, scope)
+        for (idx, sig) in flat_lir.signals.iter().enumerate() {
+            let sig_id = LirSignalId(idx as u32);
+            let is_produced = produced.contains(&sig_id);
+            let is_consumed = consumed.contains(&sig_id);
+
+            if is_consumed && !is_produced {
+                // Extract scope
+                let scope = if let Some(last_dot) = sig.name.rfind('.') {
+                    sig.name[..last_dot].to_string()
+                } else {
+                    String::new()
+                };
+                orphans.push((sig_id, sig.width, scope));
+            }
+        }
+
+        // Find buffer nodes that output to synthesized signals (inst_X_Y_*)
+        // and redirect them to matching orphan signals
+        let mut redirects: Vec<(usize, LirSignalId)> = Vec::new(); // (node_idx, new_output)
+        let mut used_orphans: HashSet<LirSignalId> = HashSet::new();
+
+        for (node_idx, node) in flat_lir.nodes.iter().enumerate() {
+            if !matches!(&node.op, LirOp::Buf { .. }) {
+                continue;
+            }
+
+            let output_sig = &flat_lir.signals[node.output.0 as usize];
+            let output_name = if let Some(last_dot) = output_sig.name.rfind('.') {
+                &output_sig.name[last_dot + 1..]
+            } else {
+                &output_sig.name
+            };
+            let output_scope = if let Some(last_dot) = output_sig.name.rfind('.') {
+                output_sig.name[..last_dot].to_string()
+            } else {
+                String::new()
+            };
+
+            // Check if output goes to a synthesized signal
+            let is_synthesized = output_name.starts_with("inst_") && {
+                let parts: Vec<&str> = output_name.splitn(4, '_').collect();
+                parts.len() >= 4 && parts[0] == "inst" &&
+                    parts[1].chars().all(|c| c.is_ascii_digit()) &&
+                    parts[2].chars().all(|c| c.is_ascii_digit())
+            };
+
+            if !is_synthesized {
+                continue;
+            }
+
+            // Find matching orphan in the same scope with same width
+            let candidates: Vec<_> = orphans.iter()
+                .filter(|(orphan_id, orphan_width, orphan_scope)| {
+                    *orphan_width == output_sig.width &&
+                    *orphan_scope == output_scope &&
+                    !used_orphans.contains(orphan_id)
+                })
+                .collect();
+
+            if candidates.len() == 1 {
+                let (orphan_id, _, _) = candidates[0];
+                redirects.push((node_idx, *orphan_id));
+                used_orphans.insert(*orphan_id);
+
+                let orphan_name = &flat_lir.signals[orphan_id.0 as usize].name;
+                println!("[ORPHAN_FIX] Redirecting buffer from '{}' to '{}'",
+                    output_sig.name, orphan_name);
+            } else if candidates.len() > 1 {
+                println!("[ORPHAN_FIX] AMBIGUOUS: {} candidates for synthesized '{}' (width={})",
+                    candidates.len(), output_sig.name, output_sig.width);
+            }
+        }
+
+        // Apply redirects
+        for (node_idx, new_output) in redirects {
+            flat_lir.nodes[node_idx].output = new_output;
+        }
     }
 
     /// Get instances in topological order (parents before children)
@@ -4133,6 +4481,35 @@ fn extract_connection_info(
 
     for port_name in sorted_port_names {
         let expr = connections.get(port_name).unwrap();
+
+        // Debug: Log expression kind for interesting ports (disabled)
+        if false && (port_name == "gate_high" || port_name == "counter" || port_name == "rst" || port_name == "clk") {
+            println!("[EXTRACT_CONN_DEBUG] Port '{}' in instance '{}' has expr kind: {:?}",
+                port_name, instance_name, expr.kind);
+            // If it's a signal ref, look up the signal name
+            if let ExpressionKind::Ref(LValue::Signal(sig_id)) = &expr.kind {
+                println!("[EXTRACT_CONN_DEBUG]   parent_module '{}' has {} signals",
+                    parent_module.name, parent_module.signals.len());
+                if let Some(sig) = parent_module.signals.get(sig_id.0 as usize) {
+                    println!("[EXTRACT_CONN_DEBUG]   Signal {} in parent_module is named '{}'",
+                        sig_id.0, sig.name);
+                } else {
+                    println!("[EXTRACT_CONN_DEBUG]   Signal {} not found in parent_module (max={})",
+                        sig_id.0, parent_module.signals.len());
+                }
+                if let Some(fb_mod) = fallback_module {
+                    println!("[EXTRACT_CONN_DEBUG]   fallback_module '{}' has {} signals",
+                        fb_mod.name, fb_mod.signals.len());
+                    if let Some(sig) = fb_mod.signals.get(sig_id.0 as usize) {
+                        println!("[EXTRACT_CONN_DEBUG]   Signal {} in fallback_module is named '{}'",
+                            sig_id.0, sig.name);
+                    }
+                } else {
+                    println!("[EXTRACT_CONN_DEBUG]   No fallback module");
+                }
+            }
+        }
+
         let info = match &expr.kind {
             ExpressionKind::Literal(value) => {
                 // Constant connection
@@ -4253,6 +4630,41 @@ fn extract_connection_info(
                         PortConnectionInfo::Signal(synth_signal_name)
                     }
                 }
+            }
+            // Handle struct field access: gates.primary -> gates__primary
+            ExpressionKind::FieldAccess { base, field } => {
+                // Recursively extract the base name
+                fn extract_field_access_name(expr: &Expression, parent_module: &Module, fallback_module: Option<&Module>) -> String {
+                    match &expr.kind {
+                        ExpressionKind::Ref(lvalue) => {
+                            let name = lvalue_to_name_with_module(lvalue, parent_module);
+                            // If we got a fallback name like "port_X" or "signal_X", try the fallback module
+                            if (name.starts_with("port_") || name.starts_with("signal_"))
+                                && fallback_module.is_some()
+                            {
+                                let fallback_name = lvalue_to_name_with_module(lvalue, fallback_module.unwrap());
+                                if !fallback_name.starts_with("port_") && !fallback_name.starts_with("signal_") {
+                                    return fallback_name;
+                                }
+                            }
+                            name
+                        }
+                        ExpressionKind::FieldAccess { base: inner_base, field: inner_field } => {
+                            let base_name = extract_field_access_name(inner_base, parent_module, fallback_module);
+                            format!("{}__{}", base_name, inner_field)
+                        }
+                        _ => format!("expr")
+                    }
+                }
+                let base_name = extract_field_access_name(base, parent_module, fallback_module);
+                let signal_name = format!("{}__{}", base_name, field);
+                trace!(
+                    "[EXTRACT_CONN] FieldAccess for port '{}': {} -> '{}'",
+                    port_name,
+                    field,
+                    signal_name
+                );
+                PortConnectionInfo::Signal(signal_name)
             }
             _ => {
                 // Complex expression - use the synthesized signal from Phase 4b

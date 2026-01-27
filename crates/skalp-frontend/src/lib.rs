@@ -501,19 +501,59 @@ fn rebuild_instances_for_all_modules(
 
                 // Update implementations in result_hir
                 for (entity_name, rebuilt_instances) in &rebuilt_instances_by_name {
-                    // Find the entity ID in result_hir by name
-                    let result_entity_id = result_hir
+                    // Find the entity in result_hir by name
+                    let result_entity = result_hir
                         .entities
                         .iter()
                         .find(|e| &e.name == entity_name)
-                        .map(|e| e.id);
+                        .cloned();
 
-                    if let Some(entity_id) = result_entity_id {
+                    // Find the entity in rebuilt by name
+                    let rebuilt_entity = rebuilt
+                        .entities
+                        .iter()
+                        .find(|e| &e.name == entity_name)
+                        .cloned();
+
+                    if let Some(ref result_ent) = result_entity {
+                        // Build port/signal ID remap from rebuilt entity to result entity
+                        // This maps port names to (rebuilt_id, result_id) for remapping
+                        let mut port_remap: std::collections::HashMap<hir::PortId, hir::PortId> = std::collections::HashMap::new();
+                        let mut signal_remap: std::collections::HashMap<hir::SignalId, hir::SignalId> = std::collections::HashMap::new();
+
+                        if let Some(ref rebuilt_ent) = rebuilt_entity {
+                            // Build port ID remap by name
+                            for rebuilt_port in &rebuilt_ent.ports {
+                                if let Some(result_port) = result_ent.ports.iter().find(|p| p.name == rebuilt_port.name) {
+                                    if rebuilt_port.id != result_port.id {
+                                        port_remap.insert(rebuilt_port.id, result_port.id);
+                                    }
+                                }
+                            }
+                        }
+
+                        // Also check signals from the implementation
+                        if let Some(rebuilt_impl) = rebuilt.implementations.iter()
+                            .find(|i| rebuilt_entity.as_ref().map(|e| i.entity == e.id).unwrap_or(false))
+                        {
+                            if let Some(result_impl) = result_hir.implementations.iter()
+                                .find(|i| i.entity == result_ent.id)
+                            {
+                                for rebuilt_sig in &rebuilt_impl.signals {
+                                    if let Some(result_sig) = result_impl.signals.iter().find(|s| s.name == rebuilt_sig.name) {
+                                        if rebuilt_sig.id != result_sig.id {
+                                            signal_remap.insert(rebuilt_sig.id, result_sig.id);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
                         // Find the implementation in result_hir by entity ID
                         if let Some(existing_impl) = result_hir
                             .implementations
                             .iter_mut()
-                            .find(|i| i.entity == entity_id)
+                            .find(|i| i.entity == result_ent.id)
                         {
                             let old_count = existing_impl.instances.len();
                             if rebuilt_instances.len() > old_count {
@@ -548,6 +588,12 @@ fn rebuild_instances_for_all_modules(
                                         {
                                             let mut remapped = inst.clone();
                                             remapped.entity = result_inst_entity_id;
+
+                                            // Remap port/signal IDs in connection expressions
+                                            for conn in &mut remapped.connections {
+                                                remap_port_signal_ids_in_expr(&mut conn.expr, &port_remap, &signal_remap);
+                                            }
+
                                             remapped_instances.push(remapped);
                                         }
                                     }
@@ -568,6 +614,148 @@ fn rebuild_instances_for_all_modules(
     }
 
     Ok(result_hir)
+}
+
+/// Recursively remap port and signal IDs in an HIR expression
+/// This is needed when copying instances from a rebuilt HIR where port/signal IDs
+/// may differ from the merged HIR.
+fn remap_port_signal_ids_in_expr(
+    expr: &mut hir::HirExpression,
+    port_remap: &std::collections::HashMap<hir::PortId, hir::PortId>,
+    signal_remap: &std::collections::HashMap<hir::SignalId, hir::SignalId>,
+) {
+    use hir::HirExpression;
+
+    match expr {
+        HirExpression::Port(id) => {
+            if let Some(new_id) = port_remap.get(id) {
+                *id = *new_id;
+            }
+        }
+        HirExpression::Signal(id) => {
+            if let Some(new_id) = signal_remap.get(id) {
+                *id = *new_id;
+            }
+        }
+        HirExpression::Binary(bin) => {
+            remap_port_signal_ids_in_expr(&mut bin.left, port_remap, signal_remap);
+            remap_port_signal_ids_in_expr(&mut bin.right, port_remap, signal_remap);
+        }
+        HirExpression::Unary(un) => {
+            remap_port_signal_ids_in_expr(&mut un.operand, port_remap, signal_remap);
+        }
+        HirExpression::Call(call) => {
+            for arg in &mut call.args {
+                remap_port_signal_ids_in_expr(arg, port_remap, signal_remap);
+            }
+        }
+        HirExpression::Index(base, idx) => {
+            remap_port_signal_ids_in_expr(base, port_remap, signal_remap);
+            remap_port_signal_ids_in_expr(idx, port_remap, signal_remap);
+        }
+        HirExpression::Range(base, hi, lo) => {
+            remap_port_signal_ids_in_expr(base, port_remap, signal_remap);
+            remap_port_signal_ids_in_expr(hi, port_remap, signal_remap);
+            remap_port_signal_ids_in_expr(lo, port_remap, signal_remap);
+        }
+        HirExpression::FieldAccess { base, .. } => {
+            remap_port_signal_ids_in_expr(base, port_remap, signal_remap);
+        }
+        HirExpression::ArrayRepeat { value, count } => {
+            remap_port_signal_ids_in_expr(value, port_remap, signal_remap);
+            remap_port_signal_ids_in_expr(count, port_remap, signal_remap);
+        }
+        HirExpression::Concat(exprs) => {
+            for e in exprs {
+                remap_port_signal_ids_in_expr(e, port_remap, signal_remap);
+            }
+        }
+        HirExpression::Ternary { condition, true_expr, false_expr } => {
+            remap_port_signal_ids_in_expr(condition, port_remap, signal_remap);
+            remap_port_signal_ids_in_expr(true_expr, port_remap, signal_remap);
+            remap_port_signal_ids_in_expr(false_expr, port_remap, signal_remap);
+        }
+        HirExpression::StructLiteral(lit) => {
+            for field in &mut lit.fields {
+                remap_port_signal_ids_in_expr(&mut field.value, port_remap, signal_remap);
+            }
+        }
+        HirExpression::TupleLiteral(exprs) | HirExpression::ArrayLiteral(exprs) => {
+            for e in exprs {
+                remap_port_signal_ids_in_expr(e, port_remap, signal_remap);
+            }
+        }
+        HirExpression::If(if_expr) => {
+            remap_port_signal_ids_in_expr(&mut if_expr.condition, port_remap, signal_remap);
+            remap_port_signal_ids_in_expr(&mut if_expr.then_expr, port_remap, signal_remap);
+            remap_port_signal_ids_in_expr(&mut if_expr.else_expr, port_remap, signal_remap);
+        }
+        HirExpression::Match(match_expr) => {
+            remap_port_signal_ids_in_expr(&mut match_expr.expr, port_remap, signal_remap);
+            for arm in &mut match_expr.arms {
+                remap_port_signal_ids_in_expr(&mut arm.expr, port_remap, signal_remap);
+            }
+        }
+        HirExpression::Cast(cast) => {
+            remap_port_signal_ids_in_expr(&mut cast.expr, port_remap, signal_remap);
+        }
+        HirExpression::Block { statements, result_expr } => {
+            // Recursively handle statements if they contain expressions
+            for stmt in statements {
+                remap_port_signal_ids_in_stmt(stmt, port_remap, signal_remap);
+            }
+            remap_port_signal_ids_in_expr(result_expr, port_remap, signal_remap);
+        }
+        // Literals, constants, variables, enums, generic params - no port/signal IDs to remap
+        HirExpression::Literal(_)
+        | HirExpression::Variable(_)
+        | HirExpression::Constant(_)
+        | HirExpression::GenericParam(_)
+        | HirExpression::EnumVariant { .. }
+        | HirExpression::AssociatedConstant { .. } => {}
+    }
+}
+
+/// Helper to remap IDs in statements (needed for Block expressions)
+fn remap_port_signal_ids_in_stmt(
+    stmt: &mut hir::HirStatement,
+    port_remap: &std::collections::HashMap<hir::PortId, hir::PortId>,
+    signal_remap: &std::collections::HashMap<hir::SignalId, hir::SignalId>,
+) {
+    use hir::HirStatement;
+
+    match stmt {
+        HirStatement::Assignment(assign) => {
+            remap_port_signal_ids_in_expr(&mut assign.rhs, port_remap, signal_remap);
+        }
+        HirStatement::If(if_stmt) => {
+            remap_port_signal_ids_in_expr(&mut if_stmt.condition, port_remap, signal_remap);
+            for s in &mut if_stmt.then_statements {
+                remap_port_signal_ids_in_stmt(s, port_remap, signal_remap);
+            }
+            if let Some(ref mut else_stmts) = if_stmt.else_statements {
+                for s in else_stmts {
+                    remap_port_signal_ids_in_stmt(s, port_remap, signal_remap);
+                }
+            }
+        }
+        HirStatement::Block(stmts) => {
+            for s in stmts {
+                remap_port_signal_ids_in_stmt(s, port_remap, signal_remap);
+            }
+        }
+        HirStatement::Let(let_stmt) => {
+            remap_port_signal_ids_in_expr(&mut let_stmt.value, port_remap, signal_remap);
+        }
+        HirStatement::Return(Some(e)) => {
+            remap_port_signal_ids_in_expr(e, port_remap, signal_remap);
+        }
+        HirStatement::Expression(e) => {
+            remap_port_signal_ids_in_expr(e, port_remap, signal_remap);
+        }
+        // Other statement types don't contain expressions we need to remap
+        _ => {}
+    }
 }
 
 /// Merge imported symbols from dependencies into HIR
