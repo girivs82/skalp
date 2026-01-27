@@ -508,6 +508,16 @@ impl HierarchicalNetlist {
                             }
                         } else if result.get_net(&net_name).is_some() {
                             // Single net exists - use simple tie cell
+                            trace!(
+                                "[STITCH]   ✓ Constant 0x{:X} -> {} (single)",
+                                value,
+                                net_name
+                            );
+                            // Debug trace for compare_high constant
+                            if net_name.contains("compare_high") {
+                                println!("[GATE] 📌 Creating TIE cell for {} = 0x{:X}",
+                                    net_name, *value);
+                            }
                             result.add_tie_cell(&net_name, *value);
                         } else {
                             // Net doesn't exist - this might be an unused connection
@@ -516,6 +526,11 @@ impl HierarchicalNetlist {
                                 value,
                                 net_name
                             );
+                            // Debug trace for compare_high constant not found
+                            if net_name.contains("compare_high") {
+                                println!("[GATE] ⚠️ TIE cell for {} = 0x{:X} FAILED - net not found!",
+                                    net_name, *value);
+                            }
                         }
                     }
                     PortConnection::ChildPort(child_path, child_port) => {
