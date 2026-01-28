@@ -3887,10 +3887,6 @@ impl<'a> MirToSirConverter<'a> {
                 // original port name and use it as a signal reference.
                 for child_module in &self.mir_design.modules {
                     if let Some(port) = child_module.ports.iter().find(|p| p.id == *port_id) {
-                        println!(
-                            "🔧 BUG FIX: Port {:?} found in child module '{}' as '{}', using as signal",
-                            port_id, child_module.name, port.name
-                        );
                         // The port has been merged as a signal - use get_or_create_signal_driver
                         return self.get_or_create_signal_driver(&port.name);
                     }
