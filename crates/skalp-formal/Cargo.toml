@@ -10,6 +10,8 @@ license = "MIT OR Apache-2.0"
 skalp-frontend = { path = "../skalp-frontend" }
 skalp-mir = { path = "../skalp-mir" }
 skalp-lir = { path = "../skalp-lir" }
+skalp-sir = { path = "../skalp-sir" }
+skalp-sim = { path = "../skalp-sim" }
 thiserror = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 tokio = { version = "1.0", features = ["full"] }
