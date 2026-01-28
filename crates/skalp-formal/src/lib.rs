@@ -26,6 +26,8 @@ pub use equivalence::{
     build_miter_with_port_matching, normalize_port_name,
     // BMC (Bounded Model Checking) types
     BoundedModelChecker, BmcEquivalenceResult, BmcCounterexample,
+    // Hierarchical equivalence checking types
+    HierarchicalEquivalenceChecker, HierarchicalEquivalenceResult, MismatchDetails, SemanticFingerprint,
 };
 
 use skalp_frontend::ast::Item;

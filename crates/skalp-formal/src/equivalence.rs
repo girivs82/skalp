@@ -7498,6 +7498,865 @@ impl Default for BoundedModelChecker {
 }
 
 // ============================================================================
+// Hierarchical Equivalence Checker with Semantic Fingerprinting
+// ============================================================================
+//
+// This is a cleaner approach inspired by commercial tools (Synopsys Formality,
+// Cadence Conformal) but with a fresh design:
+//
+// 1. **Output-only BMC**: We only compare primary outputs, letting internal
+//    state evolve freely. This handles cross-module optimizations naturally.
+//
+// 2. **Semantic fingerprinting**: Match outputs by simulation signatures,
+//    not by name. This is robust to renaming and restructuring.
+//
+// 3. **Hierarchical verification**: Optionally verify each entity separately,
+//    then compose. This provides better debugging when mismatches occur.
+//
+// The key insight: if two designs produce identical outputs for ALL possible
+// input sequences over K cycles, starting from reset, they are K-equivalent.
+// This doesn't require internal state correspondence at all.
+
+/// A semantic fingerprint for an output signal
+///
+/// This captures the "behavior" of an output by simulating it with
+/// deterministic pseudo-random inputs and recording the result pattern.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct SemanticFingerprint {
+    /// Bit pattern from simulation (128 cycles of output values)
+    pub signature: u128,
+    /// Output index in the original AIG
+    pub output_idx: usize,
+}
+
+impl SemanticFingerprint {
+    /// Generate a fingerprint for an output by simulating the AIG
+    pub fn from_output(aig: &Aig, output_idx: usize, num_cycles: usize) -> Self {
+        let mut signature = 0u128;
+        let mut state = Self::get_initial_state(aig);
+
+        // Use deterministic LFSR-based input generation for reproducibility
+        let mut lfsr = 0xDEADBEEFu64;
+
+        for cycle in 0..num_cycles.min(128) {
+            // Generate inputs for this cycle
+            let mut input_vals: HashMap<u32, bool> = HashMap::new();
+            for &input_id in &aig.inputs {
+                lfsr = Self::lfsr_next(lfsr);
+                input_vals.insert(input_id.0, (lfsr & 1) == 1);
+            }
+
+            // Simulate one cycle
+            let (values, next_state) = Self::simulate_cycle(aig, &input_vals, &state);
+            state = next_state;
+
+            // Extract output value
+            let out_lit = &aig.outputs[output_idx];
+            let out_val = values.get(&out_lit.node.0).copied().unwrap_or(false);
+            let out_val = if out_lit.inverted { !out_val } else { out_val };
+
+            if out_val {
+                signature |= 1u128 << cycle;
+            }
+        }
+
+        Self {
+            signature,
+            output_idx,
+        }
+    }
+
+    /// LFSR for deterministic pseudo-random generation
+    fn lfsr_next(state: u64) -> u64 {
+        let bit = ((state >> 0) ^ (state >> 2) ^ (state >> 3) ^ (state >> 5)) & 1;
+        (state >> 1) | (bit << 63)
+    }
+
+    /// Get initial latch state (all latches at their init values)
+    fn get_initial_state(aig: &Aig) -> HashMap<u32, bool> {
+        let mut state = HashMap::new();
+        for (idx, node) in aig.nodes.iter().enumerate() {
+            if let AigNode::Latch { init, .. } = node {
+                state.insert(idx as u32, *init);
+            }
+        }
+        state
+    }
+
+    /// Simulate one cycle, returning node values and next state
+    fn simulate_cycle(
+        aig: &Aig,
+        inputs: &HashMap<u32, bool>,
+        state: &HashMap<u32, bool>,
+    ) -> (HashMap<u32, bool>, HashMap<u32, bool>) {
+        let mut values: HashMap<u32, bool> = HashMap::new();
+        values.insert(0, false); // Constant false
+
+        // Set input values
+        for (&id, &val) in inputs {
+            values.insert(id, val);
+        }
+
+        // Set latch current values (from state)
+        for (&latch_id, &val) in state {
+            values.insert(latch_id, val);
+        }
+
+        // Handle state_input -> latch mappings
+        for (&state_input_id, &latch_id) in &aig.state_input_to_latch {
+            if let Some(&val) = state.get(&latch_id) {
+                values.insert(state_input_id, val);
+            }
+        }
+
+        // Evaluate all nodes in order
+        for (idx, node) in aig.nodes.iter().enumerate() {
+            let idx = idx as u32;
+            match node {
+                AigNode::False => {}
+                AigNode::Input { .. } => {
+                    // Already set from inputs or state
+                    if !values.contains_key(&idx) {
+                        values.insert(idx, false);
+                    }
+                }
+                AigNode::And { left, right } => {
+                    let l = values.get(&left.node.0).copied().unwrap_or(false);
+                    let r = values.get(&right.node.0).copied().unwrap_or(false);
+                    let l = if left.inverted { !l } else { l };
+                    let r = if right.inverted { !r } else { r };
+                    values.insert(idx, l && r);
+                }
+                AigNode::Latch { .. } => {
+                    // Latch output already set from state
+                    if !values.contains_key(&idx) {
+                        values.insert(idx, false);
+                    }
+                }
+            }
+        }
+
+        // Compute next state (latch next values)
+        let mut next_state = HashMap::new();
+        for (idx, node) in aig.nodes.iter().enumerate() {
+            if let AigNode::Latch { next, .. } = node {
+                let next_val = values.get(&next.node.0).copied().unwrap_or(false);
+                let next_val = if next.inverted { !next_val } else { next_val };
+                next_state.insert(idx as u32, next_val);
+            }
+        }
+
+        (values, next_state)
+    }
+}
+
+/// Result of hierarchical equivalence checking
+#[derive(Debug, Clone)]
+pub struct HierarchicalEquivalenceResult {
+    /// Overall equivalence status
+    pub equivalent: bool,
+    /// BMC bound used
+    pub bound: usize,
+    /// Per-output equivalence status (output key -> equivalent)
+    pub output_status: HashMap<String, bool>,
+    /// Unmatched outputs in design 1
+    pub unmatched_outputs_1: Vec<String>,
+    /// Unmatched outputs in design 2
+    pub unmatched_outputs_2: Vec<String>,
+    /// Total time in milliseconds
+    pub time_ms: u64,
+    /// Detailed mismatch info if any
+    pub mismatch_details: Option<MismatchDetails>,
+}
+
+/// Details about a mismatch found during verification
+#[derive(Debug, Clone)]
+pub struct MismatchDetails {
+    /// Output name/key that mismatched
+    pub output: String,
+    /// Cycle at which mismatch occurred
+    pub cycle: usize,
+    /// Value in design 1
+    pub value_1: bool,
+    /// Value in design 2
+    pub value_2: bool,
+    /// Input sequence that led to mismatch
+    pub input_sequence: Vec<HashMap<String, bool>>,
+}
+
+/// Hierarchical equivalence checker with semantic fingerprinting
+///
+/// This is the recommended approach for post-synthesis verification:
+/// - No internal state matching required
+/// - Handles cross-module optimizations
+/// - Semantic output matching (not name-based)
+/// - Proper reset handling
+pub struct HierarchicalEquivalenceChecker {
+    /// BMC bound (number of cycles to verify)
+    pub max_bound: usize,
+    /// Whether to use semantic fingerprinting for output matching
+    pub use_fingerprinting: bool,
+    /// Number of cycles for fingerprint generation
+    pub fingerprint_cycles: usize,
+}
+
+impl HierarchicalEquivalenceChecker {
+    pub fn new() -> Self {
+        Self {
+            max_bound: 20,
+            use_fingerprinting: true,
+            fingerprint_cycles: 64,
+        }
+    }
+
+    pub fn with_bound(mut self, bound: usize) -> Self {
+        self.max_bound = bound;
+        self
+    }
+
+    pub fn with_fingerprinting(mut self, enabled: bool) -> Self {
+        self.use_fingerprinting = enabled;
+        self
+    }
+
+    /// Check equivalence between two sequential AIGs using output-only BMC
+    ///
+    /// This is the core verification: given same inputs, do both designs
+    /// produce same outputs over K cycles from reset?
+    pub fn check_equivalence(
+        &self,
+        aig1: &Aig,
+        aig2: &Aig,
+        bound: usize,
+    ) -> FormalResult<HierarchicalEquivalenceResult> {
+        let start = std::time::Instant::now();
+
+        println!("\n[HIER_EQ] Starting hierarchical equivalence check");
+        println!("[HIER_EQ] Design 1: {} inputs, {} outputs, {} latches",
+            aig1.inputs.len(), aig1.outputs.len(), aig1.latches.len());
+        println!("[HIER_EQ] Design 2: {} inputs, {} outputs, {} latches",
+            aig2.inputs.len(), aig2.outputs.len(), aig2.latches.len());
+
+        // Step 1: Match outputs (semantic or name-based)
+        let matched_outputs = if self.use_fingerprinting {
+            self.match_outputs_semantic(aig1, aig2)
+        } else {
+            self.match_outputs_by_name(aig1, aig2)
+        };
+
+        println!("[HIER_EQ] Matched {} output pairs", matched_outputs.len());
+
+        // Step 2: Match inputs (by normalized name, inputs should be stable)
+        let (matched_inputs, aig1_input_map, aig2_input_map) =
+            self.match_inputs(aig1, aig2);
+
+        println!("[HIER_EQ] Matched {} input pairs", matched_inputs.len());
+
+        if matched_inputs.is_empty() {
+            return Err(FormalError::PropertyFailed(
+                "No matching primary inputs".to_string()
+            ));
+        }
+
+        if matched_outputs.is_empty() {
+            return Err(FormalError::PropertyFailed(
+                "No matching primary outputs".to_string()
+            ));
+        }
+
+        // Step 3: Compute unmatched outputs
+        let unmatched_1 = self.get_unmatched_outputs(aig1, &matched_outputs, true);
+        let unmatched_2 = self.get_unmatched_outputs(aig2, &matched_outputs, false);
+
+        if !unmatched_1.is_empty() {
+            println!("[HIER_EQ] Warning: {} unmatched outputs in design 1", unmatched_1.len());
+            for name in unmatched_1.iter().take(5) {
+                println!("  - {}", name);
+            }
+        }
+
+        if !unmatched_2.is_empty() {
+            println!("[HIER_EQ] Warning: {} unmatched outputs in design 2", unmatched_2.len());
+            for name in unmatched_2.iter().take(5) {
+                println!("  - {}", name);
+            }
+        }
+
+        // Step 4: Run output-only BMC
+        let mut output_status: HashMap<String, bool> = HashMap::new();
+        let mut mismatch_details: Option<MismatchDetails> = None;
+        let mut all_equivalent = true;
+
+        // First do simulation-based quick check
+        println!("[HIER_EQ] Phase 1: Simulation-based verification...");
+
+        for (key, o1_idx, o2_idx) in &matched_outputs {
+            let sim_result = self.simulate_output_equivalence(
+                aig1, aig2,
+                *o1_idx, *o2_idx,
+                &matched_inputs,
+                &aig1_input_map,
+                &aig2_input_map,
+                bound,
+            );
+
+            if let Some((cycle, val1, val2, inputs)) = sim_result {
+                println!("[HIER_EQ] Simulation mismatch on '{}' at cycle {}: {} vs {}",
+                    key, cycle, val1, val2);
+                output_status.insert(key.clone(), false);
+                all_equivalent = false;
+                mismatch_details = Some(MismatchDetails {
+                    output: key.clone(),
+                    cycle,
+                    value_1: val1,
+                    value_2: val2,
+                    input_sequence: inputs,
+                });
+                break; // Stop on first mismatch for debugging
+            } else {
+                output_status.insert(key.clone(), true);
+            }
+        }
+
+        if all_equivalent {
+            println!("[HIER_EQ] Phase 2: SAT-based verification...");
+
+            // SAT-based verification for proof
+            for k in 1..=bound {
+                let sat_result = self.check_cycle_sat(
+                    aig1, aig2,
+                    &matched_outputs,
+                    &matched_inputs,
+                    &aig1_input_map,
+                    &aig2_input_map,
+                    k,
+                )?;
+
+                if let Some((output_key, val1, val2)) = sat_result {
+                    println!("[HIER_EQ] SAT found mismatch on '{}' at cycle {}", output_key, k);
+                    output_status.insert(output_key.clone(), false);
+                    all_equivalent = false;
+                    mismatch_details = Some(MismatchDetails {
+                        output: output_key,
+                        cycle: k,
+                        value_1: val1,
+                        value_2: val2,
+                        input_sequence: vec![],
+                    });
+                    break;
+                }
+
+                if k % 5 == 0 {
+                    println!("[HIER_EQ] Verified equivalent through cycle {}", k);
+                }
+            }
+        }
+
+        if all_equivalent {
+            println!("[HIER_EQ] Designs are equivalent up to bound {}", bound);
+        }
+
+        Ok(HierarchicalEquivalenceResult {
+            equivalent: all_equivalent,
+            bound,
+            output_status,
+            unmatched_outputs_1: unmatched_1,
+            unmatched_outputs_2: unmatched_2,
+            time_ms: start.elapsed().as_millis() as u64,
+            mismatch_details,
+        })
+    }
+
+    /// Match outputs using semantic fingerprinting
+    ///
+    /// This generates fingerprints for each output and matches them by
+    /// signature similarity, not by name.
+    fn match_outputs_semantic(&self, aig1: &Aig, aig2: &Aig) -> Vec<(String, usize, usize)> {
+        let mut matched = Vec::new();
+
+        println!("[HIER_EQ] Generating fingerprints for {} + {} outputs...",
+            aig1.outputs.len(), aig2.outputs.len());
+
+        // Generate fingerprints for design 1
+        let fp1: Vec<SemanticFingerprint> = (0..aig1.outputs.len())
+            .map(|i| SemanticFingerprint::from_output(aig1, i, self.fingerprint_cycles))
+            .collect();
+
+        // Generate fingerprints for design 2
+        let fp2: Vec<SemanticFingerprint> = (0..aig2.outputs.len())
+            .map(|i| SemanticFingerprint::from_output(aig2, i, self.fingerprint_cycles))
+            .collect();
+
+        // Build a map of signature -> outputs in design 2
+        let mut fp2_map: HashMap<u128, Vec<usize>> = HashMap::new();
+        for fp in &fp2 {
+            fp2_map.entry(fp.signature).or_default().push(fp.output_idx);
+        }
+
+        // Match by signature
+        let mut used_outputs_2 = std::collections::HashSet::new();
+
+        for fp in &fp1 {
+            if let Some(candidates) = fp2_map.get(&fp.signature) {
+                // Find a candidate that hasn't been matched yet
+                for &o2_idx in candidates {
+                    if !used_outputs_2.contains(&o2_idx) {
+                        // Use a composite key: try name match first, else use index
+                        let key = if let (Some(n1), Some(n2)) = (
+                            aig1.output_names.get(fp.output_idx),
+                            aig2.output_names.get(o2_idx)
+                        ) {
+                            let k1 = normalize_port_name(n1).key();
+                            let k2 = normalize_port_name(n2).key();
+                            if k1 == k2 {
+                                k1
+                            } else {
+                                format!("fp_{:x}", fp.signature)
+                            }
+                        } else {
+                            format!("fp_{:x}", fp.signature)
+                        };
+
+                        matched.push((key, fp.output_idx, o2_idx));
+                        used_outputs_2.insert(o2_idx);
+                        break;
+                    }
+                }
+            }
+        }
+
+        // Also try name-based matching for outputs that didn't match by fingerprint
+        // (in case they have different behavior due to optimization but same interface)
+        let matched_1: std::collections::HashSet<_> = matched.iter().map(|(_, i, _)| *i).collect();
+        let matched_2: std::collections::HashSet<_> = matched.iter().map(|(_, _, i)| *i).collect();
+
+        let aig2_by_name: HashMap<String, usize> = aig2.output_names.iter()
+            .enumerate()
+            .filter(|(i, _)| !matched_2.contains(i))
+            .map(|(i, n)| (normalize_port_name(n).key(), i))
+            .collect();
+
+        for (o1_idx, name) in aig1.output_names.iter().enumerate() {
+            if matched_1.contains(&o1_idx) {
+                continue;
+            }
+            let key = normalize_port_name(name).key();
+            if let Some(&o2_idx) = aig2_by_name.get(&key) {
+                matched.push((key, o1_idx, o2_idx));
+            }
+        }
+
+        matched
+    }
+
+    /// Match outputs by normalized name only (fallback)
+    fn match_outputs_by_name(&self, aig1: &Aig, aig2: &Aig) -> Vec<(String, usize, usize)> {
+        let mut matched = Vec::new();
+
+        let aig2_outputs: HashMap<String, usize> = aig2.output_names.iter()
+            .enumerate()
+            .map(|(i, name)| (normalize_port_name(name).key(), i))
+            .collect();
+
+        for (i, name) in aig1.output_names.iter().enumerate() {
+            let key = normalize_port_name(name).key();
+            if let Some(&j) = aig2_outputs.get(&key) {
+                matched.push((key, i, j));
+            }
+        }
+
+        matched
+    }
+
+    /// Match inputs by normalized name
+    fn match_inputs(
+        &self,
+        aig1: &Aig,
+        aig2: &Aig,
+    ) -> (Vec<String>, HashMap<String, u32>, HashMap<String, u32>) {
+        let mut matched = Vec::new();
+        let mut aig1_map: HashMap<String, u32> = HashMap::new();
+        let mut aig2_map: HashMap<String, u32> = HashMap::new();
+
+        // Build maps
+        for (idx, node) in aig1.nodes.iter().enumerate() {
+            if let AigNode::Input { name } = node {
+                if !is_internal_signal(name) {
+                    let key = normalize_port_name(name).key();
+                    aig1_map.insert(key, idx as u32);
+                }
+            }
+        }
+
+        for (idx, node) in aig2.nodes.iter().enumerate() {
+            if let AigNode::Input { name } = node {
+                if !is_internal_signal(name) {
+                    let key = normalize_port_name(name).key();
+                    aig2_map.insert(key, idx as u32);
+                }
+            }
+        }
+
+        // Find matches
+        for key in aig1_map.keys() {
+            if aig2_map.contains_key(key) {
+                matched.push(key.clone());
+            }
+        }
+
+        (matched, aig1_map, aig2_map)
+    }
+
+    /// Get unmatched outputs
+    fn get_unmatched_outputs(
+        &self,
+        aig: &Aig,
+        matched: &[(String, usize, usize)],
+        is_first: bool,
+    ) -> Vec<String> {
+        let matched_set: std::collections::HashSet<usize> = if is_first {
+            matched.iter().map(|(_, i, _)| *i).collect()
+        } else {
+            matched.iter().map(|(_, _, i)| *i).collect()
+        };
+
+        aig.output_names.iter()
+            .enumerate()
+            .filter(|(i, _)| !matched_set.contains(i))
+            .map(|(_, n)| n.clone())
+            .collect()
+    }
+
+    /// Simulate output equivalence using deterministic and random patterns
+    fn simulate_output_equivalence(
+        &self,
+        aig1: &Aig,
+        aig2: &Aig,
+        o1_idx: usize,
+        o2_idx: usize,
+        matched_inputs: &[String],
+        aig1_input_map: &HashMap<String, u32>,
+        aig2_input_map: &HashMap<String, u32>,
+        bound: usize,
+    ) -> Option<(usize, bool, bool, Vec<HashMap<String, bool>>)> {
+        // Test with deterministic patterns first
+        let test_patterns: Vec<(&str, Box<dyn Fn(&str, usize) -> bool>)> = vec![
+            ("all-zeros", Box::new(|_, _| false)),
+            ("all-ones", Box::new(|_, _| true)),
+            ("rst-high", Box::new(|key, _| key.contains("rst"))),
+            ("alternating", Box::new(|_, cycle| cycle % 2 == 0)),
+        ];
+
+        for (name, pattern) in &test_patterns {
+            let result = self.simulate_pattern(
+                aig1, aig2, o1_idx, o2_idx,
+                matched_inputs, aig1_input_map, aig2_input_map,
+                bound,
+                |key, cycle| pattern(key, cycle),
+            );
+            if let Some(r) = result {
+                log::debug!("[HIER_EQ] Pattern '{}' found mismatch", name);
+                return Some(r);
+            }
+        }
+
+        // Random simulation using LFSR for deterministic pseudo-random
+        for seed in 0u64..500 {
+            // Use LFSR-based pattern for reproducibility
+            let result = self.simulate_pattern(
+                aig1, aig2, o1_idx, o2_idx,
+                matched_inputs, aig1_input_map, aig2_input_map,
+                bound,
+                |key, cycle| {
+                    // LFSR-based deterministic pseudo-random
+                    let hash = key.as_bytes().iter().fold(seed.wrapping_add(cycle as u64), |acc, &b| {
+                        acc.wrapping_mul(31).wrapping_add(b as u64)
+                    });
+                    hash % 2 == 0
+                },
+            );
+            if result.is_some() {
+                return result;
+            }
+        }
+
+        None
+    }
+
+    /// Simulate a specific input pattern
+    fn simulate_pattern<F>(
+        &self,
+        aig1: &Aig,
+        aig2: &Aig,
+        o1_idx: usize,
+        o2_idx: usize,
+        matched_inputs: &[String],
+        aig1_input_map: &HashMap<String, u32>,
+        aig2_input_map: &HashMap<String, u32>,
+        bound: usize,
+        pattern: F,
+    ) -> Option<(usize, bool, bool, Vec<HashMap<String, bool>>)>
+    where
+        F: Fn(&str, usize) -> bool,
+    {
+        let mut state1 = SemanticFingerprint::get_initial_state(aig1);
+        let mut state2 = SemanticFingerprint::get_initial_state(aig2);
+        let mut input_history: Vec<HashMap<String, bool>> = Vec::new();
+
+        for cycle in 0..bound {
+            // Generate inputs for this cycle
+            let mut inputs1: HashMap<u32, bool> = HashMap::new();
+            let mut inputs2: HashMap<u32, bool> = HashMap::new();
+            let mut input_record: HashMap<String, bool> = HashMap::new();
+
+            for key in matched_inputs {
+                let val = pattern(key, cycle);
+                input_record.insert(key.clone(), val);
+                if let Some(&id) = aig1_input_map.get(key) {
+                    inputs1.insert(id, val);
+                }
+                if let Some(&id) = aig2_input_map.get(key) {
+                    inputs2.insert(id, val);
+                }
+            }
+            input_history.push(input_record);
+
+            // Simulate both designs
+            let (values1, next_state1) = SemanticFingerprint::simulate_cycle(aig1, &inputs1, &state1);
+            let (values2, next_state2) = SemanticFingerprint::simulate_cycle(aig2, &inputs2, &state2);
+
+            // Extract output values
+            let out1_lit = &aig1.outputs[o1_idx];
+            let out1_val = values1.get(&out1_lit.node.0).copied().unwrap_or(false);
+            let out1_val = if out1_lit.inverted { !out1_val } else { out1_val };
+
+            let out2_lit = &aig2.outputs[o2_idx];
+            let out2_val = values2.get(&out2_lit.node.0).copied().unwrap_or(false);
+            let out2_val = if out2_lit.inverted { !out2_val } else { out2_val };
+
+            if out1_val != out2_val {
+                return Some((cycle, out1_val, out2_val, input_history));
+            }
+
+            state1 = next_state1;
+            state2 = next_state2;
+        }
+
+        None
+    }
+
+    /// SAT-based verification for a specific cycle
+    fn check_cycle_sat(
+        &self,
+        aig1: &Aig,
+        aig2: &Aig,
+        matched_outputs: &[(String, usize, usize)],
+        matched_inputs: &[String],
+        aig1_input_map: &HashMap<String, u32>,
+        aig2_input_map: &HashMap<String, u32>,
+        k: usize,
+    ) -> FormalResult<Option<(String, bool, bool)>> {
+        // For each output pair, build a fresh formula and check
+        for (key, o1_idx, o2_idx) in matched_outputs {
+            let mut solver = Solver::new();
+            let mut formula = CnfFormula::new();
+            let mut var_map: HashMap<(u8, u32, usize), Var> = HashMap::new();
+            let mut var_counter = 0usize;
+
+            // Build CNF for both AIGs unrolled k cycles
+            Self::build_unrolled_cnf_direct(aig1, 1, k, &mut formula, &mut var_map, &mut var_counter);
+            Self::build_unrolled_cnf_direct(aig2, 2, k, &mut formula, &mut var_map, &mut var_counter);
+
+            // Tie inputs together at each cycle
+            for cycle in 0..k {
+                for inp_key in matched_inputs {
+                    if let (Some(&id1), Some(&id2)) = (aig1_input_map.get(inp_key), aig2_input_map.get(inp_key)) {
+                        let var1 = Self::get_or_create_var(&mut var_map, &mut var_counter, 1, id1, cycle);
+                        let var2 = Self::get_or_create_var(&mut var_map, &mut var_counter, 2, id2, cycle);
+                        // var1 <=> var2
+                        formula.add_clause(&[Lit::negative(var1), Lit::positive(var2)]);
+                        formula.add_clause(&[Lit::positive(var1), Lit::negative(var2)]);
+                    }
+                }
+            }
+
+            let out1_lit = &aig1.outputs[*o1_idx];
+            let out2_lit = &aig2.outputs[*o2_idx];
+
+            let var1 = Self::get_or_create_var(&mut var_map, &mut var_counter, 1, out1_lit.node.0, k - 1);
+            let var2 = Self::get_or_create_var(&mut var_map, &mut var_counter, 2, out2_lit.node.0, k - 1);
+
+            // Create miter: XOR of outputs
+            let lit1 = if out1_lit.inverted { Lit::negative(var1) } else { Lit::positive(var1) };
+            let lit2 = if out2_lit.inverted { Lit::negative(var2) } else { Lit::positive(var2) };
+
+            // Check if XOR can be true (outputs can differ)
+            // XOR(a,b) = (a v b) & (!a v !b)
+            formula.add_clause(&[lit1, lit2]);
+            formula.add_clause(&[!lit1, !lit2]);
+
+            solver.add_formula(&formula);
+
+            match solver.solve() {
+                Ok(true) => {
+                    // SAT - found a case where outputs differ
+                    return Ok(Some((key.clone(), false, false)));
+                }
+                Ok(false) => {
+                    // UNSAT for this output - they're equivalent at this cycle
+                }
+                Err(e) => {
+                    return Err(FormalError::PropertyFailed(format!("SAT solver error: {:?}", e)));
+                }
+            }
+        }
+
+        Ok(None)
+    }
+
+    /// Helper to get or create a SAT variable
+    fn get_or_create_var(
+        var_map: &mut HashMap<(u8, u32, usize), Var>,
+        var_counter: &mut usize,
+        aig_id: u8,
+        node_id: u32,
+        cycle: usize,
+    ) -> Var {
+        let key = (aig_id, node_id, cycle);
+        *var_map.entry(key).or_insert_with(|| {
+            let v = Var::from_index(*var_counter);
+            *var_counter += 1;
+            v
+        })
+    }
+
+    /// Build CNF for an unrolled AIG (direct version)
+    fn build_unrolled_cnf_direct(
+        aig: &Aig,
+        aig_id: u8,
+        k: usize,
+        formula: &mut CnfFormula,
+        var_map: &mut HashMap<(u8, u32, usize), Var>,
+        var_counter: &mut usize,
+    ) {
+        // Constant false at all cycles
+        for cycle in 0..k {
+            let var = Self::get_or_create_var(var_map, var_counter, aig_id, 0, cycle);
+            formula.add_clause(&[Lit::negative(var)]);
+        }
+
+        // Initialize latches at cycle 0
+        for latch_id in &aig.latches {
+            if let AigNode::Latch { init, .. } = &aig.nodes[latch_id.0 as usize] {
+                let var = Self::get_or_create_var(var_map, var_counter, aig_id, latch_id.0, 0);
+                if *init {
+                    formula.add_clause(&[Lit::positive(var)]);
+                } else {
+                    formula.add_clause(&[Lit::negative(var)]);
+                }
+            }
+        }
+
+        // Unroll each cycle
+        for cycle in 0..k {
+            // Encode AND gates
+            for (idx, node) in aig.nodes.iter().enumerate() {
+                let idx = idx as u32;
+                if let AigNode::And { left, right } = node {
+                    let out_var = Self::get_or_create_var(var_map, var_counter, aig_id, idx, cycle);
+                    let left_var = Self::get_or_create_var(var_map, var_counter, aig_id, left.node.0, cycle);
+                    let right_var = Self::get_or_create_var(var_map, var_counter, aig_id, right.node.0, cycle);
+
+                    let left_lit = if left.inverted {
+                        Lit::negative(left_var)
+                    } else {
+                        Lit::positive(left_var)
+                    };
+                    let right_lit = if right.inverted {
+                        Lit::negative(right_var)
+                    } else {
+                        Lit::positive(right_var)
+                    };
+
+                    // out = left & right
+                    // CNF: (!out | left) & (!out | right) & (out | !left | !right)
+                    formula.add_clause(&[Lit::negative(out_var), left_lit]);
+                    formula.add_clause(&[Lit::negative(out_var), right_lit]);
+                    formula.add_clause(&[Lit::positive(out_var), !left_lit, !right_lit]);
+                }
+            }
+
+            // Connect latches to next cycle (if not last cycle)
+            if cycle + 1 < k {
+                for latch_id in &aig.latches {
+                    if let AigNode::Latch { next, .. } = &aig.nodes[latch_id.0 as usize] {
+                        let next_var = Self::get_or_create_var(var_map, var_counter, aig_id, next.node.0, cycle);
+                        let latch_var = Self::get_or_create_var(var_map, var_counter, aig_id, latch_id.0, cycle + 1);
+
+                        let next_lit = if next.inverted {
+                            Lit::negative(next_var)
+                        } else {
+                            Lit::positive(next_var)
+                        };
+
+                        // latch[cycle+1] = next[cycle]
+                        formula.add_clause(&[Lit::negative(latch_var), next_lit]);
+                        formula.add_clause(&[Lit::positive(latch_var), !next_lit]);
+                    }
+                }
+            }
+
+            // Connect state inputs to their linked latches
+            for (&state_input_id, &latch_id) in &aig.state_input_to_latch {
+                let input_var = Self::get_or_create_var(var_map, var_counter, aig_id, state_input_id, cycle);
+                let latch_var = Self::get_or_create_var(var_map, var_counter, aig_id, latch_id, cycle);
+                formula.add_clause(&[Lit::negative(input_var), Lit::positive(latch_var)]);
+                formula.add_clause(&[Lit::positive(input_var), Lit::negative(latch_var)]);
+            }
+        }
+    }
+
+    /// Check equivalence between MIR hierarchy and gate netlist
+    pub fn check_mir_vs_gates(
+        &self,
+        mir: &skalp_mir::Mir,
+        top_module: &skalp_mir::Module,
+        netlist: &GateNetlist,
+        bound: usize,
+    ) -> FormalResult<HierarchicalEquivalenceResult> {
+        println!("\n[HIER_EQ] Converting MIR hierarchy to AIG...");
+        let mir_aig = MirToAig::new_with_mir(mir, top_module).convert_sequential_hierarchical();
+
+        println!("[HIER_EQ] Converting GateNetlist to AIG...");
+        let gate_aig = GateNetlistToAig::new().convert_sequential(netlist);
+
+        self.check_equivalence(&mir_aig, &gate_aig, bound)
+    }
+
+    /// Check equivalence between LIR and gate netlist
+    pub fn check_lir_vs_gates(
+        &self,
+        lir: &Lir,
+        netlist: &GateNetlist,
+        bound: usize,
+    ) -> FormalResult<HierarchicalEquivalenceResult> {
+        println!("\n[HIER_EQ] Converting LIR to AIG...");
+        let lir_aig = LirToAig::new().convert_sequential(lir);
+
+        println!("[HIER_EQ] Converting GateNetlist to AIG...");
+        let gate_aig = GateNetlistToAig::new().convert_sequential(netlist);
+
+        self.check_equivalence(&lir_aig, &gate_aig, bound)
+    }
+}
+
+impl Default for HierarchicalEquivalenceChecker {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
 
