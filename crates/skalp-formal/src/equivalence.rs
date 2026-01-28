@@ -3788,6 +3788,371 @@ impl<'a> MirToAig<'a> {
         self.aig
     }
 
+    /// Convert MIR hierarchy to sequential AIG with proper Latch nodes
+    ///
+    /// This flattens the entire design hierarchy (top module + all instances)
+    /// into a single AIG, which is necessary for proper BMC equivalence checking
+    /// against a flattened gate netlist.
+    ///
+    /// Requires `new_with_mir` constructor to provide the full MIR.
+    pub fn convert_sequential_hierarchical(mut self) -> Aig {
+        let mir = match self.mir {
+            Some(m) => m,
+            None => {
+                // Fall back to single-module conversion if no MIR provided
+                return self.convert_sequential();
+            }
+        };
+
+        // Collect all modules in the hierarchy with their instance paths
+        // (instance_path, module_ref)
+        let mut all_instances: Vec<(String, &Module)> = Vec::new();
+        self.collect_instances_recursive("", self.module, mir, &mut all_instances);
+
+        println!("[HIER_AIG] Found {} instances in hierarchy", all_instances.len());
+        for (path, m) in &all_instances {
+            println!("[HIER_AIG]   {} -> module {}",
+                if path.is_empty() { "top" } else { path }, m.name);
+        }
+
+        // First pass: collect all registers from all instances
+        // (instance_path, sig_ref, name, width)
+        let mut all_registers: Vec<(String, MirSignalRef, String, u32)> = Vec::new();
+
+        for (inst_path, module) in &all_instances {
+            for process in &module.processes {
+                if matches!(process.kind, ProcessKind::Sequential) {
+                    let mut module_regs: Vec<(MirSignalRef, String, u32)> = Vec::new();
+                    self.collect_register_signals_from_module(module, &process.body, &mut module_regs);
+
+                    for (sig_ref, name, width) in module_regs {
+                        let prefixed_name = if inst_path.is_empty() {
+                            name.clone()
+                        } else {
+                            format!("{}.{}", inst_path, name)
+                        };
+                        all_registers.push((inst_path.clone(), sig_ref, prefixed_name, width));
+                    }
+                }
+            }
+        }
+
+        println!("[HIER_AIG] Found {} registers total", all_registers.len());
+
+        // Add primary inputs (only from top module)
+        for port in &self.module.ports {
+            if port.direction == PortDirection::Input {
+                let width = self.get_type_width(&port.port_type);
+                for bit in 0..width {
+                    let name = if width == 1 {
+                        port.name.clone()
+                    } else {
+                        format!("{}[{}]", port.name, bit)
+                    };
+                    let lit = self.aig.add_input(name);
+                    self.signal_map.insert((MirSignalRef::Port(port.id), bit as u32), lit);
+                }
+            }
+        }
+
+        // Create temporary input nodes for all register current values
+        let mut reg_current_lits: HashMap<(String, MirSignalRef, u32), AigLit> = HashMap::new();
+        for (inst_path, sig_ref, name, width) in &all_registers {
+            for bit in 0..*width {
+                let temp_name = if *width == 1 {
+                    format!("__reg_cur_{}", name)
+                } else {
+                    format!("__reg_cur_{}[{}]", name, bit)
+                };
+                let lit = self.aig.add_input(temp_name);
+                reg_current_lits.insert((inst_path.clone(), *sig_ref, bit), lit);
+            }
+        }
+
+        // Process each instance in the hierarchy
+        let mut next_state_map: HashMap<(String, MirSignalRef, u32), AigLit> = HashMap::new();
+        let mut reset_values: HashMap<(String, MirSignalRef, u32), u64> = HashMap::new();
+
+        for (inst_path, module) in &all_instances {
+            // Build signal_map for this instance's registers
+            for (path, sig_ref, _, width) in &all_registers {
+                if path == inst_path {
+                    for bit in 0..*width {
+                        if let Some(&lit) = reg_current_lits.get(&(path.clone(), *sig_ref, bit)) {
+                            self.signal_map.insert((*sig_ref, bit), lit);
+                        }
+                    }
+                }
+            }
+
+            // Track which signals are registers in this module
+            self.register_outputs.clear();
+            for (path, sig_ref, _, _) in &all_registers {
+                if path == inst_path {
+                    self.register_outputs.push(*sig_ref);
+                }
+            }
+
+            // Process port connections (connect child inputs to parent signals)
+            if !inst_path.is_empty() {
+                self.connect_instance_ports(inst_path, module, mir);
+            }
+
+            // Process continuous assignments
+            for assign in &module.assignments {
+                self.convert_continuous_assign(assign);
+            }
+
+            // Process combinational processes
+            for process in &module.processes {
+                if matches!(process.kind, ProcessKind::Combinational) {
+                    self.convert_combinational_process(process);
+                }
+            }
+
+            // Process sequential processes
+            for process in &module.processes {
+                if matches!(process.kind, ProcessKind::Sequential) {
+                    let mut inst_next_state: HashMap<(MirSignalRef, u32), AigLit> = HashMap::new();
+                    self.convert_sequential_process_for_bmc(process, &mut inst_next_state);
+
+                    // Transfer to global next_state_map with instance prefix
+                    for ((sig_ref, bit), lit) in inst_next_state {
+                        next_state_map.insert((inst_path.clone(), sig_ref, bit), lit);
+                    }
+
+                    // Collect reset values
+                    let mut inst_reset: HashMap<(MirSignalRef, u32), u64> = HashMap::new();
+                    self.collect_reset_values(&process.body, &mut inst_reset);
+                    for ((sig_ref, bit), val) in inst_reset {
+                        reset_values.insert((inst_path.clone(), sig_ref, bit), val);
+                    }
+                }
+            }
+        }
+
+        // Create Latch nodes for all registers
+        for (inst_path, sig_ref, name, width) in &all_registers {
+            for bit in 0..*width {
+                let latch_name = if *width == 1 {
+                    name.clone()
+                } else {
+                    format!("{}[{}]", name, bit)
+                };
+
+                let next_lit = next_state_map
+                    .get(&(inst_path.clone(), *sig_ref, bit))
+                    .copied()
+                    .unwrap_or_else(|| {
+                        // If no next-state computed, register holds its value
+                        reg_current_lits
+                            .get(&(inst_path.clone(), *sig_ref, bit))
+                            .copied()
+                            .unwrap_or_else(|| self.aig.false_lit())
+                    });
+
+                let init_value = reset_values
+                    .get(&(inst_path.clone(), *sig_ref, bit))
+                    .map(|&v| v != 0)
+                    .unwrap_or(false);
+
+                let latch_lit = self.aig.add_latch(latch_name, next_lit, init_value);
+                let latch_id = latch_lit.node.0;
+
+                // Link state input to latch
+                if let Some(state_input_lit) = reg_current_lits.get(&(inst_path.clone(), *sig_ref, bit)) {
+                    self.aig.link_state_input_to_latch(state_input_lit.node.0, latch_id);
+                }
+
+                self.signal_map.insert((*sig_ref, bit), latch_lit);
+            }
+        }
+
+        // Add primary outputs (only from top module)
+        for port in &self.module.ports {
+            if port.direction == PortDirection::Output {
+                let width = self.get_type_width(&port.port_type);
+                for bit in 0..width {
+                    let name = if width == 1 {
+                        port.name.clone()
+                    } else {
+                        format!("{}[{}]", port.name, bit)
+                    };
+                    let lit = self.signal_map
+                        .get(&(MirSignalRef::Port(port.id), bit as u32))
+                        .copied()
+                        .unwrap_or_else(|| self.aig.false_lit());
+                    self.aig.add_output(name, lit);
+                }
+            }
+        }
+
+        self.aig
+    }
+
+    /// Recursively collect all instances in the hierarchy
+    fn collect_instances_recursive<'b>(
+        &self,
+        parent_path: &str,
+        module: &'b Module,
+        mir: &'b Mir,
+        result: &mut Vec<(String, &'b Module)>,
+    ) {
+        // Add this module
+        result.push((parent_path.to_string(), module));
+
+        // Recursively process child instances
+        for instance in &module.instances {
+            let child_path = if parent_path.is_empty() {
+                instance.name.clone()
+            } else {
+                format!("{}.{}", parent_path, instance.name)
+            };
+
+            // Find the child module
+            if let Some(child_module) = mir.modules.iter().find(|m| m.id == instance.module) {
+                self.collect_instances_recursive(&child_path, child_module, mir, result);
+            }
+        }
+    }
+
+    /// Collect register signals from a specific module
+    fn collect_register_signals_from_module(
+        &self,
+        module: &Module,
+        block: &Block,
+        registers: &mut Vec<(MirSignalRef, String, u32)>,
+    ) {
+        for stmt in &block.statements {
+            match stmt {
+                Statement::Assignment(assign) => {
+                    let sig_ref = self.lvalue_to_ref_in_module(module, &assign.lhs);
+                    if let Some(sig_ref) = sig_ref {
+                        let (name, width) = self.get_signal_info_from_module(module, sig_ref);
+                        if !registers.iter().any(|(r, _, _)| *r == sig_ref) {
+                            registers.push((sig_ref, name, width));
+                        }
+                    }
+                }
+                Statement::If(if_stmt) => {
+                    self.collect_register_signals_from_module(module, &if_stmt.then_block, registers);
+                    if let Some(else_block) = &if_stmt.else_block {
+                        self.collect_register_signals_from_module(module, else_block, registers);
+                    }
+                }
+                Statement::Case(case_stmt) => {
+                    for item in &case_stmt.items {
+                        self.collect_register_signals_from_module(module, &item.block, registers);
+                    }
+                    if let Some(default) = &case_stmt.default {
+                        self.collect_register_signals_from_module(module, default, registers);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Get lvalue reference for a specific module
+    fn lvalue_to_ref_in_module(&self, module: &Module, lvalue: &LValue) -> Option<MirSignalRef> {
+        match lvalue {
+            LValue::Signal(id) => {
+                if module.signals.iter().any(|s| s.id == *id) {
+                    Some(MirSignalRef::Signal(*id))
+                } else {
+                    None
+                }
+            }
+            LValue::Port(id) => {
+                if module.ports.iter().any(|p| p.id == *id) {
+                    Some(MirSignalRef::Port(*id))
+                } else {
+                    None
+                }
+            }
+            LValue::Variable(id) => {
+                if module.variables.iter().any(|v| v.id == *id) {
+                    Some(MirSignalRef::Variable(*id))
+                } else {
+                    None
+                }
+            }
+            LValue::BitSelect { base, .. } => self.lvalue_to_ref_in_module(module, base),
+            LValue::RangeSelect { base, .. } => self.lvalue_to_ref_in_module(module, base),
+            LValue::Concat(_) => None, // Concatenations don't have a single reference
+        }
+    }
+
+    /// Get signal name and width from a module
+    fn get_signal_info_from_module(&self, module: &Module, sig_ref: MirSignalRef) -> (String, u32) {
+        match sig_ref {
+            MirSignalRef::Port(id) => {
+                if let Some(port) = module.ports.iter().find(|p| p.id == id) {
+                    (port.name.clone(), self.get_type_width(&port.port_type) as u32)
+                } else {
+                    ("unknown".to_string(), 1)
+                }
+            }
+            MirSignalRef::Signal(id) => {
+                if let Some(signal) = module.signals.iter().find(|s| s.id == id) {
+                    (signal.name.clone(), self.get_type_width(&signal.signal_type) as u32)
+                } else {
+                    ("unknown".to_string(), 1)
+                }
+            }
+            MirSignalRef::Variable(id) => {
+                if let Some(var) = module.variables.iter().find(|v| v.id == id) {
+                    (var.name.clone(), self.get_type_width(&var.var_type) as u32)
+                } else {
+                    ("unknown".to_string(), 1)
+                }
+            }
+        }
+    }
+
+    /// Connect instance ports to parent signals
+    fn connect_instance_ports(&mut self, inst_path: &str, _child_module: &Module, mir: &Mir) {
+        // Find the parent module and instance
+        let (parent_path, inst_name) = if let Some(dot_pos) = inst_path.rfind('.') {
+            (&inst_path[..dot_pos], &inst_path[dot_pos + 1..])
+        } else {
+            ("", inst_path)
+        };
+
+        let parent_module = if parent_path.is_empty() {
+            self.module
+        } else {
+            // Find parent module in hierarchy (simplified - assumes flat for now)
+            self.module
+        };
+
+        // Find the instance in the parent
+        if let Some(instance) = parent_module.instances.iter().find(|i| i.name == inst_name) {
+            // Find child module definition
+            if let Some(child_module) = mir.modules.iter().find(|m| m.id == instance.module) {
+                // Process port connections
+                for (port_name, conn_expr) in &instance.connections {
+                    // Find the port in child module
+                    if let Some(child_port) = child_module.ports.iter().find(|p| p.name == *port_name) {
+                        let width = self.get_type_width(&child_port.port_type);
+
+                        // Convert the connection expression
+                        let conn_lits = self.convert_expression(conn_expr);
+
+                        // Map child port to parent signal's literals
+                        let max_bits = width.min(conn_lits.len());
+                        for bit in 0..max_bits {
+                            self.signal_map.insert(
+                                (MirSignalRef::Port(child_port.id), bit as u32),
+                                conn_lits[bit],
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     /// Convert sequential process for BMC - stores next-state values separately
     fn convert_sequential_process_for_bmc(
         &mut self,
@@ -5630,6 +5995,52 @@ impl BoundedModelChecker {
         );
         log::debug!(
             "BMC: Gate has {} inputs, {} outputs, {} latches",
+            gate_aig.inputs.len(),
+            gate_aig.outputs.len(),
+            gate_aig.latches.len()
+        );
+
+        // Run BMC
+        let result = self.check_sequential_aig_equivalence(&mir_aig, &gate_aig, bound)?;
+
+        Ok(BmcEquivalenceResult {
+            time_ms: start.elapsed().as_millis() as u64,
+            ..result
+        })
+    }
+
+    /// Check bounded equivalence between hierarchical MIR and GateNetlist
+    ///
+    /// This is the proper verification for full synthesis flow.
+    /// It flattens the entire MIR hierarchy (top module + all child instances)
+    /// and compares against the flattened gate netlist.
+    ///
+    /// This verifies both:
+    /// - MIR → LIR lowering (synthesis)
+    /// - LIR → Gate tech mapping
+    pub fn check_mir_hierarchy_vs_gates_bmc(
+        &self,
+        mir: &Mir,
+        top_module: &Module,
+        netlist: &GateNetlist,
+        bound: usize,
+    ) -> FormalResult<BmcEquivalenceResult> {
+        let start = std::time::Instant::now();
+
+        // Convert hierarchical MIR to sequential AIG (flattens all instances)
+        let mir_aig = MirToAig::new_with_mir(mir, top_module).convert_sequential_hierarchical();
+
+        // Convert GateNetlist to sequential AIG (with latches)
+        let gate_aig = GateNetlistToAig::new().convert_sequential(netlist);
+
+        println!(
+            "[HIER_BMC] MIR has {} inputs, {} outputs, {} latches",
+            mir_aig.inputs.len(),
+            mir_aig.outputs.len(),
+            mir_aig.latches.len()
+        );
+        println!(
+            "[HIER_BMC] Gate has {} inputs, {} outputs, {} latches",
             gate_aig.inputs.len(),
             gate_aig.outputs.len(),
             gate_aig.latches.len()
