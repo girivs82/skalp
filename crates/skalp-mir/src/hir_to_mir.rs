@@ -1544,7 +1544,10 @@ impl<'hir> HirToMir<'hir> {
                         }
                     }
 
-                    // Convert formal verification statements (assert!/assume!/cover!)
+                    // Convert formal verification statements AND Let statements for entity instantiation
+                    // BUG FIX: Previously only Assert/Assume/Cover were handled, but Let statements
+                    // with entity struct literals (e.g., `let voltage_loop = PiController { ... }`)
+                    // were being ignored, causing PI controllers in CcCvController to be missing
                     for stmt in &impl_block.statements {
                         match stmt {
                             hir::HirStatement::Assert(assert_stmt) => {
@@ -1584,9 +1587,27 @@ impl<'hir> HirToMir<'hir> {
                                     }
                                 }
                             }
-                            _ => {} // Ignore other statement types
+                            hir::HirStatement::Let(let_stmt) => {
+                                // BUG FIX: Handle Let statements with entity instantiation via struct literals
+                                // This enables patterns like: let voltage_loop = PiController { ... }
+                                // which create child module instances
+                                trace!(
+                                    "[IMPL_BLOCK_LET] Processing Let '{}' in impl block statements",
+                                    let_stmt.name
+                                );
+                                // convert_statement handles entity instantiation detection internally
+                                // and pushes to pending_entity_instances if it's an entity struct literal
+                                let _ = self.convert_statement(stmt);
+                            }
+                            _ => {} // Ignore other statement types (handled elsewhere or not applicable)
                         }
                     }
+
+                    // BUG FIX: Drain any pending entity instances created from Let statements above
+                    // These weren't being drained before because the earlier drain happened before
+                    // the statements loop
+                    self.drain_pending_entity_instances(module);
+                    self.drain_pending_module_instances(module);
 
                     // Clean up generic parameter bindings for this impl block
                     for name in &bound_generic_names {
@@ -16366,16 +16387,18 @@ impl<'hir> HirToMir<'hir> {
             hir::HirType::FixedParametric {
                 width,
                 frac,
-                signed: _,
+                signed,
             } => {
-                // TODO: Evaluate width and frac expressions
-                // For now, map to Bit type with evaluated width
+                // Evaluate width, frac, and signed expressions
+                // Map to Int (signed) or Nat (unsigned) based on signed parameter
                 match (
                     self.try_eval_const_expr(width),
                     self.try_eval_const_expr(frac),
+                    self.try_eval_const_expr(signed),
                 ) {
-                    (Some(w), Some(_f)) => DataType::Bit(w as usize),
-                    _ => DataType::Bit(32), // Fallback
+                    (Some(w), Some(_f), Some(s)) if s != 0 => DataType::Int(w as usize),
+                    (Some(w), Some(_f), _) => DataType::Nat(w as usize),
+                    _ => DataType::Int(32), // Fallback to signed 32-bit
                 }
             }
             hir::HirType::IntParametric { width, signed } => {
