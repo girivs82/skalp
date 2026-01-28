@@ -6134,16 +6134,18 @@ impl BoundedModelChecker {
         let gate_aig = GateNetlistToAig::new().convert_sequential(netlist);
 
         println!(
-            "[HIER_BMC] MIR has {} inputs, {} outputs, {} latches",
+            "[HIER_BMC] MIR has {} inputs, {} outputs, {} latches, {} state_input_to_latch mappings",
             mir_aig.inputs.len(),
             mir_aig.outputs.len(),
-            mir_aig.latches.len()
+            mir_aig.latches.len(),
+            mir_aig.state_input_to_latch.len()
         );
         println!(
-            "[HIER_BMC] Gate has {} inputs, {} outputs, {} latches",
+            "[HIER_BMC] Gate has {} inputs, {} outputs, {} latches, {} state_input_to_latch mappings",
             gate_aig.inputs.len(),
             gate_aig.outputs.len(),
-            gate_aig.latches.len()
+            gate_aig.latches.len(),
+            gate_aig.state_input_to_latch.len()
         );
 
         // Run BMC
