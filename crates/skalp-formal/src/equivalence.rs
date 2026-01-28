@@ -3816,11 +3816,7 @@ impl<'a> MirToAig<'a> {
         let mut all_instances: Vec<(String, &Module)> = Vec::new();
         self.collect_instances_recursive("", self.module, mir, &mut all_instances);
 
-        println!("[HIER_AIG] Found {} instances in hierarchy", all_instances.len());
-        for (path, m) in &all_instances {
-            println!("[HIER_AIG]   {} -> module {}",
-                if path.is_empty() { "top" } else { path }, m.name);
-        }
+        log::debug!("[HIER_AIG] Found {} instances in hierarchy", all_instances.len());
 
         // First pass: collect all registers from all instances
         // (instance_path, sig_ref, name, width)
@@ -3844,7 +3840,7 @@ impl<'a> MirToAig<'a> {
             }
         }
 
-        println!("[HIER_AIG] Found {} registers total", all_registers.len());
+        log::debug!("[HIER_AIG] Found {} registers total", all_registers.len());
 
         // Add primary inputs (only from top module)
         for port in &self.module.ports {
@@ -4025,10 +4021,31 @@ impl<'a> MirToAig<'a> {
                 format!("{}.{}", parent_path, instance.name)
             };
 
-            // Find the child module
-            if let Some(child_module) = mir.modules.iter().find(|m| m.id == instance.module) {
-                self.collect_instances_recursive(&child_path, child_module, mir, result);
-            }
+            // Find the child module - try direct match first
+            let child_module = mir.modules.iter().find(|m| m.id == instance.module);
+
+            // If found module has no instances but there's a monomorphized version, use that
+            let resolved_module = if let Some(m) = child_module {
+                if m.instances.is_empty() {
+                    // Look for monomorphized version (e.g., "Foo" -> "Foo_10" or "Foo_10_1000")
+                    let base_name = &m.name;
+                    mir.modules.iter()
+                        .filter(|mm| {
+                            mm.name.starts_with(base_name) &&
+                            mm.name.len() > base_name.len() &&
+                            mm.name.chars().nth(base_name.len()) == Some('_') &&
+                            !mm.instances.is_empty() // Must have instances
+                        })
+                        .next()
+                        .unwrap_or(m)
+                } else {
+                    m
+                }
+            } else {
+                continue;
+            };
+
+            self.collect_instances_recursive(&child_path, resolved_module, mir, result);
         }
 
         // Add this module after all children (post-order)
