@@ -3540,10 +3540,12 @@ pub enum MirSignalRef {
 /// This converts behavioral RTL (if/else, case, processes) to combinational
 /// logic (AND-Inverter Graph) for formal verification.
 pub struct MirToAig<'a> {
-    /// The module being converted
+    /// The top-level module being converted
     module: &'a Module,
     /// Full MIR design (for hierarchical flattening)
     mir: Option<&'a Mir>,
+    /// Current module being processed (for hierarchical conversion)
+    current_module: Option<&'a Module>,
     /// The AIG being built
     pub aig: Aig,
     /// Map from (MirSignalRef, bit_index) to current AigLit
@@ -3559,6 +3561,7 @@ impl<'a> MirToAig<'a> {
         let mut converter = Self {
             module,
             mir: None,
+            current_module: None,
             aig: Aig::new(),
             signal_map: HashMap::new(),
             name_to_ref: HashMap::new(),
@@ -3576,6 +3579,7 @@ impl<'a> MirToAig<'a> {
         let mut converter = Self {
             module: top_module,
             mir: Some(mir),
+            current_module: None,
             aig: Aig::new(),
             signal_map: HashMap::new(),
             name_to_ref: HashMap::new(),
@@ -3602,17 +3606,20 @@ impl<'a> MirToAig<'a> {
 
     /// Find a port by its ID
     fn find_port(&self, id: PortId) -> Option<&Port> {
-        self.module.ports.iter().find(|p| p.id == id)
+        let module = self.current_module.unwrap_or(self.module);
+        module.ports.iter().find(|p| p.id == id)
     }
 
     /// Find a signal by its ID
     fn find_signal(&self, id: SignalId) -> Option<&Signal> {
-        self.module.signals.iter().find(|s| s.id == id)
+        let module = self.current_module.unwrap_or(self.module);
+        module.signals.iter().find(|s| s.id == id)
     }
 
     /// Find a variable by its ID
     fn find_variable(&self, id: VariableId) -> Option<&skalp_mir::Variable> {
-        self.module.variables.iter().find(|v| v.id == id)
+        let module = self.current_module.unwrap_or(self.module);
+        module.variables.iter().find(|v| v.id == id)
     }
 
     /// Convert MIR module to AIG
@@ -3874,6 +3881,9 @@ impl<'a> MirToAig<'a> {
         let mut reset_values: HashMap<(String, MirSignalRef, u32), u64> = HashMap::new();
 
         for (inst_path, module) in &all_instances {
+            // Set current module for this iteration
+            self.current_module = Some(*module);
+
             // Build signal_map for this instance's registers
             for (path, sig_ref, _, width) in &all_registers {
                 if path == inst_path {
@@ -3893,9 +3903,9 @@ impl<'a> MirToAig<'a> {
                 }
             }
 
-            // Process port connections (connect child inputs to parent signals)
+            // Connect INPUT ports from parent to child (before processing child)
             if !inst_path.is_empty() {
-                self.connect_instance_ports(inst_path, module, mir);
+                self.connect_instance_inputs(inst_path, mir);
             }
 
             // Process continuous assignments
@@ -3929,7 +3939,15 @@ impl<'a> MirToAig<'a> {
                     }
                 }
             }
+
+            // Connect OUTPUT ports from child to parent (after processing child)
+            if !inst_path.is_empty() {
+                self.connect_instance_outputs(inst_path, mir);
+            }
         }
+
+        // Reset current_module to top module for final processing
+        self.current_module = None;
 
         // Create Latch nodes for all registers
         for (inst_path, sig_ref, name, width) in &all_registers {
@@ -3990,7 +4008,8 @@ impl<'a> MirToAig<'a> {
         self.aig
     }
 
-    /// Recursively collect all instances in the hierarchy
+    /// Recursively collect all instances in the hierarchy (post-order)
+    /// Children are added before parents so their outputs are computed first
     fn collect_instances_recursive<'b>(
         &self,
         parent_path: &str,
@@ -3998,10 +4017,7 @@ impl<'a> MirToAig<'a> {
         mir: &'b Mir,
         result: &mut Vec<(String, &'b Module)>,
     ) {
-        // Add this module
-        result.push((parent_path.to_string(), module));
-
-        // Recursively process child instances
+        // First, recursively process child instances (post-order traversal)
         for instance in &module.instances {
             let child_path = if parent_path.is_empty() {
                 instance.name.clone()
@@ -4014,6 +4030,24 @@ impl<'a> MirToAig<'a> {
                 self.collect_instances_recursive(&child_path, child_module, mir, result);
             }
         }
+
+        // Add this module after all children (post-order)
+        result.push((parent_path.to_string(), module));
+    }
+
+    /// Find the module for a given instance path (e.g., "protection" -> ProtectionSystem module)
+    fn find_module_for_instance_path(&self, mir: &'a Mir, inst_path: &str) -> Option<&'a Module> {
+        let parts: Vec<&str> = inst_path.split('.').collect();
+        let mut current_module: &'a Module = self.module;
+
+        for part in parts {
+            // Find the instance in current module
+            let instance = current_module.instances.iter().find(|i| i.name == part)?;
+            // Find the module definition
+            current_module = mir.modules.iter().find(|m| m.id == instance.module)?;
+        }
+
+        Some(current_module)
     }
 
     /// Collect register signals from a specific module
@@ -4110,8 +4144,9 @@ impl<'a> MirToAig<'a> {
         }
     }
 
-    /// Connect instance ports to parent signals
-    fn connect_instance_ports(&mut self, inst_path: &str, _child_module: &Module, mir: &Mir) {
+    /// Connect instance INPUT ports to parent signals (before processing child)
+    /// Maps parent expressions to child input port IDs
+    fn connect_instance_inputs(&mut self, inst_path: &str, mir: &Mir) {
         // Find the parent module and instance
         let (parent_path, inst_name) = if let Some(dot_pos) = inst_path.rfind('.') {
             (&inst_path[..dot_pos], &inst_path[dot_pos + 1..])
@@ -4122,30 +4157,95 @@ impl<'a> MirToAig<'a> {
         let parent_module = if parent_path.is_empty() {
             self.module
         } else {
-            // Find parent module in hierarchy (simplified - assumes flat for now)
-            self.module
+            // Find the parent module by traversing the instance path
+            self.find_module_for_instance_path(mir, parent_path)
+                .unwrap_or(self.module)
         };
 
         // Find the instance in the parent
         if let Some(instance) = parent_module.instances.iter().find(|i| i.name == inst_name) {
             // Find child module definition
             if let Some(child_module) = mir.modules.iter().find(|m| m.id == instance.module) {
-                // Process port connections
+                // Process INPUT port connections
                 for (port_name, conn_expr) in &instance.connections {
                     // Find the port in child module
                     if let Some(child_port) = child_module.ports.iter().find(|p| p.name == *port_name) {
+                        // Only handle INPUT ports here
+                        if child_port.direction != PortDirection::Input {
+                            continue;
+                        }
+
                         let width = self.get_type_width(&child_port.port_type);
 
-                        // Convert the connection expression
+                        // Convert the connection expression (parent value)
                         let conn_lits = self.convert_expression(conn_expr);
 
-                        // Map child port to parent signal's literals
+                        // Map child input port to parent signal's literals
                         let max_bits = width.min(conn_lits.len());
                         for bit in 0..max_bits {
                             self.signal_map.insert(
                                 (MirSignalRef::Port(child_port.id), bit as u32),
                                 conn_lits[bit],
                             );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Connect instance OUTPUT ports to parent signals (after processing child)
+    /// Propagates child output values to the parent's connected signals
+    fn connect_instance_outputs(&mut self, inst_path: &str, mir: &Mir) {
+        // Find the parent module and instance
+        let (parent_path, inst_name) = if let Some(dot_pos) = inst_path.rfind('.') {
+            (&inst_path[..dot_pos], &inst_path[dot_pos + 1..])
+        } else {
+            ("", inst_path)
+        };
+
+        let parent_module = if parent_path.is_empty() {
+            self.module
+        } else {
+            // Find the parent module by traversing the instance path
+            self.find_module_for_instance_path(mir, parent_path)
+                .unwrap_or(self.module)
+        };
+
+        // Find the instance in the parent
+        if let Some(instance) = parent_module.instances.iter().find(|i| i.name == inst_name) {
+            // Find child module definition
+            if let Some(child_module) = mir.modules.iter().find(|m| m.id == instance.module) {
+                // Process OUTPUT port connections
+                for (port_name, conn_expr) in &instance.connections {
+                    // Find the port in child module
+                    if let Some(child_port) = child_module.ports.iter().find(|p| p.name == *port_name) {
+                        // Only handle OUTPUT ports here
+                        if child_port.direction != PortDirection::Output {
+                            continue;
+                        }
+
+                        let width = self.get_type_width(&child_port.port_type);
+
+                        // Get the child output port's value
+                        let child_lits: Vec<AigLit> = (0..width)
+                            .map(|bit| {
+                                self.signal_map
+                                    .get(&(MirSignalRef::Port(child_port.id), bit as u32))
+                                    .copied()
+                                    .unwrap_or_else(|| self.aig.false_lit())
+                            })
+                            .collect();
+
+                        // If the connection expression is a simple signal reference,
+                        // map the child output to the parent signal
+                        if let ExpressionKind::Ref(lvalue) = &conn_expr.kind {
+                            if let Some(parent_sig_ref) = self.lvalue_to_ref(lvalue) {
+                                for (bit, &lit) in child_lits.iter().enumerate() {
+                                    self.signal_map.insert((parent_sig_ref, bit as u32), lit);
+                                }
+                                println!("[HIER_AIG]   -> mapped to parent {:?}", parent_sig_ref);
+                            }
                         }
                     }
                 }
