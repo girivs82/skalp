@@ -9023,11 +9023,16 @@ impl SimBasedEquivalenceChecker {
                         .and_then(|v| v.first().copied())
                         .map(|b| if b { 1u64 << i } else { 0 })
                 }).sum();
-                // Check fault_out
-                let fault_out = gate_sim.get_gate_signal("top.protection.current_prot.oc_hard_latch.fault_out")
-                    .map(|v| v.first().copied().unwrap_or(false));
-                println!("[SIM_EQ] Quiet cycle {}: latched={:?}, fault_in={:?}, clear_counter={}, count={}, fault_out={:?}",
-                    quiet_cycle, latched.first().copied(), fault_in, clear_counter_val, count_val, fault_out);
+                // Check ALL temporaries to trace the issue
+                println!("[SIM_EQ] Quiet cycle {}: latched={:?}, fault_in={:?}, count={}",
+                    quiet_cycle, latched.first().copied(), fault_in, count_val);
+                // Dump first 10 temporaries with their values
+                for i in 0..10 {
+                    let name = format!("top.protection.current_prot.oc_hard_latch._t{}", i);
+                    if let Some(bits) = gate_sim.get_gate_signal(&name) {
+                        println!("[SIM_EQ]   _t{} = {}", i, bits.first().copied().unwrap_or(false) as u8);
+                    }
+                }
             }
 
             // Compare outputs
