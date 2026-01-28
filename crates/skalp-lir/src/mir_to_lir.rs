@@ -853,12 +853,13 @@ impl MirToLirTransform {
                             paths.extend(else_paths);
                         }
 
-                        // Build priority mux chain: first matching condition wins
+                        // Build priority mux chain: last matching condition wins (sequential semantics)
+                        // In sequential code, later assignments override earlier ones
                         // Start with feedback (keep current value) as the default
                         let mut current_value = target_signal;
 
-                        // Process paths in reverse order so earlier paths have higher priority
-                        for (condition, expr) in paths.into_iter().rev() {
+                        // Process paths in forward order so later paths have higher priority
+                        for (condition, expr) in paths.into_iter() {
                             let expr_signal = self.transform_expression(&expr, target_width);
 
                             if let Some(cond) = condition {
@@ -928,9 +929,10 @@ impl MirToLirTransform {
                                     None,
                                 );
 
+                                // Process in forward order so later statements have higher priority
                                 let mut current_value = target_signal; // Feedback as default
 
-                                for (condition, expr) in else_paths.into_iter().rev() {
+                                for (condition, expr) in else_paths.into_iter() {
                                     let expr_signal = self.transform_expression(&expr, target_width);
 
                                     if let Some(cond) = condition {
