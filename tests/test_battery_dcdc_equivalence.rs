@@ -3570,3 +3570,73 @@ fn test_debug_tap_select_trace() {
         }
     }
 }
+
+/// Test the new HierarchicalEquivalenceChecker with semantic fingerprinting
+/// This is the recommended approach for post-synthesis verification
+#[test]
+fn test_hierarchical_equivalence_checker() {
+    use skalp_formal::HierarchicalEquivalenceChecker;
+
+    let path = Path::new(BATTERY_DCDC_PATH);
+    let hir = parse_and_build_hir_from_file(path).expect("HIR parse failed");
+
+    let compiler = MirCompiler::new();
+    let mir = compiler.compile_to_mir(&hir).expect("MIR compile failed");
+
+    let library = get_stdlib_library("generic_asic").expect("Library load failed");
+
+    let top_module = mir.modules.iter()
+        .find(|m| m.name == TOP_MODULE)
+        .expect("Top module not found");
+
+    println!("=== Hierarchical Equivalence Checker Test ===");
+    println!("Module: {}", TOP_MODULE);
+
+    // Get flattened gate netlist
+    let hier_lir = lower_mir_hierarchical_with_top(&mir, Some(TOP_MODULE));
+    let hier_netlist = map_hierarchical_to_gates(&hier_lir, &library);
+    let netlist = hier_netlist.flatten();
+
+    println!("Gate netlist: {} cells, {} nets", netlist.cells.len(), netlist.nets.len());
+
+    // Create the hierarchical equivalence checker with semantic fingerprinting
+    let checker = HierarchicalEquivalenceChecker::new()
+        .with_bound(5)
+        .with_fingerprinting(true);
+
+    // Run the check
+    let result = checker.check_mir_vs_gates(&mir, top_module, &netlist, 5);
+
+    match result {
+        Ok(hier_result) => {
+            println!("\n=== Hierarchical Equivalence Result ===");
+            println!("Equivalent: {}", hier_result.equivalent);
+            println!("Bound: {} cycles", hier_result.bound);
+            println!("Time: {}ms", hier_result.time_ms);
+            println!("Matched outputs: {}", hier_result.output_status.len());
+            println!("Unmatched in design 1: {}", hier_result.unmatched_outputs_1.len());
+            println!("Unmatched in design 2: {}", hier_result.unmatched_outputs_2.len());
+
+            if !hier_result.equivalent {
+                if let Some(details) = &hier_result.mismatch_details {
+                    println!("\n--- Mismatch Details ---");
+                    println!("Output: {}", details.output);
+                    println!("Cycle: {}", details.cycle);
+                    println!("Value in MIR: {}", details.value_1);
+                    println!("Value in Gate: {}", details.value_2);
+                }
+            } else {
+                println!("\nSUCCESS: MIR and GateNetlist produce equivalent outputs!");
+            }
+
+            // Print status for first few outputs
+            println!("\n--- Per-output equivalence (first 10) ---");
+            for (i, (key, equiv)) in hier_result.output_status.iter().take(10).enumerate() {
+                println!("  {}. {} -> {}", i + 1, key, if *equiv { "EQ" } else { "NEQ" });
+            }
+        }
+        Err(e) => {
+            println!("Hierarchical equivalence check error: {:?}", e);
+        }
+    }
+}
