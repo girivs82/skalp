@@ -340,6 +340,10 @@ enum Commands {
         #[arg(long)]
         quick: bool,
 
+        /// Number of reset cycles for simulation mode (--quick)
+        #[arg(long, default_value = "10")]
+        reset_cycles: u64,
+
         /// Verbose output showing internal AIG details
         #[arg(long)]
         verbose: bool,
@@ -699,6 +703,7 @@ fn main() -> Result<()> {
             format,
             entity,
             quick,
+            reset_cycles,
             verbose,
         } => {
             run_equivalence_check(
@@ -709,6 +714,7 @@ fn main() -> Result<()> {
                 &format,
                 entity.as_deref(),
                 quick,
+                reset_cycles,
                 verbose,
             )?;
         }
@@ -2273,6 +2279,7 @@ fn run_equivalence_check(
     format: &str,
     entity: Option<&str>,
     quick: bool,
+    reset_cycles: u64,
     verbose: bool,
 ) -> Result<()> {
     use skalp_formal::BoundedModelChecker;
@@ -2361,37 +2368,81 @@ fn run_equivalence_check(
     println!("🔬 Running equivalence check...");
     println!("   Mode: {}", if quick { "simulation-only (quick)" } else { "BMC (exhaustive)" });
 
-    let checker = BoundedModelChecker::new();
-    let result = checker
-        .check_lir_vs_gates_bmc(&lir, &gate_netlist, bound)
-        .map_err(|e| anyhow::anyhow!("Equivalence check failed: {:?}", e))?;
+    if quick {
+        // Use simulation-based equivalence checking (faster, not exhaustive)
+        use skalp_formal::SimBasedEquivalenceChecker;
 
-    let total_time = start_time.elapsed();
+        let checker = SimBasedEquivalenceChecker::new()
+            .with_cycles(bound as u64)
+            .with_reset("rst", reset_cycles);
 
-    // Step 5: Generate report
-    println!();
-    generate_ec_report(&result, &target_entity.name, output_dir, format, verbose, total_time)?;
+        // Run async check using tokio runtime
+        let rt = tokio::runtime::Runtime::new()
+            .context("Failed to create tokio runtime")?;
 
-    // Print summary
-    println!();
-    println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-    if result.equivalent {
-        println!("✅ PASS: Designs are equivalent up to {} cycles", result.bound);
+        let sim_result = rt.block_on(async {
+            checker.check_mir_vs_gate(&mir, target_entity, &gate_netlist).await
+        }).map_err(|e| anyhow::anyhow!("Simulation equivalence check failed: {:?}", e))?;
+
+        let total_time = start_time.elapsed();
+
+        // Print summary
+        println!();
+        println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+        if sim_result.equivalent {
+            println!("✅ PASS: Designs are equivalent for {} cycles", sim_result.cycles_verified);
+            println!("   Outputs compared: {}", sim_result.outputs_compared);
+        } else {
+            println!("❌ FAIL: Mismatch detected!");
+            if let Some(cycle) = sim_result.mismatch_cycle {
+                println!("   Cycle: {}", cycle);
+            }
+            if let Some(ref output) = sim_result.mismatch_output {
+                println!("   Output: {}", output);
+            }
+            if let (Some(v1), Some(v2)) = (sim_result.value_1, sim_result.value_2) {
+                println!("   MIR value:  0x{:x}", v1);
+                println!("   Gate value: 0x{:x}", v2);
+            }
+        }
+        println!("   Time: {:.2}s", total_time.as_secs_f64());
+
+        if !sim_result.equivalent {
+            anyhow::bail!("Equivalence check failed");
+        }
     } else {
-        println!("❌ FAIL: Mismatch detected!");
-        if let Some(cycle) = result.mismatch_cycle {
-            println!("   Cycle: {}", cycle);
-        }
-        if let Some(ref output) = result.mismatch_output {
-            println!("   Output: {}", output);
-        }
-    }
-    println!("   Time: {:.2}s", total_time.as_secs_f64());
-    println!("   SAT calls: {}", result.sat_calls);
+        // Use BMC-based equivalence checking (exhaustive)
+        let checker = BoundedModelChecker::new();
+        let result = checker
+            .check_lir_vs_gates_bmc(&lir, &gate_netlist, bound)
+            .map_err(|e| anyhow::anyhow!("Equivalence check failed: {:?}", e))?;
 
-    if !result.equivalent {
-        // Return error for CI/scripting
-        anyhow::bail!("Equivalence check failed");
+        let total_time = start_time.elapsed();
+
+        // Step 5: Generate report
+        println!();
+        generate_ec_report(&result, &target_entity.name, output_dir, format, verbose, total_time)?;
+
+        // Print summary
+        println!();
+        println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+        if result.equivalent {
+            println!("✅ PASS: Designs are equivalent up to {} cycles", result.bound);
+        } else {
+            println!("❌ FAIL: Mismatch detected!");
+            if let Some(cycle) = result.mismatch_cycle {
+                println!("   Cycle: {}", cycle);
+            }
+            if let Some(ref output) = result.mismatch_output {
+                println!("   Output: {}", output);
+            }
+        }
+        println!("   Time: {:.2}s", total_time.as_secs_f64());
+        println!("   SAT calls: {}", result.sat_calls);
+
+        if !result.equivalent {
+            anyhow::bail!("Equivalence check failed");
+        }
     }
 
     Ok(())
