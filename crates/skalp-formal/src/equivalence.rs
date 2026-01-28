@@ -8657,9 +8657,10 @@ impl SimBasedEquivalenceChecker {
             .map_err(|e| FormalError::SolverError(format!("MIR load failed: {}", e)))?;
 
         // Create gate-level simulator
+        // Force CPU mode to enable internal signal inspection for debugging
         let mut gate_config = UnifiedSimConfig::default();
         gate_config.level = SimLevel::GateLevel;
-        gate_config.hw_accel = HwAccel::Auto; // Use GPU if available
+        gate_config.hw_accel = HwAccel::Cpu; // Force CPU for signal inspection
         let mut gate_sim = UnifiedSimulator::new(gate_config)
             .map_err(|e| FormalError::SolverError(format!("Gate simulator init failed: {}", e)))?;
         gate_sim.load_gate_level(&gate_sir_result.sir)
@@ -8669,6 +8670,19 @@ impl SimBasedEquivalenceChecker {
             if mir_sim.is_using_gpu() { "GPU" } else { "CPU" }, mir_sim.is_using_gpu());
         println!("[SIM_EQ] Gate simulator: {} (GPU: {})",
             if gate_sim.is_using_gpu() { "GPU" } else { "CPU" }, gate_sim.is_using_gpu());
+
+        // Debug: check reset signals in gate netlist
+        println!("[SIM_EQ] Gate netlist resets: {:?}", netlist.resets);
+        println!("[SIM_EQ] Gate SIR seq_blocks: {}", gate_sir_result.sir.top_module.seq_blocks.len());
+        for (i, block) in gate_sir_result.sir.top_module.seq_blocks.iter().enumerate() {
+            println!("[SIM_EQ]   seq_block[{}]: clock={:?}, reset={:?}, ops={}",
+                i, block.clock, block.reset, block.operations.len());
+        }
+        // Map signal IDs to names
+        println!("[SIM_EQ] Gate SIR signal 0 (clock): {:?}",
+            gate_sir_result.sir.top_module.signals.get(0).map(|s| &s.name));
+        println!("[SIM_EQ] Gate SIR signal 1 (reset): {:?}",
+            gate_sir_result.sir.top_module.signals.get(1).map(|s| &s.name));
 
         // Get input and output names
         let mir_inputs = mir_sim.get_input_names();
@@ -8814,7 +8828,7 @@ impl SimBasedEquivalenceChecker {
 
         // Reset sequence
         println!("[SIM_EQ] Applying {} reset cycles...", self.reset_cycles);
-        for _ in 0..self.reset_cycles {
+        for cycle in 0..self.reset_cycles {
             mir_sim.set_input(&self.reset_name, 1).await;
             gate_sim.set_input(&gate_reset_name, 1).await;
 
@@ -8827,11 +8841,26 @@ impl SimBasedEquivalenceChecker {
             gate_sim.set_input(&gate_clock_name, 1).await;
             mir_sim.step().await;
             gate_sim.step().await;
+
+            // Debug: trace key signals during reset
+            if let Some(latched) = gate_sim.get_gate_signal("top.protection.current_prot.oc_hard_latch.latched") {
+                let rst = gate_sim.get_gate_signal("rst").map(|v| v.first().copied().unwrap_or(false));
+                let clk = gate_sim.get_gate_signal("clk").map(|v| v.first().copied().unwrap_or(false));
+                println!("[SIM_EQ] Reset cycle {}: rst={:?}, clk={:?}, latched={:?}",
+                    cycle, rst, clk, latched.first().copied());
+            }
         }
 
         // Release reset
         mir_sim.set_input(&self.reset_name, 0).await;
         gate_sim.set_input(&gate_reset_name, 0).await;
+
+        // Debug: trace after reset release
+        if let Some(latched) = gate_sim.get_gate_signal("top.protection.current_prot.oc_hard_latch.latched") {
+            let rst = gate_sim.get_gate_signal("rst").map(|v| v.first().copied().unwrap_or(false));
+            println!("[SIM_EQ] After reset release: rst={:?}, latched={:?}",
+                rst, latched.first().copied());
+        }
 
         // Initialize all matched inputs to 0 after reset
         for (mir_name, gate_bits) in &matched_inputs {
@@ -8839,6 +8868,14 @@ impl SimBasedEquivalenceChecker {
             for (gate_name, _) in gate_bits {
                 gate_sim.set_input(gate_name, 0).await;
             }
+        }
+
+        // Debug: trace after input init
+        if let Some(latched) = gate_sim.get_gate_signal("top.protection.current_prot.oc_hard_latch.latched") {
+            let fault_in = gate_sim.get_gate_signal("top.protection.current_prot.oc_hard_latch.fault_in")
+                .map(|v| v.first().copied().unwrap_or(false));
+            println!("[SIM_EQ] After input init: latched={:?}, fault_in={:?}",
+                latched.first().copied(), fault_in);
         }
 
         // Debug: Check outputs immediately after reset release (before propagation cycle)
@@ -8958,6 +8995,40 @@ impl SimBasedEquivalenceChecker {
             gate_sim.set_input(&gate_clock_name, 1).await;
             mir_sim.step().await;
             gate_sim.step().await;
+
+            // Debug: trace latch state during quiet cycles
+            if let Some(latched) = gate_sim.get_gate_signal("top.protection.current_prot.oc_hard_latch.latched") {
+                let fault_in = gate_sim.get_gate_signal("top.protection.current_prot.oc_hard_latch.fault_in")
+                    .map(|v| v.first().copied().unwrap_or(false));
+                let rst = gate_sim.get_gate_signal("rst").map(|v| v.first().copied().unwrap_or(false));
+                let clear = gate_sim.get_gate_signal("top.protection.current_prot.oc_hard_latch.clear")
+                    .map(|v| v.first().copied().unwrap_or(false));
+                let auto_clear = gate_sim.get_gate_signal("top.protection.current_prot.oc_hard_latch.auto_clear_enable")
+                    .map(|v| v.first().copied().unwrap_or(false));
+                // Check clear_counter
+                let clear_counter_bits = gate_sim.get_gate_signal("top.protection.current_prot.oc_hard_latch.clear_counter[0]");
+                let clear_counter_val: u64 = (0..16).filter_map(|i| {
+                    gate_sim.get_gate_signal(&format!("top.protection.current_prot.oc_hard_latch.clear_counter[{}]", i))
+                        .and_then(|v| v.first().copied())
+                        .map(|b| if b { 1u64 << i } else { 0 })
+                }).sum();
+                let auto_clear_delay_val: u64 = (0..16).filter_map(|i| {
+                    gate_sim.get_gate_signal(&format!("top.protection.current_prot.oc_hard_latch.auto_clear_delay[{}]", i))
+                        .and_then(|v| v.first().copied())
+                        .map(|b| if b { 1u64 << i } else { 0 })
+                }).sum();
+                // Also check count
+                let count_val: u64 = (0..8).filter_map(|i| {
+                    gate_sim.get_gate_signal(&format!("top.protection.current_prot.oc_hard_latch.count[{}]", i))
+                        .and_then(|v| v.first().copied())
+                        .map(|b| if b { 1u64 << i } else { 0 })
+                }).sum();
+                // Check fault_out
+                let fault_out = gate_sim.get_gate_signal("top.protection.current_prot.oc_hard_latch.fault_out")
+                    .map(|v| v.first().copied().unwrap_or(false));
+                println!("[SIM_EQ] Quiet cycle {}: latched={:?}, fault_in={:?}, clear_counter={}, count={}, fault_out={:?}",
+                    quiet_cycle, latched.first().copied(), fault_in, clear_counter_val, count_val, fault_out);
+            }
 
             // Compare outputs
             for (mir_name, gate_bits) in &matched_outputs {
@@ -9091,6 +9162,71 @@ impl SimBasedEquivalenceChecker {
                                 println!("[SIM_EQ]     [{}] {} = {}", bit_idx.unwrap_or(0), gate_name, bv);
                             }
                         }
+
+                        // Hierarchical debugging: trace internal signals
+                        println!("[SIM_EQ] === Hierarchical Debug for '{}' ===", user_name);
+
+                        // Get all gate signals and find those related to this output
+                        // The gate netlist uses hierarchical names like "instance.signal"
+                        let gate_all_outputs = gate_sim.get_output_names();
+
+                        // Find the base name without struct field separator
+                        let base_output = user_name.split('.').next().unwrap_or(&user_name);
+
+                        // Look for related signals in the gate netlist
+                        // These would be from sub-instances that drive this output
+                        let related_prefixes: Vec<&str> = match base_output {
+                            "faults" => vec!["protection", "prot_faults"],
+                            "lockstep_tx" => vec!["lockstep", "any_fault"],
+                            "state" => vec!["state_reg"],
+                            _ => vec![],
+                        };
+
+                        // For faults.oc specifically, trace the protection hierarchy
+                        if user_name.contains("faults") && user_name.contains("oc") {
+                            println!("[SIM_EQ]   Tracing faults.oc hierarchy:");
+                            println!("[SIM_EQ]   faults.oc = prot_faults.oc = i_hard_oc | hw_oc_latched");
+
+                            // Try to get internal signals from MIR behavioral sim
+                            // These use the internal _sN naming that we need to resolve
+                            for entry in sir_module.name_registry.all_entries() {
+                                let path = &entry.hierarchical_path;
+                                // Look for protection-related signals
+                                if path.contains("protection") ||
+                                   path.contains("i_hard_oc") ||
+                                   path.contains("hw_oc") ||
+                                   path.contains("oc_hard") ||
+                                   path.contains("latched") {
+                                    // Try to get the value from MIR simulator
+                                    if let Some(mir_internal) = mir_sim.get_output_raw(&entry.internal_name).await {
+                                        println!("[SIM_EQ]     MIR '{}' ({}) = {}",
+                                            path, entry.internal_name, mir_internal);
+                                    }
+                                }
+                            }
+
+                            // Dump ALL gate signals (not just outputs) for debugging
+                            println!("[SIM_EQ]   Gate internal signals with 'protection', 'oc', 'latch':");
+                            let all_gate_signals = gate_sim.dump_gate_signals();
+                            for (sig_name, bits) in &all_gate_signals {
+                                let lower = sig_name.to_lowercase();
+                                if lower.contains("protection") ||
+                                   lower.contains("_oc") ||
+                                   lower.contains(".oc") ||
+                                   lower.contains("hw_oc") ||
+                                   lower.contains("latch") ||
+                                   lower.contains("fault") {
+                                    // Convert bits to integer
+                                    let val: u64 = bits.iter()
+                                        .enumerate()
+                                        .fold(0u64, |acc, (i, &b)| acc | ((b as u64) << i));
+                                    println!("[SIM_EQ]     Gate '{}' = {} (bits: {:?})", sig_name, val, bits);
+                                }
+                            }
+                            println!("[SIM_EQ]   Total gate signals: {}", all_gate_signals.len());
+                        }
+
+                        println!("[SIM_EQ] === End Hierarchical Debug ===");
                     }
                     // Return on first mismatch but with detailed info
                     return Ok(SimEquivalenceResult {

@@ -888,6 +888,30 @@ impl UnifiedSimulator {
         }
     }
 
+    /// Dump all gate-level signals (for debugging)
+    /// Returns a vector of (signal_name, value) pairs sorted by name
+    pub fn dump_gate_signals(&self) -> Vec<(String, Vec<bool>)> {
+        match &self.backend {
+            SimulatorBackend::GateLevelCpu(gate_sim) => gate_sim.dump_signals(),
+            #[cfg(target_os = "macos")]
+            SimulatorBackend::GateLevelGpu(runtime) => {
+                // GPU runtime doesn't have dump_signals, return empty
+                Vec::new()
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    /// Get a gate-level signal by name (for debugging)
+    pub fn get_gate_signal(&self, name: &str) -> Option<Vec<bool>> {
+        match &self.backend {
+            SimulatorBackend::GateLevelCpu(gate_sim) => gate_sim.get_signal(name),
+            #[cfg(target_os = "macos")]
+            SimulatorBackend::GateLevelGpu(_runtime) => None, // GPU doesn't expose this
+            _ => None,
+        }
+    }
+
     /// Get an output value (as u64), with latency adjustment applied
     ///
     /// If pipeline annotations have been loaded and this output has a
