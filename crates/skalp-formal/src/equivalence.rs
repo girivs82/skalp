@@ -107,6 +107,9 @@ pub struct Aig {
     pub input_names: Vec<String>,
     /// Latch node IDs (for sequential circuits)
     pub latches: Vec<AigNodeId>,
+    /// Mapping from state-input node IDs to their corresponding latch node IDs
+    /// Used during simulation: state_input reads from its linked latch's current value
+    pub state_input_to_latch: HashMap<u32, u32>,
 }
 
 impl Aig {
@@ -119,7 +122,14 @@ impl Aig {
             output_names: Vec::new(),
             input_names: Vec::new(),
             latches: Vec::new(),
+            state_input_to_latch: HashMap::new(),
         }
+    }
+
+    /// Link a state input node to its corresponding latch node
+    /// During simulation, the state input will read from the latch's current value
+    pub fn link_state_input_to_latch(&mut self, state_input_id: u32, latch_id: u32) {
+        self.state_input_to_latch.insert(state_input_id, latch_id);
     }
 
     /// Get the constant false literal
@@ -416,10 +426,19 @@ impl LirToAig {
                         if let Some(rst_id) = node.reset {
                             let rst_lit = self.get_input_bit(rst_id, 0);
                             let reset_bit = (reset_val >> bit) & 1 != 0;
+                            // Debug for tap_reg
+                            if output_signal.name.contains("tap_reg") {
+                                eprintln!("[LIR_TO_AIG_DEBUG] tap_reg: has_reset=true, rst_id={:?}, rst_lit={:?}, reset_bit={}, d_lit={:?}",
+                                    rst_id, rst_lit, reset_bit, d_lit);
+                            }
                             // MUX: rst ? reset_bit : d
                             if reset_bit {
                                 // rst | (!rst & d) = rst | d
-                                self.aig.add_or(rst_lit, d_lit)
+                                let result = self.aig.add_or(rst_lit, d_lit);
+                                if output_signal.name.contains("tap_reg") {
+                                    eprintln!("[LIR_TO_AIG_DEBUG] tap_reg: next_lit = rst OR d = {:?}", result);
+                                }
+                                result
                             } else {
                                 // !rst & d
                                 self.aig.add_and(rst_lit.invert(), d_lit)
@@ -436,6 +455,12 @@ impl LirToAig {
 
                     // Create latch
                     let latch_lit = self.aig.add_latch(latch_name, next_lit, init_value);
+                    let latch_id = latch_lit.node.0;
+
+                    // Link state input to latch (metadata-based, no name matching needed)
+                    if let Some(state_input_lit) = reg_current_map.get(&(node.output.0, bit)) {
+                        self.aig.link_state_input_to_latch(state_input_lit.node.0, latch_id);
+                    }
 
                     // Update signal_map to use latch output
                     self.signal_map.insert((node.output.0, bit), latch_lit);
@@ -1349,6 +1374,27 @@ impl GateNetlistToAig {
 
         let output_net = cell.outputs.first().copied();
 
+        // Debug: trace cells that output to _t94, _t91, or _t95 net
+        if let Some(out) = output_net {
+            let net = &netlist.nets[out.0 as usize];
+            if net.name.contains("_t95") || net.name.contains("_t94") || net.name.contains("_t91")
+               || net.name.contains("eq_and") || net.name.contains("Equal_37") {
+                static T9X_DEBUG: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+                let count = T9X_DEBUG.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                if count < 20 {  // First 20 occurrences
+                    eprintln!("[T9X_CELL_DEBUG] Cell driving {} (id={}):", net.name, out.0);
+                    eprintln!("[T9X_CELL_DEBUG]   cell_type: {}", cell.cell_type);
+                    eprintln!("[T9X_CELL_DEBUG]   function: {:?}", cell.function);
+                    eprintln!("[T9X_CELL_DEBUG]   source_op: {:?}", cell.source_op);
+                    for (i, &inp) in cell.inputs.iter().enumerate() {
+                        let inp_net = &netlist.nets[inp.0 as usize];
+                        let inp_lit = self.net_map.get(&inp.0);
+                        eprintln!("[T9X_CELL_DEBUG]   input[{}] = {} (id={}) lit={:?}", i, inp_net.name, inp.0, inp_lit);
+                    }
+                }
+            }
+        }
+
         // Check if cell is sequential (has clock) - treat output as input for CEC
         if cell.is_sequential() {
             if let Some(out) = output_net {
@@ -1448,8 +1494,79 @@ impl GateNetlistToAig {
                 let d0 = self.get_net(cell.inputs[1]);  // else_value (when sel=0)
                 let d1 = self.get_net(cell.inputs[2]);  // then_value (when sel=1)
 
-                let result = self.aig.add_mux(sel, d0, d1);
+                // Debug: trace _t95 MUX conversion and semantics
                 if let Some(out) = output_net {
+                    let out_net = &netlist.nets[out.0 as usize];
+                    if out_net.name.contains("_t95") {
+                        static T95_MUX_SEM_DEBUG: std::sync::Once = std::sync::Once::new();
+                        T95_MUX_SEM_DEBUG.call_once(|| {
+                            eprintln!("[T95_MUX_CONVERT] MUX2 for {}: sel={:?}, d0={:?}, d1={:?}",
+                                out_net.name, sel, d0, d1);
+                            eprintln!("[T95_MUX_CONVERT] Semantics: sel ? d1 : d0");
+                            eprintln!("[T95_MUX_CONVERT] When sel=0 (condition false): result = d0 (tap_reg)");
+                            eprintln!("[T95_MUX_CONVERT] When sel=1 (condition true): result = d1 (_t91 = comparison)");
+                            // Trace input nets
+                            let sel_net = &netlist.nets[cell.inputs[0].0 as usize];
+                            let d0_net = &netlist.nets[cell.inputs[1].0 as usize];
+                            let d1_net = &netlist.nets[cell.inputs[2].0 as usize];
+                            eprintln!("[T95_MUX_CONVERT] sel_net={}, d0_net={}, d1_net={}",
+                                sel_net.name, d0_net.name, d1_net.name);
+                        });
+                    }
+                }
+
+                // Debug: trace ResetMux inputs
+                if cell.source_op.as_deref() == Some("ResetMux") {
+                    if let Some(out) = output_net {
+                        let out_net = &netlist.nets[out.0 as usize];
+                        // Only trace tap_reg's ResetMux
+                        if out_net.name.contains("tap_reg") || out_net.name.contains("tap") {
+                            static TAP_MUX_DEBUG: std::sync::Once = std::sync::Once::new();
+                            TAP_MUX_DEBUG.call_once(|| {
+                                eprintln!("[TAP_MUX_CONE_DEBUG] ResetMux for tap_reg (CellFunction::Mux2 path):");
+                                eprintln!("[TAP_MUX_CONE_DEBUG]   sel={:?} (net {})", sel, cell.inputs[0].0);
+                                eprintln!("[TAP_MUX_CONE_DEBUG]   d0={:?} (net {}, when sel=0)", d0, cell.inputs[1].0);
+                                eprintln!("[TAP_MUX_CONE_DEBUG]   d1={:?} (net {}, when sel=1)", d1, cell.inputs[2].0);
+                                eprintln!("[TAP_MUX_CONE_DEBUG]   output net: {}", out_net.name);
+
+                                // Trace cone of influence for d0 (the comparison result)
+                                eprintln!("[TAP_MUX_CONE_DEBUG]   Cone of influence for d0 (node {}):", d0.node.0);
+                                let mut visited: std::collections::HashSet<u32> = std::collections::HashSet::new();
+                                let mut worklist = vec![(d0.node.0, 0usize)];
+                                while let Some((node_id, depth)) = worklist.pop() {
+                                    if depth > 20 || visited.contains(&node_id) || node_id == 0 {
+                                        continue;
+                                    }
+                                    visited.insert(node_id);
+                                    if let Some(node) = self.aig.nodes.get(node_id as usize) {
+                                        match node {
+                                            AigNode::Input { name } => {
+                                                eprintln!("[TAP_MUX_CONE_DEBUG]     Input: {} (node {})", name, node_id);
+                                            }
+                                            AigNode::And { left, right } => {
+                                                worklist.push((left.node.0, depth + 1));
+                                                worklist.push((right.node.0, depth + 1));
+                                            }
+                                            AigNode::Latch { name, .. } => {
+                                                eprintln!("[TAP_MUX_CONE_DEBUG]     Latch: {} (node {})", name, node_id);
+                                            }
+                                            AigNode::False => {}
+                                        }
+                                    }
+                                }
+                            });
+                        }
+                    }
+                }
+
+                let result = self.aig.add_mux(sel, d0, d1);
+
+                // Debug: trace _t95 MUX result
+                if let Some(out) = output_net {
+                    let out_net = &netlist.nets[out.0 as usize];
+                    if out_net.name.contains("_t95") {
+                        eprintln!("[T95_MUX_RESULT] MUX2 {} result={:?}", out_net.name, result);
+                    }
                     self.set_net(out, result);
                 }
             }
@@ -1475,6 +1592,14 @@ impl GateNetlistToAig {
                     // Inverter: output = !input
                     if !inputs.is_empty() {
                         if let Some(out) = output_net {
+                            let out_net = &netlist.nets[out.0 as usize];
+                            if out_net.name.contains("_t91") {
+                                static T91_INV_DEBUG: std::sync::Once = std::sync::Once::new();
+                                T91_INV_DEBUG.call_once(|| {
+                                    eprintln!("[T91_INV_DEBUG] INV cell for {}: input={:?}, output={:?}",
+                                        out_net.name, inputs[0], inputs[0].invert());
+                                });
+                            }
                             self.set_net(out, inputs[0].invert());
                         }
                         true
@@ -1562,6 +1687,18 @@ impl GateNetlistToAig {
                 } else if cell_type_upper.starts_with("MUX") {
                     // MUX: inputs = [sel, d0, d1]
                     if inputs.len() >= 3 {
+                        // Debug: trace tap_reg MUX
+                        if cell.source_op.as_deref() == Some("ResetMux") {
+                            if let Some(out) = output_net {
+                                let out_net = &netlist.nets[out.0 as usize];
+                                if out_net.name.contains("tap_reg") {
+                                    eprintln!("[MUX_CONVERT_DEBUG] ResetMux for tap_reg:");
+                                    eprintln!("[MUX_CONVERT_DEBUG]   sel={:?}, d0={:?}, d1={:?}",
+                                        inputs[0], inputs[1], inputs[2]);
+                                    eprintln!("[MUX_CONVERT_DEBUG]   result will be add_mux(sel, d0, d1) = sel ? d1 : d0");
+                                }
+                            }
+                        }
                         let result = self.aig.add_mux(inputs[0], inputs[1], inputs[2]);
                         if let Some(out) = output_net {
                             self.set_net(out, result);
@@ -1697,7 +1834,8 @@ impl GateNetlistToAig {
 
         // First pass: identify all DFF cells and create placeholder literals for their outputs
         // We need this because the D input might reference other DFF outputs
-        let mut dff_cells: Vec<(usize, skalp_lir::GateNetId, String)> = Vec::new();
+        // Tuple: (cell_idx, out_net, latch_name, state_input_node_id)
+        let mut dff_cells: Vec<(usize, skalp_lir::GateNetId, String, u32)> = Vec::new();
 
         for (idx, cell) in netlist.cells.iter().enumerate() {
             if cell.is_sequential() {
@@ -1706,8 +1844,9 @@ impl GateNetlistToAig {
                     // Create temporary input for the current DFF output (latch state)
                     let temp_name = format!("__dff_cur_{}", net.name);
                     let temp_lit = self.aig.add_input(temp_name);
+                    let state_input_id = temp_lit.node.0;
                     self.net_map.insert(out.0, temp_lit);
-                    dff_cells.push((idx, out, net.name.clone()));
+                    dff_cells.push((idx, out, net.name.clone(), state_input_id));
                 }
             }
         }
@@ -1752,7 +1891,7 @@ impl GateNetlistToAig {
 
         // Now create Latch nodes for each DFF
         // The D input is the next-state logic, with reset handling
-        for (cell_idx, out_net, latch_name) in &dff_cells {
+        for (cell_idx, out_net, latch_name, state_input_id) in &dff_cells {
             let cell = &netlist.cells[*cell_idx];
 
             // Find the D input (data input to the DFF)
@@ -1770,157 +1909,93 @@ impl GateNetlistToAig {
                 self.net_map.get(&out_net.0).copied().unwrap_or_else(|| self.aig.false_lit())
             };
 
-            // Handle reset: if cell has reset input, next_state = rst ? 0 : D
-            // But SKIP this if the D input is already driven by a MUX with rst as selector,
-            // because that means sync reset is handled by the MUX
-            let mut reset_value_from_mux: Option<bool> = None;
+            // Determine reset handling using source_op metadata from tech mapper:
+            // 1. If D is driven by source_op="ResetMux" -> non-zero reset, get value from TIE cell
+            // 2. If DFF has cell.reset -> it's a DFFR, reset value is 0
+            // 3. Otherwise -> no reset
+            //
+            // The tech mapper sets source_op="ResetMux" for MUXes that handle non-zero reset
+            // and source_op="ResetValue" for TIE cells that provide the reset bit value.
 
-            // First, check if D is driven by a MUX with rst as selector (even without cell.reset)
-            // This handles the case where MUX-based reset is used instead of DFFR
-            if let Some(&d_net) = d_input {
-                // Find if D is driven by a MUX where selector contains "rst"
-                if let Some(mux_cell) = netlist.cells.iter().find(|driver| {
-                    let outputs_match = driver.outputs.iter().any(|o| o.0 == d_net.0);
-                    let is_mux = matches!(driver.function, Some(CellFunction::Mux2));
-                    let sel_is_rst = if let Some(&sel_net) = driver.inputs.first() {
-                        let sel_net_name = &netlist.nets[sel_net.0 as usize].name;
-                        sel_net_name.contains("rst")
-                    } else {
-                        false
-                    };
-                    outputs_match && is_mux && sel_is_rst
-                }) {
-                    // MUX inputs: [sel, d0 (when sel=0), d1 (when sel=1)]
-                    // When rst=1 (sel=1), we use d1 - that's the reset value
-                    // d1 is inputs[2] in MUX2
-                    if let Some(&reset_net) = mux_cell.inputs.get(2) {
-                        // Check if reset_net is driven by TIE cell
-                        let reset_val = netlist.cells.iter().find(|c| {
+            let (next_lit, init_value) = if let Some(&d_net) = d_input {
+                // Check if D is driven by a ResetMux (indicates non-zero reset value)
+                let reset_mux = netlist.cells.iter().find(|c| {
+                    c.outputs.iter().any(|o| o.0 == d_net.0)
+                        && c.source_op.as_deref() == Some("ResetMux")
+                });
+
+                if let Some(mux_cell) = reset_mux {
+                    // D is driven by ResetMux: non-zero reset value
+                    // MUX inputs: [rst, d_orig, reset_bit_net]
+                    // The reset value comes from the TIE cell driving reset_bit_net (inputs[2])
+                    let reset_val = mux_cell.inputs.get(2).and_then(|&reset_net| {
+                        netlist.cells.iter().find(|c| {
                             c.outputs.iter().any(|o| o.0 == reset_net.0)
-                        }).and_then(|driver| {
-                            if driver.cell_type.contains("TIE_HIGH") || driver.cell_type.contains("TIEHI") {
-                                Some(true)
-                            } else if driver.cell_type.contains("TIE_LOW") || driver.cell_type.contains("TIELO") {
-                                Some(false)
-                            } else {
-                                None
-                            }
-                        });
-                        reset_value_from_mux = reset_val;
-                    }
-                }
-            }
+                                && c.source_op.as_deref() == Some("ResetValue")
+                        })
+                    }).map(|tie_cell| {
+                        tie_cell.cell_type.contains("HIGH") || tie_cell.cell_type.contains("HI")
+                    }).unwrap_or(false);
 
-            let next_lit = if let Some(rst_net) = cell.reset {
-                // Check if D input is driven by a MUX that handles reset
-                // Multiple detection strategies:
-                // 1. MUX where one data input is a constant (TIE cell)
-                // 2. MUX where selector is derived from the same reset net
-                let d_has_reset_mux = if let Some(&d_net) = d_input {
-                    // Find if D is driven by a MUX
-                    let result = netlist.cells.iter().any(|driver| {
-                        let outputs_match = driver.outputs.iter().any(|o| o.0 == d_net.0);
-                        let is_mux = matches!(driver.function, Some(CellFunction::Mux2));
-                        if !outputs_match || !is_mux {
-                            return false;
+                    // Debug: trace tap_reg handling
+                    if latch_name.contains("tap_reg") {
+                        eprintln!("[GATE_LATCH_DEBUG] tap_reg: found ResetMux, d_lit={:?}, reset_val={}", d_lit, reset_val);
+                        // Trace MUX inputs
+                        eprintln!("[GATE_MUX_DEBUG] tap_reg ResetMux inputs:");
+                        for (i, &inp) in mux_cell.inputs.iter().enumerate() {
+                            let inp_net = &netlist.nets[inp.0 as usize];
+                            let inp_lit = self.net_map.get(&inp.0);
+                            eprintln!("[GATE_MUX_DEBUG]   input[{}] net={} (id={}) lit={:?}",
+                                i, inp_net.name, inp.0, inp_lit);
                         }
+                    }
 
-                        // Strategy 1: Check if any data input is a TIE cell
-                        let has_tie_input = driver.inputs.iter().skip(1).any(|&data_net| {
-                            netlist.cells.iter().any(|c| {
-                                c.outputs.iter().any(|o| o.0 == data_net.0)
-                                    && (c.cell_type.contains("TIE") || c.cell_type.contains("TIEHI") || c.cell_type.contains("TIELO"))
-                            })
-                        });
-
-                        // Strategy 2: Check if selector is derived from the reset net
-                        // Trace back through multiple levels of combinational logic
-                        // The MUX selector is inputs[0]
-                        let selector_related_to_reset = if !driver.inputs.is_empty() {
-                            let sel_net = driver.inputs[0];
-                            // BFS to trace back through combinational logic to find if it derives from rst
-                            let mut visited = std::collections::HashSet::new();
-                            let mut queue = std::collections::VecDeque::new();
-                            queue.push_back(sel_net.0);
-                            let mut found_rst = false;
-                            let max_depth = 10; // Limit depth to avoid infinite loops
-                            let mut depth = 0;
-
-                            while !queue.is_empty() && depth < max_depth && !found_rst {
-                                let level_size = queue.len();
-                                for _ in 0..level_size {
-                                    if let Some(current_net) = queue.pop_front() {
-                                        if visited.contains(&current_net) {
-                                            continue;
-                                        }
-                                        visited.insert(current_net);
-
-                                        // Direct match with reset net
-                                        if current_net == rst_net.0 {
-                                            found_rst = true;
-                                            break;
-                                        }
-
-                                        // Find the cell that drives this net and add its inputs to queue
-                                        for c in &netlist.cells {
-                                            if c.outputs.iter().any(|o| o.0 == current_net) {
-                                                // Don't trace through sequential elements
-                                                if matches!(c.function, Some(CellFunction::Dff) | Some(CellFunction::DffR)) {
-                                                    continue;
-                                                }
-                                                for &input_net in &c.inputs {
-                                                    if !visited.contains(&input_net.0) {
-                                                        queue.push_back(input_net.0);
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                                depth += 1;
-                            }
-                            found_rst
-                        } else {
-                            false
-                        };
-
-                        has_tie_input || selector_related_to_reset
-                    });
-                    result
-                } else {
-                    false
-                };
-
-                // Only apply reset logic if D input doesn't already include a reset MUX
-                // If D = MUX(rst, data, reset_value), then D already handles reset and we
-                // should NOT apply !rst AND D, which would corrupt the reset_value to 0
-                if d_has_reset_mux {
-                    // D already includes reset logic via MUX - use D directly
-                    d_lit
-                } else {
-                    // D doesn't include reset MUX - we need to apply reset gate
-                    // next = rst ? 0 : D = !rst AND D
+                    // For ResetMux: D already handles reset, use D directly
+                    // Init value is the reset value
+                    (d_lit, reset_val)
+                } else if let Some(rst_net) = cell.reset {
+                    // DFF has reset pin: it's a DFFR, reset value is always 0
+                    // Apply reset gate: next = !rst AND D (rst ? 0 : D)
                     let rst_lit = self.net_map.get(&rst_net.0).copied().unwrap_or_else(|| {
                         let rst_net_obj = &netlist.nets[rst_net.0 as usize];
-                        // Create input for reset signal
                         let lit = self.aig.add_input(rst_net_obj.name.clone());
                         self.net_map.insert(rst_net.0, lit);
                         lit
                     });
-                    self.aig.add_and(rst_lit.invert(), d_lit)
+                    // Debug: trace tap_reg handling
+                    if latch_name.contains("tap_reg") {
+                        eprintln!("[GATE_LATCH_DEBUG] tap_reg: DFFR path, rst_lit={:?}, d_lit={:?}", rst_lit, d_lit);
+                    }
+                    (self.aig.add_and(rst_lit.invert(), d_lit), false) // init = 0
+                } else {
+                    // No reset at all - use D directly, init = 0
+                    // Debug: trace tap_reg handling
+                    if latch_name.contains("tap_reg") {
+                        eprintln!("[GATE_LATCH_DEBUG] tap_reg: no reset path, d_lit={:?}", d_lit);
+                    }
+                    (d_lit, false)
                 }
             } else {
-                // No reset - just use D input
-                d_lit
+                // No D input found - default behavior
+                (d_lit, false)
             };
-
-            // Determine init value:
-            // - If we found a MUX with a reset value, use that
-            // - Otherwise, default to false
-            let init_value = reset_value_from_mux.unwrap_or(false);
 
             // Create latch with proper init value
             let latch_lit = self.aig.add_latch(latch_name.clone(), next_lit, init_value);
+            let latch_id = latch_lit.node.0;
+
+            // Link state input to latch (metadata-based, no name matching needed)
+            self.aig.link_state_input_to_latch(*state_input_id, latch_id);
+
+            // Debug: trace tap_reg latch creation and verify d_lit == next_lit for ResetMux path
+            if latch_name.contains("tap_reg") {
+                eprintln!("[GATE_LATCH_CREATE] tap_reg: latch_lit={:?}, next_lit={:?}, init_value={}, d_lit={:?}",
+                    latch_lit, next_lit, init_value, d_lit);
+                eprintln!("[GATE_LATCH_CREATE] tap_reg: linked state_input {} -> latch {}", state_input_id, latch_id);
+                if next_lit != d_lit {
+                    eprintln!("[GATE_LATCH_MISMATCH] WARNING: next_lit != d_lit for tap_reg!");
+                }
+            }
 
             // Update net_map to use latch output
             self.net_map.insert(out_net.0, latch_lit);
@@ -3678,6 +3753,12 @@ impl<'a> MirToAig<'a> {
 
                 // Create latch with proper init value
                 let latch_lit = self.aig.add_latch(latch_name, next_lit, init_value);
+                let latch_id = latch_lit.node.0;
+
+                // Link state input to latch (metadata-based, no name matching needed)
+                if let Some(state_input_lit) = reg_current_lits.get(&(*sig_ref, bit)) {
+                    self.aig.link_state_input_to_latch(state_input_lit.node.0, latch_id);
+                }
 
                 // Update signal_map to point to latch output
                 self.signal_map.insert((*sig_ref, bit), latch_lit);
@@ -5641,6 +5722,17 @@ impl BoundedModelChecker {
             bound
         );
 
+        // Debug: print matched inputs
+        println!("\n=== BMC Debug: Matched Inputs ===");
+        for key in matched_inputs.iter().take(20) {
+            let aig1_id = aig1_input_map.get(key);
+            let aig2_id = aig2_input_map.get(key);
+            println!("  {} -> LIR:{:?}, Gate:{:?}", key, aig1_id, aig2_id);
+        }
+        if matched_inputs.len() > 20 {
+            println!("  ... and {} more", matched_inputs.len() - 20);
+        }
+
         // For each cycle, simulate both designs and check output equivalence
         // We use simulation first for speed, then SAT for proof
 
@@ -5698,6 +5790,120 @@ impl BoundedModelChecker {
                     "BMC: Simulation found mismatch at cycle {} on output '{}' (trace {})",
                     cycle, output_name, trace
                 );
+
+                // Debug: trace cone of influence for mismatching output
+                if let Some((o1_idx, o2_idx)) = matched_outputs.iter()
+                    .find(|(_, _, name)| *name == output_name)
+                    .map(|(i1, i2, _)| (*i1, *i2))
+                {
+                    println!("\n=== Cone of influence for {} (mismatch at cycle {}) ===", output_name, cycle);
+
+                    let lir_lit = &aig1.outputs[o1_idx];
+                    let lir_inputs = self.trace_input_cone(aig1, lir_lit.node.0, 50);
+                    let lir_primary: Vec<_> = lir_inputs.iter()
+                        .filter(|(n, _)| !n.starts_with("__reg_cur") && !n.starts_with("__dff_cur") && !n.starts_with("(latch)"))
+                        .collect();
+                    let lir_latches: Vec<_> = lir_inputs.iter()
+                        .filter(|(n, _)| n.starts_with("(latch)"))
+                        .collect();
+                    let lir_state_inputs: Vec<_> = lir_inputs.iter()
+                        .filter(|(n, _)| n.starts_with("__reg_cur") || n.starts_with("__dff_cur"))
+                        .collect();
+                    println!("  LIR primary inputs ({}):", lir_primary.len());
+                    for (name, _) in lir_primary.iter().take(15) {
+                        println!("    {}", name);
+                    }
+                    println!("  LIR state inputs ({}):", lir_state_inputs.len());
+                    for (name, node_id) in lir_state_inputs.iter().take(10) {
+                        println!("    {} (node {})", name, node_id);
+                    }
+                    println!("  LIR latches in cone ({}):", lir_latches.len());
+                    for (name, node_id) in lir_latches.iter().take(10) {
+                        // Get latch initial value
+                        let init = if let Some(AigNode::Latch { init, .. }) = aig1.nodes.get(*node_id as usize) {
+                            if *init { "1" } else { "0" }
+                        } else { "?" };
+                        println!("    {} (node {}, init={})", name, node_id, init);
+                    }
+
+                    let gate_lit = &aig2.outputs[o2_idx];
+                    let gate_inputs = self.trace_input_cone(aig2, gate_lit.node.0, 50);
+                    let gate_primary: Vec<_> = gate_inputs.iter()
+                        .filter(|(n, _)| !n.starts_with("__reg_cur") && !n.starts_with("__dff_cur") && !n.starts_with("(latch)"))
+                        .collect();
+                    let gate_latches: Vec<_> = gate_inputs.iter()
+                        .filter(|(n, _)| n.starts_with("(latch)"))
+                        .collect();
+                    let gate_state_inputs: Vec<_> = gate_inputs.iter()
+                        .filter(|(n, _)| n.starts_with("__reg_cur") || n.starts_with("__dff_cur"))
+                        .collect();
+                    println!("  Gate primary inputs ({}):", gate_primary.len());
+                    for (name, _) in gate_primary.iter().take(15) {
+                        println!("    {}", name);
+                    }
+                    println!("  Gate state inputs ({}):", gate_state_inputs.len());
+                    for (name, node_id) in gate_state_inputs.iter().take(10) {
+                        println!("    {} (node {})", name, node_id);
+                    }
+                    println!("  Gate latches in cone ({}):", gate_latches.len());
+                    for (name, node_id) in gate_latches.iter().take(10) {
+                        // Get latch initial value
+                        let init = if let Some(AigNode::Latch { init, .. }) = aig2.nodes.get(*node_id as usize) {
+                            if *init { "1" } else { "0" }
+                        } else { "?" };
+                        println!("    {} (node {}, init={})", name, node_id, init);
+                    }
+
+                    // Show differences
+                    let lir_set: std::collections::HashSet<_> = lir_primary.iter().map(|(n, _)| n.as_str()).collect();
+                    let gate_set: std::collections::HashSet<_> = gate_primary.iter().map(|(n, _)| n.as_str()).collect();
+                    let only_lir: Vec<_> = lir_set.difference(&gate_set).collect();
+                    let only_gate: Vec<_> = gate_set.difference(&lir_set).collect();
+                    if !only_lir.is_empty() {
+                        println!("  Only in LIR cone: {:?}", only_lir);
+                    }
+                    if !only_gate.is_empty() {
+                        println!("  Only in Gate cone: {:?}", only_gate);
+                    }
+
+                    // Check output literal inversion
+                    println!("  LIR output: node {}{}",
+                        lir_lit.node.0, if lir_lit.inverted { " (inverted)" } else { "" });
+                    println!("  Gate output: node {}{}",
+                        gate_lit.node.0, if gate_lit.inverted { " (inverted)" } else { "" });
+
+                    // Trace further - what does the output node connect to?
+                    println!("  LIR node {} structure:", lir_lit.node.0);
+                    if let Some(node) = aig1.nodes.get(lir_lit.node.0 as usize) {
+                        println!("    {:?}", node);
+                        // Trace children
+                        if let AigNode::And { left, right } = node {
+                            println!("    -> left child (node {}):", left.node.0);
+                            if let Some(ln) = aig1.nodes.get(left.node.0 as usize) {
+                                println!("       {:?}", ln);
+                            }
+                            println!("    -> right child (node {}):", right.node.0);
+                            if let Some(rn) = aig1.nodes.get(right.node.0 as usize) {
+                                println!("       {:?}", rn);
+                            }
+                        }
+                    }
+                    println!("  Gate node {} structure:", gate_lit.node.0);
+                    if let Some(node) = aig2.nodes.get(gate_lit.node.0 as usize) {
+                        println!("    {:?}", node);
+                        // Trace children
+                        if let AigNode::And { left, right } = node {
+                            println!("    -> left child (node {}):", left.node.0);
+                            if let Some(ln) = aig2.nodes.get(left.node.0 as usize) {
+                                println!("       {:?}", ln);
+                            }
+                            println!("    -> right child (node {}):", right.node.0);
+                            if let Some(rn) = aig2.nodes.get(right.node.0 as usize) {
+                                println!("       {:?}", rn);
+                            }
+                        }
+                    }
+                }
 
                 return Ok(BmcEquivalenceResult {
                     equivalent: false,
@@ -5884,6 +6090,26 @@ impl BoundedModelChecker {
             }
 
             // Update state for next cycle
+            // Debug: show tap_reg state every cycle
+            for (&latch_id, &val) in &next_state1 {
+                if let AigNode::Latch { name, next, .. } = &aig1.nodes[latch_id as usize] {
+                    if name.contains("tap_reg") {
+                        let old_val = state1.get(&latch_id).copied().unwrap_or(false);
+                        eprintln!("[STATE_TRACE] Cycle {}: LIR '{}' cur={} -> next={} (next.node={}, next.inv={})",
+                            cycle, name, old_val, val, next.node.0, next.inverted);
+                    }
+                }
+            }
+            for (&latch_id, &val) in &next_state2 {
+                if let AigNode::Latch { name, next, .. } = &aig2.nodes[latch_id as usize] {
+                    if name.contains("tap_reg") {
+                        let old_val = state2.get(&latch_id).copied().unwrap_or(false);
+                        eprintln!("[STATE_TRACE] Cycle {}: Gate '{}' cur={} -> next={} (next.node={}, next.inv={})",
+                            cycle, name, old_val, val, next.node.0, next.inverted);
+                    }
+                }
+            }
+
             state1 = next_state1;
             state2 = next_state2;
         }
@@ -5926,6 +6152,41 @@ impl BoundedModelChecker {
                 let o1 = outputs1.get(*i1).copied().unwrap_or(false);
                 let o2 = outputs2.get(*i2).copied().unwrap_or(false);
                 if o1 != o2 {
+                    println!("\n=== Mismatch Debug at cycle {} ===", cycle);
+                    println!("  Output: {} (LIR idx={}, Gate idx={})", name, i1, i2);
+                    println!("  LIR value: {}, Gate value: {}", o1, o2);
+
+                    // Find relevant latches for this output by looking at state inputs
+                    println!("  Relevant latch states:");
+                    let output_name_lower = name.to_lowercase();
+                    for &latch_id in &aig1.latches {
+                        if let AigNode::Latch { name: latch_name, .. } = &aig1.nodes[latch_id.0 as usize] {
+                            if latch_name.to_lowercase().contains(&output_name_lower.replace(".", "_"))
+                                || latch_name.contains("latched")
+                                || latch_name.contains("_ov_")
+                                || latch_name.contains("_uv_")
+                                || latch_name.contains("_oc_")
+                            {
+                                if let Some(&val) = state1.get(&latch_id.0) {
+                                    println!("    LIR latch '{}' = {}", latch_name, val);
+                                }
+                            }
+                        }
+                    }
+                    for &latch_id in &aig2.latches {
+                        if let AigNode::Latch { name: latch_name, .. } = &aig2.nodes[latch_id.0 as usize] {
+                            if latch_name.to_lowercase().contains(&output_name_lower.replace(".", "_"))
+                                || latch_name.contains("latched")
+                                || latch_name.contains("_ov_")
+                                || latch_name.contains("_uv_")
+                                || latch_name.contains("_oc_")
+                            {
+                                if let Some(&val) = state2.get(&latch_id.0) {
+                                    println!("    Gate latch '{}' = {}", latch_name, val);
+                                }
+                            }
+                        }
+                    }
                     return Some((cycle, name.clone()));
                 }
             }
@@ -6241,36 +6502,51 @@ impl BoundedModelChecker {
             }
         }
 
+        // Debug: Check rst input mapping
+        static RST_DEBUG: std::sync::Once = std::sync::Once::new();
+        RST_DEBUG.call_once(|| {
+            if let Some(&rst_id) = input_map.get("rst") {
+                if let Some(AigNode::Input { name }) = aig.nodes.get(rst_id as usize) {
+                    eprintln!("[SIM_DEBUG] rst input mapped to node {} (name: {})", rst_id, name);
+                }
+            } else {
+                eprintln!("[SIM_DEBUG] rst NOT found in input_map!");
+                eprintln!("[SIM_DEBUG] Available keys in input_map: {:?}", input_map.keys().take(20).collect::<Vec<_>>());
+            }
+        });
+
         // Set latch output values from current state
         for (&latch_id, &val) in latch_state {
             values.insert(latch_id, val);
         }
 
-        // Build mapping from latch names to their __reg_cur_ / __dff_cur_ INPUT nodes
-        // This is needed because in sequential AIGs, the current state is read from
-        // INPUT nodes (e.g., __reg_cur_foo), not directly from LATCH outputs
-        let mut latch_name_to_cur_input: HashMap<String, u32> = HashMap::new();
-        for (idx, node) in aig.nodes.iter().enumerate() {
-            if let AigNode::Input { name } = node {
-                if let Some(latch_name) = name.strip_prefix("__reg_cur_") {
-                    latch_name_to_cur_input.insert(latch_name.to_string(), idx as u32);
-                } else if let Some(latch_name) = name.strip_prefix("__dff_cur_") {
-                    latch_name_to_cur_input.insert(latch_name.to_string(), idx as u32);
-                }
+        // Set state input values from their linked latches (metadata-based, no name matching)
+        // The state_input_to_latch map was populated when the AIG was built
+        for (&state_input_id, &latch_id) in &aig.state_input_to_latch {
+            if let Some(&latch_val) = latch_state.get(&latch_id) {
+                values.insert(state_input_id, latch_val);
             }
         }
 
-        // Set __reg_cur_ / __dff_cur_ INPUT nodes with corresponding latch state values
-        for &latch_id in &aig.latches {
-            if let AigNode::Latch { name, .. } = &aig.nodes[latch_id.0 as usize] {
-                if let Some(latch_val) = latch_state.get(&latch_id.0) {
-                    // Find the corresponding current-state INPUT node
-                    if let Some(&input_id) = latch_name_to_cur_input.get(name) {
-                        values.insert(input_id, *latch_val);
-                    }
-                }
+        // Debug: print state_input_to_latch mappings (once)
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| {
+            println!("\n=== State Input to Latch Mapping (first 10) ===");
+            for (input_id, latch_id) in aig.state_input_to_latch.iter().take(10) {
+                let input_name = if let Some(AigNode::Input { name }) = aig.nodes.get(*input_id as usize) {
+                    name.as_str()
+                } else {
+                    "<unknown>"
+                };
+                let latch_name = if let Some(AigNode::Latch { name, .. }) = aig.nodes.get(*latch_id as usize) {
+                    name.as_str()
+                } else {
+                    "<unknown>"
+                };
+                println!("  input {} ({}) -> latch {} ({})", input_id, input_name, latch_id, latch_name);
             }
-        }
+            println!("  Total mappings: {}", aig.state_input_to_latch.len());
+        });
 
         // Evaluate all nodes in order
         for (idx, node) in aig.nodes.iter().enumerate() {
@@ -6315,11 +6591,71 @@ impl BoundedModelChecker {
 
         // Compute next latch state
         let mut next_state: HashMap<u32, bool> = HashMap::new();
+        let rst_val = inputs.get("rst").copied().unwrap_or(false);
         for &latch_id in &aig.latches {
-            if let AigNode::Latch { next, .. } = &aig.nodes[latch_id.0 as usize] {
-                let val = values.get(&next.node.0).copied().unwrap_or(false);
-                let val = if next.inverted { !val } else { val };
+            if let AigNode::Latch { next, name, .. } = &aig.nodes[latch_id.0 as usize] {
+                let raw_val = values.get(&next.node.0).copied().unwrap_or(false);
+                let val = if next.inverted { !raw_val } else { raw_val };
                 next_state.insert(latch_id.0, val);
+
+                // Debug tap_reg at every cycle
+                if name.contains("tap_reg") {
+                    let cur_val = latch_state.get(&latch_id.0).copied().unwrap_or(false);
+                    // Show cell_count inputs
+                    let mut cell_count_vals: Vec<(String, bool)> = Vec::new();
+                    for (key, &v) in inputs {
+                        if key.contains("cell_count") {
+                            cell_count_vals.push((key.clone(), v));
+                        }
+                    }
+                    cell_count_vals.sort_by_key(|(k, _)| k.clone());
+                    eprintln!("[TAP_REG_DEBUG] rst={}, latch '{}': cur={}, next.node={}, next.inverted={}, raw_val={}, final_next={}",
+                        rst_val, name, cur_val, next.node.0, next.inverted, raw_val, val);
+                    if !rst_val && !cell_count_vals.is_empty() {
+                        eprintln!("[TAP_REG_DEBUG]   cell_count inputs: {:?}", cell_count_vals);
+                    }
+
+                    // Trace AND gate when rst=false
+                    if !rst_val {
+                        if let Some(AigNode::And { left, right }) = aig.nodes.get(next.node.0 as usize) {
+                            let l_raw = values.get(&left.node.0).copied().unwrap_or(false);
+                            let r_raw = values.get(&right.node.0).copied().unwrap_or(false);
+                            let l_val = if left.inverted { !l_raw } else { l_raw };
+                            let r_val = if right.inverted { !r_raw } else { r_raw };
+                            eprintln!("[TAP_REG_DEBUG]   AND gate (inner OR): left.node={} inv={} raw={} val={}, right.node={} inv={} raw={} val={}",
+                                left.node.0, left.inverted, l_raw, l_val, right.node.0, right.inverted, r_raw, r_val);
+
+                            // Trace right node (not_sel_and_a term = !rst AND d_orig)
+                            // This represents one arm of the OR in the MUX
+                            if let Some(AigNode::And { left: l2, right: r2 }) = aig.nodes.get(right.node.0 as usize) {
+                                let l2_raw = values.get(&l2.node.0).copied().unwrap_or(false);
+                                let r2_raw = values.get(&r2.node.0).copied().unwrap_or(false);
+                                let l2_val = if l2.inverted { !l2_raw } else { l2_raw };
+                                let r2_val = if r2.inverted { !r2_raw } else { r2_raw };
+                                eprintln!("[TAP_REG_DEBUG]     not_sel_and_a (node {}): left.node={} inv={} raw={} val={}, right.node={} inv={} raw={} val={}",
+                                    right.node.0, l2.node.0, l2.inverted, l2_raw, l2_val, r2.node.0, r2.inverted, r2_raw, r2_val);
+                                eprintln!("[TAP_REG_DEBUG]     => !rst={}, d_orig={}", l2_val, r2_val);
+
+                                // For Gate AIG: trace _t95 MUX components
+                                // _t95 = _t94 ? _t91 : tap_reg
+                                // where _t94 = condition, _t91 = comparison
+                                if name.contains("top.tap_reg") {
+                                    // Try to trace deeper into the _t95 MUX structure
+                                    // The r2 node (d_orig after inversion) should lead to _t95 MUX
+                                    if let Some(AigNode::And { left: l3, right: r3 }) = aig.nodes.get(r2.node.0 as usize) {
+                                        // This might be the inner AND of _t95's add_mux
+                                        let l3_raw = values.get(&l3.node.0).copied().unwrap_or(false);
+                                        let r3_raw = values.get(&r3.node.0).copied().unwrap_or(false);
+                                        let l3_val = if l3.inverted { !l3_raw } else { l3_raw };
+                                        let r3_val = if r3.inverted { !r3_raw } else { r3_raw };
+                                        eprintln!("[TAP_REG_DEBUG]       _t95 inner AND: l3.node={} inv={} raw={} val={}, r3.node={} inv={} raw={} val={}",
+                                            l3.node.0, l3.inverted, l3_raw, l3_val, r3.node.0, r3.inverted, r3_raw, r3_val);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
 
@@ -6562,14 +6898,7 @@ impl BoundedModelChecker {
         formula: &mut CnfFormula,
         get_var: &mut impl FnMut(u8, u32, usize) -> Var,
     ) {
-        // Build mapping from latch names to latch nodes
-        let mut latch_name_to_id: HashMap<String, u32> = HashMap::new();
-        for &latch_id in &aig.latches {
-            if let AigNode::Latch { name, .. } = &aig.nodes[latch_id.0 as usize] {
-                latch_name_to_id.insert(name.clone(), latch_id.0);
-            }
-        }
-
+        // Connect latch outputs to their next-state values from the previous cycle
         for &latch_id in &aig.latches {
             if let AigNode::Latch { next, .. } = &aig.nodes[latch_id.0 as usize] {
                 // latch_output[cycle] = next[cycle-1]
@@ -6588,27 +6917,19 @@ impl BoundedModelChecker {
             }
         }
 
-        // Connect __reg_cur_ / __dff_cur_ INPUT nodes to corresponding latch outputs at this cycle
-        for (idx, node) in aig.nodes.iter().enumerate() {
-            if let AigNode::Input { name } = node {
-                let latch_name = name.strip_prefix("__reg_cur_")
-                    .or_else(|| name.strip_prefix("__dff_cur_"));
-                if let Some(latch_name) = latch_name {
-                    if let Some(&latch_id) = latch_name_to_id.get(latch_name) {
-                        // Connect input node to latch output at this cycle
-                        let input_var = get_var(aig_id, idx as u32, cycle);
-                        let latch_var = get_var(aig_id, latch_id, cycle);
-                        // input_var = latch_var
-                        formula.add_clause(&[Lit::negative(input_var), Lit::positive(latch_var)]);
-                        formula.add_clause(&[Lit::positive(input_var), Lit::negative(latch_var)]);
-                    }
-                }
-            }
+        // Connect state inputs to their linked latch outputs at this cycle
+        // Uses metadata mapping, no name matching needed
+        for (&state_input_id, &latch_id) in &aig.state_input_to_latch {
+            let input_var = get_var(aig_id, state_input_id, cycle);
+            let latch_var = get_var(aig_id, latch_id, cycle);
+            // input_var = latch_var
+            formula.add_clause(&[Lit::negative(input_var), Lit::positive(latch_var)]);
+            formula.add_clause(&[Lit::positive(input_var), Lit::negative(latch_var)]);
         }
     }
 
     /// Constrain latches to initial values at cycle 0
-    /// Also connects __reg_cur_ / __dff_cur_ input nodes to latch outputs
+    /// Also connects state input nodes to latch outputs
     fn constrain_initial_state(
         &self,
         aig: &Aig,
@@ -6616,14 +6937,6 @@ impl BoundedModelChecker {
         formula: &mut CnfFormula,
         get_var: &mut impl FnMut(u8, u32, usize) -> Var,
     ) {
-        // Build mapping from latch names to latch nodes
-        let mut latch_name_to_id: HashMap<String, u32> = HashMap::new();
-        for &latch_id in &aig.latches {
-            if let AigNode::Latch { name, .. } = &aig.nodes[latch_id.0 as usize] {
-                latch_name_to_id.insert(name.clone(), latch_id.0);
-            }
-        }
-
         // Constrain latch outputs to init values
         for &latch_id in &aig.latches {
             if let AigNode::Latch { init, .. } = &aig.nodes[latch_id.0 as usize] {
@@ -6636,23 +6949,14 @@ impl BoundedModelChecker {
             }
         }
 
-        // Connect __reg_cur_ / __dff_cur_ INPUT nodes to corresponding latch outputs
-        // These inputs represent the current latch state and must equal the latch output
-        for (idx, node) in aig.nodes.iter().enumerate() {
-            if let AigNode::Input { name } = node {
-                let latch_name = name.strip_prefix("__reg_cur_")
-                    .or_else(|| name.strip_prefix("__dff_cur_"));
-                if let Some(latch_name) = latch_name {
-                    if let Some(&latch_id) = latch_name_to_id.get(latch_name) {
-                        // Connect input node to latch output
-                        let input_var = get_var(aig_id, idx as u32, 0);
-                        let latch_var = get_var(aig_id, latch_id, 0);
-                        // input_var = latch_var
-                        formula.add_clause(&[Lit::negative(input_var), Lit::positive(latch_var)]);
-                        formula.add_clause(&[Lit::positive(input_var), Lit::negative(latch_var)]);
-                    }
-                }
-            }
+        // Connect state inputs to their linked latch outputs at cycle 0
+        // Uses metadata mapping, no name matching needed
+        for (&state_input_id, &latch_id) in &aig.state_input_to_latch {
+            let input_var = get_var(aig_id, state_input_id, 0);
+            let latch_var = get_var(aig_id, latch_id, 0);
+            // input_var = latch_var
+            formula.add_clause(&[Lit::negative(input_var), Lit::positive(latch_var)]);
+            formula.add_clause(&[Lit::positive(input_var), Lit::negative(latch_var)]);
         }
     }
 }
