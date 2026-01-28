@@ -28,6 +28,8 @@ pub use equivalence::{
     BoundedModelChecker, BmcEquivalenceResult, BmcCounterexample,
     // Hierarchical equivalence checking types
     HierarchicalEquivalenceChecker, HierarchicalEquivalenceResult, MismatchDetails, SemanticFingerprint,
+    // Simulation-based equivalence checking types
+    SimBasedEquivalenceChecker, SimEquivalenceResult,
 };
 
 use skalp_frontend::ast::Item;
