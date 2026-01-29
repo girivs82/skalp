@@ -16578,12 +16578,20 @@ impl<'hir> HirToMir<'hir> {
     fn try_eval_const_expr_impl(&mut self, expr: &hir::HirExpression) -> Option<u64> {
         // Try using the const evaluator first (handles both built-in and user-defined functions)
         if let Ok(const_val) = self.const_evaluator.eval(expr) {
-            return const_val.as_nat().map(|n| n as u64);
+            // BUG FIX: Handle both nat and boolean values from const evaluator
+            if let Some(n) = const_val.as_nat() {
+                return Some(n as u64);
+            }
+            if let Some(b) = const_val.as_bool() {
+                return Some(if b { 1 } else { 0 });
+            }
         }
 
         // Fallback to manual evaluation for expressions the evaluator can't handle
         match expr {
             hir::HirExpression::Literal(hir::HirLiteral::Integer(val)) => Some(*val),
+            // BUG FIX: Handle boolean literals for fixed<W, F, SIGNED> type parameters
+            hir::HirExpression::Literal(hir::HirLiteral::Boolean(val)) => Some(if *val { 1 } else { 0 }),
             hir::HirExpression::Binary(bin_expr) => {
                 // Recursively evaluate binary expressions
                 let left = self.try_eval_const_expr(&bin_expr.left)?;
