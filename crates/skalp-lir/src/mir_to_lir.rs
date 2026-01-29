@@ -930,54 +930,55 @@ impl MirToLirTransform {
                         // SDFF pattern detected: skip mux, use integrated sync reset
                         // For nested else ifs, we need to collect all paths from else branch
                         let else_signal = if else_has_nested {
-                            // Collect paths from else branch and build mux chain
+                            // Collect paths from else branch grouped by sibling statement
                             if let Some(ref else_block) = if_stmt.else_block {
-                                let else_paths = Self::collect_conditional_paths_for_target(
+                                let sibling_groups = Self::collect_conditional_paths_grouped(
                                     else_block,
                                     target,
                                     None,
                                 );
 
-                                // BUG FIX: Build MUX cascade correctly for if-else-if chains
-                                // For: if A { v1 } else if B { v2 } else if C { v3 } else { v4 }
-                                // Correct structure: mux(A, v1, mux(B, v2, mux(C, v3, v4)))
-                                // This requires processing from innermost (last) to outermost (first)
+                                // Build MUX cascade with correct priority:
+                                // - Between sibling ifs: LATER sibling has HIGHER priority (forward order)
+                                // - Within if-else-if chain: FIRST condition has HIGHER priority (reverse order)
+                                //
+                                // Processing order:
+                                // 1. Start with feedback (or unconditional else) as base
+                                // 2. Process sibling groups in FORWARD order (later siblings wrap earlier)
+                                // 3. Within each group, process in REVERSE order (first condition wraps later)
 
-                                let mut conditional_paths: Vec<_> = else_paths.into_iter().collect();
+                                let mut current_value = target_signal; // Default: feedback
 
-                                // BUG FIX: Only use last path as base if it's UNCONDITIONAL
-                                // If all paths are conditional, use target_signal (feedback) as base
-                                let mut current_value = if let Some((None, last_expr)) = conditional_paths.last() {
-                                    // Last path is unconditional (final else) - use as base
-                                    let base = self.transform_expression(last_expr, target_width);
-                                    conditional_paths.pop(); // Remove it from the list
-                                    base
-                                } else {
-                                    // No unconditional path, or last path is conditional
-                                    // Use feedback (keep current value) as base
-                                    target_signal
-                                };
+                                // Check if the LAST group has an unconditional else
+                                // (it would be the last path in the last group)
+                                let mut groups: Vec<Vec<_>> = sibling_groups;
+                                if let Some(last_group) = groups.last_mut() {
+                                    if let Some((None, last_expr)) = last_group.last() {
+                                        // Last path of last group is unconditional - use as base
+                                        current_value = self.transform_expression(last_expr, target_width);
+                                        last_group.pop(); // Remove it
+                                    }
+                                }
 
-                                // Build mux chain in REVERSE order (innermost to outermost)
-                                // This creates: mux(first_cond, first_val, mux(second_cond, ...))
-                                for (condition, expr) in conditional_paths.into_iter().rev() {
-                                    let expr_signal = self.transform_expression(&expr, target_width);
+                                // Process each sibling group in FORWARD order
+                                // (later siblings become outer muxes = higher priority)
+                                for group in groups {
+                                    // Within each group, process in REVERSE order
+                                    // (first condition in chain becomes outer mux = higher priority)
+                                    for (condition, expr) in group.into_iter().rev() {
+                                        let expr_signal = self.transform_expression(&expr, target_width);
 
-                                    if let Some(cond) = condition {
-                                        // BUG FIX: Use the FULL condition, not just the simple/inner condition
-                                        // For nested ifs (not if-else-if chains), each path has independent
-                                        // compound conditions that must all be checked.
-                                        // E.g., `lockstep_rx_valid && mismatch_detected && count < 10`
-                                        // must check all three conditions, not just `count < 10`.
-                                        let cond_signal = self.transform_expression(&cond, 1);
-                                        let mux_out = self.alloc_temp_signal(target_width);
-                                        self.lir.add_node(
-                                            LirOp::Mux2 { width: target_width },
-                                            vec![cond_signal, current_value, expr_signal],
-                                            mux_out,
-                                            format!("{}.mux", self.hierarchy_path),
-                                        );
-                                        current_value = mux_out;
+                                        if let Some(cond) = condition {
+                                            let cond_signal = self.transform_expression(&cond, 1);
+                                            let mux_out = self.alloc_temp_signal(target_width);
+                                            self.lir.add_node(
+                                                LirOp::Mux2 { width: target_width },
+                                                vec![cond_signal, current_value, expr_signal],
+                                                mux_out,
+                                                format!("{}.mux", self.hierarchy_path),
+                                            );
+                                            current_value = mux_out;
+                                        }
                                     }
                                 }
 
@@ -1566,6 +1567,187 @@ impl MirToLirTransform {
         }
 
         paths
+    }
+
+    /// Collect conditional paths grouped by sibling statement.
+    ///
+    /// This is critical for correct priority handling:
+    /// - Within an if-else-if chain: first condition has highest priority (reverse order)
+    /// - Between sibling ifs: later sibling has highest priority (forward order)
+    ///
+    /// Returns Vec<Vec<(condition, expression)>> where:
+    /// - Each inner Vec is a "sibling group" (paths from one if-else-if chain)
+    /// - Inner groups are in collection order (first condition first)
+    /// - Outer groups are in statement order (first sibling first)
+    fn collect_conditional_paths_grouped(
+        block: &Block,
+        target: &LValue,
+        outer_condition: Option<&Expression>,
+    ) -> Vec<Vec<(Option<Expression>, Expression)>> {
+        let mut sibling_groups: Vec<Vec<(Option<Expression>, Expression)>> = Vec::new();
+
+        for stmt in &block.statements {
+            match stmt {
+                Statement::Assignment(assign)
+                    if matches!(assign.kind, AssignmentKind::NonBlocking) && &assign.lhs == target =>
+                {
+                    // Direct assignment - treat as its own sibling group
+                    sibling_groups.push(vec![(outer_condition.cloned(), assign.rhs.clone())]);
+                }
+                Statement::If(if_stmt) => {
+                    // An if statement (possibly with else-if chain) is one sibling group
+                    let mut group_paths = Vec::new();
+
+                    // Build the combined condition for the then branch
+                    let then_condition = if let Some(outer) = outer_condition {
+                        Some(Expression {
+                            kind: ExpressionKind::Binary {
+                                op: BinaryOp::And,
+                                left: Box::new(outer.clone()),
+                                right: Box::new(if_stmt.condition.clone()),
+                            },
+                            ty: skalp_frontend::types::Type::Bool,
+                            span: None,
+                        })
+                    } else {
+                        Some(if_stmt.condition.clone())
+                    };
+
+                    // Collect paths from then branch (flattened - if-else-if chains stay together)
+                    let then_paths = Self::collect_conditional_paths_for_target(
+                        &if_stmt.then_block,
+                        target,
+                        then_condition.as_ref(),
+                    );
+                    group_paths.extend(then_paths);
+
+                    // Build the combined condition for the else branch
+                    if let Some(ref else_block) = if_stmt.else_block {
+                        let negated_condition = Expression {
+                            kind: ExpressionKind::Unary {
+                                op: UnaryOp::Not,
+                                operand: Box::new(if_stmt.condition.clone()),
+                            },
+                            ty: skalp_frontend::types::Type::Bool,
+                            span: None,
+                        };
+
+                        let else_condition = if let Some(outer) = outer_condition {
+                            Some(Expression {
+                                kind: ExpressionKind::Binary {
+                                    op: BinaryOp::And,
+                                    left: Box::new(outer.clone()),
+                                    right: Box::new(negated_condition),
+                                },
+                                ty: skalp_frontend::types::Type::Bool,
+                                span: None,
+                            })
+                        } else {
+                            Some(negated_condition)
+                        };
+
+                        let else_paths = Self::collect_conditional_paths_for_target(
+                            else_block,
+                            target,
+                            else_condition.as_ref(),
+                        );
+                        group_paths.extend(else_paths);
+                    }
+
+                    if !group_paths.is_empty() {
+                        sibling_groups.push(group_paths);
+                    }
+                }
+                Statement::Block(inner_block) => {
+                    // Recurse into inner block, preserving sibling structure
+                    let inner_groups = Self::collect_conditional_paths_grouped(
+                        inner_block,
+                        target,
+                        outer_condition,
+                    );
+                    sibling_groups.extend(inner_groups);
+                }
+                Statement::Case(case_stmt) => {
+                    // Case statement is one sibling group (all arms together)
+                    let mut group_paths = Vec::new();
+
+                    for item in &case_stmt.items {
+                        for value in &item.values {
+                            let eq_condition = Expression {
+                                kind: ExpressionKind::Binary {
+                                    op: BinaryOp::Equal,
+                                    left: Box::new(case_stmt.expr.clone()),
+                                    right: Box::new(value.clone()),
+                                },
+                                ty: skalp_frontend::types::Type::Bool,
+                                span: None,
+                            };
+
+                            let combined_condition = if let Some(outer) = outer_condition {
+                                Some(Expression {
+                                    kind: ExpressionKind::Binary {
+                                        op: BinaryOp::And,
+                                        left: Box::new(outer.clone()),
+                                        right: Box::new(eq_condition),
+                                    },
+                                    ty: skalp_frontend::types::Type::Bool,
+                                    span: None,
+                                })
+                            } else {
+                                Some(eq_condition)
+                            };
+
+                            let arm_paths = Self::collect_conditional_paths_for_target(
+                                &item.block,
+                                target,
+                                combined_condition.as_ref(),
+                            );
+                            group_paths.extend(arm_paths);
+                        }
+                    }
+
+                    if let Some(ref default_block) = case_stmt.default {
+                        let default_paths = Self::collect_conditional_paths_for_target(
+                            default_block,
+                            target,
+                            outer_condition,
+                        );
+                        group_paths.extend(default_paths);
+                    }
+
+                    if !group_paths.is_empty() {
+                        sibling_groups.push(group_paths);
+                    }
+                }
+                Statement::ResolvedConditional(rc) if &rc.target == target => {
+                    // ResolvedConditional is one sibling group
+                    let mut group_paths = Vec::new();
+
+                    for case in &rc.resolved.cases {
+                        let combined_condition = if let Some(outer) = outer_condition {
+                            Some(Expression {
+                                kind: ExpressionKind::Binary {
+                                    op: BinaryOp::And,
+                                    left: Box::new(outer.clone()),
+                                    right: Box::new(case.condition.clone()),
+                                },
+                                ty: skalp_frontend::types::Type::Bool,
+                                span: None,
+                            })
+                        } else {
+                            Some(case.condition.clone())
+                        };
+                        group_paths.push((combined_condition, case.value.clone()));
+                    }
+                    group_paths.push((outer_condition.cloned(), rc.resolved.default.clone()));
+
+                    sibling_groups.push(group_paths);
+                }
+                _ => {}
+            }
+        }
+
+        sibling_groups
     }
 
     /// Extract the simple (innermost) condition from a compound condition.
