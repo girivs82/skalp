@@ -48,8 +48,10 @@ pub struct SirModule {
 /// Type information for SIR signals and ports
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum SirType {
-    /// Bit vector with fixed width
+    /// Bit vector with fixed width (unsigned)
     Bits(usize),
+    /// Signed bit vector with fixed width
+    SignedBits(usize),
     /// IEEE 754 half precision (16-bit)
     Float16,
     /// IEEE 754 single precision (32-bit)
@@ -71,6 +73,7 @@ impl SirType {
     pub fn width(&self) -> usize {
         match self {
             SirType::Bits(w) => *w,
+            SirType::SignedBits(w) => *w,
             SirType::Float16 => 16,
             SirType::Float32 => 32,
             SirType::Float64 => 64,
@@ -79,6 +82,11 @@ impl SirType {
             SirType::Vec4(elem) => elem.width() * 4,
             SirType::Array(elem, size) => elem.width() * size,
         }
+    }
+
+    /// Check if this is a signed type
+    pub fn is_signed(&self) -> bool {
+        matches!(self, SirType::SignedBits(_))
     }
 
     /// Check if this is a floating-point type
@@ -221,13 +229,18 @@ pub enum BinaryOperation {
     And,
     Or,
     Xor,
-    // Comparison operations
+    // Comparison operations (unsigned)
     Eq,
     Neq,
     Lt,
     Lte,
     Gt,
     Gte,
+    // Signed comparison operations
+    Slt,  // Signed less than
+    Slte, // Signed less than or equal
+    Sgt,  // Signed greater than
+    Sgte, // Signed greater than or equal
     // Shift operations
     Shl,
     Shr,

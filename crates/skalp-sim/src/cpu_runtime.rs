@@ -419,6 +419,35 @@ impl CpuRuntime {
                     0
                 }
             }
+            // Signed comparison operations - interpret as signed integers
+            BinaryOperation::Slt => {
+                if (left_val as i64) < (right_val as i64) {
+                    1
+                } else {
+                    0
+                }
+            }
+            BinaryOperation::Slte => {
+                if (left_val as i64) <= (right_val as i64) {
+                    1
+                } else {
+                    0
+                }
+            }
+            BinaryOperation::Sgt => {
+                if (left_val as i64) > (right_val as i64) {
+                    1
+                } else {
+                    0
+                }
+            }
+            BinaryOperation::Sgte => {
+                if (left_val as i64) >= (right_val as i64) {
+                    1
+                } else {
+                    0
+                }
+            }
             BinaryOperation::Shl => left_val << (right_val & 0x3F), // Limit shift amount
             BinaryOperation::Shr => left_val >> (right_val & 0x3F),
             // Floating-point operations - perform proper IEEE 754 arithmetic

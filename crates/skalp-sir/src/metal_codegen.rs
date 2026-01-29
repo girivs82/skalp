@@ -1684,6 +1684,11 @@ impl<'a> MetalShaderGenerator<'a> {
                 BinaryOperation::Lte => "<=",
                 BinaryOperation::Gt => ">",
                 BinaryOperation::Gte => ">=",
+                // Signed comparison (Metal uses < > with signed casts)
+                BinaryOperation::Slt => "<",
+                BinaryOperation::Slte => "<=",
+                BinaryOperation::Sgt => ">",
+                BinaryOperation::Sgte => ">=",
                 BinaryOperation::Shl => "<<",
                 BinaryOperation::Shr => ">>",
                 // Floating-point operations
@@ -6250,6 +6255,27 @@ impl<'a> MetalShaderGenerator<'a> {
         }
     }
 
+    /// Get Metal type representation for wide signed bit types
+    fn get_metal_type_for_wide_signed_bits(&self, width: usize) -> (String, Option<usize>) {
+        // Signed types use int/short/char instead of uint/ushort/uchar
+        // For wide types, we use int array which will be interpreted as signed
+        if width > 256 {
+            return ("int".to_string(), Some(8)); // int[8] for 256 bits
+        }
+        match width {
+            1..=8 => ("char".to_string(), None),
+            9..=16 => ("short".to_string(), None),
+            17..=32 => ("int".to_string(), None),
+            33..=64 => ("int2".to_string(), None),
+            65..=128 => ("int4".to_string(), None),
+            129..=256 => ("int".to_string(), Some(8)), // int[8] for 256 bits
+            _ => unreachable!(
+                "Width {} should have been handled by >256 check above",
+                width
+            ),
+        }
+    }
+
     /// Safe version of get_metal_type_for_wide_bits that handles decomposed signals
     /// BUG FIX #71: For signals > 256 bits, returns info about first decomposed part
     /// Returns (base_type, array_size, is_decomposed)
@@ -6315,6 +6341,19 @@ impl<'a> MetalShaderGenerator<'a> {
                     ("uint".to_string(), None)
                 } else {
                     self.get_metal_type_for_wide_bits(*w)
+                };
+                if let Some(size) = array_size {
+                    (base_type, format!("[{}]", size))
+                } else {
+                    (base_type, String::new())
+                }
+            }
+            SirType::SignedBits(w) => {
+                // Signed bit types use signed integer types
+                let (base_type, array_size) = if force_4byte_align && *w <= 32 {
+                    ("int".to_string(), None) // Use signed int for signed types
+                } else {
+                    self.get_metal_type_for_wide_signed_bits(*w)
                 };
                 if let Some(size) = array_size {
                     (base_type, format!("[{}]", size))
