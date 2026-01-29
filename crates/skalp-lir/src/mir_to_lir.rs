@@ -730,12 +730,16 @@ impl MirToLirTransform {
                         reset_value: Some(0), // Default reset value
                     };
 
+                    // BUG FIX: Include target signal name in path to avoid naming collisions
+                    let target_name = self.get_signal_name(target_signal);
+                    let reg_path = format!("{}.{}", self.hierarchy_path, target_name);
+
                     if let Some(clk) = clock_signal {
                         self.lir.add_seq_node(
                             reg_op,
                             vec![d_signal],
                             target_signal,
-                            format!("{}.reg", self.hierarchy_path),
+                            reg_path,
                             clk,
                             reset_signal,
                         );
@@ -744,7 +748,7 @@ impl MirToLirTransform {
                             reg_op,
                             vec![d_signal],
                             target_signal,
-                            format!("{}.reg", self.hierarchy_path),
+                            reg_path,
                         );
                     }
                 } else {
@@ -886,12 +890,16 @@ impl MirToLirTransform {
                             reset_value: Some(0),
                         };
 
+                        // BUG FIX: Include target signal name in path to avoid naming collisions
+                        let target_name = self.get_signal_name(target_signal);
+                        let reg_path = format!("{}.{}", self.hierarchy_path, target_name);
+
                         if let Some(clk) = clock_signal {
                             self.lir.add_seq_node(
                                 reg_op,
                                 vec![current_value],
                                 target_signal,
-                                format!("{}.reg", self.hierarchy_path),
+                                reg_path,
                                 clk,
                                 reset_signal,
                             );
@@ -900,7 +908,7 @@ impl MirToLirTransform {
                                 reg_op,
                                 vec![current_value],
                                 target_signal,
-                                format!("{}.reg", self.hierarchy_path),
+                                reg_path,
                             );
                         }
                         continue;
@@ -977,12 +985,16 @@ impl MirToLirTransform {
                             reset_value: Some(reset_value),
                         };
 
+                        // BUG FIX: Include target signal name in path to avoid naming collisions
+                        let target_name = self.get_signal_name(target_signal);
+                        let reg_path = format!("{}.{}", self.hierarchy_path, target_name);
+
                         if let Some(clk) = clock_signal {
                             self.lir.add_seq_node(
                                 reg_op,
                                 vec![else_signal], // Direct value, no mux
                                 target_signal,
-                                format!("{}.reg", self.hierarchy_path),
+                                reg_path,
                                 clk,
                                 reset_signal,
                             );
@@ -991,7 +1003,7 @@ impl MirToLirTransform {
                                 reg_op,
                                 vec![else_signal],
                                 target_signal,
-                                format!("{}.reg", self.hierarchy_path),
+                                reg_path,
                             );
                         }
                     } else if directly_assigned {
@@ -1032,12 +1044,16 @@ impl MirToLirTransform {
                             reset_value: Some(0),
                         };
 
+                        // BUG FIX: Include target signal name in path to avoid naming collisions
+                        let target_name = self.get_signal_name(target_signal);
+                        let reg_path = format!("{}.{}", self.hierarchy_path, target_name);
+
                         if let Some(clk) = clock_signal {
                             self.lir.add_seq_node(
                                 reg_op,
                                 vec![mux_out],
                                 target_signal,
-                                format!("{}.reg", self.hierarchy_path),
+                                reg_path,
                                 clk,
                                 reset_signal,
                             );
@@ -1046,7 +1062,7 @@ impl MirToLirTransform {
                                 reg_op,
                                 vec![mux_out],
                                 target_signal,
-                                format!("{}.reg", self.hierarchy_path),
+                                reg_path,
                             );
                         }
                     }
@@ -1243,12 +1259,16 @@ impl MirToLirTransform {
                 reset_value: Some(0),
             };
 
+            // BUG FIX: Include target signal name in path to avoid naming collisions
+            let target_name = self.get_signal_name(target_signal);
+            let reg_path = format!("{}.{}", self.hierarchy_path, target_name);
+
             if let Some(clk) = clock_signal {
                 self.lir.add_seq_node(
                     reg_op,
                     vec![current_result],
                     target_signal,
-                    format!("{}.case_reg", self.hierarchy_path),
+                    reg_path,
                     clk,
                     reset_signal,
                 );
@@ -1257,7 +1277,7 @@ impl MirToLirTransform {
                     reg_op,
                     vec![current_result],
                     target_signal,
-                    format!("{}.case_reg", self.hierarchy_path),
+                    reg_path,
                 );
             }
         }
@@ -1617,12 +1637,16 @@ impl MirToLirTransform {
                 reset_value: Some(0),
             };
 
+            // BUG FIX: Include target signal name in path to avoid naming collisions
+            let target_name = self.get_signal_name(target_signal);
+            let reg_path = format!("{}.{}", self.hierarchy_path, target_name);
+
             if let Some(clk) = clock_signal {
                 self.lir.add_seq_node(
                     reg_op,
                     vec![mux_out],
                     target_signal,
-                    format!("{}.reg", self.hierarchy_path),
+                    reg_path,
                     clk,
                     reset_signal,
                 );
@@ -1631,7 +1655,7 @@ impl MirToLirTransform {
                     reg_op,
                     vec![mux_out],
                     target_signal,
-                    format!("{}.reg", self.hierarchy_path),
+                    reg_path,
                 );
             }
         }
@@ -2258,6 +2282,15 @@ impl MirToLirTransform {
             format!("{}.const_{}", self.hierarchy_path, val),
         );
         out
+    }
+
+    /// Get the name of a signal from its ID
+    fn get_signal_name(&self, sig_id: LirSignalId) -> String {
+        self.lir
+            .signals
+            .get(sig_id.0 as usize)
+            .map(|s| s.name.clone())
+            .unwrap_or_else(|| format!("sig_{}", sig_id.0))
     }
 
     /// Get signal ID for an LValue
