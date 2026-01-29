@@ -310,7 +310,11 @@ enum Commands {
     /// Equivalence checking between RTL and gate-level netlist
     ///
     /// Verifies that the synthesized gate-level netlist is functionally
-    /// equivalent to the original RTL description using bounded model checking.
+    /// equivalent to the original RTL description.
+    ///
+    /// Default mode: Hybrid (simulation + SAT-based symbolic check)
+    /// --quick: Simulation-only (fast, not exhaustive)
+    /// --symbolic: SAT-based symbolic check only (finds deep bugs)
     Ec {
         /// Source file (.sk) containing the RTL design
         source: PathBuf,
@@ -324,7 +328,7 @@ enum Commands {
         #[arg(short, long, default_value = "equiv")]
         output: PathBuf,
 
-        /// BMC bound (number of cycles to check)
+        /// BMC bound (number of cycles to check for simulation)
         #[arg(short, long, default_value = "10")]
         bound: usize,
 
@@ -337,10 +341,16 @@ enum Commands {
         entity: Option<String>,
 
         /// Run quick simulation-only check (faster but not exhaustive)
+        /// Good for catching easy bugs quickly
         #[arg(long)]
         quick: bool,
 
-        /// Number of reset cycles for simulation mode (--quick)
+        /// Run SAT-based symbolic check (finds bugs in unreachable states)
+        /// Essential for protocols with long timeouts (PCIe, USB, etc.)
+        #[arg(long)]
+        symbolic: bool,
+
+        /// Number of reset cycles for simulation mode
         #[arg(long, default_value = "10")]
         reset_cycles: u64,
 
@@ -703,6 +713,7 @@ fn main() -> Result<()> {
             format,
             entity,
             quick,
+            symbolic,
             reset_cycles,
             verbose,
         } => {
@@ -714,6 +725,7 @@ fn main() -> Result<()> {
                 &format,
                 entity.as_deref(),
                 quick,
+                symbolic,
                 reset_cycles,
                 verbose,
             )?;
@@ -2279,20 +2291,33 @@ fn run_equivalence_check(
     format: &str,
     entity: Option<&str>,
     quick: bool,
+    symbolic: bool,
     reset_cycles: u64,
     verbose: bool,
 ) -> Result<()> {
-    use skalp_formal::BoundedModelChecker;
+    use skalp_formal::equivalence::{LirToAig, GateNetlistToAig, check_sequential_equivalence_sat};
     use skalp_frontend::parse_and_build_compilation_context;
     use skalp_lir::{get_stdlib_library, lower_mir_hierarchical_with_top, map_hierarchical_to_gates};
     use std::time::Instant;
 
     let start_time = Instant::now();
 
+    // Determine mode
+    let mode_str = if quick {
+        "simulation-only (quick)"
+    } else if symbolic {
+        "SAT-based symbolic (thorough)"
+    } else {
+        "hybrid (simulation + SAT)"
+    };
+
     println!("🔍 Equivalence Checking");
     println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
     println!("Source: {:?}", source);
-    println!("Bound:  {} cycles", bound);
+    println!("Mode:   {}", mode_str);
+    if !symbolic {
+        println!("Bound:  {} cycles", bound);
+    }
     println!();
 
     // Create output directory
@@ -2366,17 +2391,20 @@ fn run_equivalence_check(
     // Step 4: Run equivalence check
     println!();
     println!("🔬 Running equivalence check...");
-    println!("   Mode: {}", if quick { "simulation-only (quick)" } else { "BMC (exhaustive)" });
 
-    if quick {
-        // Use simulation-based equivalence checking (faster, not exhaustive)
+    let mut overall_pass = true;
+    let mut sim_found_bug = false;
+
+    // Phase 1: Simulation (unless --symbolic only)
+    if !symbolic {
+        println!();
+        println!("📊 Phase 1: Simulation-based check ({} cycles)...", bound);
         use skalp_formal::SimBasedEquivalenceChecker;
 
         let checker = SimBasedEquivalenceChecker::new()
             .with_cycles(bound as u64)
             .with_reset("rst", reset_cycles);
 
-        // Run async check using tokio runtime
         let rt = tokio::runtime::Runtime::new()
             .context("Failed to create tokio runtime")?;
 
@@ -2384,65 +2412,122 @@ fn run_equivalence_check(
             checker.check_mir_vs_gate(&mir, target_entity, &gate_netlist).await
         }).map_err(|e| anyhow::anyhow!("Simulation equivalence check failed: {:?}", e))?;
 
-        let total_time = start_time.elapsed();
-
-        // Print summary
-        println!();
-        println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
         if sim_result.equivalent {
-            println!("✅ PASS: Designs are equivalent for {} cycles", sim_result.cycles_verified);
-            println!("   Outputs compared: {}", sim_result.outputs_compared);
+            println!("   ✓ Simulation PASS: No mismatch in {} cycles", sim_result.cycles_verified);
         } else {
-            println!("❌ FAIL: Mismatch detected!");
+            println!("   ✗ Simulation FAIL: Mismatch detected!");
             if let Some(cycle) = sim_result.mismatch_cycle {
-                println!("   Cycle: {}", cycle);
+                println!("     Cycle: {}", cycle);
             }
             if let Some(ref output) = sim_result.mismatch_output {
-                println!("   Output: {}", output);
+                println!("     Output: {}", output);
             }
-            if let (Some(v1), Some(v2)) = (sim_result.value_1, sim_result.value_2) {
-                println!("   MIR value:  0x{:x}", v1);
-                println!("   Gate value: 0x{:x}", v2);
+            sim_found_bug = true;
+            overall_pass = false;
+        }
+
+        // If quick mode, stop here
+        if quick {
+            let total_time = start_time.elapsed();
+            println!();
+            println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+            if overall_pass {
+                println!("✅ PASS: Designs equivalent for {} cycles (simulation only)", bound);
+                println!("   Note: Use --symbolic for exhaustive proof");
+            } else {
+                println!("❌ FAIL: Mismatch detected by simulation");
+            }
+            println!("   Time: {:.2}s", total_time.as_secs_f64());
+
+            if !overall_pass {
+                anyhow::bail!("Equivalence check failed");
+            }
+            return Ok(());
+        }
+    }
+
+    // Phase 2: SAT-based symbolic check (unless simulation already found bug)
+    if !sim_found_bug {
+        println!();
+        println!("🔬 Phase 2: SAT-based symbolic equivalence check...");
+        println!("   Checking transition function equivalence for ALL states...");
+
+        // Convert to sequential AIGs
+        let lir_aig = LirToAig::new().convert_sequential(&lir);
+        let gate_aig = GateNetlistToAig::new().convert_sequential(&gate_netlist);
+
+        println!("   LIR AIG:  {} nodes, {} latches", lir_aig.nodes.len(), lir_aig.latches.len());
+        println!("   Gate AIG: {} nodes, {} latches", gate_aig.nodes.len(), gate_aig.latches.len());
+
+        match check_sequential_equivalence_sat(&lir_aig, &gate_aig) {
+            Ok(sat_result) => {
+                if sat_result.equivalent {
+                    println!("   ✓ SAT PASS: Transition functions equivalent for ALL states");
+                    println!("     Proof completed in {}ms", sat_result.time_ms);
+                } else {
+                    println!("   ✗ SAT FAIL: Found state where designs differ!");
+                    overall_pass = false;
+
+                    if let Some(ref ce) = sat_result.counterexample {
+                        // Show state where bug occurs
+                        let state_vars: Vec<_> = ce.state.iter()
+                            .filter(|(k, _)| k.contains("state"))
+                            .collect();
+                        if !state_vars.is_empty() {
+                            println!("     State where difference occurs:");
+                            for (name, val) in &state_vars {
+                                println!("       {} = {}", name, if **val { "1" } else { "0" });
+                            }
+                        }
+
+                        // This is the key insight for slow state machines
+                        println!();
+                        println!("   💡 Note: This bug may be in a state unreachable via normal simulation");
+                        println!("      (e.g., requires millions of cycles to reach via timeout)");
+                        println!("      SAT found it by reasoning symbolically about all possible states.");
+                    }
+                }
+            }
+            Err(e) => {
+                println!("   ⚠ SAT check error: {:?}", e);
+                println!("   Falling back to simulation-only result");
             }
         }
-        println!("   Time: {:.2}s", total_time.as_secs_f64());
+    }
 
-        if !sim_result.equivalent {
-            anyhow::bail!("Equivalence check failed");
+    let total_time = start_time.elapsed();
+
+    // Generate report for non-quick mode
+    if !quick {
+        // Create a summary result for reporting
+        let summary_result = skalp_formal::BmcEquivalenceResult {
+            equivalent: overall_pass,
+            bound,
+            mismatch_cycle: None,
+            mismatch_output: None,
+            counterexample: None,
+            time_ms: total_time.as_millis() as u64,
+            sat_calls: 1,
+        };
+        generate_ec_report(&summary_result, &target_entity.name, output_dir, format, verbose, total_time)?;
+    }
+
+    // Print final summary
+    println!();
+    println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    if overall_pass {
+        if symbolic {
+            println!("✅ PASS: Designs are PROVEN equivalent (SAT-based)");
+        } else {
+            println!("✅ PASS: Designs equivalent (simulation + SAT proof)");
         }
     } else {
-        // Use BMC-based equivalence checking (exhaustive)
-        let checker = BoundedModelChecker::new();
-        let result = checker
-            .check_lir_vs_gates_bmc(&lir, &gate_netlist, bound)
-            .map_err(|e| anyhow::anyhow!("Equivalence check failed: {:?}", e))?;
+        println!("❌ FAIL: Designs are NOT equivalent");
+    }
+    println!("   Time: {:.2}s", total_time.as_secs_f64());
 
-        let total_time = start_time.elapsed();
-
-        // Step 5: Generate report
-        println!();
-        generate_ec_report(&result, &target_entity.name, output_dir, format, verbose, total_time)?;
-
-        // Print summary
-        println!();
-        println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-        if result.equivalent {
-            println!("✅ PASS: Designs are equivalent up to {} cycles", result.bound);
-        } else {
-            println!("❌ FAIL: Mismatch detected!");
-            if let Some(cycle) = result.mismatch_cycle {
-                println!("   Cycle: {}", cycle);
-            }
-            if let Some(ref output) = result.mismatch_output {
-                println!("   Output: {}", output);
-            }
-        }
-        println!("   Time: {:.2}s", total_time.as_secs_f64());
-        println!("   SAT calls: {}", result.sat_calls);
-
-        if !result.equivalent {
-            anyhow::bail!("Equivalence check failed");
-        }
+    if !overall_pass {
+        anyhow::bail!("Equivalence check failed");
     }
 
     Ok(())

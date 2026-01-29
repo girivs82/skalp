@@ -2124,6 +2124,217 @@ fn copy_aig_structure(target: &mut Aig, source: &Aig, map: &mut HashMap<u32, Aig
     }
 }
 
+/// SAT-based symbolic equivalence check for sequential circuits
+///
+/// Unlike simulation-based BMC, this checks if the transition functions are equivalent
+/// by using SAT to find ANY state/input combination where designs differ.
+/// This can find bugs in slow state machines without needing to simulate to reach the state.
+///
+/// The check asks: "Exists state S, input I: next_state_A(S,I) != next_state_B(S,I) OR output_A(S,I) != output_B(S,I)"
+pub fn check_sequential_equivalence_sat(aig1: &Aig, aig2: &Aig) -> FormalResult<SymbolicEquivalenceResult> {
+    let start = std::time::Instant::now();
+
+    // Build a miter that compares both outputs AND next-state (latch D inputs)
+    let miter = build_sequential_miter(aig1, aig2)?;
+
+    // Convert to CNF and solve
+    let (formula, var_map, output_var) = aig_to_cnf(&miter);
+
+    let mut solver = Solver::new();
+    solver.add_formula(&formula);
+    solver.add_clause(&[output_var]); // Look for counterexample
+
+    match solver.solve() {
+        Ok(true) => {
+            // SAT - found state/input where designs differ
+            let model = solver.model().unwrap();
+            let counterexample = extract_symbolic_counterexample(&miter, &var_map, &model);
+
+            Ok(SymbolicEquivalenceResult {
+                equivalent: false,
+                counterexample: Some(counterexample),
+                checked_outputs: true,
+                checked_next_state: true,
+                time_ms: start.elapsed().as_millis() as u64,
+            })
+        }
+        Ok(false) => {
+            // UNSAT - designs are equivalent for all states/inputs
+            Ok(SymbolicEquivalenceResult {
+                equivalent: true,
+                counterexample: None,
+                checked_outputs: true,
+                checked_next_state: true,
+                time_ms: start.elapsed().as_millis() as u64,
+            })
+        }
+        Err(e) => Err(FormalError::SolverError(format!("SAT solver error: {}", e))),
+    }
+}
+
+/// Result of symbolic equivalence checking
+#[derive(Debug, Clone)]
+pub struct SymbolicEquivalenceResult {
+    /// True if designs are equivalent for all reachable AND unreachable states
+    pub equivalent: bool,
+    /// Counterexample showing state/input where designs differ
+    pub counterexample: Option<SymbolicCounterexample>,
+    /// Whether output equivalence was checked
+    pub checked_outputs: bool,
+    /// Whether next-state equivalence was checked
+    pub checked_next_state: bool,
+    /// Verification time in milliseconds
+    pub time_ms: u64,
+}
+
+/// Counterexample from symbolic equivalence check
+#[derive(Debug, Clone)]
+pub struct SymbolicCounterexample {
+    /// Current state assignment (state variable -> value)
+    pub state: HashMap<String, bool>,
+    /// Input assignment
+    pub inputs: HashMap<String, bool>,
+    /// Which signal differed (output name or latch name)
+    pub differing_signal: Option<String>,
+}
+
+/// Build a miter that checks both output AND next-state equivalence
+fn build_sequential_miter(aig1: &Aig, aig2: &Aig) -> FormalResult<Aig> {
+    let mut miter = Aig::new();
+
+    // Map from old node IDs to new ones
+    let mut map1: HashMap<u32, AigLit> = HashMap::new();
+    let mut map2: HashMap<u32, AigLit> = HashMap::new();
+
+    map1.insert(0, miter.false_lit());
+    map2.insert(0, miter.false_lit());
+
+    // Collect inputs and state inputs from both AIGs
+    let mut shared_inputs: HashMap<String, AigLit> = HashMap::new();
+
+    // Add inputs from AIG1 (including state inputs __reg_cur_*)
+    for (idx, node) in aig1.nodes.iter().enumerate() {
+        if let AigNode::Input { name } = node {
+            let lit = miter.add_input(name.clone());
+            map1.insert(idx as u32, lit);
+            shared_inputs.insert(name.clone(), lit);
+        }
+    }
+
+    // Add inputs from AIG2, reusing shared inputs
+    for (idx, node) in aig2.nodes.iter().enumerate() {
+        if let AigNode::Input { name } = node {
+            // Normalize name for matching (handle different naming conventions)
+            let normalized = normalize_signal_name_for_matching(name);
+            if let Some(&lit) = shared_inputs.get(&normalized) {
+                map2.insert(idx as u32, lit);
+            } else if let Some(&lit) = shared_inputs.get(name) {
+                map2.insert(idx as u32, lit);
+            } else {
+                let lit = miter.add_input(name.clone());
+                map2.insert(idx as u32, lit);
+                shared_inputs.insert(name.clone(), lit);
+            }
+        }
+    }
+
+    // Copy AND gate structure from both AIGs
+    copy_aig_structure(&mut miter, aig1, &mut map1);
+    copy_aig_structure(&mut miter, aig2, &mut map2);
+
+    // Build miter output: OR of all differences
+    let mut miter_output = miter.false_lit();
+
+    // 1. Check output equivalence
+    for (out1, out2) in aig1.outputs.iter().zip(aig2.outputs.iter()) {
+        let lit1 = remap_lit(*out1, &map1);
+        let lit2 = remap_lit(*out2, &map2);
+        let diff = miter.add_xor(lit1, lit2);
+        miter_output = miter.add_or(miter_output, diff);
+    }
+
+    // 2. Check next-state (latch D input) equivalence
+    // Match latches by normalized name
+    let mut latch1_by_name: HashMap<String, AigLit> = HashMap::new();
+    for &latch_id in &aig1.latches {
+        if let AigNode::Latch { name, next, .. } = &aig1.nodes[latch_id.0 as usize] {
+            let normalized = normalize_signal_name_for_matching(name);
+            let next_lit = remap_lit(*next, &map1);
+            latch1_by_name.insert(normalized, next_lit);
+        }
+    }
+
+    let mut latch2_by_name: HashMap<String, AigLit> = HashMap::new();
+    for &latch_id in &aig2.latches {
+        if let AigNode::Latch { name, next, .. } = &aig2.nodes[latch_id.0 as usize] {
+            let normalized = normalize_signal_name_for_matching(name);
+            let next_lit = remap_lit(*next, &map2);
+            latch2_by_name.insert(normalized, next_lit);
+        }
+    }
+
+    // Compare next-state for matching latches
+    for (name, next1) in &latch1_by_name {
+        if let Some(next2) = latch2_by_name.get(name) {
+            let diff = miter.add_xor(*next1, *next2);
+            miter_output = miter.add_or(miter_output, diff);
+        }
+    }
+
+    miter.add_output("miter".to_string(), miter_output);
+    Ok(miter)
+}
+
+/// Normalize signal name for matching between designs
+fn normalize_signal_name_for_matching(name: &str) -> String {
+    // Remove module prefix (e.g., "FsmA.state" -> "state")
+    let without_prefix = if let Some(pos) = name.rfind('.') {
+        &name[pos + 1..]
+    } else {
+        name
+    };
+
+    // Remove __reg_cur_ prefix
+    let without_reg = without_prefix
+        .strip_prefix("__reg_cur_")
+        .unwrap_or(without_prefix);
+
+    without_reg.to_string()
+}
+
+/// Extract counterexample from SAT model
+fn extract_symbolic_counterexample(
+    miter: &Aig,
+    var_map: &HashMap<u32, Var>,
+    model: &[Lit],
+) -> SymbolicCounterexample {
+    let model_set: std::collections::HashSet<_> = model.iter().collect();
+
+    let mut state = HashMap::new();
+    let mut inputs = HashMap::new();
+
+    for (idx, node) in miter.nodes.iter().enumerate() {
+        if let AigNode::Input { name } = node {
+            if let Some(&var) = var_map.get(&(idx as u32)) {
+                let lit_pos = Lit::positive(var);
+                let value = model_set.contains(&lit_pos);
+
+                if name.starts_with("__reg_cur_") || name.contains("state") || name.contains("cnt") {
+                    state.insert(name.clone(), value);
+                } else {
+                    inputs.insert(name.clone(), value);
+                }
+            }
+        }
+    }
+
+    SymbolicCounterexample {
+        state,
+        inputs,
+        differing_signal: None, // Could be enhanced to identify which signal differs
+    }
+}
+
 // ============================================================================
 // Port Name Normalization for Equivalence Checking
 // ============================================================================
