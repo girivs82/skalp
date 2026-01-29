@@ -915,6 +915,7 @@ impl MirToLirTransform {
                     } else {
                         None
                     };
+
                     if let Some(reset_value) = sdff_pattern {
                         handled_targets.push(target.clone());
 
@@ -929,10 +930,20 @@ impl MirToLirTransform {
                                     None,
                                 );
 
-                                // Process in forward order so later statements have higher priority
-                                let mut current_value = target_signal; // Feedback as default
+                                // BUG FIX: Separate conditional paths from default/unconditional paths
+                                // The default should be the BASE for the mux chain, not an override
+                                let (conditional_paths, default_paths): (Vec<_>, Vec<_>) =
+                                    else_paths.into_iter().partition(|(cond, _)| cond.is_some());
 
-                                for (condition, expr) in else_paths.into_iter() {
+                                // Start with the default value (unconditional path or feedback)
+                                let mut current_value = if let Some((_, default_expr)) = default_paths.into_iter().next() {
+                                    self.transform_expression(&default_expr, target_width)
+                                } else {
+                                    target_signal // Feedback as default
+                                };
+
+                                // Build mux chain from conditional paths
+                                for (condition, expr) in conditional_paths.into_iter() {
                                     let expr_signal = self.transform_expression(&expr, target_width);
 
                                     if let Some(cond) = condition {
@@ -945,10 +956,9 @@ impl MirToLirTransform {
                                             format!("{}.mux", self.hierarchy_path),
                                         );
                                         current_value = mux_out;
-                                    } else {
-                                        current_value = expr_signal;
                                     }
                                 }
+
                                 current_value
                             } else {
                                 target_signal
