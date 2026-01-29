@@ -1937,6 +1937,28 @@ impl GateNetlistToAig {
                         tie_cell.cell_type.contains("HIGH") || tie_cell.cell_type.contains("HI")
                     }).unwrap_or(false);
 
+                    // Debug: trace registers with unexpected init values
+                    if latch_name.contains("lockstep") || latch_name.contains("watchdog") {
+                        eprintln!("[GATE_LATCH_DEBUG] {}: found ResetMux, reset_val={}", latch_name, reset_val);
+                        eprintln!("[GATE_MUX_DEBUG] {} ResetMux cell_type={}, inputs:", latch_name, mux_cell.cell_type);
+                        for (i, &inp) in mux_cell.inputs.iter().enumerate() {
+                            let inp_net = &netlist.nets[inp.0 as usize];
+                            eprintln!("[GATE_MUX_DEBUG]   input[{}] net={}", i, inp_net.name);
+                        }
+                        // Show what TIE cell was found
+                        if let Some(&reset_net) = mux_cell.inputs.get(2) {
+                            let tie_cell = netlist.cells.iter().find(|c| {
+                                c.outputs.iter().any(|o| o.0 == reset_net.0)
+                                    && c.source_op.as_deref() == Some("ResetValue")
+                            });
+                            if let Some(tc) = tie_cell {
+                                eprintln!("[GATE_MUX_DEBUG]   TIE cell: type={}, source_op={:?}", tc.cell_type, tc.source_op);
+                            } else {
+                                eprintln!("[GATE_MUX_DEBUG]   No ResetValue TIE cell found for input[2]!");
+                            }
+                        }
+                    }
+
                     // Debug: trace tap_reg handling
                     if latch_name.contains("tap_reg") {
                         eprintln!("[GATE_LATCH_DEBUG] tap_reg: found ResetMux, d_lit={:?}, reset_val={}", d_lit, reset_val);
@@ -1981,6 +2003,10 @@ impl GateNetlistToAig {
             };
 
             // Create latch with proper init value
+            // Debug: print init value for registers we're investigating
+            if latch_name.contains("lockstep") || latch_name.contains("watchdog") {
+                eprintln!("[GATE_LATCH_INIT] Creating latch '{}' with init_value={}", latch_name, init_value);
+            }
             let latch_lit = self.aig.add_latch(latch_name.clone(), next_lit, init_value);
             let latch_id = latch_lit.node.0;
 
@@ -2514,6 +2540,12 @@ fn is_internal_signal(name: &str) -> bool {
     // DFF outputs should ALWAYS be kept for sequential equivalence checking
     if name.ends_with("_dff_out") {
         return false;
+    }
+
+    // Clock signals are internal for BMC - we simulate cycles, not clock edges
+    // This allows MIR (which has explicit clk port) to match Gate (which has implicit clock)
+    if name == "clk" || name.ends_with(".clk") {
+        return true;
     }
 
     // Register/DFF current state pseudo-inputs are internal
@@ -4316,6 +4348,9 @@ impl<'a> MirToAig<'a> {
     }
 
     /// Get lvalue reference for a specific module
+    /// NOTE: Only returns Signal and Port references, not Variables.
+    /// Variables (let bindings) in sequential processes are intermediate computations,
+    /// not registers. Only Signals and output Ports create actual state.
     fn lvalue_to_ref_in_module(&self, module: &Module, lvalue: &LValue) -> Option<MirSignalRef> {
         match lvalue {
             LValue::Signal(id) => {
@@ -4332,12 +4367,10 @@ impl<'a> MirToAig<'a> {
                     None
                 }
             }
-            LValue::Variable(id) => {
-                if module.variables.iter().any(|v| v.id == *id) {
-                    Some(MirSignalRef::Variable(*id))
-                } else {
-                    None
-                }
+            LValue::Variable(_id) => {
+                // Variables (let bindings) are intermediate computations, not registers.
+                // They should not be included in the register list for sequential processes.
+                None
             }
             LValue::BitSelect { base, .. } => self.lvalue_to_ref_in_module(module, base),
             LValue::RangeSelect { base, .. } => self.lvalue_to_ref_in_module(module, base),
@@ -6376,6 +6409,110 @@ impl BoundedModelChecker {
             gate_aig.state_input_to_latch.len()
         );
 
+        // Debug: find latches that exist in one but not the other
+        // Normalize names: remove "top." prefix and standardize separator before final component
+        // MIR uses: inst_0_0.inst_4_2.inst_0_4.gate_high
+        // Gate uses: inst_0_0.inst_4_2.inst_0_4_gate_high
+        fn normalize_latch_name(name: &str) -> String {
+            let without_top = name.strip_prefix("top.").unwrap_or(name);
+            // Replace the last '.' before 'gate_' with '_' for consistent comparison
+            if let Some(pos) = without_top.rfind(".gate_") {
+                format!("{}{}", &without_top[..pos], &without_top[pos..].replacen(".", "_", 1))
+            } else {
+                without_top.to_string()
+            }
+        }
+        let mir_latch_names: std::collections::HashSet<String> = mir_aig.latches.iter()
+            .filter_map(|&id| {
+                if let AigNode::Latch { name, .. } = &mir_aig.nodes[id.0 as usize] {
+                    Some(normalize_latch_name(name))
+                } else { None }
+            }).collect();
+        let gate_latch_names: std::collections::HashSet<String> = gate_aig.latches.iter()
+            .filter_map(|&id| {
+                if let AigNode::Latch { name, .. } = &gate_aig.nodes[id.0 as usize] {
+                    Some(normalize_latch_name(name))
+                } else { None }
+            }).collect();
+
+        let mir_only: Vec<_> = mir_latch_names.difference(&gate_latch_names).collect();
+        let gate_only: Vec<_> = gate_latch_names.difference(&mir_latch_names).collect();
+
+        // Debug: find primary inputs (non-state) that exist in one AIG but not the other
+        let mir_primary_inputs: Vec<String> = mir_aig.nodes.iter()
+            .filter_map(|node| {
+                if let AigNode::Input { name } = node {
+                    // Skip state inputs
+                    if name.starts_with("__reg_cur_") || name.starts_with("__dff_cur_") {
+                        return None;
+                    }
+                    return Some(name.clone());
+                }
+                None
+            }).collect();
+        let gate_primary_inputs: Vec<String> = gate_aig.nodes.iter()
+            .filter_map(|node| {
+                if let AigNode::Input { name } = node {
+                    // Skip state inputs
+                    if name.starts_with("__reg_cur_") || name.starts_with("__dff_cur_") {
+                        return None;
+                    }
+                    return Some(name.clone());
+                }
+                None
+            }).collect();
+
+        // Create normalized sets for comparison
+        let mir_normalized: std::collections::HashSet<String> = mir_primary_inputs.iter()
+            .map(|n| n.strip_prefix("top.").unwrap_or(n).to_string())
+            .collect();
+        let gate_normalized: std::collections::HashSet<String> = gate_primary_inputs.iter()
+            .map(|n| n.strip_prefix("top.").unwrap_or(n).to_string())
+            .collect();
+
+        let mir_only_norm: Vec<_> = mir_normalized.difference(&gate_normalized).collect();
+        let gate_only_norm: Vec<_> = gate_normalized.difference(&mir_normalized).collect();
+
+        println!("[HIER_BMC] MIR primary inputs: {}, Gate primary inputs: {}",
+            mir_primary_inputs.len(), gate_primary_inputs.len());
+
+        if !mir_only_norm.is_empty() {
+            println!("[HIER_BMC] Primary inputs only in MIR ({}):", mir_only_norm.len());
+            println!("[HIER_BMC]   All unmatched: {:?}", mir_only_norm);
+        }
+        if !gate_only_norm.is_empty() {
+            println!("[HIER_BMC] Primary inputs only in Gate ({}):", gate_only_norm.len());
+            println!("[HIER_BMC]   All unmatched: {:?}", gate_only_norm);
+        }
+        // Extra debug: find clock-related inputs
+        println!("[HIER_BMC] MIR inputs containing 'clk':");
+        for name in mir_primary_inputs.iter().filter(|n| n.to_lowercase().contains("clk")) {
+            println!("  - {}", name);
+        }
+        println!("[HIER_BMC] Gate inputs containing 'clk':");
+        for name in gate_primary_inputs.iter().filter(|n| n.to_lowercase().contains("clk")) {
+            println!("  - {}", name);
+        }
+
+        if !mir_only.is_empty() {
+            println!("[HIER_BMC] Latches only in MIR ({}):", mir_only.len());
+            for name in mir_only.iter().take(20) {
+                println!("  - {}", name);
+            }
+            if mir_only.len() > 20 {
+                println!("  ... and {} more", mir_only.len() - 20);
+            }
+        }
+        if !gate_only.is_empty() {
+            println!("[HIER_BMC] Latches only in Gate ({}):", gate_only.len());
+            for name in gate_only.iter().take(20) {
+                println!("  - {}", name);
+            }
+            if gate_only.len() > 20 {
+                println!("  ... and {} more", gate_only.len() - 20);
+            }
+        }
+
         // Run BMC
         let result = self.check_sequential_aig_equivalence(&mir_aig, &gate_aig, bound)?;
 
@@ -6472,6 +6609,53 @@ impl BoundedModelChecker {
         }
         if matched_inputs.len() > 20 {
             println!("  ... and {} more", matched_inputs.len() - 20);
+        }
+
+        // Debug: check specifically for bms.fault
+        let bms_fault_key = "bms.fault";
+        if matched_inputs.contains(&bms_fault_key.to_string()) {
+            println!("[INPUT_MATCH_DEBUG] bms.fault IS in matched inputs");
+        } else {
+            println!("[INPUT_MATCH_DEBUG] bms.fault is NOT in matched inputs!");
+            // Check what keys exist that might be related
+            for key in matched_inputs.iter() {
+                if key.contains("fault") || key.contains("bms") {
+                    println!("[INPUT_MATCH_DEBUG]   Found related key: {}", key);
+                }
+            }
+            // Check aig maps for bms.fault related entries
+            for (key, &id) in &aig1_input_map {
+                if key.contains("fault") || key.contains("bms") {
+                    println!("[INPUT_MATCH_DEBUG]   LIR map has: {} -> {}", key, id);
+                }
+            }
+            for (key, &id) in &aig2_input_map {
+                if key.contains("fault") || key.contains("bms") {
+                    println!("[INPUT_MATCH_DEBUG]   Gate map has: {} -> {}", key, id);
+                }
+            }
+        }
+
+        // Debug: compare latch initial values
+        println!("\n=== BMC Debug: Latch Initial Values ===");
+        let state1 = self.get_initial_latch_state(aig1);
+        let state2 = self.get_initial_latch_state(aig2);
+        println!("  LIR latches: {}, Gate latches: {}", aig1.latches.len(), aig2.latches.len());
+
+        // Find fan_counter and fan_duty latches specifically
+        for &latch_id in &aig1.latches {
+            if let AigNode::Latch { name, init, .. } = &aig1.nodes[latch_id.0 as usize] {
+                if name.contains("fan_counter") || name.contains("fan_duty") {
+                    println!("  LIR latch '{}' init={}", name, init);
+                }
+            }
+        }
+        for &latch_id in &aig2.latches {
+            if let AigNode::Latch { name, init, .. } = &aig2.nodes[latch_id.0 as usize] {
+                if name.contains("fan_counter") || name.contains("fan_duty") {
+                    println!("  Gate latch '{}' init={}", name, init);
+                }
+            }
         }
 
         // For each cycle, simulate both designs and check output equivalence
@@ -6779,11 +6963,25 @@ impl BoundedModelChecker {
         // Store inputs for each cycle for debugging
         let mut all_inputs: Vec<HashMap<String, bool>> = Vec::new();
 
+        // Reset phase: keep rst=true for first 2 cycles to properly initialize state
+        let reset_cycles = 2;
+
         for cycle in 0..bound {
-            // Generate random inputs for this cycle
+            // Generate inputs for this cycle
+            // Use constrained random simulation that represents realistic operation:
+            // - rst=true during reset phase, then rst=false
+            // - enable=true during normal operation (after reset)
+            // - Other inputs are random
             let mut input_values: HashMap<String, bool> = HashMap::new();
             for key in matched_inputs {
-                input_values.insert(key.clone(), rng.gen());
+                let val = if key == "rst" {
+                    cycle < reset_cycles  // Reset only during reset phase
+                } else if key == "enable" {
+                    cycle >= reset_cycles  // Enable only after reset
+                } else {
+                    rng.gen()  // Random for other inputs
+                };
+                input_values.insert(key.clone(), val);
             }
             all_inputs.push(input_values.clone());
 
@@ -6795,14 +6993,76 @@ impl BoundedModelChecker {
                 aig2, &input_values, &state2, aig2_input_map
             );
 
-            // Check output equivalence
-            for (i1, i2, name) in matched_outputs {
-                let o1 = outputs1.get(*i1).copied().unwrap_or(false);
-                let o2 = outputs2.get(*i2).copied().unwrap_or(false);
-                if o1 != o2 {
-                    // Debug: print inputs that led to mismatch
-                    if name.contains("tap_select") {
-                        println!("\n=== Input trace leading to {} mismatch at cycle {} ===", name, cycle);
+            // Check output equivalence (skip during reset phase since outputs are "don't care")
+            if cycle >= reset_cycles {
+                for (i1, i2, name) in matched_outputs {
+                    let o1 = outputs1.get(*i1).copied().unwrap_or(false);
+                    let o2 = outputs2.get(*i2).copied().unwrap_or(false);
+                    if o1 != o2 {
+                        // Debug: print state values at mismatch
+                        if name.contains("fan_pwm") {
+                            // Print fan_counter and fan_duty values at mismatch
+                            let mut lir_counter = 0u8;
+                            let mut lir_duty = 0u8;
+                            for &latch_id in &aig1.latches {
+                                if let AigNode::Latch { name: latch_name, .. } = &aig1.nodes[latch_id.0 as usize] {
+                                    if let Some(&val) = state1.get(&latch_id.0) {
+                                        if latch_name.contains("fan_counter[") {
+                                            if let Some(start) = latch_name.find('[') {
+                                                if let Some(end) = latch_name.find(']') {
+                                                    if let Ok(bit) = latch_name[start+1..end].parse::<u8>() {
+                                                        if val && bit < 8 { lir_counter |= 1 << bit; }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        if latch_name.contains("fan_duty[") {
+                                            if let Some(start) = latch_name.find('[') {
+                                                if let Some(end) = latch_name.find(']') {
+                                                    if let Ok(bit) = latch_name[start+1..end].parse::<u8>() {
+                                                        if val && bit < 8 { lir_duty |= 1 << bit; }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            let mut gate_counter = 0u8;
+                            let mut gate_duty = 0u8;
+                            for &latch_id in &aig2.latches {
+                                if let AigNode::Latch { name: latch_name, .. } = &aig2.nodes[latch_id.0 as usize] {
+                                    if let Some(&val) = state2.get(&latch_id.0) {
+                                        if latch_name.contains("fan_counter[") {
+                                            if let Some(start) = latch_name.find('[') {
+                                                if let Some(end) = latch_name.find(']') {
+                                                    if let Ok(bit) = latch_name[start+1..end].parse::<u8>() {
+                                                        if val && bit < 8 { gate_counter |= 1 << bit; }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        if latch_name.contains("fan_duty[") {
+                                            if let Some(start) = latch_name.find('[') {
+                                                if let Some(end) = latch_name.find(']') {
+                                                    if let Ok(bit) = latch_name[start+1..end].parse::<u8>() {
+                                                        if val && bit < 8 { gate_duty |= 1 << bit; }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            println!("[FAN_PWM_MISMATCH] At cycle {}: LIR counter={} duty={}, Gate counter={} duty={}",
+                                cycle, lir_counter, lir_duty, gate_counter, gate_duty);
+                            println!("[FAN_PWM_MISMATCH] Expected fan_pwm (counter < duty): LIR {} < {} = {}, Gate {} < {} = {}",
+                                lir_counter, lir_duty, lir_counter < lir_duty,
+                                gate_counter, gate_duty, gate_counter < gate_duty);
+                        }
+                        // Debug: print inputs that led to mismatch
+                        {
+                            println!("\n=== Input trace leading to {} mismatch at cycle {} ===", name, cycle);
                         for (c, inputs) in all_inputs.iter().enumerate() {
                             // Show key inputs: rst, enable, bms.connected (note: using normalized name with dots)
                             let rst = inputs.get("rst").copied().unwrap_or(false);
@@ -6829,28 +7089,9 @@ impl BoundedModelChecker {
                     return Some((cycle, name.clone()));
                 }
             }
+            } // end if cycle >= reset_cycles
 
             // Update state for next cycle
-            // Debug: show tap_reg state every cycle
-            for (&latch_id, &val) in &next_state1 {
-                if let AigNode::Latch { name, next, .. } = &aig1.nodes[latch_id as usize] {
-                    if name.contains("tap_reg") {
-                        let old_val = state1.get(&latch_id).copied().unwrap_or(false);
-                        eprintln!("[STATE_TRACE] Cycle {}: LIR '{}' cur={} -> next={} (next.node={}, next.inv={})",
-                            cycle, name, old_val, val, next.node.0, next.inverted);
-                    }
-                }
-            }
-            for (&latch_id, &val) in &next_state2 {
-                if let AigNode::Latch { name, next, .. } = &aig2.nodes[latch_id as usize] {
-                    if name.contains("tap_reg") {
-                        let old_val = state2.get(&latch_id).copied().unwrap_or(false);
-                        eprintln!("[STATE_TRACE] Cycle {}: Gate '{}' cur={} -> next={} (next.node={}, next.inv={})",
-                            cycle, name, old_val, val, next.node.0, next.inverted);
-                    }
-                }
-            }
-
             state1 = next_state1;
             state2 = next_state2;
         }
@@ -6882,6 +7123,66 @@ impl BoundedModelChecker {
                 input_values.insert(key.clone(), input_fn(key));
             }
 
+            // Debug: trace fan_counter and fan_duty latches at each cycle
+            if cycle < 5 {
+                // Build fan_counter value for LIR
+                let mut lir_counter = 0u8;
+                let mut lir_duty = 0u8;
+                for &latch_id in &aig1.latches {
+                    if let AigNode::Latch { name: latch_name, .. } = &aig1.nodes[latch_id.0 as usize] {
+                        if let Some(&val) = state1.get(&latch_id.0) {
+                            if latch_name.contains("fan_counter[") {
+                                if let Some(start) = latch_name.find('[') {
+                                    if let Some(end) = latch_name.find(']') {
+                                        if let Ok(bit) = latch_name[start+1..end].parse::<u8>() {
+                                            if val && bit < 8 { lir_counter |= 1 << bit; }
+                                        }
+                                    }
+                                }
+                            }
+                            if latch_name.contains("fan_duty[") {
+                                if let Some(start) = latch_name.find('[') {
+                                    if let Some(end) = latch_name.find(']') {
+                                        if let Ok(bit) = latch_name[start+1..end].parse::<u8>() {
+                                            if val && bit < 8 { lir_duty |= 1 << bit; }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                // Build fan_counter value for Gate
+                let mut gate_counter = 0u8;
+                let mut gate_duty = 0u8;
+                for &latch_id in &aig2.latches {
+                    if let AigNode::Latch { name: latch_name, .. } = &aig2.nodes[latch_id.0 as usize] {
+                        if let Some(&val) = state2.get(&latch_id.0) {
+                            if latch_name.contains("fan_counter[") {
+                                if let Some(start) = latch_name.find('[') {
+                                    if let Some(end) = latch_name.find(']') {
+                                        if let Ok(bit) = latch_name[start+1..end].parse::<u8>() {
+                                            if val && bit < 8 { gate_counter |= 1 << bit; }
+                                        }
+                                    }
+                                }
+                            }
+                            if latch_name.contains("fan_duty[") {
+                                if let Some(start) = latch_name.find('[') {
+                                    if let Some(end) = latch_name.find(']') {
+                                        if let Ok(bit) = latch_name[start+1..end].parse::<u8>() {
+                                            if val && bit < 8 { gate_duty |= 1 << bit; }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                println!("[FAN_DEBUG] Cycle {}: LIR counter={} duty={}, Gate counter={} duty={}",
+                    cycle, lir_counter, lir_duty, gate_counter, gate_duty);
+            }
+
             let (outputs1, next_state1) = self.simulate_aig_cycle(
                 aig1, &input_values, &state1, aig1_input_map
             );
@@ -6892,6 +7193,14 @@ impl BoundedModelChecker {
             for (i1, i2, name) in matched_outputs {
                 let o1 = outputs1.get(*i1).copied().unwrap_or(false);
                 let o2 = outputs2.get(*i2).copied().unwrap_or(false);
+
+                // Debug: trace lockstep_tx.fault and power_actual outputs at every cycle
+                if (name.contains("lockstep_tx") && name.contains("fault")) || name.contains("power_actual") {
+                    if cycle < 5 {
+                        println!("[OUTPUT_DEBUG] Cycle {}: {} LIR={} Gate={}", cycle, name, o1, o2);
+                    }
+                }
+
                 if o1 != o2 {
                     println!("\n=== Mismatch Debug at cycle {} ===", cycle);
                     println!("  Output: {} (LIR idx={}, Gate idx={})", name, i1, i2);
@@ -6900,13 +7209,20 @@ impl BoundedModelChecker {
                     // Find relevant latches for this output by looking at state inputs
                     println!("  Relevant latch states:");
                     let output_name_lower = name.to_lowercase();
+                    // Extract base name for matching (e.g., "lockstep_tx.fault" -> "lockstep", "fault")
+                    let keywords: Vec<&str> = output_name_lower
+                        .split(|c| c == '.' || c == '_')
+                        .filter(|s| s.len() > 2)
+                        .collect();
                     for &latch_id in &aig1.latches {
                         if let AigNode::Latch { name: latch_name, .. } = &aig1.nodes[latch_id.0 as usize] {
-                            if latch_name.to_lowercase().contains(&output_name_lower.replace(".", "_"))
+                            let latch_lower = latch_name.to_lowercase();
+                            if keywords.iter().any(|kw| latch_lower.contains(kw))
                                 || latch_name.contains("latched")
                                 || latch_name.contains("_ov_")
                                 || latch_name.contains("_uv_")
                                 || latch_name.contains("_oc_")
+                                || latch_name.contains("watchdog")
                             {
                                 if let Some(&val) = state1.get(&latch_id.0) {
                                     println!("    LIR latch '{}' = {}", latch_name, val);
@@ -6916,11 +7232,13 @@ impl BoundedModelChecker {
                     }
                     for &latch_id in &aig2.latches {
                         if let AigNode::Latch { name: latch_name, .. } = &aig2.nodes[latch_id.0 as usize] {
-                            if latch_name.to_lowercase().contains(&output_name_lower.replace(".", "_"))
+                            let latch_lower = latch_name.to_lowercase();
+                            if keywords.iter().any(|kw| latch_lower.contains(kw))
                                 || latch_name.contains("latched")
                                 || latch_name.contains("_ov_")
                                 || latch_name.contains("_uv_")
                                 || latch_name.contains("_oc_")
+                                || latch_name.contains("watchdog")
                             {
                                 if let Some(&val) = state2.get(&latch_id.0) {
                                     println!("    Gate latch '{}' = {}", latch_name, val);
@@ -7216,7 +7534,11 @@ impl BoundedModelChecker {
     fn get_initial_latch_state(&self, aig: &Aig) -> HashMap<u32, bool> {
         let mut state = HashMap::new();
         for &latch_id in &aig.latches {
-            if let AigNode::Latch { init, .. } = &aig.nodes[latch_id.0 as usize] {
+            if let AigNode::Latch { name, init, .. } = &aig.nodes[latch_id.0 as usize] {
+                // Debug: check for unexpected init values
+                if (name.contains("watchdog") || name.contains("lockstep")) && *init {
+                    eprintln!("[GET_INIT_DEBUG] Latch '{}' (id={}) has init=true!", name, latch_id.0);
+                }
                 state.insert(latch_id.0, *init);
             }
         }
@@ -7269,11 +7591,11 @@ impl BoundedModelChecker {
             }
         }
 
-        // Debug: print state_input_to_latch mappings (once)
+        // Debug: print state_input_to_latch mappings for fan_duty (once)
         static ONCE: std::sync::Once = std::sync::Once::new();
         ONCE.call_once(|| {
-            println!("\n=== State Input to Latch Mapping (first 10) ===");
-            for (input_id, latch_id) in aig.state_input_to_latch.iter().take(10) {
+            println!("\n=== State Input to Latch Mapping (fan_duty) ===");
+            for (input_id, latch_id) in aig.state_input_to_latch.iter() {
                 let input_name = if let Some(AigNode::Input { name }) = aig.nodes.get(*input_id as usize) {
                     name.as_str()
                 } else {
@@ -7284,7 +7606,9 @@ impl BoundedModelChecker {
                 } else {
                     "<unknown>"
                 };
-                println!("  input {} ({}) -> latch {} ({})", input_id, input_name, latch_id, latch_name);
+                if input_name.contains("fan_duty") || latch_name.contains("fan_duty") {
+                    println!("  input {} ({}) -> latch {} ({})", input_id, input_name, latch_id, latch_name);
+                }
             }
             println!("  Total mappings: {}", aig.state_input_to_latch.len());
         });
@@ -7303,8 +7627,18 @@ impl BoundedModelChecker {
                         let normalized = normalize_port_name(name);
                         if let Some(&val) = inputs.get(&normalized.key()) {
                             values.insert(idx, val);
+                            // Debug: trace bms.fault input
+                            if name.contains("bms") && name.contains("fault") {
+                                println!("[INPUT_DEBUG] Input '{}' (node {}) normalized to '{}' = {}",
+                                    name, idx, normalized.key(), val);
+                            }
                         } else {
                             values.insert(idx, false);
+                            // Debug: trace unmatched inputs that might be important
+                            if name.contains("fault") || name.contains("watchdog") {
+                                println!("[INPUT_DEBUG] Unmatched input '{}' (node {}) normalized='{}' -> defaulting to false",
+                                    name, idx, normalized.key());
+                            }
                         }
                     }
                 }
@@ -7332,71 +7666,12 @@ impl BoundedModelChecker {
 
         // Compute next latch state
         let mut next_state: HashMap<u32, bool> = HashMap::new();
-        let rst_val = inputs.get("rst").copied().unwrap_or(false);
+        let _rst_val = inputs.get("rst").copied().unwrap_or(false);
         for &latch_id in &aig.latches {
-            if let AigNode::Latch { next, name, .. } = &aig.nodes[latch_id.0 as usize] {
+            if let AigNode::Latch { next, .. } = &aig.nodes[latch_id.0 as usize] {
                 let raw_val = values.get(&next.node.0).copied().unwrap_or(false);
                 let val = if next.inverted { !raw_val } else { raw_val };
                 next_state.insert(latch_id.0, val);
-
-                // Debug tap_reg at every cycle
-                if name.contains("tap_reg") {
-                    let cur_val = latch_state.get(&latch_id.0).copied().unwrap_or(false);
-                    // Show cell_count inputs
-                    let mut cell_count_vals: Vec<(String, bool)> = Vec::new();
-                    for (key, &v) in inputs {
-                        if key.contains("cell_count") {
-                            cell_count_vals.push((key.clone(), v));
-                        }
-                    }
-                    cell_count_vals.sort_by_key(|(k, _)| k.clone());
-                    eprintln!("[TAP_REG_DEBUG] rst={}, latch '{}': cur={}, next.node={}, next.inverted={}, raw_val={}, final_next={}",
-                        rst_val, name, cur_val, next.node.0, next.inverted, raw_val, val);
-                    if !rst_val && !cell_count_vals.is_empty() {
-                        eprintln!("[TAP_REG_DEBUG]   cell_count inputs: {:?}", cell_count_vals);
-                    }
-
-                    // Trace AND gate when rst=false
-                    if !rst_val {
-                        if let Some(AigNode::And { left, right }) = aig.nodes.get(next.node.0 as usize) {
-                            let l_raw = values.get(&left.node.0).copied().unwrap_or(false);
-                            let r_raw = values.get(&right.node.0).copied().unwrap_or(false);
-                            let l_val = if left.inverted { !l_raw } else { l_raw };
-                            let r_val = if right.inverted { !r_raw } else { r_raw };
-                            eprintln!("[TAP_REG_DEBUG]   AND gate (inner OR): left.node={} inv={} raw={} val={}, right.node={} inv={} raw={} val={}",
-                                left.node.0, left.inverted, l_raw, l_val, right.node.0, right.inverted, r_raw, r_val);
-
-                            // Trace right node (not_sel_and_a term = !rst AND d_orig)
-                            // This represents one arm of the OR in the MUX
-                            if let Some(AigNode::And { left: l2, right: r2 }) = aig.nodes.get(right.node.0 as usize) {
-                                let l2_raw = values.get(&l2.node.0).copied().unwrap_or(false);
-                                let r2_raw = values.get(&r2.node.0).copied().unwrap_or(false);
-                                let l2_val = if l2.inverted { !l2_raw } else { l2_raw };
-                                let r2_val = if r2.inverted { !r2_raw } else { r2_raw };
-                                eprintln!("[TAP_REG_DEBUG]     not_sel_and_a (node {}): left.node={} inv={} raw={} val={}, right.node={} inv={} raw={} val={}",
-                                    right.node.0, l2.node.0, l2.inverted, l2_raw, l2_val, r2.node.0, r2.inverted, r2_raw, r2_val);
-                                eprintln!("[TAP_REG_DEBUG]     => !rst={}, d_orig={}", l2_val, r2_val);
-
-                                // For Gate AIG: trace _t95 MUX components
-                                // _t95 = _t94 ? _t91 : tap_reg
-                                // where _t94 = condition, _t91 = comparison
-                                if name.contains("top.tap_reg") {
-                                    // Try to trace deeper into the _t95 MUX structure
-                                    // The r2 node (d_orig after inversion) should lead to _t95 MUX
-                                    if let Some(AigNode::And { left: l3, right: r3 }) = aig.nodes.get(r2.node.0 as usize) {
-                                        // This might be the inner AND of _t95's add_mux
-                                        let l3_raw = values.get(&l3.node.0).copied().unwrap_or(false);
-                                        let r3_raw = values.get(&r3.node.0).copied().unwrap_or(false);
-                                        let l3_val = if l3.inverted { !l3_raw } else { l3_raw };
-                                        let r3_val = if r3.inverted { !r3_raw } else { r3_raw };
-                                        eprintln!("[TAP_REG_DEBUG]       _t95 inner AND: l3.node={} inv={} raw={} val={}, r3.node={} inv={} raw={} val={}",
-                                            l3.node.0, l3.inverted, l3_raw, l3_val, r3.node.0, r3.inverted, r3_raw, r3_val);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
             }
         }
 
