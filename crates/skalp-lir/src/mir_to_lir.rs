@@ -945,11 +945,17 @@ impl MirToLirTransform {
 
                                 let mut conditional_paths: Vec<_> = else_paths.into_iter().collect();
 
-                                // The last path corresponds to the final else - use as base
-                                let mut current_value = if let Some((_, last_expr)) = conditional_paths.pop() {
-                                    self.transform_expression(&last_expr, target_width)
+                                // BUG FIX: Only use last path as base if it's UNCONDITIONAL
+                                // If all paths are conditional, use target_signal (feedback) as base
+                                let mut current_value = if let Some((None, last_expr)) = conditional_paths.last() {
+                                    // Last path is unconditional (final else) - use as base
+                                    let base = self.transform_expression(last_expr, target_width);
+                                    conditional_paths.pop(); // Remove it from the list
+                                    base
                                 } else {
-                                    target_signal // Feedback if no paths
+                                    // No unconditional path, or last path is conditional
+                                    // Use feedback (keep current value) as base
+                                    target_signal
                                 };
 
                                 // Build mux chain in REVERSE order (innermost to outermost)
@@ -958,10 +964,12 @@ impl MirToLirTransform {
                                     let expr_signal = self.transform_expression(&expr, target_width);
 
                                     if let Some(cond) = condition {
-                                        // Extract the simple condition from compound conditions
-                                        // Compound: (!A && !B && C) -> simple: C (rightmost operand)
-                                        let simple_cond = Self::extract_simple_condition(&cond);
-                                        let cond_signal = self.transform_expression(&simple_cond, 1);
+                                        // BUG FIX: Use the FULL condition, not just the simple/inner condition
+                                        // For nested ifs (not if-else-if chains), each path has independent
+                                        // compound conditions that must all be checked.
+                                        // E.g., `lockstep_rx_valid && mismatch_detected && count < 10`
+                                        // must check all three conditions, not just `count < 10`.
+                                        let cond_signal = self.transform_expression(&cond, 1);
                                         let mux_out = self.alloc_temp_signal(target_width);
                                         self.lir.add_node(
                                             LirOp::Mux2 { width: target_width },
