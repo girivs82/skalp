@@ -566,7 +566,10 @@ impl<'a> TechMapper<'a> {
 
             // Register
             LirOp::Reg {
-                width, has_reset, ..
+                width,
+                has_reset,
+                reset_value,
+                ..
             } => {
                 let clock_net = node
                     .clock
@@ -584,6 +587,7 @@ impl<'a> TechMapper<'a> {
                     &node.path,
                     clock_net,
                     reset_net,
+                    *reset_value,
                 );
             }
 
@@ -2455,6 +2459,7 @@ impl<'a> TechMapper<'a> {
         path: &str,
         clock: Option<GateNetId>,
         reset: Option<GateNetId>,
+        reset_value: Option<u64>,
     ) {
         if inputs.is_empty() {
             self.warnings
@@ -2462,23 +2467,67 @@ impl<'a> TechMapper<'a> {
             return;
         }
 
-        let dff_func = if reset.is_some() {
-            CellFunction::DffR
-        } else {
-            CellFunction::Dff
-        };
+        // BUG FIX: Always use MUX-based reset for ALL reset values (including 0)
+        // This ensures consistent behavior between gate netlist and SIR simulation.
+        // The SIR converter doesn't track per-cell reset ports, so DFFR cells with
+        // reset-to-0 were broken. Using MUX for all cases makes reset work correctly.
+        let reset_val = reset_value.unwrap_or(0);
+        let use_mux_for_reset = reset.is_some();
+
+        // Always use regular DFF - reset is handled by MUX
+        let dff_func = CellFunction::Dff;
 
         let dff_info = self.get_cell_info(&dff_func);
-
         let clk = clock.unwrap_or(GateNetId(0));
 
         for bit in 0..width as usize {
-            let d = inputs[0].get(bit).copied().unwrap_or(inputs[0][0]);
+            let d_orig = inputs[0].get(bit).copied().unwrap_or(inputs[0][0]);
             let q = outputs.get(bit).copied().unwrap_or(outputs[0]);
 
-            // D input only - reset is passed separately to Cell::new_seq
-            // and rendered as .RST in Verilog output
+            // If non-zero reset value, add MUX: d_new = rst ? reset_bit : d_orig
+            let d = if use_mux_for_reset {
+                let reset_bit_val = (reset_val >> bit) & 1 != 0;
+
+                // Create tie-high or tie-low for reset value bit
+                let reset_bit_net = self.netlist.add_net_with_name(format!("{}.rst_val_bit{}", path, bit));
+                let tie_cell_name = if reset_bit_val { "TIE_HIGH" } else { "TIE_LOW" };
+                let mut tie_cell = Cell::new_comb(
+                    CellId(0),
+                    tie_cell_name.to_string(),
+                    self.library.name.clone(),
+                    0.01,
+                    format!("{}.rst_tie{}", path, bit),
+                    vec![],
+                    vec![reset_bit_net],
+                );
+                tie_cell.source_op = Some("ResetValue".to_string());
+                self.add_cell(tie_cell);
+
+                // Create MUX: sel=rst, d0=d_orig, d1=reset_bit
+                // MUX output = rst ? reset_bit : d_orig
+                let mux_out = self.netlist.add_net_with_name(format!("{}.rst_mux_bit{}", path, bit));
+                let mux_info = self.get_cell_info(&CellFunction::Mux2);
+                let mut mux_cell = Cell::new_comb(
+                    CellId(0),
+                    mux_info.name.clone(),
+                    self.library.name.clone(),
+                    mux_info.fit,
+                    format!("{}.rst_mux{}", path, bit),
+                    vec![reset.unwrap(), d_orig, reset_bit_net],
+                    vec![mux_out],
+                );
+                mux_cell.source_op = Some("ResetMux".to_string());
+                mux_info.apply_to_cell(&mut mux_cell);
+                self.add_cell(mux_cell);
+
+                mux_out
+            } else {
+                d_orig
+            };
+
+            // D input - reset is only passed for DFFR cells (reset-to-0)
             let dff_inputs = vec![d];
+            let dff_reset = if use_mux_for_reset { None } else { reset };
 
             let mut cell = Cell::new_seq(
                 CellId(0),
@@ -2489,7 +2538,7 @@ impl<'a> TechMapper<'a> {
                 dff_inputs,
                 vec![q],
                 clk,
-                reset,
+                dff_reset,
             );
             cell.source_op = Some("Register".to_string());
             dff_info.apply_to_cell(&mut cell);
