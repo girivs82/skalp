@@ -1,0 +1,248 @@
+// Minimal Working Example for Equivalence Checking
+// Tests key patterns: sibling ifs, FaultLatch, sequential logic, state machines
+
+/// FaultLatch - latches a fault condition until cleared
+/// Tests sibling if priority: clear should override fault_in
+pub entity FaultLatch {
+    in clk: clock
+    in rst: reset(active_high)
+    in fault_in: bit
+    in clear: bit
+    in auto_clear_enable: bit
+
+    out latched: bit
+    out latched_count: nat[8]
+}
+
+impl FaultLatch {
+    signal latch_state: bit = 0
+    signal count: nat[8] = 0
+
+    on(clk.rise) {
+        if rst {
+            latch_state = 0
+            count = 0
+        } else {
+            // Sibling 1: Set latch on fault (lower priority)
+            if fault_in && !latch_state {
+                latch_state = 1
+                count = count + 1
+            }
+            // Sibling 2: Clear conditions (higher priority - should win)
+            if clear {
+                latch_state = 0
+            } else if auto_clear_enable && latch_state && !fault_in {
+                latch_state = 0
+            }
+        }
+    }
+
+    latched = latch_state
+    latched_count = count
+}
+
+/// Simple counter with enable and load
+pub entity Counter8 {
+    in clk: clock
+    in rst: reset(active_high)
+    in enable: bit
+    in load: bit
+    in load_value: nat[8]
+
+    out count: nat[8]
+    out overflow: bit
+}
+
+impl Counter8 {
+    signal counter: nat[8] = 0
+
+    on(clk.rise) {
+        if rst {
+            counter = 0
+        } else if load {
+            counter = load_value
+        } else if enable {
+            counter = counter + 1
+        }
+    }
+
+    count = counter
+    overflow = (counter == 255)
+}
+
+/// PWM generator - tests comparison and counter logic
+pub entity PwmGenerator {
+    in clk: clock
+    in rst: reset(active_high)
+    in enable: bit
+    in duty: nat[8]
+    in period: nat[8]
+
+    out pwm_out: bit
+    out counter: nat[8]
+}
+
+impl PwmGenerator {
+    signal cnt: nat[8] = 0
+
+    on(clk.rise) {
+        if rst {
+            cnt = 0
+        } else if enable {
+            if cnt >= period {
+                cnt = 0
+            } else {
+                cnt = cnt + 1
+            }
+        }
+    }
+
+    counter = cnt
+    pwm_out = enable && (cnt < duty)
+}
+
+/// Simple state machine with 3 states
+pub entity StateMachine {
+    in clk: clock
+    in rst: reset(active_high)
+    in start: bit
+    in done: bit
+
+    out state: nat[2]
+    out busy: bit
+    out complete: bit
+}
+
+impl StateMachine {
+    signal current_state: nat[2] = 0
+
+    // States: 0=IDLE, 1=RUNNING, 2=DONE
+
+    on(clk.rise) {
+        if rst {
+            current_state = 0
+        } else {
+            if current_state == 0 {
+                // IDLE
+                if start {
+                    current_state = 1
+                }
+            } else if current_state == 1 {
+                // RUNNING
+                if done {
+                    current_state = 2
+                }
+            } else if current_state == 2 {
+                // DONE - go back to idle
+                current_state = 0
+            }
+        }
+    }
+
+    state = current_state
+    busy = (current_state == 1)
+    complete = (current_state == 2)
+}
+
+/// Top-level module combining all test patterns
+pub entity EquivalenceMwe {
+    in clk: clock
+    in rst: reset(active_high)
+
+    // FaultLatch inputs
+    in fault_in: bit
+    in clear_fault: bit
+    in auto_clear: bit
+
+    // Counter inputs
+    in counter_enable: bit
+    in counter_load: bit
+    in counter_value: nat[8]
+
+    // PWM inputs
+    in pwm_enable: bit
+    in pwm_duty: nat[8]
+
+    // State machine inputs
+    in sm_start: bit
+    in sm_done: bit
+
+    // Outputs
+    out fault_latched: bit
+    out fault_count: nat[8]
+    out counter_out: nat[8]
+    out counter_overflow: bit
+    out pwm_out: bit
+    out pwm_counter: nat[8]
+    out sm_state: nat[2]
+    out sm_busy: bit
+    out sm_complete: bit
+
+    // Combined status output (tests multi-bit OR)
+    out any_active: bit
+}
+
+impl EquivalenceMwe {
+    // Output signals for connecting to sub-module outputs
+    signal fl_latched: bit
+    signal fl_count: nat[8]
+    signal cnt_count: nat[8]
+    signal cnt_overflow: bit
+    signal pwm_output: bit
+    signal pwm_cnt: nat[8]
+    signal sm_st: nat[2]
+    signal sm_b: bit
+    signal sm_c: bit
+
+    let fault_latch = FaultLatch {
+        clk: clk,
+        rst: rst,
+        fault_in: fault_in,
+        clear: clear_fault,
+        auto_clear_enable: auto_clear,
+        latched: fl_latched,
+        latched_count: fl_count
+    }
+
+    let counter = Counter8 {
+        clk: clk,
+        rst: rst,
+        enable: counter_enable,
+        load: counter_load,
+        load_value: counter_value,
+        count: cnt_count,
+        overflow: cnt_overflow
+    }
+
+    let pwm = PwmGenerator {
+        clk: clk,
+        rst: rst,
+        enable: pwm_enable,
+        duty: pwm_duty,
+        period: 100,
+        pwm_out: pwm_output,
+        counter: pwm_cnt
+    }
+
+    let state_machine = StateMachine {
+        clk: clk,
+        rst: rst,
+        start: sm_start,
+        done: sm_done,
+        state: sm_st,
+        busy: sm_b,
+        complete: sm_c
+    }
+
+    fault_latched = fl_latched
+    fault_count = fl_count
+    counter_out = cnt_count
+    counter_overflow = cnt_overflow
+    pwm_out = pwm_output
+    pwm_counter = pwm_cnt
+    sm_state = sm_st
+    sm_busy = sm_b
+    sm_complete = sm_c
+
+    any_active = fl_latched | cnt_overflow | sm_b
+}
