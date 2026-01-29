@@ -3441,6 +3441,99 @@ impl<'a> MirToSirConverter<'a> {
         }
     }
 
+    /// Check if a type is signed (Int types are signed)
+    fn is_type_signed(ty: &skalp_frontend::types::Type) -> bool {
+        use skalp_frontend::types::Type;
+        match ty {
+            Type::Int(_) => true,
+            // Recurse into tuples/arrays if needed
+            Type::Tuple(elements) => elements.iter().any(Self::is_type_signed),
+            Type::Array { element_type, .. } => Self::is_type_signed(element_type),
+            _ => false,
+        }
+    }
+
+    /// Check if an expression is signed by looking at its type or recursing into operands
+    fn is_expression_signed(&self, expr: &Expression) -> bool {
+        // First check the expression's type field
+        if Self::is_type_signed(&expr.ty) {
+            return true;
+        }
+
+        // If type is Unknown, look at the expression kind
+        match &expr.kind {
+            ExpressionKind::Ref(lvalue) => {
+                // Look up the signal/port type from the MIR module
+                self.is_lvalue_signed(lvalue)
+            }
+            ExpressionKind::Binary { left, right, .. } => {
+                // Recurse into binary operands
+                self.is_expression_signed(left) || self.is_expression_signed(right)
+            }
+            ExpressionKind::Unary { operand, .. } => {
+                self.is_expression_signed(operand)
+            }
+            ExpressionKind::Conditional { then_expr, else_expr, .. } => {
+                self.is_expression_signed(then_expr) || self.is_expression_signed(else_expr)
+            }
+            ExpressionKind::Cast { target_type, .. } => {
+                // Check if the target type is signed
+                matches!(target_type, DataType::Int(_) | DataType::IntParam { .. } | DataType::IntExpr { .. })
+            }
+            _ => false,
+        }
+    }
+
+    /// Check if an lvalue refers to a signed type
+    /// This searches across all modules in the design since signals may be from submodules
+    fn is_lvalue_signed(&self, lvalue: &LValue) -> bool {
+        match lvalue {
+            LValue::Signal(signal_id) => {
+                // First try current module
+                if let Some(s) = self.mir.signals.iter().find(|s| &s.id == signal_id) {
+                    return matches!(s.signal_type, DataType::Int(_) | DataType::IntParam { .. } | DataType::IntExpr { .. });
+                }
+                // Search across all modules in the design
+                for module in &self.mir_design.modules {
+                    if let Some(s) = module.signals.iter().find(|s| &s.id == signal_id) {
+                        return matches!(s.signal_type, DataType::Int(_) | DataType::IntParam { .. } | DataType::IntExpr { .. });
+                    }
+                }
+                false
+            }
+            LValue::Port(port_id) => {
+                // First try current module
+                if let Some(p) = self.mir.ports.iter().find(|p| &p.id == port_id) {
+                    return matches!(p.port_type, DataType::Int(_) | DataType::IntParam { .. } | DataType::IntExpr { .. });
+                }
+                // Search across all modules in the design
+                for module in &self.mir_design.modules {
+                    if let Some(p) = module.ports.iter().find(|p| &p.id == port_id) {
+                        return matches!(p.port_type, DataType::Int(_) | DataType::IntParam { .. } | DataType::IntExpr { .. });
+                    }
+                }
+                false
+            }
+            LValue::Variable(var_id) => {
+                // First try current module
+                if let Some(v) = self.mir.variables.iter().find(|v| &v.id == var_id) {
+                    return matches!(v.var_type, DataType::Int(_) | DataType::IntParam { .. } | DataType::IntExpr { .. });
+                }
+                // Search across all modules in the design
+                for module in &self.mir_design.modules {
+                    if let Some(v) = module.variables.iter().find(|v| &v.id == var_id) {
+                        return matches!(v.var_type, DataType::Int(_) | DataType::IntParam { .. } | DataType::IntExpr { .. });
+                    }
+                }
+                false
+            }
+            LValue::BitSelect { base, .. } | LValue::RangeSelect { base, .. } => {
+                self.is_lvalue_signed(base)
+            }
+            LValue::Concat(_) => false,
+        }
+    }
+
     fn create_expression_node(&mut self, expr: &Expression) -> usize {
         // Call with no width hint
         self.create_expression_node_with_width(expr, None)
@@ -3482,9 +3575,15 @@ impl<'a> MirToSirConverter<'a> {
                     target_width
                 };
 
+                // BUG FIX: Check MIR expression types for signedness (for signed comparisons)
+                // Use is_expression_signed which also looks up signal/port types when expr.ty is Unknown
+                let left_is_signed = self.is_expression_signed(left);
+                let right_is_signed = self.is_expression_signed(right);
+                let is_signed = left_is_signed || right_is_signed;
+
                 let left_node = self.create_expression_node_with_width(left, operand_width);
                 let right_node = self.create_expression_node_with_width(right, operand_width);
-                self.create_binary_op_node(op, left_node, right_node)
+                self.create_binary_op_node_with_signedness(op, left_node, right_node, is_signed)
             }
             ExpressionKind::Unary { op, operand } => {
                 let operand_node = self.create_expression_node_with_width(operand, target_width);
@@ -4026,8 +4125,18 @@ impl<'a> MirToSirConverter<'a> {
         left: usize,
         right: usize,
     ) -> usize {
+        // Default to unsigned when signedness is not known from MIR expression types
+        self.create_binary_op_node_with_signedness(op, left, right, false)
+    }
+
+    fn create_binary_op_node_with_signedness(
+        &mut self,
+        op: &skalp_mir::BinaryOp,
+        left: usize,
+        right: usize,
+        is_signed_from_mir: bool,
+    ) -> usize {
         let node_id = self.next_node_id();
-        let bin_op = self.convert_binary_op(op);
 
         let left_signal = self.node_to_signal_ref(left);
         let right_signal = self.node_to_signal_ref(right);
@@ -4035,6 +4144,13 @@ impl<'a> MirToSirConverter<'a> {
         // Determine type from operation and inputs
         let left_type = self.get_signal_type(&left_signal.signal_id);
         let right_type = self.get_signal_type(&right_signal.signal_id);
+
+        // BUG FIX: Use signed comparisons when MIR expression types indicate signed operands
+        // This ensures correct evaluation of signed fixed-point comparisons (e.g., q16_16)
+        // The is_signed_from_mir flag is determined from the original MIR Expression.ty field,
+        // which is more reliable than looking at intermediate SIR signal types.
+        let is_signed = is_signed_from_mir || left_type.is_signed() || right_type.is_signed();
+        let bin_op = self.convert_binary_op_with_signedness(op, is_signed);
 
         // BUG DEBUG #65: Log signal names being looked up
         if bin_op.is_float_op() {
@@ -4086,6 +4202,10 @@ impl<'a> MirToSirConverter<'a> {
                 | BinaryOperation::Lte
                 | BinaryOperation::Gt
                 | BinaryOperation::Gte
+                | BinaryOperation::Slt
+                | BinaryOperation::Slte
+                | BinaryOperation::Sgt
+                | BinaryOperation::Sgte
                 | BinaryOperation::FEq
                 | BinaryOperation::FNeq
                 | BinaryOperation::FLt
@@ -5248,6 +5368,12 @@ impl<'a> MirToSirConverter<'a> {
     }
 
     fn convert_binary_op(&self, op: &skalp_mir::BinaryOp) -> BinaryOperation {
+        // Default to unsigned comparisons
+        self.convert_binary_op_with_signedness(op, false)
+    }
+
+    /// Convert MIR BinaryOp to SIR BinaryOperation, using signed comparisons when is_signed is true
+    fn convert_binary_op_with_signedness(&self, op: &skalp_mir::BinaryOp, is_signed: bool) -> BinaryOperation {
         use skalp_mir::BinaryOp::*;
         match op {
             Add => BinaryOperation::Add,
@@ -5263,10 +5389,11 @@ impl<'a> MirToSirConverter<'a> {
             Xor => BinaryOperation::Xor, // Logical XOR mapped to bitwise
             Equal => BinaryOperation::Eq,
             NotEqual => BinaryOperation::Neq,
-            Less => BinaryOperation::Lt,
-            LessEqual => BinaryOperation::Lte,
-            Greater => BinaryOperation::Gt,
-            GreaterEqual => BinaryOperation::Gte,
+            // BUG FIX: Use signed comparisons when operands are signed
+            Less => if is_signed { BinaryOperation::Slt } else { BinaryOperation::Lt },
+            LessEqual => if is_signed { BinaryOperation::Slte } else { BinaryOperation::Lte },
+            Greater => if is_signed { BinaryOperation::Sgt } else { BinaryOperation::Gt },
+            GreaterEqual => if is_signed { BinaryOperation::Sgte } else { BinaryOperation::Gte },
             LeftShift => BinaryOperation::Shl,
             RightShift => BinaryOperation::Shr,
             LogicalAnd => BinaryOperation::And, // Boolean AND
@@ -5288,7 +5415,10 @@ impl<'a> MirToSirConverter<'a> {
     /// Convert MIR DataType to SIR SirType
     fn convert_type(&self, data_type: &DataType) -> SirType {
         match data_type {
-            DataType::Bit(w) | DataType::Logic(w) | DataType::Int(w) | DataType::Nat(w) => {
+            // Signed types: Int is signed
+            DataType::Int(w) => SirType::SignedBits(*w),
+            // Unsigned types: Bit, Logic, Nat are unsigned
+            DataType::Bit(w) | DataType::Logic(w) | DataType::Nat(w) => {
                 SirType::Bits(*w)
             }
             DataType::Bool => SirType::Bits(1),
@@ -5300,13 +5430,15 @@ impl<'a> MirToSirConverter<'a> {
             DataType::Vec3(elem) => SirType::Vec3(Box::new(self.convert_type(elem))),
             DataType::Vec4(elem) => SirType::Vec4(Box::new(self.convert_type(elem))),
             DataType::Array(elem, size) => SirType::Array(Box::new(self.convert_type(elem)), *size),
+            // Signed parametric types
+            DataType::IntParam { default, .. }
+            | DataType::IntExpr { default, .. } => SirType::SignedBits(*default),
+            // Unsigned parametric types
             DataType::BitParam { default, .. }
             | DataType::LogicParam { default, .. }
-            | DataType::IntParam { default, .. }
             | DataType::NatParam { default, .. }
             | DataType::BitExpr { default, .. }
             | DataType::LogicExpr { default, .. }
-            | DataType::IntExpr { default, .. }
             | DataType::NatExpr { default, .. } => SirType::Bits(*default),
             // BUG FIX #65 & Metal Backend Fix: Struct types need proper type preservation
             DataType::Struct(struct_type) => {
@@ -8167,7 +8299,12 @@ impl<'a> MirToSirConverter<'a> {
                     parent_module_for_signals,
                     parent_prefix,
                 );
-                self.create_binary_op_node(op, left_node, right_node)
+                // BUG FIX: Check signedness for comparison operations in instance context
+                // This ensures signed comparisons (e.g., q16_16 > out_max) use signed operations
+                let left_is_signed = self.is_expression_signed(left);
+                let right_is_signed = self.is_expression_signed(right);
+                let is_signed = left_is_signed || right_is_signed;
+                self.create_binary_op_node_with_signedness(op, left_node, right_node, is_signed)
             }
             ExpressionKind::Unary { op, operand } => {
                 let operand_node = self.create_expression_node_for_instance_with_context(
