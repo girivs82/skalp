@@ -740,22 +740,12 @@ impl GateLevelSimulator {
                         false
                     };
 
-                    if reset_active {
-                        // Reset all registers in this block to 0
-                        for op in &block.operations {
-                            if let SirOperation::Primitive { outputs, .. } = op {
-                                for out in outputs {
-                                    let width =
-                                        self.signal_widths.get(&out.0).copied().unwrap_or(1);
-                                    self.state.signals.insert(out.0, vec![false; width]);
-                                }
-                            }
-                        }
-                    } else {
-                        // Normal operation: evaluate sequential operations (DFFs)
-                        for op in &block.operations {
-                            self.evaluate_operation(op);
-                        }
+                    // BUG FIX: Always evaluate DFFs normally, regardless of reset_active.
+                    // Reset behavior is now handled by MUX in front of DFFs (tech_mapper change).
+                    // The MUX selects the reset value when rst=1, and the DFF latches it.
+                    // Previously, forcing all registers to 0 broke non-zero reset values.
+                    for op in &block.operations {
+                        self.evaluate_operation(op);
                     }
                 }
             }
