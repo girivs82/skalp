@@ -938,24 +938,30 @@ impl MirToLirTransform {
                                     None,
                                 );
 
-                                // BUG FIX: Separate conditional paths from default/unconditional paths
-                                // The default should be the BASE for the mux chain, not an override
-                                let (conditional_paths, default_paths): (Vec<_>, Vec<_>) =
-                                    else_paths.into_iter().partition(|(cond, _)| cond.is_some());
+                                // BUG FIX: Build MUX cascade correctly for if-else-if chains
+                                // For: if A { v1 } else if B { v2 } else if C { v3 } else { v4 }
+                                // Correct structure: mux(A, v1, mux(B, v2, mux(C, v3, v4)))
+                                // This requires processing from innermost (last) to outermost (first)
 
-                                // Start with the default value (unconditional path or feedback)
-                                let mut current_value = if let Some((_, default_expr)) = default_paths.into_iter().next() {
-                                    self.transform_expression(&default_expr, target_width)
+                                let mut conditional_paths: Vec<_> = else_paths.into_iter().collect();
+
+                                // The last path corresponds to the final else - use as base
+                                let mut current_value = if let Some((_, last_expr)) = conditional_paths.pop() {
+                                    self.transform_expression(&last_expr, target_width)
                                 } else {
-                                    target_signal // Feedback as default
+                                    target_signal // Feedback if no paths
                                 };
 
-                                // Build mux chain from conditional paths
-                                for (condition, expr) in conditional_paths.into_iter() {
+                                // Build mux chain in REVERSE order (innermost to outermost)
+                                // This creates: mux(first_cond, first_val, mux(second_cond, ...))
+                                for (condition, expr) in conditional_paths.into_iter().rev() {
                                     let expr_signal = self.transform_expression(&expr, target_width);
 
                                     if let Some(cond) = condition {
-                                        let cond_signal = self.transform_expression(&cond, 1);
+                                        // Extract the simple condition from compound conditions
+                                        // Compound: (!A && !B && C) -> simple: C (rightmost operand)
+                                        let simple_cond = Self::extract_simple_condition(&cond);
+                                        let cond_signal = self.transform_expression(&simple_cond, 1);
                                         let mux_out = self.alloc_temp_signal(target_width);
                                         self.lir.add_node(
                                             LirOp::Mux2 { width: target_width },
@@ -1552,6 +1558,23 @@ impl MirToLirTransform {
         }
 
         paths
+    }
+
+    /// Extract the simple (innermost) condition from a compound condition.
+    /// For cascaded if-else-if, compound conditions look like:
+    /// - `A` (simple, at top level)
+    /// - `!A && B` = And(Not(A), B) -> simple is B
+    /// - `!A && !B && C` = And(And(...), C) -> simple is C
+    /// The simple condition is always the rightmost operand of the And chain.
+    fn extract_simple_condition(cond: &Expression) -> Expression {
+        match &cond.kind {
+            ExpressionKind::Binary { op: BinaryOp::And, right, .. } => {
+                // The right side of an AND in a compound condition is the simple condition
+                // (or another compound that we need to extract from)
+                Self::extract_simple_condition(right)
+            }
+            _ => cond.clone(), // Already a simple condition
+        }
     }
 
     /// BUG #238 FIX: Process a nested if statement while excluding targets already handled
