@@ -606,7 +606,7 @@ impl UnifiedSimulator {
     ///
     /// For NCL mode, this sets the dual-rail encoded value (use set_ncl_input for more control)
     pub async fn set_input(&mut self, name: &str, value: u64) {
-        // Resolve user-facing path to internal name
+        // Resolve user-facing path to internal name (for behavioral simulation)
         let internal_name = self.resolve_path(name);
 
         match &mut self.backend {
@@ -627,13 +627,15 @@ impl UnifiedSimulator {
                 }
             }
             SimulatorBackend::GateLevelCpu(sim) => {
+                // Gate-level netlists use user-facing names, not internal _s names
                 // Convert u64 to bool vector
                 let bits: Vec<bool> = (0..64).map(|i| (value >> i) & 1 == 1).collect();
-                sim.set_input(&internal_name, &bits);
+                sim.set_input(name, &bits);
             }
             #[cfg(target_os = "macos")]
             SimulatorBackend::GateLevelGpu(runtime) => {
-                runtime.set_input_u64(&internal_name, value);
+                // Gate-level netlists use user-facing names, not internal _s names
+                runtime.set_input_u64(name, value);
             }
             SimulatorBackend::NclCpu(ncl_sim) => {
                 // For NCL, infer width from value (up to 64 bits)
@@ -931,15 +933,21 @@ impl UnifiedSimulator {
                     value
                 })
             }
-            SimulatorBackend::GateLevelCpu(sim) => sim.get_output(&internal_name).map(|bits| {
-                bits.iter()
-                    .enumerate()
-                    .filter(|(_, &b)| b)
-                    .map(|(i, _)| 1u64 << i)
-                    .sum()
-            }),
+            SimulatorBackend::GateLevelCpu(sim) => {
+                // Gate-level netlists use user-facing names, not internal _s names
+                sim.get_output(name).map(|bits| {
+                    bits.iter()
+                        .enumerate()
+                        .filter(|(_, &b)| b)
+                        .map(|(i, _)| 1u64 << i)
+                        .sum()
+                })
+            }
             #[cfg(target_os = "macos")]
-            SimulatorBackend::GateLevelGpu(runtime) => runtime.get_output_u64(&internal_name),
+            SimulatorBackend::GateLevelGpu(runtime) => {
+                // Gate-level netlists use user-facing names, not internal _s names
+                runtime.get_output_u64(name)
+            }
             SimulatorBackend::NclCpu(ncl_sim) => {
                 // For NCL, we need to determine width somehow
                 // Try common widths and return first valid result
