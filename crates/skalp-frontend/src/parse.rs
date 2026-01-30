@@ -121,6 +121,15 @@ impl<'a> ParseState<'a> {
     /// Parse entity declaration
     /// Handles both 'entity' and 'async entity' (NCL) declarations
     fn parse_entity_decl(&mut self) {
+        // Look ahead to determine if this is an entity alias (entity Name = ...)
+        // We need to skip: [async] entity Ident [<generics>] and check for '='
+        let is_alias = self.is_entity_alias();
+
+        if is_alias {
+            self.parse_entity_alias();
+            return;
+        }
+
         self.start_node(SyntaxKind::EntityDecl);
 
         // Optional 'async' keyword for NCL entities
@@ -153,6 +162,58 @@ impl<'a> ParseState<'a> {
         self.expect(SyntaxKind::LBrace);
         self.parse_port_list();
         self.expect(SyntaxKind::RBrace);
+
+        self.finish_node();
+    }
+
+    /// Check if this is an entity alias: `entity Name = Target;`
+    fn is_entity_alias(&self) -> bool {
+        let mut lookahead = 0;
+
+        // Skip 'async' if present
+        if self.peek_kind(lookahead) == Some(SyntaxKind::AsyncKw) {
+            lookahead += 1;
+        }
+
+        // Skip 'entity'
+        if self.peek_kind(lookahead) != Some(SyntaxKind::EntityKw) {
+            return false;
+        }
+        lookahead += 1;
+
+        // Skip identifier
+        if self.peek_kind(lookahead) != Some(SyntaxKind::Ident) {
+            return false;
+        }
+        lookahead += 1;
+
+        // Check for '=' (entity alias) vs '<' or '{' (entity decl)
+        matches!(self.peek_kind(lookahead), Some(SyntaxKind::Assign))
+    }
+
+    /// Parse entity alias: `[pub] entity Name = TargetEntity<params>;`
+    fn parse_entity_alias(&mut self) {
+        self.start_node(SyntaxKind::EntityAlias);
+
+        // Optional 'async' keyword (inherited by target)
+        if self.at(SyntaxKind::AsyncKw) {
+            self.bump();
+        }
+
+        // 'entity' keyword
+        self.expect(SyntaxKind::EntityKw);
+
+        // Alias name
+        self.expect(SyntaxKind::Ident);
+
+        // '=' sign
+        self.expect(SyntaxKind::Assign);
+
+        // Target entity type (may include generic parameters)
+        self.parse_type();
+
+        // Semicolon
+        self.expect(SyntaxKind::Semicolon);
 
         self.finish_node();
     }
@@ -342,6 +403,7 @@ impl<'a> ParseState<'a> {
                 Some(SyntaxKind::LetKw) => {
                     // Disambiguate between instance declaration and let binding
                     // Instance: let name = EntityName { ... } or let name = EntityName<T> { ... }
+                    //           or let name = EntityName::<T> { ... } (turbofish syntax)
                     // Let binding: let name = expression
                     // Look ahead to see if we have: let ident = ident { or let ident = ident < ...
                     let mut is_instance = false;
@@ -349,14 +411,24 @@ impl<'a> ParseState<'a> {
                         && self.peek_kind(2) == Some(SyntaxKind::Assign)
                         && self.peek_kind(3) == Some(SyntaxKind::Ident)
                     {
-                        // Check if followed by { or <
+                        // Check if followed by { or < or ::<
                         if self.peek_kind(4) == Some(SyntaxKind::LBrace) {
                             is_instance = true;
-                        } else if self.peek_kind(4) == Some(SyntaxKind::Lt) {
+                        } else if self.peek_kind(4) == Some(SyntaxKind::Lt)
+                            || (self.peek_kind(4) == Some(SyntaxKind::ColonColon)
+                                && self.peek_kind(5) == Some(SyntaxKind::Lt))
+                        {
+                            // Handle both Entity<T> and Entity::<T> (turbofish) syntax
+                            let generic_start = if self.peek_kind(4) == Some(SyntaxKind::ColonColon)
+                            {
+                                5 // Skip :: to get to <
+                            } else {
+                                4
+                            };
                             // Generic instantiation - scan forward to find the closing >
                             // then check if there's a { after it
                             let mut depth = 0;
-                            let mut offset = 4;
+                            let mut offset = generic_start;
                             loop {
                                 match self.peek_kind(offset) {
                                     Some(SyntaxKind::Lt) => depth += 1,
@@ -664,7 +736,11 @@ impl<'a> ParseState<'a> {
         self.expect(SyntaxKind::Ident);
 
         // Optional generic arguments (values, not parameter declarations)
-        if self.at(SyntaxKind::Lt) {
+        // Handle both Entity<T> and Entity::<T> (turbofish) syntax
+        if self.at(SyntaxKind::ColonColon) && self.peek_kind(1) == Some(SyntaxKind::Lt) {
+            self.bump(); // consume ::
+            self.parse_generic_args();
+        } else if self.at(SyntaxKind::Lt) {
             self.parse_generic_args();
         }
 
