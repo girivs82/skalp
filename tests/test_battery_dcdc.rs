@@ -7,8 +7,9 @@
 
 use skalp_testing::testbench::*;
 
-const BATTERY_DCDC_PATH: &str = "/Users/girivs/src/design/electronics/skalp/battery_dcdc/main.sk";
-const TOP_MODULE: &str = "DabBatteryController";
+// Use FastSim wrapper for reduced simulation time (1000 cycles vs millions)
+const BATTERY_DCDC_PATH: &str = "/Users/girivs/src/design/sangam/src/battery_dcdc/test_config.sk";
+const TOP_MODULE: &str = "DabController_FastSim";
 
 /// Test basic initialization and reset
 #[tokio::test]
