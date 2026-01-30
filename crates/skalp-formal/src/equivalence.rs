@@ -29,7 +29,7 @@ use skalp_lir::{CellFunction, GateNetlist, Lir, LirNode, LirOp, LirSignalId};
 use skalp_mir::Type;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
-use varisat::{CnfFormula, ExtendFormula, Lit, Solver, Var};
+use crate::sat_solver::{CnfFormula, ExtendFormula, Lit, Solver, Var};
 
 // ============================================================================
 // AIG (And-Inverter Graph) Representation

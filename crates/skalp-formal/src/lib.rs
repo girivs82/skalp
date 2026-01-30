@@ -15,6 +15,7 @@ pub mod bmc;
 pub mod equivalence;
 pub mod model_checker;
 pub mod property;
+pub mod sat_solver;
 pub mod smt;
 pub mod temporal;
 
