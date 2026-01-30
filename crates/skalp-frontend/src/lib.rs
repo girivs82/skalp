@@ -2267,9 +2267,25 @@ fn merge_all_symbols(target: &mut Hir, source: &Hir) -> Result<()> {
     for impl_block in &source.implementations {
         // Only merge constants from the global scope (entity ID 0)
         if impl_block.entity == hir::EntityId::GLOBAL_IMPL {
+            eprintln!(
+                "[MERGE_ALL_SYMBOLS] Found GLOBAL_IMPL in source with {} constants",
+                impl_block.constants.len()
+            );
             for constant in &impl_block.constants {
-                // Create global implementation block if it doesn't exist
-                if target.implementations.is_empty() {
+                eprintln!(
+                    "[MERGE_ALL_SYMBOLS]   Merging constant '{}' (id={:?})",
+                    constant.name, constant.id
+                );
+                // BUG #85 FIX: Find or create GLOBAL_IMPL in target, don't just use first impl
+                // The previous code used target.implementations.first_mut() which was wrong -
+                // if target already had entity implementations, constants would go to the wrong place
+                let global_impl_idx = target
+                    .implementations
+                    .iter()
+                    .position(|i| i.entity == hir::EntityId::GLOBAL_IMPL);
+
+                if global_impl_idx.is_none() {
+                    // Create GLOBAL_IMPL if it doesn't exist
                     target.implementations.push(hir::HirImplementation {
                         entity: hir::EntityId::GLOBAL_IMPL,
                         signals: Vec::new(),
@@ -2284,11 +2300,17 @@ fn merge_all_symbols(target: &mut Hir, source: &Hir) -> Result<()> {
                         statements: Vec::new(),
                     });
                 }
-                // Add constant to the first implementation (global scope)
+
+                // Find GLOBAL_IMPL and add constant to it
                 // BUG #234 FIX: Preserve original constant ID instead of remapping.
-                // See comment in merge_symbol() for full explanation.
-                if let Some(impl_block) = target.implementations.first_mut() {
-                    impl_block.constants.push(constant.clone());
+                if let Some(global_impl) = target
+                    .implementations
+                    .iter_mut()
+                    .find(|i| i.entity == hir::EntityId::GLOBAL_IMPL)
+                {
+                    if !global_impl.constants.iter().any(|c| c.id == constant.id) {
+                        global_impl.constants.push(constant.clone());
+                    }
                 }
             }
         }
@@ -2304,8 +2326,13 @@ fn merge_all_symbols(target: &mut Hir, source: &Hir) -> Result<()> {
                     "📦 BUG #67 FIX: Merging glob-imported function '{}' with return type: {:?}",
                     function.name, function.return_type
                 );
-                // Create global implementation block if it doesn't exist
-                if target.implementations.is_empty() {
+                // BUG #85 FIX: Find or create GLOBAL_IMPL in target
+                let global_impl_idx = target
+                    .implementations
+                    .iter()
+                    .position(|i| i.entity == hir::EntityId::GLOBAL_IMPL);
+
+                if global_impl_idx.is_none() {
                     target.implementations.push(hir::HirImplementation {
                         entity: hir::EntityId::GLOBAL_IMPL,
                         signals: Vec::new(),
@@ -2320,9 +2347,16 @@ fn merge_all_symbols(target: &mut Hir, source: &Hir) -> Result<()> {
                         statements: Vec::new(),
                     });
                 }
-                // Add function to the first implementation (global scope)
-                if let Some(impl_block) = target.implementations.first_mut() {
-                    impl_block.functions.push(function.clone());
+
+                // Add function to GLOBAL_IMPL (not just first impl)
+                if let Some(global_impl) = target
+                    .implementations
+                    .iter_mut()
+                    .find(|i| i.entity == hir::EntityId::GLOBAL_IMPL)
+                {
+                    if !global_impl.functions.iter().any(|f| f.name == function.name) {
+                        global_impl.functions.push(function.clone());
+                    }
                 }
             }
         }
@@ -2386,6 +2420,7 @@ pub fn build_hir(_ast: &ast::SourceFile) -> Result<Hir> {
     Ok(Hir {
         name: "design".to_string(),
         entities: Vec::new(),
+        entity_aliases: Vec::new(),
         implementations: Vec::new(),
         protocols: Vec::new(),
         intents: Vec::new(),
