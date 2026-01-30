@@ -69,11 +69,33 @@ async fn test_state_transition_init_to_waitbms() {
     // Set BMS data to indicate no fault
     tb.set("bms.connected", 1u8);
     tb.set("bms.fault", 0u8);
-    tb.set("bms_rx_valid", 0u8);  // Will set this to prevent watchdog timeout
+    tb.set("bms_rx_valid", 1u8);  // Reset watchdog to prevent timeout
     tb.clock(1).await;
+
+    // Keep sending BMS valid to prevent watchdog timeout
+    tb.set("bms_rx_valid", 1u8);
 
     // Enable the controller - should transition to WaitBms
     tb.set("enable", 1u8);
+
+    // Debug: check fault status before transition
+    let faults_ov: u8 = tb.get_as("faults.ov").await;
+    let faults_uv: u8 = tb.get_as("faults.uv").await;
+    let faults_oc: u8 = tb.get_as("faults.oc").await;
+    let faults_ot: u8 = tb.get_as("faults.ot").await;
+    let faults_desat: u8 = tb.get_as("faults.desat").await;
+    let faults_bms_fault: u8 = tb.get_as("faults.bms_fault").await;
+    let faults_bms_timeout: u8 = tb.get_as("faults.bms_timeout").await;
+    let faults_lockstep: u8 = tb.get_as("faults.lockstep").await;
+    println!("=== Before transition: fault status ===");
+    println!("  faults.ov = {}", faults_ov);
+    println!("  faults.uv = {}", faults_uv);
+    println!("  faults.oc = {}", faults_oc);
+    println!("  faults.ot = {}", faults_ot);
+    println!("  faults.desat = {}", faults_desat);
+    println!("  faults.bms_fault = {}", faults_bms_fault);
+    println!("  faults.bms_timeout = {}", faults_bms_timeout);
+    println!("  faults.lockstep = {}", faults_lockstep);
 
     // Debug: check state before clock
     let state_before: u8 = tb.get_as("state").await;
@@ -84,6 +106,10 @@ async fn test_state_transition_init_to_waitbms() {
     );
 
     tb.clock(1).await;
+
+    // Debug: check fault status after transition
+    let faults_bms_timeout_after: u8 = tb.get_as("faults.bms_timeout").await;
+    println!("After clock: faults.bms_timeout = {}", faults_bms_timeout_after);
 
     // Debug: check state after clock
     let state_after: u8 = tb.get_as("state").await;
@@ -112,6 +138,22 @@ async fn test_fault_prevents_transition() {
     tb.set("rst", 0u8);
     tb.clock(1).await;
 
+    // Initialize all fault inputs to clear (except the one we'll test)
+    tb.set("hw_uv", 0u8);
+    tb.set("hw_oc", 0u8);
+    tb.set("hw_ot", 0u8);
+    tb.set("desat", 0u8);
+
+    // Set BMS data to prevent BMS-related faults
+    tb.set("bms.connected", 1u8);
+    tb.set("bms.fault", 0u8);
+    tb.set("bms_rx_valid", 1u8);
+
+    // Initialize lockstep signals
+    tb.set("lockstep_rx_valid", 0u8);
+
+    tb.clock(1).await;
+
     // Set a hardware fault
     tb.set("hw_ov", 1u8);  // Hardware overvoltage fault
     tb.clock(1).await;
@@ -128,8 +170,12 @@ async fn test_fault_prevents_transition() {
         state
     );
 
-    // Clear fault and reset
+    // Clear fault, disable, then reset
+    // Note: FaultLatch clears when clear_faults = !enable, so we need enable=0
     tb.set("hw_ov", 0u8);
+    tb.set("enable", 0u8);  // Disable to allow fault latch to clear
+    tb.clock(1).await;      // Let fault latch clear
+
     tb.set("rst", 1u8);
     tb.clock(1).await;
     tb.set("rst", 0u8);
@@ -137,6 +183,7 @@ async fn test_fault_prevents_transition() {
 
     // Now should be able to transition
     tb.set("enable", 1u8);
+    tb.set("bms_rx_valid", 1u8);  // Keep BMS watchdog happy
     tb.clock(1).await;
 
     let state: u8 = tb.get_as("state").await;
