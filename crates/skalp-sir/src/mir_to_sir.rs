@@ -6900,6 +6900,8 @@ impl<'a> MirToSirConverter<'a> {
         }
 
         // Convert sequential processes from child module
+        println!("🔥 Converting {} processes for inst_prefix='{}', child_module='{}'",
+            child_module.processes.len(), inst_prefix, child_module.name);
         for process in &child_module.processes {
             self.convert_child_process_with_context(
                 process,
@@ -7159,6 +7161,9 @@ impl<'a> MirToSirConverter<'a> {
                     targets.sort();
                     targets.dedup();
 
+                    println!("      📋 Collected {} targets for inst_prefix='{}': {:?}",
+                        targets.len(), inst_prefix, targets.iter().take(10).collect::<Vec<_>>());
+
                     // For each target, synthesize conditional logic and create FlipFlop
                     // CRITICAL: If target is a base signal for a flattened array, we need to
                     // create FlipFlops for ALL flattened elements
@@ -7183,6 +7188,14 @@ impl<'a> MirToSirConverter<'a> {
 
                             // BUG #117r FIX: Translate hierarchical target to internal name
                             let internal_target = self.translate_to_internal_name(&actual_target);
+
+                            // DEBUG: Trace FlipFlop creation for state_reg
+                            if actual_target.contains("state") {
+                                println!("      🔧 FLIPFLOP_CREATE: target='{}' internal='{}' data_node={} ff_node={}",
+                                    actual_target, internal_target, data_node, node_id);
+                                println!("         D_INPUT: node_{}_out", data_node);
+                                println!("         Q_OUTPUT: {}", internal_target);
+                            }
 
                             // Create FlipFlop node with clock and synthesized data
                             let ff_node = SirNode {
@@ -7450,6 +7463,33 @@ impl<'a> MirToSirConverter<'a> {
                     );
                 }
             }
+            Statement::Case(case_stmt) => {
+                // BUG #237 FIX: Collect targets from Case/match statement arms
+                // This is critical for state machines that assign in match arms
+                for item in &case_stmt.items {
+                    for stmt in &item.block.statements {
+                        self.collect_assignment_targets_for_instance(
+                            stmt,
+                            inst_prefix,
+                            port_mapping,
+                            child_module,
+                            targets,
+                        );
+                    }
+                }
+                // Also check default block
+                if let Some(default_block) = &case_stmt.default {
+                    for stmt in &default_block.statements {
+                        self.collect_assignment_targets_for_instance(
+                            stmt,
+                            inst_prefix,
+                            port_mapping,
+                            child_module,
+                            targets,
+                        );
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -7467,6 +7507,15 @@ impl<'a> MirToSirConverter<'a> {
         parent_prefix: &str,
     ) -> usize {
         // Process all statements to find assignments to target
+        let stmt_types: Vec<_> = statements.iter().map(|s| match s {
+            Statement::Assignment(_) => "Assignment",
+            Statement::If(_) => "If",
+            Statement::Block(_) => "Block",
+            Statement::Case(_) => "Case",
+            _ => "Other",
+        }).collect();
+        println!("      SYNTH_SEQ: target={}, {} stmts: {:?}",
+            target, statements.len(), stmt_types);
         for statement in statements {
             match statement {
                 Statement::Assignment(assign) => {
@@ -7567,6 +7616,9 @@ impl<'a> MirToSirConverter<'a> {
                 }
                 Statement::If(if_stmt) => {
                     // Build conditional MUX
+                    if target.contains("state_reg") {
+                        eprintln!("      ⚙️ Found If statement for target={}, calling synthesize_conditional_for_instance", target);
+                    }
                     return self.synthesize_conditional_for_instance(
                         if_stmt,
                         inst_prefix,
@@ -7576,6 +7628,23 @@ impl<'a> MirToSirConverter<'a> {
                         parent_module_for_signals,
                         parent_prefix,
                     );
+                }
+                Statement::Case(case_stmt) => {
+                    // BUG #237 FIX: Handle top-level Case statements too
+                    if target.contains("state_reg") {
+                        eprintln!("      ⚙️ Found top-level Case statement for target={}, {} items", target, case_stmt.items.len());
+                    }
+                    if let Some(val) = self.synthesize_case_for_target_for_instance(
+                        case_stmt,
+                        inst_prefix,
+                        port_mapping,
+                        child_module,
+                        target,
+                        parent_module_for_signals,
+                        parent_prefix,
+                    ) {
+                        return val;
+                    }
                 }
                 _ => {}
             }
@@ -7679,6 +7748,17 @@ impl<'a> MirToSirConverter<'a> {
         parent_module_for_signals: Option<&Module>,
         parent_prefix: &str,
     ) -> Option<usize> {
+        let stmt_types: Vec<_> = statements.iter().map(|s| match s {
+            Statement::Assignment(_) => "Assignment",
+            Statement::If(_) => "If",
+            Statement::Block(_) => "Block",
+            Statement::Case(_) => "Case",
+            _ => "Other",
+        }).collect();
+        if target.contains("state_reg") {
+            println!("      FIND_ASSIGN_BRANCH: target={}, prefix={}, {} stmts: {:?}",
+                target, inst_prefix, statements.len(), stmt_types);
+        }
         for stmt in statements {
             match stmt {
                 Statement::Assignment(assign) => {
@@ -7721,6 +7801,9 @@ impl<'a> MirToSirConverter<'a> {
                             let target_stripped = self.strip_flattened_index_suffix(target);
                             lhs == target_stripped
                         };
+                        if target.contains("state_reg") {
+                            println!("         ASSIGN_CHECK: lhs={}, target={}, matches={}", lhs, target, matches);
+                        }
 
                         if matches {
                             // Found assignment for this target!
@@ -7761,10 +7844,169 @@ impl<'a> MirToSirConverter<'a> {
                         return Some(result);
                     }
                 }
+                Statement::Case(case_stmt) => {
+                    // BUG #237 FIX: Handle Case/match statements in instance branches
+                    // This is critical for state machines that use match statements
+                    println!("         CASE_FOUND: Found Case statement in instance branch for target={}, {} items", target, case_stmt.items.len());
+                    if let Some(val) = self.synthesize_case_for_target_for_instance(
+                        case_stmt,
+                        inst_prefix,
+                        port_mapping,
+                        child_module,
+                        target,
+                        parent_module_for_signals,
+                        parent_prefix,
+                    ) {
+                        return Some(val);
+                    }
+                }
                 _ => {}
             }
         }
         None
+    }
+
+    /// BUG #237 FIX: Synthesize case statement for a specific target in instance context
+    /// This is the instance-aware version of synthesize_case_for_target_with_default
+    fn synthesize_case_for_target_for_instance(
+        &mut self,
+        case_stmt: &skalp_mir::CaseStatement,
+        inst_prefix: &str,
+        port_mapping: &HashMap<String, Expression>,
+        child_module: &Module,
+        target: &str,
+        parent_module_for_signals: Option<&Module>,
+        parent_prefix: &str,
+    ) -> Option<usize> {
+        if target.contains("state_reg") {
+            println!(
+                "      CASE_SYNTH: target={}, prefix={}, {} items",
+                target, inst_prefix, case_stmt.items.len()
+            );
+        }
+
+        // Create expression node for the case expression (e.g., state_reg)
+        let case_expr_node = self.create_expression_node_for_instance_with_context(
+            &case_stmt.expr,
+            inst_prefix,
+            port_mapping,
+            child_module,
+            parent_module_for_signals,
+            parent_prefix,
+        );
+
+        // Collect values and expressions for this target from all case arms
+        let mut case_arms: Vec<(Vec<&Expression>, Option<usize>)> = Vec::new();
+        let mut found_target = false;
+
+        for (idx, item) in case_stmt.items.iter().enumerate() {
+            // Recursively find assignment in this arm's block
+            let arm_value = self.find_assignment_in_branch_for_instance(
+                &item.block.statements,
+                inst_prefix,
+                port_mapping,
+                child_module,
+                target,
+                parent_module_for_signals,
+                parent_prefix,
+            );
+            if target.contains("state_reg") {
+                println!("         ARM[{}]: found={:?} value_node={:?}", idx, arm_value.is_some(), arm_value);
+            }
+            if arm_value.is_some() {
+                found_target = true;
+            }
+            case_arms.push((item.values.iter().collect(), arm_value));
+        }
+
+        // Get default block value
+        let default_block_value = if let Some(default_block) = &case_stmt.default {
+            let val = self.find_assignment_in_branch_for_instance(
+                &default_block.statements,
+                inst_prefix,
+                port_mapping,
+                child_module,
+                target,
+                parent_module_for_signals,
+                parent_prefix,
+            );
+            if val.is_some() {
+                found_target = true;
+            }
+            val
+        } else {
+            None
+        };
+
+        // If no arm assigns to this target, return None
+        if !found_target {
+            println!("         ❌ No case arm assigns to {} in instance context", target);
+            return None;
+        }
+
+        // Use default block value, or signal ref (keep current value)
+        let mut current_mux = match default_block_value {
+            Some(block_val) => block_val,  // Default block has assignment
+            None => self.create_signal_ref(target),  // Keep current value
+        };
+
+        // Build mux chain from last case to first (so first has priority)
+        for (values, arm_value) in case_arms.iter().rev() {
+            let value_node = match arm_value {
+                Some(val) => *val,
+                None => current_mux,
+            };
+
+            if values.is_empty() {
+                continue;
+            }
+
+            let condition_node = if values.len() == 1 {
+                let val_node = self.create_expression_node_for_instance_with_context(
+                    values[0],
+                    inst_prefix,
+                    port_mapping,
+                    child_module,
+                    parent_module_for_signals,
+                    parent_prefix,
+                );
+                self.create_binary_op_node(&skalp_mir::BinaryOp::Equal, case_expr_node, val_node)
+            } else {
+                let mut or_node = {
+                    let val_node = self.create_expression_node_for_instance_with_context(
+                        values[0],
+                        inst_prefix,
+                        port_mapping,
+                        child_module,
+                        parent_module_for_signals,
+                        parent_prefix,
+                    );
+                    self.create_binary_op_node(&skalp_mir::BinaryOp::Equal, case_expr_node, val_node)
+                };
+                for value in &values[1..] {
+                    let val_node = self.create_expression_node_for_instance_with_context(
+                        value,
+                        inst_prefix,
+                        port_mapping,
+                        child_module,
+                        parent_module_for_signals,
+                        parent_prefix,
+                    );
+                    let eq_node = self.create_binary_op_node(&skalp_mir::BinaryOp::Equal, case_expr_node, val_node);
+                    or_node = self.create_binary_op_node(&skalp_mir::BinaryOp::Or, or_node, eq_node);
+                }
+                or_node
+            };
+
+            current_mux = self.create_mux_node(condition_node, value_node, current_mux);
+            if target.contains("state_reg") {
+                println!("         MUX_CHAIN: cond={} value={} else={} → new_mux={}",
+                    condition_node, value_node, current_mux, current_mux);
+            }
+        }
+
+        println!("         ✅ Built mux tree for target={} node_{}", target, current_mux);
+        Some(current_mux)
     }
 
     /// Convert a statement from child module with instance prefix
@@ -8256,6 +8498,31 @@ impl<'a> MirToSirConverter<'a> {
                         ) {
                             self.get_or_create_signal_driver(&sig_name)
                         } else {
+                            // BUG #237 FIX: Before giving up, try to find the port in parent modules
+                            // This handles the case where a port ID from a parent module is referenced
+                            // in a child context (common with deeply nested state machines)
+                            if let Some(parent_module) = parent_module_for_signals {
+                                if let Some(parent_port) = parent_module.ports.iter().find(|p| p.id == *port_id) {
+                                    let sig_name = if parent_prefix.is_empty() {
+                                        parent_port.name.clone()
+                                    } else {
+                                        format!("{}{}", parent_prefix, parent_port.name)
+                                    };
+                                    println!(
+                                        "🎨🎨🎨   -> BUG #237 FIX: Found port '{}' in parent_module '{}', signal='{}'",
+                                        parent_port.name, parent_module.name, sig_name
+                                    );
+                                    return self.get_or_create_signal_driver(&sig_name);
+                                }
+                            }
+                            // Also try self.mir (top-level)
+                            if let Some(mir_port) = self.mir.ports.iter().find(|p| p.id == *port_id) {
+                                println!(
+                                    "🎨🎨🎨   -> BUG #237 FIX: Found port '{}' in top-level mir, using signal directly",
+                                    mir_port.name
+                                );
+                                return self.get_or_create_signal_driver(&mir_port.name);
+                            }
                             println!(
                                 "🎨🎨🎨   -> FALLBACK: port {:?} not found, creating Constant(0,1)",
                                 port_id

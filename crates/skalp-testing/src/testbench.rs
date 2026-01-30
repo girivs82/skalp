@@ -436,7 +436,24 @@ impl Testbench {
         );
 
         // Convert to SIR and load
-        let sir_result = convert_gate_netlist_to_sir(&netlist);
+        let mut sir_result = convert_gate_netlist_to_sir(&netlist);
+
+        // BUG #237 FIX: Also compile to behavioral SIR to get name_registry
+        // The behavioral SIR has the correct mappings from user-facing names (e.g., "rst")
+        // to internal signal names (e.g., "_s1")
+        let top_mir_module = if let Some(top_name) = top_module_name {
+            mir.modules.iter().find(|m| m.name == top_name)
+        } else {
+            mir.modules.first()
+        };
+        if let Some(top_module) = top_mir_module {
+            let behavioral_sir = skalp_sir::convert_mir_to_sir_with_hierarchy(&mir, top_module);
+            sir_result.sir.name_registry = behavioral_sir.name_registry.clone();
+            eprintln!(
+                "⏱️  [TESTBENCH] BUG #237 FIX: Copied name_registry with {} entries from behavioral SIR",
+                behavioral_sir.name_registry.len()
+            );
+        }
 
         let mut sim = UnifiedSimulator::new(config)
             .map_err(|e| anyhow::anyhow!("Failed to create simulator: {}", e))?;

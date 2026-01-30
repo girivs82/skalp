@@ -412,55 +412,23 @@ impl UnifiedSimulator {
         Ok(())
     }
 
-    /// Build name registry from gate-level SIR signal names
+    /// Build name registry from gate-level SIR
     ///
-    /// Creates mappings from user-friendly paths to actual signal names:
-    /// - "bms.connected" -> "bms__connected"
-    /// - "config.protection.v_ov_soft" -> "config__protection__v_ov_soft"
+    /// BUG #237 FIX: Use the SIR's name_registry which contains proper mappings
+    /// from user-facing paths (e.g., "rst", "state") to internal names (e.g., "_s1", "_s74")
+    ///
+    /// The SIR's name_registry is populated during MIR-to-SIR conversion and contains
+    /// all the correct mappings. Previously this function was creating a new registry
+    /// and guessing mappings based on `__` replacement, which doesn't work for
+    /// collision-proof internal names like `_s0`, `_s1`, etc.
     fn build_gate_level_name_registry(&mut self, sir: &crate::sir::Sir) {
-        use crate::sir::{SirPortDirection, SirSignalType};
-        use skalp_mir::name_registry::NameKind;
+        // BUG #237 FIX: Clone the name registry from SIR instead of building our own
+        // This ensures gate-level simulation uses the same signal name mappings
+        // as behavioral simulation
+        self.name_registry = sir.name_registry.clone();
 
-        self.name_registry = NameRegistry::for_module(&sir.name);
-
-        for signal in &sir.top_module.signals {
-            let internal_name = &signal.name;
-
-            // Create user-friendly path by replacing "__" with "."
-            let user_path = if internal_name.contains("__") {
-                internal_name.replace("__", ".")
-            } else {
-                internal_name.clone()
-            };
-
-            // Determine kind from signal type
-            let kind = match &signal.signal_type {
-                SirSignalType::Port { direction } => match direction {
-                    SirPortDirection::Input => NameKind::Input,
-                    SirPortDirection::Output => NameKind::Output,
-                    SirPortDirection::InOut => NameKind::InOut,
-                },
-                _ => NameKind::Signal,
-            };
-
-            // Register the mapping
-            self.name_registry.register_with_internal_name(
-                &user_path,
-                internal_name,
-                kind,
-                signal.width,
-            );
-
-            // Also register the signal name as-is (for direct access)
-            if user_path != *internal_name {
-                self.name_registry.register_with_internal_name(
-                    internal_name,
-                    internal_name,
-                    kind,
-                    signal.width,
-                );
-            }
-        }
+        println!("[DEBUG] build_gate_level_name_registry: Using SIR's name_registry with {} entries",
+            self.name_registry.len());
     }
 
     /// Load a gate-level GateNetlist for NCL (async) simulation

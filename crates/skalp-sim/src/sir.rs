@@ -31,6 +31,11 @@ pub struct Sir {
     pub top_module: SirModule,
     /// All modules in the design
     pub modules: IndexMap<String, SirModule>,
+    /// Name registry mapping user-facing paths to internal signal names
+    /// BUG #237 FIX: Added to support consistent signal name resolution
+    /// between behavioral and gate-level simulation
+    #[serde(default)]
+    pub name_registry: skalp_mir::name_registry::NameRegistry,
 }
 
 /// Module in SIR format optimized for GPU simulation
@@ -361,8 +366,9 @@ impl Sir {
     pub fn new(name: String) -> Self {
         Self {
             name: name.clone(),
-            top_module: SirModule::new(name),
+            top_module: SirModule::new(name.clone()),
             modules: IndexMap::new(),
+            name_registry: skalp_mir::name_registry::NameRegistry::for_module(&name),
         }
     }
 
