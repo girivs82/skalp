@@ -349,6 +349,28 @@ impl CpuRuntime {
         Ok(())
     }
 
+    /// Sign-extend a value from a given byte width to i64
+    /// For proper signed comparison, we need to treat the MSB of the original
+    /// width as the sign bit and extend it to 64 bits.
+    fn sign_extend(val: u64, byte_width: usize) -> i64 {
+        let bit_width = byte_width * 8;
+        if bit_width == 0 || bit_width >= 64 {
+            // Already 64 bits or empty, just reinterpret
+            val as i64
+        } else {
+            // Check if the sign bit (MSB of the actual width) is set
+            let sign_bit = 1u64 << (bit_width - 1);
+            if val & sign_bit != 0 {
+                // Negative: sign-extend by setting all upper bits to 1
+                let mask = !((1u64 << bit_width) - 1);
+                (val | mask) as i64
+            } else {
+                // Positive: upper bits are already 0
+                val as i64
+            }
+        }
+    }
+
     fn evaluate_binary_op(
         op: &skalp_sir::BinaryOperation,
         left: &[u8],
@@ -424,29 +446,38 @@ impl CpuRuntime {
                 }
             }
             // Signed comparison operations - interpret as signed integers
+            // Must sign-extend from actual byte width to i64 for proper comparison
             BinaryOperation::Slt => {
-                if (left_val as i64) < (right_val as i64) {
+                let left_signed = Self::sign_extend(left_val, left.len());
+                let right_signed = Self::sign_extend(right_val, right.len());
+                if left_signed < right_signed {
                     1
                 } else {
                     0
                 }
             }
             BinaryOperation::Slte => {
-                if (left_val as i64) <= (right_val as i64) {
+                let left_signed = Self::sign_extend(left_val, left.len());
+                let right_signed = Self::sign_extend(right_val, right.len());
+                if left_signed <= right_signed {
                     1
                 } else {
                     0
                 }
             }
             BinaryOperation::Sgt => {
-                if (left_val as i64) > (right_val as i64) {
+                let left_signed = Self::sign_extend(left_val, left.len());
+                let right_signed = Self::sign_extend(right_val, right.len());
+                if left_signed > right_signed {
                     1
                 } else {
                     0
                 }
             }
             BinaryOperation::Sgte => {
-                if (left_val as i64) >= (right_val as i64) {
+                let left_signed = Self::sign_extend(left_val, left.len());
+                let right_signed = Self::sign_extend(right_val, right.len());
+                if left_signed >= right_signed {
                     1
                 } else {
                     0

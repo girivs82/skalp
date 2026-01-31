@@ -2074,11 +2074,43 @@ impl<'a> MetalShaderGenerator<'a> {
                     let needs_float_comparison =
                         is_integer_comparison && left_is_float && right_is_float;
 
+                    // BUG FIX: Signed comparisons (Slt, Slte, Sgt, Sgte) need proper sign extension
+                    // Metal stores values as uint, so we must sign-extend to int for proper signed comparison.
+                    // For signals narrower than 32 bits, we need to extend the sign bit from position (width-1)
+                    // to fill the upper bits. This uses arithmetic right shift: (int)(val << (32-W)) >> (32-W)
+                    let is_signed_comparison = matches!(
+                        op,
+                        BinaryOperation::Slt
+                            | BinaryOperation::Slte
+                            | BinaryOperation::Sgt
+                            | BinaryOperation::Sgte
+                    );
+
+                    // Helper to generate sign-extended expression for a signal
+                    let sign_extend_expr = |signal_name: &str, width: usize| -> String {
+                        let sanitized = self.sanitize_name(signal_name);
+                        if width >= 32 {
+                            // 32-bit or wider: simple cast (sign bit already at position 31)
+                            format!("(int)signals->{}", sanitized)
+                        } else {
+                            // Narrower than 32 bits: sign extend from actual width
+                            // (int)((int)(value << (32 - width)) >> (32 - width))
+                            let shift = 32 - width;
+                            format!(
+                                "((int)((int)(signals->{} << {}) >> {}))",
+                                sanitized, shift, shift
+                            )
+                        }
+                    };
+
                     let left_expr = if needs_float_comparison {
                         // Keep as float for proper IEEE 754 comparison
                         format!("signals->{}", self.sanitize_name(left))
                     } else if left_is_float {
                         format!("as_type<uint>(signals->{})", self.sanitize_name(left))
+                    } else if is_signed_comparison {
+                        // Sign extend to int for proper signed comparison
+                        sign_extend_expr(left, left_width)
                     } else {
                         format!("signals->{}", self.sanitize_name(left))
                     };
@@ -2088,6 +2120,9 @@ impl<'a> MetalShaderGenerator<'a> {
                         format!("signals->{}", self.sanitize_name(right))
                     } else if right_is_float {
                         format!("as_type<uint>(signals->{})", self.sanitize_name(right))
+                    } else if is_signed_comparison {
+                        // Sign extend to int for proper signed comparison
+                        sign_extend_expr(right, right_width)
                     } else {
                         format!("signals->{}", self.sanitize_name(right))
                     };
@@ -2138,57 +2173,78 @@ impl<'a> MetalShaderGenerator<'a> {
                         // BUG FIX #213: Vector comparison operations need special handling
                         // Metal's comparison operators on vector types (uint2, uint4) return
                         // vector booleans (bool2, bool4), but we need a scalar result.
-                        // For 33-64 bit comparisons, convert to ulong for proper numeric comparison.
+                        // For 33-64 bit comparisons, convert to ulong/long for proper numeric comparison.
                         // For 65-128 bit comparisons, convert to uint4 and compare element-wise.
-                        let is_comparison = matches!(
+                        let is_any_comparison = matches!(
                             op,
                             BinaryOperation::Lt
                                 | BinaryOperation::Lte
                                 | BinaryOperation::Gt
                                 | BinaryOperation::Gte
+                                | BinaryOperation::Slt
+                                | BinaryOperation::Slte
+                                | BinaryOperation::Sgt
+                                | BinaryOperation::Sgte
                                 | BinaryOperation::Eq
                                 | BinaryOperation::Neq
                         );
                         let left_is_vector = left_width > 32;
                         let right_is_vector = right_width > 32;
 
-                        if is_comparison && (left_is_vector || right_is_vector) {
+                        if is_any_comparison && (left_is_vector || right_is_vector) {
                             // Vector comparison - need to handle properly
                             let max_width = left_width.max(right_width);
 
                             if max_width <= 64 {
-                                // 33-64 bit: convert to ulong for proper comparison
+                                // 33-64 bit: convert to ulong/long for proper comparison
+                                // Use signed (long) for signed comparisons, unsigned (ulong) otherwise
+                                let long_type = if is_signed_comparison { "long" } else { "ulong" };
                                 self.write_indented(&format!(
-                                    "// BUG #213: Use ulong for {}-bit comparison\n",
-                                    max_width
+                                    "// BUG #213: Use {} for {}-bit {} comparison\n",
+                                    long_type, max_width, if is_signed_comparison { "signed" } else { "unsigned" }
                                 ));
 
-                                let left_ulong = if left_width <= 32 {
-                                    format!("(ulong)signals->{}", self.sanitize_name(left))
-                                } else {
-                                    format!(
-                                        "((ulong)signals->{}[0] | ((ulong)signals->{}[1] << 32))",
-                                        self.sanitize_name(left),
-                                        self.sanitize_name(left)
-                                    )
+                                // Helper to generate sign-extended 64-bit expression for a signal
+                                // For signed comparisons, sign-extend from actual bit width to 64 bits
+                                // Sign bit is at position (width-1), need to extend to position 63
+                                let make_long_expr = |name: &str, width: usize, signed: bool| -> String {
+                                    let sanitized = self.sanitize_name(name);
+                                    if width <= 32 {
+                                        if signed {
+                                            // Sign extend 32-bit to 64-bit via (long)(int)
+                                            format!("(long)(int)signals->{}", sanitized)
+                                        } else {
+                                            format!("(ulong)signals->{}", sanitized)
+                                        }
+                                    } else {
+                                        // Width is 33-64 bits, stored in uint2
+                                        let ulong_expr = format!(
+                                            "((ulong)signals->{}[0] | ((ulong)signals->{}[1] << 32))",
+                                            sanitized, sanitized
+                                        );
+                                        if signed && width < 64 {
+                                            // Sign extend from actual width to 64 bits using arithmetic shift
+                                            // (long)((long)(ulong_val << (64 - width)) >> (64 - width))
+                                            let shift = 64 - width;
+                                            format!("((long)((long)({}) << {}) >> {})", ulong_expr, shift, shift)
+                                        } else if signed {
+                                            // 64-bit: sign bit already at position 63
+                                            format!("(long)({})", ulong_expr)
+                                        } else {
+                                            ulong_expr
+                                        }
+                                    }
                                 };
 
-                                let right_ulong = if right_width <= 32 {
-                                    format!("(ulong)signals->{}", self.sanitize_name(right))
-                                } else {
-                                    format!(
-                                        "((ulong)signals->{}[0] | ((ulong)signals->{}[1] << 32))",
-                                        self.sanitize_name(right),
-                                        self.sanitize_name(right)
-                                    )
-                                };
+                                let left_long = make_long_expr(left, left_width, is_signed_comparison);
+                                let right_long = make_long_expr(right, right_width, is_signed_comparison);
 
                                 self.write_indented(&format!(
                                     "signals->{} = (uint)({} {} {});\n",
                                     self.sanitize_name(output),
-                                    left_ulong,
+                                    left_long,
                                     op_str,
-                                    right_ulong
+                                    right_long
                                 ));
                             } else if max_width <= 128 {
                                 // 65-128 bit: element-wise comparison with proper semantics

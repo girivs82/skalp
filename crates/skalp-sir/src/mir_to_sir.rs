@@ -3318,7 +3318,23 @@ impl<'a> MirToSirConverter<'a> {
         }
 
         let node_id = self.create_expression_node_with_width(value, Some(target_width));
-        self.connect_node_to_signal(node_id, target);
+
+        // BUG FIX: Truncate expression result if it's wider than target
+        // This is needed because operations like multiplication produce wider results,
+        // and even after shifts, the SIR doesn't automatically narrow the width.
+        // The result must be truncated to match the declared target type.
+        let expr_width = self.get_node_output_width(node_id);
+        let final_node_id = if expr_width > target_width && target_width > 0 {
+            println!(
+                "  ✂️ BUG FIX: Truncating expression from {} bits to {} bits for target '{}'",
+                expr_width, target_width, target
+            );
+            self.create_slice_node(node_id, target_width - 1, 0)
+        } else {
+            node_id
+        };
+
+        self.connect_node_to_signal(final_node_id, target);
     }
 
     /// Translate a MIR signal/port name to its internal name in SIR

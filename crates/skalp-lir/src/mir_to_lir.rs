@@ -838,6 +838,13 @@ impl MirToLirTransform {
                     if in_sibling_nested && !directly_assigned {
                         handled_targets.push(target.clone());
 
+                        // BUG FIX: Transform blocking assignments (let bindings) in both branches
+                        // BEFORE collecting paths. This ensures variables are properly assigned.
+                        self.transform_blocking_assignments_recursive(&if_stmt.then_block);
+                        if let Some(ref else_block) = if_stmt.else_block {
+                            self.transform_blocking_assignments_recursive(else_block);
+                        }
+
                         // Collect all conditional paths through the entire if tree
                         let mut paths = Vec::new();
 
@@ -942,6 +949,11 @@ impl MirToLirTransform {
                         let else_signal = if else_has_nested {
                             // Collect paths from else branch grouped by sibling statement
                             if let Some(ref else_block) = if_stmt.else_block {
+                                // BUG FIX: Transform all blocking assignments (let bindings) in the
+                                // else block BEFORE collecting paths. This ensures variables referenced
+                                // in conditions are properly assigned before the MUX cascade is built.
+                                self.transform_blocking_assignments_recursive(else_block);
+
                                 let sibling_groups = Self::collect_conditional_paths_grouped(
                                     else_block,
                                     target,
@@ -1044,8 +1056,58 @@ impl MirToLirTransform {
                             target_signal // Feedback: keep current value
                         };
 
+                        // BUG FIX: When else_expr is None but else_has_nested is true,
+                        // we need to collect paths from nested else and build a MUX cascade
+                        // instead of just using feedback.
                         let else_signal = if let Some(expr) = else_expr {
                             self.transform_expression(expr, target_width)
+                        } else if else_has_nested {
+                            // Collect and process nested else paths (same logic as SDFF pattern)
+                            if let Some(ref else_block) = if_stmt.else_block {
+                                // Transform blocking assignments first
+                                self.transform_blocking_assignments_recursive(else_block);
+
+                                let sibling_groups = Self::collect_conditional_paths_grouped(
+                                    else_block,
+                                    target,
+                                    None,
+                                );
+
+                                // Build MUX cascade
+                                let mut current_value = target_signal; // Default: feedback
+
+                                // Check for unconditional else
+                                let mut groups: Vec<Vec<_>> = sibling_groups;
+                                if let Some(last_group) = groups.last_mut() {
+                                    if let Some((None, last_expr)) = last_group.last() {
+                                        current_value = self.transform_expression(last_expr, target_width);
+                                        last_group.pop();
+                                    }
+                                }
+
+                                // Process each conditional path
+                                for group in groups {
+                                    for (condition, expr) in group.into_iter().rev() {
+                                        let expr_signal = self.transform_expression(&expr, target_width);
+
+                                        if let Some(cond) = condition {
+                                            let cond_signal = self.transform_expression(&cond, 1);
+                                            let mux_out = self.alloc_temp_signal(target_width);
+                                            self.lir.add_node(
+                                                LirOp::Mux2 { width: target_width },
+                                                vec![cond_signal, current_value, expr_signal],
+                                                mux_out,
+                                                format!("{}.mux", self.hierarchy_path),
+                                            );
+                                            current_value = mux_out;
+                                        }
+                                    }
+                                }
+
+                                current_value
+                            } else {
+                                target_signal
+                            }
                         } else {
                             target_signal // Feedback: keep current value
                         };
@@ -1385,6 +1447,44 @@ impl MirToLirTransform {
             }
         }
         false
+    }
+
+    /// BUG FIX: Transform all blocking assignments (let bindings) in a block recursively.
+    /// This must be called BEFORE collecting conditional paths to ensure that variables
+    /// referenced in conditions have their values properly assigned.
+    ///
+    /// Without this fix, `let x = !saturated; if x { ... }` would fail because the
+    /// condition `x` would reference an unassigned signal.
+    fn transform_blocking_assignments_recursive(&mut self, block: &Block) {
+        for stmt in &block.statements {
+            match stmt {
+                Statement::Assignment(assign)
+                    if matches!(assign.kind, AssignmentKind::Blocking) =>
+                {
+                    // Transform blocking assignment as combinational
+                    self.transform_combinational_statement(stmt);
+                }
+                Statement::Block(inner_block) => {
+                    self.transform_blocking_assignments_recursive(inner_block);
+                }
+                Statement::If(if_stmt) => {
+                    // Process blocking assignments in both branches
+                    self.transform_blocking_assignments_recursive(&if_stmt.then_block);
+                    if let Some(ref else_block) = if_stmt.else_block {
+                        self.transform_blocking_assignments_recursive(else_block);
+                    }
+                }
+                Statement::Case(case_stmt) => {
+                    for item in &case_stmt.items {
+                        self.transform_blocking_assignments_recursive(&item.block);
+                    }
+                    if let Some(ref default_block) = case_stmt.default {
+                        self.transform_blocking_assignments_recursive(default_block);
+                    }
+                }
+                _ => {}
+            }
+        }
     }
 
     /// Recursively collect all assignments from a block, including those in nested ifs/cases
@@ -1785,6 +1885,13 @@ impl MirToLirTransform {
         reset_signal: Option<LirSignalId>,
         excluded_targets: &[LValue],
     ) {
+        // BUG FIX: Transform blocking assignments (let bindings) in both branches
+        // BEFORE processing, to ensure variables are properly assigned.
+        self.transform_blocking_assignments_recursive(&if_stmt.then_block);
+        if let Some(ref else_block) = if_stmt.else_block {
+            self.transform_blocking_assignments_recursive(else_block);
+        }
+
         // Collect assignments from each branch (direct only)
         let then_assigns = Self::collect_assignments(&if_stmt.then_block);
         let else_assigns = if let Some(ref else_block) = if_stmt.else_block {
