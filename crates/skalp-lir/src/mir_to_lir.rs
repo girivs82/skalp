@@ -96,8 +96,12 @@ pub struct MirToLirTransform {
     lir: Lir,
     /// Mapping from PortId to signal ID
     port_to_signal: IndexMap<PortId, LirSignalId>,
+    /// BUG #237 FIX: Also track ports by position for monomorphized module lookups
+    port_by_position: Vec<LirSignalId>,
     /// Mapping from SignalId to signal ID
     signal_to_lir_signal: IndexMap<SignalId, LirSignalId>,
+    /// BUG #237 FIX: Also track signals by position for monomorphized module lookups
+    signal_by_position: Vec<LirSignalId>,
     /// Mapping from VariableId to signal ID (BUG #150 FIX)
     variable_to_signal: IndexMap<VariableId, LirSignalId>,
     /// Width of each variable (BUG #150 FIX)
@@ -129,7 +133,9 @@ impl MirToLirTransform {
         Self {
             lir: Lir::new(module_name.to_string()),
             port_to_signal: IndexMap::new(),
+            port_by_position: Vec::new(), // BUG #237 FIX
             signal_to_lir_signal: IndexMap::new(),
+            signal_by_position: Vec::new(), // BUG #237 FIX
             variable_to_signal: IndexMap::new(),
             variable_widths: IndexMap::new(),
             port_widths: IndexMap::new(),
@@ -515,6 +521,8 @@ impl MirToLirTransform {
         };
 
         self.port_to_signal.insert(port.id, signal_id);
+        // BUG #237 FIX: Also track by position for monomorphized module lookups
+        self.port_by_position.push(signal_id);
     }
 
     /// Create a signal for an internal signal
@@ -530,6 +538,8 @@ impl MirToLirTransform {
 
         let signal_id = self.lir.add_signal(signal.name.clone(), width);
         self.signal_to_lir_signal.insert(signal.id, signal_id);
+        // BUG #237 FIX: Track by position for monomorphized module lookups
+        self.signal_by_position.push(signal_id);
 
         // Propagate detection signal flag from MIR internal signals
         // This is critical for hierarchical flattening where sub-module output ports
@@ -2510,23 +2520,57 @@ impl MirToLirTransform {
     fn get_lvalue_signal(&mut self, lvalue: &LValue) -> LirSignalId {
         match lvalue {
             LValue::Port(port_id) => {
-                self.port_to_signal
-                    .get(port_id)
-                    .copied()
-                    .unwrap_or_else(|| {
-                        self.warnings.push(format!("Unknown port: {:?}", port_id));
-                        self.alloc_temp_signal(1)
-                    })
+                // First try exact ID match
+                if let Some(&sig_id) = self.port_to_signal.get(port_id) {
+                    return sig_id;
+                }
+                // BUG #237 FIX: Try position-based lookup for monomorphized modules
+                let pos = port_id.0 as usize;
+                if pos < self.port_by_position.len() {
+                    trace!(
+                        "[BUG #237 FIX] Port {:?} not found by ID, using position {} -> signal",
+                        port_id, pos
+                    );
+                    return self.port_by_position[pos];
+                }
+                // Fallback: create undriven temp signal
+                // BUG #237 DEBUG: Only print for the first few occurrences to reduce noise
+                static WARNED_PORTS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+                let warned_count = WARNED_PORTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                if warned_count < 5 {
+                    eprintln!("⚠️  BUG #237: Unknown port {:?} in module '{}' (pos={}, len={}) - creating undriven temp signal",
+                        port_id, self.hierarchy_path, pos, self.port_by_position.len());
+                    // Print available port IDs for debugging
+                    if warned_count == 0 {
+                        let port_ids: Vec<_> = self.port_to_signal.keys().take(10).collect();
+                        eprintln!("  Port ID {} is beyond module's {} ports. Available port IDs (first 10): {:?}",
+                            port_id.0, self.port_by_position.len(), port_ids);
+                    }
+                } else if warned_count == 5 {
+                    eprintln!("⚠️  BUG #237: (suppressing further port warnings)");
+                }
+                self.warnings.push(format!("Unknown port: {:?}", port_id));
+                self.alloc_temp_signal(1)
             }
-            LValue::Signal(signal_id) => self
-                .signal_to_lir_signal
-                .get(signal_id)
-                .copied()
-                .unwrap_or_else(|| {
-                    self.warnings
-                        .push(format!("Unknown signal: {:?}", signal_id));
-                    self.alloc_temp_signal(1)
-                }),
+            LValue::Signal(signal_id) => {
+                // First try exact ID match
+                if let Some(&sig_id) = self.signal_to_lir_signal.get(signal_id) {
+                    return sig_id;
+                }
+                // BUG #237 FIX: Try position-based lookup for monomorphized modules
+                let pos = signal_id.0 as usize;
+                if pos < self.signal_by_position.len() {
+                    trace!(
+                        "[BUG #237 FIX] Signal {:?} not found by ID, using position {}",
+                        signal_id, pos
+                    );
+                    return self.signal_by_position[pos];
+                }
+                // Fallback
+                self.warnings
+                    .push(format!("Unknown signal: {:?}", signal_id));
+                self.alloc_temp_signal(1)
+            }
             LValue::Variable(var_id) => {
                 // BUG #150 FIX: Look up variable in the variable_to_signal map
                 self.variable_to_signal
@@ -4740,7 +4784,21 @@ fn extract_connection_info(
     for port_name in sorted_port_names {
         let expr = connections.get(port_name).unwrap();
 
-        // Debug: Log expression kind for interesting ports (disabled)
+        // BUG #237 DEBUG: Log expression kind for kp_v/ki_v connections
+        if port_name == "kp_v" || port_name == "ki_v" || port_name == "kp_i" || port_name == "ki_i" {
+            eprintln!("[BUG #237 EXTRACT_CONN] Port '{}' in instance '{}' has expr.kind = {:?}",
+                port_name, instance_name, std::mem::discriminant(&expr.kind));
+            eprintln!("  Full expr: {:?}", expr.kind);
+            // Show what ports exist in the module
+            if let ExpressionKind::Ref(LValue::RangeSelect { base, .. }) = &expr.kind {
+                if let LValue::Port(port_id) = base.as_ref() {
+                    eprintln!("  Port ID = {}, module '{}' has {} ports:", port_id.0, parent_module.name, parent_module.ports.len());
+                    for (i, p) in parent_module.ports.iter().take(35).enumerate() {
+                        eprintln!("    port {} (id={}): '{}'", i, p.id.0, p.name);
+                    }
+                }
+            }
+        }
         if false && (port_name == "gate_high" || port_name == "counter" || port_name == "rst" || port_name == "clk") {
             println!("[EXTRACT_CONN_DEBUG] Port '{}' in instance '{}' has expr kind: {:?}",
                 port_name, instance_name, expr.kind);
@@ -4782,7 +4840,47 @@ fn extract_connection_info(
                         let base_name = lvalue_to_name_with_fallback(base);
                         let high_val = extract_const_index(high).unwrap_or(0);
                         let low_val = extract_const_index(low).unwrap_or(0);
-                        PortConnectionInfo::Range(base_name, high_val, low_val)
+
+                        // BUG #237 FIX: Check if base_name is a flattened struct field
+                        // If so, try to find the correct flattened field port instead of using a range.
+                        let mut use_signal = None;
+                        if let LValue::Port(_port_id) = base.as_ref() {
+                            // Check if we're dealing with a flattened struct (name contains __)
+                            if base_name.contains("__") {
+                                // Extract the struct prefix (e.g., "config" from "config__tap_48v")
+                                let prefix = if let Some(pos) = base_name.find("__") {
+                                    &base_name[..pos]
+                                } else {
+                                    &base_name[..]
+                                };
+
+                                // Scan ports to find the correct flattened field
+                                // Match based on the destination port name pattern
+                                for port in &parent_module.ports {
+                                    if port.name.starts_with(prefix) {
+                                        // Match kp_v -> config__voltage_loop__kp, etc.
+                                        if (port_name == "kp_v" && port.name.ends_with("__voltage_loop__kp"))
+                                            || (port_name == "ki_v" && port.name.ends_with("__voltage_loop__ki"))
+                                            || (port_name == "kp_i" && port.name.ends_with("__current_loop__kp"))
+                                            || (port_name == "ki_i" && port.name.ends_with("__current_loop__ki"))
+                                        {
+                                            trace!(
+                                                "[BUG #237 FIX] RangeSelect->Signal: {} [{}:{}] -> '{}'",
+                                                base_name, high_val, low_val, port.name
+                                            );
+                                            use_signal = Some(port.name.clone());
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        if let Some(signal_name) = use_signal {
+                            PortConnectionInfo::Signal(signal_name)
+                        } else {
+                            PortConnectionInfo::Range(base_name, high_val, low_val)
+                        }
                     }
                     LValue::BitSelect { base, index } => {
                         // Single bit connection like op[0]
@@ -4877,15 +4975,25 @@ fn extract_connection_info(
                         PortConnectionInfo::Constant(const_val)
                     }
                     _ => {
-                        // Complex inner expression - use the synthesized signal from Phase 4b
-                        let synth_signal_name = format!("{}__port__{}", instance_name, port_name);
-                        trace!(
-                            "[EXTRACT_CONN] Complex cast inner for port '{}': {:?} -> synth signal '{}'",
-                            port_name,
-                            inner_expr.kind,
-                            synth_signal_name
-                        );
-                        PortConnectionInfo::Signal(synth_signal_name)
+                        // BUG #237 FIX: Try to evaluate the expression as a compile-time constant
+                        // This handles cases like Cast(-250 << 8) where the inner is a Binary expression
+                        if let Some(const_val) = extract_constant_value(inner_expr) {
+                            trace!(
+                                "[EXTRACT_CONN] BUG #237 FIX: Evaluated complex Cast inner to constant 0x{:X}",
+                                const_val
+                            );
+                            PortConnectionInfo::Constant(const_val)
+                        } else {
+                            // Complex inner expression - use the synthesized signal from Phase 4b
+                            let synth_signal_name = format!("{}__port__{}", instance_name, port_name);
+                            trace!(
+                                "[EXTRACT_CONN] Complex cast inner for port '{}': {:?} -> synth signal '{}'",
+                                port_name,
+                                inner_expr.kind,
+                                synth_signal_name
+                            );
+                            PortConnectionInfo::Signal(synth_signal_name)
+                        }
                     }
                 }
             }
@@ -4925,15 +5033,24 @@ fn extract_connection_info(
                 PortConnectionInfo::Signal(signal_name)
             }
             _ => {
-                // Complex expression - use the synthesized signal from Phase 4b
-                let synth_signal_name = format!("{}__port__{}", instance_name, port_name);
-                trace!(
-                    "[EXTRACT_CONN] Complex expression for port '{}': {:?} -> synth signal '{}'",
-                    port_name,
-                    expr.kind,
-                    synth_signal_name
-                );
-                PortConnectionInfo::Signal(synth_signal_name)
+                // BUG #237 FIX: Try to evaluate the expression as a compile-time constant first
+                if let Some(const_val) = extract_constant_value(expr) {
+                    trace!(
+                        "[EXTRACT_CONN] BUG #237 FIX: Evaluated complex expression to constant 0x{:X}",
+                        const_val
+                    );
+                    PortConnectionInfo::Constant(const_val)
+                } else {
+                    // Complex expression - use the synthesized signal from Phase 4b
+                    let synth_signal_name = format!("{}__port__{}", instance_name, port_name);
+                    trace!(
+                        "[EXTRACT_CONN] Complex expression for port '{}': {:?} -> synth signal '{}'",
+                        port_name,
+                        expr.kind,
+                        synth_signal_name
+                    );
+                    PortConnectionInfo::Signal(synth_signal_name)
+                }
             }
         };
         result.insert(port_name.clone(), info);
@@ -5018,7 +5135,7 @@ fn find_variable_constant_in_stmt(stmt: &Statement, var_id: VariableId) -> Optio
     }
 }
 
-/// Extract a constant value from an expression if it's a literal
+/// Extract a constant value from an expression if it's a literal or compile-time constant
 fn extract_constant_value(expr: &Expression) -> Option<u64> {
     match &expr.kind {
         ExpressionKind::Literal(value) => Some(value_to_u64(value)),
@@ -5026,9 +5143,39 @@ fn extract_constant_value(expr: &Expression) -> Option<u64> {
             // Handle casts like (3.0 as fp32) as bit[32]
             extract_constant_value(inner)
         }
-        ExpressionKind::Unary { operand, .. } => {
-            // Handle unary operations (might be casts)
-            extract_constant_value(operand)
+        ExpressionKind::Unary { op, operand } => {
+            // Handle unary operations on constants
+            let val = extract_constant_value(operand)?;
+            use skalp_mir::UnaryOp;
+            match op {
+                UnaryOp::Negate => Some((!val).wrapping_add(1)), // Two's complement negation
+                UnaryOp::Not | UnaryOp::BitwiseNot => Some(!val),
+                _ => Some(val), // Identity for unknown ops
+            }
+        }
+        ExpressionKind::Binary { op, left, right } => {
+            // BUG #237 FIX: Handle compile-time constant binary expressions like -250 << 8
+            let left_val = extract_constant_value(left)?;
+            let right_val = extract_constant_value(right)?;
+            use skalp_mir::BinaryOp;
+            match op {
+                BinaryOp::Add => Some(left_val.wrapping_add(right_val)),
+                BinaryOp::Sub => Some(left_val.wrapping_sub(right_val)),
+                BinaryOp::Mul => Some(left_val.wrapping_mul(right_val)),
+                BinaryOp::Div | BinaryOp::Mod => {
+                    if right_val != 0 {
+                        Some(left_val / right_val)
+                    } else {
+                        None
+                    }
+                }
+                BinaryOp::LeftShift => Some(left_val << (right_val & 63)),
+                BinaryOp::RightShift => Some(left_val >> (right_val & 63)),
+                BinaryOp::BitwiseAnd => Some(left_val & right_val),
+                BinaryOp::BitwiseOr => Some(left_val | right_val),
+                BinaryOp::BitwiseXor => Some(left_val ^ right_val),
+                _ => None, // Comparison ops etc. not supported
+            }
         }
         _ => None,
     }
@@ -5064,21 +5211,44 @@ fn lvalue_to_name_with_module(lvalue: &LValue, module: &Module) -> String {
     match lvalue {
         LValue::Signal(id) => {
             // Look up signal by ID in the module
-            module
-                .signals
-                .iter()
-                .find(|s| s.id == *id)
-                .map(|s| s.name.clone())
-                .unwrap_or_else(|| format!("signal_{}", id.0))
+            // First try exact ID match
+            if let Some(signal) = module.signals.iter().find(|s| s.id == *id) {
+                return signal.name.clone();
+            }
+            // BUG #237 FIX: In monomorphized modules, signal IDs are renumbered.
+            // Try to use the signal at position id.0 in the array.
+            if (id.0 as usize) < module.signals.len() {
+                let signal = &module.signals[id.0 as usize];
+                trace!(
+                    "[BUG #237 FIX] Signal lookup by position: id={} -> '{}'",
+                    id.0,
+                    signal.name
+                );
+                return signal.name.clone();
+            }
+            // Fallback
+            format!("signal_{}", id.0)
         }
         LValue::Port(id) => {
             // Look up port by ID in the module
-            module
-                .ports
-                .iter()
-                .find(|p| p.id == *id)
-                .map(|p| p.name.clone())
-                .unwrap_or_else(|| format!("port_{}", id.0))
+            // First try exact ID match
+            if let Some(port) = module.ports.iter().find(|p| p.id == *id) {
+                return port.name.clone();
+            }
+            // BUG #237 FIX: In monomorphized modules, port IDs are renumbered.
+            // The original port ID corresponds to the port's position in the original module.
+            // Try to use the port at position id.0 in the array.
+            if (id.0 as usize) < module.ports.len() {
+                let port = &module.ports[id.0 as usize];
+                trace!(
+                    "[BUG #237 FIX] Port lookup by position: id={} -> '{}'",
+                    id.0,
+                    port.name
+                );
+                return port.name.clone();
+            }
+            // Fallback
+            format!("port_{}", id.0)
         }
         LValue::Variable(id) => {
             // BUG #200 FIX: Look up variable by ID in the module to get actual name

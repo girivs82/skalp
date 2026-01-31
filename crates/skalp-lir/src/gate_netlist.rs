@@ -1654,23 +1654,45 @@ impl GateNetlist {
         // Process all pairs, building the union-find structure
         let mut net_names_to_update: Vec<(String, u32)> = Vec::with_capacity(pairs.len());
 
+        // BUG #237 DEBUG: Track skipped pairs
+        let mut skipped_survivor = 0;
+        let mut skipped_merged = 0;
+        let mut same_net = 0;
+        let mut merged_count = 0;
+
         for (survivor_name, merged_name) in pairs {
             let net1_id = match self.net_map.get(*survivor_name) {
                 Some(&id) => id,
-                None => continue,
+                None => {
+                    skipped_survivor += 1;
+                    continue;
+                }
             };
             let net2_id = match self.net_map.get(*merged_name) {
                 Some(&id) => id,
-                None => continue,
+                None => {
+                    skipped_merged += 1;
+                    continue;
+                }
             };
 
             if net1_id == net2_id {
+                same_net += 1;
                 continue;
             }
 
             union(&mut parent, net1_id.0, net2_id.0);
             net_names_to_update.push((merged_name.to_string(), net1_id.0));
+            merged_count += 1;
         }
+
+        eprintln!(
+            "🔗 BUG #237 MERGE: {} pairs total, {} merged, {} skipped (survivor not found), {} skipped (merged not found), {} same-net",
+            pairs.len(), merged_count, skipped_survivor, skipped_merged, same_net
+        );
+
+        // Phase 2: Build final mapping
+        eprintln!("🔗 BUG #237 MERGE: Building remap from union-find...");
 
         // Phase 2: Build final mapping from each net to its canonical representative
         let mut remap: HashMap<u32, u32> = HashMap::with_capacity(num_nets / 4);

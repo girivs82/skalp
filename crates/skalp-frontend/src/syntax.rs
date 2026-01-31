@@ -268,6 +268,7 @@ pub enum SyntaxKind {
 
     // Items
     EntityDecl,
+    EntityAlias,
     ImplBlock,
     ProtocolDecl,
     IntentDecl,
@@ -879,6 +880,7 @@ impl SyntaxKind {
 
             SourceFile => "source file",
             EntityDecl => "entity declaration",
+            EntityAlias => "entity alias",
             ImplBlock => "implementation block",
             ProtocolDecl => "protocol declaration",
             IntentDecl => "intent declaration",

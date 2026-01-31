@@ -70,20 +70,23 @@ impl Testbench {
         // Store the name registry for path resolution
         self.name_registry = module.name_registry.clone();
 
-        // Register clocks from the module
-        // Use the name registry to find original names since internal names like "_s0"
-        // don't contain "clk" or "clock"
+        // Collect clock signal names from clock_domains metadata
+        let clock_domain_names: std::collections::HashSet<&str> = module
+            .clock_domains
+            .keys()
+            .map(|s| s.as_str())
+            .collect();
+
+        // Register clocks from the module using clock_domains metadata
         for input in &module.inputs {
             // Try to find the original user-facing name for this input
             let original_name = self.name_registry
                 .reverse_resolve(&input.name)
                 .unwrap_or(&input.name);
 
-            // Check if the original name suggests this is a clock signal
-            let is_clock = original_name.contains("clk")
-                || original_name.contains("clock")
-                || input.name.contains("clk")
-                || input.name.contains("clock");
+            // Check if the signal is a registered clock domain
+            let is_clock = clock_domain_names.contains(original_name)
+                || clock_domain_names.contains(input.name.as_str());
 
             if is_clock {
                 // Register using the internal name (used in set_input calls)

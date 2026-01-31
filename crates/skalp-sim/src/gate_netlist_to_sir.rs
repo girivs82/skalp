@@ -65,7 +65,8 @@ impl GateNetlistToSirConverter {
         self.convert_nets(&netlist.nets, &mut sir.top_module);
 
         // Phase 2: Convert cells to primitives
-        let (mut comb_ops, seq_ops) = self.convert_cells(&netlist.cells);
+        // Pass netlist to resolve net aliases created by buffer removal
+        let (mut comb_ops, seq_ops) = self.convert_cells(&netlist.cells, netlist);
 
         // Phase 2.5: Create buffer primitives for output ports that have drivers
         // This ensures output ports are connected to their driving nets
@@ -153,7 +154,11 @@ impl GateNetlistToSirConverter {
     }
 
     /// Convert cells to primitive operations
-    fn convert_cells(&mut self, cells: &[Cell]) -> (Vec<SirOperation>, Vec<SirOperation>) {
+    fn convert_cells(
+        &mut self,
+        cells: &[Cell],
+        netlist: &GateNetlist,
+    ) -> (Vec<SirOperation>, Vec<SirOperation>) {
         let mut comb_ops = Vec::new();
         let mut seq_ops = Vec::new();
 
@@ -187,16 +192,25 @@ impl GateNetlistToSirConverter {
             };
 
             // Convert input/output net IDs to signal IDs
+            // BUG FIX: Resolve net aliases before looking up signals.
+            // Buffer removal creates alias chains (output net -> input net).
+            // Without alias resolution, cells point to undriven nets.
             let inputs: Vec<SirSignalId> = cell
                 .inputs
                 .iter()
-                .filter_map(|net_id| self.net_to_signal.get(net_id).copied())
+                .filter_map(|net_id| {
+                    let resolved_id = netlist.resolve_alias(*net_id);
+                    self.net_to_signal.get(&resolved_id).copied()
+                })
                 .collect();
 
             let outputs: Vec<SirSignalId> = cell
                 .outputs
                 .iter()
-                .filter_map(|net_id| self.net_to_signal.get(net_id).copied())
+                .filter_map(|net_id| {
+                    let resolved_id = netlist.resolve_alias(*net_id);
+                    self.net_to_signal.get(&resolved_id).copied()
+                })
                 .collect();
 
             let op = SirOperation::Primitive {

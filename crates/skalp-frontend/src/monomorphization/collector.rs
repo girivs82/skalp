@@ -182,15 +182,22 @@ impl<'hir> InstantiationCollector<'hir> {
             }
         }
 
-        // BUG #179 FIX: Only register constants from GLOBAL impl blocks.
-        // Entity-specific constants (like W, E, M in impl FpAdd<F>) have IDs that may
-        // collide with global constants. Entity-specific constants should only be used
-        // when processing that entity.
-        // BUG #232: Global constants use EntityId::GLOBAL_IMPL
+        // Register ALL constants from all implementations upfront.
+        // This is needed because:
+        // 1. Module-level constants (like PWM_PERIOD_100K) have IDs that need to be
+        //    resolvable when evaluating entity default generic args
+        // 2. Constants from imported modules need to be accessible during collection
+        //
+        // Note: This may cause ID collisions in edge cases where different impls have
+        // constants with the same ID. If that becomes an issue, we need a more sophisticated
+        // constant ID remapping during module merge.
+        eprintln!("[COLLECTOR] Registering constants from {} implementations", hir.implementations.len());
         for implementation in &hir.implementations {
-            if implementation.entity == crate::hir::EntityId::GLOBAL_IMPL
-                && !implementation.constants.is_empty()
-            {
+            if !implementation.constants.is_empty() {
+                eprintln!("[COLLECTOR]   Impl entity={:?} has {} constants:", implementation.entity, implementation.constants.len());
+                for c in &implementation.constants {
+                    eprintln!("[COLLECTOR]     - '{}' (id={:?})", c.name, c.id);
+                }
                 evaluator.register_constants(&implementation.constants);
             }
         }
@@ -520,12 +527,44 @@ impl<'hir> InstantiationCollector<'hir> {
             struct_lit.generic_args.len()
         );
 
-        // Find the entity by name
-        let entity = match self.hir.entities.iter().find(|e| e.name == *type_name) {
-            Some(e) => e.clone(),
+        // Find the entity by name, or resolve entity alias
+        let (entity, resolved_generic_args) = match self.hir.entities.iter().find(|e| e.name == *type_name) {
+            Some(e) => (e.clone(), struct_lit.generic_args.clone()),
             None => {
-                trace!("[COLLECTOR] Entity '{}' NOT FOUND", type_name);
-                return;
+                // Check if it's an entity alias
+                if let Some(alias) = self.hir.entity_aliases.iter().find(|a| a.name == *type_name) {
+                    // Extract target entity name from alias
+                    let target_name = match &alias.target_type {
+                        crate::hir::HirType::Custom(name) => name.clone(),
+                        _ => {
+                            trace!("[COLLECTOR] Entity alias '{}' has non-Custom target type", type_name);
+                            return;
+                        }
+                    };
+                    // Find the target entity
+                    match self.hir.entities.iter().find(|e| e.name == target_name) {
+                        Some(e) => {
+                            eprintln!(
+                                "[COLLECTOR] Resolved entity alias '{}' -> '{}' with {} alias generic_args",
+                                type_name, target_name, alias.generic_args.len()
+                            );
+                            // Use alias's generic_args if present, otherwise struct_lit's
+                            let args = if !alias.generic_args.is_empty() {
+                                alias.generic_args.clone()
+                            } else {
+                                struct_lit.generic_args.clone()
+                            };
+                            (e.clone(), args)
+                        }
+                        None => {
+                            trace!("[COLLECTOR] Entity alias '{}' target '{}' NOT FOUND", type_name, target_name);
+                            return;
+                        }
+                    }
+                } else {
+                    trace!("[COLLECTOR] Entity '{}' NOT FOUND and not an alias", type_name);
+                    return;
+                }
             }
         };
 
@@ -549,8 +588,8 @@ impl<'hir> InstantiationCollector<'hir> {
         let mut const_args = IndexMap::new();
         let mut intent_args = IndexMap::new();
 
-        // Extract generic arguments from the struct literal
-        for (i, arg) in struct_lit.generic_args.iter().enumerate() {
+        // Extract generic arguments from the struct literal (or resolved from alias)
+        for (i, arg) in resolved_generic_args.iter().enumerate() {
             if i >= entity.generics.len() {
                 break;
             }
@@ -568,8 +607,14 @@ impl<'hir> InstantiationCollector<'hir> {
                     }
                 }
                 HirGenericType::Const(_const_type) => {
-                    if let Ok(value) = self.evaluator.eval(arg) {
-                        const_args.insert(generic.name.clone(), value);
+                    match self.evaluator.eval(arg) {
+                        Ok(value) => {
+                            eprintln!("[COLLECTOR] Const arg '{}' evaluated to: {:?}", generic.name, value);
+                            const_args.insert(generic.name.clone(), value);
+                        }
+                        Err(e) => {
+                            eprintln!("[COLLECTOR] Const arg '{}' eval FAILED: {:?}, arg={:?}", generic.name, e, arg);
+                        }
                     }
                 }
                 HirGenericType::Intent => {

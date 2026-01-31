@@ -2338,11 +2338,33 @@ fn run_equivalence_check(
         .map_err(|e| anyhow::anyhow!("Failed to compile to MIR: {}", e))?;
 
     // Find the target entity
+    // BUG FIX: Handle monomorphized module names (e.g., DabBatteryController_100000000_20000000_10000000)
+    // When generics are specialized, modules get parameter suffixes. We need to find the actual
+    // implementation, not just the base declaration.
     let target_entity = if let Some(name) = entity {
-        mir.modules
-            .iter()
-            .find(|m| m.name == name)
-            .ok_or_else(|| anyhow::anyhow!("Entity '{}' not found in design", name))?
+        // First try exact match
+        if let Some(m) = mir.modules.iter().find(|m| m.name == name) {
+            // Check if this module has instances - if not, look for a monomorphized variant
+            if !m.instances.is_empty() || !m.processes.is_empty() {
+                m
+            } else {
+                // Look for monomorphized variant with most content (instances + processes)
+                let mono_prefix = format!("{}_", name);
+                mir.modules
+                    .iter()
+                    .filter(|m| m.name.starts_with(&mono_prefix))
+                    .max_by_key(|m| m.instances.len() + m.processes.len())
+                    .unwrap_or(m)
+            }
+        } else {
+            // Try prefix match for monomorphized modules
+            let mono_prefix = format!("{}_", name);
+            mir.modules
+                .iter()
+                .filter(|m| m.name.starts_with(&mono_prefix))
+                .max_by_key(|m| m.instances.len() + m.processes.len())
+                .ok_or_else(|| anyhow::anyhow!("Entity '{}' not found in design", name))?
+        }
     } else {
         mir.modules
             .first()
@@ -2394,6 +2416,7 @@ fn run_equivalence_check(
 
     let mut overall_pass = true;
     let mut sim_found_bug = false;
+    let mut sim_result_for_report: Option<skalp_formal::SimEquivalenceResult> = None;
 
     // Phase 1: Simulation (unless --symbolic only)
     if !symbolic {
@@ -2424,6 +2447,8 @@ fn run_equivalence_check(
             }
             sim_found_bug = true;
             overall_pass = false;
+            // Store for detailed report generation
+            sim_result_for_report = Some(sim_result.clone());
         }
 
         // If quick mode, stop here
@@ -2469,14 +2494,37 @@ fn run_equivalence_check(
                     overall_pass = false;
 
                     if let Some(ref ce) = sat_result.counterexample {
-                        // Show state where bug occurs
-                        let state_vars: Vec<_> = ce.state.iter()
-                            .filter(|(k, _)| k.contains("state"))
-                            .collect();
-                        if !state_vars.is_empty() {
-                            println!("     State where difference occurs:");
-                            for (name, val) in &state_vars {
+                        // Show the differing signal
+                        if let Some(ref diff_sig) = ce.differing_signal {
+                            println!();
+                            println!("   🔍 DIFFERING SIGNAL: {}", diff_sig);
+                        }
+
+                        // Show ALL inputs that trigger the bug
+                        if !ce.inputs.is_empty() {
+                            println!();
+                            println!("   📥 INPUTS that trigger the bug ({} total):", ce.inputs.len());
+                            let mut sorted_inputs: Vec<_> = ce.inputs.iter().collect();
+                            sorted_inputs.sort_by_key(|(k, _)| *k);
+                            for (name, val) in sorted_inputs.iter().take(50) {
                                 println!("       {} = {}", name, if **val { "1" } else { "0" });
+                            }
+                            if ce.inputs.len() > 50 {
+                                println!("       ... and {} more inputs", ce.inputs.len() - 50);
+                            }
+                        }
+
+                        // Show ALL state values (latch values) where bug occurs
+                        if !ce.state.is_empty() {
+                            println!();
+                            println!("   📊 STATE (latch values) where difference occurs ({} total):", ce.state.len());
+                            let mut sorted_state: Vec<_> = ce.state.iter().collect();
+                            sorted_state.sort_by_key(|(k, _)| *k);
+                            for (name, val) in sorted_state.iter().take(50) {
+                                println!("       {} = {}", name, if **val { "1" } else { "0" });
+                            }
+                            if ce.state.len() > 50 {
+                                println!("       ... and {} more state variables", ce.state.len() - 50);
                             }
                         }
 
@@ -2485,6 +2533,8 @@ fn run_equivalence_check(
                         println!("   💡 Note: This bug may be in a state unreachable via normal simulation");
                         println!("      (e.g., requires millions of cycles to reach via timeout)");
                         println!("      SAT found it by reasoning symbolically about all possible states.");
+                    } else {
+                        println!("   ⚠️  No counterexample returned by SAT solver");
                     }
                 }
             }
@@ -2509,7 +2559,7 @@ fn run_equivalence_check(
             time_ms: total_time.as_millis() as u64,
             sat_calls: 1,
         };
-        generate_ec_report(&summary_result, &target_entity.name, output_dir, format, verbose, total_time)?;
+        generate_ec_report(&summary_result, &target_entity.name, output_dir, format, verbose, total_time, sim_result_for_report.as_ref())?;
     }
 
     // Print final summary
@@ -2541,6 +2591,7 @@ fn generate_ec_report(
     format: &str,
     verbose: bool,
     total_time: std::time::Duration,
+    sim_result: Option<&skalp_formal::SimEquivalenceResult>,
 ) -> Result<()> {
     let formats: Vec<&str> = if format == "all" {
         vec!["text", "json", "html"]
@@ -2551,19 +2602,19 @@ fn generate_ec_report(
     for fmt in formats {
         match fmt.trim() {
             "text" => {
-                let report = generate_ec_text_report(result, entity_name, verbose, total_time);
+                let report = generate_ec_text_report(result, entity_name, verbose, total_time, sim_result);
                 let path = output_dir.join("ec_report.txt");
                 fs::write(&path, report)?;
                 println!("📄 Text report: {:?}", path);
             }
             "json" => {
-                let report = generate_ec_json_report(result, entity_name, total_time)?;
+                let report = generate_ec_json_report(result, entity_name, total_time, sim_result)?;
                 let path = output_dir.join("ec_report.json");
                 fs::write(&path, report)?;
                 println!("📄 JSON report: {:?}", path);
             }
             "html" => {
-                let report = generate_ec_html_report(result, entity_name, verbose, total_time);
+                let report = generate_ec_html_report(result, entity_name, verbose, total_time, sim_result);
                 let path = output_dir.join("ec_report.html");
                 fs::write(&path, report)?;
                 println!("📄 HTML report: {:?}", path);
@@ -2583,6 +2634,7 @@ fn generate_ec_text_report(
     entity_name: &str,
     verbose: bool,
     total_time: std::time::Duration,
+    sim_result: Option<&skalp_formal::SimEquivalenceResult>,
 ) -> String {
     let mut report = String::new();
 
@@ -2602,15 +2654,165 @@ fn generate_ec_text_report(
         report.push_str("FAILURE DETAILS\n");
         report.push_str("--------------------------------------------------------------------------------\n\n");
 
-        if let Some(cycle) = result.mismatch_cycle {
-            report.push_str(&format!("Mismatch Cycle:  {}\n", cycle));
-        }
-        if let Some(ref output) = result.mismatch_output {
-            report.push_str(&format!("Failing Output:  {}\n", output));
+        // Include simulation mismatch details if available
+        if let Some(sim) = sim_result {
+            if let Some(cycle) = sim.mismatch_cycle {
+                report.push_str(&format!("Mismatch Cycle:  {}\n", cycle));
+            }
+            if let Some(ref output) = sim.mismatch_output {
+                report.push_str(&format!("Failing Output:  {}\n", output));
+            }
+            if let (Some(v1), Some(v2)) = (sim.value_1, sim.value_2) {
+                report.push_str(&format!("MIR Value:       {}\n", v1));
+                report.push_str(&format!("Gate Value:      {}\n", v2));
+            }
+            report.push_str(&format!("Cycles Verified: {}\n", sim.cycles_verified));
+            report.push_str(&format!("Outputs Compared: {}\n", sim.outputs_compared));
+
+            // Include detailed diagnostics if available
+            if let Some(ref diag) = sim.diagnostics {
+                // Input values at mismatch
+                if !diag.input_values.is_empty() {
+                    report.push_str("\n--------------------------------------------------------------------------------\n");
+                    report.push_str("INPUT VALUES AT MISMATCH\n");
+                    report.push_str("--------------------------------------------------------------------------------\n\n");
+                    let mut sorted_inputs: Vec<_> = diag.input_values.iter().collect();
+                    sorted_inputs.sort_by(|a, b| a.0.cmp(&b.0));
+                    for (name, val) in &sorted_inputs {
+                        report.push_str(&format!("  {} = {}\n", name, val));
+                    }
+                }
+
+                // MIR signal values
+                if !diag.mir_signals.is_empty() {
+                    report.push_str("\n--------------------------------------------------------------------------------\n");
+                    report.push_str("MIR SIGNAL VALUES\n");
+                    report.push_str("--------------------------------------------------------------------------------\n\n");
+                    let mut sorted_mir: Vec<_> = diag.mir_signals.iter().collect();
+                    sorted_mir.sort_by(|a, b| a.0.cmp(&b.0));
+                    for (hier_path, internal_name, val) in &sorted_mir {
+                        if hier_path.is_empty() || hier_path == internal_name {
+                            report.push_str(&format!("  {} = {}\n", internal_name, val));
+                        } else {
+                            report.push_str(&format!("  {} ({}) = {}\n", hier_path, internal_name, val));
+                        }
+                    }
+                }
+
+                // Gate signal values
+                if !diag.gate_signals.is_empty() {
+                    report.push_str("\n--------------------------------------------------------------------------------\n");
+                    report.push_str("GATE SIGNAL VALUES\n");
+                    report.push_str("--------------------------------------------------------------------------------\n\n");
+                    let mut sorted_gate: Vec<_> = diag.gate_signals.iter().collect();
+                    sorted_gate.sort_by(|a, b| a.0.cmp(&b.0));
+                    for (name, val) in &sorted_gate {
+                        report.push_str(&format!("  {} = {}\n", name, val));
+                    }
+                }
+
+                // SIR dataflow trace
+                if !diag.sir_dataflow.is_empty() {
+                    report.push_str("\n--------------------------------------------------------------------------------\n");
+                    report.push_str("SIR DATAFLOW TRACE\n");
+                    report.push_str("--------------------------------------------------------------------------------\n\n");
+                    for line in &diag.sir_dataflow {
+                        report.push_str(&format!("  {}\n", line));
+                    }
+                }
+
+                // Input matching info
+                report.push_str("\n--------------------------------------------------------------------------------\n");
+                report.push_str("INPUT PORT MATCHING\n");
+                report.push_str("--------------------------------------------------------------------------------\n\n");
+
+                if !diag.input_matching.matched.is_empty() {
+                    report.push_str("  Matched Inputs:\n");
+                    for (user_name, mir_name, gate_names) in &diag.input_matching.matched {
+                        let gate_str = if gate_names.len() == 1 {
+                            gate_names[0].clone()
+                        } else {
+                            format!("[{} bits]", gate_names.len())
+                        };
+                        report.push_str(&format!("    {} ({}) → {}\n", user_name, mir_name, gate_str));
+                    }
+                }
+
+                if !diag.input_matching.unmatched_mir.is_empty() {
+                    report.push_str("\n  ⚠ Unmatched MIR Inputs:\n");
+                    for (user_name, mir_name, reason) in &diag.input_matching.unmatched_mir {
+                        report.push_str(&format!("    {} ({}) - {}\n", user_name, mir_name, reason));
+                    }
+                }
+
+                if !diag.input_matching.unmatched_gate.is_empty() {
+                    report.push_str("\n  ⚠ Unmatched Gate Inputs:\n");
+                    let mut shown = std::collections::HashSet::new();
+                    for (gate_name, reason) in &diag.input_matching.unmatched_gate {
+                        // Only show base name once to avoid repetition for multi-bit signals
+                        let base = gate_name.split('[').next().unwrap_or(gate_name);
+                        if shown.insert(base.to_string()) {
+                            report.push_str(&format!("    {} - {}\n", base, reason));
+                        }
+                    }
+                }
+
+                // Cycle trace (per-cycle signal history)
+                if !diag.cycle_trace.is_empty() {
+                    report.push_str("\n--------------------------------------------------------------------------------\n");
+                    report.push_str(&format!("CYCLE-BY-CYCLE TRACE (last {} cycles before mismatch)\n", diag.cycle_trace.len()));
+                    report.push_str("--------------------------------------------------------------------------------\n\n");
+
+                    // Find the mismatching signal to highlight
+                    let mismatch_signal = sim.mismatch_output.as_ref();
+
+                    for entry in &diag.cycle_trace {
+                        report.push_str(&format!("  Cycle {} ({}):\n", entry.cycle, entry.phase));
+
+                        // Show inputs applied
+                        if !entry.inputs.is_empty() {
+                            report.push_str("    Inputs:\n");
+                            for (name, val) in &entry.inputs {
+                                report.push_str(&format!("      {} = {}\n", name, val));
+                            }
+                        }
+
+                        // Show signals with mismatches highlighted
+                        report.push_str("    Outputs:\n");
+                        for (user_name, internal_name, mir_val, gate_val, matches) in &entry.signals {
+                            let mir_str = mir_val.map(|v| v.to_string()).unwrap_or("?".to_string());
+                            let gate_str = gate_val.map(|v| v.to_string()).unwrap_or("?".to_string());
+
+                            let is_failing = mismatch_signal.map(|s| s == user_name).unwrap_or(false);
+                            let marker = if !matches {
+                                if is_failing { ">>> " } else { "!!! " }
+                            } else {
+                                "    "
+                            };
+
+                            if !matches || is_failing {
+                                report.push_str(&format!("{}  {} ({}): MIR={}, Gate={}\n",
+                                    marker, user_name, internal_name, mir_str, gate_str));
+                            }
+                        }
+                        report.push_str("\n");
+                    }
+                }
+            }
+        } else {
+            // Fallback to BmcEquivalenceResult fields
+            if let Some(cycle) = result.mismatch_cycle {
+                report.push_str(&format!("Mismatch Cycle:  {}\n", cycle));
+            }
+            if let Some(ref output) = result.mismatch_output {
+                report.push_str(&format!("Failing Output:  {}\n", output));
+            }
         }
 
         if let Some(ref cex) = result.counterexample {
-            report.push_str("\nCounterexample Trace:\n");
+            report.push_str("\n--------------------------------------------------------------------------------\n");
+            report.push_str("SAT COUNTEREXAMPLE TRACE\n");
+            report.push_str("--------------------------------------------------------------------------------\n");
             for (cycle, inputs) in cex.inputs_per_cycle.iter().enumerate() {
                 report.push_str(&format!("\n  Cycle {}:\n", cycle));
                 report.push_str("    Inputs:\n");
@@ -2658,8 +2860,45 @@ fn generate_ec_json_report(
     result: &skalp_formal::BmcEquivalenceResult,
     entity_name: &str,
     total_time: std::time::Duration,
+    sim_result: Option<&skalp_formal::SimEquivalenceResult>,
 ) -> Result<String> {
     use serde_json::json;
+
+    // Build simulation diagnostics section if available
+    let sim_diagnostics = sim_result.and_then(|sim| {
+        sim.diagnostics.as_ref().map(|diag| {
+            json!({
+                "input_values": diag.input_values.iter()
+                    .map(|(n, v)| json!({"name": n, "value": v}))
+                    .collect::<Vec<_>>(),
+                "mir_signals": diag.mir_signals.iter()
+                    .map(|(hier, internal, v)| json!({
+                        "hierarchical_path": hier,
+                        "internal_name": internal,
+                        "value": v
+                    }))
+                    .collect::<Vec<_>>(),
+                "gate_signals": diag.gate_signals.iter()
+                    .map(|(n, v)| json!({"name": n, "value": v}))
+                    .collect::<Vec<_>>(),
+                "sir_dataflow": diag.sir_dataflow,
+            })
+        })
+    });
+
+    // Build simulation result section if available
+    let sim_section = sim_result.map(|sim| {
+        json!({
+            "mismatch_cycle": sim.mismatch_cycle,
+            "mismatch_output": sim.mismatch_output,
+            "mir_value": sim.value_1,
+            "gate_value": sim.value_2,
+            "cycles_verified": sim.cycles_verified,
+            "outputs_compared": sim.outputs_compared,
+            "time_ms": sim.time_ms,
+            "diagnostics": sim_diagnostics,
+        })
+    });
 
     let report = json!({
         "entity": entity_name,
@@ -2671,6 +2910,7 @@ fn generate_ec_json_report(
         "sat_calls": result.sat_calls,
         "time_ms": result.time_ms,
         "total_time_ms": total_time.as_millis() as u64,
+        "simulation": sim_section,
         "counterexample": result.counterexample.as_ref().map(|cex| {
             json!({
                 "inputs_per_cycle": cex.inputs_per_cycle,
@@ -2689,8 +2929,9 @@ fn generate_ec_json_report(
 fn generate_ec_html_report(
     result: &skalp_formal::BmcEquivalenceResult,
     entity_name: &str,
-    verbose: bool,
+    _verbose: bool,
     total_time: std::time::Duration,
+    sim_result: Option<&skalp_formal::SimEquivalenceResult>,
 ) -> String {
     let status_class = if result.equivalent { "pass" } else { "fail" };
     let status_text = if result.equivalent { "EQUIVALENT" } else { "NOT EQUIVALENT" };
@@ -2702,18 +2943,27 @@ fn generate_ec_html_report(
     <title>Equivalence Check Report - {}</title>
     <style>
         body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; margin: 40px; background: #f5f5f5; }}
-        .container {{ max-width: 900px; margin: 0 auto; background: white; padding: 30px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }}
+        .container {{ max-width: 1100px; margin: 0 auto; background: white; padding: 30px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }}
         h1 {{ color: #333; border-bottom: 2px solid #eee; padding-bottom: 10px; }}
         .status {{ padding: 20px; border-radius: 8px; margin: 20px 0; font-size: 1.2em; }}
         .status.pass {{ background: #d4edda; color: #155724; border: 1px solid #c3e6cb; }}
         .status.fail {{ background: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; }}
         table {{ width: 100%; border-collapse: collapse; margin: 20px 0; }}
         th, td {{ padding: 12px; text-align: left; border-bottom: 1px solid #ddd; }}
-        th {{ background: #f8f9fa; font-weight: 600; }}
+        th {{ background: #f8f9fa; font-weight: 600; width: 30%; }}
         .section {{ margin: 30px 0; }}
         .section h2 {{ color: #495057; font-size: 1.1em; margin-bottom: 15px; }}
-        .trace {{ background: #f8f9fa; padding: 15px; border-radius: 4px; font-family: monospace; font-size: 0.9em; overflow-x: auto; }}
+        .section h3 {{ color: #6c757d; font-size: 1em; margin: 15px 0 10px 0; }}
+        .trace {{ background: #f8f9fa; padding: 15px; border-radius: 4px; font-family: monospace; font-size: 0.9em; overflow-x: auto; max-height: 400px; overflow-y: auto; }}
+        .signal-table {{ font-family: monospace; font-size: 0.85em; }}
+        .signal-table th {{ width: 60%; }}
+        .signal-table td {{ text-align: right; }}
         .footer {{ margin-top: 30px; padding-top: 20px; border-top: 1px solid #eee; color: #6c757d; font-size: 0.9em; }}
+        .collapsible {{ cursor: pointer; user-select: none; }}
+        .collapsible:after {{ content: ' [+]'; color: #6c757d; }}
+        .collapsible.active:after {{ content: ' [-]'; }}
+        .content {{ display: none; padding-top: 10px; }}
+        .content.show {{ display: block; }}
     </style>
 </head>
 <body>
@@ -2737,23 +2987,116 @@ fn generate_ec_html_report(
     entity_name, result.bound, total_time.as_secs_f64(), result.sat_calls);
 
     if !result.equivalent {
-        html.push_str(r#"
+        // Include simulation mismatch details if available
+        if let Some(sim) = sim_result {
+            html.push_str(r#"
+        <div class="section">
+            <h2>Simulation Mismatch Details</h2>
+            <table>
+"#);
+            if let Some(cycle) = sim.mismatch_cycle {
+                html.push_str(&format!("                <tr><th>Mismatch Cycle</th><td>{}</td></tr>\n", cycle));
+            }
+            if let Some(ref output) = sim.mismatch_output {
+                html.push_str(&format!("                <tr><th>Failing Output</th><td><code>{}</code></td></tr>\n", output));
+            }
+            if let (Some(v1), Some(v2)) = (sim.value_1, sim.value_2) {
+                html.push_str(&format!("                <tr><th>MIR Value</th><td>{}</td></tr>\n", v1));
+                html.push_str(&format!("                <tr><th>Gate Value</th><td>{}</td></tr>\n", v2));
+            }
+            html.push_str(&format!("                <tr><th>Cycles Verified</th><td>{}</td></tr>\n", sim.cycles_verified));
+            html.push_str(&format!("                <tr><th>Outputs Compared</th><td>{}</td></tr>\n", sim.outputs_compared));
+            html.push_str("            </table>\n        </div>\n");
+
+            // Include detailed diagnostics if available
+            if let Some(ref diag) = sim.diagnostics {
+                // Input values at mismatch
+                if !diag.input_values.is_empty() {
+                    html.push_str(r#"
+        <div class="section">
+            <h2 class="collapsible" onclick="this.classList.toggle('active'); this.nextElementSibling.classList.toggle('show');">Input Values at Mismatch</h2>
+            <div class="content">
+            <table class="signal-table">
+                <tr><th>Signal</th><th>Value</th></tr>
+"#);
+                    let mut sorted: Vec<_> = diag.input_values.iter().collect();
+                    sorted.sort_by(|a, b| a.0.cmp(&b.0));
+                    for (name, val) in &sorted {
+                        html.push_str(&format!("                <tr><td>{}</td><td>{}</td></tr>\n", name, val));
+                    }
+                    html.push_str("            </table>\n            </div>\n        </div>\n");
+                }
+
+                // MIR signal values
+                if !diag.mir_signals.is_empty() {
+                    html.push_str(r#"
+        <div class="section">
+            <h2 class="collapsible" onclick="this.classList.toggle('active'); this.nextElementSibling.classList.toggle('show');">MIR Signal Values</h2>
+            <div class="content">
+            <table class="signal-table">
+                <tr><th>Hierarchical Path</th><th>Internal Name</th><th>Value</th></tr>
+"#);
+                    let mut sorted: Vec<_> = diag.mir_signals.iter().collect();
+                    sorted.sort_by(|a, b| a.0.cmp(&b.0));
+                    for (hier, internal, val) in &sorted {
+                        let hier_display = if hier.is_empty() { "-" } else { hier.as_str() };
+                        html.push_str(&format!("                <tr><td>{}</td><td>{}</td><td>{}</td></tr>\n",
+                            hier_display, internal, val));
+                    }
+                    html.push_str("            </table>\n            </div>\n        </div>\n");
+                }
+
+                // Gate signal values
+                if !diag.gate_signals.is_empty() {
+                    html.push_str(r#"
+        <div class="section">
+            <h2 class="collapsible" onclick="this.classList.toggle('active'); this.nextElementSibling.classList.toggle('show');">Gate Signal Values</h2>
+            <div class="content">
+            <table class="signal-table">
+                <tr><th>Signal</th><th>Value</th></tr>
+"#);
+                    let mut sorted: Vec<_> = diag.gate_signals.iter().collect();
+                    sorted.sort_by(|a, b| a.0.cmp(&b.0));
+                    for (name, val) in &sorted {
+                        html.push_str(&format!("                <tr><td>{}</td><td>{}</td></tr>\n", name, val));
+                    }
+                    html.push_str("            </table>\n            </div>\n        </div>\n");
+                }
+
+                // SIR dataflow trace
+                if !diag.sir_dataflow.is_empty() {
+                    html.push_str(r#"
+        <div class="section">
+            <h2 class="collapsible" onclick="this.classList.toggle('active'); this.nextElementSibling.classList.toggle('show');">SIR Dataflow Trace</h2>
+            <div class="content">
+            <div class="trace">
+"#);
+                    for line in &diag.sir_dataflow {
+                        html.push_str(&format!("{}<br>\n", line));
+                    }
+                    html.push_str("            </div>\n            </div>\n        </div>\n");
+                }
+            }
+        } else {
+            // Fallback to BmcEquivalenceResult fields
+            html.push_str(r#"
         <div class="section">
             <h2>Failure Details</h2>
             <table>
 "#);
-        if let Some(cycle) = result.mismatch_cycle {
-            html.push_str(&format!("                <tr><th>Mismatch Cycle</th><td>{}</td></tr>\n", cycle));
+            if let Some(cycle) = result.mismatch_cycle {
+                html.push_str(&format!("                <tr><th>Mismatch Cycle</th><td>{}</td></tr>\n", cycle));
+            }
+            if let Some(ref output) = result.mismatch_output {
+                html.push_str(&format!("                <tr><th>Failing Output</th><td>{}</td></tr>\n", output));
+            }
+            html.push_str("            </table>\n        </div>\n");
         }
-        if let Some(ref output) = result.mismatch_output {
-            html.push_str(&format!("                <tr><th>Failing Output</th><td>{}</td></tr>\n", output));
-        }
-        html.push_str("            </table>\n        </div>\n");
 
         if let Some(ref cex) = result.counterexample {
             html.push_str(r#"
         <div class="section">
-            <h2>Counterexample Trace</h2>
+            <h2>SAT Counterexample Trace</h2>
             <div class="trace">
 "#);
             for (cycle, inputs) in cex.inputs_per_cycle.iter().enumerate() {

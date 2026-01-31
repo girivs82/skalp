@@ -391,6 +391,9 @@ impl UnifiedSimulator {
             {
                 match crate::gpu_gate_runtime::GpuGateRuntime::new(sir) {
                     Ok(runtime) => {
+                        use std::io::Write;
+                        writeln!(std::io::stderr(), "🔧 [UNIFIED] Using GateLevelGpu backend").ok();
+                        std::io::stderr().flush().ok();
                         self.backend = SimulatorBackend::GateLevelGpu(runtime);
                         return Ok(());
                     }
@@ -407,6 +410,11 @@ impl UnifiedSimulator {
         }
 
         // CPU fallback
+        {
+            use std::io::Write;
+            writeln!(std::io::stderr(), "🔧 [UNIFIED] Using GateLevelCpu backend").ok();
+            std::io::stderr().flush().ok();
+        }
         self.backend =
             SimulatorBackend::GateLevelCpu(crate::gate_simulator::GateLevelSimulator::new(sir));
         Ok(())

@@ -114,6 +114,7 @@ impl<'hir> MonomorphizationEngine<'hir> {
             let current_hir = Hir {
                 name: hir.name.clone(),
                 entities: current_entities.clone(),
+                entity_aliases: hir.entity_aliases.clone(),
                 implementations: current_implementations.clone(),
                 protocols: hir.protocols.clone(),
                 intents: hir.intents.clone(),
@@ -296,28 +297,35 @@ impl<'hir> MonomorphizationEngine<'hir> {
                         impl_port_ids_used.sort_by_key(|id| id.0);
                         impl_port_ids_used.dedup();
 
-                        // Build mapping from impl port IDs to specialized port IDs
-                        // BUG #179 FIX: The impl block's port IDs may directly match the entity's
-                        // port IDs (if they were parsed together), or they may be sequential (0, 1, 2...)
-                        // if the impl was parsed separately. We need to handle both cases.
-                        //
-                        // Strategy: First try direct ID matching (impl port ID == entity port ID),
-                        // then fall back to positional matching.
-                        for &impl_port_id in &impl_port_ids_used {
-                            // First, check if this impl port ID matches any entity port ID directly
-                            if let Some(entity_port) =
-                                entity.ports.iter().find(|p| p.id == impl_port_id)
-                            {
-                                if let Some(&specialized_port_id) = port_id_map.get(&entity_port.id)
-                                {
-                                    impl_to_specialized_map
-                                        .insert(impl_port_id, specialized_port_id);
-                                }
+                        // BUG #237 DEBUG: Print port IDs for diagnosis
+                        eprintln!("[BUG #237 DEBUG] Entity '{}' has {} ports:", entity.name, entity.ports.len());
+                        for (i, p) in entity.ports.iter().enumerate() {
+                            if i < 5 {
+                                eprintln!("  [{}] PortId({}) = '{}'", i, p.id.0, p.name);
                             }
                         }
+                        eprintln!("[BUG #237 DEBUG] port_id_map has {} entries:", port_id_map.len());
+                        for (i, (old, new)) in port_id_map.iter().enumerate() {
+                            if i < 5 {
+                                eprintln!("  PortId({}) -> PortId({})", old.0, new.0);
+                            }
+                        }
+                        eprintln!("[BUG #237 DEBUG] impl_port_ids_used: {:?}", impl_port_ids_used.iter().map(|p| p.0).collect::<Vec<_>>());
 
-                        // For any impl port IDs that weren't matched by direct ID, try positional matching
-                        // This handles cases where the impl block uses sequential IDs (0, 1, 2, ...)
+                        // BUG #237 FIX: Include ALL entity ports in the mapping, not just those used in impl_port_ids_used.
+                        // The previous approach only mapped ports explicitly referenced in the impl block,
+                        // but some port references can come from nested expressions or instance connections
+                        // that weren't captured by collect_port_ids_from_expr. Using the full port_id_map
+                        // ensures all port references are correctly remapped.
+                        //
+                        // The port_id_map from specialize_entity contains: old entity port ID -> new specialized port ID
+                        // We add all of these to impl_to_specialized_map.
+                        for (&old_port_id, &new_port_id) in &port_id_map {
+                            impl_to_specialized_map.insert(old_port_id, new_port_id);
+                        }
+
+                        // Also try positional matching for ports in impl_port_ids_used that weren't matched
+                        // by direct ID (handles cases where the impl block uses sequential IDs like 0, 1, 2, ...)
                         for &impl_port_id in &impl_port_ids_used {
                             if let indexmap::map::Entry::Vacant(e) =
                                 impl_to_specialized_map.entry(impl_port_id)
@@ -451,6 +459,7 @@ impl<'hir> MonomorphizationEngine<'hir> {
         Hir {
             name: hir.name.clone(),
             entities: new_entities,
+            entity_aliases: hir.entity_aliases.clone(),
             implementations: new_implementations,
             protocols: hir.protocols.clone(),
             intents: hir.intents.clone(),
@@ -509,6 +518,35 @@ impl<'hir> MonomorphizationEngine<'hir> {
             })
             .collect();
 
+        // BUG #237 FIX: Remap port IDs in entity signals' initial values
+        let specialized_signals: Vec<crate::hir::HirSignal> = entity
+            .signals
+            .iter()
+            .map(|signal| {
+                let mut new_signal = signal.clone();
+                if let Some(ref init_val) = signal.initial_value {
+                    new_signal.initial_value = Some(self.remap_expr_ports(init_val, &port_id_map));
+                }
+                new_signal
+            })
+            .collect();
+
+        // BUG #237 FIX: Remap port IDs in entity assignments
+        if !entity.assignments.is_empty() {
+            eprintln!("[BUG #237 DEBUG] Remapping {} entity assignments for '{}', port_id_map has {} entries",
+                entity.assignments.len(), entity.name, port_id_map.len());
+        }
+        let specialized_assignments = entity
+            .assignments
+            .iter()
+            .map(|assign| {
+                let mut new_assign = assign.clone();
+                new_assign.lhs = self.remap_lvalue_ports(&assign.lhs, &port_id_map);
+                new_assign.rhs = self.remap_expr_ports(&assign.rhs, &port_id_map);
+                new_assign
+            })
+            .collect();
+
         // Create specialized entity with unique ID
         let specialized_entity = HirEntity {
             id: specialized_id,
@@ -518,8 +556,8 @@ impl<'hir> MonomorphizationEngine<'hir> {
             ports: specialized_ports,
             generics: vec![], // No generics in specialized version
             clock_domains: entity.clock_domains.clone(),
-            signals: entity.signals.clone(),
-            assignments: entity.assignments.clone(),
+            signals: specialized_signals, // Use remapped signals
+            assignments: specialized_assignments, // Use remapped assignments
             span: entity.span.clone(), // Preserve source span from original entity
             pipeline_config: entity.pipeline_config.clone(), // Preserve pipeline config
             vendor_ip_config: entity.vendor_ip_config.clone(), // Preserve vendor IP config
@@ -1709,6 +1747,8 @@ impl<'hir> MonomorphizationEngine<'hir> {
                 if let Some(&new_id) = port_id_map.get(old_id) {
                     HirExpression::Port(new_id)
                 } else {
+                    // Port not in remap map - this can happen for ports from other entities
+                    // or for ports that were already remapped. Pass through unchanged.
                     expr.clone()
                 }
             }

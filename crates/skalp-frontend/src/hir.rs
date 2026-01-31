@@ -125,6 +125,9 @@ pub struct Hir {
     pub trait_implementations: Vec<HirTraitImplementation>,
     /// Type aliases
     pub type_aliases: Vec<HirTypeAlias>,
+    /// Entity aliases (entity Name = TargetEntity<params>;)
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub entity_aliases: Vec<HirEntityAlias>,
     /// Distinct types (newtype pattern - same representation, different type)
     pub distinct_types: Vec<HirDistinctType>,
     /// User-defined types (struct, enum, union definitions)
@@ -2235,6 +2238,7 @@ impl HirBuilder {
         Hir {
             name: "main".to_string(),
             entities: Vec::new(),
+            entity_aliases: Vec::new(),
             implementations: Vec::new(),
             protocols: Vec::new(),
             intents: Vec::new(),
@@ -2328,6 +2332,7 @@ impl Hir {
         Self {
             name,
             entities: Vec::new(),
+            entity_aliases: Vec::new(),
             implementations: Vec::new(),
             protocols: Vec::new(),
             intents: Vec::new(),
@@ -2477,6 +2482,31 @@ pub struct HirTypeAlias {
     pub generics: Vec<HirGeneric>,
     /// Target type (what this alias resolves to)
     pub target_type: HirType,
+}
+
+/// Entity alias declaration in HIR
+///
+/// Creates an alias for a generic entity instantiation, avoiding the need
+/// to redeclare all ports. Commonly used for test configurations.
+///
+/// Example:
+/// ```skalp
+/// pub entity DabController_FastSim = DabBatteryController::<1000, 1000, 10000>;
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HirEntityAlias {
+    /// Entity alias name
+    pub name: String,
+    /// Visibility
+    pub visibility: HirVisibility,
+    /// Whether this is an async (NCL) entity alias
+    pub is_async: bool,
+    /// Target entity type (the entity being aliased)
+    pub target_type: HirType,
+    /// Generic arguments for the target entity (const generic values)
+    pub generic_args: Vec<HirExpression>,
+    /// Source location span (for error reporting)
+    pub span: Option<SourceSpan>,
 }
 
 /// Distinct type declaration in HIR (newtype pattern)

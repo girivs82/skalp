@@ -49,6 +49,24 @@ struct FlattenedField {
     leaf_type: DataType,
 }
 
+/// BUG #237 FIX: Cached entity-scope maps
+/// This structure holds all the maps that are specific to a single entity.
+/// When processing an entity in the first pass, we populate these maps.
+/// After the first pass completes, we cache them by entity ID.
+/// In the second pass (impl blocks), we restore the cached maps for the
+/// entity being processed.
+#[derive(Debug, Clone, Default)]
+struct EntityScopeCache {
+    port_map: IndexMap<hir::PortId, PortId>,
+    flattened_ports: IndexMap<hir::PortId, Vec<FlattenedField>>,
+    port_to_hir: IndexMap<PortId, (hir::PortId, Vec<String>)>,
+    port_owner: IndexMap<hir::PortId, hir::EntityId>,
+    signal_map: IndexMap<hir::SignalId, SignalId>,
+    flattened_signals: IndexMap<hir::SignalId, Vec<FlattenedField>>,
+    signal_to_hir: IndexMap<SignalId, (hir::SignalId, Vec<String>)>,
+    signal_owner: IndexMap<hir::SignalId, hir::EntityId>,
+}
+
 /// HIR to MIR transformer
 #[allow(clippy::type_complexity)]
 pub struct HirToMir<'hir> {
@@ -80,6 +98,9 @@ pub struct HirToMir<'hir> {
     /// Reverse port lookup: MIR port ID -> (HIR port ID, field path)
     /// BUG #33 FIX: This allows finding the correct HIR port for a given MIR port
     port_to_hir: IndexMap<PortId, (hir::PortId, Vec<String>)>,
+    /// BUG #237 FIX: Track which entity each port_map entry belongs to
+    /// This prevents cross-entity port ID confusion by allowing ownership checks
+    port_owner: IndexMap<hir::PortId, hir::EntityId>,
     /// Signal ID mapping (HIR to MIR) - now 1-to-many for flattened structs
     signal_map: IndexMap<hir::SignalId, SignalId>,
     /// Flattened signals: HIR signal ID -> list of flattened MIR signals
@@ -87,6 +108,9 @@ pub struct HirToMir<'hir> {
     /// Reverse signal lookup: MIR signal ID -> (HIR signal ID, field path)
     /// BUG #33 FIX: This allows finding the correct HIR signal for a given MIR signal
     signal_to_hir: IndexMap<SignalId, (hir::SignalId, Vec<String>)>,
+    /// BUG #237 FIX: Track which entity each signal_map entry belongs to
+    /// This prevents cross-entity signal ID confusion by allowing ownership checks
+    signal_owner: IndexMap<hir::SignalId, hir::EntityId>,
     /// Variable ID mapping (HIR to MIR)
     variable_map: IndexMap<hir::VariableId, VariableId>,
     /// Context-aware variable mapping for match arm isolation
@@ -240,6 +264,12 @@ pub struct HirToMir<'hir> {
     /// Without this, entity connections with GenericParam references resolve to 0 instead of
     /// the correct input port.
     current_module_param_to_port: Option<IndexMap<String, PortId>>,
+
+    /// BUG #237 FIX: Cache of entity-scoped port/signal maps
+    /// After processing each entity in the first pass, we save the maps here.
+    /// In the second pass (impl blocks), we restore them for the entity being processed.
+    /// This prevents cross-entity port/signal ID confusion.
+    entity_scope_cache: IndexMap<hir::EntityId, EntityScopeCache>,
 }
 
 /// Context for converting HIR expressions within a synthesized module
@@ -308,9 +338,11 @@ impl<'hir> HirToMir<'hir> {
             port_map: IndexMap::new(),
             flattened_ports: IndexMap::new(),
             port_to_hir: IndexMap::new(),
+            port_owner: IndexMap::new(), // BUG #237 FIX
             signal_map: IndexMap::new(),
             flattened_signals: IndexMap::new(),
             signal_to_hir: IndexMap::new(),
+            signal_owner: IndexMap::new(), // BUG #237 FIX
             variable_map: IndexMap::new(),
             context_variable_map: IndexMap::new(),
             mir_variable_names: IndexMap::new(),
@@ -347,6 +379,7 @@ impl<'hir> HirToMir<'hir> {
             placeholder_hir_signal_to_entity_output: IndexMap::new(),
             current_module_var_to_signal: None, // BUG #200 FIX
             current_module_param_to_port: None, // BUG #205 FIX
+            entity_scope_cache: IndexMap::new(), // BUG #237 FIX
         }
     }
 
@@ -391,6 +424,7 @@ impl<'hir> HirToMir<'hir> {
                 );
             }
             let entity_start = Instant::now();
+
             let module_id = self.next_module_id();
             self.entity_map.insert(entity.id, module_id);
             if entity.name.contains("FpAdd")
@@ -518,6 +552,10 @@ impl<'hir> HirToMir<'hir> {
                     self.port_map.insert(hir_port.id, first_port.id);
                 }
 
+                // BUG #237 FIX: Track which entity this port belongs to
+                // This enables proper ownership checks to prevent cross-entity port confusion
+                self.port_owner.insert(hir_port.id, entity.id);
+
                 // Add all flattened ports to the module, propagating detection_config
                 for mut port in flattened_ports {
                     // Propagate the detection config from HIR
@@ -588,6 +626,9 @@ impl<'hir> HirToMir<'hir> {
                 if let Some(first_signal) = flattened_signals.first() {
                     self.signal_map.insert(hir_signal.id, first_signal.id);
                 }
+
+                // BUG #237 FIX: Track which entity this signal belongs to
+                self.signal_owner.insert(hir_signal.id, entity.id);
 
                 for mut signal in flattened_signals {
                     // Propagate memory config from HIR signal to MIR signal
@@ -693,6 +734,7 @@ impl<'hir> HirToMir<'hir> {
                 entity.name,
                 entity_start.elapsed()
             );
+
             mir.add_module(module);
         }
 
@@ -840,6 +882,9 @@ impl<'hir> HirToMir<'hir> {
                         if let Some(first_signal) = flattened_signals.first() {
                             self.signal_map.insert(hir_signal.id, first_signal.id);
                         }
+
+                        // BUG #237 FIX: Track which entity this signal belongs to
+                        self.signal_owner.insert(hir_signal.id, impl_block.entity);
 
                         // Add all flattened signals to the module
                         for mut signal in flattened_signals {
@@ -1673,8 +1718,13 @@ impl<'hir> HirToMir<'hir> {
             // Convert the signal reference to an LValue
             let signal_lvalue = match &trigger.signal {
                 hir::HirEventSignal::Port(port_id) => {
+                    // BUG #237 FIX: Only use port_map if port belongs to current entity
                     if let Some(&mir_port_id) = self.port_map.get(port_id) {
-                        LValue::Port(mir_port_id)
+                        if self.port_belongs_to_current_entity(port_id) {
+                            LValue::Port(mir_port_id)
+                        } else {
+                            continue;
+                        }
                     } else {
                         continue;
                     }
@@ -1870,12 +1920,32 @@ impl<'hir> HirToMir<'hir> {
                     // Check if this type_name matches an entity
                     let hir = self.hir.as_ref();
                     if let Some(hir) = hir {
+                        // Entity alias resolution: check if type_name is an entity alias
+                        // If so, resolve to the target entity with its generic args
+                        let (resolved_type_name, resolved_generic_args) =
+                            if let Some(entity_alias) = hir.entity_aliases.iter().find(|a| a.name == struct_lit.type_name) {
+                                // Extract entity name from alias target type
+                                // Use the alias's generic_args if present, otherwise fall back to struct_lit's
+                                let name = match &entity_alias.target_type {
+                                    hir::HirType::Custom(n) => n.clone(),
+                                    _ => struct_lit.type_name.clone(),
+                                };
+                                let args = if !entity_alias.generic_args.is_empty() {
+                                    entity_alias.generic_args.clone()
+                                } else {
+                                    struct_lit.generic_args.clone()
+                                };
+                                (name, args)
+                            } else {
+                                (struct_lit.type_name.clone(), struct_lit.generic_args.clone())
+                            };
+
                         // BUG #207 FIX: When struct_lit has generic_args, construct the specialized entity name
                         // For example, FpAdd<IEEE754_32>{...} should look for "FpAdd_fp32" entity
-                        let target_entity_name = if !struct_lit.generic_args.is_empty() {
+                        let target_entity_name = if !resolved_generic_args.is_empty() {
                             // Evaluate generic_args to construct specialized name
-                            let mut name_parts = vec![struct_lit.type_name.clone()];
-                            for arg_expr in &struct_lit.generic_args {
+                            let mut name_parts = vec![resolved_type_name.clone()];
+                            for arg_expr in &resolved_generic_args {
                                 match self.const_evaluator.eval(arg_expr) {
                                     Ok(const_val) => {
                                         let suffix = match &const_val {
@@ -1906,7 +1976,7 @@ impl<'hir> HirToMir<'hir> {
                             }
                             name_parts.join("_")
                         } else {
-                            struct_lit.type_name.clone()
+                            resolved_type_name.clone()
                         };
 
                         // BUG #207 FIX: Look for specialized entity first, then fall back to generic
@@ -1916,7 +1986,7 @@ impl<'hir> HirToMir<'hir> {
                             .find(|e| e.name == target_entity_name)
                             .or_else(|| {
                                 // Fall back to generic entity name if specialized not found
-                                hir.entities.iter().find(|e| e.name == struct_lit.type_name)
+                                hir.entities.iter().find(|e| e.name == resolved_type_name)
                             });
 
                         if let Some(entity) = entity {
@@ -3358,16 +3428,17 @@ impl<'hir> HirToMir<'hir> {
         };
 
         // Check if LHS is a simple signal/port that was flattened
+        // BUG #237 FIX: Also verify the port/signal belongs to the current entity
         let (lhs_hir_id, lhs_is_signal) = match &assign.lhs {
             hir::HirLValue::Signal(id) => {
-                if self.flattened_signals.contains_key(id) {
+                if self.flattened_signals.contains_key(id) && self.signal_belongs_to_current_entity(id) {
                     (id.0, true)
                 } else {
                     return None;
                 }
             }
             hir::HirLValue::Port(id) => {
-                if self.flattened_ports.contains_key(id) {
+                if self.flattened_ports.contains_key(id) && self.port_belongs_to_current_entity(id) {
                     (id.0, false)
                 } else {
                     return None;
@@ -3386,7 +3457,8 @@ impl<'hir> HirToMir<'hir> {
                 }
             }
             hir::HirExpression::Port(id) => {
-                if self.flattened_ports.contains_key(id) {
+                // BUG #237 FIX: Verify port belongs to current entity
+                if self.flattened_ports.contains_key(id) && self.port_belongs_to_current_entity(id) {
                     (id.0, false, vec![])
                 } else {
                     return None;
@@ -3413,7 +3485,8 @@ impl<'hir> HirToMir<'hir> {
                             }
                         }
                         hir::HirExpression::Port(id) => {
-                            if self.flattened_ports.contains_key(id) {
+                            // BUG #237 FIX: Verify port belongs to current entity
+                            if self.flattened_ports.contains_key(id) && self.port_belongs_to_current_entity(id) {
                                 break (id.0, false, field_path);
                             } else {
                                 return None;
@@ -3426,7 +3499,7 @@ impl<'hir> HirToMir<'hir> {
             _ => return None,
         };
 
-        // Get flattened fields for LHS and RHS
+        // Get flattened fields for LHS and RHS (ownership already verified above)
         let lhs_fields = if lhs_is_signal {
             self.flattened_signals.get(&hir::SignalId(lhs_hir_id))?
         } else {
@@ -4026,11 +4099,14 @@ impl<'hir> HirToMir<'hir> {
         {
             // Check if this type_name matches an entity
             if let Some(hir) = self.hir.as_ref() {
+                // Resolve entity alias if present
+                let resolved_type_name = self.resolve_entity_alias(&struct_lit.type_name);
+
                 // BUG #207 FIX: When struct_lit has generic_args, construct the specialized entity name
                 // For example, FpAdd<IEEE754_32>{...} should look for "FpAdd_fp32" entity
                 let target_entity_name = if !struct_lit.generic_args.is_empty() {
                     // Evaluate generic_args to construct specialized name
-                    let mut name_parts = vec![struct_lit.type_name.clone()];
+                    let mut name_parts = vec![resolved_type_name.clone()];
                     for arg_expr in &struct_lit.generic_args {
                         if let Ok(const_val) = self.const_evaluator.eval(arg_expr) {
                             let suffix = match &const_val {
@@ -4055,7 +4131,7 @@ impl<'hir> HirToMir<'hir> {
                     }
                     name_parts.join("_")
                 } else {
-                    struct_lit.type_name.clone()
+                    resolved_type_name.clone()
                 };
 
                 // BUG #207 FIX: Look for specialized entity first, then fall back to generic
@@ -4065,7 +4141,7 @@ impl<'hir> HirToMir<'hir> {
                     .find(|e| e.name == target_entity_name)
                     .or_else(|| {
                         // Fall back to generic entity name if specialized not found
-                        hir.entities.iter().find(|e| e.name == struct_lit.type_name)
+                        hir.entities.iter().find(|e| e.name == resolved_type_name)
                     });
 
                 if let Some(entity) = entity {
@@ -4327,6 +4403,27 @@ impl<'hir> HirToMir<'hir> {
                         arm_descs.join("\n")
                     )
                 }
+                hir::HirExpression::Binary(bin) => {
+                    // BUG #237 DEBUG: Show binary expression details
+                    let left_desc = match &*bin.left {
+                        hir::HirExpression::Cast(c) => format!("Cast(inner={:?}, target={:?})", std::mem::discriminant(&*c.expr), c.target_type),
+                        hir::HirExpression::Signal(id) => format!("Signal({:?})", id),
+                        hir::HirExpression::Port(id) => format!("Port({:?})", id),
+                        other => format!("{:?}", std::mem::discriminant(other)),
+                    };
+                    let right_desc = match &*bin.right {
+                        hir::HirExpression::Cast(c) => format!("Cast(inner={:?}, target={:?})", std::mem::discriminant(&*c.expr), c.target_type),
+                        hir::HirExpression::Signal(id) => format!("Signal({:?})", id),
+                        hir::HirExpression::Port(id) => format!("Port({:?})", id),
+                        other => format!("{:?}", std::mem::discriminant(other)),
+                    };
+                    format!(
+                        "Binary(op={:?}, left={}, right={})",
+                        bin.op,
+                        left_desc,
+                        right_desc
+                    )
+                }
                 _ => format!(
                     "expression of type {:?}",
                     std::mem::discriminant(&assign.rhs)
@@ -4473,16 +4570,17 @@ impl<'hir> HirToMir<'hir> {
         assign: &hir::HirAssignment,
     ) -> Option<Vec<ContinuousAssign>> {
         // Check if LHS is a simple signal/port that was flattened
+        // BUG #237 FIX: Also verify the port/signal belongs to the current entity
         let (lhs_hir_id, lhs_is_signal) = match &assign.lhs {
             hir::HirLValue::Signal(id) => {
-                if self.flattened_signals.contains_key(id) {
+                if self.flattened_signals.contains_key(id) && self.signal_belongs_to_current_entity(id) {
                     (id.0, true)
                 } else {
                     return None;
                 }
             }
             hir::HirLValue::Port(id) => {
-                if self.flattened_ports.contains_key(id) {
+                if self.flattened_ports.contains_key(id) && self.port_belongs_to_current_entity(id) {
                     (id.0, false)
                 } else {
                     return None;
@@ -4492,16 +4590,18 @@ impl<'hir> HirToMir<'hir> {
         };
 
         // Check if RHS is a field access or signal that can be expanded
+        // BUG #237 FIX: Also verify the port/signal belongs to the current entity
         let (rhs_hir_id, rhs_is_signal, rhs_field_path) = match &assign.rhs {
             hir::HirExpression::Signal(id) => {
-                if self.flattened_signals.contains_key(id) {
+                if self.flattened_signals.contains_key(id) && self.signal_belongs_to_current_entity(id) {
                     (id.0, true, vec![])
                 } else {
                     return None;
                 }
             }
             hir::HirExpression::Port(id) => {
-                if self.flattened_ports.contains_key(id) {
+                // BUG #237 FIX: Verify port belongs to current entity
+                if self.flattened_ports.contains_key(id) && self.port_belongs_to_current_entity(id) {
                     (id.0, false, vec![])
                 } else {
                     return None;
@@ -4528,7 +4628,8 @@ impl<'hir> HirToMir<'hir> {
                             }
                         }
                         hir::HirExpression::Port(id) => {
-                            if self.flattened_ports.contains_key(id) {
+                            // BUG #237 FIX: Verify port belongs to current entity
+                            if self.flattened_ports.contains_key(id) && self.port_belongs_to_current_entity(id) {
                                 break (id.0, false, field_path);
                             } else {
                                 return None;
@@ -4541,7 +4642,7 @@ impl<'hir> HirToMir<'hir> {
             _ => return None,
         };
 
-        // Get flattened fields for LHS and RHS
+        // Get flattened fields for LHS and RHS (ownership already verified above)
         let lhs_fields = if lhs_is_signal {
             self.flattened_signals.get(&hir::SignalId(lhs_hir_id))?
         } else {
@@ -4640,10 +4741,15 @@ impl<'hir> HirToMir<'hir> {
                 }
             }
             hir::HirLValue::Port(id) => {
-                if let Some(fields) = self.flattened_ports.get(id) {
-                    if fields.len() > 1 {
-                        // Multiple flattened fields indicates struct/composite type
-                        (id.0, false, fields.clone())
+                // BUG #237 FIX: Only use flattened_ports if the port belongs to the current entity
+                if self.flattened_ports.contains_key(id) && self.port_belongs_to_current_entity(id) {
+                    if let Some(fields) = self.flattened_ports.get(id) {
+                        if fields.len() > 1 {
+                            // Multiple flattened fields indicates struct/composite type
+                            (id.0, false, fields.clone())
+                        } else {
+                            return None;
+                        }
                     } else {
                         return None;
                     }
@@ -4897,10 +5003,15 @@ impl<'hir> HirToMir<'hir> {
         };
 
         // Get flattened fields for the RHS signal/port
+        // BUG #237 FIX: Only use flattened_ports if port belongs to current entity
         let rhs_fields = if is_signal {
             self.flattened_signals.get(&hir::SignalId(base_hir_id))?.clone()
         } else {
-            self.flattened_ports.get(&hir::PortId(base_hir_id))?.clone()
+            let port_id = hir::PortId(base_hir_id);
+            if !self.port_belongs_to_current_entity(&port_id) {
+                return None;
+            }
+            self.flattened_ports.get(&port_id)?.clone()
         };
 
         // Create connections for each flattened field
@@ -5293,7 +5404,17 @@ impl<'hir> HirToMir<'hir> {
 
                 mir_id.map(LValue::Variable)
             }
-            hir::HirLValue::Port(id) => self.port_map.get(id).map(|&id| LValue::Port(id)),
+            hir::HirLValue::Port(id) => {
+                // BUG #237 FIX: Only use port_map if port belongs to current entity
+                if self.port_belongs_to_current_entity(id) {
+                    self.port_map.get(id).map(|&id| LValue::Port(id))
+                } else {
+                    // BUG #237 extended FIX: Try to remap by port name for monomorphization issues
+                    // When port IDs weren't properly remapped during monomorphization, look up
+                    // the port by name in the current entity instead
+                    self.try_remap_port_by_name(id)
+                }
+            }
             hir::HirLValue::Index(base, index) => {
                 let base = Box::new(self.convert_lvalue(base)?);
                 let index = Box::new(self.convert_expression(index, 0)?);
@@ -5335,12 +5456,15 @@ impl<'hir> HirToMir<'hir> {
                             break;
                         }
                         hir::HirLValue::Port(port_id) => {
-                            // Check if this port was flattened
-                            if let Some(flattened) = self.flattened_ports.get(port_id) {
-                                // Find the flattened field with matching path
-                                for flat_field in flattened {
-                                    if flat_field.field_path == field_path {
-                                        return Some(LValue::Port(PortId(flat_field.id)));
+                            // BUG #237 FIX: Only use flattened_ports if port belongs to current entity
+                            if self.port_belongs_to_current_entity(port_id) {
+                                // Check if this port was flattened
+                                if let Some(flattened) = self.flattened_ports.get(port_id) {
+                                    // Find the flattened field with matching path
+                                    for flat_field in flattened {
+                                        if flat_field.field_path == field_path {
+                                            return Some(LValue::Port(PortId(flat_field.id)));
+                                        }
                                     }
                                 }
                             }
@@ -5794,20 +5918,30 @@ impl<'hir> HirToMir<'hir> {
                 }
 
                 // First try signal_map
+                // BUG #237 FIX: Verify the signal belongs to the current entity
                 if let Some(&signal_id) = self.signal_map.get(id) {
-                    Some(Expression::new(
-                        ExpressionKind::Ref(LValue::Signal(signal_id)),
-                        ty,
-                    ))
+                    if self.signal_belongs_to_current_entity(id) {
+                        Some(Expression::new(
+                            ExpressionKind::Ref(LValue::Signal(signal_id)),
+                            ty,
+                        ))
+                    } else {
+                        None
+                    }
                 } else {
                     // If not found in signals, check if it's a port masquerading as a signal
                     // (due to HIR builder converting ports to signals in expressions)
+                    // BUG #237 FIX: Verify the port belongs to the current entity
                     let hir_port_id = hir::PortId(id.0);
                     if let Some(&mir_port_id) = self.port_map.get(&hir_port_id) {
-                        Some(Expression::new(
-                            ExpressionKind::Ref(LValue::Port(mir_port_id)),
-                            ty,
-                        ))
+                        if self.port_belongs_to_current_entity(&hir_port_id) {
+                            Some(Expression::new(
+                                ExpressionKind::Ref(LValue::Port(mir_port_id)),
+                                ty,
+                            ))
+                        } else {
+                            None
+                        }
                     } else {
                         None
                     }
@@ -5815,13 +5949,39 @@ impl<'hir> HirToMir<'hir> {
             }
             hir::HirExpression::Port(id) => {
                 // Handle port references in expressions
+                // Use port_map to look up the MIR port ID
+                // BUG #237 FIX: Only use port_map if port belongs to current entity
                 if let Some(&mir_port_id) = self.port_map.get(id) {
-                    Some(Expression::new(
-                        ExpressionKind::Ref(LValue::Port(mir_port_id)),
-                        ty,
-                    ))
+                    if self.port_belongs_to_current_entity(id) {
+                        Some(Expression::new(
+                            ExpressionKind::Ref(LValue::Port(mir_port_id)),
+                            ty,
+                        ))
+                    } else {
+                        // BUG #237 FIX: Try to remap port by name to current entity
+                        // This happens when a monomorphized entity inherits code from a wrapper
+                        // that references the wrapper's ports by their original IDs
+                        if let Some(lvalue) = self.try_remap_port_by_name(id) {
+                            Some(Expression::new(
+                                ExpressionKind::Ref(lvalue),
+                                ty,
+                            ))
+                        } else {
+                            trace!("[PORT_DEBUG] Port({}) doesn't belong to current entity and remap failed", id.0);
+                            None
+                        }
+                    }
                 } else {
-                    None
+                    // Port not in port_map, try name-based remap
+                    if let Some(lvalue) = self.try_remap_port_by_name(id) {
+                        Some(Expression::new(
+                            ExpressionKind::Ref(lvalue),
+                            ty,
+                        ))
+                    } else {
+                        trace!("[PORT_DEBUG] Port({}) not found in port_map", id.0);
+                        None
+                    }
                 }
             }
             hir::HirExpression::Variable(id) => {
@@ -6886,7 +7046,8 @@ impl<'hir> HirToMir<'hir> {
                             }
                         }
                         hir::HirExpression::Port(id) => {
-                            if self.flattened_ports.contains_key(id) {
+                            // BUG #237 FIX: Only use flattened_ports if port belongs to current entity
+                            if self.flattened_ports.contains_key(id) && self.port_belongs_to_current_entity(id) {
                                 (id.0, false)
                             } else {
                                 return None;
@@ -6898,7 +7059,7 @@ impl<'hir> HirToMir<'hir> {
                     // Try to evaluate index as constant
                     let index_val = self.try_eval_const_expr(index)?;
 
-                    // Get flattened fields
+                    // Get flattened fields (ownership already verified above)
                     let fields = if is_signal {
                         self.flattened_signals.get(&hir::SignalId(base_hir_id))?
                     } else {
@@ -6944,7 +7105,8 @@ impl<'hir> HirToMir<'hir> {
                             }
                         }
                         hir::HirExpression::Port(id) => {
-                            if self.flattened_ports.contains_key(id) {
+                            // BUG #237 FIX: Only use flattened_ports if port belongs to current entity
+                            if self.flattened_ports.contains_key(id) && self.port_belongs_to_current_entity(id) {
                                 (id.0, false)
                             } else {
                                 return None;
@@ -6953,7 +7115,7 @@ impl<'hir> HirToMir<'hir> {
                         _ => return None,
                     };
 
-                    // Get flattened fields and clone to avoid borrow issues
+                    // Get flattened fields and clone to avoid borrow issues (ownership verified above)
                     let fields = if is_signal {
                         self.flattened_signals
                             .get(&hir::SignalId(base_hir_id))?
@@ -11351,10 +11513,8 @@ impl<'hir> HirToMir<'hir> {
                 // BUT we should NOT further expand Variable references to their source expressions.
                 // Example: GenericParam("a") -> Variable(a_fp32) is OK
                 //          Variable(a_fp32) -> (a[15:0] as fp16 as fp32) is NOT OK
-                let is_entity_struct = self
-                    .hir
-                    .as_ref()
-                    .is_some_and(|hir| hir.entities.iter().any(|e| e.name == struct_lit.type_name));
+                // Also check for entity aliases
+                let is_entity_struct = self.is_entity_or_alias(&struct_lit.type_name);
                 trace!(
                     "[BUG #200 TRACE] StructLiteral type='{}', is_entity_struct={}",
                     struct_lit.type_name,
@@ -14795,16 +14955,32 @@ impl<'hir> HirToMir<'hir> {
         fn find_entity_instantiations(
             expr: &hir::HirExpression,
             entities: &[skalp_frontend::hir::HirEntity],
+            entity_aliases: &[skalp_frontend::hir::HirEntityAlias],
             found: &mut Vec<(String, hir::HirStructLiteral)>,
         ) {
+            // Helper to check if a type name is an entity (directly or via alias)
+            let is_entity_or_alias = |type_name: &str| -> bool {
+                // Direct entity match
+                if entities.iter().any(|e| e.name == type_name) {
+                    return true;
+                }
+                // Check if it's an alias that points to an entity
+                if let Some(alias) = entity_aliases.iter().find(|a| a.name == type_name) {
+                    if let hir::HirType::Custom(target_name) = &alias.target_type {
+                        return entities.iter().any(|e| &e.name == target_name);
+                    }
+                }
+                false
+            };
+
             match expr {
                 hir::HirExpression::StructLiteral(struct_lit) => {
-                    if entities.iter().any(|e| e.name == struct_lit.type_name) {
+                    if is_entity_or_alias(&struct_lit.type_name) {
                         found.push((format!("__entity_{}", found.len()), struct_lit.clone()));
                     }
                     // Also recurse into field values
                     for field in &struct_lit.fields {
-                        find_entity_instantiations(&field.value, entities, found);
+                        find_entity_instantiations(&field.value, entities, entity_aliases, found);
                     }
                 }
                 hir::HirExpression::Block {
@@ -14813,26 +14989,26 @@ impl<'hir> HirToMir<'hir> {
                 } => {
                     for stmt in statements {
                         if let hir::HirStatement::Let(let_stmt) = stmt {
-                            find_entity_instantiations(&let_stmt.value, entities, found);
+                            find_entity_instantiations(&let_stmt.value, entities, entity_aliases, found);
                         }
                     }
-                    find_entity_instantiations(result_expr, entities, found);
+                    find_entity_instantiations(result_expr, entities, entity_aliases, found);
                 }
                 hir::HirExpression::Binary(bin) => {
-                    find_entity_instantiations(&bin.left, entities, found);
-                    find_entity_instantiations(&bin.right, entities, found);
+                    find_entity_instantiations(&bin.left, entities, entity_aliases, found);
+                    find_entity_instantiations(&bin.right, entities, entity_aliases, found);
                 }
                 hir::HirExpression::Cast(cast_expr) => {
-                    find_entity_instantiations(&cast_expr.expr, entities, found);
+                    find_entity_instantiations(&cast_expr.expr, entities, entity_aliases, found);
                 }
                 hir::HirExpression::If(if_expr) => {
-                    find_entity_instantiations(&if_expr.condition, entities, found);
-                    find_entity_instantiations(&if_expr.then_expr, entities, found);
-                    find_entity_instantiations(&if_expr.else_expr, entities, found);
+                    find_entity_instantiations(&if_expr.condition, entities, entity_aliases, found);
+                    find_entity_instantiations(&if_expr.then_expr, entities, entity_aliases, found);
+                    find_entity_instantiations(&if_expr.else_expr, entities, entity_aliases, found);
                 }
                 hir::HirExpression::Call(call) => {
                     for arg in &call.args {
-                        find_entity_instantiations(arg, entities, found);
+                        find_entity_instantiations(arg, entities, entity_aliases, found);
                     }
                 }
                 _ => {}
@@ -14845,12 +15021,17 @@ impl<'hir> HirToMir<'hir> {
             .as_ref()
             .map(|h| h.entities.clone())
             .unwrap_or_default();
+        let entity_aliases = self
+            .hir
+            .as_ref()
+            .map(|h| h.entity_aliases.clone())
+            .unwrap_or_default();
         let mut entity_insts = Vec::new();
         for binding_value in let_bindings.values() {
-            find_entity_instantiations(binding_value, &entities, &mut entity_insts);
+            find_entity_instantiations(binding_value, &entities, &entity_aliases, &mut entity_insts);
         }
         // Also check the substituted body itself
-        find_entity_instantiations(&substituted_body, &entities, &mut entity_insts);
+        find_entity_instantiations(&substituted_body, &entities, &entity_aliases, &mut entity_insts);
 
         // Process found entity instantiations
         for (name, struct_lit) in entity_insts {
@@ -14914,7 +15095,14 @@ impl<'hir> HirToMir<'hir> {
     fn expr_to_lvalue(&mut self, expr: &hir::HirExpression) -> Option<LValue> {
         match expr {
             hir::HirExpression::Signal(id) => self.signal_map.get(id).map(|&id| LValue::Signal(id)),
-            hir::HirExpression::Port(id) => self.port_map.get(id).map(|&id| LValue::Port(id)),
+            hir::HirExpression::Port(id) => {
+                // BUG #237 FIX: Only use port_map if port belongs to current entity
+                if self.port_belongs_to_current_entity(id) {
+                    self.port_map.get(id).map(|&id| LValue::Port(id))
+                } else {
+                    None
+                }
+            }
             hir::HirExpression::Variable(id) => {
                 // BUG #200 FIX: Check current_module_var_to_signal FIRST
                 // This is critical for entity struct literal fields in module synthesis context
@@ -16972,36 +17160,42 @@ impl<'hir> HirToMir<'hir> {
                     return None;
                 }
                 hir::HirExpression::Port(port_id) => {
-                    // Check if this port was flattened
-                    if let Some(flattened) = self.flattened_ports.get(port_id) {
-                        // Find the flattened field with matching path
-                        for flat_field in flattened {
-                            if flat_field.field_path == field_path {
-                                return Some(Expression::with_unknown_type(ExpressionKind::Ref(
-                                    LValue::Port(PortId(flat_field.id)),
-                                )));
+                    // BUG #237 FIX: Only use flattened_ports if port belongs to current entity
+                    if self.port_belongs_to_current_entity(port_id) {
+                        // Check if this port was flattened
+                        if let Some(flattened) = self.flattened_ports.get(port_id) {
+                            // Find the flattened field with matching path
+                            for flat_field in flattened {
+                                if flat_field.field_path == field_path {
+                                    return Some(Expression::with_unknown_type(ExpressionKind::Ref(
+                                        LValue::Port(PortId(flat_field.id)),
+                                    )));
+                                }
                             }
                         }
                     }
                     // Not flattened - use mapped port ID (or fall back to bit range)
-                    if let Some(&port_id_mir) = self.port_map.get(port_id) {
-                        // Fall back to bit range approach
-                        let base_lval = LValue::Port(port_id_mir);
-                        let (high_bit, low_bit) =
-                            self.get_field_bit_range(base, &normalized_field_name)?;
-                        let high_expr = Expression::with_unknown_type(ExpressionKind::Literal(
-                            Value::Integer(high_bit as i64),
-                        ));
-                        let low_expr = Expression::with_unknown_type(ExpressionKind::Literal(
-                            Value::Integer(low_bit as i64),
-                        ));
-                        return Some(Expression::with_unknown_type(ExpressionKind::Ref(
-                            LValue::RangeSelect {
-                                base: Box::new(base_lval),
-                                high: Box::new(high_expr),
-                                low: Box::new(low_expr),
-                            },
-                        )));
+                    // BUG #237 FIX: Only use port_map if port belongs to current entity
+                    if self.port_belongs_to_current_entity(port_id) {
+                        if let Some(&port_id_mir) = self.port_map.get(port_id) {
+                            // Fall back to bit range approach
+                            let base_lval = LValue::Port(port_id_mir);
+                            let (high_bit, low_bit) =
+                                self.get_field_bit_range(base, &normalized_field_name)?;
+                            let high_expr = Expression::with_unknown_type(ExpressionKind::Literal(
+                                Value::Integer(high_bit as i64),
+                            ));
+                            let low_expr = Expression::with_unknown_type(ExpressionKind::Literal(
+                                Value::Integer(low_bit as i64),
+                            ));
+                            return Some(Expression::with_unknown_type(ExpressionKind::Ref(
+                                LValue::RangeSelect {
+                                    base: Box::new(base_lval),
+                                    high: Box::new(high_expr),
+                                    low: Box::new(low_expr),
+                                },
+                            )));
+                        }
                     }
                     return None;
                 }
@@ -17422,10 +17616,16 @@ impl<'hir> HirToMir<'hir> {
                             }
                         }
                         hir::HirExpression::Port(port_id) => {
-                            if let Some(fields) = self.flattened_ports.get(port_id) {
-                                (port_id.0, false, fields.clone())
+                            // BUG #237 FIX: Only use flattened_ports if port belongs to current entity
+                            if self.port_belongs_to_current_entity(port_id) {
+                                if let Some(fields) = self.flattened_ports.get(port_id) {
+                                    (port_id.0, false, fields.clone())
+                                } else {
+                                    trace!("[BUG #31 ARRAY_FIELD] Port not flattened");
+                                    return None;
+                                }
                             } else {
-                                trace!("[BUG #31 ARRAY_FIELD] Port not flattened");
+                                trace!("[BUG #31 ARRAY_FIELD] Port belongs to different entity");
                                 return None;
                             }
                         }
@@ -18488,17 +18688,38 @@ impl<'hir> HirToMir<'hir> {
 
     /// Check if a struct literal is an entity instantiation (like FpMul, FpAdd)
     /// This is used by count_function_calls to count entity instantiations toward the inlining threshold.
-    fn is_entity_struct_literal(&self, type_name: &str) -> bool {
+    /// Resolve an entity alias to its target entity name.
+    /// Returns the resolved name if type_name is an alias, otherwise returns the original name.
+    fn resolve_entity_alias(&self, type_name: &str) -> String {
         if let Some(hir) = self.hir {
-            // Check if the type name matches any entity in the HIR
-            // Also check for monomorphized names (e.g., "FpMul_fp32" from "FpMul")
-            let base_name = type_name.split('_').next().unwrap_or(type_name);
+            if let Some(alias) = hir.entity_aliases.iter().find(|a| a.name == type_name) {
+                // Extract the entity name from the alias target type
+                if let hir::HirType::Custom(name) = &alias.target_type {
+                    return name.clone();
+                }
+            }
+        }
+        type_name.to_string()
+    }
+
+    /// Check if a type name refers to an entity (directly or via alias).
+    fn is_entity_or_alias(&self, type_name: &str) -> bool {
+        if let Some(hir) = self.hir {
+            // First check if it's an entity alias
+            let resolved_name = self.resolve_entity_alias(type_name);
+            // Check if the resolved name matches any entity
+            let base_name = resolved_name.split('_').next().unwrap_or(&resolved_name);
             hir.entities
                 .iter()
-                .any(|e| e.name == type_name || e.name == base_name)
+                .any(|e| e.name == resolved_name || e.name == base_name)
         } else {
             false
         }
+    }
+
+    fn is_entity_struct_literal(&self, type_name: &str) -> bool {
+        // Use the new helper that handles aliases
+        self.is_entity_or_alias(type_name)
     }
 
     /// Check if a binary expression uses a trait operator (like fp32 arithmetic)
@@ -19801,9 +20022,8 @@ impl<'hir> HirToMir<'hir> {
                             struct_lit,
                         ) = &let_stmt.value
                         {
-                            self.hir.as_ref().is_some_and(|hir| {
-                                hir.entities.iter().any(|e| e.name == struct_lit.type_name)
-                            })
+                            // Check for entity aliases as well as direct entity names
+                            self.is_entity_or_alias(&struct_lit.type_name)
                         } else {
                             false
                         };
@@ -19827,10 +20047,8 @@ impl<'hir> HirToMir<'hir> {
                         // and set up the placeholder signal to entity output mappings.
                         // This is critical for FP trait implementations that create entity instances.
                         if let hir::HirExpression::StructLiteral(struct_lit) = &substituted_value {
-                            // Check if this struct literal is an entity instantiation
-                            let is_entity = self.hir.as_ref().is_some_and(|hir| {
-                                hir.entities.iter().any(|e| e.name == struct_lit.type_name)
-                            });
+                            // Check if this struct literal is an entity instantiation (including aliases)
+                            let is_entity = self.is_entity_or_alias(&struct_lit.type_name);
                             if is_entity {
                                 // BUG #212 FIX: Set up module context maps BEFORE calling convert_statement
                                 // When convert_statement processes entity struct literal fields, it calls
@@ -21630,6 +21848,249 @@ impl<'hir> HirToMir<'hir> {
         let id = PortId(self.next_port_id);
         self.next_port_id += 1;
         id
+    }
+
+    /// BUG #237 FIX: Save current entity-scoped PORT maps to the cache
+    ///
+    /// Called after processing an entity's ports in the first pass.
+    /// This allows the second pass (impl blocks) to restore these maps.
+    ///
+    /// NOTE: We only cache PORT maps, not signal maps. The original bug was
+    /// specifically about port IDs from one entity bleeding into another.
+    /// Signal maps work correctly because signals are processed in the impl block
+    /// where they're defined, and we don't have the same cross-entity confusion.
+    fn save_entity_scope_to_cache(&mut self, entity_id: hir::EntityId) {
+        let cache = EntityScopeCache {
+            port_map: self.port_map.clone(),
+            flattened_ports: self.flattened_ports.clone(),
+            port_to_hir: self.port_to_hir.clone(),
+            port_owner: self.port_owner.clone(),
+            // Signals are included for completeness but are also rebuilt in second pass
+            signal_map: self.signal_map.clone(),
+            flattened_signals: self.flattened_signals.clone(),
+            signal_to_hir: self.signal_to_hir.clone(),
+            signal_owner: self.signal_owner.clone(),
+        };
+        self.entity_scope_cache.insert(entity_id, cache);
+    }
+
+    /// BUG #237 FIX: Restore entity-scoped PORT maps from the cache
+    ///
+    /// Called at the start of processing an impl block in the second pass.
+    /// This restores the port maps that were created in the first pass
+    /// for the entity being processed.
+    ///
+    /// NOTE: We restore ports and merge signals (not replace). This is because:
+    /// - Ports are only created in the first pass (entity.ports)
+    /// - Signals can come from both entity.signals (first pass) and impl_block.signals (second pass)
+    fn restore_entity_scope_from_cache(&mut self, entity_id: hir::EntityId) {
+        if let Some(cache) = self.entity_scope_cache.get(&entity_id) {
+            // Restore port maps (completely replace, ports only come from first pass)
+            self.port_map = cache.port_map.clone();
+            self.flattened_ports = cache.flattened_ports.clone();
+            self.port_to_hir = cache.port_to_hir.clone();
+            self.port_owner = cache.port_owner.clone();
+            // Restore signal maps (also replace, signals from first pass + impl will be added)
+            self.signal_map = cache.signal_map.clone();
+            self.flattened_signals = cache.flattened_signals.clone();
+            self.signal_to_hir = cache.signal_to_hir.clone();
+            self.signal_owner = cache.signal_owner.clone();
+        }
+        // If no cache entry exists, we keep the existing maps
+        // This handles cases like monomorphized entities
+        // NOTE: We do NOT clear variable_map and other maps here anymore.
+        // The original bug #237 was about PORT maps accumulating across entities,
+        // not variable/signal maps. Clearing these was too aggressive and broke
+        // legitimate cross-entity references and variable tracking.
+    }
+
+    /// BUG #237 FIX: Clear entity-scoped PORT maps when starting a new entity
+    ///
+    /// This is critical because `port_map` and `flattened_ports` accumulate entries
+    /// from ALL entities processed so far. When processing entity B, entries from
+    /// entity A remain in these maps, causing cross-entity port ID confusion where
+    /// a port ID from entity A could be incorrectly matched when processing entity B.
+    ///
+    /// Example: Entity A has Port(107) = "enable". After processing A, port_map
+    /// contains {PortId(107) -> MirPortId(274)}. When processing Entity B which
+    /// doesn't have Port(107), expressions containing Port(107) incorrectly match
+    /// the stale entry from Entity A, creating undriven nets in the final netlist.
+    ///
+    /// NOTE: We only clear PORT and SIGNAL maps for the first pass.
+    /// Variable and entity instance maps must NOT be cleared here because
+    /// they are used across entity processing.
+    fn clear_entity_scope_maps(&mut self) {
+        // Clear port maps - these must be scoped per-entity
+        self.port_map.clear();
+        self.flattened_ports.clear();
+        self.port_to_hir.clear();
+        // Also clear port_owner tracking for the new entity
+        self.port_owner.clear();
+        // Clear signal maps - these are rebuilt per-entity in the first pass
+        self.signal_map.clear();
+        self.flattened_signals.clear();
+        self.signal_to_hir.clear();
+        self.signal_owner.clear();
+        // DO NOT clear variable_map, dynamic_variables, entity_instance_* here
+        // Those are needed across entity processing and are managed separately
+    }
+
+    /// BUG #237 FIX: Check if a port ID belongs to the current entity
+    /// This prevents cross-entity port ID confusion where a port ID from entity A
+    /// could be incorrectly matched when processing entity B.
+    /// BUG #237 extended FIX: Try to remap a port by name when it belongs to a different entity
+    /// This handles monomorphization bugs where port IDs weren't properly remapped
+    fn try_remap_port_by_name(&self, foreign_port_id: &hir::PortId) -> Option<LValue> {
+        let hir = self.hir?;
+        let current_entity_id = self.current_entity_id?;
+
+        // Find which entity owns the foreign port
+        let owner_id = self.port_owner.get(foreign_port_id);
+        if owner_id.is_none() {
+            println!("[REMAP_FAIL] No owner for port {:?}", foreign_port_id);
+            return None;
+        }
+        let owner_id = owner_id?;
+        let owner_entity = hir.entities.iter().find(|e| e.id == *owner_id)?;
+        let current_entity = hir.entities.iter().find(|e| e.id == current_entity_id)?;
+
+        // Find the port by ID in the owner entity
+        let foreign_port = owner_entity.ports.iter().find(|p| p.id == *foreign_port_id);
+        if foreign_port.is_none() {
+            println!("[REMAP_FAIL] Port {:?} not found in owner '{}'", foreign_port_id, owner_entity.name);
+            return None;
+        }
+        let foreign_port = foreign_port?;
+
+        // Look for a port with the same name in the current entity
+        let current_port = current_entity.ports.iter().find(|p| p.name == foreign_port.name);
+        if current_port.is_none() {
+            println!("[REMAP_FAIL] Port '{}' not found in current entity '{}'", foreign_port.name, current_entity.name);
+            return None;
+        }
+        let current_port = current_port?;
+
+        // Get the MIR port ID for the current entity's port
+        let mir_port_id = self.port_map.get(&current_port.id);
+        if mir_port_id.is_none() {
+            println!("[REMAP_FAIL] No MIR port for HIR port {:?} '{}' in current entity", current_port.id, current_port.name);
+            return None;
+        }
+        let mir_port_id = mir_port_id?;
+
+        println!("[REMAP_OK] Remapped '{}': {:?} → {:?}", foreign_port.name, foreign_port_id, mir_port_id);
+        Some(LValue::Port(*mir_port_id))
+    }
+
+    ///
+    /// The check is designed to catch the specific case where flattened_ports or port_map
+    /// contains entries from PREVIOUS entities, and we're trying to use those entries
+    /// when processing a DIFFERENT entity. However, we must be permissive enough to
+    /// allow valid port references in monomorphized entities.
+    fn port_belongs_to_current_entity(&self, port_id: &hir::PortId) -> bool {
+        if let Some(entity_id) = self.current_entity_id {
+            // BUG #237 FIX: Use port_owner to check if this port belongs to a DIFFERENT entity.
+            // If it does, reject it to prevent cross-entity port confusion.
+            // If it's not tracked, allow it for backwards compatibility.
+            if let Some(&owner_id) = self.port_owner.get(port_id) {
+                // Port IS tracked - only allow if it belongs to the current entity
+                // OR if the owner is a base entity that the current entity derives from
+                if owner_id == entity_id {
+                    return true;
+                }
+
+                // BUG #237 FIX: Check if current entity is a monomorphized version of the owner
+                // Monomorphized entities have names like "EntityName_param1_param2"
+                // In this case, the base entity's ports should be allowed
+                if let Some(hir) = self.hir {
+                    let owner_entity = hir.entities.iter().find(|e| e.id == owner_id);
+                    let current_entity = hir.entities.iter().find(|e| e.id == entity_id);
+
+                    if let (Some(owner), Some(current)) = (owner_entity, current_entity) {
+                        // Check if current is a monomorphized version of owner
+                        // e.g., owner="DabBatteryController", current="DabBatteryController_10000_1000_1000"
+                        if current.name.starts_with(&owner.name)
+                            && (current.name.len() == owner.name.len()
+                                || current.name.chars().nth(owner.name.len()) == Some('_'))
+                        {
+                            return true;
+                        }
+                    }
+                }
+                // Port belongs to a different, unrelated entity - reject it
+                return false;
+            }
+
+            // Port is NOT tracked in port_owner - check the HIR directly
+            if let Some(hir) = self.hir {
+                if let Some(entity) = hir.entities.iter().find(|e| e.id == entity_id) {
+                    if entity.ports.iter().any(|p| p.id == *port_id) {
+                        return true;
+                    }
+                    // Port not found in this entity and not tracked - reject
+                    // (This catches ports from entities that were processed before tracking was added)
+                    return false;
+                }
+                // Entity not in HIR, be permissive
+                return true;
+            }
+        }
+        // Can't verify, allow for legacy behavior
+        true
+    }
+
+    /// BUG #237 FIX: Check if a signal ID belongs to the current entity
+    fn signal_belongs_to_current_entity(&self, signal_id: &hir::SignalId) -> bool {
+        if let Some(entity_id) = self.current_entity_id {
+            // Use signal_owner to check if this signal belongs to a DIFFERENT entity
+            if let Some(&owner_id) = self.signal_owner.get(signal_id) {
+                // Signal IS tracked - only allow if it belongs to the current entity
+                // OR if the owner is a base entity that the current entity derives from
+                if owner_id == entity_id {
+                    return true;
+                }
+
+                // Check if current entity is a monomorphized version of the owner
+                if let Some(hir) = self.hir {
+                    let owner_entity = hir.entities.iter().find(|e| e.id == owner_id);
+                    let current_entity = hir.entities.iter().find(|e| e.id == entity_id);
+
+                    if let (Some(owner), Some(current)) = (owner_entity, current_entity) {
+                        // Check if current is a monomorphized version of owner
+                        if current.name.starts_with(&owner.name)
+                            && (current.name.len() == owner.name.len()
+                                || current.name.chars().nth(owner.name.len()) == Some('_'))
+                        {
+                            return true;
+                        }
+                    }
+                }
+
+                // Signal belongs to a different, unrelated entity - reject it
+                return false;
+            }
+
+            // Signal is NOT tracked in signal_owner - check the HIR directly
+            if let Some(hir) = self.hir {
+                // Check entity signals
+                if let Some(entity) = hir.entities.iter().find(|e| e.id == entity_id) {
+                    if entity.signals.iter().any(|s| s.id == *signal_id) {
+                        return true;
+                    }
+                }
+                // Check impl block signals
+                if let Some(impl_block) = hir.implementations.iter().find(|i| i.entity == entity_id) {
+                    if impl_block.signals.iter().any(|s| s.id == *signal_id) {
+                        return true;
+                    }
+                }
+                // Entity/impl found but signal not in either - be permissive for untracked signals
+                // (This handles signals created during function inlining, etc.)
+                return true;
+            }
+        }
+        // Can't verify, allow for legacy behavior
+        true
     }
 
     fn next_signal_id(&mut self) -> SignalId {

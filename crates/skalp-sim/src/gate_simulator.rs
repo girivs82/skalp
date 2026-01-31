@@ -291,6 +291,14 @@ impl GateLevelSimulator {
     fn initialize(&mut self) {
         let module = &self.sir.top_module;
 
+        // Collect clock signal IDs from sequential blocks
+        // Gate-level SIR stores clock info in SequentialBlock, not in SirSignalType::Register
+        let clock_ids: std::collections::HashSet<u32> = module
+            .seq_blocks
+            .iter()
+            .map(|block| block.clock.0)
+            .collect();
+
         // Build signal mappings
         for signal in &module.signals {
             self.signal_name_to_id
@@ -309,8 +317,8 @@ impl GateLevelSimulator {
                 SirSignalType::Port { direction } => match direction {
                     SirPortDirection::Input => {
                         self.input_ports.push(signal.id);
-                        // Check if it's a clock
-                        if signal.name.contains("clk") || signal.name.contains("clock") {
+                        // Identify clock signals by checking if this signal is used as a clock for any register
+                        if clock_ids.contains(&signal.id.0) {
                             self.clock_signals.push(signal.id);
                         }
                     }
@@ -339,6 +347,19 @@ impl GateLevelSimulator {
                 }
                 SirSignalType::Wire => {}
             }
+        }
+
+        // Debug: Print clock info
+        if std::env::var("SKALP_DEBUG_SEQ").is_ok() {
+            use std::io::Write;
+            let clock_names: Vec<_> = self.clock_signals.iter()
+                .filter_map(|id| self.signal_id_to_name.get(&id.0))
+                .collect();
+            let seq_block_count = self.sir.top_module.seq_blocks.len();
+            writeln!(std::io::stderr(), "🕐 [CPU GATE INIT] clock_ids found: {:?}", clock_ids).ok();
+            writeln!(std::io::stderr(), "🕐 [CPU GATE INIT] clock_signals: {:?}", clock_names).ok();
+            writeln!(std::io::stderr(), "🕐 [CPU GATE INIT] Sequential blocks: {}", seq_block_count).ok();
+            std::io::stderr().flush().ok();
         }
 
         // Calculate total FIT from primitives
@@ -644,12 +665,70 @@ impl GateLevelSimulator {
     fn evaluate_operation(&mut self, op: &SirOperation) {
         match op {
             SirOperation::Primitive {
+                path, ptype, inputs, outputs, ..
+            } if path.contains("state_reg") && path.contains("rst_mux") => {
+                // Special debug for state_reg rst_mux
+                let input_values: Vec<bool> = inputs
+                    .iter()
+                    .filter_map(|sig_id| {
+                        self.state.signals.get(&sig_id.0)
+                            .and_then(|v| v.first().copied())
+                    })
+                    .collect();
+                let input_names: Vec<_> = inputs.iter()
+                    .map(|sig_id| self.signal_id_to_name.get(&sig_id.0).cloned().unwrap_or_else(|| format!("id{}", sig_id.0)))
+                    .collect();
+                let output_vals = crate::gate_eval::evaluate_primitive(ptype, &input_values);
+                println!("[GATE_MUX] state_reg rst_mux: path={}", path);
+                println!("[GATE_MUX]   inputs: {:?}", input_names.iter().zip(input_values.iter()).collect::<Vec<_>>());
+                println!("[GATE_MUX]   sel={}, d0={}, d1={} -> output={}",
+                    input_values.get(0).copied().unwrap_or(false),
+                    input_values.get(1).copied().unwrap_or(false),
+                    input_values.get(2).copied().unwrap_or(false),
+                    output_vals.first().copied().unwrap_or(false));
+
+                // Actually evaluate
+                let output_values = crate::gate_eval::evaluate_primitive(ptype, &input_values);
+                for (i, out_id) in outputs.iter().enumerate() {
+                    if let Some(&value) = output_values.get(i) {
+                        let width = self.signal_widths.get(&out_id.0).copied().unwrap_or(1);
+                        let mut bits = vec![false; width];
+                        bits[0] = value;
+                        self.state.signals.insert(out_id.0, bits);
+                    }
+                }
+            }
+            SirOperation::Primitive {
                 id,
                 ptype,
                 inputs,
                 outputs,
                 path,
             } => {
+                // Check if this operation produces _t300 (next state logic) or faults__oc
+                let produces_t300 = outputs.iter().any(|out_id| {
+                    self.signal_id_to_name
+                        .get(&out_id.0)
+                        .map(|name| name.contains("_t300"))
+                        .unwrap_or(false)
+                });
+
+                // Debug: trace faults__oc signal
+                let produces_faults_oc = outputs.iter().any(|out_id| {
+                    self.signal_id_to_name
+                        .get(&out_id.0)
+                        .map(|name| name.contains("faults__oc") || name.contains("faults.oc"))
+                        .unwrap_or(false)
+                });
+
+                // Debug: trace FaultLatch fault_out signal
+                let produces_fault_out = outputs.iter().any(|out_id| {
+                    self.signal_id_to_name
+                        .get(&out_id.0)
+                        .map(|name| name.contains("fault_out") || name.contains("_latched"))
+                        .unwrap_or(false)
+                });
+
                 // Gather input values
                 let input_values: Vec<bool> = inputs
                     .iter()
@@ -660,6 +739,65 @@ impl GateLevelSimulator {
                             .and_then(|v| v.first().copied())
                     })
                     .collect();
+
+                // Debug trace for _t300 producers
+                if produces_t300 {
+                    let input_details: Vec<_> = inputs
+                        .iter()
+                        .map(|sig_id| {
+                            let name = self.signal_id_to_name.get(&sig_id.0).cloned().unwrap_or_else(|| format!("id{}", sig_id.0));
+                            let value = self.state.signals.get(&sig_id.0).and_then(|v| v.first().copied());
+                            (name, value)
+                        })
+                        .collect();
+                    let output_names: Vec<_> = outputs
+                        .iter()
+                        .map(|o| self.signal_id_to_name.get(&o.0).cloned().unwrap_or_default())
+                        .collect();
+                    println!("[GATE_T300] path={}, ptype={:?}", path, ptype);
+                    println!("[GATE_T300]   inputs: {:?}", input_details);
+                    println!("[GATE_T300]   outputs: {:?}", output_names);
+                }
+
+                // Debug trace for faults__oc signal
+                if produces_faults_oc {
+                    let input_details: Vec<_> = inputs
+                        .iter()
+                        .map(|sig_id| {
+                            let name = self.signal_id_to_name.get(&sig_id.0).cloned().unwrap_or_else(|| format!("id{}", sig_id.0));
+                            let value = self.state.signals.get(&sig_id.0).and_then(|v| v.first().copied());
+                            (name, value)
+                        })
+                        .collect();
+                    let output_names: Vec<_> = outputs
+                        .iter()
+                        .map(|o| self.signal_id_to_name.get(&o.0).cloned().unwrap_or_default())
+                        .collect();
+                    println!("[GATE_FAULTS_OC] path={}, ptype={:?}", path, ptype);
+                    println!("[GATE_FAULTS_OC]   inputs: {:?}", input_details);
+                    println!("[GATE_FAULTS_OC]   outputs: {:?}", output_names);
+                    println!("[GATE_FAULTS_OC]   input_values: {:?}", input_values);
+                }
+
+                // Debug trace for fault_out/latched signals (FaultLatch outputs)
+                if produces_fault_out && (path.contains("hw_uv_latch") || path.contains("hw_ot_latch")) {
+                    let input_details: Vec<_> = inputs
+                        .iter()
+                        .map(|sig_id| {
+                            let name = self.signal_id_to_name.get(&sig_id.0).cloned().unwrap_or_else(|| format!("id{}", sig_id.0));
+                            let value = self.state.signals.get(&sig_id.0).and_then(|v| v.first().copied());
+                            (name, value)
+                        })
+                        .collect();
+                    let output_names: Vec<_> = outputs
+                        .iter()
+                        .map(|o| self.signal_id_to_name.get(&o.0).cloned().unwrap_or_default())
+                        .collect();
+                    println!("[GATE_FAULT_LATCH] path={}, ptype={:?}", path, ptype);
+                    println!("[GATE_FAULT_LATCH]   inputs: {:?}", input_details);
+                    println!("[GATE_FAULT_LATCH]   outputs: {:?}", output_names);
+                    println!("[GATE_FAULT_LATCH]   input_values: {:?}", input_values);
+                }
 
                 // Evaluate primitive with potential fault injection
                 let output_values = if let Some(fault) = &self.active_fault {
@@ -676,6 +814,21 @@ impl GateLevelSimulator {
                 } else {
                     evaluate_primitive(ptype, &input_values)
                 };
+
+                // Debug trace output values for _t300
+                if produces_t300 {
+                    println!("[GATE_T300]   evaluated: {:?}", output_values);
+                }
+
+                // Debug trace output values for faults__oc
+                if produces_faults_oc {
+                    println!("[GATE_FAULTS_OC]   evaluated: {:?}", output_values);
+                }
+
+                // Debug trace output values for fault_out/latched
+                if produces_fault_out && (path.contains("hw_uv_latch") || path.contains("hw_ot_latch")) {
+                    println!("[GATE_FAULT_LATCH]   evaluated: {:?}", output_values);
+                }
 
                 // Store output values
                 for (i, out_id) in outputs.iter().enumerate() {
@@ -745,6 +898,28 @@ impl GateLevelSimulator {
                     // The MUX selects the reset value when rst=1, and the DFF latches it.
                     // Previously, forcing all registers to 0 broke non-zero reset values.
                     for op in &block.operations {
+                        // Debug: trace state_reg DFF operations
+                        if let SirOperation::Primitive { outputs, inputs, ptype, path, .. } = op {
+                            let is_state_reg = path.contains("state_reg");
+                            if is_state_reg {
+                                let input_details: Vec<_> = inputs
+                                    .iter()
+                                    .map(|sig_id| {
+                                        let name = self.signal_id_to_name.get(&sig_id.0).cloned().unwrap_or_else(|| format!("id{}", sig_id.0));
+                                        let value = self.state.signals.get(&sig_id.0).and_then(|v| v.first().copied());
+                                        (name, sig_id.0, value)
+                                    })
+                                    .collect();
+                                let output_names: Vec<_> = outputs.iter()
+                                    .map(|o| self.signal_id_to_name.get(&o.0).cloned().unwrap_or_default())
+                                    .collect();
+                                println!("[GATE_DFF] state_reg: path={}, outputs={:?}", path, output_names);
+                                for (name, id, sig_val) in &input_details {
+                                    println!("[GATE_DFF]   d_input '{}' (id={}): value={:?}",
+                                        name, id, sig_val);
+                                }
+                            }
+                        }
                         self.evaluate_operation(op);
                     }
                 }

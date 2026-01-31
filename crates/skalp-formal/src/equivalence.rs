@@ -8879,6 +8879,51 @@ pub struct SimEquivalenceResult {
     pub time_ms: u64,
     /// Number of outputs compared per cycle
     pub outputs_compared: usize,
+    /// Diagnostic information for debugging mismatches
+    pub diagnostics: Option<MismatchDiagnostics>,
+}
+
+/// Detailed diagnostics for a simulation mismatch
+#[derive(Debug, Clone, Default)]
+pub struct MismatchDiagnostics {
+    /// Input values at the time of mismatch (name -> value)
+    pub input_values: Vec<(String, u64)>,
+    /// MIR internal signal values relevant to the failing output
+    pub mir_signals: Vec<(String, String, u64)>,  // (hierarchical_path, internal_name, value)
+    /// Gate internal signal values relevant to the failing output
+    pub gate_signals: Vec<(String, u64)>,  // (signal_name, value)
+    /// SIR node chain for the failing output (for dataflow tracing)
+    pub sir_dataflow: Vec<String>,
+    /// Per-cycle trace of the failing signal and its dependencies
+    /// Each entry: (cycle, signal_name, mir_value, gate_value)
+    pub cycle_trace: Vec<CycleTraceEntry>,
+    /// Input port matching information
+    pub input_matching: InputMatchingInfo,
+}
+
+/// Per-cycle trace entry for debugging signal propagation
+#[derive(Debug, Clone)]
+pub struct CycleTraceEntry {
+    /// Cycle number (0 = after reset)
+    pub cycle: u64,
+    /// Phase within cycle ("pre-clock", "post-clock")
+    pub phase: String,
+    /// Traced signals with their values
+    /// (user_name, internal_name, mir_value, gate_value, match)
+    pub signals: Vec<(String, String, Option<u64>, Option<u64>, bool)>,
+    /// Input values applied this cycle
+    pub inputs: Vec<(String, u64)>,
+}
+
+/// Information about input port matching between MIR and Gate
+#[derive(Debug, Clone, Default)]
+pub struct InputMatchingInfo {
+    /// Successfully matched inputs: (user_name, mir_internal_name, gate_names)
+    pub matched: Vec<(String, String, Vec<String>)>,
+    /// Unmatched MIR inputs: (user_name, mir_internal_name, reason)
+    pub unmatched_mir: Vec<(String, String, String)>,
+    /// Unmatched Gate inputs: (gate_name, reason)
+    pub unmatched_gate: Vec<(String, String)>,
 }
 
 /// Simulation-based equivalence checker using SKALP's gate-level simulator
@@ -9056,6 +9101,7 @@ impl SimBasedEquivalenceChecker {
                             value_2: Some(v2),
                             time_ms: start.elapsed().as_millis() as u64,
                             outputs_compared: matched_outputs.len(),
+                            diagnostics: None,
                         });
                     }
                     (None, Some(_)) | (Some(_), None) => {
@@ -9082,6 +9128,7 @@ impl SimBasedEquivalenceChecker {
             value_2: None,
             time_ms: start.elapsed().as_millis() as u64,
             outputs_compared: matched_outputs.len(),
+            diagnostics: None,
         })
     }
 
@@ -9247,8 +9294,51 @@ impl SimBasedEquivalenceChecker {
             }
         }
 
-        // Debug: show unmatched MIR inputs
+        // Build input matching info for diagnostics
         let matched_mir_inputs: std::collections::HashSet<_> = matched_inputs.iter().map(|(m, _)| m.clone()).collect();
+
+        // Build InputMatchingInfo struct for diagnostics
+        let mut input_matching_info = InputMatchingInfo::default();
+
+        // Record matched inputs
+        for (mir_name, gate_bits) in &matched_inputs {
+            let user_name = resolve_mir_name(mir_name);
+            let gate_names: Vec<String> = gate_bits.iter().map(|(n, _)| n.clone()).collect();
+            input_matching_info.matched.push((user_name, mir_name.clone(), gate_names));
+        }
+
+        // Record unmatched MIR inputs with reasons
+        for mir_name in &mir_inputs {
+            if !matched_mir_inputs.contains(mir_name) {
+                let user_name = resolve_mir_name(mir_name);
+                let base = normalize_port_name(&user_name).base_name;
+                let reason = if gate_inputs_by_base.contains_key(&base) {
+                    "Base name matches but failed to match (unexpected)".to_string()
+                } else {
+                    format!("No gate input with base name '{}'", base)
+                };
+                input_matching_info.unmatched_mir.push((user_name, mir_name.clone(), reason));
+            }
+        }
+
+        // Record unmatched Gate inputs
+        let matched_gate_bases: std::collections::HashSet<_> = matched_inputs.iter()
+            .flat_map(|(mir_name, _)| {
+                let user_name = resolve_mir_name(mir_name);
+                Some(normalize_port_name(&user_name).base_name)
+            })
+            .collect();
+        for (gate_base, gate_bits) in &gate_inputs_by_base {
+            if !matched_gate_bases.contains(gate_base) {
+                let gate_names: Vec<String> = gate_bits.iter().map(|(n, _)| n.clone()).collect();
+                let reason = format!("No MIR input resolves to base name '{}'", gate_base);
+                for gate_name in gate_names {
+                    input_matching_info.unmatched_gate.push((gate_name, reason.clone()));
+                }
+            }
+        }
+
+        // Debug: show unmatched MIR inputs
         let unmatched_mir_inputs: Vec<_> = mir_inputs.iter()
             .filter(|n| !matched_mir_inputs.contains(*n))
             .map(|n| {
@@ -9559,6 +9649,10 @@ impl SimBasedEquivalenceChecker {
         }
         println!("[SIM_EQ] Quiet cycles passed - baseline equivalence verified");
 
+        // Cycle trace buffer - keep last N cycles for diagnostics
+        const TRACE_BUFFER_SIZE: usize = 10;
+        let mut cycle_trace_buffer: Vec<CycleTraceEntry> = Vec::with_capacity(TRACE_BUFFER_SIZE);
+
         for cycle in 0..self.max_cycles {
             // Generate deterministic pseudo-random inputs
             for (mir_name, gate_bits) in &matched_inputs {
@@ -9616,6 +9710,63 @@ impl SimBasedEquivalenceChecker {
             mir_sim.step().await;
             gate_sim.step().await;
 
+            // Collect cycle trace for diagnostics
+            let mut trace_entry = CycleTraceEntry {
+                cycle,
+                phase: "post-clock".to_string(),
+                signals: Vec::new(),
+                inputs: Vec::new(),
+            };
+
+            // Collect input values applied this cycle
+            for (mir_name, _) in &matched_inputs {
+                let user_name = resolve_mir_name(mir_name);
+                if user_name.contains("clk") || user_name.contains("clock") ||
+                   user_name.contains("rst") || user_name.contains("reset") {
+                    continue;
+                }
+                if let Some(val) = mir_sim.get_output_raw(mir_name).await {
+                    trace_entry.inputs.push((user_name, val));
+                }
+            }
+
+            // Collect all output values for trace
+            for (mir_name, gate_bits) in &matched_outputs {
+                let user_name = resolve_mir_name(mir_name);
+                let mir_val = mir_sim.get_output_raw(mir_name).await;
+
+                // Assemble gate value
+                let mut sorted_bits = gate_bits.clone();
+                sorted_bits.sort_by_key(|(_, idx)| idx.unwrap_or(0));
+                let mut gate_val: u64 = 0;
+                let mut has_gate = false;
+                for (gate_name, bit_idx) in &sorted_bits {
+                    if let Some(gv) = gate_sim.get_output_raw(gate_name).await {
+                        has_gate = true;
+                        if let Some(idx) = bit_idx {
+                            gate_val |= (gv & 1) << idx;
+                        } else {
+                            gate_val = gv;
+                        }
+                    }
+                }
+
+                let matches = mir_val == Some(gate_val);
+                trace_entry.signals.push((
+                    user_name,
+                    mir_name.clone(),
+                    mir_val,
+                    if has_gate { Some(gate_val) } else { None },
+                    matches
+                ));
+            }
+
+            // Keep only last N cycles in buffer
+            if cycle_trace_buffer.len() >= TRACE_BUFFER_SIZE {
+                cycle_trace_buffer.remove(0);
+            }
+            cycle_trace_buffer.push(trace_entry);
+
             // Compare outputs
             for (mir_name, gate_bits) in &matched_outputs {
                 let mir_val = mir_sim.get_output_raw(mir_name).await.unwrap_or(0);
@@ -9626,9 +9777,14 @@ impl SimBasedEquivalenceChecker {
 
                 let mut gate_val: u64 = 0;
                 let mut has_bits = false;
+                let user_name = resolve_mir_name(mir_name);
                 for (gate_name, bit_idx) in &sorted_bits {
                     if let Some(gv) = gate_sim.get_output_raw(gate_name).await {
                         has_bits = true;
+                        // Debug: trace faults.oc
+                        if user_name.contains("faults.oc") || user_name.contains("faults__oc") {
+                            println!("[EC_DEBUG] faults.oc: gate_name='{}', bit_idx={:?}, gv={}", gate_name, bit_idx, gv);
+                        }
                         if let Some(idx) = bit_idx {
                             // Set the specific bit
                             gate_val |= (gv & 1) << idx;
@@ -9639,87 +9795,75 @@ impl SimBasedEquivalenceChecker {
                     }
                 }
 
+                // Debug: trace faults.oc final value
+                if user_name.contains("faults.oc") || user_name.contains("faults__oc") {
+                    println!("[EC_DEBUG] faults.oc final: mir_val={}, gate_val={}", mir_val, gate_val);
+                }
+
                 if has_bits && mir_val != gate_val {
-                    let user_name = resolve_mir_name(mir_name);
-                    // Log the mismatch but continue to find more
-                    if cycle < 5 {
-                        println!("[SIM_EQ] MISMATCH at cycle {} on '{}':", cycle, user_name);
-                        println!("[SIM_EQ]   MIR value:  0x{:x} ({})", mir_val, mir_val);
-                        println!("[SIM_EQ]   Gate value: 0x{:x} ({})", gate_val, gate_val);
-                        if sorted_bits.len() <= 8 {
-                            println!("[SIM_EQ]   Gate bits ({}):", sorted_bits.len());
-                            for (gate_name, bit_idx) in sorted_bits.iter().take(8) {
-                                let bv = gate_sim.get_output_raw(gate_name).await.unwrap_or(999);
-                                println!("[SIM_EQ]     [{}] {} = {}", bit_idx.unwrap_or(0), gate_name, bv);
-                            }
+                    // Build diagnostics for the report
+                    let mut diagnostics = MismatchDiagnostics::default();
+
+                    // Collect ALL MIR internal signals (let the report filter as needed)
+                    for entry in sir_module.name_registry.all_entries() {
+                        if let Some(val) = mir_sim.get_output_raw(&entry.internal_name).await {
+                            diagnostics.mir_signals.push((
+                                entry.hierarchical_path.clone(),
+                                entry.internal_name.clone(),
+                                val
+                            ));
                         }
+                    }
 
-                        // Hierarchical debugging: trace internal signals
-                        println!("[SIM_EQ] === Hierarchical Debug for '{}' ===", user_name);
+                    // Collect ALL Gate internal signals
+                    let all_gate_signals = gate_sim.dump_gate_signals();
+                    for (sig_name, bits) in &all_gate_signals {
+                        let val: u64 = bits.iter()
+                            .enumerate()
+                            .fold(0u64, |acc, (i, &b)| acc | ((b as u64) << i));
+                        diagnostics.gate_signals.push((sig_name.clone(), val));
+                    }
 
-                        // Get all gate signals and find those related to this output
-                        // The gate netlist uses hierarchical names like "instance.signal"
-                        let gate_all_outputs = gate_sim.get_output_names();
+                    // Collect input values
+                    for (mir_input_name, _) in &matched_inputs {
+                        let input_user_name = resolve_mir_name(mir_input_name);
+                        if let Some(val) = mir_sim.get_output_raw(mir_input_name).await {
+                            diagnostics.input_values.push((input_user_name, val));
+                        }
+                    }
 
-                        // Find the base name without struct field separator
-                        let base_output = user_name.split('.').next().unwrap_or(&user_name);
-
-                        // Look for related signals in the gate netlist
-                        // These would be from sub-instances that drive this output
-                        let related_prefixes: Vec<&str> = match base_output {
-                            "faults" => vec!["protection", "prot_faults"],
-                            "lockstep_tx" => vec!["lockstep", "any_fault"],
-                            "state" => vec!["state_reg"],
-                            _ => vec![],
-                        };
-
-                        // For faults.oc specifically, trace the protection hierarchy
-                        if user_name.contains("faults") && user_name.contains("oc") {
-                            println!("[SIM_EQ]   Tracing faults.oc hierarchy:");
-                            println!("[SIM_EQ]   faults.oc = prot_faults.oc = i_hard_oc | hw_oc_latched");
-
-                            // Try to get internal signals from MIR behavioral sim
-                            // These use the internal _sN naming that we need to resolve
-                            for entry in sir_module.name_registry.all_entries() {
-                                let path = &entry.hierarchical_path;
-                                // Look for protection-related signals
-                                if path.contains("protection") ||
-                                   path.contains("i_hard_oc") ||
-                                   path.contains("hw_oc") ||
-                                   path.contains("oc_hard") ||
-                                   path.contains("latched") {
-                                    // Try to get the value from MIR simulator
-                                    if let Some(mir_internal) = mir_sim.get_output_raw(&entry.internal_name).await {
-                                        println!("[SIM_EQ]     MIR '{}' ({}) = {}",
-                                            path, entry.internal_name, mir_internal);
+                    // Extract SIR dataflow for the failing output
+                    // Find the output in SIR and trace its driver chain
+                    if let Some(output) = sir_module.outputs.iter().find(|o| o.name == *mir_name || resolve_mir_name(&o.name) == user_name) {
+                        diagnostics.sir_dataflow.push(format!("Output '{}' (SIR name: '{}')", user_name, output.name));
+                        // Find driver node for this output
+                        if let Some(signal) = sir_module.signals.iter().find(|s| s.name == output.name) {
+                            if let Some(driver_id) = signal.driver_node {
+                                if let Some(driver_node) = sir_module.combinational_nodes.iter().find(|n| n.id == driver_id) {
+                                    diagnostics.sir_dataflow.push(format!("  Driven by node {}: {:?}", driver_id, driver_node.kind));
+                                    // Trace inputs to this node
+                                    for input in &driver_node.inputs {
+                                        diagnostics.sir_dataflow.push(format!("    Input: {}", input.signal_id));
                                     }
                                 }
                             }
-
-                            // Dump ALL gate signals (not just outputs) for debugging
-                            println!("[SIM_EQ]   Gate internal signals with 'protection', 'oc', 'latch':");
-                            let all_gate_signals = gate_sim.dump_gate_signals();
-                            for (sig_name, bits) in &all_gate_signals {
-                                let lower = sig_name.to_lowercase();
-                                if lower.contains("protection") ||
-                                   lower.contains("_oc") ||
-                                   lower.contains(".oc") ||
-                                   lower.contains("hw_oc") ||
-                                   lower.contains("latch") ||
-                                   lower.contains("fault") {
-                                    // Convert bits to integer
-                                    let val: u64 = bits.iter()
-                                        .enumerate()
-                                        .fold(0u64, |acc, (i, &b)| acc | ((b as u64) << i));
-                                    println!("[SIM_EQ]     Gate '{}' = {} (bits: {:?})", sig_name, val, bits);
-                                }
-                            }
-                            println!("[SIM_EQ]   Total gate signals: {}", all_gate_signals.len());
                         }
-
-                        println!("[SIM_EQ] === End Hierarchical Debug ===");
                     }
-                    // Return on first mismatch but with detailed info
+
+                    // Add cycle trace from buffer
+                    diagnostics.cycle_trace = cycle_trace_buffer.clone();
+
+                    // Add input matching info
+                    diagnostics.input_matching = input_matching_info.clone();
+
+                    // Log summary to console
+                    println!("[SIM_EQ] MISMATCH at cycle {} on '{}':", cycle, user_name);
+                    println!("[SIM_EQ]   MIR value:  0x{:x} ({})", mir_val, mir_val);
+                    println!("[SIM_EQ]   Gate value: 0x{:x} ({})", gate_val, gate_val);
+                    println!("[SIM_EQ]   Diagnostics collected: {} MIR signals, {} Gate signals, {} inputs",
+                        diagnostics.mir_signals.len(), diagnostics.gate_signals.len(), diagnostics.input_values.len());
+
+                    // Return with diagnostics
                     return Ok(SimEquivalenceResult {
                         equivalent: false,
                         cycles_verified: cycle,
@@ -9729,6 +9873,7 @@ impl SimBasedEquivalenceChecker {
                         value_2: Some(gate_val),
                         time_ms: start.elapsed().as_millis() as u64,
                         outputs_compared: matched_outputs.len(),
+                        diagnostics: Some(diagnostics),
                     });
                 }
             }
@@ -9749,6 +9894,7 @@ impl SimBasedEquivalenceChecker {
             value_2: None,
             time_ms: start.elapsed().as_millis() as u64,
             outputs_compared: matched_outputs.len(),
+            diagnostics: None,
         })
     }
 }

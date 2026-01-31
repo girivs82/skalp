@@ -167,6 +167,14 @@ impl GpuGateRuntime {
     fn initialize(&mut self) -> Result<(), String> {
         let module = &self.sir.top_module;
 
+        // Collect clock signal IDs from sequential blocks
+        // Gate-level SIR stores clock info in SequentialBlock, not in SirSignalType::Register
+        let clock_ids: std::collections::HashSet<u32> = module
+            .seq_blocks
+            .iter()
+            .map(|block| block.clock.0)
+            .collect();
+
         // Build signal mappings
         for signal in &module.signals {
             self.signal_name_to_id
@@ -184,7 +192,8 @@ impl GpuGateRuntime {
                 SirSignalType::Port { direction } => match direction {
                     SirPortDirection::Input => {
                         self.input_ports.push(signal.id);
-                        if signal.name.contains("clk") || signal.name.contains("clock") {
+                        // Identify clock signals by checking if this signal is used as a clock for any register
+                        if clock_ids.contains(&signal.id.0) {
                             self.clock_signals.push(signal.id);
                             self.prev_clocks.insert(signal.id.0, false);
                         }
@@ -261,6 +270,18 @@ impl GpuGateRuntime {
                     });
                 }
             }
+        }
+
+        // Debug: Print clock and sequential primitive info
+        if std::env::var("SKALP_DEBUG_SEQ").is_ok() {
+            use std::io::Write;
+            let clock_names: Vec<_> = self.clock_signals.iter()
+                .filter_map(|id| self.signal_id_to_name.get(&id.0))
+                .collect();
+            let seq_count = self.primitives.iter().filter(|p| p.is_sequential).count();
+            writeln!(std::io::stderr(), "🕐 [GPU INIT] clock_signals: {:?}, sequential_primitives: {}, total_primitives: {}",
+                clock_names, seq_count, self.primitives.len()).ok();
+            std::io::stderr().flush().ok();
         }
 
         // Create GPU buffers
@@ -574,13 +595,14 @@ kernel void eval_sequential(
         }
     }
 
-    // DFF: output = D input (inputs[0] is D, clock is handled via clock_mask)
+    // DFF: output = D input
+    // For gate-level primitives (DffP), the D input is at inputs[0], clock is stored separately
     if (prim.ptype == PTYPE_DFF_P || prim.ptype == PTYPE_DFF_N) {
         if (reset_active) {
             // Reset: set output to 0
             signals_out[prim.outputs[0]] = 0;
         } else {
-            // Normal: sample D input
+            // Normal: sample D input at inputs[0]
             uint d_input = signals_in[prim.inputs[0]];
             signals_out[prim.outputs[0]] = d_input;
         }
@@ -600,15 +622,16 @@ kernel void eval_sequential(
             // Update CPU state
             self.cpu_signals.insert(id.0, padded.clone());
 
-            // Update GPU buffer
+            // Update GPU buffers - update BOTH since step_gpu swaps them during convergence
             if self.use_gpu {
                 let val = padded.first().copied().unwrap_or(false) as u32;
-                let buffer = if self.current_buffer_is_a {
-                    &self.signal_buffer_a
-                } else {
-                    &self.signal_buffer_b
-                };
-                if let Some(buf) = buffer {
+                if let Some(buf) = &self.signal_buffer_a {
+                    unsafe {
+                        let ptr = buf.contents() as *mut u32;
+                        *ptr.add(id.0 as usize) = val;
+                    }
+                }
+                if let Some(buf) = &self.signal_buffer_b {
                     unsafe {
                         let ptr = buf.contents() as *mut u32;
                         *ptr.add(id.0 as usize) = val;
@@ -628,12 +651,14 @@ kernel void eval_sequential(
 
             if self.use_gpu {
                 let val = bits.first().copied().unwrap_or(false) as u32;
-                let buffer = if self.current_buffer_is_a {
-                    &self.signal_buffer_a
-                } else {
-                    &self.signal_buffer_b
-                };
-                if let Some(buf) = buffer {
+                // Update BOTH buffers since step_gpu swaps them during convergence
+                if let Some(buf) = &self.signal_buffer_a {
+                    unsafe {
+                        let ptr = buf.contents() as *mut u32;
+                        *ptr.add(id.0 as usize) = val;
+                    }
+                }
+                if let Some(buf) = &self.signal_buffer_b {
                     unsafe {
                         let ptr = buf.contents() as *mut u32;
                         *ptr.add(id.0 as usize) = val;
@@ -653,12 +678,14 @@ kernel void eval_sequential(
             self.cpu_signals.insert(id.0, vec![bit_value]);
 
             if self.use_gpu {
-                let buffer = if self.current_buffer_is_a {
-                    &self.signal_buffer_a
-                } else {
-                    &self.signal_buffer_b
-                };
-                if let Some(buf) = buffer {
+                // Update BOTH buffers since step_gpu swaps them during convergence
+                if let Some(buf) = &self.signal_buffer_a {
+                    unsafe {
+                        let ptr = buf.contents() as *mut u32;
+                        *ptr.add(id.0 as usize) = bit_value as u32;
+                    }
+                }
+                if let Some(buf) = &self.signal_buffer_b {
                     unsafe {
                         let ptr = buf.contents() as *mut u32;
                         *ptr.add(id.0 as usize) = bit_value as u32;
@@ -759,6 +786,7 @@ kernel void eval_sequential(
         let Some(buf_b) = &self.signal_buffer_b else {
             return;
         };
+
 
         // Detect clock edges before we start modifying signals
         let clock_mask = self.detect_clock_edges_gpu();
@@ -925,6 +953,7 @@ kernel void eval_sequential(
 
         // Evaluate sequential logic on clock edges
         if clock_mask != 0 {
+
             // Get current buffer (after combinational convergence)
             let current_buf = if self.current_buffer_is_a {
                 buf_a
@@ -1147,6 +1176,8 @@ kernel void eval_sequential(
 
     /// Step simulation on CPU (fallback)
     fn step_cpu(&mut self) {
+        let debug_seq = std::env::var("SKALP_DEBUG_SEQ").is_ok();
+
         // Detect clock edges
         let mut rising_edges = Vec::new();
         for clock_id in &self.clock_signals {
@@ -1157,9 +1188,27 @@ kernel void eval_sequential(
                 .and_then(|v| v.first().copied())
                 .unwrap_or(false);
 
+            if debug_seq {
+                // Find clock name
+                let clock_name = self
+                    .signal_name_to_id
+                    .iter()
+                    .find(|(_, &id)| id.0 == clock_id.0)
+                    .map(|(n, _)| n.as_str())
+                    .unwrap_or("?");
+                eprintln!(
+                    "🕐 [SEQ] Clock {} (id={}): prev={}, curr={}",
+                    clock_name, clock_id.0, prev, curr
+                );
+            }
+
             if !prev && curr {
                 rising_edges.push(*clock_id);
             }
+        }
+
+        if debug_seq && !rising_edges.is_empty() {
+            eprintln!("🕐 [SEQ] Rising edges detected: {:?}", rising_edges.iter().map(|s| s.0).collect::<Vec<_>>());
         }
 
         // Evaluate combinational primitives until convergence
@@ -1211,6 +1260,15 @@ kernel void eval_sequential(
         }
 
         // Evaluate sequential primitives on clock edges
+        let seq_primitives: Vec<_> = self.primitives.iter().filter(|p| p.is_sequential).collect();
+        if debug_seq {
+            eprintln!(
+                "🔄 [SEQ] Total sequential primitives: {}, rising_edges: {:?}",
+                seq_primitives.len(),
+                rising_edges.iter().map(|s| s.0).collect::<Vec<_>>()
+            );
+        }
+
         for prim in &self.primitives.clone() {
             if !prim.is_sequential {
                 continue;
@@ -1218,7 +1276,12 @@ kernel void eval_sequential(
 
             let clock_id = match prim.clock {
                 Some(c) => c,
-                None => continue,
+                None => {
+                    if debug_seq {
+                        eprintln!("⚠️ [SEQ] Sequential primitive {:?} has no clock!", prim.ptype);
+                    }
+                    continue;
+                }
             };
 
             if !rising_edges.contains(&clock_id) {
@@ -1236,6 +1299,25 @@ kernel void eval_sequential(
                 .collect();
 
             let output_values = evaluate_primitive(&prim.ptype, &input_values);
+
+            if debug_seq {
+                // Find output signal names
+                let out_names: Vec<_> = prim
+                    .outputs
+                    .iter()
+                    .map(|out_id| {
+                        self.signal_name_to_id
+                            .iter()
+                            .find(|(_, &id)| id.0 == out_id.0)
+                            .map(|(n, _)| n.clone())
+                            .unwrap_or_else(|| format!("sig_{}", out_id.0))
+                    })
+                    .collect();
+                eprintln!(
+                    "🔄 [SEQ] Evaluating {:?}: inputs={:?} -> outputs={:?}, out_signals={:?}",
+                    prim.ptype, input_values, output_values, out_names
+                );
+            }
 
             for (i, out_id) in prim.outputs.iter().enumerate() {
                 if let Some(&value) = output_values.get(i) {

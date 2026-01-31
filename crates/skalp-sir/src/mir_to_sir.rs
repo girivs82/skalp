@@ -7831,6 +7831,19 @@ impl<'a> MirToSirConverter<'a> {
                     ));
                 }
                 Statement::Block(block) => {
+                    // Debug: show what's in this inner block
+                    if target.contains("state_reg") {
+                        let inner_types: Vec<_> = block.statements.iter().map(|s| match s {
+                            Statement::Assignment(a) => {
+                                format!("Assign(sig_id={:?})", a.lhs)
+                            },
+                            Statement::If(_) => "If".to_string(),
+                            Statement::Block(_) => "Block".to_string(),
+                            Statement::Case(_) => "Case".to_string(),
+                            _ => "Other".to_string(),
+                        }).collect();
+                        println!("            INNER_BLOCK: {} stmts: {:?}", block.statements.len(), inner_types);
+                    }
                     // Recursively search within the block
                     if let Some(result) = self.find_assignment_in_branch_for_instance(
                         &block.statements,
@@ -7847,7 +7860,26 @@ impl<'a> MirToSirConverter<'a> {
                 Statement::Case(case_stmt) => {
                     // BUG #237 FIX: Handle Case/match statements in instance branches
                     // This is critical for state machines that use match statements
-                    println!("         CASE_FOUND: Found Case statement in instance branch for target={}, {} items", target, case_stmt.items.len());
+                    println!("         CASE_FOUND: Found Case statement in instance branch for target={}, {} items, child_module='{}'",
+                        target, case_stmt.items.len(), child_module.name);
+                    if target.contains("state_reg") {
+                        for (i, item) in case_stmt.items.iter().enumerate() {
+                            println!("           RAW_ITEM[{}]: block has {} stmts", i, item.block.statements.len());
+                            for (j, s) in item.block.statements.iter().enumerate() {
+                                let st = match s {
+                                    Statement::Assignment(_) => "Assignment",
+                                    Statement::If(_) => "If",
+                                    Statement::Block(b) => {
+                                        println!("             -> Block has {} inner stmts", b.statements.len());
+                                        "Block"
+                                    },
+                                    Statement::Case(_) => "Case",
+                                    _ => "Other",
+                                };
+                                println!("             stmt[{}]: {}", j, st);
+                            }
+                        }
+                    }
                     if let Some(val) = self.synthesize_case_for_target_for_instance(
                         case_stmt,
                         inst_prefix,
@@ -7900,6 +7932,16 @@ impl<'a> MirToSirConverter<'a> {
         let mut found_target = false;
 
         for (idx, item) in case_stmt.items.iter().enumerate() {
+            if target.contains("state_reg") {
+                let stmt_types: Vec<_> = item.block.statements.iter().map(|s| match s {
+                    Statement::Assignment(_) => "Assignment",
+                    Statement::If(_) => "If",
+                    Statement::Block(_) => "Block",
+                    Statement::Case(_) => "Case",
+                    _ => "Other",
+                }).collect();
+                println!("         ARM[{}] BLOCK: {} stmts: {:?}", idx, item.block.statements.len(), stmt_types);
+            }
             // Recursively find assignment in this arm's block
             let arm_value = self.find_assignment_in_branch_for_instance(
                 &item.block.statements,
@@ -7998,10 +8040,11 @@ impl<'a> MirToSirConverter<'a> {
                 or_node
             };
 
-            current_mux = self.create_mux_node(condition_node, value_node, current_mux);
+            let old_mux = current_mux;
+            current_mux = self.create_mux_node(condition_node, value_node, old_mux);
             if target.contains("state_reg") {
                 println!("         MUX_CHAIN: cond={} value={} else={} → new_mux={}",
-                    condition_node, value_node, current_mux, current_mux);
+                    condition_node, value_node, old_mux, current_mux);
             }
         }
 

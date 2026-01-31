@@ -441,8 +441,15 @@ async fn test_state_transition_init_to_waitbms_gate_level() {
     // Enable the controller - should transition to WaitBms
     tb.set("enable", 1u8);
 
-    // Single clock cycle for state transition
+    // DEBUG: Single clock cycle for state transition
     tb.clock(1).await;
+
+    // Check if enable is actually set
+    let enable_check: u8 = tb.get_as("enable").await;
+    println!("DEBUG: enable = {}", enable_check);
+
+    let state1: u8 = tb.get_as("state").await;
+    println!("DEBUG: state after 1 clock = {}", state1);
 
     // Debug: check fault outputs after enable
     println!("\n=== Fault outputs after enable ===");

@@ -650,6 +650,13 @@ impl HirBuilderContext {
                         hir.type_aliases.push(type_alias);
                     }
                 }
+                SyntaxKind::EntityAlias => {
+                    if let Some(mut entity_alias) = self.build_entity_alias(&child) {
+                        entity_alias.visibility = pending_visibility;
+                        pending_visibility = HirVisibility::Private; // Reset after use
+                        hir.entity_aliases.push(entity_alias);
+                    }
+                }
                 SyntaxKind::DistinctTypeDecl => {
                     if let Some(mut distinct_type) = self.build_distinct_type(&child) {
                         // BUG FIX: Apply pending visibility (from preceding Visibility node)
@@ -2307,6 +2314,96 @@ impl HirBuilderContext {
             visibility,
             generics,
             target_type,
+        })
+    }
+
+    /// Build entity alias declaration from syntax node
+    /// Example: `pub entity FastSim = DabController::<1000, 1000, 10000>;`
+    fn build_entity_alias(&mut self, node: &SyntaxNode) -> Option<HirEntityAlias> {
+        // Extract name (first Ident after EntityKw)
+        let name = self.extract_name(node)?;
+
+        // Extract visibility - check for PubKw token in node or parent
+        let visibility = if node.children_with_tokens().any(|child| {
+            child
+                .as_token()
+                .map(|t| t.kind() == SyntaxKind::PubKw)
+                .unwrap_or(false)
+        }) || node
+            .parent()
+            .and_then(|p| p.first_child_of_kind(SyntaxKind::PubKw))
+            .is_some()
+        {
+            HirVisibility::Public
+        } else {
+            HirVisibility::Private
+        };
+
+        // Check for async keyword
+        let is_async = node.children_with_tokens().any(|child| {
+            child
+                .as_token()
+                .map(|t| t.kind() == SyntaxKind::AsyncKw)
+                .unwrap_or(false)
+        });
+
+        // Extract target type and generic args (the entity type after '=')
+        let type_node = node.children().find(|child| {
+            matches!(
+                child.kind(),
+                SyntaxKind::TypeExpr | SyntaxKind::TypeAnnotation
+            )
+        });
+
+        let (target_type, generic_args) = if let Some(type_node) = type_node {
+            // Look for CustomType with ArgList inside
+            let mut target = HirType::Bit(1);
+            let mut args = Vec::new();
+
+            // Find the CustomType node which may have generic args
+            if let Some(custom_type) = type_node.descendants().find(|n| n.kind() == SyntaxKind::CustomType) {
+                // Extract the entity name
+                if let Some(ident) = custom_type.first_token_of_kind(SyntaxKind::Ident) {
+                    target = HirType::Custom(ident.text().to_string());
+                }
+
+                // Extract generic arguments
+                if let Some(arg_list) = custom_type.first_child_of_kind(SyntaxKind::ArgList) {
+                    for arg_node in arg_list.children() {
+                        // Each arg may be a direct expression or wrapped in Arg node
+                        let expr_node = if arg_node.kind() == SyntaxKind::Arg {
+                            arg_node.children().next()
+                        } else {
+                            Some(arg_node.clone())
+                        };
+
+                        if let Some(expr_node) = expr_node {
+                            if let Some(expr) = self.build_expression(&expr_node) {
+                                args.push(expr);
+                            }
+                        }
+                    }
+                }
+            } else {
+                // No CustomType found, just extract the type directly
+                target = self.extract_hir_type(&type_node);
+            }
+
+            (target, args)
+        } else {
+            (HirType::Bit(1), Vec::new())
+        };
+
+        // Extract source span
+        let span = self.make_span(node);
+
+        Some(HirEntityAlias {
+            name,
+            visibility,
+            is_async,
+            target_type,
+            generic_args,
+            span,
         })
     }
 
