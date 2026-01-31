@@ -5821,6 +5821,35 @@ impl<'hir> HirToMir<'hir> {
                                     index: Box::new(index),
                                 }),
                             )));
+                        } else if let ExpressionKind::Concat(elements) = &base.kind {
+                            // BUG #34 FIX: Handle constant array indexing
+                            // Arrays are represented as Concat in MIR
+                            // Build MUX tree: (index == 0) ? elem_0 : ((index == 1) ? elem_1 : ...)
+                            if elements.is_empty() {
+                                result_stack.push(None);
+                            } else {
+                                let mut mux_expr: Option<Expression> = None;
+                                for (i, elem_expr) in elements.iter().enumerate().rev() {
+                                    if let Some(else_expr) = mux_expr {
+                                        let index_literal = Expression::with_unknown_type(
+                                            ExpressionKind::Literal(Value::Integer(i as i64)),
+                                        );
+                                        let condition = Expression::with_unknown_type(ExpressionKind::Binary {
+                                            op: BinaryOp::Equal,
+                                            left: Box::new(index.clone()),
+                                            right: Box::new(index_literal),
+                                        });
+                                        mux_expr = Some(Expression::with_unknown_type(ExpressionKind::Conditional {
+                                            cond: Box::new(condition),
+                                            then_expr: Box::new(elem_expr.clone()),
+                                            else_expr: Box::new(else_expr),
+                                        }));
+                                    } else {
+                                        mux_expr = Some(elem_expr.clone());
+                                    }
+                                }
+                                result_stack.push(mux_expr);
+                            }
                         } else {
                             result_stack.push(None);
                         }

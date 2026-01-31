@@ -313,6 +313,9 @@ pub struct SignalRef {
 pub struct StateElement {
     pub name: String,
     pub width: usize,
+    /// The actual SIR type (preserves Array, Vec types for proper Metal codegen)
+    #[serde(default)]
+    pub sir_type: Option<SirType>,
     pub reset_value: Option<u64>,
     pub clock: String,
     pub reset: Option<String>,

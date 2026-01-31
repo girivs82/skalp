@@ -466,11 +466,28 @@ impl<'a> MetalShaderGenerator<'a> {
             for output in &sir.outputs {
                 let output_width = self.get_signal_width_from_sir(sir, &output.name);
                 let is_wide = output_width > 128;
+                let state_sir_type = self.get_signal_sir_type(sir, &output.name);
+                let is_array = matches!(state_sir_type, Some(SirType::Array(_, _)));
 
                 // Check if this output is a state element (sequential output)
                 if sir.state_elements.contains_key(&output.name) {
                     // Output is driven by a register - read from register buffer
-                    if is_wide {
+                    if is_array {
+                        // Array type - use element-wise copy (Metal doesn't allow direct array assignment)
+                        if let Some(SirType::Array(_, array_size)) = state_sir_type {
+                            self.write_indented(&format!(
+                                "// Array copy for output from register (array[{}])\n",
+                                array_size
+                            ));
+                            let reg_accessor = self.get_register_accessor(&output.name);
+                            self.write_indented(&format!(
+                                "for (uint i = 0; i < {}; i++) signals->{}[i] = {}[i];\n",
+                                array_size,
+                                self.sanitize_name(&output.name),
+                                reg_accessor
+                            ));
+                        }
+                    } else if is_wide {
                         // Wide bit type - use element-wise copy
                         let array_size = output_width.div_ceil(32);
                         self.write_indented(&format!(
@@ -1294,13 +1311,33 @@ impl<'a> MetalShaderGenerator<'a> {
                         self.sanitize_name(&output.name),
                         self.sanitize_name(&output.name)
                     ));
-                } else if is_array || is_wide {
-                    // Arrays and wide state elements - copy from registers
-                    self.write_indented(&format!(
-                        "signals->{} = registers->{};\n",
-                        self.sanitize_name(&output.name),
-                        self.sanitize_name(&output.name)
-                    ));
+                } else if is_array {
+                    // Arrays - copy element by element (Metal doesn't allow direct array assignment)
+                    if let Some(SirType::Array(_, array_size)) = state_sir_type {
+                        self.write_indented(&format!(
+                            "for (uint i = 0; i < {}; i++) signals->{}[i] = registers->{}[i];\n",
+                            array_size,
+                            self.sanitize_name(&output.name),
+                            self.sanitize_name(&output.name)
+                        ));
+                    }
+                } else if is_wide {
+                    // Wide state elements - copy from registers (use appropriate type)
+                    let (_, metal_array, _) = self.get_metal_type_safe(&output.name, output_width);
+                    if let Some(array_size) = metal_array {
+                        self.write_indented(&format!(
+                            "for (uint i = 0; i < {}; i++) signals->{}[i] = registers->{}[i];\n",
+                            array_size,
+                            self.sanitize_name(&output.name),
+                            self.sanitize_name(&output.name)
+                        ));
+                    } else {
+                        self.write_indented(&format!(
+                            "signals->{} = registers->{};\n",
+                            self.sanitize_name(&output.name),
+                            self.sanitize_name(&output.name)
+                        ));
+                    }
                 }
             } else {
                 // Output is driven by combinational logic
@@ -1391,22 +1428,41 @@ impl<'a> MetalShaderGenerator<'a> {
                         .map(|s| s.width > 128)
                         .unwrap_or(false);
 
-                    let source = if is_state && !is_array && !is_wide {
-                        // Scalar state elements have local copies
-                        format!("local_{}", self.sanitize_name(signal))
-                    } else if is_state {
-                        // Arrays and wide state elements don't have local copies
-                        format!("registers->{}", self.sanitize_name(signal))
-                    } else if is_input {
-                        format!("inputs->{}", self.sanitize_name(signal))
+                    if is_array {
+                        // Array state elements need element-wise copy
+                        if let Some(SirType::Array(_, array_size)) = state_sir_type {
+                            self.write_indented(&format!(
+                                "for (uint i = 0; i < {}; i++) signals->{}[i] = registers->{}[i];\n",
+                                array_size,
+                                self.sanitize_name(output),
+                                self.sanitize_name(signal)
+                            ));
+                        }
+                    } else if is_wide {
+                        // Wide state elements need element-wise copy
+                        let width = sir.state_elements.get(signal).map(|s| s.width).unwrap_or(128);
+                        let array_size = width.div_ceil(32);
+                        self.write_indented(&format!(
+                            "for (uint i = 0; i < {}; i++) signals->{}[i] = registers->{}[i];\n",
+                            array_size,
+                            self.sanitize_name(output),
+                            self.sanitize_name(signal)
+                        ));
                     } else {
-                        format!("signals->{}", self.sanitize_name(signal))
-                    };
-                    self.write_indented(&format!(
-                        "signals->{} = {};\n",
-                        self.sanitize_name(output),
-                        source
-                    ));
+                        let source = if is_state {
+                            // Scalar state elements have local copies
+                            format!("local_{}", self.sanitize_name(signal))
+                        } else if is_input {
+                            format!("inputs->{}", self.sanitize_name(signal))
+                        } else {
+                            format!("signals->{}", self.sanitize_name(signal))
+                        };
+                        self.write_indented(&format!(
+                            "signals->{} = {};\n",
+                            self.sanitize_name(output),
+                            source
+                        ));
+                    }
                 }
             }
             SirNodeKind::ArrayRead => self.generate_array_read(sir, node),
@@ -1550,7 +1606,26 @@ impl<'a> MetalShaderGenerator<'a> {
             format!("local_{}", sanitized_output)
         };
 
-        if needs_vector_extraction {
+        if is_array {
+            // Array registers need element-wise copy (Metal doesn't allow direct array assignment)
+            if let Some(SirType::Array(_, array_size)) = state_sir_type {
+                self.write_indented(&format!(
+                    "for (uint i = 0; i < {}; i++) registers->{}[i] = signals->{}[i];\n",
+                    array_size,
+                    sanitized_output,
+                    sanitized_data
+                ));
+            }
+        } else if is_wide {
+            // Wide registers need element-wise copy
+            let array_size = output_width.div_ceil(32);
+            self.write_indented(&format!(
+                "for (uint i = 0; i < {}; i++) registers->{}[i] = signals->{}[i];\n",
+                array_size,
+                sanitized_output,
+                sanitized_data
+            ));
+        } else if needs_vector_extraction {
             self.write_indented(&format!(
                 "{} = signals->{}[0]{};\n",
                 target,
@@ -6399,7 +6474,8 @@ impl<'a> MetalShaderGenerator<'a> {
         }
         // Check state elements (registers)
         if let Some(state_elem) = sir.state_elements.get(signal_name) {
-            return Some(SirType::Bits(state_elem.width));
+            // Use actual type if available, otherwise fall back to Bits
+            return state_elem.sir_type.clone().or(Some(SirType::Bits(state_elem.width)));
         }
         None
     }

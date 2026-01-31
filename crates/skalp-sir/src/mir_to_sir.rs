@@ -372,6 +372,7 @@ impl<'a> MirToSirConverter<'a> {
                     StateElement {
                         name: internal_name.clone(), // Use internal name
                         width,
+                        sir_type: Some(sir_type.clone()),
                         reset_value: None,
                         clock: String::new(),
                         reset: None,
@@ -435,6 +436,7 @@ impl<'a> MirToSirConverter<'a> {
                     StateElement {
                         name: internal_name.clone(), // Use internal name
                         width,
+                        sir_type: Some(sir_type.clone()),
                         reset_value: None,
                         clock: String::new(),
                         reset: None,
@@ -6309,6 +6311,7 @@ impl<'a> MirToSirConverter<'a> {
                         StateElement {
                             name: internal_name,
                             width,
+                            sir_type: Some(sir_type.clone()),
                             reset_value: None,
                             clock: String::new(),
                             reset: None,
