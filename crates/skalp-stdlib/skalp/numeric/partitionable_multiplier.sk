@@ -1,0 +1,506 @@
+// Partitionable Mantissa Multiplier for Multi-Format FP Support
+//
+// This module implements a 24-bit multiplier that can operate as:
+// - 1× 24×24 multiplier (FP32 mantissa with implicit bit)
+// - 2× 12×12 multipliers (FP16 mantissa with implicit bit)
+// - 4× 6×6 multipliers (FP8 mantissa with implicit bit)
+//
+// The key mechanism is partial product gating at section boundaries
+// that either includes or excludes cross-terms based on operating mode.
+//
+// Architecture:
+//   Each 24-bit operand is split into four 6-bit sections.
+//   16 partial products (6×6) are generated.
+//   Mode-controlled accumulation combines them appropriately.
+
+// =============================================================================
+// Operating Mode Definitions
+// =============================================================================
+
+/// Multiplier partition mode (reuse from adder for consistency)
+pub enum MultiplierMode: bit[2] {
+    Single = 0,  // 1× 24×24 (FP32)
+    Dual   = 1,  // 2× 12×12 (FP16×2)
+    Quad   = 2   // 4× 6×6 (FP8×4)
+}
+
+// =============================================================================
+// Basic Building Blocks
+// =============================================================================
+
+/// 6×6 unsigned multiplier - produces 12-bit result
+/// This is the fundamental building block for the partitionable multiplier
+pub entity Mult6x6 {
+    in a: bit[6]
+    in b: bit[6]
+    out product: bit[12]
+}
+
+impl Mult6x6 {
+    // Simple multiplication - synthesizes to DSP or LUT-based multiplier
+    product = a * b
+}
+
+/// 12×12 unsigned multiplier - produces 24-bit result
+/// Used for FP16 mantissa multiplication
+pub entity Mult12x12 {
+    in a: bit[12]
+    in b: bit[12]
+    out product: bit[24]
+}
+
+impl Mult12x12 {
+    // Direct multiplication
+    product = a * b
+}
+
+// =============================================================================
+// Partial Product Generation
+// =============================================================================
+
+/// Generates all 16 partial products from 4 sections of each operand
+/// Each partial product is 12 bits (6×6)
+pub entity PartialProductGenerator {
+    // Operand A sections (6 bits each)
+    in a0: bit[6]
+    in a1: bit[6]
+    in a2: bit[6]
+    in a3: bit[6]
+
+    // Operand B sections (6 bits each)
+    in b0: bit[6]
+    in b1: bit[6]
+    in b2: bit[6]
+    in b3: bit[6]
+
+    // All 16 partial products (pij = ai × bj)
+    out p00: bit[12]
+    out p01: bit[12]
+    out p02: bit[12]
+    out p03: bit[12]
+    out p10: bit[12]
+    out p11: bit[12]
+    out p12: bit[12]
+    out p13: bit[12]
+    out p20: bit[12]
+    out p21: bit[12]
+    out p22: bit[12]
+    out p23: bit[12]
+    out p30: bit[12]
+    out p31: bit[12]
+    out p32: bit[12]
+    out p33: bit[12]
+}
+
+impl PartialProductGenerator {
+    // Row 0: a0 × b[0-3]
+    let m00 = Mult6x6 { a: a0, b: b0, product: p00 }
+    let m01 = Mult6x6 { a: a0, b: b1, product: p01 }
+    let m02 = Mult6x6 { a: a0, b: b2, product: p02 }
+    let m03 = Mult6x6 { a: a0, b: b3, product: p03 }
+
+    // Row 1: a1 × b[0-3]
+    let m10 = Mult6x6 { a: a1, b: b0, product: p10 }
+    let m11 = Mult6x6 { a: a1, b: b1, product: p11 }
+    let m12 = Mult6x6 { a: a1, b: b2, product: p12 }
+    let m13 = Mult6x6 { a: a1, b: b3, product: p13 }
+
+    // Row 2: a2 × b[0-3]
+    let m20 = Mult6x6 { a: a2, b: b0, product: p20 }
+    let m21 = Mult6x6 { a: a2, b: b1, product: p21 }
+    let m22 = Mult6x6 { a: a2, b: b2, product: p22 }
+    let m23 = Mult6x6 { a: a2, b: b3, product: p23 }
+
+    // Row 3: a3 × b[0-3]
+    let m30 = Mult6x6 { a: a3, b: b0, product: p30 }
+    let m31 = Mult6x6 { a: a3, b: b1, product: p31 }
+    let m32 = Mult6x6 { a: a3, b: b2, product: p32 }
+    let m33 = Mult6x6 { a: a3, b: b3, product: p33 }
+}
+
+// =============================================================================
+// Mode-Controlled Partial Product Accumulator
+// =============================================================================
+
+/// Accumulates partial products based on mode
+///
+/// Partial product layout for 24×24:
+///   Position:  0    6   12   18   24   30   36   42
+///              |----|----|----|----|----|----|----|
+///   p00:       [====]
+///   p01:            [====]
+///   p10:            [====]
+///   p02:                 [====]
+///   p11:                 [====]
+///   p20:                 [====]
+///   p03:                      [====]
+///   p12:                      [====]
+///   p21:                      [====]
+///   p30:                      [====]
+///   p13:                           [====]
+///   p22:                           [====]
+///   p31:                           [====]
+///   p23:                                [====]
+///   p32:                                [====]
+///   p33:                                     [====]
+///
+/// In Quad mode: only diagonal terms (p00, p11, p22, p33)
+/// In Dual mode: low half (p00, p01, p10, p11) + high half (p22, p23, p32, p33)
+/// In Single mode: all 16 terms
+
+pub entity PartialProductAccumulator {
+    // All 16 partial products
+    in p00: bit[12]
+    in p01: bit[12]
+    in p02: bit[12]
+    in p03: bit[12]
+    in p10: bit[12]
+    in p11: bit[12]
+    in p12: bit[12]
+    in p13: bit[12]
+    in p20: bit[12]
+    in p21: bit[12]
+    in p22: bit[12]
+    in p23: bit[12]
+    in p30: bit[12]
+    in p31: bit[12]
+    in p32: bit[12]
+    in p33: bit[12]
+
+    // Operating mode
+    in mode: MultiplierMode
+
+    // Results for each mode:
+    // - Quad: four 12-bit results (prod0, prod1, prod2, prod3)
+    // - Dual: two 24-bit results packed into 48 bits
+    // - Single: one 48-bit result
+    out result: bit[48]
+
+    // Individual section results for Quad mode
+    out prod0: bit[12]
+    out prod1: bit[12]
+    out prod2: bit[12]
+    out prod3: bit[12]
+}
+
+impl PartialProductAccumulator {
+    // Mode flags
+    signal is_single: bit = (mode == MultiplierMode::Single)
+    signal is_dual: bit = (mode == MultiplierMode::Dual)
+    signal is_quad: bit = (mode == MultiplierMode::Quad)
+
+    // =========================================================================
+    // Quad Mode: Four independent 6×6 multiplications
+    // =========================================================================
+    // In quad mode, only diagonal products are used
+    signal quad_prod0: bit[12] = p00
+    signal quad_prod1: bit[12] = p11
+    signal quad_prod2: bit[12] = p22
+    signal quad_prod3: bit[12] = p33
+
+    // =========================================================================
+    // Dual Mode: Two independent 12×12 multiplications
+    // =========================================================================
+    // Low half (bits 0-11 of each operand): p00 + (p01 + p10)<<6 + p11<<12
+    // High half (bits 12-23 of each operand): p22 + (p23 + p32)<<6 + p33<<12
+
+    // Low half accumulation (24 bits)
+    signal dual_low_sum: bit[24] = {12'b0, p00} +
+                                   ({6'b0, p01, 6'b0}) +
+                                   ({6'b0, p10, 6'b0}) +
+                                   ({p11, 12'b0})
+
+    // High half accumulation (24 bits)
+    signal dual_high_sum: bit[24] = {12'b0, p22} +
+                                    ({6'b0, p23, 6'b0}) +
+                                    ({6'b0, p32, 6'b0}) +
+                                    ({p33, 12'b0})
+
+    // =========================================================================
+    // Single Mode: Full 24×24 multiplication
+    // =========================================================================
+    // Sum all partial products at their correct positions
+    // Position 0: p00
+    // Position 6: p01, p10
+    // Position 12: p02, p11, p20
+    // Position 18: p03, p12, p21, p30
+    // Position 24: p13, p22, p31
+    // Position 30: p23, p32
+    // Position 36: p33
+
+    // Use wider accumulators to handle full 48-bit result
+    signal single_sum: bit[48] =
+        {36'b0, p00} +
+        ({30'b0, p01, 6'b0}) +
+        ({30'b0, p10, 6'b0}) +
+        ({24'b0, p02, 12'b0}) +
+        ({24'b0, p11, 12'b0}) +
+        ({24'b0, p20, 12'b0}) +
+        ({18'b0, p03, 18'b0}) +
+        ({18'b0, p12, 18'b0}) +
+        ({18'b0, p21, 18'b0}) +
+        ({18'b0, p30, 18'b0}) +
+        ({12'b0, p13, 24'b0}) +
+        ({12'b0, p22, 24'b0}) +
+        ({12'b0, p31, 24'b0}) +
+        ({6'b0, p23, 30'b0}) +
+        ({6'b0, p32, 30'b0}) +
+        ({p33, 36'b0})
+
+    // =========================================================================
+    // Output Selection
+    // =========================================================================
+
+    // Individual section outputs (for quad mode)
+    prod0 = quad_prod0
+    prod1 = quad_prod1
+    prod2 = quad_prod2
+    prod3 = quad_prod3
+
+    // Combined result output
+    result = if is_single {
+        single_sum
+    } else if is_dual {
+        {dual_high_sum, dual_low_sum}
+    } else {
+        // Quad mode: pack four 12-bit results
+        {quad_prod3, quad_prod2, quad_prod1, quad_prod0}
+    }
+}
+
+// =============================================================================
+// Main Partitionable Multiplier
+// =============================================================================
+
+/// Partitionable 24-bit Mantissa Multiplier
+///
+/// Section layout (24 bits each operand):
+///   [sec3: 6b][sec2: 6b][sec1: 6b][sec0: 6b]
+///
+/// Mode behavior:
+///   Single (FP32×1): Full 24×24 → 48-bit result
+///   Dual (FP16×2):   Two 12×12 → two 24-bit results
+///   Quad (FP8×4):    Four 6×6 → four 12-bit results
+///
+pub entity PartitionableMantissaMultiplier {
+    // Operands (24 bits each - includes implicit 1 bit)
+    in a: bit[24]
+    in b: bit[24]
+
+    // Operating mode
+    in mode: MultiplierMode
+
+    // Full result (48 bits for single mode)
+    out result: bit[48]
+
+    // Section results for quad mode
+    out prod0: bit[12]
+    out prod1: bit[12]
+    out prod2: bit[12]
+    out prod3: bit[12]
+}
+
+impl PartitionableMantissaMultiplier {
+    // =========================================================================
+    // Input Sectioning
+    // =========================================================================
+
+    // Split 24-bit operands into four 6-bit sections
+    signal a0: bit[6] = a[5:0]
+    signal a1: bit[6] = a[11:6]
+    signal a2: bit[6] = a[17:12]
+    signal a3: bit[6] = a[23:18]
+
+    signal b0: bit[6] = b[5:0]
+    signal b1: bit[6] = b[11:6]
+    signal b2: bit[6] = b[17:12]
+    signal b3: bit[6] = b[23:18]
+
+    // =========================================================================
+    // Partial Product Generation
+    // =========================================================================
+
+    signal p00: bit[12]
+    signal p01: bit[12]
+    signal p02: bit[12]
+    signal p03: bit[12]
+    signal p10: bit[12]
+    signal p11: bit[12]
+    signal p12: bit[12]
+    signal p13: bit[12]
+    signal p20: bit[12]
+    signal p21: bit[12]
+    signal p22: bit[12]
+    signal p23: bit[12]
+    signal p30: bit[12]
+    signal p31: bit[12]
+    signal p32: bit[12]
+    signal p33: bit[12]
+
+    let ppgen = PartialProductGenerator {
+        a0: a0, a1: a1, a2: a2, a3: a3,
+        b0: b0, b1: b1, b2: b2, b3: b3,
+        p00: p00, p01: p01, p02: p02, p03: p03,
+        p10: p10, p11: p11, p12: p12, p13: p13,
+        p20: p20, p21: p21, p22: p22, p23: p23,
+        p30: p30, p31: p31, p32: p32, p33: p33
+    }
+
+    // =========================================================================
+    // Partial Product Accumulation
+    // =========================================================================
+
+    let accum = PartialProductAccumulator {
+        p00: p00, p01: p01, p02: p02, p03: p03,
+        p10: p10, p11: p11, p12: p12, p13: p13,
+        p20: p20, p21: p21, p22: p22, p23: p23,
+        p30: p30, p31: p31, p32: p32, p33: p33,
+        mode: mode,
+        result: result,
+        prod0: prod0,
+        prod1: prod1,
+        prod2: prod2,
+        prod3: prod3
+    }
+}
+
+// =============================================================================
+// Convenience Wrappers for Common Use Cases
+// =============================================================================
+
+/// FP32 Mantissa Multiplier (single 24×24 operation)
+pub entity FP32MantissaMultiplier {
+    in a: bit[24]   // 23-bit mantissa + implicit 1
+    in b: bit[24]
+    out product: bit[48]
+}
+
+impl FP32MantissaMultiplier {
+    signal result: bit[48]
+    signal p0: bit[12]
+    signal p1: bit[12]
+    signal p2: bit[12]
+    signal p3: bit[12]
+
+    let mult = PartitionableMantissaMultiplier {
+        a: a,
+        b: b,
+        mode: MultiplierMode::Single,
+        result: result,
+        prod0: p0,
+        prod1: p1,
+        prod2: p2,
+        prod3: p3
+    }
+
+    product = result
+}
+
+/// Dual FP16 Mantissa Multiplier (two 12×12 operations)
+pub entity DualFP16MantissaMultiplier {
+    // Low half
+    in a_lo: bit[12]   // 10-bit mantissa + implicit 1 + guard
+    in b_lo: bit[12]
+    out product_lo: bit[24]
+
+    // High half
+    in a_hi: bit[12]
+    in b_hi: bit[12]
+    out product_hi: bit[24]
+}
+
+impl DualFP16MantissaMultiplier {
+    signal result: bit[48]
+    signal p0: bit[12]
+    signal p1: bit[12]
+    signal p2: bit[12]
+    signal p3: bit[12]
+
+    let mult = PartitionableMantissaMultiplier {
+        a: {a_hi, a_lo},
+        b: {b_hi, b_lo},
+        mode: MultiplierMode::Dual,
+        result: result,
+        prod0: p0,
+        prod1: p1,
+        prod2: p2,
+        prod3: p3
+    }
+
+    product_lo = result[23:0]
+    product_hi = result[47:24]
+}
+
+/// Quad FP8 Mantissa Multiplier (four 6×6 operations)
+pub entity QuadFP8MantissaMultiplier {
+    in a0: bit[6]   // 3-bit mantissa + implicit 1 + guards
+    in a1: bit[6]
+    in a2: bit[6]
+    in a3: bit[6]
+
+    in b0: bit[6]
+    in b1: bit[6]
+    in b2: bit[6]
+    in b3: bit[6]
+
+    out product0: bit[12]
+    out product1: bit[12]
+    out product2: bit[12]
+    out product3: bit[12]
+}
+
+impl QuadFP8MantissaMultiplier {
+    signal result: bit[48]
+
+    let mult = PartitionableMantissaMultiplier {
+        a: {a3, a2, a1, a0},
+        b: {b3, b2, b1, b0},
+        mode: MultiplierMode::Quad,
+        result: result,
+        prod0: product0,
+        prod1: product1,
+        prod2: product2,
+        prod3: product3
+    }
+}
+
+// =============================================================================
+// Test Wrapper
+// =============================================================================
+
+/// Test wrapper for partitionable multiplier
+pub entity TestPartitionableMultiplier {
+    in a: bit[24]
+    in b: bit[24]
+    in mode: bit[2]
+    out result: bit[48]
+    out prod0: bit[12]
+    out prod1: bit[12]
+    out prod2: bit[12]
+    out prod3: bit[12]
+}
+
+impl TestPartitionableMultiplier {
+    signal res: bit[48]
+    signal p0: bit[12]
+    signal p1: bit[12]
+    signal p2: bit[12]
+    signal p3: bit[12]
+
+    let mult = PartitionableMantissaMultiplier {
+        a: a,
+        b: b,
+        mode: mode as MultiplierMode,
+        result: res,
+        prod0: p0,
+        prod1: p1,
+        prod2: p2,
+        prod3: p3
+    }
+
+    result = res
+    prod0 = p0
+    prod1 = p1
+    prod2 = p2
+    prod3 = p3
+}

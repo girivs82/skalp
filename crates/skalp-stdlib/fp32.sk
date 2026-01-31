@@ -1,0 +1,179 @@
+// Synthesizable IEEE 754 FP32 Operations
+// These implementations use pure integer/bit operations for NCL synthesis
+
+// ============================================================================
+// FP32 Bit Field Extraction
+// ============================================================================
+
+// Extract sign bit (bit 31)
+pub fn fp32_sign(x: bit[32]) -> bit[1] {
+    x[31:31]
+}
+
+// Extract exponent (bits 30:23)
+pub fn fp32_exp(x: bit[32]) -> bit[8] {
+    x[30:23]
+}
+
+// Extract mantissa (bits 22:0)
+pub fn fp32_mantissa(x: bit[32]) -> bit[23] {
+    x[22:0]
+}
+
+// Pack FP32 from components
+pub fn fp32_pack(sign: bit[1], exp: bit[8], mantissa: bit[23]) -> bit[32] {
+    let s32: bit[32] = sign as bit[32];
+    let e32: bit[32] = exp as bit[32];
+    let m32: bit[32] = mantissa as bit[32];
+    (s32 << 31) | (e32 << 23) | m32
+}
+
+// Check if FP32 is zero (exp=0, mantissa=0)
+pub fn fp32_is_zero(x: bit[32]) -> bit[1] {
+    let exp = fp32_exp(x);
+    let mant = fp32_mantissa(x);
+    if exp == 0 {
+        if mant == 0 { 1 } else { 0 }
+    } else {
+        0
+    }
+}
+
+// ============================================================================
+// FP32 Multiplication
+// ============================================================================
+
+// FP32 Multiplication: a * b
+pub fn fp32_mul(a: bit[32], b: bit[32]) -> bit[32] {
+    let sign_a = fp32_sign(a);
+    let sign_b = fp32_sign(b);
+    let exp_a = fp32_exp(a);
+    let exp_b = fp32_exp(b);
+    let mant_a = fp32_mantissa(a);
+    let mant_b = fp32_mantissa(b);
+
+    // Result sign is XOR of input signs
+    let result_sign: bit[1] = sign_a ^ sign_b;
+
+    // Handle zeros
+    let a_is_zero = fp32_is_zero(a);
+    let b_is_zero = fp32_is_zero(b);
+
+    if a_is_zero == 1 {
+        fp32_pack(result_sign, 0, 0)
+    } else if b_is_zero == 1 {
+        fp32_pack(result_sign, 0, 0)
+    } else {
+        // Normal multiplication
+        // Add implicit leading 1 to mantissas (24 bits each)
+        let mant_a_full: bit[24] = (1 << 23) | (mant_a as bit[24]);
+        let mant_b_full: bit[24] = (1 << 23) | (mant_b as bit[24]);
+
+        // Multiply mantissas (48-bit result)
+        let product: bit[48] = (mant_a_full as bit[48]) * (mant_b_full as bit[48]);
+
+        // Exponent: exp_a + exp_b - 127 (remove double bias)
+        let exp_sum: bit[10] = (exp_a as bit[10]) + (exp_b as bit[10]);
+        let exp_unbiased: bit[10] = exp_sum - 127;
+
+        // Check if product MSB is set (1.xxx * 1.xxx can be 01.xxx or 1x.xxx)
+        let overflow: bit[1] = product[47:47];
+
+        // Adjust exponent and mantissa based on overflow
+        let exp_result: bit[10] = if overflow == 1 { exp_unbiased + 1 } else { exp_unbiased };
+        let mant_result: bit[23] = if overflow == 1 { product[46:24] } else { product[45:23] };
+
+        // Handle overflow/underflow
+        if exp_result >= 255 {
+            fp32_pack(result_sign, 255, 0)  // Infinity
+        } else if exp_result <= 0 {
+            fp32_pack(result_sign, 0, 0)  // Zero (underflow)
+        } else {
+            fp32_pack(result_sign, exp_result[7:0], mant_result)
+        }
+    }
+}
+
+// ============================================================================
+// FP32 Addition
+// ============================================================================
+
+// FP32 Addition: a + b
+pub fn fp32_add(a: bit[32], b: bit[32]) -> bit[32] {
+    let sign_a = fp32_sign(a);
+    let sign_b = fp32_sign(b);
+    let exp_a = fp32_exp(a);
+    let exp_b = fp32_exp(b);
+    let mant_a = fp32_mantissa(a);
+    let mant_b = fp32_mantissa(b);
+
+    // Handle zeros
+    let a_is_zero = fp32_is_zero(a);
+    let b_is_zero = fp32_is_zero(b);
+
+    if a_is_zero == 1 {
+        b  // 0 + b = b
+    } else if b_is_zero == 1 {
+        a  // a + 0 = a
+    } else {
+        // Normal addition - align exponents and add mantissas
+        // Add implicit leading 1 to mantissas
+        let mant_a_full: bit[27] = (1 << 23) | (mant_a as bit[27]);
+        let mant_b_full: bit[27] = (1 << 23) | (mant_b as bit[27]);
+
+        // Determine which has larger exponent
+        let a_larger: bit[1] = if exp_a >= exp_b { 1 } else { 0 };
+
+        let exp_large: bit[8] = if a_larger == 1 { exp_a } else { exp_b };
+        let exp_small: bit[8] = if a_larger == 1 { exp_b } else { exp_a };
+        let mant_large: bit[27] = if a_larger == 1 { mant_a_full } else { mant_b_full };
+        let mant_small: bit[27] = if a_larger == 1 { mant_b_full } else { mant_a_full };
+        let sign_large: bit[1] = if a_larger == 1 { sign_a } else { sign_b };
+        let sign_small: bit[1] = if a_larger == 1 { sign_b } else { sign_a };
+
+        // Calculate exponent difference and align smaller mantissa
+        let exp_diff: bit[8] = exp_large - exp_small;
+        let shift_amt: bit[5] = if exp_diff > 27 { 27 } else { exp_diff[4:0] };
+        let mant_small_aligned: bit[27] = mant_small >> shift_amt;
+
+        // Add or subtract mantissas based on signs
+        let same_sign: bit[1] = if sign_large == sign_small { 1 } else { 0 };
+        let mant_result: bit[28] = if same_sign == 1 {
+            (mant_large as bit[28]) + (mant_small_aligned as bit[28])
+        } else {
+            (mant_large as bit[28]) - (mant_small_aligned as bit[28])
+        };
+
+        // Simple normalization: check for overflow
+        let overflow: bit[1] = mant_result[27:27];
+
+        let exp_adj: bit[9] = if overflow == 1 {
+            (exp_large as bit[9]) + 1
+        } else {
+            exp_large as bit[9]
+        };
+
+        let mant_adj: bit[27] = if overflow == 1 {
+            mant_result[27:1]
+        } else {
+            mant_result[26:0]
+        };
+
+        // Check for overflow/underflow
+        if exp_adj >= 255 {
+            fp32_pack(sign_large, 255, 0)  // Overflow to Inf
+        } else if exp_adj == 0 {
+            fp32_pack(sign_large, 0, 0)  // Underflow to zero
+        } else if mant_result == 0 {
+            fp32_pack(0, 0, 0)  // Zero result
+        } else {
+            fp32_pack(sign_large, exp_adj[7:0], mant_adj[22:0])
+        }
+    }
+}
+
+// FP32 Subtraction: a - b
+pub fn fp32_sub(a: bit[32], b: bit[32]) -> bit[32] {
+    let b_neg: bit[32] = b ^ 0x80000000;  // Flip sign bit
+    fp32_add(a, b_neg)
+}
