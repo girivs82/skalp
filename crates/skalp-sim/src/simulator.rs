@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use indexmap::IndexMap;
+use skalp_mir::name_registry::NameRegistry;
 use skalp_sir::SirModule;
 use std::sync::Arc;
 use thiserror::Error;
@@ -73,6 +74,8 @@ pub struct Simulator {
     paused: bool,
     /// Last breakpoint hits (for inspection)
     last_breakpoint_hits: Vec<BreakpointHit>,
+    /// Name registry for resolving user-facing paths to internal names
+    name_registry: NameRegistry,
 }
 
 #[allow(dead_code)]
@@ -130,11 +133,16 @@ impl Simulator {
             breakpoint_manager: BreakpointManager::new(),
             paused: false,
             last_breakpoint_hits: Vec::new(),
+            name_registry: NameRegistry::new(),
         })
     }
 
     pub async fn load_module(&mut self, module: &SirModule) -> SimulationResult<()> {
         eprintln!("🔧 Simulator::load_module calling runtime.initialize()...");
+
+        // Store the name registry for path resolution
+        self.name_registry = module.name_registry.clone();
+
         let result = self.runtime.initialize(module).await;
         eprintln!("🔧 Simulator::load_module result: {:?}", result.is_ok());
         result
@@ -259,12 +267,47 @@ impl Simulator {
         Ok(())
     }
 
+    /// Resolve a user-facing path to an internal signal name
+    fn resolve_path(&self, path: &str) -> String {
+        // Try exact match first
+        if let Some(internal) = self.name_registry.resolve(path) {
+            return internal.to_string();
+        }
+
+        // Try converting underscore notation to dot notation
+        // This handles testbench paths like "vertex_x" → "vertex.x"
+        if path.contains('_') && !path.contains('.') {
+            // Simple case: one underscore (e.g., "vertex_x" → "vertex.x")
+            let parts: Vec<&str> = path.splitn(2, '_').collect();
+            if parts.len() == 2 {
+                let dot_path = format!("{}.{}", parts[0], parts[1]);
+                if let Some(internal) = self.name_registry.resolve(&dot_path) {
+                    return internal.to_string();
+                }
+            }
+
+            // Try replacing the last underscore with a dot
+            if let Some(last_underscore) = path.rfind('_') {
+                let (base, field) = path.split_at(last_underscore);
+                let dot_path = format!("{}.{}", base, &field[1..]); // Skip the underscore
+                if let Some(internal) = self.name_registry.resolve(&dot_path) {
+                    return internal.to_string();
+                }
+            }
+        }
+
+        // Fallback: use path as-is (for internal names or direct signal access)
+        path.to_string()
+    }
+
     pub async fn set_input(&mut self, name: &str, value: Vec<u8>) -> SimulationResult<()> {
-        self.runtime.set_input(name, &value).await
+        let internal_name = self.resolve_path(name);
+        self.runtime.set_input(&internal_name, &value).await
     }
 
     pub async fn get_output(&self, name: &str) -> SimulationResult<Vec<u8>> {
-        self.runtime.get_output(name).await
+        let internal_name = self.resolve_path(name);
+        self.runtime.get_output(&internal_name).await
     }
 
     pub async fn get_waveforms(&self) -> Vec<SimulationState> {

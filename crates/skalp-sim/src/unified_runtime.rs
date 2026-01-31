@@ -280,16 +280,41 @@ impl UnifiedSimulator {
     /// # Returns
     /// The internal signal name to use for actual lookups
     fn resolve_path(&self, path: &str) -> String {
-        let resolved = self.name_registry
-            .resolve(path)
-            .map(|s| s.to_string());
-
-        let result = resolved.unwrap_or_else(|| path.to_string());
-        // Debug for key signals
-        if path == "enable" || path == "rst" || path == "state" {
-            println!("🔍 RESOLVE_PATH: '{}' → '{}'", path, result);
+        // Try exact match first
+        if let Some(internal) = self.name_registry.resolve(path) {
+            return internal.to_string();
         }
-        result
+
+        // Try converting underscore notation to dot notation
+        // This handles testbench paths like "vertex_x" → "vertex.x"
+        // which is how struct fields are registered in the name registry
+        if path.contains('_') && !path.contains('.') {
+            // Try replacing single underscores with dots for struct field access
+            // We need to be careful here - only try reasonable conversions
+            // For "vertex_x", try "vertex.x"
+            // For "foo_bar_x", try "foo.bar.x", "foo.bar_x", "foo_bar.x"
+
+            // Simple case: one underscore
+            let parts: Vec<&str> = path.splitn(2, '_').collect();
+            if parts.len() == 2 {
+                let dot_path = format!("{}.{}", parts[0], parts[1]);
+                if let Some(internal) = self.name_registry.resolve(&dot_path) {
+                    return internal.to_string();
+                }
+            }
+
+            // Try replacing the last underscore with a dot
+            if let Some(last_underscore) = path.rfind('_') {
+                let (base, field) = path.split_at(last_underscore);
+                let dot_path = format!("{}.{}", base, &field[1..]); // Skip the underscore
+                if let Some(internal) = self.name_registry.resolve(&dot_path) {
+                    return internal.to_string();
+                }
+            }
+        }
+
+        // Fallback: use path as-is (for internal names or direct signal access)
+        path.to_string()
     }
 
     /// Load pipeline annotations from a TOML file
