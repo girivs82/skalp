@@ -7838,7 +7838,98 @@ impl<'a> MirToSirConverter<'a> {
         }
     }
 
+    /// BUG #238 FIX: Synthesize conditional with explicit default value
+    /// This allows chaining multiple If statements where later ones wrap earlier results
+    fn synthesize_conditional_for_instance_with_default(
+        &mut self,
+        if_stmt: &IfStatement,
+        inst_prefix: &str,
+        port_mapping: &HashMap<String, Expression>,
+        child_module: &Module,
+        target: &str,
+        parent_module_for_signals: Option<&Module>,
+        parent_prefix: &str,
+        default_result: Option<usize>,
+    ) -> usize {
+        // Get values from then and else branches, passing current result as default
+        let then_value = self.find_assignment_in_branch_for_instance_with_default(
+            &if_stmt.then_block.statements,
+            inst_prefix,
+            port_mapping,
+            child_module,
+            target,
+            parent_module_for_signals,
+            parent_prefix,
+            None, // Then branch doesn't inherit default
+        );
+
+        let else_value = if let Some(else_block) = &if_stmt.else_block {
+            self.find_assignment_in_branch_for_instance_with_default(
+                &else_block.statements,
+                inst_prefix,
+                port_mapping,
+                child_module,
+                target,
+                parent_module_for_signals,
+                parent_prefix,
+                default_result, // BUG #238 FIX: Pass default_result to else branch for proper chaining
+            )
+        } else {
+            None
+        };
+
+        // Get the default node to use when this if doesn't assign
+        let default_node = default_result.unwrap_or_else(|| self.create_signal_ref(target));
+
+        // Build MUX based on what was found
+        match (then_value, else_value) {
+            (Some(then_val), Some(else_val)) => {
+                // Both branches assign: mux(cond, then, else)
+                let condition = self.create_expression_node_for_instance_with_context(
+                    &if_stmt.condition,
+                    inst_prefix,
+                    port_mapping,
+                    child_module,
+                    parent_module_for_signals,
+                    parent_prefix,
+                );
+                self.create_mux_node(condition, then_val, else_val)
+            }
+            (Some(then_val), None) => {
+                // Only then assigns: mux(cond, then, default)
+                let condition = self.create_expression_node_for_instance_with_context(
+                    &if_stmt.condition,
+                    inst_prefix,
+                    port_mapping,
+                    child_module,
+                    parent_module_for_signals,
+                    parent_prefix,
+                );
+                self.create_mux_node(condition, then_val, default_node)
+            }
+            (None, Some(else_val)) => {
+                // Only else assigns: mux(cond, default, else)
+                let condition = self.create_expression_node_for_instance_with_context(
+                    &if_stmt.condition,
+                    inst_prefix,
+                    port_mapping,
+                    child_module,
+                    parent_module_for_signals,
+                    parent_prefix,
+                );
+                self.create_mux_node(condition, default_node, else_val)
+            }
+            (None, None) => {
+                // Neither assigns: return the default (previous result in chain)
+                default_node
+            }
+        }
+    }
+
     /// Find assignment to target in a branch
+    /// BUG #238 FIX: Process ALL statements and chain them together.
+    /// In RTL, later assignments in a clocked block take priority over earlier ones.
+    /// So `if A { x = 1 } if B { x = 0 }` should give: mux(B, 0, mux(A, 1, current_x))
     fn find_assignment_in_branch_for_instance(
         &mut self,
         statements: &[Statement],
@@ -7849,17 +7940,10 @@ impl<'a> MirToSirConverter<'a> {
         parent_module_for_signals: Option<&Module>,
         parent_prefix: &str,
     ) -> Option<usize> {
-        let stmt_types: Vec<_> = statements.iter().map(|s| match s {
-            Statement::Assignment(_) => "Assignment",
-            Statement::If(_) => "If",
-            Statement::Block(_) => "Block",
-            Statement::Case(_) => "Case",
-            _ => "Other",
-        }).collect();
-        if target.contains("state_reg") {
-            println!("      FIND_ASSIGN_BRANCH: target={}, prefix={}, {} stmts: {:?}",
-                target, inst_prefix, statements.len(), stmt_types);
-        }
+        // BUG #238 FIX: Collect all statement results, then chain them together
+        // Later statements have higher priority (override earlier ones)
+        let mut result: Option<usize> = None;
+
         for stmt in statements {
             match stmt {
                 Statement::Assignment(assign) => {
@@ -7907,8 +7991,8 @@ impl<'a> MirToSirConverter<'a> {
                         }
 
                         if matches {
-                            // Found assignment for this target!
-                            return Some(self.create_expression_node_for_instance_with_context(
+                            // Found assignment for this target - this overrides any previous result
+                            result = Some(self.create_expression_node_for_instance_with_context(
                                 &assign.rhs,
                                 inst_prefix,
                                 port_mapping,
@@ -7920,8 +8004,9 @@ impl<'a> MirToSirConverter<'a> {
                     }
                 }
                 Statement::If(nested_if) => {
-                    // Recursively handle nested if
-                    return Some(self.synthesize_conditional_for_instance(
+                    // BUG #238 FIX: Don't return immediately! Chain conditionals together.
+                    // Each If statement should wrap the previous result as the else case.
+                    let if_result = self.synthesize_conditional_for_instance_with_default(
                         nested_if,
                         inst_prefix,
                         port_mapping,
@@ -7929,7 +8014,9 @@ impl<'a> MirToSirConverter<'a> {
                         target,
                         parent_module_for_signals,
                         parent_prefix,
-                    ));
+                        result, // Pass current result as default (else case)
+                    );
+                    result = Some(if_result);
                 }
                 Statement::Block(block) => {
                     // Debug: show what's in this inner block
@@ -7945,8 +8032,8 @@ impl<'a> MirToSirConverter<'a> {
                         }).collect();
                         println!("            INNER_BLOCK: {} stmts: {:?}", block.statements.len(), inner_types);
                     }
-                    // Recursively search within the block
-                    if let Some(result) = self.find_assignment_in_branch_for_instance(
+                    // Recursively search within the block, passing current result as base
+                    if let Some(block_result) = self.find_assignment_in_branch_for_instance_with_default(
                         &block.statements,
                         inst_prefix,
                         port_mapping,
@@ -7954,8 +8041,9 @@ impl<'a> MirToSirConverter<'a> {
                         target,
                         parent_module_for_signals,
                         parent_prefix,
+                        result,
                     ) {
-                        return Some(result);
+                        result = Some(block_result);
                     }
                 }
                 Statement::Case(case_stmt) => {
@@ -7990,13 +8078,117 @@ impl<'a> MirToSirConverter<'a> {
                         parent_module_for_signals,
                         parent_prefix,
                     ) {
-                        return Some(val);
+                        result = Some(val);
                     }
                 }
                 _ => {}
             }
         }
-        None
+        result
+    }
+
+    /// Helper for find_assignment_in_branch_for_instance that carries a default value
+    fn find_assignment_in_branch_for_instance_with_default(
+        &mut self,
+        statements: &[Statement],
+        inst_prefix: &str,
+        port_mapping: &HashMap<String, Expression>,
+        child_module: &Module,
+        target: &str,
+        parent_module_for_signals: Option<&Module>,
+        parent_prefix: &str,
+        default_result: Option<usize>,
+    ) -> Option<usize> {
+        let mut result = default_result;
+
+        for stmt in statements {
+            match stmt {
+                Statement::Assignment(assign) => {
+                    let lhs_signal = match &assign.lhs {
+                        LValue::Signal(sig_id) => {
+                            child_module
+                                .signals
+                                .iter()
+                                .find(|s| s.id == *sig_id)
+                                .map(|signal| format!("{}.{}", inst_prefix, signal.name))
+                        }
+                        LValue::BitSelect { base, .. } => {
+                            let extracted = self.extract_base_signal_for_instance(
+                                base,
+                                inst_prefix,
+                                child_module,
+                            );
+                            extracted
+                                .as_ref()
+                                .map(|base_name| self.strip_flattened_index_suffix(base_name))
+                        }
+                        _ => None,
+                    };
+
+                    if let Some(lhs) = lhs_signal {
+                        let matches = if matches!(assign.lhs, LValue::Signal(_)) {
+                            lhs == target
+                        } else {
+                            let target_stripped = self.strip_flattened_index_suffix(target);
+                            lhs == target_stripped
+                        };
+
+                        if matches {
+                            result = Some(self.create_expression_node_for_instance_with_context(
+                                &assign.rhs,
+                                inst_prefix,
+                                port_mapping,
+                                child_module,
+                                parent_module_for_signals,
+                                parent_prefix,
+                            ));
+                        }
+                    }
+                }
+                Statement::If(nested_if) => {
+                    let if_result = self.synthesize_conditional_for_instance_with_default(
+                        nested_if,
+                        inst_prefix,
+                        port_mapping,
+                        child_module,
+                        target,
+                        parent_module_for_signals,
+                        parent_prefix,
+                        result,
+                    );
+                    result = Some(if_result);
+                }
+                Statement::Block(block) => {
+                    if let Some(block_result) = self.find_assignment_in_branch_for_instance_with_default(
+                        &block.statements,
+                        inst_prefix,
+                        port_mapping,
+                        child_module,
+                        target,
+                        parent_module_for_signals,
+                        parent_prefix,
+                        result,
+                    ) {
+                        result = Some(block_result);
+                    }
+                }
+                Statement::Case(case_stmt) => {
+                    if let Some(val) = self.synthesize_case_for_target_for_instance(
+                        case_stmt,
+                        inst_prefix,
+                        port_mapping,
+                        child_module,
+                        target,
+                        parent_module_for_signals,
+                        parent_prefix,
+                    ) {
+                        result = Some(val);
+                    }
+                }
+                _ => {}
+            }
+        }
+        result
     }
 
     /// BUG #237 FIX: Synthesize case statement for a specific target in instance context

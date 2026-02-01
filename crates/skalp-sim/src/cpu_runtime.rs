@@ -887,11 +887,6 @@ impl CpuRuntime {
                 // Track this clock for later update (don't update yet!)
                 clock_updates.insert(clock_signal.clone(), current_clock);
 
-                // Debug: show flip-flop evaluation
-                if let Some(output) = node.outputs.first() {
-                    println!("⚡ FF node_{}: clk='{}' prev={} curr={} edge={} d_in='{}' q_out='{}'",
-                        node.id, clock_signal, prev_clock, current_clock, edge_detected, d_input, output.signal_id);
-                }
 
                 if edge_detected {
                     // Get the D input value
@@ -912,7 +907,12 @@ impl CpuRuntime {
                     } else {
                         "default"
                     };
-                    println!("   📥 FF node_{}: d_input '{}' from {} = {:?}", node.id, d_input, source, d_value);
+                    // Debug for latched signal
+                    if let Some(output) = node.outputs.first() {
+                        if output.signal_id == "_s73" {
+                            println!("   🔒 LATCHED D_INPUT '{}' from {} = {:?}", d_input, source, d_value);
+                        }
+                    }
 
                     // Write to the output (which is the register)
                     // Truncate to the correct width
@@ -923,7 +923,9 @@ impl CpuRuntime {
                             } else {
                                 d_value.clone()
                             };
-                        println!("   📤 FF node_{}: writing to '{}' = {:?}", node.id, output.signal_id, truncated);
+                        if output.signal_id == "_s73" {
+                            println!("   🔒 LATCHED WRITING '{}' = {:?}", output.signal_id, truncated);
+                        }
                         self.next_state.insert(output.signal_id.clone(), truncated);
                     }
                 }
@@ -1144,17 +1146,7 @@ impl SimulationRuntime for CpuRuntime {
 
     async fn set_input(&mut self, name: &str, value: &[u8]) -> SimulationResult<()> {
         if self.inputs.contains_key(name) {
-            // Debug for key inputs
-            if name == "_s2" || name == "_s1" {
-                println!("✅ SET_INPUT '{}' = {:?}", name, value);
-            }
             self.inputs.insert(name.to_string(), value.to_vec());
-            // Verify the value was stored
-            if name == "_s2" || name == "_s1" {
-                if let Some(stored) = self.inputs.get(name) {
-                    println!("   VERIFIED '{}' = {:?}", name, stored);
-                }
-            }
             Ok(())
         } else {
             println!("❌ SET_INPUT '{}' NOT FOUND in inputs. Available: {:?}", name, self.inputs.keys().collect::<Vec<_>>());
