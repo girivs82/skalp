@@ -1164,10 +1164,9 @@ impl UnifiedSimulator {
             }
             _ => {
                 // Fallback to step-by-step for non-GPU backends
-                for _ in 0..cycles {
-                    self.step().await;
-                }
-                self.build_result().await
+                // BUG FIX: Must toggle clock like run_clocked does
+                // (testbench expects run_batched to handle clock toggling internally)
+                self.run_clocked(cycles, "clk").await
             }
         }
     }

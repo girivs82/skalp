@@ -698,8 +698,18 @@ impl HirBuilderContext {
 
     /// Build entity from syntax node
     fn build_entity(&mut self, node: &SyntaxNode) -> Option<HirEntity> {
-        let id = self.next_entity_id();
         let name = self.extract_name(node)?;
+
+        // BUG #240 FIX: Check if entity was preregistered (from merged HIR during file rebuild).
+        // If so, use the preregistered ID to maintain consistency; otherwise generate a new one.
+        let id = if let Some(&preregistered_id) = self.symbols.entities.get(&name) {
+            preregistered_id
+        } else {
+            let fresh_id = self.next_entity_id();
+            // Register in symbol table only if not preregistered
+            self.symbols.entities.insert(name.clone(), fresh_id);
+            fresh_id
+        };
 
         // Default visibility (will be overridden by caller using pending_visibility)
         let visibility = HirVisibility::Private;
@@ -712,9 +722,6 @@ impl HirBuilderContext {
         // IMPORTANT: Consume entity-level power_domain_config BEFORE processing ports
         // Otherwise build_port() will steal it via its own .take()
         let entity_power_domain_config = self.pending_power_domain_config.take();
-
-        // Register in symbol table
-        self.symbols.entities.insert(name.clone(), id);
 
         // Build generics first - this must come before ports since ports may reference generic parameters
         let generics =

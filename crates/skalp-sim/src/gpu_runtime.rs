@@ -788,13 +788,14 @@ impl SimulationRuntime for GpuRuntime {
         }
 
         // PERF: Compile batched simulation kernel for multi-cycle execution
-        // Compile batched simulation kernel for multi-cycle execution
         match self.compile_shader(&shader_source, "batched_simulation") {
             Ok(pipeline) => {
                 self.pipelines.insert("batched".to_string(), pipeline);
+                println!("⚡ BATCHED: Kernel compiled successfully");
             }
-            Err(_e) => {
-                // Continue without batched kernel - will fall back to step mode
+            Err(e) => {
+                println!("⚠️ BATCHED: Kernel compilation FAILED: {:?}", e);
+                println!("   Falling back to step-by-step GPU execution");
             }
         }
 
@@ -1136,7 +1137,9 @@ impl GpuRuntime {
     /// Run multiple cycles in a single GPU dispatch for massive speedup
     /// This bypasses per-cycle CPU<->GPU synchronization overhead
     pub async fn run_batched(&mut self, cycles: u64) -> SimulationResult<SimulationState> {
+        println!("⚡ GPU run_batched called with {} cycles", cycles);
         if let Some(pipeline) = self.pipelines.get("batched") {
+            println!("⚡ GPU run_batched: Using batched kernel");
             // Set up params buffer with cycle count and clock offset
             if let Some(params_buffer) = &self.params_buffer {
                 let params_ptr = params_buffer.contents() as *mut u32;

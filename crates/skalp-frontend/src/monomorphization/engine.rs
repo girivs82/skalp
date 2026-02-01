@@ -404,11 +404,21 @@ impl<'hir> MonomorphizationEngine<'hir> {
                         );
                     }
 
-                    if !entity.generics.is_empty() && !instance.generic_args.is_empty() {
+                    if !entity.generics.is_empty() {
                         // This is a generic instantiation - find the specialized entity
-                        if let Some(instantiation) =
+                        // BUG #239 FIX: Handle both explicit generic args AND default values.
+                        // Previously only instances with explicit generic_args were matched,
+                        // but instances using default generic values (empty generic_args) were
+                        // left pointing to the unspecialized entity template (which has 0 signals).
+                        let instantiation_opt = if !instance.generic_args.is_empty() {
+                            // Explicit generic args - use normal matching
                             self.find_matching_instantiation(entity, instance, &instantiations)
-                        {
+                        } else {
+                            // No explicit args - try to find instantiation using default values
+                            self.find_instantiation_with_defaults(entity, &instantiations)
+                        };
+
+                        if let Some(instantiation) = instantiation_opt {
                             // BUG #207 DEBUG
                             if instance.name == "adder" {
                                 eprintln!(
@@ -425,6 +435,11 @@ impl<'hir> MonomorphizationEngine<'hir> {
                                         instance.entity, specialized_id
                                     );
                                 }
+                                // BUG #239 FIX DEBUG
+                                eprintln!(
+                                    "[BUG #239 FIX] Updating instance '{}' entity {:?} -> {:?}",
+                                    instance.name, instance.entity, specialized_id
+                                );
                                 // Update instance to reference specialized entity
                                 instance.entity = specialized_id;
                                 // Clear generic args since specialized entity doesn't have generics
@@ -1628,6 +1643,46 @@ impl<'hir> MonomorphizationEngine<'hir> {
         }
 
         // Find matching instantiation
+        instantiations
+            .iter()
+            .find(|inst| inst.entity_id == entity.id && inst.const_args == const_args)
+    }
+
+    /// BUG #239 FIX: Find an instantiation for an entity that uses default generic values.
+    /// This is called when an instance has no explicit generic_args but the entity has generics.
+    fn find_instantiation_with_defaults<'a>(
+        &self,
+        entity: &HirEntity,
+        instantiations: &'a [Instantiation],
+    ) -> Option<&'a Instantiation> {
+        // Check if all generics have default values
+        let all_have_defaults = entity.generics.iter().all(|g| {
+            // Const generics need default values for this to work
+            match &g.param_type {
+                crate::hir::HirGenericType::Const(_) => g.default_value.is_some(),
+                _ => true, // Non-const generics are OK (type inference, etc.)
+            }
+        });
+
+        if !all_have_defaults {
+            return None;
+        }
+
+        // Build const_args from default values
+        let mut const_args = IndexMap::new();
+        let mut evaluator = self.create_evaluator_with_constants();
+
+        for generic in &entity.generics {
+            if let crate::hir::HirGenericType::Const(_) = generic.param_type {
+                if let Some(ref default_expr) = generic.default_value {
+                    if let Ok(value) = evaluator.eval(default_expr) {
+                        const_args.insert(generic.name.clone(), value);
+                    }
+                }
+            }
+        }
+
+        // Find matching instantiation with these default values
         instantiations
             .iter()
             .find(|inst| inst.entity_id == entity.id && inst.const_args == const_args)

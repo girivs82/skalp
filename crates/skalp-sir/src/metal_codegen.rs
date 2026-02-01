@@ -375,6 +375,61 @@ impl<'a> MetalShaderGenerator<'a> {
             }
         }
 
+        // BUG FIX: Also collect signals that are used as INPUTS to nodes
+        // but aren't in sir.signals (e.g., flattened module instance port signals)
+        // These signals need struct fields so they can be read during kernel execution.
+        for node in &sir.combinational_nodes {
+            for input in &node.inputs {
+                let signal_id = &input.signal_id;
+                let sanitized_name = self.sanitize_name(signal_id);
+
+                // Skip if already added
+                if !added_names.insert(sanitized_name.clone()) {
+                    continue;
+                }
+
+                // Skip input ports and state elements
+                if input_names.contains(signal_id) || sir.state_elements.contains_key(signal_id) {
+                    continue;
+                }
+
+                // Determine type from signal_types or default to Bits(32)
+                let sir_type = if let Some(src_type) = signal_types.get(signal_id) {
+                    (*src_type).clone()
+                } else {
+                    let width = signal_widths.get(signal_id).copied().unwrap_or(32);
+                    SirType::Bits(width)
+                };
+
+                self.generate_signal_field(signal_id, &sir_type);
+            }
+        }
+
+        // Also check sequential nodes for input signals
+        for node in &sir.sequential_nodes {
+            for input in &node.inputs {
+                let signal_id = &input.signal_id;
+                let sanitized_name = self.sanitize_name(signal_id);
+
+                if !added_names.insert(sanitized_name.clone()) {
+                    continue;
+                }
+
+                if input_names.contains(signal_id) || sir.state_elements.contains_key(signal_id) {
+                    continue;
+                }
+
+                let sir_type = if let Some(src_type) = signal_types.get(signal_id) {
+                    (*src_type).clone()
+                } else {
+                    let width = signal_widths.get(signal_id).copied().unwrap_or(32);
+                    SirType::Bits(width)
+                };
+
+                self.generate_signal_field(signal_id, &sir_type);
+            }
+        }
+
         self.indent -= 1;
         writeln!(self.output, "}};\n").unwrap();
     }
@@ -1170,6 +1225,9 @@ impl<'a> MetalShaderGenerator<'a> {
         let mut sorted_states: Vec<_> = sir.state_elements.iter().collect();
         sorted_states.sort_by_key(|(name, _)| *name);
 
+        // Track which local variables we've already declared
+        let mut declared_locals: std::collections::HashSet<String> = std::collections::HashSet::new();
+
         for (state_name, state_elem) in &sorted_states {
             let sanitized = self.sanitize_name(state_name);
             let state_sir_type = self.get_signal_sir_type(sir, state_name);
@@ -1186,6 +1244,46 @@ impl<'a> MetalShaderGenerator<'a> {
                     "{} local_{} = registers->{};\n",
                     base_type, sanitized, sanitized
                 ));
+                declared_locals.insert(sanitized);
+            }
+        }
+
+        // BUG FIX: Also declare local variables for flip-flop outputs not in state_elements
+        // This handles signals from nested module instances (like pwm_gen_*)
+        self.write_indented("\n// Local copies for flip-flop outputs from nested instances\n");
+        for node in &sir.sequential_nodes {
+            if let SirNodeKind::FlipFlop { .. } = &node.kind {
+                if let Some(output) = node.outputs.first() {
+                    let sanitized = self.sanitize_name(&output.signal_id);
+                    if declared_locals.contains(&sanitized) {
+                        continue; // Already declared
+                    }
+                    let output_width = self.get_signal_width_from_sir(sir, &output.signal_id);
+                    let state_sir_type = self.get_signal_sir_type(sir, &output.signal_id);
+                    let is_array = matches!(state_sir_type, Some(SirType::Array(_, _)));
+                    let is_wide = output_width > 128;
+
+                    if !is_array && !is_wide {
+                        let base_type = if output_width <= 32 {
+                            "uint".to_string()
+                        } else {
+                            self.get_metal_type_for_wide_bits(output_width).0
+                        };
+                        // Initialize from registers if exists, otherwise 0
+                        if sir.state_elements.contains_key(&output.signal_id) {
+                            self.write_indented(&format!(
+                                "{} local_{} = registers->{};\n",
+                                base_type, sanitized, sanitized
+                            ));
+                        } else {
+                            self.write_indented(&format!(
+                                "{} local_{} = 0;\n",
+                                base_type, sanitized
+                            ));
+                        }
+                        declared_locals.insert(sanitized);
+                    }
+                }
             }
         }
 
@@ -4746,17 +4844,83 @@ impl<'a> MetalShaderGenerator<'a> {
                 // a local signal AND a prefixed signal for the nested module
                 if node.outputs.len() > 1 {
                     let primary_output = &node.outputs[0].signal_id;
+                    let primary_width = self.get_signal_width_from_sir(sir, primary_output);
+                    // Calculate Metal vector size for primary (how many 32-bit components)
+                    let primary_vector_size = if primary_width <= 32 {
+                        1
+                    } else if primary_width <= 128 {
+                        primary_width.div_ceil(32)
+                    } else {
+                        0 // Wide array, not a simple vector
+                    };
+
                     for additional_output in node.outputs.iter().skip(1) {
                         let add_name = &additional_output.signal_id;
+                        let add_width = self.get_signal_width_from_sir(sir, add_name);
+                        let add_vector_size = if add_width <= 32 {
+                            1
+                        } else if add_width <= 128 {
+                            add_width.div_ceil(32)
+                        } else {
+                            0 // Wide array
+                        };
+
                         println!(
-                            ">>> BUG #115 FIX: Copying {} -> {}",
-                            primary_output, add_name
+                            ">>> BUG #115 FIX: Copying {} (width={}, vec_size={}) -> {} (width={}, vec_size={})",
+                            primary_output, primary_width, primary_vector_size,
+                            add_name, add_width, add_vector_size
                         );
-                        self.write_indented(&format!(
-                            "signals->{} = signals->{}; // BUG #115 FIX\n",
-                            self.sanitize_name(add_name),
-                            self.sanitize_name(primary_output)
-                        ));
+
+                        // Generate type-safe copy based on Metal representation
+                        if primary_vector_size == add_vector_size || (primary_width == add_width) {
+                            // Same type/size - direct assignment
+                            self.write_indented(&format!(
+                                "signals->{} = signals->{}; // BUG #115 FIX\n",
+                                self.sanitize_name(add_name),
+                                self.sanitize_name(primary_output)
+                            ));
+                        } else if primary_vector_size > 1 && add_vector_size == 1 {
+                            // Primary is vector (uint2/uint3/uint4), additional is scalar - extract .x
+                            self.write_indented(&format!(
+                                "signals->{} = signals->{}.x; // BUG #115 FIX (vec->scalar)\n",
+                                self.sanitize_name(add_name),
+                                self.sanitize_name(primary_output)
+                            ));
+                        } else if primary_width > 128 && add_width <= 128 {
+                            // Primary is wide array, additional is smaller - copy first elements
+                            if add_vector_size == 1 {
+                                self.write_indented(&format!(
+                                    "signals->{} = signals->{}[0]; // BUG #115 FIX (array->scalar)\n",
+                                    self.sanitize_name(add_name),
+                                    self.sanitize_name(primary_output)
+                                ));
+                            } else {
+                                // Copy first N elements to form a vector
+                                for i in 0..add_vector_size {
+                                    let comp = match i {
+                                        0 => "x",
+                                        1 => "y",
+                                        2 => "z",
+                                        3 => "w",
+                                        _ => "x",
+                                    };
+                                    self.write_indented(&format!(
+                                        "signals->{}.{} = signals->{}[{}]; // BUG #115 FIX\n",
+                                        self.sanitize_name(add_name),
+                                        comp,
+                                        self.sanitize_name(primary_output),
+                                        i
+                                    ));
+                                }
+                            }
+                        } else {
+                            // Fallback - try direct assignment and let Metal compiler catch issues
+                            self.write_indented(&format!(
+                                "signals->{} = signals->{}; // BUG #115 FIX (fallback)\n",
+                                self.sanitize_name(add_name),
+                                self.sanitize_name(primary_output)
+                            ));
+                        }
                     }
                 }
             }
