@@ -3004,15 +3004,19 @@ impl<'a> MirToSirConverter<'a> {
             }
             ExpressionKind::FieldAccess {
                 base,
-                field: _field,
+                field,
             } => {
-                // For named field access, fall back to base expression
-                // This would need type information to determine field offsets
-                println!(
-                    "    ⚠️ FieldAccess on field '{}' - falling back to base",
-                    _field
-                );
-                self.create_expression_with_local_context(base, local_context)
+                // BUG #220 FIX: Properly resolve FieldAccess to flattened signal names
+                if let Some(node_id) = self.resolve_field_access_to_signal(base, field) {
+                    node_id
+                } else {
+                    // Fallback to base expression if resolution fails
+                    println!(
+                        "    ⚠️ FieldAccess on field '{}' - falling back to base",
+                        field
+                    );
+                    self.create_expression_with_local_context(base, local_context)
+                }
             }
         }
     }
@@ -5383,6 +5387,84 @@ impl<'a> MirToSirConverter<'a> {
 
         self.sir.combinational_nodes.push(node);
         node_id
+    }
+
+    /// BUG #220 FIX: Resolve a FieldAccess expression chain to a flattened signal name
+    ///
+    /// Walks up the FieldAccess chain to find the root signal/port/variable,
+    /// then builds the flattened signal name (e.g., `faults.ov` -> `faults__ov`).
+    ///
+    /// Returns the node ID of the signal driver if found, None otherwise.
+    fn resolve_field_access_to_signal(&mut self, base: &Expression, field: &str) -> Option<usize> {
+        // Walk up the FieldAccess chain to find root and build field path
+        let mut field_path = vec![field.to_string()];
+        let mut current_base = base;
+
+        loop {
+            match &current_base.kind {
+                ExpressionKind::FieldAccess {
+                    base: inner_base,
+                    field: inner_field,
+                } => {
+                    field_path.insert(0, inner_field.clone());
+                    current_base = inner_base.as_ref();
+                }
+                ExpressionKind::Ref(lvalue) => {
+                    // Found the root - construct the flattened signal name
+                    let root_name = match lvalue {
+                        LValue::Signal(sig_id) => {
+                            self.mir.signals.iter().find(|s| s.id == *sig_id).map(|s| s.name.clone())
+                        }
+                        LValue::Port(port_id) => {
+                            self.mir.ports.iter().find(|p| p.id == *port_id).map(|p| p.name.clone())
+                        }
+                        LValue::Variable(var_id) => {
+                            self.mir.variables.iter().find(|v| v.id == *var_id).map(|v| {
+                                // Variables use unique naming: name_id
+                                format!("{}_{}", v.name, v.id.0)
+                            })
+                        }
+                        _ => None,
+                    };
+
+                    if let Some(root) = root_name {
+                        // Build flattened name: root__field1__field2...
+                        let flattened_name = format!("{}__{}", root, field_path.join("__"));
+
+                        // Look up the flattened signal
+                        if let Some(internal_name) = self.mir_to_internal_name.get(&flattened_name).cloned() {
+                            return Some(self.get_or_create_signal_driver(&internal_name));
+                        }
+
+                        // Try with single underscore (some flattening uses _ instead of __)
+                        let flattened_name_single = format!("{}_{}", root, field_path.join("_"));
+                        if let Some(internal_name) = self.mir_to_internal_name.get(&flattened_name_single).cloned() {
+                            return Some(self.get_or_create_signal_driver(&internal_name));
+                        }
+
+                        // Try looking in MIR signals directly for flattened names
+                        let mir_match = self.mir.signals.iter()
+                            .find(|s| s.name == flattened_name || s.name == flattened_name_single)
+                            .map(|s| s.name.clone());
+                        if let Some(name) = mir_match {
+                            return Some(self.get_or_create_signal_driver(&name));
+                        }
+
+                        // Try looking in SIR signals directly
+                        let sir_match = self.sir.signals.iter()
+                            .find(|s| s.name == flattened_name || s.name == flattened_name_single)
+                            .map(|s| s.name.clone());
+                        if let Some(name) = sir_match {
+                            return Some(self.get_or_create_signal_driver(&name));
+                        }
+
+                        println!("    ⚠️ FieldAccess could not find flattened signal: {}", flattened_name);
+                    }
+                    return None;
+                }
+                _ => return None,
+            }
+        }
     }
 
     fn convert_binary_op(&self, op: &skalp_mir::BinaryOp) -> BinaryOperation {
@@ -8865,21 +8947,26 @@ impl<'a> MirToSirConverter<'a> {
             }
             ExpressionKind::FieldAccess {
                 base,
-                field: _field,
+                field,
             } => {
-                // For named field access, fall back to base expression
-                println!(
-                    "    ⚠️ FieldAccess on field '{}' - falling back to base (inst)",
-                    _field
-                );
-                self.create_expression_node_for_instance_with_context(
-                    base,
-                    inst_prefix,
-                    port_mapping,
-                    child_module,
-                    parent_module_for_signals,
-                    parent_prefix,
-                )
+                // BUG #220 FIX: Properly resolve FieldAccess to flattened signal names
+                if let Some(node_id) = self.resolve_field_access_to_signal(base, field) {
+                    node_id
+                } else {
+                    // Fallback to base expression if resolution fails
+                    println!(
+                        "    ⚠️ FieldAccess on field '{}' - falling back to base (inst)",
+                        field
+                    );
+                    self.create_expression_node_for_instance_with_context(
+                        base,
+                        inst_prefix,
+                        port_mapping,
+                        child_module,
+                        parent_module_for_signals,
+                        parent_prefix,
+                    )
+                }
             }
             ExpressionKind::Cast { expr, .. } => {
                 // BUG #186 FIX: Cast is a no-op for hardware generation (bitwise reinterpretation)
