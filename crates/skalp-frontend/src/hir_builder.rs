@@ -12845,43 +12845,75 @@ impl HirBuilderContext {
                 default_value,
             })
         } else {
-            // Regular type parameter (e.g., T or T: Trait1 + Trait2 or WIDTH: nat = 8)
+            // Could be a type parameter (T, T: Trait1 + Trait2) or const parameter (WIDTH: nat = 8)
             let name = node
                 .first_token_of_kind(SyntaxKind::Ident)
                 .map(|t| t.text().to_string())?;
 
-            // Check if this is a type parameter with trait bounds
-            // Look for TraitBoundList node which indicates trait bounds (T: FloatingPoint)
-            let param_type = if let Some(trait_bound_list) =
-                node.first_child_of_kind(SyntaxKind::TraitBoundList)
-            {
-                // Extract trait names from TraitBoundList
-                let mut trait_bounds = Vec::new();
+            // BUG #241 FIX: Check if this has a type annotation (e.g., WIDTH: nat[32] = 8).
+            // Parameters with type annotations like nat[32], int[16], bit[N] are const parameters,
+            // even without the explicit `const` keyword. Type parameters (T, T: Trait) don't have
+            // concrete type annotations.
+            let has_type_annotation = node.first_child_of_kind(SyntaxKind::TypeAnnotation).is_some();
 
-                for trait_bound in trait_bound_list.children_of_kind(SyntaxKind::TraitBound) {
-                    if let Some(trait_name) = trait_bound.first_token_of_kind(SyntaxKind::Ident) {
-                        trait_bounds.push(trait_name.text().to_string());
-                    }
-                }
-
-                if !trait_bounds.is_empty() {
-                    HirGenericType::TypeWithBounds(trait_bounds)
+            // Also check for primitive types that indicate const parameters
+            let looks_like_const_type = node.children_with_tokens().any(|elem| {
+                if let Some(token) = elem.as_token() {
+                    // Common const parameter type keywords
+                    matches!(
+                        token.text(),
+                        "nat" | "int" | "bit" | "bool" | "u8" | "u16" | "u32" | "u64"
+                            | "i8" | "i16" | "i32" | "i64"
+                    )
                 } else {
-                    HirGenericType::Type
+                    false
                 }
+            });
+
+            if has_type_annotation || looks_like_const_type {
+                // This is a const parameter without explicit `const` keyword
+                let param_type = self.extract_hir_type(node);
+                let default_value = self.find_initial_value_expr(node);
+
+                Some(HirGeneric {
+                    name,
+                    param_type: HirGenericType::Const(param_type),
+                    default_value,
+                })
             } else {
-                // No trait bounds, just a plain type parameter
-                HirGenericType::Type
-            };
+                // Check if this is a type parameter with trait bounds
+                // Look for TraitBoundList node which indicates trait bounds (T: FloatingPoint)
+                let param_type = if let Some(trait_bound_list) =
+                    node.first_child_of_kind(SyntaxKind::TraitBoundList)
+                {
+                    // Extract trait names from TraitBoundList
+                    let mut trait_bounds = Vec::new();
 
-            // Check for default value (= expression after type)
-            let default_value = self.find_initial_value_expr(node);
+                    for trait_bound in trait_bound_list.children_of_kind(SyntaxKind::TraitBound) {
+                        if let Some(trait_name) = trait_bound.first_token_of_kind(SyntaxKind::Ident) {
+                            trait_bounds.push(trait_name.text().to_string());
+                        }
+                    }
 
-            Some(HirGeneric {
-                name,
-                param_type,
-                default_value,
-            })
+                    if !trait_bounds.is_empty() {
+                        HirGenericType::TypeWithBounds(trait_bounds)
+                    } else {
+                        HirGenericType::Type
+                    }
+                } else {
+                    // No trait bounds, just a plain type parameter
+                    HirGenericType::Type
+                };
+
+                // Check for default value (= expression after type)
+                let default_value = self.find_initial_value_expr(node);
+
+                Some(HirGeneric {
+                    name,
+                    param_type,
+                    default_value,
+                })
+            }
         }
     }
 

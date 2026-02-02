@@ -864,6 +864,17 @@ impl<'hir> MonomorphizationEngine<'hir> {
                 );
                 HirStatement::Let(new_let)
             }
+            // Block statement - recursively substitute statements inside the block
+            // BUG #242 FIX: Block statements were previously falling through to the default case,
+            // which caused generic parameters inside match arms to not be substituted.
+            // Example: PRECHARGE_CYCLES in `match state { Precharge => { if timer > PRECHARGE_CYCLES ... } }`
+            HirStatement::Block(stmts) => {
+                let substituted_stmts = stmts
+                    .iter()
+                    .map(|s| self.substitute_statement_with_ports(s, const_args, port_id_map))
+                    .collect();
+                HirStatement::Block(substituted_stmts)
+            }
             // Other statement types pass through (for now)
             _ => stmt.clone(),
         }
