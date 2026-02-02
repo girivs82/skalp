@@ -2950,10 +2950,55 @@ impl<'a> MirToSirConverter<'a> {
                 // Fall back to original implementation for function calls
                 self.create_expression_node(expr)
             }
-            ExpressionKind::Cast { expr, .. } => {
-                // Cast is a no-op for hardware generation (bitwise reinterpretation)
-                // Just process the inner expression
-                self.create_expression_with_local_context(expr, local_context)
+            ExpressionKind::Cast { expr: inner_expr, target_type } => {
+                // BUG #245 FIX: Widening casts need sign/zero extension
+                // Get source and target widths
+                let source_width = Self::type_to_width(&inner_expr.ty).unwrap_or(32);
+                let target_width = Self::datatype_to_width(target_type);
+
+                // Create node for the inner expression
+                let inner_node = self.create_expression_with_local_context(inner_expr, local_context);
+
+                if target_width > source_width {
+                    // Widening cast - need to extend
+                    let extend_bits = target_width - source_width;
+                    let is_signed = Self::is_datatype_signed(target_type) || self.is_expression_signed(inner_expr);
+
+                    println!("🔧 BUG #245 FIX: Widening cast from {} bits to {} bits (signed={})",
+                             source_width, target_width, is_signed);
+
+                    if is_signed {
+                        // Sign extension: replicate MSB (sign bit) for the extension
+                        // Create a slice to extract the MSB (sign bit)
+                        let msb_index = source_width - 1;
+                        let sign_bit_node = self.create_slice_node(inner_node, msb_index, msb_index);
+
+                        // Create a constant with all 1s for the extension width (used with MUX)
+                        let ones_constant = self.create_constant_node((1u64 << extend_bits) - 1, extend_bits);
+                        // Create a constant with all 0s for the extension width
+                        let zeros_constant = self.create_constant_node(0, extend_bits);
+
+                        // Create a MUX: if sign_bit == 1 then extend with 1s else extend with 0s
+                        let sign_extend_node = self.create_mux_node(sign_bit_node, ones_constant, zeros_constant);
+
+                        // Concatenate: [sign_extension, original_value]
+                        // In HDL, concat is MSB-first, so extension bits go first
+                        self.create_concat_node(vec![sign_extend_node, inner_node])
+                    } else {
+                        // Zero extension: pad with zeros
+                        let zeros_node = self.create_constant_node(0, extend_bits);
+                        // Concatenate: [zeros, original_value]
+                        self.create_concat_node(vec![zeros_node, inner_node])
+                    }
+                } else if target_width < source_width {
+                    // Narrowing cast - truncate by slicing
+                    println!("🔧 BUG #245: Narrowing cast from {} bits to {} bits (truncation)",
+                             source_width, target_width);
+                    self.create_slice_node(inner_node, target_width - 1, 0)
+                } else {
+                    // Same width - just return the inner expression (bitwise reinterpretation)
+                    inner_node
+                }
             }
             // BUG FIX #85: Handle tuple field access for module synthesis
             ExpressionKind::TupleFieldAccess { base, index } => {
@@ -3461,6 +3506,38 @@ impl<'a> MirToSirConverter<'a> {
             }
             _ => None,
         }
+    }
+
+    /// BUG #245 FIX: Get width from MIR DataType for cast handling
+    fn datatype_to_width(dt: &DataType) -> usize {
+        match dt {
+            DataType::Bit(w) | DataType::Logic(w) | DataType::Int(w) | DataType::Nat(w) => *w,
+            DataType::Bool => 1,
+            DataType::Clock { .. } | DataType::Reset { .. } | DataType::Event => 1,
+            DataType::Float16 => 16,
+            DataType::Float32 => 32,
+            DataType::Float64 => 64,
+            DataType::BitParam { default, .. }
+            | DataType::LogicParam { default, .. }
+            | DataType::IntParam { default, .. }
+            | DataType::NatParam { default, .. }
+            | DataType::BitExpr { default, .. }
+            | DataType::LogicExpr { default, .. }
+            | DataType::IntExpr { default, .. }
+            | DataType::NatExpr { default, .. } => *default,
+            DataType::Array(elem, size) => Self::datatype_to_width(elem) * size,
+            DataType::Vec2(elem) => Self::datatype_to_width(elem) * 2,
+            DataType::Vec3(elem) => Self::datatype_to_width(elem) * 3,
+            DataType::Vec4(elem) => Self::datatype_to_width(elem) * 4,
+            DataType::Ncl(w) => w * 2, // Dual-rail encoding
+            DataType::Struct(s) => s.fields.iter().map(|f| Self::datatype_to_width(&f.field_type)).sum(),
+            DataType::Enum(_) | DataType::Union(_) => 32, // Default assumption
+        }
+    }
+
+    /// BUG #245 FIX: Check if a DataType is signed
+    fn is_datatype_signed(dt: &DataType) -> bool {
+        matches!(dt, DataType::Int(_) | DataType::IntParam { .. } | DataType::IntExpr { .. })
     }
 
     /// Check if a type is signed (Int types are signed)
