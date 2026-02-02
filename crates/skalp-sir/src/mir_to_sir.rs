@@ -8069,7 +8069,9 @@ impl<'a> MirToSirConverter<'a> {
                             }
                         }
                     }
-                    if let Some(val) = self.synthesize_case_for_target_for_instance(
+                    // BUG #244 FIX: Pass current result so unconditional assignments before
+                    // the case statement are used as the default when no case arm matches
+                    if let Some(val) = self.synthesize_case_for_target_for_instance_with_default(
                         case_stmt,
                         inst_prefix,
                         port_mapping,
@@ -8077,6 +8079,7 @@ impl<'a> MirToSirConverter<'a> {
                         target,
                         parent_module_for_signals,
                         parent_prefix,
+                        result, // BUG #244: Pass current result as default
                     ) {
                         result = Some(val);
                     }
@@ -8173,7 +8176,9 @@ impl<'a> MirToSirConverter<'a> {
                     }
                 }
                 Statement::Case(case_stmt) => {
-                    if let Some(val) = self.synthesize_case_for_target_for_instance(
+                    // BUG #244 FIX: Pass current result so unconditional assignments before
+                    // the case statement are used as the default when no case arm matches
+                    if let Some(val) = self.synthesize_case_for_target_for_instance_with_default(
                         case_stmt,
                         inst_prefix,
                         port_mapping,
@@ -8181,6 +8186,7 @@ impl<'a> MirToSirConverter<'a> {
                         target,
                         parent_module_for_signals,
                         parent_prefix,
+                        result, // BUG #244: Pass current result as default
                     ) {
                         result = Some(val);
                     }
@@ -8342,6 +8348,147 @@ impl<'a> MirToSirConverter<'a> {
         }
 
         println!("         ✅ Built mux tree for target={} node_{}", target, current_mux);
+        Some(current_mux)
+    }
+
+    /// BUG #244 FIX: Synthesize case statement with an explicit default value
+    /// When an unconditional assignment precedes the case statement, pass it as default
+    /// so that if no case arm matches, we use the unconditional value instead of "keep current"
+    fn synthesize_case_for_target_for_instance_with_default(
+        &mut self,
+        case_stmt: &skalp_mir::CaseStatement,
+        inst_prefix: &str,
+        port_mapping: &HashMap<String, Expression>,
+        child_module: &Module,
+        target: &str,
+        parent_module_for_signals: Option<&Module>,
+        parent_prefix: &str,
+        default_result: Option<usize>,
+    ) -> Option<usize> {
+        // Create expression node for the case expression (e.g., state_reg)
+        let case_expr_node = self.create_expression_node_for_instance_with_context(
+            &case_stmt.expr,
+            inst_prefix,
+            port_mapping,
+            child_module,
+            parent_module_for_signals,
+            parent_prefix,
+        );
+
+        // Collect values and expressions for this target from all case arms
+        let mut case_arms: Vec<(Vec<&Expression>, Option<usize>)> = Vec::new();
+        let mut found_target = false;
+
+        for (idx, item) in case_stmt.items.iter().enumerate() {
+            // Recursively find assignment in this arm's block, passing default_result for chaining
+            let arm_value = self.find_assignment_in_branch_for_instance_with_default(
+                &item.block.statements,
+                inst_prefix,
+                port_mapping,
+                child_module,
+                target,
+                parent_module_for_signals,
+                parent_prefix,
+                None, // Case arms don't inherit the default
+            );
+            if arm_value.is_some() {
+                found_target = true;
+            }
+            case_arms.push((item.values.iter().collect(), arm_value));
+        }
+
+        // Get default block value
+        let default_block_value = if let Some(default_block) = &case_stmt.default {
+            let val = self.find_assignment_in_branch_for_instance_with_default(
+                &default_block.statements,
+                inst_prefix,
+                port_mapping,
+                child_module,
+                target,
+                parent_module_for_signals,
+                parent_prefix,
+                default_result, // BUG #244 FIX: pass default_result for proper chaining
+            );
+            if val.is_some() {
+                found_target = true;
+            }
+            val
+        } else {
+            None
+        };
+
+        // BUG #244 FIX: If we have a default_result (from unconditional assignment before case),
+        // treat the case statement as assigning to this target even if no arm explicitly assigns
+        if !found_target && default_result.is_none() {
+            return None;
+        }
+
+        // BUG #244 FIX: Use default_result (unconditional assignment value) when:
+        // 1. No default block in the case statement, AND
+        // 2. We have a default_result from a preceding unconditional assignment
+        // Otherwise fall back to keeping current value
+        let mut current_mux = match default_block_value {
+            Some(block_val) => block_val,  // Default block has assignment
+            None => {
+                // BUG #244 FIX: Use unconditional assignment if provided
+                match default_result {
+                    Some(default_val) => default_val,
+                    None => self.create_signal_ref(target),  // Keep current value
+                }
+            }
+        };
+
+        // Build mux chain from last case to first (so first has priority)
+        for (values, arm_value) in case_arms.iter().rev() {
+            let value_node = match arm_value {
+                Some(val) => *val,
+                None => current_mux,
+            };
+
+            if values.is_empty() {
+                continue;
+            }
+
+            let condition_node = if values.len() == 1 {
+                let val_node = self.create_expression_node_for_instance_with_context(
+                    values[0],
+                    inst_prefix,
+                    port_mapping,
+                    child_module,
+                    parent_module_for_signals,
+                    parent_prefix,
+                );
+                self.create_binary_op_node(&skalp_mir::BinaryOp::Equal, case_expr_node, val_node)
+            } else {
+                let mut or_node = {
+                    let val_node = self.create_expression_node_for_instance_with_context(
+                        values[0],
+                        inst_prefix,
+                        port_mapping,
+                        child_module,
+                        parent_module_for_signals,
+                        parent_prefix,
+                    );
+                    self.create_binary_op_node(&skalp_mir::BinaryOp::Equal, case_expr_node, val_node)
+                };
+                for value in &values[1..] {
+                    let val_node = self.create_expression_node_for_instance_with_context(
+                        value,
+                        inst_prefix,
+                        port_mapping,
+                        child_module,
+                        parent_module_for_signals,
+                        parent_prefix,
+                    );
+                    let eq_node = self.create_binary_op_node(&skalp_mir::BinaryOp::Equal, case_expr_node, val_node);
+                    or_node = self.create_binary_op_node(&skalp_mir::BinaryOp::Or, or_node, eq_node);
+                }
+                or_node
+            };
+
+            current_mux = self.create_mux_node(condition_node, value_node, current_mux);
+        }
+
         Some(current_mux)
     }
 
