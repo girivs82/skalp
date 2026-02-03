@@ -2138,18 +2138,15 @@ impl MirToLirTransform {
                     }
                     std::cmp::Ordering::Greater => {
                         // Widening - use ZeroExtend (unsigned) or SignExtend (signed)
+                        // BUG #245 FIX: Check if the SOURCE expression is signed, not the target
+                        // Casting unsigned to signed should zero-extend, not sign-extend
                         let out = self.alloc_temp_signal(target_width);
-                        let is_signed = matches!(
-                            target_type,
-                            DataType::Int(_)
-                                | DataType::IntParam { .. }
-                                | DataType::IntExpr { .. }
-                                | DataType::Float16
-                                | DataType::Float32
-                                | DataType::Float64
-                        );
+                        let is_source_signed = self.infer_expression_is_signed(expr);
 
-                        if is_signed {
+                        println!("[LIR_CAST_DEBUG] Widening cast: {} -> {} bits, source_signed={}, expr_kind={:?}",
+                                 source_width, target_width, is_source_signed, std::mem::discriminant(&expr.kind));
+
+                        if is_source_signed {
                             self.lir.add_node(
                                 LirOp::SignExtend {
                                     from: source_width,

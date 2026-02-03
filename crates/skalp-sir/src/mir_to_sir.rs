@@ -2952,20 +2952,22 @@ impl<'a> MirToSirConverter<'a> {
             }
             ExpressionKind::Cast { expr: inner_expr, target_type } => {
                 // BUG #245 FIX: Widening casts need sign/zero extension
-                // Get source and target widths
-                let source_width = Self::type_to_width(&inner_expr.ty).unwrap_or(32);
                 let target_width = Self::datatype_to_width(target_type);
 
-                // Create node for the inner expression
+                // Create node for the inner expression first
                 let inner_node = self.create_expression_with_local_context(inner_expr, local_context);
+
+                // Get actual width from the created node, not from type annotation (which can be Unknown)
+                let source_width = self.get_node_output_width(inner_node);
 
                 if target_width > source_width {
                     // Widening cast - need to extend
                     let extend_bits = target_width - source_width;
-                    let is_signed = Self::is_datatype_signed(target_type) || self.is_expression_signed(inner_expr);
+                    // BUG FIX: Only sign-extend if the SOURCE is signed
+                    let is_signed = self.is_expression_signed(inner_expr);
 
-                    println!("🔧 BUG #245 FIX: Widening cast from {} bits to {} bits (signed={})",
-                             source_width, target_width, is_signed);
+                    println!("🔧 BUG #245 FIX: Widening cast from {} bits to {} bits (signed={}) node={}",
+                             source_width, target_width, is_signed, inner_node);
 
                     if is_signed {
                         // Sign extension: replicate MSB (sign bit) for the extension
@@ -3674,6 +3676,12 @@ impl<'a> MirToSirConverter<'a> {
                     target_width
                 };
 
+                // Debug for Mul operations
+                if matches!(op, BinaryOp::Mul) {
+                    println!("🔧 [MUL_DEBUG] target_width={:?}, operand_width={:?}, left_kind={:?}, right_kind={:?}",
+                             target_width, operand_width, std::mem::discriminant(&left.kind), std::mem::discriminant(&right.kind));
+                }
+
                 // BUG FIX: Check MIR expression types for signedness (for signed comparisons)
                 // Use is_expression_signed which also looks up signal/port types when expr.ty is Unknown
                 let left_is_signed = self.is_expression_signed(left);
@@ -3682,6 +3690,15 @@ impl<'a> MirToSirConverter<'a> {
 
                 let left_node = self.create_expression_node_with_width(left, operand_width);
                 let right_node = self.create_expression_node_with_width(right, operand_width);
+
+                // Debug for Mul: check the actual node widths
+                if matches!(op, BinaryOp::Mul) {
+                    let left_w = self.get_node_output_width(left_node);
+                    let right_w = self.get_node_output_width(right_node);
+                    println!("🔧 [MUL_DEBUG] Created nodes: left={} ({}bits), right={} ({}bits)",
+                             left_node, left_w, right_node, right_w);
+                }
+
                 self.create_binary_op_node_with_signedness(op, left_node, right_node, is_signed)
             }
             ExpressionKind::Unary { op, operand } => {
@@ -3748,10 +3765,52 @@ impl<'a> MirToSirConverter<'a> {
                 println!("  → Created {} SIR nodes for concat", truncated_nodes.len());
                 self.create_concat_node_with_width(truncated_nodes, target_width)
             }
-            ExpressionKind::Cast { expr, .. } => {
-                // Cast is a no-op for hardware generation (bitwise reinterpretation)
-                // Just process the inner expression
-                self.create_expression_node_with_width(expr, target_width)
+            ExpressionKind::Cast { expr: inner_expr, target_type } => {
+                // BUG #245 FIX: Widening casts need sign/zero extension
+                let cast_target_width = Self::datatype_to_width(target_type);
+
+                // Create node for the inner expression at its native width (don't pass target width
+                // since we want the natural width of the source expression)
+                let inner_node = self.create_expression_node_with_width(inner_expr, None);
+
+                // Get actual width from the created node, not from type annotation (which can be Unknown)
+                let source_width = self.get_node_output_width(inner_node);
+
+                println!("🔧 [CAST_DEBUG] source_width={} (from node {}), cast_target_width={}, inner_kind={:?}, target_type={:?}",
+                         source_width, inner_node, cast_target_width, std::mem::discriminant(&inner_expr.kind), target_type);
+
+                if cast_target_width > source_width {
+                    // Widening cast - need to extend
+                    let extend_bits = cast_target_width - source_width;
+                    // BUG FIX: Only sign-extend if the SOURCE is signed, not the target
+                    // Casting unsigned to signed should zero-extend, not sign-extend
+                    let is_signed = self.is_expression_signed(inner_expr);
+
+                    println!("🔧 BUG #245 FIX (node_with_width): Widening cast from {} bits to {} bits (source_signed={}), creating extend node",
+                             source_width, cast_target_width, is_signed);
+
+                    if is_signed {
+                        // Sign extension: replicate MSB (sign bit) for the extension
+                        let msb_index = source_width - 1;
+                        let sign_bit_node = self.create_slice_node(inner_node, msb_index, msb_index);
+                        let ones_constant = self.create_constant_node((1u64 << extend_bits) - 1, extend_bits);
+                        let zeros_constant = self.create_constant_node(0, extend_bits);
+                        let sign_extend_node = self.create_mux_node(sign_bit_node, ones_constant, zeros_constant);
+                        self.create_concat_node(vec![sign_extend_node, inner_node])
+                    } else {
+                        // Zero extension: pad with zeros
+                        let zeros_node = self.create_constant_node(0, extend_bits);
+                        self.create_concat_node(vec![zeros_node, inner_node])
+                    }
+                } else if cast_target_width < source_width {
+                    // Narrowing cast - truncate by slicing
+                    println!("🔧 BUG #245 FIX (node_with_width): Narrowing cast from {} bits to {} bits",
+                             source_width, cast_target_width);
+                    self.create_slice_node(inner_node, cast_target_width - 1, 0)
+                } else {
+                    // Same width - just return the inner expression (bitwise reinterpretation)
+                    inner_node
+                }
             }
             // BUG FIX #85: Handle tuple field access for module synthesis
             ExpressionKind::TupleFieldAccess { base, index } => {
@@ -9384,19 +9443,58 @@ impl<'a> MirToSirConverter<'a> {
                     )
                 }
             }
-            ExpressionKind::Cast { expr, .. } => {
-                // BUG #186 FIX: Cast is a no-op for hardware generation (bitwise reinterpretation)
-                // Just process the inner expression. This is critical for FP operations where
-                // bit[32] is cast to fp32 - the bits stay the same.
-                println!("🎨🎨🎨   -> ExpressionKind::Cast - processing inner expression");
-                self.create_expression_node_for_instance_with_context(
-                    expr,
+            ExpressionKind::Cast { expr: inner_expr, target_type } => {
+                // BUG #245 FIX: Widening casts need sign/zero extension
+                // BUG #186 NOTE: For same-width casts (e.g., bit[32] to fp32), this is still a no-op
+                println!("🎨🎨🎨   -> ExpressionKind::Cast - processing with width handling");
+
+                let cast_target_width = Self::datatype_to_width(target_type);
+
+                // Create node for the inner expression first
+                let inner_node = self.create_expression_node_for_instance_with_context(
+                    inner_expr,
                     inst_prefix,
                     port_mapping,
                     child_module,
                     parent_module_for_signals,
                     parent_prefix,
-                )
+                );
+
+                // Get actual width from the created node, not from type annotation (which can be Unknown)
+                let source_width = self.get_node_output_width(inner_node);
+
+                if cast_target_width > source_width {
+                    // Widening cast - need to extend
+                    let extend_bits = cast_target_width - source_width;
+                    // BUG FIX: Only sign-extend if the SOURCE is signed
+                    let is_signed = self.is_expression_signed(inner_expr);
+
+                    println!("🔧 BUG #245 FIX (instance_with_context): Widening cast from {} bits to {} bits (signed={}) node={}",
+                             source_width, cast_target_width, is_signed, inner_node);
+
+                    if is_signed {
+                        // Sign extension: replicate MSB (sign bit) for the extension
+                        let msb_index = source_width - 1;
+                        let sign_bit_node = self.create_slice_node(inner_node, msb_index, msb_index);
+                        let ones_constant = self.create_constant_node((1u64 << extend_bits) - 1, extend_bits);
+                        let zeros_constant = self.create_constant_node(0, extend_bits);
+                        let sign_extend_node = self.create_mux_node(sign_bit_node, ones_constant, zeros_constant);
+                        self.create_concat_node(vec![sign_extend_node, inner_node])
+                    } else {
+                        // Zero extension: pad with zeros
+                        let zeros_node = self.create_constant_node(0, extend_bits);
+                        self.create_concat_node(vec![zeros_node, inner_node])
+                    }
+                } else if cast_target_width < source_width {
+                    // Narrowing cast - truncate by slicing
+                    println!("🔧 BUG #245 FIX (instance_with_context): Narrowing cast from {} bits to {} bits",
+                             source_width, cast_target_width);
+                    self.create_slice_node(inner_node, cast_target_width - 1, 0)
+                } else {
+                    // Same width - just return the inner expression (bitwise reinterpretation)
+                    // This handles cases like bit[32] cast to fp32 where the bits stay the same
+                    inner_node
+                }
             }
             _ => {
                 // For unsupported expressions, create a zero constant
