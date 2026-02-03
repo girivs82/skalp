@@ -2465,6 +2465,105 @@ impl MirToLirTransform {
                 )
             }
 
+            // BUG #245: Implement integer division
+            BinaryOp::Div => {
+                // Try to extract constant divisor for optimized division
+                if let Some(divisor) = extract_constant_value(right) {
+                    if divisor == 0 {
+                        self.warnings.push("Division by zero constant".to_string());
+                        let left_sig = self.transform_expression(left, operand_width);
+                        let zero = self.create_constant(&Value::Integer(0), operand_width);
+                        return zero; // Return 0 for div by 0
+                    }
+
+                    let left_sig = self.transform_expression(left, operand_width);
+
+                    // Check if divisor is power of 2 - use right shift
+                    if divisor.is_power_of_two() {
+                        let shift_amount = divisor.trailing_zeros() as u64;
+                        let shift_const = self.create_constant(&Value::Integer(shift_amount as i64), operand_width);
+
+                        return self.create_shift_right_node(left_sig, shift_const, operand_width);
+                    }
+
+                    // For other constants, use magic number multiplication
+                    // This implements: n / d ≈ (n * m) >> (32 + s)
+                    // where m is the magic multiplier and s is the extra shift
+                    let (magic, shift) = compute_magic_number(divisor as u64, operand_width);
+
+                    // Step 1: Create the magic constant
+                    let magic_const = self.create_constant(&Value::Integer(magic as i64), operand_width * 2);
+
+                    // Step 2: Zero-extend dividend to double width for multiplication
+                    let extended_dividend = self.alloc_temp_signal(operand_width * 2);
+                    self.lir.add_node(
+                        LirOp::ZeroExtend {
+                            from: operand_width,
+                            to: operand_width * 2,
+                        },
+                        vec![left_sig],
+                        extended_dividend,
+                        format!("{}.div_zext", self.hierarchy_path),
+                    );
+
+                    // Step 3: Multiply by magic number
+                    let product = self.alloc_temp_signal(operand_width * 2);
+                    self.lir.add_node(
+                        LirOp::Mul {
+                            width: operand_width * 2,
+                            result_width: operand_width * 2,
+                        },
+                        vec![extended_dividend, magic_const],
+                        product,
+                        format!("{}.div_mul", self.hierarchy_path),
+                    );
+
+                    // Step 4: Right shift to get quotient
+                    let total_shift = operand_width + shift;
+                    let shift_const = self.create_constant(&Value::Integer(total_shift as i64), operand_width * 2);
+                    let shifted = self.alloc_temp_signal(operand_width * 2);
+                    self.lir.add_node(
+                        LirOp::Shr {
+                            width: operand_width * 2,
+                        },
+                        vec![product, shift_const],
+                        shifted,
+                        format!("{}.div_shr", self.hierarchy_path),
+                    );
+
+                    // Step 5: Extract lower bits (truncate back to original width)
+                    let result = self.alloc_temp_signal(operand_width);
+                    self.lir.add_node(
+                        LirOp::RangeSelect {
+                            width: operand_width * 2,
+                            high: operand_width - 1,
+                            low: 0,
+                        },
+                        vec![shifted],
+                        result,
+                        format!("{}.div_trunc", self.hierarchy_path),
+                    );
+
+                    return result;
+                } else {
+                    // Variable divisor - not supported yet, emit warning
+                    self.warnings.push(format!(
+                        "Division by non-constant value not supported at {}, using fallback",
+                        self.hierarchy_path
+                    ));
+                    let left_sig = self.transform_expression(left, operand_width);
+                    let right_sig = self.transform_expression(right, operand_width);
+                    (
+                        left_sig,
+                        right_sig,
+                        LirOp::Buffer {
+                            width: operand_width,
+                        },
+                        operand_width,
+                    )
+                }
+            }
+
             _ => {
                 self.warnings
                     .push(format!("Unsupported binary op: {:?}", op));
@@ -2607,6 +2706,18 @@ impl MirToLirTransform {
             vec![],
             out,
             format!("{}.const_{}", self.hierarchy_path, val),
+        );
+        out
+    }
+
+    /// Create a right-shift node
+    fn create_shift_right_node(&mut self, input: LirSignalId, shift: LirSignalId, width: u32) -> LirSignalId {
+        let out = self.alloc_temp_signal(width);
+        self.lir.add_node(
+            LirOp::Shr { width },
+            vec![input, shift],
+            out,
+            format!("{}.shr", self.hierarchy_path),
         );
         out
     }
@@ -5283,6 +5394,51 @@ fn extract_constant_value(expr: &Expression) -> Option<u64> {
         }
         _ => None,
     }
+}
+
+/// Compute the magic number and shift for unsigned division by constant
+/// Using the algorithm from Hacker's Delight, Chapter 10
+/// Returns (magic_multiplier, extra_shift)
+fn compute_magic_number(divisor: u64, width: u32) -> (u64, u32) {
+    if divisor == 0 {
+        return (0, 0);
+    }
+
+    // For division by power of 2, this should be handled separately
+    // (using shift instead of multiply)
+
+    // Calculate magic number using: m = ceil(2^(N+p) / d)
+    // where N is the bit width and p is the extra precision needed
+
+    // Simple approach for 32-bit division:
+    // m = ceil(2^(32+s) / d) where s is chosen to minimize error
+    // Typical s = ceil(log2(d))
+
+    let n = width as u64;
+
+    // For most divisors, use s = ceil(log2(d)) but minimum 1
+    let s = if divisor > 1 {
+        (64 - divisor.leading_zeros()) as u64
+    } else {
+        1
+    };
+
+    // Calculate magic number: ceil(2^(n+s) / d)
+    // We need to be careful about overflow for large n+s
+    // For n=32, s could be up to 32, so n+s could be 64
+
+    let shift_amount = n + s;
+    let magic = if shift_amount < 64 {
+        // Can compute directly
+        let two_power = 1u128 << shift_amount;
+        ((two_power + divisor as u128 - 1) / divisor as u128) as u64
+    } else {
+        // For very large shifts, use 128-bit arithmetic
+        let two_power = 1u128 << shift_amount;
+        ((two_power + divisor as u128 - 1) / divisor as u128) as u64
+    };
+
+    (magic, s as u32)
 }
 
 /// Extract a constant index value from an expression
