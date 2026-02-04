@@ -1731,7 +1731,7 @@ impl GateNetlist {
             }
         }
 
-        // Phase 4: Update net metadata and net_map
+        // Phase 4: Update net metadata, set alias_of, and update net_map
         for (old_id, new_id) in &remap {
             let old_idx = *old_id as usize;
             let new_idx = *new_id as usize;
@@ -1746,13 +1746,25 @@ impl GateNetlist {
                 self.nets[new_idx].driver_pin = self.nets[old_idx].driver_pin;
             }
 
-            // Clear old net
+            // Clear old net driver
             self.nets[old_idx].driver = None;
+
+            // BUG #246 FIX: Set alias_of so resolve_alias() works for batched merges.
+            // This is critical for SIR conversion - cells call resolve_alias() to find
+            // the canonical net ID, and without alias_of set, merged nets appear as
+            // separate signals in the SIR, breaking EC input propagation.
+            self.nets[old_idx].alias_of = Some(GateNetId(*new_id));
         }
 
-        // Update net_map for merged names to point to survivor
+        // Update net_map for merged names to point to CANONICAL root (not immediate survivor)
+        // BUG #246 FIX: Use remap to get the canonical root for transitive merges.
+        // Example: If A→B→C (A merges into B, B merges into C), then:
+        //   - net_names_to_update has ("A", B_id)
+        //   - But remap[B_id] = C_id (the canonical root)
+        //   - So we must look up remap to get C_id, not use B_id directly
         for (merged_name, survivor_id) in net_names_to_update {
-            self.net_map.insert(merged_name, GateNetId(survivor_id));
+            let canonical_id = remap.get(&survivor_id).copied().unwrap_or(survivor_id);
+            self.net_map.insert(merged_name, GateNetId(canonical_id));
         }
     }
 

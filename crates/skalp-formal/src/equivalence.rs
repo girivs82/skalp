@@ -9377,6 +9377,14 @@ impl SimBasedEquivalenceChecker {
             println!("[SIM_EQ]   - {} ({} bits)", base, bits.len());
         }
 
+        // Debug: trace power_actual specifically
+        if let Some(bits) = gate_outputs_by_base.get("power_actual") {
+            println!("[SIM_EQ] power_actual gate bits: {:?}", bits);
+        } else {
+            println!("[SIM_EQ] power_actual NOT found in gate_outputs_by_base");
+            println!("[SIM_EQ] Available bases: {:?}", gate_outputs_by_base.keys().take(20).collect::<Vec<_>>());
+        }
+
         if matched_outputs.is_empty() {
             // Print some debug info with resolved names
             println!("[SIM_EQ] MIR outputs (resolved): {:?}", mir_outputs.iter().take(10)
@@ -9674,10 +9682,12 @@ impl SimBasedEquivalenceChecker {
                 let mir_value = if is_single_bit { value & 1 } else { value };
 
                 // Debug: Print hw_oc and fault-related inputs for cycle 0
+                // BUG #246 DEBUG: Also trace bms.fault which directly drives any_fault_flag
                 if cycle == 0 && (user_name.contains("hw_oc") || user_name.contains("hw_ov") ||
                                   user_name.contains("hw_uv") || user_name.contains("hw_ot") ||
                                   user_name.contains("desat") || user_name.contains("i_oc") ||
-                                  user_name.contains("adc_ibat") || user_name.contains("current")) {
+                                  user_name.contains("adc_ibat") || user_name.contains("current") ||
+                                  user_name.contains("bms") || user_name.contains("fault")) {
                     println!("[SIM_EQ] Cycle 0 input '{}': LFSR={}, actual={} (single_bit={})",
                         user_name, value & 0xFFFF, mir_value, is_single_bit);
                 }
@@ -9781,9 +9791,67 @@ impl SimBasedEquivalenceChecker {
                 for (gate_name, bit_idx) in &sorted_bits {
                     if let Some(gv) = gate_sim.get_output_raw(gate_name).await {
                         has_bits = true;
-                        // Debug: trace faults.oc
+                        // Debug: trace faults.oc and power_actual
                         if user_name.contains("faults.oc") || user_name.contains("faults__oc") {
                             println!("[EC_DEBUG] faults.oc: gate_name='{}', bit_idx={:?}, gv={}", gate_name, bit_idx, gv);
+                        }
+                        if user_name.contains("power_actual") {
+                            println!("[EC_DEBUG] cycle={} power_actual: gate_name='{}', bit_idx={:?}, gv={}", cycle, gate_name, bit_idx, gv);
+                        }
+                        // Debug: print adc_valid at each cycle
+                        if gate_name == "power_actual[0]" {
+                            if let Some(adc_valid_gate) = gate_sim.get_output_raw("adc_valid").await {
+                                let adc_valid_mir = mir_sim.get_output_raw("adc_valid").await.unwrap_or(999);
+                                let mir_power = mir_sim.get_output_raw(mir_name).await.unwrap_or(999);
+                                // Check converted values - MIR
+                                let mir_v_bat_mv = mir_sim.get_output_raw("v_bat_mv").await.unwrap_or(666);
+                                let mir_i_bat_ma = mir_sim.get_output_raw("i_bat_ma").await.unwrap_or(666);
+                                let mir_power_mw = mir_sim.get_output_raw("power_mw").await.unwrap_or(555);
+                                // Expected power_mw (Rust calculation)
+                                let expected_power_mw = (mir_v_bat_mv as i64) * (mir_i_bat_ma as i64) / 1000;
+                                println!("[EC_DEBUG] cycle={} mir_power={} v_bat_mv={} i_bat_ma={} power_mw={} (expected={}) adc_valid={}",
+                                    cycle, mir_power, mir_v_bat_mv, mir_i_bat_ma, mir_power_mw, expected_power_mw, adc_valid_mir);
+
+                                // BUG #245: Also trace Gate's v_bat_mv, i_bat_ma, and power_mw
+                                // Assemble multi-bit gate values
+                                let mut gate_v_bat_mv: u64 = 0;
+                                let mut gate_i_bat_ma: u64 = 0;
+                                let mut gate_power_mw: u64 = 0;
+                                for bit in 0..16u32 {
+                                    if let Some(v) = gate_sim.get_output_raw(&format!("v_bat_mv[{}]", bit)).await {
+                                        gate_v_bat_mv |= (v & 1) << bit;
+                                    }
+                                    if let Some(v) = gate_sim.get_output_raw(&format!("i_bat_ma[{}]", bit)).await {
+                                        gate_i_bat_ma |= (v & 1) << bit;
+                                    }
+                                }
+                                for bit in 0..32u32 {
+                                    if let Some(v) = gate_sim.get_output_raw(&format!("power_mw[{}]", bit)).await {
+                                        gate_power_mw |= (v & 1) << bit;
+                                    }
+                                }
+                                // Sign-extend i_bat_ma if bit 15 is set (it's a signed 16-bit value)
+                                let gate_i_bat_ma_signed: i64 = if (gate_i_bat_ma & 0x8000) != 0 {
+                                    (gate_i_bat_ma | 0xFFFF_FFFF_FFFF_0000) as i64
+                                } else {
+                                    gate_i_bat_ma as i64
+                                };
+                                // Sign-extend power_mw if bit 31 is set (it's a signed 32-bit value)
+                                let gate_power_mw_signed: i64 = if (gate_power_mw & 0x8000_0000) != 0 {
+                                    (gate_power_mw | 0xFFFF_FFFF_0000_0000) as i64
+                                } else {
+                                    gate_power_mw as i64
+                                };
+                                let gate_expected_power_mw = (gate_v_bat_mv as i64) * gate_i_bat_ma_signed / 1000;
+                                println!("[EC_DEBUG] cycle={} GATE: v_bat_mv={} i_bat_ma={} (signed={}) power_mw={} (signed={}) expected={}",
+                                    cycle, gate_v_bat_mv, gate_i_bat_ma, gate_i_bat_ma_signed, gate_power_mw, gate_power_mw_signed, gate_expected_power_mw);
+
+                                // Check if inputs match between MIR and Gate
+                                if mir_v_bat_mv != gate_v_bat_mv || mir_i_bat_ma as i64 != gate_i_bat_ma_signed {
+                                    println!("[EC_DEBUG] cycle={} INPUT MISMATCH! MIR: v_bat_mv={} i_bat_ma={} vs GATE: v_bat_mv={} i_bat_ma={}",
+                                        cycle, mir_v_bat_mv, mir_i_bat_ma, gate_v_bat_mv, gate_i_bat_ma_signed);
+                                }
+                            }
                         }
                         if let Some(idx) = bit_idx {
                             // Set the specific bit

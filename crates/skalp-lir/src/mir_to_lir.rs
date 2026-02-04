@@ -617,13 +617,14 @@ impl MirToLirTransform {
 
         // If they're different signals, create a buffer
         if expr_signal != target_signal {
+            let path = self.unique_node_path("assign");
             self.lir.add_node(
                 LirOp::Buffer {
                     width: target_width,
                 },
                 vec![expr_signal],
                 target_signal,
-                format!("{}.assign", self.hierarchy_path),
+                path,
             );
         }
     }
@@ -886,11 +887,12 @@ impl MirToLirTransform {
                             if let Some(cond) = condition {
                                 let cond_signal = self.transform_expression(&cond, 1);
                                 let mux_out = self.alloc_temp_signal(target_width);
+                                let path = self.unique_node_path("mux");
                                 self.lir.add_node(
                                     LirOp::Mux2 { width: target_width },
                                     vec![cond_signal, current_value, expr_signal],
                                     mux_out,
-                                    format!("{}.mux", self.hierarchy_path),
+                                    path,
                                 );
                                 current_value = mux_out;
                             } else {
@@ -993,11 +995,12 @@ impl MirToLirTransform {
                                         if let Some(cond) = condition {
                                             let cond_signal = self.transform_expression(&cond, 1);
                                             let mux_out = self.alloc_temp_signal(target_width);
+                                            let path = self.unique_node_path("mux");
                                             self.lir.add_node(
                                                 LirOp::Mux2 { width: target_width },
                                                 vec![cond_signal, current_value, expr_signal],
                                                 mux_out,
-                                                format!("{}.mux", self.hierarchy_path),
+                                                path,
                                             );
                                             current_value = mux_out;
                                         }
@@ -1093,11 +1096,12 @@ impl MirToLirTransform {
                                         if let Some(cond) = condition {
                                             let cond_signal = self.transform_expression(&cond, 1);
                                             let mux_out = self.alloc_temp_signal(target_width);
+                                            let path = self.unique_node_path("mux");
                                             self.lir.add_node(
                                                 LirOp::Mux2 { width: target_width },
                                                 vec![cond_signal, current_value, expr_signal],
                                                 mux_out,
-                                                format!("{}.mux", self.hierarchy_path),
+                                                path,
                                             );
                                             current_value = mux_out;
                                         }
@@ -1114,13 +1118,14 @@ impl MirToLirTransform {
 
                         // Create mux: sel, d0 (else), d1 (then)
                         let mux_out = self.alloc_temp_signal(target_width);
+                        let path = self.unique_node_path("mux");
                         self.lir.add_node(
                             LirOp::Mux2 {
                                 width: target_width,
                             },
                             vec![cond_signal, else_signal, then_signal],
                             mux_out,
-                            format!("{}.mux", self.hierarchy_path),
+                            path,
                         );
 
                         // Create register
@@ -1286,11 +1291,12 @@ impl MirToLirTransform {
                     // Single value match: case_expr == value
                     let val_signal = self.transform_expression(&case_values[0], case_expr_width);
                     let eq_out = self.alloc_temp_signal(1);
+                    let path = self.unique_node_path("case_eq");
                     self.lir.add_node(
                         LirOp::Eq { width: case_expr_width },
                         vec![case_expr_signal, val_signal],
                         eq_out,
-                        format!("{}.case_eq", self.hierarchy_path),
+                        path,
                     );
                     eq_out
                 } else {
@@ -1298,29 +1304,32 @@ impl MirToLirTransform {
                     let mut or_result = {
                         let val_signal = self.transform_expression(&case_values[0], case_expr_width);
                         let eq_out = self.alloc_temp_signal(1);
+                        let path = self.unique_node_path("case_eq");
                         self.lir.add_node(
                             LirOp::Eq { width: case_expr_width },
                             vec![case_expr_signal, val_signal],
                             eq_out,
-                            format!("{}.case_eq", self.hierarchy_path),
+                            path,
                         );
                         eq_out
                     };
                     for value in &case_values[1..] {
                         let val_signal = self.transform_expression(value, case_expr_width);
                         let eq_out = self.alloc_temp_signal(1);
+                        let path = self.unique_node_path("case_eq");
                         self.lir.add_node(
                             LirOp::Eq { width: case_expr_width },
                             vec![case_expr_signal, val_signal],
                             eq_out,
-                            format!("{}.case_eq", self.hierarchy_path),
+                            path,
                         );
                         let or_out = self.alloc_temp_signal(1);
+                        let path = self.unique_node_path("case_or");
                         self.lir.add_node(
                             LirOp::Or { width: 1 },
                             vec![or_result, eq_out],
                             or_out,
-                            format!("{}.case_or", self.hierarchy_path),
+                            path,
                         );
                         or_result = or_out;
                     }
@@ -1329,11 +1338,12 @@ impl MirToLirTransform {
 
                 // Create mux: if condition then arm_signal else current_result
                 let mux_out = self.alloc_temp_signal(target_width);
+                let path = self.unique_node_path("case_mux");
                 self.lir.add_node(
                     LirOp::Mux2 { width: target_width },
                     vec![condition, current_result, arm_signal],
                     mux_out,
-                    format!("{}.case_mux", self.hierarchy_path),
+                    path,
                 );
                 current_result = mux_out;
             }
@@ -1953,11 +1963,12 @@ impl MirToLirTransform {
             };
 
             let mux_out = self.alloc_temp_signal(target_width);
+            let path = self.unique_node_path("mux");
             self.lir.add_node(
                 LirOp::Mux2 { width: target_width },
                 vec![cond_signal, else_signal, then_signal],
                 mux_out,
-                format!("{}.mux", self.hierarchy_path),
+                path,
             );
 
             let reg_op = LirOp::Reg {
@@ -2046,13 +2057,14 @@ impl MirToLirTransform {
                 let expr_signal = self.transform_expression(&assign.rhs, target_width);
 
                 if expr_signal != target_signal {
+                    let path = self.unique_node_path("wire");
                     self.lir.add_node(
                         LirOp::Buffer {
                             width: target_width,
                         },
                         vec![expr_signal],
                         target_signal,
-                        format!("{}.wire", self.hierarchy_path),
+                        path,
                     );
                 }
             }
@@ -2092,14 +2104,14 @@ impl MirToLirTransform {
                 let then_signal = self.transform_expression(then_expr, expected_width);
                 let else_signal = self.transform_expression(else_expr, expected_width);
                 let out = self.alloc_temp_signal(expected_width);
-
+                let path = self.unique_node_path("mux");
                 self.lir.add_node(
                     LirOp::Mux2 {
                         width: expected_width,
                     },
                     vec![cond_signal, else_signal, then_signal],
                     out,
-                    format!("{}.mux", self.hierarchy_path),
+                    path,
                 );
                 out
             }
@@ -2115,11 +2127,12 @@ impl MirToLirTransform {
                 }
 
                 let out = self.alloc_temp_signal(widths.iter().sum());
+                let path = self.unique_node_path("concat");
                 self.lir.add_node(
                     LirOp::Concat { widths },
                     signals,
                     out,
-                    format!("{}.concat", self.hierarchy_path),
+                    path,
                 );
                 out
             }
@@ -2147,6 +2160,7 @@ impl MirToLirTransform {
                                  source_width, target_width, is_source_signed, std::mem::discriminant(&expr.kind));
 
                         if is_source_signed {
+                            let path = self.unique_node_path("sext");
                             self.lir.add_node(
                                 LirOp::SignExtend {
                                     from: source_width,
@@ -2154,9 +2168,10 @@ impl MirToLirTransform {
                                 },
                                 vec![source_signal],
                                 out,
-                                format!("{}.sext", self.hierarchy_path),
+                                path,
                             );
                         } else {
+                            let path = self.unique_node_path("zext");
                             self.lir.add_node(
                                 LirOp::ZeroExtend {
                                     from: source_width,
@@ -2164,7 +2179,7 @@ impl MirToLirTransform {
                                 },
                                 vec![source_signal],
                                 out,
-                                format!("{}.zext", self.hierarchy_path),
+                                path,
                             );
                         }
                         out
@@ -2172,6 +2187,7 @@ impl MirToLirTransform {
                     std::cmp::Ordering::Less => {
                         // Narrowing - use RangeSelect (truncation)
                         let out = self.alloc_temp_signal(target_width);
+                        let path = self.unique_node_path("trunc");
                         self.lir.add_node(
                             LirOp::RangeSelect {
                                 width: source_width,
@@ -2180,7 +2196,7 @@ impl MirToLirTransform {
                             },
                             vec![source_signal],
                             out,
-                            format!("{}.trunc", self.hierarchy_path),
+                            path,
                         );
                         out
                     }
@@ -2216,6 +2232,7 @@ impl MirToLirTransform {
                 let high = low + expected_width - 1;
 
                 let out = self.alloc_temp_signal(expected_width);
+                let path = self.unique_node_path(&format!("tuple_{}", index));
                 self.lir.add_node(
                     LirOp::RangeSelect {
                         width: base_width,
@@ -2224,7 +2241,7 @@ impl MirToLirTransform {
                     },
                     vec![base_signal],
                     out,
-                    format!("{}.tuple_{}", self.hierarchy_path, index),
+                    path,
                 );
                 out
             }
@@ -2496,6 +2513,7 @@ impl MirToLirTransform {
 
                     // Step 2: Zero-extend dividend to double width for multiplication
                     let extended_dividend = self.alloc_temp_signal(operand_width * 2);
+                    let path = self.unique_node_path("div_zext");
                     self.lir.add_node(
                         LirOp::ZeroExtend {
                             from: operand_width,
@@ -2503,11 +2521,12 @@ impl MirToLirTransform {
                         },
                         vec![left_sig],
                         extended_dividend,
-                        format!("{}.div_zext", self.hierarchy_path),
+                        path,
                     );
 
                     // Step 3: Multiply by magic number
                     let product = self.alloc_temp_signal(operand_width * 2);
+                    let path = self.unique_node_path("div_mul");
                     self.lir.add_node(
                         LirOp::Mul {
                             width: operand_width * 2,
@@ -2515,24 +2534,26 @@ impl MirToLirTransform {
                         },
                         vec![extended_dividend, magic_const],
                         product,
-                        format!("{}.div_mul", self.hierarchy_path),
+                        path,
                     );
 
                     // Step 4: Right shift to get quotient
                     let total_shift = operand_width + shift;
                     let shift_const = self.create_constant(&Value::Integer(total_shift as i64), operand_width * 2);
                     let shifted = self.alloc_temp_signal(operand_width * 2);
+                    let path = self.unique_node_path("div_shr");
                     self.lir.add_node(
                         LirOp::Shr {
                             width: operand_width * 2,
                         },
                         vec![product, shift_const],
                         shifted,
-                        format!("{}.div_shr", self.hierarchy_path),
+                        path,
                     );
 
                     // Step 5: Extract lower bits (truncate back to original width)
                     let result = self.alloc_temp_signal(operand_width);
+                    let path = self.unique_node_path("div_trunc");
                     self.lir.add_node(
                         LirOp::RangeSelect {
                             width: operand_width * 2,
@@ -2541,7 +2562,7 @@ impl MirToLirTransform {
                         },
                         vec![shifted],
                         result,
-                        format!("{}.div_trunc", self.hierarchy_path),
+                        path,
                     );
 
                     return result;
@@ -2613,18 +2634,20 @@ impl MirToLirTransform {
                 // Two's complement negation
                 // First invert
                 let inv_out = self.alloc_temp_signal(operand_width);
+                let path = self.unique_node_path("neg_inv");
                 self.lir.add_node(
                     LirOp::Not {
                         width: operand_width,
                     },
                     vec![operand_signal],
                     inv_out,
-                    format!("{}.neg_inv", self.hierarchy_path),
+                    path,
                 );
 
                 // Then add 1
                 let one = self.create_constant(&Value::Integer(1), operand_width);
                 let out = self.alloc_temp_signal(operand_width);
+                let path = self.unique_node_path("neg_add");
                 self.lir.add_node(
                     LirOp::Add {
                         width: operand_width,
@@ -2632,7 +2655,7 @@ impl MirToLirTransform {
                     },
                     vec![inv_out, one],
                     out,
-                    format!("{}.neg_add", self.hierarchy_path),
+                    path,
                 );
                 return out;
             }
@@ -2668,11 +2691,13 @@ impl MirToLirTransform {
         };
 
         let out = self.alloc_temp_signal(result_width);
+        // BUG #246 FIX: Use unique_node_path to avoid duplicate paths
+        let path = self.unique_node_path(&format!("{:?}", op));
         self.lir.add_node(
             word_op,
             vec![operand_signal],
             out,
-            format!("{}.{:?}", self.hierarchy_path, op),
+            path,
         );
         out
     }
@@ -2698,6 +2723,8 @@ impl MirToLirTransform {
         };
 
         let out = self.alloc_temp_signal(w);
+        // BUG #246 FIX: Use unique_node_path to avoid duplicate paths for same constants
+        let path = self.unique_node_path(&format!("const_{}", val));
         self.lir.add_node(
             LirOp::Constant {
                 width: w,
@@ -2705,7 +2732,7 @@ impl MirToLirTransform {
             },
             vec![],
             out,
-            format!("{}.const_{}", self.hierarchy_path, val),
+            path,
         );
         out
     }
@@ -2713,11 +2740,12 @@ impl MirToLirTransform {
     /// Create a right-shift node
     fn create_shift_right_node(&mut self, input: LirSignalId, shift: LirSignalId, width: u32) -> LirSignalId {
         let out = self.alloc_temp_signal(width);
+        let path = self.unique_node_path("shr");
         self.lir.add_node(
             LirOp::Shr { width },
             vec![input, shift],
             out,
-            format!("{}.shr", self.hierarchy_path),
+            path,
         );
         out
     }
@@ -2803,6 +2831,7 @@ impl MirToLirTransform {
 
                 if let ExpressionKind::Literal(Value::Integer(i)) = &index.kind {
                     let out = self.alloc_temp_signal(1);
+                    let path = self.unique_node_path("bit_sel");
                     self.lir.add_node(
                         LirOp::RangeSelect {
                             width: base_width,
@@ -2811,18 +2840,19 @@ impl MirToLirTransform {
                         },
                         vec![base_signal],
                         out,
-                        format!("{}.bit_sel", self.hierarchy_path),
+                        path,
                     );
                     out
                 } else {
                     // Dynamic bit select
                     let idx_signal = self.transform_expression(index, 32);
                     let out = self.alloc_temp_signal(1);
+                    let path = self.unique_node_path("dyn_bit_sel");
                     self.lir.add_node(
                         LirOp::BitSelect { width: base_width },
                         vec![base_signal, idx_signal],
                         out,
-                        format!("{}.dyn_bit_sel", self.hierarchy_path),
+                        path,
                     );
                     out
                 }
@@ -2838,6 +2868,7 @@ impl MirToLirTransform {
                 {
                     let out_width = (*h - *l + 1) as u32;
                     let out = self.alloc_temp_signal(out_width);
+                    let path = self.unique_node_path("range_sel");
                     self.lir.add_node(
                         LirOp::RangeSelect {
                             width: base_width,
@@ -2846,7 +2877,7 @@ impl MirToLirTransform {
                         },
                         vec![base_signal],
                         out,
-                        format!("{}.range_sel", self.hierarchy_path),
+                        path,
                     );
                     out
                 } else {
@@ -2866,11 +2897,12 @@ impl MirToLirTransform {
                 }
 
                 let out = self.alloc_temp_signal(widths.iter().sum());
+                let path = self.unique_node_path("concat");
                 self.lir.add_node(
                     LirOp::Concat { widths },
                     signals,
                     out,
-                    format!("{}.concat", self.hierarchy_path),
+                    path,
                 );
                 out
             }
@@ -3148,6 +3180,14 @@ impl MirToLirTransform {
         let name = format!("_t{}", self.temp_counter);
         self.temp_counter += 1;
         self.lir.add_signal(name, width)
+    }
+
+    /// Generate a unique node path by appending a counter
+    /// BUG #246 FIX: Node paths must be unique to avoid duplicate cells in gate netlist
+    fn unique_node_path(&mut self, name: &str) -> String {
+        let id = self.node_counter;
+        self.node_counter += 1;
+        format!("{}.{}_{}", self.hierarchy_path, name, id)
     }
 }
 
@@ -3478,9 +3518,17 @@ impl HierarchicalMirToLirResult {
                         })
                         .collect();
 
-                    let new_output = signal_id_map.get(&(inst_path.clone(), node.output))
-                        .copied()
-                        .unwrap_or(LirSignalId(0));
+                    // BUG #246 FIX: Check output_remap_map first for output port redirection
+                    // When a child node writes to an output port, redirect it to the parent's signal
+                    // This prevents signal ID collision issues during hierarchical flattening
+                    let new_output = if let Some(&remapped) = output_remap_map.get(&(inst_path.clone(), node.output)) {
+                        // Output port is connected to parent's signal - redirect directly
+                        remapped
+                    } else {
+                        signal_id_map.get(&(inst_path.clone(), node.output))
+                            .copied()
+                            .unwrap_or(LirSignalId(0))
+                    };
 
                     let new_clock = node.clock.and_then(|clk| {
                         // Clocks are usually connected from parent, check alias first

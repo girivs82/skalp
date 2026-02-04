@@ -62,7 +62,8 @@ impl GateNetlistToSirConverter {
         let mut sir = Sir::new(netlist.name.clone());
 
         // Phase 1: Convert all nets to signals
-        self.convert_nets(&netlist.nets, &mut sir.top_module);
+        // BUG #246 FIX: Pass full netlist for alias resolution of merged nets
+        self.convert_nets(&netlist.nets, netlist, &mut sir.top_module);
 
         // Phase 2: Convert cells to primitives
         // Pass netlist to resolve net aliases created by buffer removal
@@ -71,6 +72,11 @@ impl GateNetlistToSirConverter {
         // Phase 2.5: Create buffer primitives for output ports that have drivers
         // This ensures output ports are connected to their driving nets
         self.create_output_buffers(netlist, &mut comb_ops);
+
+        // BUG #246 FIX: Extract DFF reset values from ResetMux pattern
+        // The tech_mapper creates: TIE_HIGH/TIE_LOW (source_op="ResetValue") -> MUX (source_op="ResetMux") -> DFF
+        // We need to trace this pattern and set initial_value on DFF output signals
+        self.extract_dff_reset_values(netlist, &mut sir.top_module);
 
         // Phase 3: Build combinational and sequential blocks
         self.build_blocks(&mut sir.top_module, comb_ops, seq_ops, netlist);
@@ -92,8 +98,18 @@ impl GateNetlistToSirConverter {
     }
 
     /// Convert all nets to SIR signals
-    fn convert_nets(&mut self, nets: &[GateNet], module: &mut SirModule) {
+    ///
+    /// BUG #246 FIX: Handles merged nets (from hierarchical stitching) by mapping them
+    /// to the canonical signal instead of creating phantom signals. This ensures that
+    /// when EC sets input values by name, all equivalent nets reference the same signal.
+    fn convert_nets(&mut self, nets: &[GateNet], netlist: &GateNetlist, module: &mut SirModule) {
+        // First pass: create SIR signals for canonical nets only (those without alias_of)
         for net in nets {
+            // Skip merged nets - they will be mapped in the second pass
+            if net.alias_of.is_some() {
+                continue;
+            }
+
             let signal_id = SirSignalId(self.next_signal_id);
             self.next_signal_id += 1;
 
@@ -151,6 +167,19 @@ impl GateNetlistToSirConverter {
             module.signals.push(signal);
             self.net_to_signal.insert(net.id, signal_id);
         }
+
+        // Second pass: map merged nets to their canonical signals
+        // This ensures cells that reference merged net IDs (though they shouldn't after
+        // merge_nets_batched remaps them) still get the correct signal.
+        for net in nets {
+            if net.alias_of.is_some() {
+                // Resolve to canonical net using the alias chain
+                let canonical_id = netlist.resolve_alias(net.id);
+                if let Some(&signal_id) = self.net_to_signal.get(&canonical_id) {
+                    self.net_to_signal.insert(net.id, signal_id);
+                }
+            }
+        }
     }
 
     /// Convert cells to primitive operations
@@ -195,6 +224,7 @@ impl GateNetlistToSirConverter {
             // BUG FIX: Resolve net aliases before looking up signals.
             // Buffer removal creates alias chains (output net -> input net).
             // Without alias resolution, cells point to undriven nets.
+
             let inputs: Vec<SirSignalId> = cell
                 .inputs
                 .iter()
@@ -310,6 +340,97 @@ impl GateNetlistToSirConverter {
                                 }
 
                                 comb_ops.push(buffer_op);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// BUG #246 FIX: Extract DFF reset values from ResetMux pattern
+    ///
+    /// The tech_mapper creates a specific pattern for DFF resets:
+    /// - TIE_HIGH/TIE_LOW cell with source_op="ResetValue" provides the reset bit value
+    /// - MUX cell with source_op="ResetMux" selects between D input and reset value
+    /// - Regular DFF captures the MUX output
+    ///
+    /// This function traces this pattern and sets initial_value on DFF output signals
+    /// so the gate-level simulator can properly initialize registers at cycle 0.
+    fn extract_dff_reset_values(&self, netlist: &GateNetlist, module: &mut SirModule) {
+        use bitvec::prelude::*;
+
+        let debug = std::env::var("SKALP_DEBUG_RESET").is_ok();
+
+        // Count cells by source_op for debugging
+        if debug {
+            let mut reset_mux_count = 0;
+            let mut reset_value_count = 0;
+            let mut seq_count = 0;
+            for cell in &netlist.cells {
+                if cell.source_op.as_deref() == Some("ResetMux") {
+                    reset_mux_count += 1;
+                }
+                if cell.source_op.as_deref() == Some("ResetValue") {
+                    reset_value_count += 1;
+                }
+                if cell.is_sequential() {
+                    seq_count += 1;
+                }
+            }
+            println!("[BUG #246 DEBUG] Netlist has {} cells: {} sequential, {} ResetMux, {} ResetValue",
+                     netlist.cells.len(), seq_count, reset_mux_count, reset_value_count);
+        }
+
+        // Find all DFF cells
+        for cell in &netlist.cells {
+            if !cell.is_sequential() {
+                continue;
+            }
+
+            // Get DFF D input net
+            let d_input_net_id = match cell.inputs.first() {
+                Some(net_id) => *net_id,
+                None => continue,
+            };
+
+            // Check if D input is driven by a ResetMux cell
+            let reset_mux = netlist.cells.iter().find(|c| {
+                c.outputs.iter().any(|&out| out == d_input_net_id)
+                    && c.source_op.as_deref() == Some("ResetMux")
+            });
+
+            if let Some(mux_cell) = reset_mux {
+                // MUX inputs: [rst, d_orig, reset_bit_net]
+                // The reset value comes from the ResetValue TIE cell driving inputs[2]
+                if let Some(&reset_bit_net_id) = mux_cell.inputs.get(2) {
+                    // Find the TIE cell driving this net
+                    let tie_cell = netlist.cells.iter().find(|c| {
+                        c.outputs.iter().any(|&out| out == reset_bit_net_id)
+                            && c.source_op.as_deref() == Some("ResetValue")
+                    });
+
+                    if let Some(tie) = tie_cell {
+                        // Determine reset value: TIE_HIGH = 1, TIE_LOW = 0
+                        let reset_bit = tie.cell_type.contains("HIGH") || tie.cell_type.contains("HI");
+
+                        // Get DFF output net and corresponding signal
+                        if let Some(&q_net_id) = cell.outputs.first() {
+                            if let Some(&signal_id) = self.net_to_signal.get(&q_net_id) {
+                                // Find and update the signal's initial_value
+                                if let Some(signal) = module.signals.iter_mut().find(|s| s.id == signal_id) {
+                                    // Create BitVec with default storage type (usize)
+                                    let mut bv: BitVec = BitVec::with_capacity(1);
+                                    bv.push(reset_bit);
+                                    signal.initial_value = Some(bv);
+
+                                    if std::env::var("SKALP_DEBUG_RESET").is_ok() {
+                                        println!(
+                                            "[BUG #246 FIX] DFF '{}' reset value = {} (from TIE cell '{}')",
+                                            signal.name, reset_bit as u8, tie.cell_type
+                                        );
+                                    }
+                                }
                             }
                         }
                     }
@@ -693,7 +814,7 @@ impl GateNetlistToSirConverter {
             }
         }
 
-        // Kahn's algorithm
+        // Kahn's algorithm for topological sort
         let mut result = Vec::with_capacity(n);
         let mut queue: VecDeque<usize> = VecDeque::new();
 
@@ -716,9 +837,9 @@ impl GateNetlistToSirConverter {
             }
         }
 
-        // If we didn't process all operations, there's a cycle (shouldn't happen for combinational)
+        // If we didn't process all operations, there's a cycle
         if result.len() != n {
-            // Fall back to original order
+            // Fall back to original order (shouldn't happen for well-formed combinational logic)
             eprintln!("Warning: Cycle detected in combinational logic, using original order");
             return (0..n).collect();
         }

@@ -859,6 +859,16 @@ impl GateOptimizer {
         // because output port net IDs are fixed (part of module interface)
         let output_port_nets: HashSet<GateNetId> = netlist.outputs.iter().copied().collect();
 
+        // BUG #246 FIX: Build set of "alias target" nets - nets that are the canonical
+        // representative after hierarchical port stitching. These nets have other nets
+        // pointing to them via alias_of, so they must not be replaced by buffer removal.
+        // If we replace them, the alias chains become broken and EC mismatches occur.
+        let alias_targets: HashSet<GateNetId> = netlist
+            .nets
+            .iter()
+            .filter_map(|net| net.alias_of)
+            .collect();
+
         for cell in &netlist.cells {
             if self.cells_to_remove.contains(&cell.id) {
                 continue;
@@ -875,6 +885,13 @@ impl GateOptimizer {
                     // Output port net IDs are fixed (part of module interface).
                     // If we remove the buffer, the output port would have no driver.
                     if output_port_nets.contains(&output) {
+                        continue;
+                    }
+
+                    // BUG #246 FIX: Do NOT remove buffers that drive alias target nets!
+                    // These are canonical representatives from hierarchical port stitching.
+                    // If we replace them, it breaks the alias chain and causes EC mismatches.
+                    if alias_targets.contains(&output) {
                         continue;
                     }
 

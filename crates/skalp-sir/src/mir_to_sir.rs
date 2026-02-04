@@ -5547,12 +5547,52 @@ impl<'a> MirToSirConverter<'a> {
                 }
                 ExpressionKind::Ref(lvalue) => {
                     // Found the root - construct the flattened signal name
+                    // BUG #246 FIX: Search child modules when signal/port not found in current module
+                    // This happens when field access is on an instance output port (e.g., prot_faults.ov)
                     let root_name = match lvalue {
                         LValue::Signal(sig_id) => {
-                            self.mir.signals.iter().find(|s| s.id == *sig_id).map(|s| s.name.clone())
+                            // First try current module
+                            if let Some(signal) = self.mir.signals.iter().find(|s| s.id == *sig_id) {
+                                Some(signal.name.clone())
+                            } else {
+                                // BUG #246: Search child modules and prefix with instance name
+                                let mut result = None;
+                                for child_module in &self.mir_design.modules {
+                                    if let Some(signal) = child_module.signals.iter().find(|s| s.id == *sig_id) {
+                                        // Found in child module - look for instance of this module
+                                        for instance in &self.mir.instances {
+                                            if instance.module == child_module.id {
+                                                result = Some(format!("{}.{}", instance.name, signal.name));
+                                                break;
+                                            }
+                                        }
+                                        if result.is_some() { break; }
+                                    }
+                                }
+                                result
+                            }
                         }
                         LValue::Port(port_id) => {
-                            self.mir.ports.iter().find(|p| p.id == *port_id).map(|p| p.name.clone())
+                            // First try current module
+                            if let Some(port) = self.mir.ports.iter().find(|p| p.id == *port_id) {
+                                Some(port.name.clone())
+                            } else {
+                                // BUG #246: Search child modules and prefix with instance name
+                                let mut result = None;
+                                for child_module in &self.mir_design.modules {
+                                    if let Some(port) = child_module.ports.iter().find(|p| p.id == *port_id) {
+                                        // Found in child module - look for instance of this module
+                                        for instance in &self.mir.instances {
+                                            if instance.module == child_module.id {
+                                                result = Some(format!("{}.{}", instance.name, port.name));
+                                                break;
+                                            }
+                                        }
+                                        if result.is_some() { break; }
+                                    }
+                                }
+                                result
+                            }
                         }
                         LValue::Variable(var_id) => {
                             self.mir.variables.iter().find(|v| v.id == *var_id).map(|v| {

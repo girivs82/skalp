@@ -307,10 +307,17 @@ impl GateLevelSimulator {
                 .insert(signal.id.0, signal.name.clone());
             self.signal_widths.insert(signal.id.0, signal.width);
 
-            // Initialize signal values to 0
-            self.state
-                .signals
-                .insert(signal.id.0, vec![false; signal.width]);
+            // BUG #246 FIX: Initialize signal values with initial_value if present
+            // This is needed for DFF outputs to have correct reset values at cycle 0
+            let init_bits = if let Some(ref bv) = signal.initial_value {
+                // Use the initial_value (reset value from ResetMux pattern)
+                (0..signal.width)
+                    .map(|i| bv.get(i).map(|b| *b).unwrap_or(false))
+                    .collect()
+            } else {
+                vec![false; signal.width]
+            };
+            self.state.signals.insert(signal.id.0, init_bits);
 
             // Categorize signals
             match &signal.signal_type {
@@ -464,9 +471,21 @@ impl GateLevelSimulator {
 
     /// Get an output signal value
     pub fn get_output(&self, name: &str) -> Option<Vec<bool>> {
-        self.signal_name_to_id
+        let result = self.signal_name_to_id
             .get(name)
-            .and_then(|id| self.state.signals.get(&id.0).cloned())
+            .and_then(|id| {
+                let value = self.state.signals.get(&id.0).cloned();
+                // Debug: trace power_actual lookups
+                if name.contains("power_actual") {
+                    println!("[GATE_GET_OUTPUT] name='{}', id={}, value={:?}", name, id.0, value);
+                }
+                value
+            });
+        // Debug: if power_actual not found
+        if name.contains("power_actual") && result.is_none() {
+            println!("[GATE_GET_OUTPUT] name='{}' NOT FOUND in signal_name_to_id", name);
+        }
+        result
     }
 
     /// Get any signal value by name (for debugging)
@@ -621,7 +640,7 @@ impl GateLevelSimulator {
                 .state
                 .signals
                 .get(&clock_id.0)
-                .and_then(|v| v.first().copied())
+                .and_then(|v: &Vec<bool>| v.first().copied())
                 .unwrap_or(false);
 
             if !prev && curr {
@@ -672,7 +691,7 @@ impl GateLevelSimulator {
                     .iter()
                     .filter_map(|sig_id| {
                         self.state.signals.get(&sig_id.0)
-                            .and_then(|v| v.first().copied())
+                            .and_then(|v: &Vec<bool>| v.first().copied())
                     })
                     .collect();
                 let input_names: Vec<_> = inputs.iter()
@@ -729,6 +748,14 @@ impl GateLevelSimulator {
                         .unwrap_or(false)
                 });
 
+                // Debug: trace power_actual signal
+                let produces_power_actual = outputs.iter().any(|out_id| {
+                    self.signal_id_to_name
+                        .get(&out_id.0)
+                        .map(|name| name.contains("power_actual"))
+                        .unwrap_or(false)
+                });
+
                 // Gather input values
                 let input_values: Vec<bool> = inputs
                     .iter()
@@ -736,7 +763,7 @@ impl GateLevelSimulator {
                         self.state
                             .signals
                             .get(&sig_id.0)
-                            .and_then(|v| v.first().copied())
+                            .and_then(|v: &Vec<bool>| v.first().copied())
                     })
                     .collect();
 
@@ -746,7 +773,7 @@ impl GateLevelSimulator {
                         .iter()
                         .map(|sig_id| {
                             let name = self.signal_id_to_name.get(&sig_id.0).cloned().unwrap_or_else(|| format!("id{}", sig_id.0));
-                            let value = self.state.signals.get(&sig_id.0).and_then(|v| v.first().copied());
+                            let value = self.state.signals.get(&sig_id.0).and_then(|v: &Vec<bool>| v.first().copied());
                             (name, value)
                         })
                         .collect();
@@ -765,7 +792,7 @@ impl GateLevelSimulator {
                         .iter()
                         .map(|sig_id| {
                             let name = self.signal_id_to_name.get(&sig_id.0).cloned().unwrap_or_else(|| format!("id{}", sig_id.0));
-                            let value = self.state.signals.get(&sig_id.0).and_then(|v| v.first().copied());
+                            let value = self.state.signals.get(&sig_id.0).and_then(|v: &Vec<bool>| v.first().copied());
                             (name, value)
                         })
                         .collect();
@@ -785,7 +812,7 @@ impl GateLevelSimulator {
                         .iter()
                         .map(|sig_id| {
                             let name = self.signal_id_to_name.get(&sig_id.0).cloned().unwrap_or_else(|| format!("id{}", sig_id.0));
-                            let value = self.state.signals.get(&sig_id.0).and_then(|v| v.first().copied());
+                            let value = self.state.signals.get(&sig_id.0).and_then(|v: &Vec<bool>| v.first().copied());
                             (name, value)
                         })
                         .collect();
@@ -828,6 +855,29 @@ impl GateLevelSimulator {
                 // Debug trace output values for fault_out/latched
                 if produces_fault_out && (path.contains("hw_uv_latch") || path.contains("hw_ot_latch")) {
                     println!("[GATE_FAULT_LATCH]   evaluated: {:?}", output_values);
+                }
+
+                // Debug trace output values for power_actual
+                if produces_power_actual {
+                    let input_details: Vec<_> = inputs
+                        .iter()
+                        .map(|sig_id| {
+                            let name = self.signal_id_to_name.get(&sig_id.0).cloned().unwrap_or_else(|| format!("id{}", sig_id.0));
+                            let value = self.state.signals.get(&sig_id.0).and_then(|v: &Vec<bool>| v.first().copied());
+                            (name, value)
+                        })
+                        .collect();
+                    let output_details: Vec<_> = outputs
+                        .iter()
+                        .map(|sig_id| {
+                            let name = self.signal_id_to_name.get(&sig_id.0).cloned().unwrap_or_else(|| format!("id{}", sig_id.0));
+                            (name, sig_id.0)
+                        })
+                        .collect();
+                    println!("[GATE_POWER_ACTUAL] path={}, ptype={:?}", path, ptype);
+                    println!("[GATE_POWER_ACTUAL]   inputs: {:?}", input_details);
+                    println!("[GATE_POWER_ACTUAL]   outputs (name, id): {:?}", output_details);
+                    println!("[GATE_POWER_ACTUAL]   evaluated: {:?}", output_values);
                 }
 
                 // Store output values
@@ -881,7 +931,7 @@ impl GateLevelSimulator {
                             .state
                             .signals
                             .get(&reset_spec.signal.0)
-                            .and_then(|v| v.first().copied())
+                            .and_then(|v: &Vec<bool>| v.first().copied())
                             .unwrap_or(false);
                         // Check against active_high flag
                         if reset_spec.active_high {
@@ -901,22 +951,28 @@ impl GateLevelSimulator {
                         // Debug: trace state_reg DFF operations
                         if let SirOperation::Primitive { outputs, inputs, ptype, path, .. } = op {
                             let is_state_reg = path.contains("state_reg");
-                            if is_state_reg {
+                            let is_power_reg = path.contains("power_reg");
+                            if is_state_reg || is_power_reg {
                                 let input_details: Vec<_> = inputs
                                     .iter()
                                     .map(|sig_id| {
                                         let name = self.signal_id_to_name.get(&sig_id.0).cloned().unwrap_or_else(|| format!("id{}", sig_id.0));
-                                        let value = self.state.signals.get(&sig_id.0).and_then(|v| v.first().copied());
+                                        let value = self.state.signals.get(&sig_id.0).and_then(|v: &Vec<bool>| v.first().copied());
                                         (name, sig_id.0, value)
                                     })
                                     .collect();
                                 let output_names: Vec<_> = outputs.iter()
                                     .map(|o| self.signal_id_to_name.get(&o.0).cloned().unwrap_or_default())
                                     .collect();
-                                println!("[GATE_DFF] state_reg: path={}, outputs={:?}", path, output_names);
-                                for (name, id, sig_val) in &input_details {
-                                    println!("[GATE_DFF]   d_input '{}' (id={}): value={:?}",
-                                        name, id, sig_val);
+                                if is_power_reg {
+                                    println!("[GATE_DFF_POWER] cycle={} path={}, outputs={:?}", self.state.cycle, path, output_names);
+                                    for (name, id, sig_val) in &input_details {
+                                        println!("[GATE_DFF_POWER]   d_input '{}' (id={}): value={:?}",
+                                            name, id, sig_val);
+                                    }
+                                } else if is_state_reg {
+                                    // Only log state_reg if needed
+                                    // println!("[GATE_DFF] state_reg: path={}, outputs={:?}", path, output_names);
                                 }
                             }
                         }
