@@ -1836,6 +1836,10 @@ impl<'a> MetalShaderGenerator<'a> {
                 BinaryOperation::Mul => "*",
                 BinaryOperation::Div => "/",
                 BinaryOperation::Mod => "%",
+                // Signed arithmetic (Metal uses signed casts)
+                BinaryOperation::SMul => "*",
+                BinaryOperation::SDiv => "/",
+                BinaryOperation::SMod => "%",
                 BinaryOperation::And => {
                     if is_boolean_context {
                         "&&" // Logical AND for booleans (prevents bitwise & on float comparison results)
@@ -1864,6 +1868,8 @@ impl<'a> MetalShaderGenerator<'a> {
                 BinaryOperation::Sgte => ">=",
                 BinaryOperation::Shl => "<<",
                 BinaryOperation::Shr => ">>",
+                // Signed/arithmetic right shift - same operator but needs signed operand
+                BinaryOperation::Sar => ">>",
                 // Floating-point operations
                 BinaryOperation::FAdd => "+",
                 BinaryOperation::FSub => "-",
@@ -2184,6 +2190,16 @@ impl<'a> MetalShaderGenerator<'a> {
                             | BinaryOperation::Sgte
                     );
 
+                    // BUG FIX #247: Signed arithmetic (SMul, SDiv, SMod, Sar) need signed operands
+                    // Metal stores values as uint, so we must sign-extend to int for proper signed arithmetic.
+                    let is_signed_arithmetic = matches!(
+                        op,
+                        BinaryOperation::SMul
+                            | BinaryOperation::SDiv
+                            | BinaryOperation::SMod
+                            | BinaryOperation::Sar
+                    );
+
                     // Helper to generate sign-extended expression for a signal
                     let sign_extend_expr = |signal_name: &str, width: usize| -> String {
                         let sanitized = self.sanitize_name(signal_name);
@@ -2206,8 +2222,8 @@ impl<'a> MetalShaderGenerator<'a> {
                         format!("signals->{}", self.sanitize_name(left))
                     } else if left_is_float {
                         format!("as_type<uint>(signals->{})", self.sanitize_name(left))
-                    } else if is_signed_comparison {
-                        // Sign extend to int for proper signed comparison
+                    } else if is_signed_comparison || is_signed_arithmetic {
+                        // Sign extend to int for proper signed comparison/arithmetic
                         sign_extend_expr(left, left_width)
                     } else {
                         format!("signals->{}", self.sanitize_name(left))
@@ -2218,8 +2234,8 @@ impl<'a> MetalShaderGenerator<'a> {
                         format!("signals->{}", self.sanitize_name(right))
                     } else if right_is_float {
                         format!("as_type<uint>(signals->{})", self.sanitize_name(right))
-                    } else if is_signed_comparison {
-                        // Sign extend to int for proper signed comparison
+                    } else if is_signed_comparison || is_signed_arithmetic {
+                        // Sign extend to int for proper signed comparison/arithmetic
                         sign_extend_expr(right, right_width)
                     } else {
                         format!("signals->{}", self.sanitize_name(right))
@@ -2509,6 +2525,85 @@ impl<'a> MetalShaderGenerator<'a> {
                                 ));
                                 self.write_indented(&format!(
                                     "signals->{} = {} {} {};\n",
+                                    self.sanitize_name(output),
+                                    left_expr,
+                                    op_str,
+                                    right_expr
+                                ));
+                            }
+                        } else if *op == BinaryOperation::SMul && output_width > left_width.max(right_width) {
+                            // BUG FIX #247: Signed full-precision multiply requires wider signed arithmetic
+                            // Metal's int * int only gives 32 bits. For full m×n → (m+n) bit precision,
+                            // we need to sign-extend operands to a wider signed type before multiplication.
+
+                            let signal_storage_width = self.get_signal_width_from_sir(sir, output);
+                            let needs_wide_storage = signal_storage_width > 32;
+
+                            if output_width <= 64 {
+                                // 33-64 bit result: use long (signed) multiplication
+                                self.write_indented(&format!(
+                                    "// BUG #247: Full-precision SIGNED multiply {}×{} → {} bits (signal: {} bits)\n",
+                                    left_width, right_width, output_width, signal_storage_width
+                                ));
+
+                                // Sign-extend both operands to long for full precision
+                                let left_long = if left_width <= 32 {
+                                    let shift = 32 - left_width;
+                                    if shift > 0 {
+                                        format!("(long)((int)((int)(signals->{} << {}) >> {}))", self.sanitize_name(left), shift, shift)
+                                    } else {
+                                        format!("(long)(int)signals->{}", self.sanitize_name(left))
+                                    }
+                                } else {
+                                    // Already 64-bit, sign extend from bit 63
+                                    format!(
+                                        "(long)((long)signals->{}[0] | ((long)signals->{}[1] << 32))",
+                                        self.sanitize_name(left),
+                                        self.sanitize_name(left)
+                                    )
+                                };
+
+                                let right_long = if right_width <= 32 {
+                                    let shift = 32 - right_width;
+                                    if shift > 0 {
+                                        format!("(long)((int)((int)(signals->{} << {}) >> {}))", self.sanitize_name(right), shift, shift)
+                                    } else {
+                                        format!("(long)(int)signals->{}", self.sanitize_name(right))
+                                    }
+                                } else {
+                                    format!(
+                                        "(long)((long)signals->{}[0] | ((long)signals->{}[1] << 32))",
+                                        self.sanitize_name(right),
+                                        self.sanitize_name(right)
+                                    )
+                                };
+
+                                if needs_wide_storage {
+                                    // Output is uint2 - store both halves (cast signed result to unsigned)
+                                    self.write_indented(&format!(
+                                        "{{ long _mul_result = {} * {}; signals->{}[0] = (uint)(ulong)_mul_result; signals->{}[1] = (uint)((ulong)_mul_result >> 32); }}\n",
+                                        left_long,
+                                        right_long,
+                                        self.sanitize_name(output),
+                                        self.sanitize_name(output)
+                                    ));
+                                } else {
+                                    // Output is scalar uint - truncate to lower 32 bits
+                                    self.write_indented(&format!(
+                                        "signals->{} = (uint)({} * {});\n",
+                                        self.sanitize_name(output),
+                                        left_long,
+                                        right_long
+                                    ));
+                                }
+                            } else {
+                                // >64 bit result: fall back with warning
+                                self.write_indented(&format!(
+                                    "// WARNING: Full-precision signed multiply {}×{} → {} bits not fully implemented (truncated)\n",
+                                    left_width, right_width, output_width
+                                ));
+                                self.write_indented(&format!(
+                                    "signals->{} = (uint)({} {} {});\n",
                                     self.sanitize_name(output),
                                     left_expr,
                                     op_str,

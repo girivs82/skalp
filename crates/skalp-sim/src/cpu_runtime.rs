@@ -385,7 +385,9 @@ impl CpuRuntime {
         let result_val = match op {
             BinaryOperation::Add => left_val.wrapping_add(right_val),
             BinaryOperation::Sub => left_val.wrapping_sub(right_val),
-            BinaryOperation::Mul => left_val.wrapping_mul(right_val),
+            BinaryOperation::Mul => {
+                left_val.wrapping_mul(right_val)
+            }
             BinaryOperation::Div => {
                 if right_val == 0 {
                     0
@@ -398,6 +400,31 @@ impl CpuRuntime {
                     0
                 } else {
                     left_val % right_val
+                }
+            }
+            // Signed arithmetic operations - interpret values as signed
+            BinaryOperation::SMul => {
+                let left_signed = Self::sign_extend(left_val, left.len());
+                let right_signed = Self::sign_extend(right_val, right.len());
+                let result = left_signed.wrapping_mul(right_signed);
+                result as u64
+            }
+            BinaryOperation::SDiv => {
+                let left_signed = Self::sign_extend(left_val, left.len());
+                let right_signed = Self::sign_extend(right_val, right.len());
+                if right_signed == 0 {
+                    0
+                } else {
+                    (left_signed / right_signed) as u64
+                }
+            }
+            BinaryOperation::SMod => {
+                let left_signed = Self::sign_extend(left_val, left.len());
+                let right_signed = Self::sign_extend(right_val, right.len());
+                if right_signed == 0 {
+                    0
+                } else {
+                    (left_signed % right_signed) as u64
                 }
             }
             BinaryOperation::And => left_val & right_val,
@@ -450,11 +477,7 @@ impl CpuRuntime {
             BinaryOperation::Slt => {
                 let left_signed = Self::sign_extend(left_val, left.len());
                 let right_signed = Self::sign_extend(right_val, right.len());
-                if left_signed < right_signed {
-                    1
-                } else {
-                    0
-                }
+                if left_signed < right_signed { 1 } else { 0 }
             }
             BinaryOperation::Slte => {
                 let left_signed = Self::sign_extend(left_val, left.len());
@@ -468,11 +491,7 @@ impl CpuRuntime {
             BinaryOperation::Sgt => {
                 let left_signed = Self::sign_extend(left_val, left.len());
                 let right_signed = Self::sign_extend(right_val, right.len());
-                if left_signed > right_signed {
-                    1
-                } else {
-                    0
-                }
+                if left_signed > right_signed { 1 } else { 0 }
             }
             BinaryOperation::Sgte => {
                 let left_signed = Self::sign_extend(left_val, left.len());
@@ -485,6 +504,12 @@ impl CpuRuntime {
             }
             BinaryOperation::Shl => left_val << (right_val & 0x3F), // Limit shift amount
             BinaryOperation::Shr => left_val >> (right_val & 0x3F),
+            // BUG FIX #247: Signed/arithmetic right shift (sign-extends)
+            BinaryOperation::Sar => {
+                let left_signed = Self::sign_extend(left_val, left.len());
+                let shift_amount = (right_val & 0x3F) as i64;
+                (left_signed >> shift_amount) as u64
+            }
             // Floating-point operations - perform proper IEEE 754 arithmetic
             BinaryOperation::FAdd => Self::eval_fp_binary(left, right, |a, b| a + b),
             BinaryOperation::FSub => Self::eval_fp_binary(left, right, |a, b| a - b),
@@ -911,6 +936,10 @@ impl CpuRuntime {
                     if let Some(output) = node.outputs.first() {
                         if output.signal_id == "_s73" {
                             println!("   🔒 LATCHED D_INPUT '{}' from {} = {:?}", d_input, source, d_value);
+                        }
+                        // Debug for power_reg signal
+                        if output.signal_id.contains("_s132") || output.signal_id.contains("power_reg") {
+                            println!("[MIR_SEQ] power_reg update: D_INPUT='{}' from {} = {:?}", d_input, source, d_value);
                         }
                     }
 

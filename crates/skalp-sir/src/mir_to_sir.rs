@@ -5648,15 +5648,16 @@ impl<'a> MirToSirConverter<'a> {
         self.convert_binary_op_with_signedness(op, false)
     }
 
-    /// Convert MIR BinaryOp to SIR BinaryOperation, using signed comparisons when is_signed is true
+    /// Convert MIR BinaryOp to SIR BinaryOperation, using signed operations when is_signed is true
     fn convert_binary_op_with_signedness(&self, op: &skalp_mir::BinaryOp, is_signed: bool) -> BinaryOperation {
         use skalp_mir::BinaryOp::*;
         match op {
             Add => BinaryOperation::Add,
             Sub => BinaryOperation::Sub,
-            Mul => BinaryOperation::Mul,
-            Div => BinaryOperation::Div,
-            Mod => BinaryOperation::Mod,
+            // BUG FIX #247: Use signed arithmetic when operands are signed
+            Mul => if is_signed { BinaryOperation::SMul } else { BinaryOperation::Mul },
+            Div => if is_signed { BinaryOperation::SDiv } else { BinaryOperation::Div },
+            Mod => if is_signed { BinaryOperation::SMod } else { BinaryOperation::Mod },
             BitwiseAnd => BinaryOperation::And,
             BitwiseOr => BinaryOperation::Or,
             BitwiseXor => BinaryOperation::Xor,
@@ -5671,7 +5672,8 @@ impl<'a> MirToSirConverter<'a> {
             Greater => if is_signed { BinaryOperation::Sgt } else { BinaryOperation::Gt },
             GreaterEqual => if is_signed { BinaryOperation::Sgte } else { BinaryOperation::Gte },
             LeftShift => BinaryOperation::Shl,
-            RightShift => BinaryOperation::Shr,
+            // BUG FIX #247: Use arithmetic right shift for signed values
+            RightShift => if is_signed { BinaryOperation::Sar } else { BinaryOperation::Shr },
             LogicalAnd => BinaryOperation::And, // Boolean AND
             LogicalOr => BinaryOperation::Or,   // Boolean OR
         }

@@ -219,12 +219,16 @@ pub enum SirNodeKind {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum BinaryOperation {
-    // Integer arithmetic
+    // Integer arithmetic (unsigned)
     Add,
     Sub,
     Mul,
     Div,
     Mod,
+    // Signed integer arithmetic
+    SMul, // Signed multiplication
+    SDiv, // Signed division
+    SMod, // Signed modulo
     // Bitwise operations
     And,
     Or,
@@ -244,6 +248,7 @@ pub enum BinaryOperation {
     // Shift operations
     Shl,
     Shr,
+    Sar, // Signed/arithmetic right shift (sign-extends)
     // Floating-point arithmetic (IEEE 754)
     FAdd, // FP addition
     FSub, // FP subtraction
