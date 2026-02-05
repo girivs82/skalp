@@ -239,6 +239,9 @@ struct SymbolTable {
     /// Maps parameter names to their types for proper type inference in match/if expressions
     generic_param_types: IndexMap<String, HirType>,
 
+    /// BUG FIX #117: Type alias/distinct type target types (for width resolution in type inference)
+    type_alias_targets: IndexMap<String, HirType>,
+
     /// Current scope for nested lookups
     scopes: Vec<IndexMap<String, SymbolId>>,
 }
@@ -434,6 +437,20 @@ impl HirBuilderContext {
         self.symbols.user_types.insert(
             distinct.name.clone(),
             HirType::Custom(distinct.name.clone()),
+        );
+        // BUG FIX #117: Also register base type for width resolution
+        self.symbols.type_alias_targets.insert(
+            distinct.name.clone(),
+            distinct.base_type.clone(),
+        );
+    }
+
+    /// Pre-register type aliases from merged HIR (for width resolution in type inference)
+    /// BUG FIX #117: Ensures get_type_width can resolve Custom("q8_8") -> FixedParametric width
+    pub fn preregister_type_alias(&mut self, alias: &crate::hir::HirTypeAlias) {
+        self.symbols.type_alias_targets.insert(
+            alias.name.clone(),
+            alias.target_type.clone(),
         );
     }
 
@@ -647,6 +664,11 @@ impl HirBuilderContext {
                         // syntax tree has a separate Visibility node preceding TypeAlias
                         type_alias.visibility = pending_visibility;
                         pending_visibility = HirVisibility::Private; // Reset after use
+                        // BUG FIX #117: Register target type for width resolution
+                        self.symbols.type_alias_targets.insert(
+                            type_alias.name.clone(),
+                            type_alias.target_type.clone(),
+                        );
                         hir.type_aliases.push(type_alias);
                     }
                 }
@@ -671,6 +693,11 @@ impl HirBuilderContext {
                         self.symbols.user_types.insert(
                             distinct_type.name.clone(),
                             HirType::Custom(distinct_type.name.clone()),
+                        );
+                        // BUG FIX #117: Register base type for width resolution
+                        self.symbols.type_alias_targets.insert(
+                            distinct_type.name.clone(),
+                            distinct_type.base_type.clone(),
                         );
                         hir.distinct_types.push(distinct_type);
                     }
@@ -12586,6 +12613,7 @@ impl SymbolTable {
             port_types: IndexMap::new(),            // BUG FIX #5
             function_return_types: IndexMap::new(), // BUG FIX #67
             generic_param_types: IndexMap::new(),   // BUG FIX #166
+            type_alias_targets: IndexMap::new(),    // BUG FIX #117
             scopes: vec![IndexMap::new()],          // Start with global scope
         }
     }
@@ -13512,7 +13540,6 @@ impl HirBuilderContext {
     }
 
     /// Get width of a type in bits
-    #[allow(clippy::only_used_in_recursion)]
     fn get_type_width(&self, ty: &HirType) -> u32 {
         match ty {
             HirType::Bit(w) | HirType::Logic(w) | HirType::Int(w) | HirType::Nat(w) => *w,
@@ -13522,6 +13549,18 @@ impl HirBuilderContext {
             HirType::Float16 => 16,
             HirType::Float32 => 32,
             HirType::Float64 => 64,
+            // BUG FIX #117: Resolve parametric fixed-point types
+            HirType::FixedParametric { width, .. } => {
+                self.try_eval_const(width).unwrap_or(32) as u32
+            }
+            // BUG FIX #117: Resolve custom types (type aliases + distinct types)
+            HirType::Custom(name) => {
+                if let Some(target) = self.symbols.type_alias_targets.get(name) {
+                    self.get_type_width(target)
+                } else {
+                    32
+                }
+            }
             _ => 32, // Default width
         }
     }

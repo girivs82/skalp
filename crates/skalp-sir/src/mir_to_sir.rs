@@ -1621,9 +1621,21 @@ impl<'a> MirToSirConverter<'a> {
         // BUG #227 FIX: Handle variable targets as combinational assignments
         // Variables (let bindings) inside sequential blocks are just temporary values,
         // not state that needs to be registered.
+        //
+        // BUG FIX #117b: For variable targets, pass a constant 0 as the default value
+        // instead of None. When default=None, synthesize_conditional_assignment_with_default
+        // uses create_signal_ref(target) as the "keep" value, which creates a self-referencing
+        // combinational loop (signal → mux → signal). This loop doesn't exist in the behavioral
+        // model (MIR fast sim), where let-bindings are fresh temporaries each cycle. Using 0
+        // as the default breaks the loop without affecting correctness, because:
+        // 1. When the variable IS assigned, it gets the correct computed value
+        // 2. When NOT assigned, the consuming logic (e.g., int_accum mux) already selects
+        //    a different value through its own condition, so the variable's default is unused.
         for target in variable_targets {
             println!("   🔧 BUG #227: Processing variable target '{}' as combinational", target);
-            let final_value = self.synthesize_conditional_assignment_with_default(if_stmt, &target, None);
+            let target_width = self.get_signal_width(&target);
+            let zero_default = self.create_constant_node(0, target_width);
+            let final_value = self.synthesize_conditional_assignment_with_default(if_stmt, &target, Some(zero_default));
             println!("   🔧 BUG #227: Final mux value for variable '{}': node_{}", target, final_value);
             self.connect_node_to_signal(final_value, &target);
             println!("   🔧 BUG #227: Connected combinational node_{} to variable '{}'", final_value, target);
@@ -2767,6 +2779,11 @@ impl<'a> MirToSirConverter<'a> {
         // BUG #226 FIX: Start with the initial default from the outer context
         let mut current_default: Option<usize> = initial_default;
         let mut conditional_results = Vec::new();
+        // BUG FIX #117c: Track whether this branch actually assigns to target
+        // (vs. just inheriting the initial_default from the parent context).
+        // This prevents the caller from treating inherited defaults as actual assignments,
+        // which would create unnecessary mux nodes with self-referencing conditions.
+        let mut has_direct_assignment = false;
 
         for stmt in statements {
             match stmt {
@@ -2778,6 +2795,7 @@ impl<'a> MirToSirConverter<'a> {
                     if assign_target == target {
                         let value = self.create_expression_node(&assign.rhs);
                         current_default = Some(value);
+                        has_direct_assignment = true; // BUG FIX #117c
                     }
                 }
                 Statement::If(nested_if) => {
@@ -2857,8 +2875,12 @@ impl<'a> MirToSirConverter<'a> {
         if !meaningful_results.is_empty() {
             // Use the last meaningful conditional result (which incorporates the default)
             Some(*meaningful_results.last().unwrap())
-        } else if current_default.is_some() {
-            // No conditionals modified target, but we had a direct assignment
+        } else if has_direct_assignment && current_default.is_some() {
+            // BUG FIX #117c: Only return current_default if THIS branch actually assigned
+            // to the target. If current_default was just inherited from initial_default
+            // (no direct assignment), return None so the caller doesn't create a spurious
+            // mux with the same value on both branches, which can introduce self-referencing
+            // combinational loops for variable targets.
             current_default
         } else {
             None
@@ -4584,25 +4606,43 @@ impl<'a> MirToSirConverter<'a> {
                 actual_true_val = sliced_true;
                 actual_true_signal = self.node_to_signal_ref(sliced_true);
             } else {
-                // Check if the narrower input is a zero constant that needs widening
+                // BUG FIX #117/#125: Widen narrower mux input to match the target width.
+                // Previously only zero constants were widened; now we widen any constant,
+                // and for non-constant narrow values we zero-extend via a concat with
+                // a zero-padding constant.
                 #[allow(clippy::comparison_chain)]
-                if false_width < true_width {
-                    // false branch is narrower - check if it's a zero constant
-                    if let Some(zero_value) = self.is_zero_constant_node(actual_false_val) {
-                        println!("[BUG #125] Replacing narrow zero constant (width={}) with wide zero (width={})",
-                                 false_width, width);
-                        // Create a new zero constant with the correct width
-                        let wide_zero = self.create_constant_node(zero_value, width);
-                        actual_false_signal = self.node_to_signal_ref(wide_zero);
+                if false_width < width {
+                    // false branch is narrower than target
+                    if let Some(const_value) = self.is_constant_node(actual_false_val) {
+                        println!("[BUG #125] Replacing narrow constant {} (width={}) with wide constant (width={})",
+                                 const_value, false_width, width);
+                        let wide_const = self.create_constant_node(const_value, width);
+                        actual_false_val = wide_const;
+                        actual_false_signal = self.node_to_signal_ref(wide_const);
+                    } else {
+                        // Non-constant: zero-extend by concatenating with zero padding
+                        let pad_width = width - false_width;
+                        let zero_pad = self.create_constant_node(0, pad_width);
+                        let extended = self.create_concat_node(vec![zero_pad, actual_false_val]);
+                        actual_false_val = extended;
+                        actual_false_signal = self.node_to_signal_ref(extended);
                     }
-                } else if true_width < false_width {
-                    // true branch is narrower - check if it's a zero constant
-                    if let Some(zero_value) = self.is_zero_constant_node(actual_true_val) {
-                        println!("[BUG #125] Replacing narrow zero constant (width={}) with wide zero (width={})",
-                                 true_width, width);
-                        // Create a new zero constant with the correct width
-                        let wide_zero = self.create_constant_node(zero_value, width);
-                        actual_true_signal = self.node_to_signal_ref(wide_zero);
+                }
+                if true_width < width {
+                    // true branch is narrower than target
+                    if let Some(const_value) = self.is_constant_node(actual_true_val) {
+                        println!("[BUG #125] Replacing narrow constant {} (width={}) with wide constant (width={})",
+                                 const_value, true_width, width);
+                        let wide_const = self.create_constant_node(const_value, width);
+                        actual_true_val = wide_const;
+                        actual_true_signal = self.node_to_signal_ref(wide_const);
+                    } else {
+                        // Non-constant: zero-extend by concatenating with zero padding
+                        let pad_width = width - true_width;
+                        let zero_pad = self.create_constant_node(0, pad_width);
+                        let extended = self.create_concat_node(vec![zero_pad, actual_true_val]);
+                        actual_true_val = extended;
+                        actual_true_signal = self.node_to_signal_ref(extended);
                     }
                 }
             }
@@ -4649,11 +4689,22 @@ impl<'a> MirToSirConverter<'a> {
         for node in &self.sir.combinational_nodes {
             if node.id == node_id {
                 if let SirNodeKind::Constant { value, .. } = &node.kind {
-                    // Return the value if it's zero (or any constant actually,
-                    // since we want to widen constants in general)
                     if *value == 0 {
                         return Some(*value);
                     }
+                }
+            }
+        }
+        None
+    }
+
+    /// Check if a node is a constant (any value) and return its value
+    /// BUG FIX #117: Used by mux width mismatch handler to widen narrow constants
+    fn is_constant_node(&self, node_id: usize) -> Option<u64> {
+        for node in &self.sir.combinational_nodes {
+            if node.id == node_id {
+                if let SirNodeKind::Constant { value, .. } = &node.kind {
+                    return Some(*value);
                 }
             }
         }
@@ -5303,6 +5354,10 @@ impl<'a> MirToSirConverter<'a> {
         // Track the old driver that needs to have this signal removed from its outputs
         let mut old_driver_to_update: Option<usize> = None;
 
+        // BUG FIX #117: Track whether we need to insert a truncation slice node.
+        // This must be done after releasing the mutable borrow on self.sir.signals.
+        let mut needs_truncation: Option<(usize, usize)> = None; // (declared_width, output_width)
+
         if let Some(signal) = self.sir.signals.iter_mut().find(|s| s.name == internal_name) {
             if let Some(existing_driver) = signal.driver_node {
                 // BUG FIX #117r: Allow flip-flops to overwrite continuous assignment drivers for state elements
@@ -5326,29 +5381,66 @@ impl<'a> MirToSirConverter<'a> {
                 }
             }
 
-            // BUG FIX #8: DISABLED - was corrupting signal widths
-            // The original intent was to fix cases like `signal foo: bit[32]; foo = {a,b,c};`
-            // where concat produces more bits than declared. But this was also corrupting
-            // correctly-declared signals (64-bit → 128-bit) because node output widths
-            // can be computed incorrectly.
-            // BUG FIX #117: Use declared signal widths - they are authoritative.
-            // If a node outputs different width than declared, that's a bug in node creation.
+            // BUG FIX #117: Check if node output is wider than declared signal width.
             if let Some(output_width) = node_output_width {
-                if signal.width != output_width {
+                if output_width > signal.width {
                     println!(
-                        "   ⚠️  BUG #117: Signal '{}' width mismatch: declared {} bits, node wants {} bits (keeping declared)",
+                        "   🔧 BUG #117 FIX: Signal '{}' width mismatch: declared {} bits, node outputs {} bits — will insert truncation",
+                        internal_name, signal.width, output_width
+                    );
+                    needs_truncation = Some((signal.width, output_width));
+                } else if output_width < signal.width {
+                    println!(
+                        "   ⚠️  BUG #117: Signal '{}' width mismatch: declared {} bits, node outputs {} bits (node is narrower)",
                         internal_name, signal.width, output_width
                     );
                 }
             }
 
-            signal.driver_node = Some(node_id);
-            println!(
-                "   ✅ Signal '{}' now driven by node {}",
-                internal_name, node_id
-            );
+            if needs_truncation.is_none() {
+                // Normal case: no truncation needed, set driver directly
+                signal.driver_node = Some(node_id);
+                println!(
+                    "   ✅ Signal '{}' now driven by node {}",
+                    internal_name, node_id
+                );
+            }
         } else {
             println!("   ❌ Signal '{}' (mir: '{}') not found!", internal_name, signal_name);
+        }
+
+        // BUG FIX #117: Insert truncation slice node when node output is wider than declared signal
+        if let Some((declared_width, output_width)) = needs_truncation {
+            let slice_node = self.create_slice_node(node_id, declared_width - 1, 0);
+            // Set the signal's driver to the slice node
+            if let Some(signal) = self.sir.signals.iter_mut().find(|s| s.name == internal_name) {
+                signal.driver_node = Some(slice_node);
+            }
+            // Add the signal name to the slice node's outputs
+            if let Some(slice) = self.sir.combinational_nodes.iter_mut().find(|n| n.id == slice_node) {
+                slice.outputs.push(SignalRef {
+                    signal_id: internal_name.clone(),
+                    bit_range: None,
+                });
+            }
+            println!(
+                "   ✅ Signal '{}' now driven by slice node {} (truncated from {} to {} bits)",
+                internal_name, slice_node, output_width, declared_width
+            );
+
+            // Handle old driver cleanup then return early (skip normal output wiring)
+            if let Some(old_driver_id) = old_driver_to_update {
+                if let Some(old_node) = self
+                    .sir
+                    .combinational_nodes
+                    .iter_mut()
+                    .chain(self.sir.sequential_nodes.iter_mut())
+                    .find(|n| n.id == old_driver_id)
+                {
+                    old_node.outputs.retain(|o| o.signal_id != internal_name);
+                }
+            }
+            return;
         }
 
         // BUG FIX #117r: Remove signal from old driver's outputs when flip-flop takes over

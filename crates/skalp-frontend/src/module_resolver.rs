@@ -458,6 +458,77 @@ impl ModuleResolver {
             }
         }
 
+        // BUG FIX #117: Rebuild module with imported type aliases for correct type inference.
+        // During the initial build above, type aliases from imported modules (e.g., q8_8 = fixed<16,8,true>)
+        // aren't available yet, causing wider_type() to use default 32-bit widths for Custom types.
+        // After loading dependencies, rebuild with type aliases preregistered from dependency HIRs
+        // so get_type_width() can properly resolve Custom type widths through the alias chain.
+        {
+            let has_dep_type_aliases = dep_paths.iter().any(|(_, dep_path)| {
+                self.loaded_modules
+                    .get(dep_path)
+                    .map_or(false, |dep_hir| !dep_hir.type_aliases.is_empty())
+            });
+
+            if has_dep_type_aliases {
+                let mut rebuild_builder = HirBuilderContext::new();
+
+                // Preregister type aliases and other symbols from dependency HIRs
+                for (_, dep_path) in &dep_paths {
+                    if let Some(dep_hir) = self.loaded_modules.get(dep_path) {
+                        for type_alias in &dep_hir.type_aliases {
+                            rebuild_builder.preregister_type_alias(type_alias);
+                        }
+                        for distinct in &dep_hir.distinct_types {
+                            rebuild_builder.preregister_distinct_type(distinct);
+                        }
+                        for function in &dep_hir.functions {
+                            rebuild_builder.preregister_function(function);
+                        }
+                        for implementation in &dep_hir.implementations {
+                            for function in &implementation.functions {
+                                rebuild_builder.preregister_function(function);
+                            }
+                            for constant in &implementation.constants {
+                                rebuild_builder.preregister_constant(constant);
+                            }
+                        }
+                    }
+                }
+                // Also preregister from already-merged hir (local + merged content)
+                for type_alias in &hir.type_aliases {
+                    rebuild_builder.preregister_type_alias(type_alias);
+                }
+                for distinct in &hir.distinct_types {
+                    rebuild_builder.preregister_distinct_type(distinct);
+                }
+                for entity in &hir.entities {
+                    rebuild_builder.preregister_entity(entity);
+                }
+                for function in &hir.functions {
+                    rebuild_builder.preregister_function(function);
+                }
+                for implementation in &hir.implementations {
+                    for function in &implementation.functions {
+                        rebuild_builder.preregister_function(function);
+                    }
+                    for constant in &implementation.constants {
+                        rebuild_builder.preregister_constant(constant);
+                    }
+                }
+
+                if let Ok(mut rebuilt_hir) = rebuild_builder.build(&syntax_tree) {
+                    // Re-merge imported symbols into rebuilt HIR
+                    for (import, dep_path) in &dep_paths {
+                        if let Some(dep_hir) = self.loaded_modules.get(dep_path) {
+                            Self::merge_import_into_hir(&mut rebuilt_hir, dep_hir, import);
+                        }
+                    }
+                    hir = rebuilt_hir;
+                }
+            }
+        }
+
         // Mark as done loading
         self.loading.remove(path);
 

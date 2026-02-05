@@ -235,6 +235,11 @@ fn rebuild_instances_with_imports(hir: &Hir, file_path: &Path) -> Result<Hir> {
         builder.preregister_distinct_type(distinct);
     }
 
+    // BUG FIX #117: Pre-register type aliases from merged HIR (for width resolution)
+    for type_alias in &hir.type_aliases {
+        builder.preregister_type_alias(type_alias);
+    }
+
     // Pre-register constants from impl blocks (BUG #170 FIX)
     // This is critical for const generic resolution: `FpAdd<IEEE754_32>`
     // IEEE754_32 needs to be in the symbol table so it resolves to Constant(id)

@@ -2506,11 +2506,11 @@ fn run_equivalence_check(
                             println!("   📥 INPUTS that trigger the bug ({} total):", ce.inputs.len());
                             let mut sorted_inputs: Vec<_> = ce.inputs.iter().collect();
                             sorted_inputs.sort_by_key(|(k, _)| *k);
-                            for (name, val) in sorted_inputs.iter().take(50) {
+                            for (name, val) in sorted_inputs.iter().take(300) {
                                 println!("       {} = {}", name, if **val { "1" } else { "0" });
                             }
-                            if ce.inputs.len() > 50 {
-                                println!("       ... and {} more inputs", ce.inputs.len() - 50);
+                            if ce.inputs.len() > 300 {
+                                println!("       ... and {} more inputs", ce.inputs.len() - 300);
                             }
                         }
 
@@ -2520,11 +2520,11 @@ fn run_equivalence_check(
                             println!("   📊 STATE (latch values) where difference occurs ({} total):", ce.state.len());
                             let mut sorted_state: Vec<_> = ce.state.iter().collect();
                             sorted_state.sort_by_key(|(k, _)| *k);
-                            for (name, val) in sorted_state.iter().take(50) {
+                            for (name, val) in sorted_state.iter().take(300) {
                                 println!("       {} = {}", name, if **val { "1" } else { "0" });
                             }
-                            if ce.state.len() > 50 {
-                                println!("       ... and {} more state variables", ce.state.len() - 50);
+                            if ce.state.len() > 300 {
+                                println!("       ... and {} more state variables", ce.state.len() - 300);
                             }
                         }
 

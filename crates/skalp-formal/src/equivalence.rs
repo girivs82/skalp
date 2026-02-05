@@ -2295,8 +2295,19 @@ fn copy_aig_structure(target: &mut Aig, source: &Aig, map: &mut HashMap<u32, Aig
                 map.insert(idx as u32, new_lit);
             }
             AigNode::Latch { .. } => {
-                // For combinational checking, latches are treated as inputs
-                // They should already be mapped
+                // For combinational checking, latches are treated as inputs.
+                // Map latch nodes to their corresponding state inputs so that
+                // outputs/next-state that reference latch nodes get remapped
+                // correctly. This happens when a DFF Q output net is also the
+                // output port net in the gate AIG (no buffer in between).
+                for (&state_input_id, &latch_id) in &source.state_input_to_latch {
+                    if latch_id == idx as u32 {
+                        if let Some(&state_lit) = map.get(&state_input_id) {
+                            map.insert(idx as u32, state_lit);
+                        }
+                        break;
+                    }
+                }
             }
         }
     }
@@ -2396,6 +2407,27 @@ pub fn check_sequential_equivalence_sat(aig1: &Aig, aig2: &Aig) -> FormalResult<
             let model = solver.model().unwrap();
             let counterexample = extract_symbolic_counterexample(&miter, &var_map, &model);
 
+            // Identify which specific comparisons fail in the counterexample
+            let model_set: std::collections::HashSet<_> = model.iter().copied().collect();
+            let mut differing_signals = Vec::new();
+            for (idx, output_lit) in miter.outputs.iter().enumerate() {
+                if let Some(name) = miter.output_names.get(idx) {
+                    if name.starts_with("diff_") {
+                        if let Some(&var) = var_map.get(&output_lit.node.0) {
+                            let lit_pos = Lit::positive(var);
+                            let is_true = model_set.contains(&lit_pos);
+                            let value = is_true ^ output_lit.inverted;
+                            if value {
+                                differing_signals.push(name.clone());
+                            }
+                        }
+                    }
+                }
+            }
+            if !differing_signals.is_empty() {
+                eprintln!("   Differing signals: {}", differing_signals.join(", "));
+            }
+
             Ok(SymbolicEquivalenceResult {
                 equivalent: false,
                 counterexample: Some(counterexample),
@@ -2472,6 +2504,12 @@ fn build_sequential_miter(aig1: &Aig, aig2: &Aig) -> FormalResult<Aig> {
             let lit = miter.add_input(name.clone());
             map1.insert(idx as u32, lit);
             shared_inputs.insert(name.clone(), lit);
+            // Also store normalized name for cross-design matching
+            // (AIG1 uses __reg_cur_ prefix, AIG2 uses __dff_cur_<module>. prefix)
+            let normalized = normalize_signal_name_for_matching(name);
+            if normalized != *name {
+                shared_inputs.entry(normalized).or_insert(lit);
+            }
         }
     }
 
@@ -2499,11 +2537,14 @@ fn build_sequential_miter(aig1: &Aig, aig2: &Aig) -> FormalResult<Aig> {
     // Build miter output: OR of all differences
     let mut miter_output = miter.false_lit();
 
+    let mut diff_gates: Vec<(String, AigLit)> = Vec::new();
+
     // 1. Check output equivalence
-    for (out1, out2) in aig1.outputs.iter().zip(aig2.outputs.iter()) {
+    for (i, (out1, out2)) in aig1.outputs.iter().zip(aig2.outputs.iter()).enumerate() {
         let lit1 = remap_lit(*out1, &map1);
         let lit2 = remap_lit(*out2, &map2);
         let diff = miter.add_xor(lit1, lit2);
+        diff_gates.push((format!("output[{}]", i), diff));
         miter_output = miter.add_or(miter_output, diff);
     }
 
@@ -2531,8 +2572,14 @@ fn build_sequential_miter(aig1: &Aig, aig2: &Aig) -> FormalResult<Aig> {
     for (name, next1) in &latch1_by_name {
         if let Some(next2) = latch2_by_name.get(name) {
             let diff = miter.add_xor(*next1, *next2);
+            diff_gates.push((format!("next_state[{}]", name), diff));
             miter_output = miter.add_or(miter_output, diff);
         }
+    }
+
+    // Add individual diff gates as named outputs for counterexample diagnostics
+    for (name, diff_lit) in &diff_gates {
+        miter.add_output(format!("diff_{}", name), *diff_lit);
     }
 
     miter.add_output("miter".to_string(), miter_output);
