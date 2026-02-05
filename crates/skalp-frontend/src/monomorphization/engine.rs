@@ -1129,11 +1129,18 @@ impl<'hir> MonomorphizationEngine<'hir> {
                 let mut eval = self.create_evaluator_with_constants();
                 eval.bind_all(instantiation.const_args.clone());
 
-                if let (Ok(w), Ok(_f), Ok(_s)) =
+                if let (Ok(w), Ok(_f), Ok(s)) =
                     (eval.eval(width), eval.eval(frac), eval.eval(signed))
                 {
                     if let Some(width_val) = w.as_nat() {
-                        HirType::Bit(width_val as u32)
+                        // BUG FIX #247: Preserve signedness of fixed-point types
+                        // If signed=true, use Int (signed) instead of Bit (unsigned)
+                        let is_signed = s.as_bool().unwrap_or(false);
+                        if is_signed {
+                            HirType::Int(width_val as u32)
+                        } else {
+                            HirType::Bit(width_val as u32)
+                        }
                     } else {
                         ty.clone()
                     }
@@ -1146,9 +1153,15 @@ impl<'hir> MonomorphizationEngine<'hir> {
                 let mut eval = self.create_evaluator_with_constants();
                 eval.bind_all(instantiation.const_args.clone());
 
-                if let (Ok(w), Ok(_s)) = (eval.eval(width), eval.eval(signed)) {
+                if let (Ok(w), Ok(s)) = (eval.eval(width), eval.eval(signed)) {
                     if let Some(width_val) = w.as_nat() {
-                        HirType::Bit(width_val as u32)
+                        // BUG FIX #247: Preserve signedness of parametric int types
+                        let is_signed = s.as_bool().unwrap_or(false);
+                        if is_signed {
+                            HirType::Int(width_val as u32)
+                        } else {
+                            HirType::Bit(width_val as u32)
+                        }
                     } else {
                         ty.clone()
                     }
