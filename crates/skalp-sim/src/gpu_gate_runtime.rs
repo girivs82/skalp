@@ -183,9 +183,16 @@ impl GpuGateRuntime {
                 .insert(signal.id.0, signal.name.clone());
             self.signal_widths.insert(signal.id.0, signal.width);
 
-            // Initialize CPU fallback signals
-            self.cpu_signals
-                .insert(signal.id.0, vec![false; signal.width]);
+            // BUG #246 FIX: Initialize CPU fallback signals with initial_value if present
+            let init_bits = if let Some(ref bv) = signal.initial_value {
+                // Use the initial_value (reset value from ResetMux pattern)
+                (0..signal.width)
+                    .map(|i| bv.get(i).map(|b| *b).unwrap_or(false))
+                    .collect()
+            } else {
+                vec![false; signal.width]
+            };
+            self.cpu_signals.insert(signal.id.0, init_bits);
 
             // Categorize signals
             match &signal.signal_type {
@@ -369,17 +376,46 @@ impl GpuGateRuntime {
                 .new_buffer(signal_size as u64, MTLResourceOptions::StorageModeShared),
         );
 
-        // Initialize signal buffers to 0
+        // BUG #246 FIX: Initialize signal buffers with initial_value if present
+        // First memset to 0, then set individual bits from initial_value
         if let Some(buf) = &self.signal_buffer_a {
             unsafe {
                 let ptr = buf.contents() as *mut u32;
                 std::ptr::write_bytes(ptr, 0, self.num_signals.max(1));
+                // Set initial values for signals that have them
+                for signal in &self.sir.top_module.signals {
+                    if let Some(ref bv) = signal.initial_value {
+                        if signal.id.0 < self.num_signals as u32 {
+                            let mut val: u32 = 0;
+                            for (i, bit) in bv.iter().enumerate().take(32) {
+                                if *bit {
+                                    val |= 1 << i;
+                                }
+                            }
+                            *ptr.add(signal.id.0 as usize) = val;
+                        }
+                    }
+                }
             }
         }
         if let Some(buf) = &self.signal_buffer_b {
             unsafe {
                 let ptr = buf.contents() as *mut u32;
                 std::ptr::write_bytes(ptr, 0, self.num_signals.max(1));
+                // Set initial values for signals that have them
+                for signal in &self.sir.top_module.signals {
+                    if let Some(ref bv) = signal.initial_value {
+                        if signal.id.0 < self.num_signals as u32 {
+                            let mut val: u32 = 0;
+                            for (i, bit) in bv.iter().enumerate().take(32) {
+                                if *bit {
+                                    val |= 1 << i;
+                                }
+                            }
+                            *ptr.add(signal.id.0 as usize) = val;
+                        }
+                    }
+                }
             }
         }
 

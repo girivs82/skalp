@@ -968,13 +968,21 @@ impl UnifiedSimulator {
             }
             SimulatorBackend::GateLevelCpu(sim) => {
                 // Gate-level netlists use user-facing names, not internal _s names
-                sim.get_output(name).map(|bits| {
-                    bits.iter()
+                let result = sim.get_output(name).map(|bits| {
+                    let val: u64 = bits.iter()
                         .enumerate()
                         .filter(|(_, &b)| b)
                         .map(|(i, _)| 1u64 << i)
-                        .sum()
-                })
+                        .sum();
+                    if name.contains("power_actual") || name.contains("power_reg") {
+                        println!("[UNIFIED_GET_OUTPUT_RAW] name='{}', bits={:?}, val={}", name, bits, val);
+                    }
+                    val
+                });
+                if name.contains("power_actual") && result.is_none() {
+                    println!("[UNIFIED_GET_OUTPUT_RAW] name='{}' returned None from get_output", name);
+                }
+                result
             }
             #[cfg(target_os = "macos")]
             SimulatorBackend::GateLevelGpu(runtime) => {

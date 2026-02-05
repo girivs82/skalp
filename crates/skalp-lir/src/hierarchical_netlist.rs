@@ -362,7 +362,8 @@ impl HierarchicalNetlist {
                     parent_path
                 );
                 // BUG #237 DEBUG: Show port connections for key instances
-                if path == "top.inner.protection" || path == "top.inner.charge_ctrl" || path.contains("current_loop") {
+                // BUG #246: Also show top.protection to debug hw_uv input issue
+                if path == "top.inner.protection" || path == "top.inner.charge_ctrl" || path.contains("current_loop") || path == "top.protection" {
                     eprintln!("    PORT CONNECTIONS:");
                     for (port_name, conn) in inst.port_connections.iter() {
                         eprintln!("      🔌 '{}' -> {:?}", port_name, conn);
@@ -402,9 +403,21 @@ impl HierarchicalNetlist {
                             }
                         }
 
+                        // BUG #246 DEBUG: Trace hw_uv stitching
+                        if child_net_name.contains("hw_uv") || parent_net_name.contains("hw_uv") {
+                            eprintln!(
+                                "[BUG #246 STITCH] child='{}' (exists={}) <-> parent='{}' (exists={})",
+                                child_net_name, child_exists, parent_net_name, parent_exists
+                            );
+                        }
+
                         if child_exists && parent_exists {
                             // Direct single-net merge - parent first so its name survives
                             trace!("[STITCH]   ✓ {} <-> {}", child_net_name, parent_net_name);
+                            // BUG #246 DEBUG: Trace hw_uv merge
+                            if child_net_name.contains("hw_uv") || parent_net_name.contains("hw_uv") {
+                                eprintln!("[BUG #246 MERGE] Merging {} into {}", child_net_name, parent_net_name);
+                            }
                             merge_pairs.push((parent_net_name, child_net_name));
                         } else {
                             // Try bit-level stitching for multi-bit ports
