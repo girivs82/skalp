@@ -26,6 +26,7 @@ pub enum UncoveredItem {
         signal: String,
         bit: usize,
         direction: String,
+        status: MuxArmStatus,
     },
     MuxArm {
         node: String,
@@ -47,6 +48,10 @@ pub struct CoverageReport {
     pub uncovered: Vec<UncoveredItem>,
     pub equivalence_ok: bool,
     pub cycles: u64,
+    /// Total toggle bits in signals optimized away by synthesis
+    pub toggle_optimized_bits: usize,
+    /// Covered toggle bits in signals optimized away (for adjusted metric)
+    pub toggle_optimized_covered: usize,
 }
 
 impl CoverageReport {
@@ -69,6 +74,7 @@ impl CoverageReport {
                 signal,
                 bit,
                 direction: direction.to_string(),
+                status: MuxArmStatus::Unknown,
             });
         }
 
@@ -105,15 +111,19 @@ impl CoverageReport {
             uncovered,
             equivalence_ok,
             cycles,
+            toggle_optimized_bits: 0,
+            toggle_optimized_covered: 0,
         }
     }
 
-    /// Build a coverage report with mux arm cross-reference data.
+    /// Build a coverage report with mux and toggle cross-reference data.
     /// `mux_xref` maps node_name -> MuxArmStatus from gate netlist cross-referencing.
+    /// `toggle_xref` maps signal_name -> MuxArmStatus for toggle signals.
     pub fn from_coverage_dbs_with_xref(
         behavioral_db: &SimCoverageDb,
         gate_db: Option<&SimCoverageDb>,
         mux_xref: &HashMap<String, MuxArmStatus>,
+        toggle_xref: &HashMap<String, MuxArmStatus>,
         equivalence_ok: bool,
         cycles: u64,
     ) -> Self {
@@ -122,12 +132,17 @@ impl CoverageReport {
 
         let mut uncovered = Vec::new();
 
-        // Toggle uncovered items (limit to 50)
+        // Toggle uncovered items with cross-reference status (limit to 50)
         for (signal, bit, direction) in behavioral_db.uncovered_toggles().into_iter().take(50) {
+            let status = toggle_xref
+                .get(&signal)
+                .cloned()
+                .unwrap_or(MuxArmStatus::Unknown);
             uncovered.push(UncoveredItem::Toggle {
                 signal,
                 bit,
                 direction: direction.to_string(),
+                status,
             });
         }
 
@@ -162,12 +177,28 @@ impl CoverageReport {
             });
         }
 
+        // Compute toggle bits in optimized-away signals
+        let mut toggle_optimized_bits = 0usize;
+        let mut toggle_optimized_covered = 0usize;
+        let tracked = behavioral_db.tracked_toggle_signals();
+        for (sig_name, status) in toggle_xref {
+            if matches!(status, MuxArmStatus::OptimizedAway) {
+                if let Some(&width) = tracked.get(sig_name.as_str()) {
+                    toggle_optimized_bits += width;
+                    toggle_optimized_covered +=
+                        behavioral_db.toggle_covered_for_signal(sig_name);
+                }
+            }
+        }
+
         CoverageReport {
             behavioral,
             gate,
             uncovered,
             equivalence_ok,
             cycles,
+            toggle_optimized_bits,
+            toggle_optimized_covered,
         }
     }
 
@@ -186,6 +217,19 @@ impl CoverageReport {
             self.behavioral.toggle_covered,
             self.behavioral.toggle_total
         );
+        if self.toggle_optimized_bits > 0 {
+            let adj_total = self.behavioral.toggle_total - self.toggle_optimized_bits;
+            let adj_covered = self.behavioral.toggle_covered - self.toggle_optimized_covered;
+            let adj_pct = if adj_total > 0 {
+                (adj_covered as f64 / adj_total as f64) * 100.0
+            } else {
+                100.0
+            };
+            println!(
+                "  Toggle adj: {:6.1}%  ({}/{} bits, {} optimized away)",
+                adj_pct, adj_covered, adj_total, self.toggle_optimized_bits
+            );
+        }
         println!(
             "  Mux arms:   {:6.1}%  ({}/{} arms)",
             self.behavioral.mux_pct,
@@ -258,10 +302,27 @@ impl CoverageReport {
                 .filter(|u| matches!(u, UncoveredItem::Comparison { .. }))
                 .count();
 
+            let toggle_optimized = self
+                .uncovered
+                .iter()
+                .filter(|u| matches!(u, UncoveredItem::Toggle { status: MuxArmStatus::OptimizedAway, .. }))
+                .count();
+            let toggle_gaps = self
+                .uncovered
+                .iter()
+                .filter(|u| matches!(u, UncoveredItem::Toggle { status: MuxArmStatus::CoverageGap, .. }))
+                .count();
+
             println!(
                 "Uncovered items: {} toggle, {} mux arms, {} comparisons",
                 toggle_count, mux_count, cmp_count
             );
+            if toggle_count > 0 && (toggle_optimized > 0 || toggle_gaps > 0) {
+                println!(
+                    "  Toggle breakdown: {} optimized away, {} coverage gaps, {} unknown",
+                    toggle_optimized, toggle_gaps, toggle_count - toggle_optimized - toggle_gaps
+                );
+            }
             if mux_count > 0 && (mux_optimized > 0 || mux_gaps > 0) {
                 println!(
                     "  Mux arm breakdown: {} optimized away, {} coverage gaps, {} unknown",
@@ -280,8 +341,14 @@ impl CoverageReport {
                             signal,
                             bit,
                             direction,
+                            status,
                         } => {
-                            println!("  - Toggle: {}[{}] missing {}", signal, bit, direction);
+                            let status_str = match status {
+                                MuxArmStatus::CoverageGap => " (coverage gap)",
+                                MuxArmStatus::OptimizedAway => " (optimized away)",
+                                MuxArmStatus::Unknown => "",
+                            };
+                            println!("  - Toggle: {}[{}] missing {}{}", signal, bit, direction, status_str);
                         }
                         UncoveredItem::MuxArm { node, arm, status } => {
                             let status_str = match status {
@@ -329,6 +396,21 @@ impl CoverageReport {
             self.behavioral.toggle_total
         )
         .unwrap();
+        if self.toggle_optimized_bits > 0 {
+            let adj_total = self.behavioral.toggle_total - self.toggle_optimized_bits;
+            let adj_covered = self.behavioral.toggle_covered - self.toggle_optimized_covered;
+            let adj_pct = if adj_total > 0 {
+                (adj_covered as f64 / adj_total as f64) * 100.0
+            } else {
+                100.0
+            };
+            writeln!(
+                report,
+                "  Toggle adj: {:6.1}%  ({}/{} bits, {} optimized away)",
+                adj_pct, adj_covered, adj_total, self.toggle_optimized_bits
+            )
+            .unwrap();
+        }
         writeln!(
             report,
             "  Mux arms:   {:6.1}%  ({}/{} arms)",
@@ -392,8 +474,14 @@ impl CoverageReport {
                         signal,
                         bit,
                         direction,
+                        status,
                     } => {
-                        writeln!(report, "  Toggle: {}[{}] missing {}", signal, bit, direction)
+                        let status_str = match status {
+                            MuxArmStatus::CoverageGap => " (coverage gap)",
+                            MuxArmStatus::OptimizedAway => " (optimized away)",
+                            MuxArmStatus::Unknown => "",
+                        };
+                        writeln!(report, "  Toggle: {}[{}] missing {}{}", signal, bit, direction, status_str)
                             .unwrap();
                     }
                     UncoveredItem::MuxArm { node, arm, status } => {

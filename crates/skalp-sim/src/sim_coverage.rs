@@ -620,6 +620,26 @@ impl SimCoverageDb {
     pub fn uncovered_toggles(&self) -> Vec<(String, usize, &'static str)> {
         self.toggle.uncovered_items()
     }
+
+    /// Get tracked toggle signal names and their widths (for cross-referencing)
+    pub fn tracked_toggle_signals(&self) -> &IndexMap<String, usize> {
+        &self.toggle.signal_widths
+    }
+
+    /// Count of covered toggle bits for a specific signal
+    pub fn toggle_covered_for_signal(&self, name: &str) -> usize {
+        if let (Some(rise), Some(fall)) = (
+            self.toggle.seen_rise.get(name),
+            self.toggle.seen_fall.get(name),
+        ) {
+            rise.iter()
+                .zip(fall.iter())
+                .filter(|(&r, &f)| r && f)
+                .count()
+        } else {
+            0
+        }
+    }
 }
 
 #[cfg(test)]

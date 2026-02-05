@@ -10935,9 +10935,29 @@ impl SimBasedEquivalenceChecker {
             mux_xref.insert(node_name.to_string(), status);
         }
 
+        // Cross-reference uncovered toggle signals against gate netlist
+        let mut toggle_xref: std::collections::HashMap<String, MuxArmStatus> =
+            std::collections::HashMap::new();
+
+        for (sig_name, _width) in behav_cov.tracked_toggle_signals() {
+            // Resolve internal name to hierarchical path
+            let hier_path = sir_module.name_registry
+                .get_entry_by_internal(sig_name)
+                .map(|e| e.hierarchical_path.clone())
+                .unwrap_or_else(|| sig_name.to_string());
+
+            // Check if any gate signal matches (exact or prefix match for bus signals)
+            let found = gate_signal_names.contains(&hier_path)
+                || gate_signal_names.iter().any(|gs|
+                    gs.starts_with(&hier_path) || hier_path.starts_with(gs));
+
+            let status = if found { MuxArmStatus::CoverageGap } else { MuxArmStatus::OptimizedAway };
+            toggle_xref.insert(sig_name.clone(), status);
+        }
+
         // Build final coverage report with cross-reference data
         let coverage_report = CoverageReport::from_coverage_dbs_with_xref(
-            &behav_cov, Some(&gate_cov), &mux_xref, true, cycle);
+            &behav_cov, Some(&gate_cov), &mux_xref, &toggle_xref, true, cycle);
 
         let m = behav_cov.metrics();
         println!("[SIM_EQ_COV] Final coverage: {:.1}% overall ({} vectors)", m.overall_pct, cycle);
