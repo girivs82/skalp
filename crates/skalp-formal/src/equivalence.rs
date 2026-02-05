@@ -604,6 +604,184 @@ impl LirToAig {
         self.signal_map.insert((signal_id.0, bit), lit);
     }
 
+    /// Build unsigned multiplier using grade-school algorithm
+    fn build_unsigned_mul_lir(
+        &mut self,
+        a: LirSignalId,
+        b: LirSignalId,
+        width: u32,
+        result_width: u32,
+    ) -> Vec<AigLit> {
+        let mut result: Vec<AigLit> = vec![self.aig.false_lit(); result_width as usize];
+
+        for i in 0..width {
+            let b_bit = self.get_input_bit(b, i);
+
+            let mut carry = self.aig.false_lit();
+            for j in 0..width {
+                let out_idx = (i + j) as usize;
+                if out_idx < result_width as usize {
+                    let a_bit = self.get_input_bit(a, j);
+                    let gated = self.aig.add_and(a_bit, b_bit);
+
+                    let sum_ab = self.aig.add_xor(result[out_idx], gated);
+                    let sum = self.aig.add_xor(sum_ab, carry);
+
+                    let ab = self.aig.add_and(result[out_idx], gated);
+                    let ac = self.aig.add_and(result[out_idx], carry);
+                    let bc = self.aig.add_and(gated, carry);
+                    let ab_or_ac = self.aig.add_or(ab, ac);
+                    carry = self.aig.add_or(ab_or_ac, bc);
+
+                    result[out_idx] = sum;
+                }
+            }
+            let mut idx = (i + width) as usize;
+            while idx < result_width as usize {
+                let sum = self.aig.add_xor(result[idx], carry);
+                carry = self.aig.add_and(result[idx], carry);
+                result[idx] = sum;
+                if carry == self.aig.false_lit() {
+                    break;
+                }
+                idx += 1;
+            }
+        }
+
+        result
+    }
+
+    /// Build signed multiplier using sign-magnitude approach
+    /// BUG FIX #247: Proper signed multiplication for formal verification
+    /// Handles asymmetric input widths (e.g., 16-bit × 32-bit) by sign-extending
+    /// narrower inputs to `width` bits using their actual sign bit.
+    fn build_signed_mul_lir(
+        &mut self,
+        a: LirSignalId,
+        b: LirSignalId,
+        width: u32,
+        result_width: u32,
+        a_actual_width: u32,
+        b_actual_width: u32,
+    ) -> Vec<AigLit> {
+        // 1. Get sign bits from actual MSB of each input
+        let a_sign = self.get_input_bit(a, a_actual_width - 1);
+        let b_sign = self.get_input_bit(b, b_actual_width - 1);
+        let result_sign = self.aig.add_xor(a_sign, b_sign);
+
+        // 2. Read and sign-extend inputs to `width` bits
+        let a_bits: Vec<AigLit> = (0..width)
+            .map(|i| {
+                if i < a_actual_width {
+                    self.get_input_bit(a, i)
+                } else {
+                    a_sign // sign-extend
+                }
+            })
+            .collect();
+
+        let b_bits: Vec<AigLit> = (0..width)
+            .map(|i| {
+                if i < b_actual_width {
+                    self.get_input_bit(b, i)
+                } else {
+                    b_sign // sign-extend
+                }
+            })
+            .collect();
+
+        // 3. Get absolute values: |x| = sign ? -x : x
+        let a_neg = self.negate_vector(&a_bits);
+        let a_mag = self.mux_vectors(a_sign, &a_neg, &a_bits);
+
+        let b_neg = self.negate_vector(&b_bits);
+        let b_mag = self.mux_vectors(b_sign, &b_neg, &b_bits);
+
+        // 4. Unsigned multiply the magnitudes
+        let unsigned_result = self.unsigned_mul_vectors(&a_mag, &b_mag, result_width);
+
+        // 5. Conditionally negate result if signs differ
+        let neg_result = self.negate_vector(&unsigned_result);
+        self.mux_vectors(result_sign, &neg_result, &unsigned_result)
+    }
+
+    /// Unsigned multiply two vectors
+    fn unsigned_mul_vectors(
+        &mut self,
+        a: &[AigLit],
+        b: &[AigLit],
+        result_width: u32,
+    ) -> Vec<AigLit> {
+        let width = a.len() as u32;
+        let mut result: Vec<AigLit> = vec![self.aig.false_lit(); result_width as usize];
+
+        for i in 0..width {
+            let b_bit = b.get(i as usize).copied().unwrap_or_else(|| self.aig.false_lit());
+
+            let mut carry = self.aig.false_lit();
+            for j in 0..width {
+                let out_idx = (i + j) as usize;
+                if out_idx < result_width as usize {
+                    let a_bit = a.get(j as usize).copied().unwrap_or_else(|| self.aig.false_lit());
+                    let gated = self.aig.add_and(a_bit, b_bit);
+
+                    let sum_ab = self.aig.add_xor(result[out_idx], gated);
+                    let sum = self.aig.add_xor(sum_ab, carry);
+
+                    let ab = self.aig.add_and(result[out_idx], gated);
+                    let ac = self.aig.add_and(result[out_idx], carry);
+                    let bc = self.aig.add_and(gated, carry);
+                    let ab_or_ac = self.aig.add_or(ab, ac);
+                    carry = self.aig.add_or(ab_or_ac, bc);
+
+                    result[out_idx] = sum;
+                }
+            }
+            let mut idx = (i + width) as usize;
+            while idx < result_width as usize {
+                let sum = self.aig.add_xor(result[idx], carry);
+                carry = self.aig.add_and(result[idx], carry);
+                result[idx] = sum;
+                if carry == self.aig.false_lit() {
+                    break;
+                }
+                idx += 1;
+            }
+        }
+
+        result
+    }
+
+    /// Negate a vector (two's complement: ~x + 1)
+    fn negate_vector(&mut self, x: &[AigLit]) -> Vec<AigLit> {
+        let mut result = Vec::with_capacity(x.len());
+        let mut carry = self.aig.true_lit(); // +1
+
+        for &bit in x {
+            let inv_bit = bit.invert();
+            let sum = self.aig.add_xor(inv_bit, carry);
+            let new_carry = self.aig.add_and(inv_bit, carry);
+            result.push(sum);
+            carry = new_carry;
+        }
+
+        result
+    }
+
+    /// Mux two vectors: sel ? a : b
+    fn mux_vectors(&mut self, sel: AigLit, a: &[AigLit], b: &[AigLit]) -> Vec<AigLit> {
+        let width = a.len().max(b.len());
+        (0..width)
+            .map(|i| {
+                let a_bit = a.get(i).copied().unwrap_or_else(|| self.aig.false_lit());
+                let b_bit = b.get(i).copied().unwrap_or_else(|| self.aig.false_lit());
+                let sel_and_a = self.aig.add_and(sel, a_bit);
+                let not_sel_and_b = self.aig.add_and(sel.invert(), b_bit);
+                self.aig.add_or(sel_and_a, not_sel_and_b)
+            })
+            .collect()
+    }
+
     fn convert_node(&mut self, node: &LirNode, lir: &Lir) {
         match &node.op {
             LirOp::Constant { width, value } => {
@@ -1063,54 +1241,22 @@ impl LirToAig {
                 }
             }
 
-            // Multiplication (simplified - creates many AND/ADD gates)
-            // Note: The 'signed' flag affects gate-level synthesis but the AIG simulation
-            // here uses behavioral semantics, so signedness is handled at MIR level.
-            LirOp::Mul { width, result_width, .. } => {
+            // Multiplication - creates grade-school multiplier
+            // BUG FIX #247: Handle signed multiplication properly
+            LirOp::Mul { width, result_width, signed } => {
                 let a = node.inputs[0];
                 let b = node.inputs[1];
 
-                // Initialize result to zero
-                let mut result: Vec<AigLit> = vec![self.aig.false_lit(); *result_width as usize];
-
-                // Grade-school multiplication: for each bit of b, add shifted a if bit is set
-                for i in 0..*width {
-                    let b_bit = self.get_input_bit(b, i);
-
-                    // Add a << i to result, gated by b[i]
-                    let mut carry = self.aig.false_lit();
-                    for j in 0..*width {
-                        let out_idx = (i + j) as usize;
-                        if out_idx < *result_width as usize {
-                            let a_bit = self.get_input_bit(a, j);
-                            // Gated a bit: a[j] & b[i]
-                            let gated = self.aig.add_and(a_bit, b_bit);
-
-                            // Full adder: result[out_idx] + gated + carry
-                            let sum_ab = self.aig.add_xor(result[out_idx], gated);
-                            let sum = self.aig.add_xor(sum_ab, carry);
-
-                            let ab = self.aig.add_and(result[out_idx], gated);
-                            let ac = self.aig.add_and(result[out_idx], carry);
-                            let bc = self.aig.add_and(gated, carry);
-                            let ab_or_ac = self.aig.add_or(ab, ac);
-                            carry = self.aig.add_or(ab_or_ac, bc);
-
-                            result[out_idx] = sum;
-                        }
-                    }
-                    // Propagate remaining carry
-                    let mut idx = (i + *width) as usize;
-                    while idx < *result_width as usize {
-                        let sum = self.aig.add_xor(result[idx], carry);
-                        carry = self.aig.add_and(result[idx], carry);
-                        result[idx] = sum;
-                        if carry == self.aig.false_lit() {
-                            break;
-                        }
-                        idx += 1;
-                    }
-                }
+                let result = if *signed {
+                    // Signed multiplication using sign-magnitude approach
+                    // BUG FIX #247: Look up actual signal widths for asymmetric inputs (e.g., 16×32)
+                    let a_actual_width = lir.signals[a.0 as usize].width;
+                    let b_actual_width = lir.signals[b.0 as usize].width;
+                    self.build_signed_mul_lir(a, b, *width, *result_width, a_actual_width, b_actual_width)
+                } else {
+                    // Unsigned multiplication (zero-extension is correct, handled by get_input_bit returning 0)
+                    self.build_unsigned_mul_lir(a, b, *width, *result_width)
+                };
 
                 for bit in 0..*result_width {
                     self.set_output_bit(node.output, bit, result[bit as usize]);
@@ -5143,7 +5289,10 @@ impl<'a> MirToAig<'a> {
     }
 
     fn convert_continuous_assign(&mut self, assign: &ContinuousAssign) {
+        println!("🔧 [MIR_AIG] convert_continuous_assign: lhs={:?}, rhs_kind={:?}",
+                 assign.lhs, std::mem::discriminant(&assign.rhs.kind));
         let rhs_lits = self.convert_expression(&assign.rhs);
+        println!("🔧 [MIR_AIG] -> rhs_lits.len()={}", rhs_lits.len());
         self.assign_lvalue(&assign.lhs, &rhs_lits);
     }
 
@@ -5632,6 +5781,8 @@ impl<'a> MirToAig<'a> {
                 let right_lits = self.convert_expression(right);
                 // Determine signedness from operand types for comparison operations
                 let signed = self.is_signed_type(&left.ty) || self.is_signed_type(&right.ty);
+                println!("🔧 [MIR_AIG] Binary op={:?}, left.len()={}, right.len()={}, signed={}, left_ty={:?}, right_ty={:?}",
+                         op, left_lits.len(), right_lits.len(), signed, left.ty, right.ty);
                 self.convert_binary_op(*op, &left_lits, &right_lits, signed)
             }
 
@@ -6037,9 +6188,13 @@ impl<'a> MirToAig<'a> {
                 }
                 left.to_vec()
             }
-            BinaryOp::Mul | BinaryOp::Div | BinaryOp::Mod => {
-                // Complex operations - would need full multiplier/divider
-                // For formal verification, we typically abstract these
+            BinaryOp::Mul => {
+                // BUG FIX #247: Implement proper multiplier for formal verification
+                self.build_multiplier(left, right, signed)
+            }
+            BinaryOp::Div | BinaryOp::Mod => {
+                // Division/modulo are complex - for now just return left
+                // TODO: Implement proper divider for formal verification
                 left.to_vec()
             }
         }
@@ -6124,6 +6279,119 @@ impl<'a> MirToAig<'a> {
         }
 
         result
+    }
+
+    /// Build a multiplier using grade-school algorithm
+    /// For signed multiplication, uses sign-magnitude approach
+    fn build_multiplier(&mut self, a: &[AigLit], b: &[AigLit], signed: bool) -> Vec<AigLit> {
+        let a_width = a.len();
+        let b_width = b.len();
+        let result_width = a_width + b_width;
+
+        println!(
+            "🔧 [MIR_AIG_MUL] build_multiplier: a_width={}, b_width={}, result_width={}, signed={}",
+            a_width, b_width, result_width, signed
+        );
+
+        if signed {
+            // Sign-magnitude multiplication:
+            // 1. Get sign bits and compute result sign
+            // 2. Take absolute values
+            // 3. Unsigned multiply
+            // 4. Conditionally negate result
+
+            let a_sign = a.last().copied().unwrap_or_else(|| self.aig.false_lit());
+            let b_sign = b.last().copied().unwrap_or_else(|| self.aig.false_lit());
+            let result_sign = self.aig.add_xor(a_sign, b_sign);
+
+            // Get |a| = a_sign ? -a : a
+            let a_neg = self.negate_aig(a);
+            let a_mag = self.mux_vector(a_sign, &a_neg, a);
+
+            // Get |b| = b_sign ? -b : b
+            let b_neg = self.negate_aig(b);
+            let b_mag = self.mux_vector(b_sign, &b_neg, b);
+
+            // Unsigned multiply: |a| * |b|
+            let unsigned_product = self.build_unsigned_multiplier(&a_mag, &b_mag, result_width);
+
+            // Conditionally negate result if result_sign is set
+            let neg_product = self.negate_aig(&unsigned_product);
+            self.mux_vector(result_sign, &neg_product, &unsigned_product)
+        } else {
+            self.build_unsigned_multiplier(a, b, result_width)
+        }
+    }
+
+    /// Build an unsigned multiplier using grade-school algorithm
+    fn build_unsigned_multiplier(
+        &mut self,
+        a: &[AigLit],
+        b: &[AigLit],
+        result_width: usize,
+    ) -> Vec<AigLit> {
+        let a_width = a.len();
+        let b_width = b.len();
+
+        // Initialize result to zero
+        let mut result: Vec<AigLit> = vec![self.aig.false_lit(); result_width];
+
+        // Grade-school multiplication: for each bit of b, add shifted a if bit is set
+        for i in 0..b_width {
+            let b_bit = b.get(i).copied().unwrap_or_else(|| self.aig.false_lit());
+
+            // Add a << i to result, gated by b[i]
+            let mut carry = self.aig.false_lit();
+            for j in 0..a_width {
+                let out_idx = i + j;
+                if out_idx < result_width {
+                    let a_bit = a.get(j).copied().unwrap_or_else(|| self.aig.false_lit());
+                    // Gated a bit: a[j] & b[i]
+                    let gated = self.aig.add_and(a_bit, b_bit);
+
+                    // Full adder: result[out_idx] + gated + carry
+                    let sum_ab = self.aig.add_xor(result[out_idx], gated);
+                    let sum = self.aig.add_xor(sum_ab, carry);
+
+                    let ab = self.aig.add_and(result[out_idx], gated);
+                    let ac = self.aig.add_and(result[out_idx], carry);
+                    let bc = self.aig.add_and(gated, carry);
+                    let ab_or_ac = self.aig.add_or(ab, ac);
+                    carry = self.aig.add_or(ab_or_ac, bc);
+
+                    result[out_idx] = sum;
+                }
+            }
+            // Propagate final carry if there's room
+            let carry_idx = i + a_width;
+            if carry_idx < result_width {
+                result[carry_idx] = self.aig.add_xor(result[carry_idx], carry);
+            }
+        }
+
+        result
+    }
+
+    /// Negate a vector (two's complement: ~x + 1)
+    fn negate_aig(&mut self, x: &[AigLit]) -> Vec<AigLit> {
+        let inverted: Vec<_> = x.iter().map(|l| l.invert()).collect();
+        let one = vec![self.aig.true_lit()];
+        self.build_adder(&inverted, &one)
+    }
+
+    /// Mux a vector: sel ? a : b
+    fn mux_vector(&mut self, sel: AigLit, a: &[AigLit], b: &[AigLit]) -> Vec<AigLit> {
+        let width = a.len().max(b.len());
+        (0..width)
+            .map(|i| {
+                let a_bit = a.get(i).copied().unwrap_or_else(|| self.aig.false_lit());
+                let b_bit = b.get(i).copied().unwrap_or_else(|| self.aig.false_lit());
+                // MUX: sel ? a : b = (sel & a) | (!sel & b)
+                let sel_and_a = self.aig.add_and(sel, a_bit);
+                let not_sel_and_b = self.aig.add_and(sel.invert(), b_bit);
+                self.aig.add_or(sel_and_a, not_sel_and_b)
+            })
+            .collect()
     }
 
     fn build_less_than(&mut self, a: &[AigLit], b: &[AigLit], signed: bool) -> AigLit {
