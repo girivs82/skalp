@@ -420,15 +420,12 @@ impl SimCoverageDb {
         let mut mux = MuxArmCoverage::new();
         let mut comparison = ComparisonCoverage::new();
 
-        // Track all signals for toggle coverage
+        // Track internal signals and output ports for toggle coverage.
+        // Input ports are excluded — they're driven by the test harness,
+        // not the design, so their toggle behavior is irrelevant.
         for signal in &module.signals {
             toggle.add_signal(&signal.name, signal.width);
         }
-        // Also track input ports
-        for port in &module.inputs {
-            toggle.add_signal(&port.name, port.width);
-        }
-        // And output ports
         for port in &module.outputs {
             toggle.add_signal(&port.name, port.width);
         }
