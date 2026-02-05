@@ -9183,7 +9183,7 @@ impl SimBasedEquivalenceChecker {
         // Create behavioral simulator for MIR
         let mut mir_config = UnifiedSimConfig::default();
         mir_config.level = SimLevel::Behavioral;
-        mir_config.hw_accel = HwAccel::Auto; // Use GPU if available
+        mir_config.hw_accel = HwAccel::Cpu; // Force CPU for consistent behavior with gate simulation
         let mut mir_sim = UnifiedSimulator::new(mir_config)
             .map_err(|e| FormalError::SolverError(format!("MIR simulator init failed: {}", e)))?;
         mir_sim.load_behavioral(&sir_module).await
@@ -9930,6 +9930,22 @@ impl SimBasedEquivalenceChecker {
                     println!("[SIM_EQ]   Gate value: 0x{:x} ({})", gate_val, gate_val);
                     println!("[SIM_EQ]   Diagnostics collected: {} MIR signals, {} Gate signals, {} inputs",
                         diagnostics.mir_signals.len(), diagnostics.gate_signals.len(), diagnostics.input_values.len());
+
+                    // BUG #247 DEBUG: Print input values at mismatch
+                    println!("[SIM_EQ]   Input values:");
+                    for (name, val) in &diagnostics.input_values {
+                        println!("[SIM_EQ]     {} = 0x{:x} ({})", name, val, *val as i64);
+                    }
+
+                    // BUG #247 DEBUG: Print key MIR internal signals
+                    println!("[SIM_EQ]   Key MIR signals:");
+                    for (hier_path, internal_name, val) in &diagnostics.mir_signals {
+                        // Filter to show only relevant signals
+                        if hier_path.contains("sum") || hier_path.contains("prop") || hier_path.contains("int")
+                            || hier_path.contains("error") || hier_path.contains("out_max") || hier_path.contains("out_min") {
+                            println!("[SIM_EQ]     {} ({}) = 0x{:x} ({})", hier_path, internal_name, val, *val as i64);
+                        }
+                    }
 
                     // Return with diagnostics
                     return Ok(SimEquivalenceResult {

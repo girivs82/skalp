@@ -485,6 +485,10 @@ impl MirToLirTransform {
             port.port_type,
             DataType::Int(_) | DataType::IntParam { .. } | DataType::IntExpr { .. }
         );
+        trace!(
+            "🔍 [PORT_SIGNED] port='{}' (id={:?}), type={:?}, is_signed={}",
+            port.name, port.id, port.port_type, is_signed
+        );
         self.port_is_signed.insert(port.id, is_signed);
 
         let signal_id = match port.direction {
@@ -533,6 +537,10 @@ impl MirToLirTransform {
         let is_signed = matches!(
             signal.signal_type,
             DataType::Int(_) | DataType::IntParam { .. } | DataType::IntExpr { .. }
+        );
+        trace!(
+            "🔍 [SIGNAL_SIGNED] signal='{}' (id={:?}), type={:?}, is_signed={}",
+            signal.name, signal.id, signal.signal_type, is_signed
         );
         self.signal_is_signed.insert(signal.id, is_signed);
 
@@ -2391,8 +2399,13 @@ impl MirToLirTransform {
                 let left_sig = self.transform_expression(left, operand_width);
                 let right_sig = self.transform_expression(right, operand_width);
                 // Use signed comparison if either operand is signed
-                let is_signed =
-                    self.infer_expression_is_signed(left) || self.infer_expression_is_signed(right);
+                let left_signed = self.infer_expression_is_signed(left);
+                let right_signed = self.infer_expression_is_signed(right);
+                let is_signed = left_signed || right_signed;
+                trace!(
+                    "🔍 [SIGNED_CMP] Less: left_signed={}, right_signed={}, is_signed={}, left={:?}, right={:?}",
+                    left_signed, right_signed, is_signed, left.kind, right.kind
+                );
                 let op = if is_signed {
                     LirOp::Slt {
                         width: operand_width,
@@ -2425,8 +2438,13 @@ impl MirToLirTransform {
                 let left_sig = self.transform_expression(left, operand_width);
                 let right_sig = self.transform_expression(right, operand_width);
                 // Use signed comparison if either operand is signed
-                let is_signed =
-                    self.infer_expression_is_signed(left) || self.infer_expression_is_signed(right);
+                let left_signed = self.infer_expression_is_signed(left);
+                let right_signed = self.infer_expression_is_signed(right);
+                let is_signed = left_signed || right_signed;
+                trace!(
+                    "🔍 [SIGNED_CMP] Greater: left_signed={}, right_signed={}, is_signed={}, left={:?}, right={:?}",
+                    left_signed, right_signed, is_signed, left.kind, right.kind
+                );
                 let op = if is_signed {
                     LirOp::Sgt {
                         width: operand_width,
@@ -3050,7 +3068,7 @@ impl MirToLirTransform {
 
     /// Check if an lvalue has a signed type
     fn is_lvalue_signed(&self, lvalue: &LValue) -> bool {
-        match lvalue {
+        let result = match lvalue {
             LValue::Signal(signal_id) => self
                 .signal_is_signed
                 .get(signal_id)
@@ -3065,7 +3083,9 @@ impl MirToLirTransform {
             LValue::BitSelect { base, .. } => self.is_lvalue_signed(base),
             LValue::RangeSelect { base, .. } => self.is_lvalue_signed(base),
             LValue::Concat(_) => false, // Concatenation is typically bit-level
-        }
+        };
+        trace!("🔍 [SIGNED_LVALUE] lvalue={:?}, is_signed={}", lvalue, result);
+        result
     }
 
     /// Get clock signal from sensitivity list
