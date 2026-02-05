@@ -9401,6 +9401,7 @@ use skalp_sim::{
     convert_gate_netlist_to_sir,
     gate_simulator::GateLevelSimulator,
     UnifiedSimulator, UnifiedSimConfig, SimLevel, HwAccel,
+    SimCoverageDb, CoverageVectorGen, CoverageReport,
 };
 use skalp_sir::convert_mir_to_sir_with_hierarchy;
 
@@ -9425,6 +9426,8 @@ pub struct SimEquivalenceResult {
     pub outputs_compared: usize,
     /// Diagnostic information for debugging mismatches
     pub diagnostics: Option<MismatchDiagnostics>,
+    /// Coverage report (when --coverage is enabled)
+    pub coverage_report: Option<CoverageReport>,
 }
 
 /// Detailed diagnostics for a simulation mismatch
@@ -9485,6 +9488,8 @@ pub struct SimBasedEquivalenceChecker {
     pub reset_name: String,
     /// Number of reset cycles to apply at start
     pub reset_cycles: u64,
+    /// Enable coverage-driven simulation
+    pub coverage: bool,
 }
 
 impl SimBasedEquivalenceChecker {
@@ -9494,6 +9499,7 @@ impl SimBasedEquivalenceChecker {
             clock_name: "clk".to_string(),
             reset_name: "rst".to_string(),
             reset_cycles: 2,
+            coverage: false,
         }
     }
 
@@ -9510,6 +9516,11 @@ impl SimBasedEquivalenceChecker {
     pub fn with_reset(mut self, name: &str, cycles: u64) -> Self {
         self.reset_name = name.to_string();
         self.reset_cycles = cycles;
+        self
+    }
+
+    pub fn with_coverage(mut self, enabled: bool) -> Self {
+        self.coverage = enabled;
         self
     }
 
@@ -9646,6 +9657,7 @@ impl SimBasedEquivalenceChecker {
                             time_ms: start.elapsed().as_millis() as u64,
                             outputs_compared: matched_outputs.len(),
                             diagnostics: None,
+                            coverage_report: None,
                         });
                     }
                     (None, Some(_)) | (Some(_), None) => {
@@ -9673,6 +9685,7 @@ impl SimBasedEquivalenceChecker {
             time_ms: start.elapsed().as_millis() as u64,
             outputs_compared: matched_outputs.len(),
             diagnostics: None,
+            coverage_report: None,
         })
     }
 
@@ -10502,6 +10515,7 @@ impl SimBasedEquivalenceChecker {
                         time_ms: start.elapsed().as_millis() as u64,
                         outputs_compared: matched_outputs.len(),
                         diagnostics: Some(diagnostics),
+                        coverage_report: None,
                     });
                 }
             }
@@ -10523,6 +10537,360 @@ impl SimBasedEquivalenceChecker {
             time_ms: start.elapsed().as_millis() as u64,
             outputs_compared: matched_outputs.len(),
             diagnostics: None,
+            coverage_report: None,
+        })
+    }
+
+    /// Check equivalence between MIR and gate netlist with coverage-driven simulation.
+    ///
+    /// Uses a 3-phase vector generation strategy:
+    /// 1. Systematic patterns (walking-one, walking-zero, boundary values)
+    /// 2. LFSR pseudo-random sweep
+    /// 3. Coverage-biased targeted generation
+    ///
+    /// Returns coverage report alongside equivalence result.
+    pub async fn check_mir_vs_gate_coverage(
+        &self,
+        mir: &skalp_mir::Mir,
+        top_module: &skalp_mir::Module,
+        netlist: &GateNetlist,
+    ) -> FormalResult<SimEquivalenceResult> {
+        let start = std::time::Instant::now();
+
+        // Convert MIR to behavioral SirModule
+        println!("[SIM_EQ_COV] Converting MIR to behavioral SIR...");
+        let sir_module = convert_mir_to_sir_with_hierarchy(mir, top_module);
+        println!("[SIM_EQ_COV] MIR module: {} inputs, {} outputs",
+            sir_module.inputs.len(), sir_module.outputs.len());
+
+        // Convert GateNetlist to gate-level SIR
+        println!("[SIM_EQ_COV] Converting GateNetlist to gate-level SIR...");
+        let gate_sir_result = convert_gate_netlist_to_sir(netlist);
+        println!("[SIM_EQ_COV] Gate netlist: {} signals, {} primitives",
+            gate_sir_result.stats.signals_created, gate_sir_result.stats.primitives_created);
+
+        // Create behavioral simulator
+        let mut mir_config = UnifiedSimConfig::default();
+        mir_config.level = SimLevel::Behavioral;
+        mir_config.hw_accel = HwAccel::Cpu;
+        let mut mir_sim = UnifiedSimulator::new(mir_config)
+            .map_err(|e| FormalError::SolverError(format!("MIR simulator init failed: {}", e)))?;
+        mir_sim.load_behavioral(&sir_module).await
+            .map_err(|e| FormalError::SolverError(format!("MIR load failed: {}", e)))?;
+
+        // Create gate-level simulator
+        let mut gate_config = UnifiedSimConfig::default();
+        gate_config.level = SimLevel::GateLevel;
+        gate_config.hw_accel = HwAccel::Cpu;
+        let mut gate_sim = UnifiedSimulator::new(gate_config)
+            .map_err(|e| FormalError::SolverError(format!("Gate simulator init failed: {}", e)))?;
+        gate_sim.load_gate_level(&gate_sir_result.sir)
+            .map_err(|e| FormalError::SolverError(format!("Gate load failed: {}", e)))?;
+
+        // Build behavioral coverage database from SirModule
+        let mut behav_cov = SimCoverageDb::from_sir_module(&sir_module);
+
+        // Build gate coverage database from gate signal info
+        let gate_signal_info: Vec<(String, usize)> = gate_sir_result.sir.top_module.signals
+            .iter()
+            .map(|s| (s.name.clone(), s.width))
+            .collect();
+        let mut gate_cov = SimCoverageDb::from_gate_netlist(&gate_signal_info);
+
+        // Get input/output names and build matching
+        let mir_inputs = mir_sim.get_input_names();
+        let mir_outputs = mir_sim.get_output_names();
+        let gate_inputs = gate_sim.get_input_names();
+        let gate_outputs = gate_sim.get_output_names();
+
+        let resolve_mir_name = |internal: &str| -> String {
+            sir_module.name_registry.get_entry_by_internal(internal)
+                .map(|entry| entry.hierarchical_path.clone())
+                .unwrap_or_else(|| internal.to_string())
+        };
+
+        // Build gate input/output maps by base_name
+        let mut gate_inputs_by_base: std::collections::HashMap<String, Vec<(String, Option<u32>)>> =
+            std::collections::HashMap::new();
+        for name in &gate_inputs {
+            let np = normalize_port_name(name);
+            gate_inputs_by_base.entry(np.base_name.clone())
+                .or_default()
+                .push((name.clone(), np.bit_index));
+        }
+
+        let mut gate_outputs_by_base: std::collections::HashMap<String, Vec<(String, Option<u32>)>> =
+            std::collections::HashMap::new();
+        for name in &gate_outputs {
+            let np = normalize_port_name(name);
+            gate_outputs_by_base.entry(np.base_name.clone())
+                .or_default()
+                .push((name.clone(), np.bit_index));
+        }
+
+        // Match inputs
+        let matched_inputs: Vec<(String, Vec<(String, Option<u32>)>)> = mir_inputs.iter()
+            .filter_map(|n1| {
+                let user_name = resolve_mir_name(n1);
+                let base1 = normalize_port_name(&user_name).base_name;
+                gate_inputs_by_base.get(&base1)
+                    .map(|bits| (n1.clone(), bits.clone()))
+            })
+            .collect();
+
+        // Match outputs
+        let matched_outputs: Vec<(String, Vec<(String, Option<u32>)>)> = mir_outputs.iter()
+            .filter_map(|n1| {
+                let user_name = resolve_mir_name(n1);
+                let base1 = normalize_port_name(&user_name).base_name;
+                gate_outputs_by_base.get(&base1)
+                    .map(|bits| (n1.clone(), bits.clone()))
+            })
+            .collect();
+
+        println!("[SIM_EQ_COV] Matched {} inputs, {} outputs",
+            matched_inputs.len(), matched_outputs.len());
+
+        if matched_outputs.is_empty() {
+            return Err(FormalError::PropertyFailed(
+                "No matching outputs between MIR and Gate".to_string()
+            ));
+        }
+
+        // Find actual reset/clock names in gate simulator
+        let gate_reset_name = gate_inputs_by_base.get(&self.reset_name)
+            .and_then(|bits| bits.first())
+            .map(|(name, _)| name.clone())
+            .unwrap_or_else(|| self.reset_name.clone());
+
+        let gate_clock_name = gate_inputs_by_base.get(&self.clock_name)
+            .and_then(|bits| bits.first())
+            .map(|(name, _)| name.clone())
+            .unwrap_or_else(|| self.clock_name.clone());
+
+        // Reset sequence
+        println!("[SIM_EQ_COV] Applying {} reset cycles...", self.reset_cycles);
+        for _ in 0..self.reset_cycles {
+            mir_sim.set_input(&self.reset_name, 1).await;
+            gate_sim.set_input(&gate_reset_name, 1).await;
+            mir_sim.set_input(&self.clock_name, 0).await;
+            gate_sim.set_input(&gate_clock_name, 0).await;
+            mir_sim.step().await;
+            gate_sim.step().await;
+            mir_sim.set_input(&self.clock_name, 1).await;
+            gate_sim.set_input(&gate_clock_name, 1).await;
+            mir_sim.step().await;
+            gate_sim.step().await;
+        }
+
+        // Release reset
+        mir_sim.set_input(&self.reset_name, 0).await;
+        gate_sim.set_input(&gate_reset_name, 0).await;
+
+        // Initialize inputs to 0
+        for (mir_name, gate_bits) in &matched_inputs {
+            mir_sim.set_input(mir_name, 0).await;
+            for (gate_name, _) in gate_bits {
+                gate_sim.set_input(gate_name, 0).await;
+            }
+        }
+
+        // Extra reset + quiet period (same as original)
+        for _ in 0..5 {
+            mir_sim.set_input(&self.reset_name, 1).await;
+            gate_sim.set_input(&gate_reset_name, 1).await;
+            mir_sim.set_input(&self.clock_name, 0).await;
+            gate_sim.set_input(&gate_clock_name, 0).await;
+            mir_sim.step().await;
+            gate_sim.step().await;
+            mir_sim.set_input(&self.clock_name, 1).await;
+            gate_sim.set_input(&gate_clock_name, 1).await;
+            mir_sim.step().await;
+            gate_sim.step().await;
+        }
+        mir_sim.set_input(&self.reset_name, 0).await;
+        gate_sim.set_input(&gate_reset_name, 0).await;
+        for (mir_name, gate_bits) in &matched_inputs {
+            mir_sim.set_input(mir_name, 0).await;
+            for (gate_name, _) in gate_bits {
+                gate_sim.set_input(gate_name, 0).await;
+            }
+        }
+
+        // Build input info for vector generator
+        // Collect (user_name, width) for each matched input
+        let input_info: Vec<(String, usize)> = matched_inputs.iter()
+            .filter_map(|(mir_name, gate_bits)| {
+                let user_name = resolve_mir_name(mir_name);
+                if user_name.contains("clk") || user_name.contains("clock") ||
+                   user_name.contains("rst") || user_name.contains("reset") {
+                    return None;
+                }
+                // Width = number of gate bits (or 1 if single signal)
+                let width = if gate_bits.len() == 1 && gate_bits[0].1.is_none() {
+                    // Single-bit signal, check MIR port for width
+                    sir_module.inputs.iter()
+                        .find(|p| p.name == *mir_name)
+                        .map(|p| p.width)
+                        .unwrap_or(1)
+                } else {
+                    gate_bits.iter()
+                        .filter_map(|(_, idx)| *idx)
+                        .max()
+                        .map(|max| max as usize + 1)
+                        .unwrap_or(gate_bits.len())
+                };
+                Some((user_name, width))
+            })
+            .collect();
+
+        // Create vector generator
+        let mut vecgen = CoverageVectorGen::from_input_info(&input_info, 0x12345678)
+            .with_lfsr_budget(1000)
+            .with_bias_budget(500)
+            .with_coverage_goal(90.0);
+
+        println!("[SIM_EQ_COV] Coverage-driven simulation with {} data inputs", vecgen.input_count());
+        println!("[SIM_EQ_COV] Phases: systematic -> LFSR(1000) -> biased(500, goal=90%)");
+
+        let mut cycle: u64 = 0;
+        let mut last_phase = vecgen.phase_name().to_string();
+
+        // Main simulation loop driven by vector generator
+        while let Some(vec) = vecgen.next(Some(&behav_cov)) {
+            let current_phase = vecgen.phase_name();
+            if current_phase != last_phase {
+                let m = behav_cov.metrics();
+                println!("[SIM_EQ_COV] Phase transition: {} -> {} (coverage: {:.1}% at cycle {})",
+                    last_phase, current_phase, m.overall_pct, cycle);
+                last_phase = current_phase.to_string();
+            }
+
+            // Apply vector to both simulators
+            for (user_name, value) in &vec.values {
+                // Find the matching MIR/gate input pair
+                for (mir_name, gate_bits) in &matched_inputs {
+                    let this_user = resolve_mir_name(mir_name);
+                    if &this_user != user_name {
+                        continue;
+                    }
+
+                    let is_single_bit = gate_bits.len() == 1 && gate_bits[0].1.is_none();
+                    let mir_value = if is_single_bit { *value & 1 } else { *value };
+
+                    mir_sim.set_input(mir_name, mir_value).await;
+                    for (gate_name, bit_idx) in gate_bits {
+                        if let Some(idx) = bit_idx {
+                            let bit_val = (*value >> idx) & 1;
+                            gate_sim.set_input(gate_name, bit_val).await;
+                        } else {
+                            gate_sim.set_input(gate_name, mir_value).await;
+                        }
+                    }
+                }
+            }
+
+            // Clock low
+            mir_sim.set_input(&self.clock_name, 0).await;
+            gate_sim.set_input(&gate_clock_name, 0).await;
+
+            // Step with snapshot for coverage
+            if let Some(mir_state) = mir_sim.step_with_snapshot().await {
+                behav_cov.update_toggle(&mir_state.signals);
+                behav_cov.update_nodes(&mir_state.signals, &sir_module);
+            }
+            gate_sim.step().await;
+
+            // Clock high
+            mir_sim.set_input(&self.clock_name, 1).await;
+            gate_sim.set_input(&gate_clock_name, 1).await;
+
+            if let Some(mir_state) = mir_sim.step_with_snapshot().await {
+                behav_cov.update_toggle(&mir_state.signals);
+                behav_cov.update_nodes(&mir_state.signals, &sir_module);
+            }
+            gate_sim.step().await;
+
+            // Update gate coverage from gate snapshot
+            gate_cov.update_toggle_gate_vec(&gate_sim.dump_gate_signals());
+
+            behav_cov.record_vector();
+            gate_cov.record_vector();
+
+            // Compare outputs
+            for (mir_name, gate_bits) in &matched_outputs {
+                let mir_val = mir_sim.get_output_raw(mir_name).await.unwrap_or(0);
+
+                let mut sorted_bits = gate_bits.clone();
+                sorted_bits.sort_by_key(|(_, idx)| idx.unwrap_or(0));
+
+                let mut gate_val: u64 = 0;
+                let mut has_bits = false;
+                for (gate_name, bit_idx) in &sorted_bits {
+                    if let Some(gv) = gate_sim.get_output_raw(gate_name).await {
+                        has_bits = true;
+                        if let Some(idx) = bit_idx {
+                            gate_val |= (gv & 1) << idx;
+                        } else {
+                            gate_val = gv;
+                        }
+                    }
+                }
+
+                if has_bits && mir_val != gate_val {
+                    let user_name = resolve_mir_name(mir_name);
+                    println!("[SIM_EQ_COV] MISMATCH at cycle {} on '{}':", cycle, user_name);
+                    println!("[SIM_EQ_COV]   MIR value:  0x{:x} ({})", mir_val, mir_val);
+                    println!("[SIM_EQ_COV]   Gate value: 0x{:x} ({})", gate_val, gate_val);
+
+                    let coverage_report = CoverageReport::from_coverage_dbs(
+                        &behav_cov, Some(&gate_cov), false, cycle);
+
+                    return Ok(SimEquivalenceResult {
+                        equivalent: false,
+                        cycles_verified: cycle,
+                        mismatch_cycle: Some(cycle),
+                        mismatch_output: Some(user_name),
+                        value_1: Some(mir_val),
+                        value_2: Some(gate_val),
+                        time_ms: start.elapsed().as_millis() as u64,
+                        outputs_compared: matched_outputs.len(),
+                        diagnostics: None,
+                        coverage_report: Some(coverage_report),
+                    });
+                }
+            }
+
+            cycle += 1;
+            if (cycle) % 100 == 0 {
+                let m = behav_cov.metrics();
+                println!("[SIM_EQ_COV] Cycle {}: coverage {:.1}% (toggle={:.1}%, mux={:.1}%, cmp={:.1}%)",
+                    cycle, m.overall_pct, m.toggle_pct, m.mux_pct, m.comparison_pct);
+            }
+        }
+
+        // Build final coverage report
+        let coverage_report = CoverageReport::from_coverage_dbs(
+            &behav_cov, Some(&gate_cov), true, cycle);
+
+        let m = behav_cov.metrics();
+        println!("[SIM_EQ_COV] Final coverage: {:.1}% overall ({} vectors)", m.overall_pct, cycle);
+        println!("[SIM_EQ_COV]   Toggle:     {:.1}% ({}/{})", m.toggle_pct, m.toggle_covered, m.toggle_total);
+        println!("[SIM_EQ_COV]   Mux arms:   {:.1}% ({}/{})", m.mux_pct, m.mux_arms_covered, m.mux_arms_total);
+        println!("[SIM_EQ_COV]   Comparison: {:.1}% ({}/{})", m.comparison_pct, m.cmp_covered, m.cmp_total);
+        println!("[SIM_EQ_COV] MIR and GateNetlist are equivalent for {} coverage-driven cycles", cycle);
+
+        Ok(SimEquivalenceResult {
+            equivalent: true,
+            cycles_verified: cycle,
+            mismatch_cycle: None,
+            mismatch_output: None,
+            value_1: None,
+            value_2: None,
+            time_ms: start.elapsed().as_millis() as u64,
+            outputs_compared: matched_outputs.len(),
+            diagnostics: None,
+            coverage_report: Some(coverage_report),
         })
     }
 }

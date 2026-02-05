@@ -1124,6 +1124,84 @@ impl UnifiedSimulator {
         }
     }
 
+    /// Step simulation and return a signal snapshot for coverage tracking.
+    ///
+    /// For behavioral CPU: returns `SimulationState.signals` from the step.
+    /// For gate-level CPU: returns signal snapshot as byte-encoded values.
+    /// For other backends: steps normally and returns None.
+    pub async fn step_with_snapshot(
+        &mut self,
+    ) -> Option<crate::simulator::SimulationState> {
+        let result = match &mut self.backend {
+            SimulatorBackend::BehavioralCpu(runtime) => {
+                // step() returns SimulationState with signals and registers
+                runtime.step().await.ok()
+            }
+            SimulatorBackend::GateLevelCpu(sim) => {
+                sim.step();
+                // Build a SimulationState from gate snapshot
+                let gate_signals = sim.snapshot_signals();
+                // Convert bool vecs to byte vecs for uniform representation
+                let signals: IndexMap<String, Vec<u8>> = gate_signals
+                    .into_iter()
+                    .map(|(name, bits)| {
+                        let num_bytes = (bits.len() + 7) / 8;
+                        let mut bytes = vec![0u8; num_bytes];
+                        for (i, &b) in bits.iter().enumerate() {
+                            if b {
+                                bytes[i / 8] |= 1 << (i % 8);
+                            }
+                        }
+                        (name, bytes)
+                    })
+                    .collect();
+                Some(crate::simulator::SimulationState {
+                    cycle: self.current_cycle,
+                    signals,
+                    registers: IndexMap::new(),
+                })
+            }
+            _ => {
+                // Other backends: just step normally
+                self.step().await;
+                return None;
+            }
+        };
+
+        self.current_cycle += 1;
+
+        // Update delay buffers for latency adjustment
+        for (output_name, delay) in &self.latency_adjustments {
+            if let Some(raw_value) = self.get_output_raw(output_name).await {
+                let buffer = self
+                    .output_delay_buffers
+                    .entry(output_name.clone())
+                    .or_insert_with(|| {
+                        let mut buf = VecDeque::with_capacity(*delay as usize + 1);
+                        for _ in 0..*delay {
+                            buf.push_back(0);
+                        }
+                        buf
+                    });
+                buffer.push_back(raw_value);
+                if buffer.len() > *delay as usize {
+                    buffer.pop_front();
+                }
+            }
+        }
+
+        // Capture waveform if enabled
+        if self.config.capture_waveforms {
+            let snapshot = SimulationSnapshot {
+                cycle: self.current_cycle,
+                signals: self.get_all_outputs().await,
+            };
+            self.waveforms.push(snapshot);
+        }
+
+        result
+    }
+
     /// Run simulation with clock toggling for a given number of cycles (sync mode only)
     pub async fn run_clocked(&mut self, cycles: u64, clock_name: &str) -> UnifiedSimResult {
         if self.is_ncl_mode() {

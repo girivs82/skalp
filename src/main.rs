@@ -357,6 +357,10 @@ enum Commands {
         /// Verbose output showing internal AIG details
         #[arg(long)]
         verbose: bool,
+
+        /// Enable coverage-driven simulation with systematic + random + biased vectors
+        #[arg(long)]
+        coverage: bool,
     },
 
     /// ISO 26262 FI-driven safety analysis
@@ -716,6 +720,7 @@ fn main() -> Result<()> {
             symbolic,
             reset_cycles,
             verbose,
+            coverage,
         } => {
             run_equivalence_check(
                 &source,
@@ -728,6 +733,7 @@ fn main() -> Result<()> {
                 symbolic,
                 reset_cycles,
                 verbose,
+                coverage,
             )?;
         }
 
@@ -2294,6 +2300,7 @@ fn run_equivalence_check(
     symbolic: bool,
     reset_cycles: u64,
     verbose: bool,
+    coverage: bool,
 ) -> Result<()> {
     use skalp_formal::equivalence::{LirToAig, GateNetlistToAig, check_sequential_equivalence_sat};
     use skalp_frontend::parse_and_build_compilation_context;
@@ -2421,19 +2428,30 @@ fn run_equivalence_check(
     // Phase 1: Simulation (unless --symbolic only)
     if !symbolic {
         println!();
-        println!("📊 Phase 1: Simulation-based check ({} cycles)...", bound);
+        if coverage {
+            println!("📊 Phase 1: Coverage-driven simulation-based check...");
+        } else {
+            println!("📊 Phase 1: Simulation-based check ({} cycles)...", bound);
+        }
         use skalp_formal::SimBasedEquivalenceChecker;
 
         let checker = SimBasedEquivalenceChecker::new()
             .with_cycles(bound as u64)
-            .with_reset("rst", reset_cycles);
+            .with_reset("rst", reset_cycles)
+            .with_coverage(coverage);
 
         let rt = tokio::runtime::Runtime::new()
             .context("Failed to create tokio runtime")?;
 
-        let sim_result = rt.block_on(async {
-            checker.check_mir_vs_gate(&mir, target_entity, &gate_netlist).await
-        }).map_err(|e| anyhow::anyhow!("Simulation equivalence check failed: {:?}", e))?;
+        let sim_result = if coverage {
+            rt.block_on(async {
+                checker.check_mir_vs_gate_coverage(&mir, target_entity, &gate_netlist).await
+            }).map_err(|e| anyhow::anyhow!("Coverage simulation equivalence check failed: {:?}", e))?
+        } else {
+            rt.block_on(async {
+                checker.check_mir_vs_gate(&mir, target_entity, &gate_netlist).await
+            }).map_err(|e| anyhow::anyhow!("Simulation equivalence check failed: {:?}", e))?
+        };
 
         if sim_result.equivalent {
             println!("   ✓ Simulation PASS: No mismatch in {} cycles", sim_result.cycles_verified);
@@ -2449,6 +2467,18 @@ fn run_equivalence_check(
             overall_pass = false;
             // Store for detailed report generation
             sim_result_for_report = Some(sim_result.clone());
+        }
+
+        // Print coverage report if available
+        if let Some(ref cov_report) = sim_result.coverage_report {
+            cov_report.print_summary();
+            // Write coverage report to output directory
+            let cov_path = output_dir.join("coverage_report.txt");
+            if let Err(e) = cov_report.write_text(&cov_path) {
+                eprintln!("Warning: failed to write coverage report: {}", e);
+            } else {
+                println!("   Coverage report written to {:?}", cov_path);
+            }
         }
 
         // If quick mode, stop here

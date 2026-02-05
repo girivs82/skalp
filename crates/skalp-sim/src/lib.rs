@@ -20,6 +20,8 @@ macro_rules! eprintln {
 
 pub mod breakpoint;
 pub mod clock_manager;
+pub mod coverage_report;
+pub mod coverage_vecgen;
 pub mod cpu_runtime;
 pub mod gate_eval;
 pub mod gate_netlist_to_sir;
@@ -34,6 +36,7 @@ pub mod gpu_ncl_runtime;
 #[cfg(target_os = "macos")]
 pub mod gpu_runtime;
 pub mod ncl_sim;
+pub mod sim_coverage;
 pub mod simulator;
 pub mod sir;
 pub mod testbench;
@@ -76,3 +79,7 @@ pub use unified_runtime::{
     CircuitMode, HwAccel, SimLevel, UnifiedSimConfig, UnifiedSimResult, UnifiedSimulator,
 };
 pub use waveform::{Signal as WaveformSignal, Waveform};
+
+pub use coverage_report::CoverageReport;
+pub use coverage_vecgen::{CoverageVectorGen, InputVector};
+pub use sim_coverage::{CoverageMetrics, SimCoverageDb};

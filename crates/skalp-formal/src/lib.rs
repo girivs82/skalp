@@ -32,6 +32,7 @@ pub use equivalence::{
     // Simulation-based equivalence checking types
     SimBasedEquivalenceChecker, SimEquivalenceResult,
 };
+pub use skalp_sim::CoverageReport;
 
 use skalp_frontend::ast::Item;
 use skalp_lir::Lir;

@@ -495,6 +495,21 @@ impl GateLevelSimulator {
             .and_then(|id| self.state.signals.get(&id.0).cloned())
     }
 
+    /// Get a snapshot of all signal values mapped by name.
+    /// Returns (signal_name -> bits) for all signals in the design.
+    /// Used for coverage tracking.
+    pub fn snapshot_signals(&self) -> IndexMap<String, Vec<bool>> {
+        self.signal_name_to_id
+            .iter()
+            .filter_map(|(name, id)| {
+                self.state
+                    .signals
+                    .get(&id.0)
+                    .map(|v| (name.clone(), v.clone()))
+            })
+            .collect()
+    }
+
     /// Get all signal values (for debugging)
     pub fn dump_signals(&self) -> Vec<(String, Vec<bool>)> {
         let mut result: Vec<_> = self
