@@ -2465,24 +2465,26 @@ fn run_equivalence_check(
             }
             sim_found_bug = true;
             overall_pass = false;
-            // Store for detailed report generation
-            sim_result_for_report = Some(sim_result.clone());
         }
 
-        // Print coverage report if available
-        if let Some(ref cov_report) = sim_result.coverage_report {
-            cov_report.print_summary();
-            // Write coverage report to output directory
-            let cov_path = output_dir.join("coverage_report.txt");
-            if let Err(e) = cov_report.write_text(&cov_path) {
-                eprintln!("Warning: failed to write coverage report: {}", e);
-            } else {
-                println!("   Coverage report written to {:?}", cov_path);
-            }
-        }
+        // Always store sim result for coverage reporting and EC report generation
+        sim_result_for_report = Some(sim_result.clone());
 
-        // If quick mode, stop here
+        // If quick mode, stop here (no SAT phase)
         if quick {
+            // Print coverage report for quick mode (simulation only, no SAT)
+            if let Some(ref sim_result) = sim_result_for_report {
+                if let Some(ref cov_report) = sim_result.coverage_report {
+                    cov_report.print_summary();
+                    let cov_path = output_dir.join("coverage_report.txt");
+                    if let Err(e) = cov_report.write_text(&cov_path) {
+                        eprintln!("Warning: failed to write coverage report: {}", e);
+                    } else {
+                        println!("   Coverage report written to {:?}", cov_path);
+                    }
+                }
+            }
+
             let total_time = start_time.elapsed();
             println!();
             println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
@@ -2571,6 +2573,22 @@ fn run_equivalence_check(
             Err(e) => {
                 println!("   ⚠ SAT check error: {:?}", e);
                 println!("   Falling back to simulation-only result");
+            }
+        }
+    }
+
+    // Print coverage report after SAT check so equivalence_ok reflects the final result
+    if let Some(ref mut sim_result) = sim_result_for_report {
+        if let Some(ref mut cov_report) = sim_result.coverage_report {
+            // Update equivalence status to reflect combined simulation + SAT result
+            cov_report.equivalence_ok = overall_pass;
+            cov_report.print_summary();
+            // Write coverage report to output directory
+            let cov_path = output_dir.join("coverage_report.txt");
+            if let Err(e) = cov_report.write_text(&cov_path) {
+                eprintln!("Warning: failed to write coverage report: {}", e);
+            } else {
+                println!("   Coverage report written to {:?}", cov_path);
             }
         }
     }
