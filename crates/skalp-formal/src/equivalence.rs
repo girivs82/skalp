@@ -6445,22 +6445,57 @@ impl<'a> MirToAig<'a> {
                 self.build_adder(left, &neg_b)
             }
             BinaryOp::LeftShift => {
-                // Static shift only for now
-                if let Some(&lit) = right.first() {
-                    if lit == self.aig.false_lit() {
-                        return left.to_vec();
+                // Barrel shifter: each stage shifts by 2^i if the i-th bit of amount is set
+                let width = left.len();
+                let mut current = left.to_vec();
+
+                let num_stages = if width <= 1 { 1 } else { (width as f32).log2().ceil() as usize };
+                for stage in 0..num_stages {
+                    let shift_bit = right.get(stage).copied().unwrap_or_else(|| self.aig.false_lit());
+                    let shift_amount = 1usize << stage;
+                    let mut next = vec![self.aig.false_lit(); width];
+
+                    for bit in 0..width {
+                        let orig = current[bit];
+                        let shifted = if bit >= shift_amount {
+                            current[bit - shift_amount]
+                        } else {
+                            self.aig.false_lit() // Shift in zero
+                        };
+                        next[bit] = self.aig.add_mux(shift_bit, orig, shifted);
                     }
+                    current = next;
                 }
-                // For dynamic shift, this is complex - simplified version
-                left.to_vec()
+                current
             }
             BinaryOp::RightShift => {
-                if let Some(&lit) = right.first() {
-                    if lit == self.aig.false_lit() {
-                        return left.to_vec();
+                // Barrel shifter: arithmetic (sign-extending) when signed, logical otherwise
+                let width = left.len();
+                let sign_bit = if signed && width > 0 {
+                    left[width - 1] // MSB for sign extension
+                } else {
+                    self.aig.false_lit() // Zero for logical shift
+                };
+                let mut current = left.to_vec();
+
+                let num_stages = if width <= 1 { 1 } else { (width as f32).log2().ceil() as usize };
+                for stage in 0..num_stages {
+                    let shift_bit = right.get(stage).copied().unwrap_or_else(|| self.aig.false_lit());
+                    let shift_amount = 1usize << stage;
+                    let mut next = vec![self.aig.false_lit(); width];
+
+                    for bit in 0..width {
+                        let orig = current[bit];
+                        let shifted = if bit + shift_amount < width {
+                            current[bit + shift_amount]
+                        } else {
+                            sign_bit // Shift in sign bit (or zero for unsigned)
+                        };
+                        next[bit] = self.aig.add_mux(shift_bit, orig, shifted);
                     }
+                    current = next;
                 }
-                left.to_vec()
+                current
             }
             BinaryOp::Mul => {
                 // BUG FIX #247: Implement proper multiplier for formal verification

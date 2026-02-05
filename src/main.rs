@@ -2302,7 +2302,7 @@ fn run_equivalence_check(
     verbose: bool,
     coverage: bool,
 ) -> Result<()> {
-    use skalp_formal::equivalence::{LirToAig, GateNetlistToAig, check_sequential_equivalence_sat};
+    use skalp_formal::equivalence::{MirToAig, GateNetlistToAig, check_sequential_equivalence_sat};
     use skalp_frontend::parse_and_build_compilation_context;
     use skalp_lir::{get_stdlib_library, lower_mir_hierarchical_with_top, map_hierarchical_to_gates};
     use std::time::Instant;
@@ -2509,14 +2509,14 @@ fn run_equivalence_check(
         println!("🔬 Phase 2: SAT-based symbolic equivalence check...");
         println!("   Checking transition function equivalence for ALL states...");
 
-        // Convert to sequential AIGs
-        let lir_aig = LirToAig::new().convert_sequential(&lir);
+        // Convert to sequential AIGs (MIR→AIG for behavioral, GateNetlist→AIG for gate)
+        let mir_aig = MirToAig::new_with_mir(&mir, target_entity).convert_sequential_hierarchical();
         let gate_aig = GateNetlistToAig::new().convert_sequential(&gate_netlist);
 
-        println!("   LIR AIG:  {} nodes, {} latches", lir_aig.nodes.len(), lir_aig.latches.len());
+        println!("   MIR AIG:  {} nodes, {} latches", mir_aig.nodes.len(), mir_aig.latches.len());
         println!("   Gate AIG: {} nodes, {} latches", gate_aig.nodes.len(), gate_aig.latches.len());
 
-        match check_sequential_equivalence_sat(&lir_aig, &gate_aig) {
+        match check_sequential_equivalence_sat(&mir_aig, &gate_aig) {
             Ok(sat_result) => {
                 if sat_result.equivalent {
                     println!("   ✓ SAT PASS: Transition functions equivalent for ALL states");
