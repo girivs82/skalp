@@ -80,6 +80,6 @@ pub use unified_runtime::{
 };
 pub use waveform::{Signal as WaveformSignal, Waveform};
 
-pub use coverage_report::CoverageReport;
+pub use coverage_report::{CoverageReport, MuxArmStatus};
 pub use coverage_vecgen::{CoverageVectorGen, InputVector};
 pub use sim_coverage::{CoverageMetrics, SimCoverageDb};

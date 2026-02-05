@@ -4,8 +4,20 @@
 //! and equivalence checking modes.
 
 use crate::sim_coverage::{CoverageMetrics, SimCoverageDb};
+use std::collections::HashMap;
 use std::io;
 use std::path::Path;
+
+/// Status of an uncovered mux arm after cross-referencing with gate netlist
+#[derive(Debug, Clone)]
+pub enum MuxArmStatus {
+    /// Mux output still present in gate netlist — true coverage gap
+    CoverageGap,
+    /// Mux output not found in gate netlist — optimized away by synthesis
+    OptimizedAway,
+    /// Cross-reference not available (e.g., no gate model)
+    Unknown,
+}
 
 /// An uncovered coverage item for detailed reporting
 #[derive(Debug, Clone)]
@@ -18,6 +30,7 @@ pub enum UncoveredItem {
     MuxArm {
         node: String,
         arm: usize,
+        status: MuxArmStatus,
     },
     Comparison {
         node: String,
@@ -65,6 +78,70 @@ impl CoverageReport {
                 uncovered.push(UncoveredItem::MuxArm {
                     node: node.to_string(),
                     arm,
+                    status: MuxArmStatus::Unknown,
+                });
+            }
+        }
+
+        // Comparison uncovered items
+        for (node, op, seen_true, seen_false) in behavioral_db.uncovered_comparisons() {
+            let missing = if !seen_true && !seen_false {
+                "both true and false"
+            } else if !seen_true {
+                "true outcome"
+            } else {
+                "false outcome"
+            };
+            uncovered.push(UncoveredItem::Comparison {
+                node: node.to_string(),
+                op: op.to_string(),
+                missing: missing.to_string(),
+            });
+        }
+
+        CoverageReport {
+            behavioral,
+            gate,
+            uncovered,
+            equivalence_ok,
+            cycles,
+        }
+    }
+
+    /// Build a coverage report with mux arm cross-reference data.
+    /// `mux_xref` maps node_name -> MuxArmStatus from gate netlist cross-referencing.
+    pub fn from_coverage_dbs_with_xref(
+        behavioral_db: &SimCoverageDb,
+        gate_db: Option<&SimCoverageDb>,
+        mux_xref: &HashMap<String, MuxArmStatus>,
+        equivalence_ok: bool,
+        cycles: u64,
+    ) -> Self {
+        let behavioral = behavioral_db.metrics();
+        let gate = gate_db.map(|g| g.metrics());
+
+        let mut uncovered = Vec::new();
+
+        // Toggle uncovered items (limit to 50)
+        for (signal, bit, direction) in behavioral_db.uncovered_toggles().into_iter().take(50) {
+            uncovered.push(UncoveredItem::Toggle {
+                signal,
+                bit,
+                direction: direction.to_string(),
+            });
+        }
+
+        // Mux arm uncovered items with cross-reference status
+        for (node, arms) in behavioral_db.uncovered_mux_arms() {
+            let status = mux_xref
+                .get(node)
+                .cloned()
+                .unwrap_or(MuxArmStatus::Unknown);
+            for arm in arms {
+                uncovered.push(UncoveredItem::MuxArm {
+                    node: node.to_string(),
+                    arm,
+                    status: status.clone(),
                 });
             }
         }
@@ -165,6 +242,16 @@ impl CoverageReport {
                 .iter()
                 .filter(|u| matches!(u, UncoveredItem::MuxArm { .. }))
                 .count();
+            let mux_optimized = self
+                .uncovered
+                .iter()
+                .filter(|u| matches!(u, UncoveredItem::MuxArm { status: MuxArmStatus::OptimizedAway, .. }))
+                .count();
+            let mux_gaps = self
+                .uncovered
+                .iter()
+                .filter(|u| matches!(u, UncoveredItem::MuxArm { status: MuxArmStatus::CoverageGap, .. }))
+                .count();
             let cmp_count = self
                 .uncovered
                 .iter()
@@ -175,6 +262,12 @@ impl CoverageReport {
                 "Uncovered items: {} toggle, {} mux arms, {} comparisons",
                 toggle_count, mux_count, cmp_count
             );
+            if mux_count > 0 && (mux_optimized > 0 || mux_gaps > 0) {
+                println!(
+                    "  Mux arm breakdown: {} optimized away, {} coverage gaps, {} unknown",
+                    mux_optimized, mux_gaps, mux_count - mux_optimized - mux_gaps
+                );
+            }
 
             // Show first few uncovered items
             let show_limit = 10;
@@ -190,8 +283,13 @@ impl CoverageReport {
                         } => {
                             println!("  - Toggle: {}[{}] missing {}", signal, bit, direction);
                         }
-                        UncoveredItem::MuxArm { node, arm } => {
-                            println!("  - Mux: {} arm {} not taken", node, arm);
+                        UncoveredItem::MuxArm { node, arm, status } => {
+                            let status_str = match status {
+                                MuxArmStatus::CoverageGap => " (coverage gap)",
+                                MuxArmStatus::OptimizedAway => " (optimized away)",
+                                MuxArmStatus::Unknown => "",
+                            };
+                            println!("  - Mux: {} arm {} not taken{}", node, arm, status_str);
                         }
                         UncoveredItem::Comparison { node, op, missing } => {
                             println!("  - Comparison: {} ({}) missing {}", node, op, missing);
@@ -298,8 +396,13 @@ impl CoverageReport {
                         writeln!(report, "  Toggle: {}[{}] missing {}", signal, bit, direction)
                             .unwrap();
                     }
-                    UncoveredItem::MuxArm { node, arm } => {
-                        writeln!(report, "  Mux: {} arm {} not taken", node, arm).unwrap();
+                    UncoveredItem::MuxArm { node, arm, status } => {
+                        let status_str = match status {
+                            MuxArmStatus::CoverageGap => " (coverage gap)",
+                            MuxArmStatus::OptimizedAway => " (optimized away)",
+                            MuxArmStatus::Unknown => "",
+                        };
+                        writeln!(report, "  Mux: {} arm {} not taken{}", node, arm, status_str).unwrap();
                     }
                     UncoveredItem::Comparison { node, op, missing } => {
                         writeln!(

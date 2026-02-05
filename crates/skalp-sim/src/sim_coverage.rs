@@ -174,6 +174,7 @@ impl ToggleCoverage {
 #[derive(Debug, Clone)]
 struct MuxPoint {
     node_name: String,
+    output_signal_id: Option<String>,
     num_arms: usize,
     arms_seen: Vec<bool>,
 }
@@ -194,10 +195,11 @@ impl MuxArmCoverage {
     }
 
     /// Add a mux coverage point
-    fn add_mux(&mut self, name: &str, num_arms: usize) {
+    fn add_mux(&mut self, name: &str, num_arms: usize, output_signal_id: Option<&str>) {
         let idx = self.points.len();
         self.points.push(MuxPoint {
             node_name: name.to_string(),
+            output_signal_id: output_signal_id.map(|s| s.to_string()),
             num_arms,
             arms_seen: vec![false; num_arms],
         });
@@ -245,6 +247,32 @@ impl MuxArmCoverage {
                     None
                 } else {
                     Some((p.node_name.as_str(), uncovered))
+                }
+            })
+            .collect()
+    }
+
+    /// Returns (node_name, uncovered_arms, output_signal_id) for cross-referencing
+    /// against gate netlist signals.
+    pub fn uncovered_mux_arms_with_signals(&self) -> Vec<(&str, Vec<usize>, Option<&str>)> {
+        self.points
+            .iter()
+            .filter_map(|p| {
+                let uncovered: Vec<usize> = p
+                    .arms_seen
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, &seen)| !seen)
+                    .map(|(i, _)| i)
+                    .collect();
+                if uncovered.is_empty() {
+                    None
+                } else {
+                    Some((
+                        p.node_name.as_str(),
+                        uncovered,
+                        p.output_signal_id.as_deref(),
+                    ))
                 }
             })
             .collect()
@@ -411,10 +439,12 @@ impl SimCoverageDb {
             match &node.kind {
                 SirNodeKind::Mux => {
                     // Binary mux: 2 arms (true/false)
-                    mux.add_mux(&node_name, 2);
+                    let output_sig = node.outputs.first().map(|r| r.signal_id.as_str());
+                    mux.add_mux(&node_name, 2, output_sig);
                 }
                 SirNodeKind::ParallelMux { num_cases, .. } => {
-                    mux.add_mux(&node_name, *num_cases);
+                    let output_sig = node.outputs.first().map(|r| r.signal_id.as_str());
+                    mux.add_mux(&node_name, *num_cases, output_sig);
                 }
                 SirNodeKind::BinaryOp(op) if is_comparison_op(op) => {
                     comparison.add_comparison(&node_name, op_name(op));
@@ -579,6 +609,11 @@ impl SimCoverageDb {
         self.mux.uncovered_mux_arms()
     }
 
+    /// Get uncovered mux arms with output signal IDs (for gate netlist cross-referencing)
+    pub fn uncovered_mux_arms_with_signals(&self) -> Vec<(&str, Vec<usize>, Option<&str>)> {
+        self.mux.uncovered_mux_arms_with_signals()
+    }
+
     /// Get uncovered comparisons
     pub fn uncovered_comparisons(&self) -> Vec<(&str, &str, bool, bool)> {
         self.comparison.uncovered_comparisons()
@@ -627,8 +662,8 @@ mod tests {
     #[test]
     fn test_mux_coverage() {
         let mut mux = MuxArmCoverage::new();
-        mux.add_mux("mux0", 2);
-        mux.add_mux("mux1", 4);
+        mux.add_mux("mux0", 2, None);
+        mux.add_mux("mux1", 4, None);
 
         assert_eq!(mux.total_arms(), 6);
         assert_eq!(mux.covered_arms(), 0);
@@ -678,7 +713,7 @@ mod tests {
 
         // Add some coverage points
         db.toggle.add_signal("x", 2);
-        db.mux.add_mux("m", 2);
+        db.mux.add_mux("m", 2, None);
         db.comparison.add_comparison("c", "Eq");
 
         let m = db.metrics();

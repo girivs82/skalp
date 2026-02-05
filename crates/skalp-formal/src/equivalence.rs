@@ -9401,7 +9401,7 @@ use skalp_sim::{
     convert_gate_netlist_to_sir,
     gate_simulator::GateLevelSimulator,
     UnifiedSimulator, UnifiedSimConfig, SimLevel, HwAccel,
-    SimCoverageDb, CoverageVectorGen, CoverageReport,
+    SimCoverageDb, CoverageVectorGen, CoverageReport, MuxArmStatus,
 };
 use skalp_sir::convert_mir_to_sir_with_hierarchy;
 
@@ -10869,9 +10869,40 @@ impl SimBasedEquivalenceChecker {
             }
         }
 
-        // Build final coverage report
-        let coverage_report = CoverageReport::from_coverage_dbs(
-            &behav_cov, Some(&gate_cov), true, cycle);
+        // Cross-reference uncovered mux arms against gate netlist
+        let mut mux_xref: std::collections::HashMap<String, MuxArmStatus> =
+            std::collections::HashMap::new();
+
+        // Build set of gate signal names for lookup
+        let gate_signal_names: std::collections::HashSet<String> =
+            gate_sir_result.sir.top_module.signals
+                .iter()
+                .map(|s| s.name.clone())
+                .collect();
+
+        for (node_name, _arms, output_sig) in behav_cov.uncovered_mux_arms_with_signals() {
+            let status = if let Some(sig_id) = output_sig {
+                // Resolve internal name to hierarchical path
+                let hier_path = sir_module.name_registry
+                    .get_entry_by_internal(sig_id)
+                    .map(|e| e.hierarchical_path.clone())
+                    .unwrap_or_else(|| sig_id.to_string());
+
+                // Check if any gate signal matches (exact or prefix match for bus signals)
+                let found = gate_signal_names.contains(&hier_path)
+                    || gate_signal_names.iter().any(|gs|
+                        gs.starts_with(&hier_path) || hier_path.starts_with(gs));
+
+                if found { MuxArmStatus::CoverageGap } else { MuxArmStatus::OptimizedAway }
+            } else {
+                MuxArmStatus::Unknown
+            };
+            mux_xref.insert(node_name.to_string(), status);
+        }
+
+        // Build final coverage report with cross-reference data
+        let coverage_report = CoverageReport::from_coverage_dbs_with_xref(
+            &behav_cov, Some(&gate_cov), &mux_xref, true, cycle);
 
         let m = behav_cov.metrics();
         println!("[SIM_EQ_COV] Final coverage: {:.1}% overall ({} vectors)", m.overall_pct, cycle);
