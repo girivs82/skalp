@@ -699,7 +699,12 @@ pub enum LirOp {
     /// Subtraction: result = a - b (with optional borrow-out)
     Sub { width: u32, has_borrow: bool },
     /// Multiplication: result = a * b
-    Mul { width: u32, result_width: u32 },
+    /// For signed multiplication, the Baugh-Wooley algorithm is used.
+    Mul {
+        width: u32,
+        result_width: u32,
+        signed: bool,
+    },
 
     // === Bitwise Logic ===
     /// Bitwise AND

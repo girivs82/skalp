@@ -2321,12 +2321,22 @@ impl MirToLirTransform {
                 // E.g., 4-bit * 4-bit = 8-bit uses a 4x4 multiplier, not an 8x8 multiplier.
                 let left_sig = self.transform_expression(left, operand_width);
                 let right_sig = self.transform_expression(right, operand_width);
+                // Use signed multiplication if either operand is signed
+                let is_signed =
+                    self.infer_expression_is_signed(left) || self.infer_expression_is_signed(right);
+                trace!(
+                    "🔍 [SIGNED_MUL] Multiplication: left_signed={}, right_signed={}, is_signed={}",
+                    self.infer_expression_is_signed(left),
+                    self.infer_expression_is_signed(right),
+                    is_signed
+                );
                 (
                     left_sig,
                     right_sig,
                     LirOp::Mul {
                         width: operand_width,
                         result_width: expected_width,
+                        signed: is_signed,
                     },
                     expected_width,
                 )
@@ -2490,12 +2500,21 @@ impl MirToLirTransform {
             BinaryOp::RightShift => {
                 let left_sig = self.transform_expression(left, operand_width);
                 let right_sig = self.transform_expression(right, operand_width);
+                // BUG FIX #247: Use arithmetic right shift (Sar) for signed operands
+                let is_signed = self.infer_expression_is_signed(left);
+                let op = if is_signed {
+                    LirOp::Sar {
+                        width: operand_width,
+                    }
+                } else {
+                    LirOp::Shr {
+                        width: operand_width,
+                    }
+                };
                 (
                     left_sig,
                     right_sig,
-                    LirOp::Shr {
-                        width: operand_width,
-                    },
+                    op,
                     operand_width,
                 )
             }
@@ -2542,13 +2561,14 @@ impl MirToLirTransform {
                         path,
                     );
 
-                    // Step 3: Multiply by magic number
+                    // Step 3: Multiply by magic number (unsigned for division optimization)
                     let product = self.alloc_temp_signal(operand_width * 2);
                     let path = self.unique_node_path("div_mul");
                     self.lir.add_node(
                         LirOp::Mul {
                             width: operand_width * 2,
                             result_width: operand_width * 2,
+                            signed: false, // Magic number multiplication is unsigned
                         },
                         vec![extended_dividend, magic_const],
                         product,

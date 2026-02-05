@@ -1064,7 +1064,9 @@ impl LirToAig {
             }
 
             // Multiplication (simplified - creates many AND/ADD gates)
-            LirOp::Mul { width, result_width } => {
+            // Note: The 'signed' flag affects gate-level synthesis but the AIG simulation
+            // here uses behavioral semantics, so signedness is handled at MIR level.
+            LirOp::Mul { width, result_width, .. } => {
                 let a = node.inputs[0];
                 let b = node.inputs[1];
 

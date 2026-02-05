@@ -2905,7 +2905,11 @@ impl<'a> MirToSirConverter<'a> {
             ExpressionKind::Binary { op, left, right } => {
                 let left_node = self.create_expression_with_local_context(left, local_context);
                 let right_node = self.create_expression_with_local_context(right, local_context);
-                self.create_binary_op_node(op, left_node, right_node)
+                // BUG FIX #247: Check signedness for signed arithmetic/comparison operations
+                let left_is_signed = self.is_expression_signed(left);
+                let right_is_signed = self.is_expression_signed(right);
+                let is_signed = left_is_signed || right_is_signed;
+                self.create_binary_op_node_with_signedness(op, left_node, right_node, is_signed)
             }
             ExpressionKind::Unary { op, operand } => {
                 let operand_node =
@@ -3193,7 +3197,11 @@ impl<'a> MirToSirConverter<'a> {
             ExpressionKind::Binary { op, left, right } => {
                 let left_node = self.create_expression_node_with_context(left, context);
                 let right_node = self.create_expression_node_with_context(right, context);
-                self.create_binary_op_node(op, left_node, right_node)
+                // BUG FIX #247: Check signedness for signed arithmetic/comparison operations
+                let left_is_signed = self.is_expression_signed(left);
+                let right_is_signed = self.is_expression_signed(right);
+                let is_signed = left_is_signed || right_is_signed;
+                self.create_binary_op_node_with_signedness(op, left_node, right_node, is_signed)
             }
             ExpressionKind::Unary { op, operand } => {
                 let operand_node = self.create_expression_node_with_context(operand, context);
@@ -4373,18 +4381,24 @@ impl<'a> MirToSirConverter<'a> {
         ) {
             // Comparison operations return 1-bit boolean
             SirType::Bits(1)
-        } else if bin_op == BinaryOperation::Mul {
-            // BUG FIX #214: Multiply produces full precision result
+        } else if bin_op == BinaryOperation::Mul || bin_op == BinaryOperation::SMul {
+            // BUG FIX #214, #247: Multiply produces full precision result
             // m-bit × n-bit = (m+n)-bit (hardware correct semantics)
             // Truncation happens at assignment to typed targets (tuples, typed variables)
+            // Both unsigned (Mul) and signed (SMul) multiplication produce full width results
             let width = left_type.width() + right_type.width();
             println!(
-                "🔧 BUG #214: Mul full precision: {}×{} → {} bits",
+                "🔧 BUG #214/#247: {:?} full precision: {}×{} → {} bits",
+                bin_op,
                 left_type.width(),
                 right_type.width(),
                 width
             );
-            SirType::Bits(width)
+            if is_signed {
+                SirType::SignedBits(width)
+            } else {
+                SirType::Bits(width)
+            }
         } else {
             // Other arithmetic/logic operations use max width
             let width = left_type.width().max(right_type.width());

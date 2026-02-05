@@ -524,8 +524,16 @@ impl CpuRuntime {
             BinaryOperation::FGte => Self::eval_fp_compare(left, right, |a, b| a >= b),
         };
 
-        // Determine output size (max of input sizes)
-        let output_size = left.len().max(right.len());
+        // Determine output size
+        // BUG FIX #247: Multiplication produces full precision (m+n bits for m*n bit operands)
+        let output_size = match op {
+            BinaryOperation::Mul | BinaryOperation::SMul => {
+                // Full precision: m-bit × n-bit = (m+n)-bit
+                // But cap at 8 bytes (64 bits) since that's what u64 can hold
+                (left.len() + right.len()).min(8)
+            }
+            _ => left.len().max(right.len()),
+        };
         Ok(Self::u64_to_bytes(result_val, output_size))
     }
 

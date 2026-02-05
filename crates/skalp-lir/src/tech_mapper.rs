@@ -521,8 +521,16 @@ impl<'a> TechMapper<'a> {
             LirOp::Mul {
                 width,
                 result_width,
+                signed,
             } => {
-                self.map_multiplier(*width, *result_width, &input_nets, &output_nets, &node.path);
+                self.map_multiplier(
+                    *width,
+                    *result_width,
+                    *signed,
+                    &input_nets,
+                    &output_nets,
+                    &node.path,
+                );
             }
 
             // Multiplexer
@@ -699,14 +707,14 @@ impl<'a> TechMapper<'a> {
 
             // Shift operations
             LirOp::Shl { width } => {
-                self.map_shift(*width, &input_nets, &output_nets, &node.path, true);
+                self.map_shift(*width, &input_nets, &output_nets, &node.path, true, false);
             }
             LirOp::Shr { width } => {
-                self.map_shift(*width, &input_nets, &output_nets, &node.path, false);
+                self.map_shift(*width, &input_nets, &output_nets, &node.path, false, false);
             }
             LirOp::Sar { width } => {
-                // Arithmetic right shift - same as logical for now, but should sign-extend
-                self.map_shift(*width, &input_nets, &output_nets, &node.path, false);
+                // Arithmetic right shift - sign-extend (fill with MSB instead of 0)
+                self.map_shift(*width, &input_nets, &output_nets, &node.path, false, true);
             }
 
             // Range select: extract bits [high:low] from input
@@ -1226,10 +1234,12 @@ impl<'a> TechMapper<'a> {
 
     /// Map a multiplier using shift-and-add algorithm
     /// result = a * b, where both inputs have 'width' bits and result has 'result_width' bits
+    /// For signed multiplication, uses sign-extension to ensure correct results.
     fn map_multiplier(
         &mut self,
         width: u32,
         result_width: u32,
+        signed: bool,
         inputs: &[Vec<GateNetId>],
         outputs: &[GateNetId],
         path: &str,
@@ -1240,6 +1250,16 @@ impl<'a> TechMapper<'a> {
             return;
         }
 
+        // For signed multiplication, use sign-magnitude approach:
+        // 1. XOR sign bits to get result sign
+        // 2. Conditionally negate inputs to get magnitudes
+        // 3. Unsigned multiply magnitudes
+        // 4. Conditionally negate result based on sign
+        if signed {
+            self.map_signed_multiplier(width, result_width, inputs, outputs, path);
+            return;
+        }
+
         let and_info = self.get_cell_info(&CellFunction::And2);
         let ha_info = self.get_cell_info(&CellFunction::HalfAdder);
         let fa_info = self.get_cell_info(&CellFunction::FullAdder);
@@ -1247,12 +1267,13 @@ impl<'a> TechMapper<'a> {
         // Create partial products: pp[i][j] = a[j] & b[i]
         // This creates a grid of AND gates
         let mut partial_products: Vec<Vec<GateNetId>> = Vec::new();
+        let n = width as usize;
 
-        for i in 0..width as usize {
+        for i in 0..n {
             let mut row: Vec<GateNetId> = Vec::new();
             let b_i = inputs[1].get(i).copied().unwrap_or(inputs[1][0]);
 
-            for j in 0..width as usize {
+            for j in 0..n {
                 let a_j = inputs[0].get(j).copied().unwrap_or(inputs[0][0]);
                 let pp = self.alloc_net_id();
                 self.netlist
@@ -1269,6 +1290,7 @@ impl<'a> TechMapper<'a> {
                     vec![pp],
                 );
                 cell.source_op = Some("PartialProduct".to_string());
+                and_info.apply_to_cell(&mut cell);
                 self.add_cell(cell);
                 row.push(pp);
             }
@@ -1290,7 +1312,7 @@ impl<'a> TechMapper<'a> {
         // Need j for both indexing and cell naming
         #[allow(clippy::needless_range_loop)]
         for j in 0..result_width as usize {
-            if j < width as usize {
+            if j < n {
                 current_sum.push(partial_products[0][j]);
             } else {
                 // Need a tie-low for zero extension
@@ -1317,13 +1339,13 @@ impl<'a> TechMapper<'a> {
         // Add each subsequent partial product (shifted by its index)
         // We need both the index i (for shift calculations) and partial_products[i]
         #[allow(clippy::needless_range_loop)]
-        for i in 1..width as usize {
+        for i in 1..n {
             let mut next_sum: Vec<GateNetId> = Vec::new();
             let mut carry: Option<GateNetId> = None;
 
             for j in 0..result_width as usize {
                 // Get the partial product bit (shifted by i)
-                let pp_bit = if j >= i && j - i < width as usize {
+                let pp_bit = if j >= i && j - i < n {
                     partial_products[i][j - i]
                 } else {
                     // Zero for bits outside the partial product range
@@ -1420,6 +1442,355 @@ impl<'a> TechMapper<'a> {
         self.stats.decomposed_mappings += 1;
     }
 
+    /// Map a signed multiplier using sign-magnitude approach
+    ///
+    /// Algorithm:
+    /// 1. Compute result sign = a_sign XOR b_sign
+    /// 2. Conditionally negate a to get |a| (two's complement if negative)
+    /// 3. Conditionally negate b to get |b|
+    /// 4. Unsigned multiply: unsigned_product = |a| * |b|
+    /// 5. Conditionally negate result if result_sign is set
+    fn map_signed_multiplier(
+        &mut self,
+        width: u32,
+        result_width: u32,
+        inputs: &[Vec<GateNetId>],
+        outputs: &[GateNetId],
+        path: &str,
+    ) {
+        if inputs.len() < 2 {
+            self.warnings
+                .push(format!("Signed multiplier needs 2 inputs, got {}", inputs.len()));
+            return;
+        }
+
+        let n = width as usize;
+        let xor_info = self.get_cell_info(&CellFunction::Xor2);
+        let inv_info = self.get_cell_info(&CellFunction::Inv);
+        let ha_info = self.get_cell_info(&CellFunction::HalfAdder);
+        let fa_info = self.get_cell_info(&CellFunction::FullAdder);
+        let mux_info = self.get_cell_info(&CellFunction::Mux2);
+
+        let a_raw = &inputs[0];
+        let b_raw = &inputs[1];
+
+        // BUG FIX #247: For asymmetric input widths (e.g., 16×32), we must:
+        // 1. Get the sign bit from the actual MSB of each input (not from bit n-1)
+        // 2. Sign-extend shorter inputs to width n before processing
+        let a_actual_width = a_raw.len();
+        let b_actual_width = b_raw.len();
+
+        // Get sign bits from actual MSB of each input
+        let a_sign = a_raw.last().copied().unwrap_or(a_raw[0]);
+        let b_sign = b_raw.last().copied().unwrap_or(b_raw[0]);
+
+        // Sign-extend inputs to width n if needed
+        let a: Vec<GateNetId> = if a_actual_width < n {
+            let mut extended = a_raw.clone();
+            // Fill remaining bits with the sign bit
+            for _ in a_actual_width..n {
+                extended.push(a_sign);
+            }
+            extended
+        } else {
+            a_raw.clone()
+        };
+
+        let b: Vec<GateNetId> = if b_actual_width < n {
+            let mut extended = b_raw.clone();
+            for _ in b_actual_width..n {
+                extended.push(b_sign);
+            }
+            extended
+        } else {
+            b_raw.clone()
+        };
+
+        let result_sign = self.alloc_net_id();
+        self.netlist
+            .add_net(GateNet::new(result_sign, format!("{}.result_sign", path)));
+        self.stats.nets_created += 1;
+
+        let mut xor_cell = Cell::new_comb(
+            CellId(0),
+            xor_info.name.clone(),
+            self.library.name.clone(),
+            xor_info.fit,
+            format!("{}.sign_xor", path),
+            vec![a_sign, b_sign],
+            vec![result_sign],
+        );
+        xor_cell.source_op = Some("SignXor".to_string());
+        xor_info.apply_to_cell(&mut xor_cell);
+        self.add_cell(xor_cell);
+
+        // Step 2: Conditionally negate a to get |a|
+        // Two's complement: -a = ~a + 1
+        // |a| = a_sign ? (~a + 1) : a
+        // We compute ~a first, then use conditional increment
+
+        // First, compute ~a
+        let mut a_inv: Vec<GateNetId> = Vec::with_capacity(n);
+        for i in 0..n {
+            let a_bit = a.get(i).copied().unwrap_or(a[0]);
+            let inv_net = self.alloc_net_id();
+            self.netlist
+                .add_net(GateNet::new(inv_net, format!("{}.a_inv_{}", path, i)));
+            self.stats.nets_created += 1;
+
+            let mut inv_cell = Cell::new_comb(
+                CellId(0),
+                inv_info.name.clone(),
+                self.library.name.clone(),
+                inv_info.fit,
+                format!("{}.a_inv_{}", path, i),
+                vec![a_bit],
+                vec![inv_net],
+            );
+            inv_cell.source_op = Some("Invert".to_string());
+            inv_info.apply_to_cell(&mut inv_cell);
+            self.add_cell(inv_cell);
+            a_inv.push(inv_net);
+        }
+
+        // Compute ~a + 1 using half/full adders with carry=1
+        let mut a_neg: Vec<GateNetId> = Vec::with_capacity(n);
+        let mut carry = self.get_tie_high(); // Initial carry = 1 for +1
+
+        for i in 0..n {
+            let sum_net = self.alloc_net_id();
+            self.netlist
+                .add_net(GateNet::new(sum_net, format!("{}.a_neg_{}", path, i)));
+            self.stats.nets_created += 1;
+
+            let carry_out = self.alloc_net_id();
+            self.netlist
+                .add_net(GateNet::new(carry_out, format!("{}.a_neg_carry_{}", path, i)));
+            self.stats.nets_created += 1;
+
+            // Half adder: a_inv[i] + carry
+            let mut ha_cell = Cell::new_comb(
+                CellId(0),
+                ha_info.name.clone(),
+                self.library.name.clone(),
+                ha_info.fit,
+                format!("{}.a_neg_ha_{}", path, i),
+                vec![a_inv[i], carry],
+                vec![sum_net, carry_out],
+            );
+            ha_cell.source_op = Some("TwosComplement".to_string());
+            ha_info.apply_to_cell(&mut ha_cell);
+            self.add_cell(ha_cell);
+
+            a_neg.push(sum_net);
+            carry = carry_out;
+        }
+
+        // Select |a| = a_sign ? a_neg : a
+        let mut a_mag: Vec<GateNetId> = Vec::with_capacity(n);
+        for i in 0..n {
+            let a_bit = a.get(i).copied().unwrap_or(a[0]);
+            let mux_out = self.alloc_net_id();
+            self.netlist
+                .add_net(GateNet::new(mux_out, format!("{}.a_mag_{}", path, i)));
+            self.stats.nets_created += 1;
+
+            // MUX: sel=a_sign, d0=a (when a_sign=0), d1=a_neg (when a_sign=1)
+            let mut mux_cell = Cell::new_comb(
+                CellId(0),
+                mux_info.name.clone(),
+                self.library.name.clone(),
+                mux_info.fit,
+                format!("{}.a_mag_mux_{}", path, i),
+                vec![a_sign, a_bit, a_neg[i]],
+                vec![mux_out],
+            );
+            mux_cell.source_op = Some("Magnitude".to_string());
+            mux_info.apply_to_cell(&mut mux_cell);
+            self.add_cell(mux_cell);
+            a_mag.push(mux_out);
+        }
+
+        // Step 3: Same for b
+        let mut b_inv: Vec<GateNetId> = Vec::with_capacity(n);
+        for i in 0..n {
+            let b_bit = b.get(i).copied().unwrap_or(b[0]);
+            let inv_net = self.alloc_net_id();
+            self.netlist
+                .add_net(GateNet::new(inv_net, format!("{}.b_inv_{}", path, i)));
+            self.stats.nets_created += 1;
+
+            let mut inv_cell = Cell::new_comb(
+                CellId(0),
+                inv_info.name.clone(),
+                self.library.name.clone(),
+                inv_info.fit,
+                format!("{}.b_inv_{}", path, i),
+                vec![b_bit],
+                vec![inv_net],
+            );
+            inv_cell.source_op = Some("Invert".to_string());
+            inv_info.apply_to_cell(&mut inv_cell);
+            self.add_cell(inv_cell);
+            b_inv.push(inv_net);
+        }
+
+        let mut b_neg: Vec<GateNetId> = Vec::with_capacity(n);
+        let mut carry = self.get_tie_high();
+
+        for i in 0..n {
+            let sum_net = self.alloc_net_id();
+            self.netlist
+                .add_net(GateNet::new(sum_net, format!("{}.b_neg_{}", path, i)));
+            self.stats.nets_created += 1;
+
+            let carry_out = self.alloc_net_id();
+            self.netlist
+                .add_net(GateNet::new(carry_out, format!("{}.b_neg_carry_{}", path, i)));
+            self.stats.nets_created += 1;
+
+            let mut ha_cell = Cell::new_comb(
+                CellId(0),
+                ha_info.name.clone(),
+                self.library.name.clone(),
+                ha_info.fit,
+                format!("{}.b_neg_ha_{}", path, i),
+                vec![b_inv[i], carry],
+                vec![sum_net, carry_out],
+            );
+            ha_cell.source_op = Some("TwosComplement".to_string());
+            ha_info.apply_to_cell(&mut ha_cell);
+            self.add_cell(ha_cell);
+
+            b_neg.push(sum_net);
+            carry = carry_out;
+        }
+
+        let mut b_mag: Vec<GateNetId> = Vec::with_capacity(n);
+        for i in 0..n {
+            let b_bit = b.get(i).copied().unwrap_or(b[0]);
+            let mux_out = self.alloc_net_id();
+            self.netlist
+                .add_net(GateNet::new(mux_out, format!("{}.b_mag_{}", path, i)));
+            self.stats.nets_created += 1;
+
+            let mut mux_cell = Cell::new_comb(
+                CellId(0),
+                mux_info.name.clone(),
+                self.library.name.clone(),
+                mux_info.fit,
+                format!("{}.b_mag_mux_{}", path, i),
+                vec![b_sign, b_bit, b_neg[i]],
+                vec![mux_out],
+            );
+            mux_cell.source_op = Some("Magnitude".to_string());
+            mux_info.apply_to_cell(&mut mux_cell);
+            self.add_cell(mux_cell);
+            b_mag.push(mux_out);
+        }
+
+        // Step 4: Unsigned multiply |a| * |b|
+        let mut unsigned_product: Vec<GateNetId> = Vec::with_capacity(result_width as usize);
+        for i in 0..result_width as usize {
+            let net = self.alloc_net_id();
+            self.netlist
+                .add_net(GateNet::new(net, format!("{}.unsigned_prod_{}", path, i)));
+            self.stats.nets_created += 1;
+            unsigned_product.push(net);
+        }
+
+        self.map_multiplier(
+            width,
+            result_width,
+            false, // Unsigned multiplication of magnitudes
+            &[a_mag, b_mag],
+            &unsigned_product,
+            &format!("{}.unsigned_mul", path),
+        );
+
+        // Step 5: Conditionally negate result
+        // If result_sign = 1, output = ~unsigned_product + 1
+        // Else, output = unsigned_product
+
+        // Compute ~unsigned_product
+        let mut prod_inv: Vec<GateNetId> = Vec::with_capacity(result_width as usize);
+        for i in 0..result_width as usize {
+            let inv_net = self.alloc_net_id();
+            self.netlist
+                .add_net(GateNet::new(inv_net, format!("{}.prod_inv_{}", path, i)));
+            self.stats.nets_created += 1;
+
+            let mut inv_cell = Cell::new_comb(
+                CellId(0),
+                inv_info.name.clone(),
+                self.library.name.clone(),
+                inv_info.fit,
+                format!("{}.prod_inv_{}", path, i),
+                vec![unsigned_product[i]],
+                vec![inv_net],
+            );
+            inv_cell.source_op = Some("Invert".to_string());
+            inv_info.apply_to_cell(&mut inv_cell);
+            self.add_cell(inv_cell);
+            prod_inv.push(inv_net);
+        }
+
+        // Compute ~unsigned_product + 1
+        let mut prod_neg: Vec<GateNetId> = Vec::with_capacity(result_width as usize);
+        let mut carry = self.get_tie_high();
+
+        for i in 0..result_width as usize {
+            let sum_net = self.alloc_net_id();
+            self.netlist
+                .add_net(GateNet::new(sum_net, format!("{}.prod_neg_{}", path, i)));
+            self.stats.nets_created += 1;
+
+            let carry_out = self.alloc_net_id();
+            self.netlist
+                .add_net(GateNet::new(carry_out, format!("{}.prod_neg_carry_{}", path, i)));
+            self.stats.nets_created += 1;
+
+            let mut ha_cell = Cell::new_comb(
+                CellId(0),
+                ha_info.name.clone(),
+                self.library.name.clone(),
+                ha_info.fit,
+                format!("{}.prod_neg_ha_{}", path, i),
+                vec![prod_inv[i], carry],
+                vec![sum_net, carry_out],
+            );
+            ha_cell.source_op = Some("TwosComplement".to_string());
+            ha_info.apply_to_cell(&mut ha_cell);
+            self.add_cell(ha_cell);
+
+            prod_neg.push(sum_net);
+            carry = carry_out;
+        }
+
+        // Final output: result_sign ? prod_neg : unsigned_product
+        for i in 0..result_width as usize {
+            if i >= outputs.len() {
+                break;
+            }
+            let out = outputs[i];
+
+            let mut mux_cell = Cell::new_comb(
+                CellId(0),
+                mux_info.name.clone(),
+                self.library.name.clone(),
+                mux_info.fit,
+                format!("{}.final_mux_{}", path, i),
+                vec![result_sign, unsigned_product[i], prod_neg[i]],
+                vec![out],
+            );
+            mux_cell.source_op = Some("SignedResult".to_string());
+            mux_info.apply_to_cell(&mut mux_cell);
+            self.add_cell(mux_cell);
+        }
+
+        self.stats.decomposed_mappings += 1;
+    }
+
     /// Map a 2:1 multiplexer
     fn map_mux2(
         &mut self,
@@ -1477,6 +1848,7 @@ impl<'a> TechMapper<'a> {
         outputs: &[GateNetId],
         path: &str,
         left: bool,
+        sign_extend: bool,
     ) {
         if inputs.len() < 2 {
             self.warnings.push(format!(
@@ -1502,6 +1874,14 @@ impl<'a> TechMapper<'a> {
 
         // Use tie-low net for filling in shifted bits (properly driven by TIE_LOW cell)
         let const_0 = self.get_tie_low();
+
+        // For arithmetic right shift, use sign bit (MSB) as fill value instead of 0
+        let fill_value = if sign_extend && !left {
+            // Get the sign bit (MSB) of the input data
+            data.get(width as usize - 1).copied().unwrap_or(data[0])
+        } else {
+            const_0
+        };
 
         // Current stage values (start with input data)
         let mut current: Vec<GateNetId> = (0..width as usize)
@@ -1542,12 +1922,14 @@ impl<'a> TechMapper<'a> {
                     };
                     (unshifted, shifted)
                 } else {
-                    // Right shift: when sel=1, bit[i] gets bit[i+shift_amount] (or 0)
+                    // Right shift: when sel=1, bit[i] gets bit[i+shift_amount] (or fill_value)
+                    // For logical shift (Shr): fill_value = 0
+                    // For arithmetic shift (Sar): fill_value = sign bit (MSB)
                     let unshifted = current[bit];
                     let shifted = if bit + shift_amount < width as usize {
                         current[bit + shift_amount]
                     } else {
-                        const_0
+                        fill_value
                     };
                     (unshifted, shifted)
                 };
@@ -3854,9 +4236,11 @@ impl<'a> TechMapper<'a> {
 
         // Call existing multiplier implementation
         // input_width x input_width -> result_width output
+        // Note: NCL multiplication uses unsigned arithmetic on true rails
         self.map_multiplier(
             input_width,
             result_width,
+            false, // NCL multiplication is unsigned
             &[mul_input_a, mul_input_b],
             &product_nets,
             &format!("{}.mul_core", path),
