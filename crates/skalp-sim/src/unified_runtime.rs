@@ -1137,6 +1137,11 @@ impl UnifiedSimulator {
                 // step() returns SimulationState with signals and registers
                 runtime.step().await.ok()
             }
+            #[cfg(target_os = "macos")]
+            SimulatorBackend::BehavioralGpu(runtime) => {
+                // GPU step() also returns SimulationState (UMA allows efficient readback)
+                runtime.step().await.ok()
+            }
             SimulatorBackend::GateLevelCpu(sim) => {
                 sim.step();
                 // Build a SimulationState from gate snapshot
@@ -1161,8 +1166,32 @@ impl UnifiedSimulator {
                     registers: IndexMap::new(),
                 })
             }
+            #[cfg(target_os = "macos")]
+            SimulatorBackend::GateLevelGpu(runtime) => {
+                runtime.step();
+                // Build a SimulationState from GPU gate snapshot (dump_signals returns Vec<(name, bits)>)
+                let gate_signals = runtime.dump_signals();
+                let signals: IndexMap<String, Vec<u8>> = gate_signals
+                    .into_iter()
+                    .map(|(name, bits)| {
+                        let num_bytes = (bits.len() + 7) / 8;
+                        let mut bytes = vec![0u8; num_bytes];
+                        for (i, &b) in bits.iter().enumerate() {
+                            if b {
+                                bytes[i / 8] |= 1 << (i % 8);
+                            }
+                        }
+                        (name, bytes)
+                    })
+                    .collect();
+                Some(crate::simulator::SimulationState {
+                    cycle: self.current_cycle,
+                    signals,
+                    registers: IndexMap::new(),
+                })
+            }
             _ => {
-                // Other backends: just step normally
+                // Other backends (NCL): just step normally
                 self.step().await;
                 return None;
             }

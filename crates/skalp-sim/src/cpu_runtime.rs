@@ -159,13 +159,6 @@ impl CpuRuntime {
                     );
                     vec![0u8]
                 };
-                // Debug for key signals
-                if signal == "_s1" {
-                    // Also show what's currently in inputs for verification
-                    let inputs_val = self.inputs.get("_s1").map(|v| v[0]).unwrap_or(255);
-                    let val_u8 = if !value.is_empty() { value[0] } else { 0 };
-                    println!("📖 SignalRef {}: source={}, value={}, inputs[_s1]={}", signal, source, val_u8, inputs_val);
-                }
                 value
             }
 
@@ -194,17 +187,6 @@ impl CpuRuntime {
                     } else {
                         input_values[2].clone()
                     };
-                    // Debug for key state machine nodes (state_reg mux chain)
-                    // BUG #237 DEBUG: Include nodes 2065-2067 and 1970 for state_reg in battery_dcdc
-                    let is_debug_node = node.id == 47 || (node.id >= 84 && node.id <= 87)
-                        || node.id == 1970 || (node.id >= 2065 && node.id <= 2067)
-                        || node.outputs.iter().any(|o| o.signal_id.contains("_s129") || o.signal_id == "node_2066_out" || o.signal_id == "node_2065_out");
-                    if is_debug_node {
-                        println!("🔀 MUX node_{}: cond_in='{}' cond_val={} → select {}, true={:?}, false={:?} → result={:?}",
-                            node.id, node.inputs[0].signal_id, input_values[0][0],
-                            if cond { "TRUE" } else { "FALSE" },
-                            input_values[1], input_values[2], result);
-                    }
                     result
                 } else {
                     vec![0u8]

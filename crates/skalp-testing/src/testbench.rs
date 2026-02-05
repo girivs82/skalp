@@ -71,6 +71,9 @@ pub struct Testbench {
     coverage_enabled: bool,
     /// Input info (name, width) for CoverageVectorGen
     coverage_input_info: Vec<(String, usize)>,
+    /// Coverage sampling rate: sample every N cycles (default 1 = every cycle)
+    /// Higher values allow GPU batched execution between samples
+    coverage_sample_rate: usize,
 }
 
 impl Testbench {
@@ -276,6 +279,7 @@ impl Testbench {
             coverage_db: None,
             coverage_enabled: false,
             coverage_input_info: vec![],
+            coverage_sample_rate: 1,
         })
     }
 
@@ -438,6 +442,7 @@ impl Testbench {
             coverage_db: Some(coverage_db),
             coverage_enabled: true,
             coverage_input_info,
+            coverage_sample_rate: 10, // Sample every 10 cycles for GPU efficiency
         })
     }
 
@@ -561,6 +566,7 @@ impl Testbench {
             coverage_db: Some(coverage_db),
             coverage_enabled: true,
             coverage_input_info,
+            coverage_sample_rate: 10, // Sample every 10 cycles for GPU efficiency
         })
     }
 
@@ -639,6 +645,7 @@ impl Testbench {
             coverage_db: None,
             coverage_enabled: false,
             coverage_input_info: vec![],
+            coverage_sample_rate: 1,
         })
     }
 
@@ -759,6 +766,7 @@ impl Testbench {
             coverage_db: None,
             coverage_enabled: false,
             coverage_input_info: vec![],
+            coverage_sample_rate: 1,
         })
     }
 
@@ -836,6 +844,7 @@ impl Testbench {
             coverage_db: None,
             coverage_enabled: false,
             coverage_input_info: vec![],
+            coverage_sample_rate: 1,
         })
     }
 
@@ -1002,27 +1011,38 @@ impl Testbench {
     /// Apply pending inputs and run for N cycles on a specific clock signal
     pub async fn clock_signal(&mut self, clock_name: &str, cycles: usize) -> &mut Self {
         // Apply all pending inputs
-        // DEBUG: Show pending inputs
-        if !self.pending_inputs.is_empty() {
-            eprintln!("[DEBUG clock_signal] Applying {} pending inputs: {:?}",
-                self.pending_inputs.len(), self.pending_inputs.keys().collect::<Vec<_>>());
-        }
         for (signal, value) in self.pending_inputs.drain() {
-            eprintln!("[DEBUG clock_signal] Setting {} = {}", signal, value);
             self.sim.set_input(&signal, value).await;
         }
 
-        // When coverage is enabled, use step-by-step to capture snapshots
+        // When coverage is enabled, use batched execution with periodic sampling
+        // This provides GPU efficiency while still tracking coverage
         if self.coverage_enabled {
-            for _ in 0..cycles {
-                self.sim.set_input(clock_name, 0).await;
-                self.step_with_coverage_update().await;
-                self.sim.set_input(clock_name, 1).await;
-                self.step_with_coverage_update().await;
-                if let Some(ref mut db) = self.coverage_db {
-                    db.record_vector();
+            let sample_rate = self.coverage_sample_rate;
+            let mut remaining = cycles;
+
+            while remaining > 0 {
+                // Run (sample_rate - 1) cycles in batched mode (no snapshot)
+                let batch_cycles = (sample_rate - 1).min(remaining);
+                if batch_cycles > 0 {
+                    self.sim.set_input(clock_name, 1).await;
+                    self.sim.run_batched(batch_cycles as u64).await;
+                    self.cycle_count += batch_cycles as u64;
+                    remaining -= batch_cycles;
                 }
-                self.cycle_count += 1;
+
+                // Then do one cycle with coverage snapshot
+                if remaining > 0 {
+                    self.sim.set_input(clock_name, 0).await;
+                    self.step_with_coverage_update().await;
+                    self.sim.set_input(clock_name, 1).await;
+                    self.step_with_coverage_update().await;
+                    if let Some(ref mut db) = self.coverage_db {
+                        db.record_vector();
+                    }
+                    self.cycle_count += 1;
+                    remaining -= 1;
+                }
             }
             return self;
         }
@@ -1285,6 +1305,27 @@ impl Testbench {
     /// Check if coverage tracking is enabled
     pub fn coverage_enabled(&self) -> bool {
         self.coverage_enabled
+    }
+
+    /// Set the coverage sampling rate (sample every N cycles).
+    ///
+    /// Higher values allow GPU batched execution between samples for better performance.
+    /// Default is 10 for coverage-enabled testbenches.
+    /// Use 1 for maximum coverage accuracy (samples every cycle, slower).
+    ///
+    /// # Example
+    /// ```rust
+    /// // Sample every 100 cycles for fast execution on long tests
+    /// tb.set_coverage_sample_rate(100);
+    /// ```
+    pub fn set_coverage_sample_rate(&mut self, rate: usize) -> &mut Self {
+        self.coverage_sample_rate = rate.max(1);
+        self
+    }
+
+    /// Get the current coverage sampling rate
+    pub fn coverage_sample_rate(&self) -> usize {
+        self.coverage_sample_rate
     }
 
     /// Get current coverage metrics
