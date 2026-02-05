@@ -174,6 +174,12 @@ impl Solver {
         }
     }
 
+    /// Set conflict limit for SAT solving.
+    /// When the limit is exceeded, solve() returns Err(SolverError::Unknown).
+    pub fn set_conflict_limit(&mut self, limit: i32) {
+        let _ = self.solver.set_limit("conflicts", limit);
+    }
+
     /// Get the satisfying assignment (if SAT)
     pub fn model(&self) -> Option<&[Lit]> {
         self.model.as_deref()
