@@ -16,6 +16,9 @@ pub use cache::CompilationCache;
 pub use golden::GoldenTest;
 pub use testbench::{FromSignalValue, IntoSignalValue, Testbench, TestbenchMode};
 
+// Coverage types re-exported for user convenience
+pub use skalp_sim::{CoverageMetrics, CoverageReport, SimCoverageDb};
+
 // Deprecated re-export for backwards compatibility
 #[allow(deprecated)]
 pub use testbench::GateLevelTestbench;

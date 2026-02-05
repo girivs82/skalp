@@ -33,10 +33,10 @@ use anyhow::Result;
 use skalp_lir::gate_netlist::GateNetlist;
 use skalp_mir::MirCompiler;
 use skalp_sim::{
-    convert_gate_netlist_to_sir, CircuitMode, HwAccel, SimLevel, UnifiedSimConfig,
-    UnifiedSimResult, UnifiedSimulator,
+    convert_gate_netlist_to_sir, CircuitMode, CoverageMetrics, CoverageReport, CoverageVectorGen,
+    HwAccel, SimCoverageDb, SimLevel, UnifiedSimConfig, UnifiedSimResult, UnifiedSimulator,
 };
-use skalp_sir::convert_mir_to_sir_with_hierarchy;
+use skalp_sir::{convert_mir_to_sir_with_hierarchy, SirModule};
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -63,6 +63,14 @@ pub struct Testbench {
     input_names: Vec<String>,
     /// Available output port names
     output_names: Vec<String>,
+    /// Retained SIR module for coverage update_nodes (behavioral mode)
+    sir_module: Option<SirModule>,
+    /// Coverage database (toggle + mux + comparison tracking)
+    coverage_db: Option<SimCoverageDb>,
+    /// Whether coverage tracking is enabled
+    coverage_enabled: bool,
+    /// Input info (name, width) for CoverageVectorGen
+    coverage_input_info: Vec<(String, usize)>,
 }
 
 impl Testbench {
@@ -264,6 +272,10 @@ impl Testbench {
             cycle_count: 0,
             input_names: vec![],
             output_names: vec![],
+            sir_module: None,
+            coverage_db: None,
+            coverage_enabled: false,
+            coverage_input_info: vec![],
         })
     }
 
@@ -288,6 +300,268 @@ impl Testbench {
         };
 
         Self::from_source_behavioral_with_top(source_path, config, Some(top_module)).await
+    }
+
+    // ========================================================================
+    // Coverage-enabled constructors
+    // ========================================================================
+
+    /// Create a behavioral testbench with coverage tracking enabled
+    ///
+    /// Coverage tracking records toggle, mux arm, and comparison coverage
+    /// per simulation cycle. The SIR module is retained for node-level
+    /// coverage updates and name resolution.
+    ///
+    /// Note: coverage mode disables batched execution (each cycle steps
+    /// individually to capture signal snapshots).
+    pub async fn behavioral_with_coverage(source_path: &str) -> Result<Self> {
+        let use_gpu = std::env::var("SKALP_SIM_MODE")
+            .map(|v| v.to_lowercase() != "cpu")
+            .unwrap_or(true);
+
+        let config = UnifiedSimConfig {
+            level: SimLevel::Behavioral,
+            circuit_mode: CircuitMode::Sync,
+            hw_accel: if use_gpu { HwAccel::Auto } else { HwAccel::Cpu },
+            max_cycles: 1_000_000,
+            capture_waveforms: true,
+            ..Default::default()
+        };
+
+        Self::from_source_behavioral_with_coverage(source_path, config, None).await
+    }
+
+    /// Create a gate-level testbench with coverage tracking enabled
+    ///
+    /// Gate-level coverage tracks toggle coverage only (no mux/comparison
+    /// nodes at the gate level).
+    pub async fn gate_level_with_coverage(source_path: &str) -> Result<Self> {
+        Self::gate_level_with_coverage_and_library(source_path, "generic_asic").await
+    }
+
+    /// Create a gate-level testbench with coverage and specific library
+    pub async fn gate_level_with_coverage_and_library(
+        source_path: &str,
+        library_name: &str,
+    ) -> Result<Self> {
+        let use_gpu = std::env::var("SKALP_SIM_MODE")
+            .map(|v| v.to_lowercase() != "cpu")
+            .unwrap_or(true);
+
+        let config = UnifiedSimConfig {
+            level: SimLevel::GateLevel,
+            circuit_mode: CircuitMode::Sync,
+            hw_accel: if use_gpu { HwAccel::Auto } else { HwAccel::Cpu },
+            max_cycles: 1_000_000,
+            capture_waveforms: true,
+            ..Default::default()
+        };
+
+        Self::from_source_gate_level_with_coverage(source_path, config, library_name, None).await
+    }
+
+    /// Internal: behavioral testbench with coverage
+    async fn from_source_behavioral_with_coverage(
+        source_path: &str,
+        config: UnifiedSimConfig,
+        top_module: Option<&str>,
+    ) -> Result<Self> {
+        use std::time::Instant;
+        let start_total = Instant::now();
+        eprintln!(
+            "⏱️  [TESTBENCH] Starting behavioral compilation with coverage of '{}'",
+            source_path
+        );
+
+        let path = Path::new(source_path);
+
+        // Initialize cache
+        let cache = CompilationCache::new();
+        let dependencies = collect_dependencies(path).unwrap_or_default();
+        let cache_key = cache.compute_cache_key(path, &dependencies).ok();
+
+        // Compile to SIR
+        let sir = if top_module.is_some() {
+            Self::compile_to_sir_with_top(path, &cache, cache_key.as_ref(), top_module)?
+        } else if let Some(ref key) = cache_key {
+            if let Ok(Some(cached_sir)) = cache.load(key) {
+                eprintln!("⏱️  [TESTBENCH] Using cached SIR");
+                cached_sir
+            } else {
+                Self::compile_to_sir_with_top(path, &cache, Some(key), None)?
+            }
+        } else {
+            Self::compile_to_sir_with_top(path, &cache, None, None)?
+        };
+
+        // Extract port names
+        let input_names: Vec<String> = sir.inputs.iter().map(|i| i.name.clone()).collect();
+        let output_names: Vec<String> = sir.outputs.iter().map(|o| o.name.clone()).collect();
+
+        // Build coverage database from SIR
+        let coverage_db = SimCoverageDb::from_sir_module(&sir);
+
+        // Collect input info for coverage vector generation
+        let coverage_input_info: Vec<(String, usize)> = sir
+            .inputs
+            .iter()
+            .map(|p| (p.name.clone(), p.width))
+            .collect();
+
+        // Create simulator
+        let start_sim = Instant::now();
+        let mut sim = UnifiedSimulator::new(config)
+            .map_err(|e| anyhow::anyhow!("Failed to create simulator: {}", e))?;
+
+        sim.load_behavioral(&sir)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to load behavioral design: {}", e))?;
+
+        eprintln!(
+            "⏱️  [TESTBENCH] Simulator initialized in {:?} (device: {})",
+            start_sim.elapsed(),
+            sim.device_info()
+        );
+        eprintln!(
+            "⏱️  [TESTBENCH] ✅ Behavioral+coverage testbench created in {:?}",
+            start_total.elapsed()
+        );
+
+        Ok(Self {
+            sim,
+            mode: TestbenchMode::Behavioral,
+            pending_inputs: HashMap::new(),
+            cycle_count: 0,
+            input_names,
+            output_names,
+            sir_module: Some(sir),
+            coverage_db: Some(coverage_db),
+            coverage_enabled: true,
+            coverage_input_info,
+        })
+    }
+
+    /// Internal: gate-level testbench with coverage
+    async fn from_source_gate_level_with_coverage(
+        source_path: &str,
+        config: UnifiedSimConfig,
+        library_name: &str,
+        top_module_name: Option<&str>,
+    ) -> Result<Self> {
+        use skalp_frontend::parse_and_build_hir_from_file;
+        use skalp_lir::{
+            get_stdlib_library, lower_mir_hierarchical_with_top, lower_mir_module_to_lir,
+            map_hierarchical_to_gates, map_lir_to_gates_optimized,
+        };
+        use std::time::Instant;
+
+        let start_total = Instant::now();
+        eprintln!(
+            "⏱️  [TESTBENCH] Starting gate-level compilation with coverage of '{}' with library '{}'",
+            source_path, library_name
+        );
+
+        let path = Path::new(source_path);
+
+        // Parse HIR
+        let hir = parse_and_build_hir_from_file(path)?;
+
+        // Compile to MIR
+        let compiler = MirCompiler::new();
+        let mir = compiler
+            .compile_to_mir(&hir)
+            .map_err(|e| anyhow::anyhow!("MIR compilation failed: {}", e))?;
+
+        // Load technology library
+        let library = get_stdlib_library(library_name).map_err(|e| {
+            anyhow::anyhow!(
+                "Failed to load technology library '{}': {:?}",
+                library_name,
+                e
+            )
+        })?;
+
+        // Lower to GateNetlist
+        let has_hierarchy =
+            mir.modules.len() > 1 || mir.modules.iter().any(|m| !m.instances.is_empty());
+
+        let netlist = if has_hierarchy || top_module_name.is_some() {
+            let hier_lir = lower_mir_hierarchical_with_top(&mir, top_module_name);
+            let hier_netlist = map_hierarchical_to_gates(&hier_lir, &library);
+            hier_netlist.flatten()
+        } else {
+            let top_module = mir
+                .modules
+                .first()
+                .ok_or_else(|| anyhow::anyhow!("No modules found"))?;
+            let lir_result = lower_mir_module_to_lir(top_module);
+            let tech_result = map_lir_to_gates_optimized(&lir_result.lir, &library);
+            tech_result.netlist
+        };
+
+        // Convert to SIR
+        let mut sir_result = convert_gate_netlist_to_sir(&netlist);
+
+        // Copy name_registry from behavioral SIR and retain behavioral SIR for name resolution
+        let top_mir_module = if let Some(top_name) = top_module_name {
+            mir.modules.iter().find(|m| m.name == top_name)
+        } else {
+            mir.modules.first()
+        };
+        let behavioral_sir = top_mir_module
+            .map(|top_module| convert_mir_to_sir_with_hierarchy(&mir, top_module));
+        if let Some(ref beh_sir) = behavioral_sir {
+            sir_result.sir.name_registry = beh_sir.name_registry.clone();
+        }
+
+        // Extract gate signal info for coverage (toggle only)
+        let gate_signal_info: Vec<(String, usize)> = sir_result
+            .sir
+            .top_module
+            .signals
+            .iter()
+            .map(|s| (s.name.clone(), s.width))
+            .collect();
+
+        let coverage_db = SimCoverageDb::from_gate_netlist(&gate_signal_info);
+
+        // Collect input info from behavioral SIR ports (gate SIR signals don't have port info)
+        let coverage_input_info: Vec<(String, usize)> = behavioral_sir
+            .as_ref()
+            .map(|sir| {
+                sir.inputs
+                    .iter()
+                    .map(|p| (p.name.clone(), p.width))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let mut sim = UnifiedSimulator::new(config)
+            .map_err(|e| anyhow::anyhow!("Failed to create simulator: {}", e))?;
+
+        sim.load_gate_level(&sir_result.sir)
+            .map_err(|e| anyhow::anyhow!("Failed to load design: {}", e))?;
+
+        let input_names = sim.get_input_names();
+        let output_names = sim.get_output_names();
+
+        eprintln!(
+            "⏱️  [TESTBENCH] ✅ Gate-level+coverage testbench created in {:?}",
+            start_total.elapsed()
+        );
+
+        Ok(Self {
+            sim,
+            mode: TestbenchMode::GateLevel,
+            pending_inputs: HashMap::new(),
+            cycle_count: 0,
+            input_names,
+            output_names,
+            sir_module: behavioral_sir,
+            coverage_db: Some(coverage_db),
+            coverage_enabled: true,
+            coverage_input_info,
+        })
     }
 
     // ========================================================================
@@ -361,6 +635,10 @@ impl Testbench {
             cycle_count: 0,
             input_names,
             output_names,
+            sir_module: None,
+            coverage_db: None,
+            coverage_enabled: false,
+            coverage_input_info: vec![],
         })
     }
 
@@ -477,6 +755,10 @@ impl Testbench {
             cycle_count: 0,
             input_names,
             output_names,
+            sir_module: None,
+            coverage_db: None,
+            coverage_enabled: false,
+            coverage_input_info: vec![],
         })
     }
 
@@ -550,6 +832,10 @@ impl Testbench {
             cycle_count: 0,
             input_names: vec![],
             output_names: vec![],
+            sir_module: None,
+            coverage_db: None,
+            coverage_enabled: false,
+            coverage_input_info: vec![],
         })
     }
 
@@ -678,6 +964,25 @@ impl Testbench {
     }
 
     // ========================================================================
+    // Coverage helpers
+    // ========================================================================
+
+    /// Step the simulation and update coverage tracking from the snapshot.
+    ///
+    /// Uses field-level borrows to avoid borrow checker conflicts:
+    /// `self.sim`, `self.coverage_db`, and `self.sir_module` are accessed
+    /// as separate fields.
+    async fn step_with_coverage_update(&mut self) {
+        let snapshot = self.sim.step_with_snapshot().await;
+        if let (Some(state), Some(ref mut cov_db)) = (snapshot, &mut self.coverage_db) {
+            cov_db.update_toggle(&state.signals);
+            if let Some(ref sir) = self.sir_module {
+                cov_db.update_nodes(&state.signals, sir);
+            }
+        }
+    }
+
+    // ========================================================================
     // Common methods (work for all modes)
     // ========================================================================
 
@@ -705,6 +1010,21 @@ impl Testbench {
         for (signal, value) in self.pending_inputs.drain() {
             eprintln!("[DEBUG clock_signal] Setting {} = {}", signal, value);
             self.sim.set_input(&signal, value).await;
+        }
+
+        // When coverage is enabled, use step-by-step to capture snapshots
+        if self.coverage_enabled {
+            for _ in 0..cycles {
+                self.sim.set_input(clock_name, 0).await;
+                self.step_with_coverage_update().await;
+                self.sim.set_input(clock_name, 1).await;
+                self.step_with_coverage_update().await;
+                if let Some(ref mut db) = self.coverage_db {
+                    db.record_vector();
+                }
+                self.cycle_count += 1;
+            }
+            return self;
         }
 
         // PERF: Use batched GPU execution for cycle counts >= BATCH_MIN
@@ -766,7 +1086,11 @@ impl Testbench {
                     self.sim.set_input(clock_name, 0).await;
                 }
             }
-            self.sim.step().await;
+            if self.coverage_enabled {
+                self.step_with_coverage_update().await;
+            } else {
+                self.sim.step().await;
+            }
 
             // Clock high phase
             for (clock_name, num_cycles) in clocks {
@@ -774,7 +1098,14 @@ impl Testbench {
                     self.sim.set_input(clock_name, 1).await;
                 }
             }
-            self.sim.step().await;
+            if self.coverage_enabled {
+                self.step_with_coverage_update().await;
+                if let Some(ref mut db) = self.coverage_db {
+                    db.record_vector();
+                }
+            } else {
+                self.sim.step().await;
+            }
             self.cycle_count += 1;
         }
 
@@ -786,7 +1117,11 @@ impl Testbench {
         for (signal, value) in self.pending_inputs.drain() {
             self.sim.set_input(&signal, value).await;
         }
-        self.sim.step().await;
+        if self.coverage_enabled {
+            self.step_with_coverage_update().await;
+        } else {
+            self.sim.step().await;
+        }
         self
     }
 
@@ -941,6 +1276,362 @@ impl Testbench {
         } else {
             self.output_names.clone()
         }
+    }
+
+    // ========================================================================
+    // Coverage query methods
+    // ========================================================================
+
+    /// Check if coverage tracking is enabled
+    pub fn coverage_enabled(&self) -> bool {
+        self.coverage_enabled
+    }
+
+    /// Get current coverage metrics
+    pub fn coverage_metrics(&self) -> Option<CoverageMetrics> {
+        self.coverage_db.as_ref().map(|db| db.metrics())
+    }
+
+    /// Get a reference to the coverage database
+    pub fn coverage_db(&self) -> Option<&SimCoverageDb> {
+        self.coverage_db.as_ref()
+    }
+
+    /// Build a coverage report from the current coverage state
+    pub fn coverage_report(&self) -> Option<CoverageReport> {
+        self.coverage_db.as_ref().map(|db| {
+            CoverageReport::from_coverage_dbs(db, None, true, self.cycle_count)
+        })
+    }
+
+    /// Print a basic coverage summary to stdout
+    pub fn print_coverage_summary(&self) {
+        if let Some(metrics) = self.coverage_metrics() {
+            println!();
+            println!("Coverage Summary (after {} cycles):", self.cycle_count);
+            println!("  Toggle:     {:6.1}%  ({}/{} bits)",
+                metrics.toggle_pct, metrics.toggle_covered, metrics.toggle_total);
+            println!("  Mux arms:   {:6.1}%  ({}/{} arms)",
+                metrics.mux_pct, metrics.mux_arms_covered, metrics.mux_arms_total);
+            println!("  Comparison: {:6.1}%  ({}/{} outcomes)",
+                metrics.comparison_pct, metrics.cmp_covered, metrics.cmp_total);
+            println!("  Overall:    {:6.1}%", metrics.overall_pct);
+            println!("  Vectors:    {}", metrics.vectors_applied);
+            println!();
+        }
+    }
+
+    /// Print actionable coverage guidance with user-facing signal names.
+    ///
+    /// Uses `name_registry` to resolve internal signal names (e.g., `_s5`)
+    /// to hierarchical user-facing paths (e.g., `controller.duty_cycle`).
+    /// Groups uncovered items by signal and provides suggestions for
+    /// closing coverage gaps.
+    pub fn print_coverage_guidance(&self) {
+        let cov_db = match &self.coverage_db {
+            Some(db) => db,
+            None => {
+                println!("Coverage tracking is not enabled.");
+                return;
+            }
+        };
+
+        let metrics = cov_db.metrics();
+        let name_registry = self.sir_module.as_ref().map(|sir| &sir.name_registry);
+
+        println!();
+        println!("Coverage Guidance (after {} cycles, {:.1}% toggle coverage):",
+            self.cycle_count, metrics.toggle_pct);
+        println!("{}", "\u{2501}".repeat(60));
+        println!();
+
+        // --- Untoggled Signals ---
+        let uncovered_toggles = cov_db.uncovered_toggles();
+        if !uncovered_toggles.is_empty() {
+            // Group by signal name (preserve insertion order via Vec)
+            let mut by_signal: Vec<(String, Vec<(usize, &str)>)> = Vec::new();
+            for (sig_name, bit, direction) in &uncovered_toggles {
+                let display_name = Self::resolve_signal_name(sig_name, name_registry);
+                if let Some(entry) = by_signal.iter_mut().find(|(n, _)| n == &display_name) {
+                    entry.1.push((*bit, *direction));
+                } else {
+                    by_signal.push((display_name, vec![(*bit, *direction)]));
+                }
+            }
+
+            println!("Untoggled Signals:");
+            for (display_name, bits) in &by_signal {
+                let total_width = bits.iter().map(|(b, _)| b + 1).max().unwrap_or(1);
+                let never_toggled = bits.iter().filter(|(_, d)| *d == "neither").count();
+
+                if never_toggled == bits.len() && bits.len() == total_width {
+                    // Entire signal never toggled
+                    println!("  {} ({}-bit): never toggled", display_name, total_width);
+                    if total_width == 1 {
+                        println!("    \u{2192} Set {} to both 0 and 1 in separate test phases",
+                            display_name);
+                    } else {
+                        println!("    \u{2192} Exercise {} with varying values (try 0x0, 0xFF, 0x55AA)",
+                            display_name);
+                    }
+                } else {
+                    // Partial toggle coverage
+                    let uncovered_bits: Vec<usize> = bits.iter().map(|(b, _)| *b).collect();
+                    let bit_range = Self::format_bit_ranges(&uncovered_bits);
+                    println!("  {} ({}-bit): {}/{} bits untoggled",
+                        display_name, total_width, bits.len(), total_width);
+                    println!("    \u{2192} bits {} need exercise with different values",
+                        bit_range);
+                }
+            }
+            println!();
+        }
+
+        // --- Untaken Mux Arms ---
+        let uncovered_mux = cov_db.uncovered_mux_arms();
+        if !uncovered_mux.is_empty() {
+            println!("Untaken Mux Arms:");
+            for (node_name, arms) in &uncovered_mux {
+                // Try to resolve the mux output signal name
+                let display_name = if let Some(ref sir) = self.sir_module {
+                    // Find the node and its output signal
+                    sir.combinational_nodes
+                        .iter()
+                        .find(|n| format!("node_{}", n.id) == *node_name)
+                        .and_then(|n| n.outputs.first())
+                        .map(|out_ref| {
+                            Self::resolve_signal_name(&out_ref.signal_id, name_registry)
+                        })
+                        .unwrap_or_else(|| node_name.to_string())
+                } else {
+                    node_name.to_string()
+                };
+
+                let total_arms = self.sir_module.as_ref()
+                    .and_then(|sir| {
+                        sir.combinational_nodes.iter()
+                            .find(|n| format!("node_{}", n.id) == *node_name)
+                    })
+                    .map(|n| match &n.kind {
+                        skalp_sir::SirNodeKind::Mux => 2,
+                        skalp_sir::SirNodeKind::ParallelMux { num_cases, .. } => *num_cases,
+                        _ => 2,
+                    })
+                    .unwrap_or(2);
+
+                for &arm in arms {
+                    println!("  {} arm {} (of {}): not taken",
+                        display_name, arm, total_arms);
+                    if total_arms == 2 {
+                        let path_desc = if arm == 0 { "false/else" } else { "true/then" };
+                        println!("    \u{2192} Exercise the '{}' path of {}",
+                            path_desc, display_name);
+                    } else {
+                        println!("    \u{2192} Drive selector to match case {}",
+                            arm);
+                    }
+                }
+            }
+            println!();
+        }
+
+        // --- Comparison Outcomes ---
+        let uncovered_cmps = cov_db.uncovered_comparisons();
+        if !uncovered_cmps.is_empty() {
+            println!("Comparison Outcomes:");
+            for (node_name, op, seen_true, seen_false) in &uncovered_cmps {
+                let display_name = if let Some(ref sir) = self.sir_module {
+                    sir.combinational_nodes
+                        .iter()
+                        .find(|n| format!("node_{}", n.id) == *node_name)
+                        .and_then(|n| n.outputs.first())
+                        .map(|out_ref| {
+                            Self::resolve_signal_name(&out_ref.signal_id, name_registry)
+                        })
+                        .unwrap_or_else(|| node_name.to_string())
+                } else {
+                    node_name.to_string()
+                };
+
+                let missing = if !seen_true && !seen_false {
+                    "both true and false"
+                } else if !seen_true {
+                    "true outcome"
+                } else {
+                    "false outcome"
+                };
+                println!("  {} ({}): missing {}", display_name, op, missing);
+                println!("    \u{2192} Choose inputs that make this comparison {}",
+                    if !*seen_true { "true" } else { "false" });
+            }
+            println!();
+        }
+
+        if uncovered_toggles.is_empty() && uncovered_mux.is_empty() && uncovered_cmps.is_empty() {
+            println!("  (all covered)");
+            println!();
+        }
+
+        // Summary line
+        let total_gaps = uncovered_toggles.len() + uncovered_mux.iter().map(|(_, a)| a.len()).sum::<usize>()
+            + uncovered_cmps.len();
+        if total_gaps > 0 {
+            println!("Summary: {} coverage gaps remaining ({} toggle bits, {} mux arms, {} comparisons)",
+                total_gaps,
+                uncovered_toggles.len(),
+                uncovered_mux.iter().map(|(_, a)| a.len()).sum::<usize>(),
+                uncovered_cmps.len());
+        } else {
+            println!("Summary: all coverage goals met");
+        }
+        println!();
+    }
+
+    /// Resolve an internal signal name to a user-facing name via the name registry.
+    fn resolve_signal_name(
+        internal_name: &str,
+        name_registry: Option<&skalp_mir::NameRegistry>,
+    ) -> String {
+        if let Some(registry) = name_registry {
+            if let Some(path) = registry.reverse_resolve(internal_name) {
+                return path.to_string();
+            }
+        }
+        internal_name.to_string()
+    }
+
+    /// Auto-generate test vectors to close coverage gaps.
+    ///
+    /// Creates a `CoverageVectorGen` from the stored input info, then loops:
+    /// generate vector → apply inputs → clock cycle with snapshots → check goal.
+    ///
+    /// Returns the final `CoverageMetrics` after the closure run.
+    ///
+    /// # Arguments
+    /// * `clock_name` - Name of the clock signal to toggle
+    /// * `goal` - Target coverage percentage (e.g., 90.0)
+    /// * `max_vectors` - Maximum number of vectors to try before stopping
+    pub async fn run_coverage_closure(
+        &mut self,
+        clock_name: &str,
+        goal: f64,
+        max_vectors: usize,
+    ) -> Result<CoverageMetrics> {
+        if !self.coverage_enabled {
+            anyhow::bail!("Coverage tracking is not enabled. Use behavioral_with_coverage() or gate_level_with_coverage().");
+        }
+
+        let mut vecgen = CoverageVectorGen::from_input_info(&self.coverage_input_info, 42)
+            .with_coverage_goal(goal)
+            .with_lfsr_budget(max_vectors.min(1000))
+            .with_bias_budget(max_vectors.saturating_sub(1000));
+
+        let mut vectors_applied = 0usize;
+
+        loop {
+            // Check if we've reached the goal
+            if let Some(ref db) = self.coverage_db {
+                let m = db.metrics();
+                if m.overall_pct >= goal {
+                    eprintln!(
+                        "⏱️  [COVERAGE] Goal {:.1}% reached at {:.1}% after {} vectors",
+                        goal, m.overall_pct, vectors_applied
+                    );
+                    return Ok(m);
+                }
+            }
+
+            if vectors_applied >= max_vectors {
+                break;
+            }
+
+            // Generate next vector
+            let vector = {
+                let cov_ref = self.coverage_db.as_ref();
+                vecgen.next(cov_ref)
+            };
+
+            let vector = match vector {
+                Some(v) => v,
+                None => break,
+            };
+
+            // Apply the vector inputs
+            for (name, value) in &vector.values {
+                self.sim.set_input(name, *value).await;
+            }
+
+            // Run one clock cycle with coverage snapshots
+            self.sim.set_input(clock_name, 0).await;
+            self.step_with_coverage_update().await;
+            self.sim.set_input(clock_name, 1).await;
+            self.step_with_coverage_update().await;
+            if let Some(ref mut db) = self.coverage_db {
+                db.record_vector();
+            }
+            self.cycle_count += 1;
+            vectors_applied += 1;
+        }
+
+        let metrics = self.coverage_db.as_ref()
+            .map(|db| db.metrics())
+            .unwrap_or(CoverageMetrics {
+                toggle_pct: 0.0,
+                toggle_covered: 0,
+                toggle_total: 0,
+                mux_pct: 0.0,
+                mux_arms_covered: 0,
+                mux_arms_total: 0,
+                comparison_pct: 0.0,
+                cmp_covered: 0,
+                cmp_total: 0,
+                overall_pct: 0.0,
+                vectors_applied: 0,
+            });
+
+        eprintln!(
+            "⏱️  [COVERAGE] Closure finished: {:.1}% after {} vectors (goal: {:.1}%)",
+            metrics.overall_pct, vectors_applied, goal
+        );
+
+        Ok(metrics)
+    }
+
+    /// Format a list of bit indices into compact range notation (e.g., "[0..5], [8]")
+    fn format_bit_ranges(bits: &[usize]) -> String {
+        if bits.is_empty() {
+            return String::new();
+        }
+        let mut sorted = bits.to_vec();
+        sorted.sort_unstable();
+        sorted.dedup();
+
+        let mut ranges = Vec::new();
+        let mut start = sorted[0];
+        let mut end = sorted[0];
+
+        for &b in &sorted[1..] {
+            if b == end + 1 {
+                end = b;
+            } else {
+                ranges.push((start, end));
+                start = b;
+                end = b;
+            }
+        }
+        ranges.push((start, end));
+
+        ranges
+            .iter()
+            .map(|(s, e)| {
+                if s == e {
+                    format!("[{}]", s)
+                } else {
+                    format!("[{}..{}]", s, e)
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
     }
 
     // ========================================================================
