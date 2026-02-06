@@ -415,6 +415,9 @@ impl SimCoverageDb {
     /// Build coverage database from a behavioral SirModule.
     /// Enumerates all signals for toggle coverage, all Mux/ParallelMux nodes
     /// for mux arm coverage, and all comparison nodes for comparison coverage.
+    ///
+    /// This version tracks ALL signals including compiler-generated intermediates.
+    /// For user-visible signals only, use `from_sir_module_user_visible`.
     pub fn from_sir_module(module: &SirModule) -> Self {
         let mut toggle = ToggleCoverage::new();
         let mut mux = MuxArmCoverage::new();
@@ -445,6 +448,71 @@ impl SimCoverageDb {
                 }
                 SirNodeKind::BinaryOp(op) if is_comparison_op(op) => {
                     comparison.add_comparison(&node_name, op_name(op));
+                }
+                _ => {}
+            }
+        }
+
+        SimCoverageDb {
+            toggle,
+            mux,
+            comparison,
+            vectors_applied: 0,
+        }
+    }
+
+    /// Build coverage database tracking only user-visible signals from SKALP source.
+    ///
+    /// This filters signals using the name_registry to only include signals that
+    /// have user-defined names in the source code. Compiler-generated intermediates
+    /// (like `_s1`, `node_123_out`) are excluded.
+    ///
+    /// For behavioral testing at the SKALP abstraction level, this gives more
+    /// meaningful coverage metrics since it only tracks signals the user defined.
+    pub fn from_sir_module_user_visible(module: &SirModule) -> Self {
+        let mut toggle = ToggleCoverage::new();
+        let mut mux = MuxArmCoverage::new();
+        let mut comparison = ComparisonCoverage::new();
+
+        // Track only user-visible signals (those with entries in name_registry)
+        for signal in &module.signals {
+            // Check if signal has a user-visible name
+            if module.name_registry.reverse_resolve(&signal.name).is_some() {
+                toggle.add_signal(&signal.name, signal.width);
+            }
+        }
+        // Output ports are always user-visible
+        for port in &module.outputs {
+            toggle.add_signal(&port.name, port.width);
+        }
+
+        // For mux and comparison coverage, track nodes that involve user-visible signals
+        // A mux is relevant if its output signal feeds into a user-visible signal
+        // (directly or through the dataflow). For simplicity, we include all muxes
+        // since they represent branching decisions in user code.
+        for node in &module.combinational_nodes {
+            let node_name = format!("node_{}", node.id);
+            match &node.kind {
+                SirNodeKind::Mux => {
+                    // Include all muxes - they represent if/else decisions in user code
+                    let output_sig = node.outputs.first().map(|r| r.signal_id.as_str());
+                    mux.add_mux(&node_name, 2, output_sig);
+                }
+                SirNodeKind::ParallelMux { num_cases, .. } => {
+                    // Include all parallel muxes - they represent case/match decisions
+                    let output_sig = node.outputs.first().map(|r| r.signal_id.as_str());
+                    mux.add_mux(&node_name, *num_cases, output_sig);
+                }
+                SirNodeKind::BinaryOp(op) if is_comparison_op(op) => {
+                    // For comparisons, check if any input or output is user-visible
+                    let any_visible = node.inputs.iter().any(|r| {
+                        module.name_registry.reverse_resolve(&r.signal_id).is_some()
+                    }) || node.outputs.iter().any(|r| {
+                        module.name_registry.reverse_resolve(&r.signal_id).is_some()
+                    });
+                    if any_visible {
+                        comparison.add_comparison(&node_name, op_name(op));
+                    }
                 }
                 _ => {}
             }

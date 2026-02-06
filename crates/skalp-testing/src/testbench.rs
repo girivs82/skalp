@@ -402,8 +402,9 @@ impl Testbench {
         let input_names: Vec<String> = sir.inputs.iter().map(|i| i.name.clone()).collect();
         let output_names: Vec<String> = sir.outputs.iter().map(|o| o.name.clone()).collect();
 
-        // Build coverage database from SIR
-        let coverage_db = SimCoverageDb::from_sir_module(&sir);
+        // Build coverage database from SIR - only track user-visible signals
+        // This gives meaningful coverage for SKALP source-level testing
+        let coverage_db = SimCoverageDb::from_sir_module_user_visible(&sir);
 
         // Collect input info for coverage vector generation
         let coverage_input_info: Vec<(String, usize)> = sir
