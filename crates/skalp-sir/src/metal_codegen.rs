@@ -210,6 +210,34 @@ impl<'a> MetalShaderGenerator<'a> {
                 array_suffix
             ));
         }
+
+        // BUG FIX: Also add flip-flop outputs that aren't state elements
+        // These need to persist between steps for the step-by-step kernel to work correctly
+        let mut ff_output_names: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for node in &sir.sequential_nodes {
+            if let SirNodeKind::FlipFlop { .. } = &node.kind {
+                if let Some(output) = node.outputs.first() {
+                    // Skip if already a state element
+                    if !sir.state_elements.contains_key(&output.signal_id) {
+                        ff_output_names.insert(output.signal_id.clone());
+                    }
+                }
+            }
+        }
+        let mut sorted_ff_outputs: Vec<_> = ff_output_names.iter().collect();
+        sorted_ff_outputs.sort();
+        for name in sorted_ff_outputs {
+            let width = self.get_signal_width_from_sir(sir, name);
+            let sir_type = SirType::Bits(width);
+            let (base_type, array_suffix) = self.get_metal_type_parts_for_struct(&sir_type);
+            self.write_indented(&format!(
+                "{} {}{};\n",
+                base_type,
+                self.sanitize_name(name),
+                array_suffix
+            ));
+        }
+
         self.indent -= 1;
         writeln!(self.output, "}};\n").unwrap();
 
@@ -222,7 +250,12 @@ impl<'a> MetalShaderGenerator<'a> {
         let mut added_names = std::collections::HashSet::new();
 
         // Outputs are computed signals too
+        // But skip state element outputs - they're in Registers struct, not Signals
         for output in &sir.outputs {
+            // Skip state element outputs - they're accessed via registers
+            if sir.state_elements.contains_key(&output.name) {
+                continue;
+            }
             let sanitized_name = self.sanitize_name(&output.name);
             if added_names.insert(sanitized_name.clone()) {
                 self.generate_signal_field(&output.name, &output.sir_type);
@@ -519,63 +552,16 @@ impl<'a> MetalShaderGenerator<'a> {
         if index == total_cones - 1 {
             // Assign outputs based on their drivers
             for output in &sir.outputs {
+                // Skip state element outputs - they're accessed via Registers struct, not Signals
+                if sir.state_elements.contains_key(&output.name) {
+                    continue;
+                }
+
                 let output_width = self.get_signal_width_from_sir(sir, &output.name);
                 let is_wide = output_width > 128;
-                let state_sir_type = self.get_signal_sir_type(sir, &output.name);
-                let is_array = matches!(state_sir_type, Some(SirType::Array(_, _)));
 
-                // Check if this output is a state element (sequential output)
-                if sir.state_elements.contains_key(&output.name) {
-                    // Output is driven by a register - read from register buffer
-                    if is_array {
-                        // Array type - use element-wise copy (Metal doesn't allow direct array assignment)
-                        if let Some(SirType::Array(_, array_size)) = state_sir_type {
-                            self.write_indented(&format!(
-                                "// Array copy for output from register (array[{}])\n",
-                                array_size
-                            ));
-                            let reg_accessor = self.get_register_accessor(&output.name);
-                            self.write_indented(&format!(
-                                "for (uint i = 0; i < {}; i++) signals->{}[i] = {}[i];\n",
-                                array_size,
-                                self.sanitize_name(&output.name),
-                                reg_accessor
-                            ));
-                        }
-                    } else if is_wide {
-                        // Wide bit type - use element-wise copy
-                        let array_size = output_width.div_ceil(32);
-                        self.write_indented(&format!(
-                            "// Element-wise copy for {}-bit output from register (uint[{}])\n",
-                            output_width, array_size
-                        ));
-                        let reg_accessor = self.get_register_accessor(&output.name);
-                        self.write_indented(&format!(
-                            "for (uint i = 0; i < {}; i++) {{\n",
-                            array_size
-                        ));
-                        self.indent += 1;
-                        self.write_indented(&format!(
-                            "signals->{}[i] = {}[i];\n",
-                            self.sanitize_name(&output.name),
-                            reg_accessor
-                        ));
-                        self.indent -= 1;
-                        self.write_indented("}\n");
-                    } else {
-                        // Scalar - direct assignment
-                        let reg_accessor = self.get_register_accessor(&output.name);
-                        self.write_indented(&format!(
-                            "signals->{} = {};\n",
-                            self.sanitize_name(&output.name),
-                            reg_accessor
-                        ));
-                    }
-                    eprintln!(
-                        "🔗 OUTPUT (STATE): {} = register accessor",
-                        output.name
-                    );
-                } else {
+                // Output is driven by combinational logic
+                {
                     // Output is driven by combinational logic
                     // Find the driver node for this output signal
                     eprintln!(
@@ -1122,6 +1108,21 @@ impl<'a> MetalShaderGenerator<'a> {
             }
         }
 
+        // BUG FIX: Also initialize flip-flop outputs that aren't state elements
+        for node in &sir.sequential_nodes {
+            if let SirNodeKind::FlipFlop { .. } = &node.kind {
+                if let Some(output) = node.outputs.first() {
+                    if !sir.state_elements.contains_key(&output.signal_id) {
+                        let sanitized = self.sanitize_name(&output.signal_id);
+                        self.write_indented(&format!(
+                            "next_registers->{} = current_registers->{};\n",
+                            sanitized, sanitized
+                        ));
+                    }
+                }
+            }
+        }
+
         // Save old register values for proper simultaneous update semantics
         self.write_indented("\n// Capture old values for simultaneous update semantics\n");
         for (state_name, state_elem) in &sorted_states {
@@ -1185,6 +1186,39 @@ impl<'a> MetalShaderGenerator<'a> {
         for node in sorted_seq_nodes {
             if let SirNodeKind::FlipFlop { clock_edge } = &node.kind {
                 self.generate_flipflop_update_v2(sir, node, clock_edge);
+            }
+        }
+
+        // BUG FIX: Also update state elements that are driven by Slice nodes
+        // These state elements get their values from flip-flop outputs via combinational logic,
+        // We need to compute the slice of the NEW flip-flop value (after it was updated above)
+        for node in &sir.combinational_nodes {
+            if let SirNodeKind::Slice { start, end } = &node.kind {
+                // Check if any additional outputs are state elements
+                for additional_output in node.outputs.iter().skip(1) {
+                    if sir.state_elements.contains_key(&additional_output.signal_id) {
+                        // Check if the slice's input comes from a flip-flop output
+                        if let Some(input) = node.inputs.first() {
+                            let is_ff_output = sir.sequential_nodes.iter().any(|n| {
+                                matches!(n.kind, SirNodeKind::FlipFlop { .. })
+                                    && n.outputs.first().map(|o| o.signal_id.as_str()) == Some(&input.signal_id)
+                            });
+                            if is_ff_output {
+                                // Compute the slice of the NEW flip-flop value (in next_registers)
+                                let (high, low) = if start >= end { (*start, *end) } else { (*end, *start) };
+                                let width = high - low + 1;
+                                let mask = if width >= 64 { u64::MAX } else { (1u64 << width) - 1 };
+                                self.write_indented(&format!(
+                                    "next_registers->{} = (next_registers->{} >> {}) & 0x{:X}; // BUG FIX: Slice of NEW FF value\n",
+                                    self.sanitize_name(&additional_output.signal_id),
+                                    self.sanitize_name(&input.signal_id),
+                                    low,
+                                    mask
+                                ));
+                            }
+                        }
+                    }
+                }
             }
         }
 
@@ -1316,6 +1350,31 @@ impl<'a> MetalShaderGenerator<'a> {
             }
         }
 
+        // BUG FIX: Sync flip-flop outputs (from nested instances) to signals struct
+        // This must happen BEFORE combinational logic so it can read the current FF values
+        for node in &sir.sequential_nodes {
+            if let SirNodeKind::FlipFlop { .. } = &node.kind {
+                if let Some(output) = node.outputs.first() {
+                    let sanitized = self.sanitize_name(&output.signal_id);
+                    // Skip state elements (synced via registers above)
+                    if sir.state_elements.contains_key(&output.signal_id) {
+                        continue;
+                    }
+                    let output_width = self.get_signal_width_from_sir(sir, &output.signal_id);
+                    let state_sir_type = self.get_signal_sir_type(sir, &output.signal_id);
+                    let is_array = matches!(state_sir_type, Some(SirType::Array(_, _)));
+                    let is_wide = output_width > 128;
+
+                    if !is_array && !is_wide {
+                        self.write_indented(&format!(
+                            "signals->{} = local_{};\n",
+                            sanitized, sanitized
+                        ));
+                    }
+                }
+            }
+        }
+
         // Evaluate combinational logic (rising edge FFs see current state)
         self.write_indented("\n// Evaluate combinational logic\n");
         self.generate_batched_combinational_logic(sir);
@@ -1395,49 +1454,16 @@ impl<'a> MetalShaderGenerator<'a> {
 
         // Assign outputs - check if they're driven by state elements or by combinational nodes
         for output in &sir.outputs {
+            // Skip state element outputs - they're accessed via Registers struct, not Signals
+            if sir.state_elements.contains_key(&output.name) {
+                continue;
+            }
+
             let output_width = self.get_signal_width_from_sir(sir, &output.name);
             let is_wide = output_width > 128;
-            let state_sir_type = self.get_signal_sir_type(sir, &output.name);
-            let is_array = matches!(state_sir_type, Some(SirType::Array(_, _)));
 
-            if sir.state_elements.contains_key(&output.name) {
-                // Output IS a state element
-                if !is_wide && !is_array {
-                    // Scalar state elements have local copies
-                    self.write_indented(&format!(
-                        "signals->{} = local_{};\n",
-                        self.sanitize_name(&output.name),
-                        self.sanitize_name(&output.name)
-                    ));
-                } else if is_array {
-                    // Arrays - copy element by element (Metal doesn't allow direct array assignment)
-                    if let Some(SirType::Array(_, array_size)) = state_sir_type {
-                        self.write_indented(&format!(
-                            "for (uint i = 0; i < {}; i++) signals->{}[i] = registers->{}[i];\n",
-                            array_size,
-                            self.sanitize_name(&output.name),
-                            self.sanitize_name(&output.name)
-                        ));
-                    }
-                } else if is_wide {
-                    // Wide state elements - copy from registers (use appropriate type)
-                    let (_, metal_array, _) = self.get_metal_type_safe(&output.name, output_width);
-                    if let Some(array_size) = metal_array {
-                        self.write_indented(&format!(
-                            "for (uint i = 0; i < {}; i++) signals->{}[i] = registers->{}[i];\n",
-                            array_size,
-                            self.sanitize_name(&output.name),
-                            self.sanitize_name(&output.name)
-                        ));
-                    } else {
-                        self.write_indented(&format!(
-                            "signals->{} = registers->{};\n",
-                            self.sanitize_name(&output.name),
-                            self.sanitize_name(&output.name)
-                        ));
-                    }
-                }
-            } else {
+            // Output is driven by combinational logic
+            {
                 // Output is driven by combinational logic
                 // Find the signal that drives this output
                 if let Some(signal) = sir.signals.iter().find(|s| s.name == output.name) {
@@ -1579,6 +1605,8 @@ impl<'a> MetalShaderGenerator<'a> {
         if node.outputs.len() > 1 {
             let first_output = &node.outputs[0].signal_id;
             for additional_output in &node.outputs[1..] {
+                let is_state_element = sir.state_elements.contains_key(&additional_output.signal_id);
+
                 let output_width =
                     self.get_signal_width_from_sir(sir, &additional_output.signal_id);
                 let source_width = self.get_signal_width_from_sir(sir, first_output);
@@ -1595,7 +1623,18 @@ impl<'a> MetalShaderGenerator<'a> {
 
                 let both_wide = output_width > 128 && source_width > 128;
 
+                // For batched kernel: state elements write to local_X, others to signals->X
+                let target_prefix = if is_state_element {
+                    "local_".to_string()
+                } else {
+                    "signals->".to_string()
+                };
+
                 if both_wide {
+                    // Wide state elements don't have local copies, skip
+                    if is_state_element {
+                        continue;
+                    }
                     // Both are wide bit types - use element-wise copy
                     let array_size = output_width.div_ceil(32);
                     self.write_indented(&format!(
@@ -1616,14 +1655,16 @@ impl<'a> MetalShaderGenerator<'a> {
                     if source_is_vector && output_is_scalar {
                         // Extract first component from vector
                         self.write_indented(&format!(
-                            "signals->{} = signals->{}.x;\n",
+                            "{}{} = signals->{}.x;\n",
+                            target_prefix,
                             self.sanitize_name(&additional_output.signal_id),
                             self.sanitize_name(first_output)
                         ));
                     } else {
                         // Scalar copy
                         self.write_indented(&format!(
-                            "signals->{} = signals->{};\n",
+                            "{}{} = signals->{};\n",
+                            target_prefix,
                             self.sanitize_name(&additional_output.signal_id),
                             self.sanitize_name(first_output)
                         ));
@@ -1736,6 +1777,17 @@ impl<'a> MetalShaderGenerator<'a> {
                 target,
                 sanitized_data,
                 mask
+            ));
+        }
+
+        // BUG FIX: Sync local flip-flop output back to signals struct
+        // The combinational logic reads from signals->X, so we need to keep it updated
+        // Skip if this is already a state element (those are synced via registers->X)
+        if !is_array && !is_wide && !sir.state_elements.contains_key(output_signal) {
+            self.write_indented(&format!(
+                "signals->{} = local_{};\n",
+                sanitized_output,
+                sanitized_output
             ));
         }
     }
@@ -3488,10 +3540,28 @@ impl<'a> MetalShaderGenerator<'a> {
                 if let Some(reg_name) = mapped_register {
                     self.get_register_accessor(&reg_name)
                 } else {
-                    format!("signals->{}", self.sanitize_name(input))
+                    // BUG FIX: Check if this is a flip-flop output that's now in Registers
+                    let is_ff_output = sir.sequential_nodes.iter().any(|n| {
+                        matches!(n.kind, SirNodeKind::FlipFlop { .. })
+                            && n.outputs.first().map(|o| o.signal_id.as_str()) == Some(input)
+                    });
+                    if is_ff_output {
+                        self.get_register_accessor(input)
+                    } else {
+                        format!("signals->{}", self.sanitize_name(input))
+                    }
                 }
             } else {
-                format!("signals->{}", self.sanitize_name(input))
+                // BUG FIX: Check if this is a flip-flop output that's now in Registers
+                let is_ff_output = sir.sequential_nodes.iter().any(|n| {
+                    matches!(n.kind, SirNodeKind::FlipFlop { .. })
+                        && n.outputs.first().map(|o| o.signal_id.as_str()) == Some(input)
+                });
+                if is_ff_output {
+                    self.get_register_accessor(input)
+                } else {
+                    format!("signals->{}", self.sanitize_name(input))
+                }
             };
 
             // Check if this is a vector component access
@@ -4875,6 +4945,13 @@ impl<'a> MetalShaderGenerator<'a> {
                     let src_width = self.get_signal_width_from_sir(sir, primary_output);
                     for additional_output in node.outputs.iter().skip(1) {
                         let add_name = &additional_output.signal_id;
+
+                        // BUG FIX: Skip if additional output is a state element (register)
+                        // State elements are in the Registers struct, not Signals struct
+                        if sir.state_elements.contains_key(add_name) {
+                            continue;
+                        }
+
                         let dst_width = self.get_signal_width_from_sir(sir, add_name);
                         if src_width > 128 || dst_width > 128 {
                             // Wide bit type - element-wise copy
@@ -4951,6 +5028,18 @@ impl<'a> MetalShaderGenerator<'a> {
 
                     for additional_output in node.outputs.iter().skip(1) {
                         let add_name = &additional_output.signal_id;
+
+                        // BUG FIX: Skip if additional output is a state element (register)
+                        // State elements are in the Registers struct, not Signals struct,
+                        // and are updated by the flip-flop logic, not direct assignment
+                        if sir.state_elements.contains_key(add_name) {
+                            println!(
+                                ">>> BUG #115 FIX: Skipping {} (is state element/register)",
+                                add_name
+                            );
+                            continue;
+                        }
+
                         let add_width = self.get_signal_width_from_sir(sir, add_name);
                         let add_vector_size = if add_width <= 32 {
                             1
@@ -5677,6 +5766,11 @@ impl<'a> MetalShaderGenerator<'a> {
         if node.outputs.len() > 1 {
             let first_output = &node.outputs[0].signal_id;
             for additional_output in &node.outputs[1..] {
+                // BUG FIX: Skip if additional output is a state element (register)
+                // State elements are in the Registers struct, not Signals struct
+                if sir.state_elements.contains_key(&additional_output.signal_id) {
+                    continue;
+                }
                 // Check if we need element-wise copy for wide bit types
                 // IMPORTANT: Check BOTH source and destination widths
                 let output_width =
@@ -6516,6 +6610,32 @@ impl<'a> MetalShaderGenerator<'a> {
                                 ));
                             }
                         }
+                    } else {
+                        // BUG FIX: Handle flip-flop outputs that aren't state elements
+                        // These are stored in the Registers struct as well
+                        let output_width = self.get_signal_width_from_sir(sir, &output.signal_id);
+                        let data_signal_width = self.get_signal_width_from_sir(sir, data_signal);
+
+                        let mask = if output_width >= 64 {
+                            "0xFFFFFFFFFFFFFFFF".to_string()
+                        } else if output_width >= 32 {
+                            "0xFFFFFFFF".to_string()
+                        } else {
+                            format!("0x{:X}", (1u64 << output_width) - 1)
+                        };
+
+                        let data_expr = if data_signal_width > 128 {
+                            format!("signals->{}[0]", self.sanitize_name(data_signal))
+                        } else {
+                            format!("signals->{}", self.sanitize_name(data_signal))
+                        };
+
+                        self.write_indented(&format!(
+                            "next_registers->{} = {} & {};\n",
+                            self.sanitize_name(&output.signal_id),
+                            data_expr,
+                            mask
+                        ));
                     }
                 }
 
