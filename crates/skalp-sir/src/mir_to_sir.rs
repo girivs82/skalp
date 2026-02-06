@@ -3372,6 +3372,50 @@ impl<'a> MirToSirConverter<'a> {
         node_id
     }
 
+    /// BUG #117r FIX PART 3: Create SignalRef for instance context, resolving output ports
+    /// through port_mapping to parent signals.
+    ///
+    /// When target is a hierarchical path like "pwm_gen.primary_bridge.leg_a.gate_high",
+    /// we need to:
+    /// 1. Extract the local port name (gate_high)
+    /// 2. Check if it's an output port in port_mapping
+    /// 3. If so, resolve to the parent signal name
+    /// 4. Create SignalRef with the resolved internal name
+    fn create_signal_ref_for_instance(
+        &mut self,
+        target: &str,
+        inst_prefix: &str,
+        port_mapping: &HashMap<String, Expression>,
+        parent_module_for_signals: Option<&Module>,
+        parent_prefix: &str,
+    ) -> usize {
+        // Extract the local signal/port name from the hierarchical path
+        // e.g., "pwm_gen.primary_bridge.leg_a.gate_high" -> "gate_high"
+        let local_name = if target.starts_with(inst_prefix) && !inst_prefix.is_empty() {
+            target
+                .strip_prefix(inst_prefix)
+                .and_then(|s| s.strip_prefix('.'))
+                .unwrap_or(target)
+        } else {
+            target
+        };
+
+        // Check if this local name is an output port in port_mapping
+        if let Some(parent_expr) = port_mapping.get(local_name) {
+            // Output port connected to parent signal - resolve to parent
+            let resolved_name = self.get_signal_name_from_expression_with_context(
+                parent_expr,
+                parent_module_for_signals,
+                parent_prefix,
+            );
+            let internal_name = self.translate_to_internal_name(&resolved_name);
+            return self.create_signal_ref(&internal_name);
+        }
+
+        // Not an output port in port_mapping - use standard path
+        self.create_signal_ref(target)
+    }
+
     fn convert_continuous_assign(&mut self, target: &str, value: &Expression) {
         // Get target signal width to propagate to expression tree
         let target_width = self.get_signal_width(target);
@@ -7571,8 +7615,31 @@ impl<'a> MirToSirConverter<'a> {
                             let node_id = self.node_counter;
                             self.node_counter += 1;
 
-                            // BUG #117r FIX: Translate hierarchical target to internal name
-                            let internal_target = self.translate_to_internal_name(&actual_target);
+                            // BUG #117r FIX: For output ports connected to parent signals,
+                            // resolve through port_mapping to get the correct output signal.
+                            // This ensures the FlipFlop outputs to the parent's signal, not an
+                            // internal hierarchical path that doesn't exist.
+                            let local_target = actual_target
+                                .strip_prefix(inst_prefix)
+                                .and_then(|s| s.strip_prefix('.'))
+                                .unwrap_or(&actual_target);
+
+                            // Check if this target is an output port with a connection
+                            let internal_target = if let Some(parent_expr) = port_mapping.get(local_target) {
+                                // Output port connected to parent - use parent's signal
+                                let parent_sig = self.get_signal_name_from_expression_with_context(
+                                    parent_expr,
+                                    parent_module_for_signals,
+                                    parent_prefix,
+                                );
+                                let resolved = self.translate_to_internal_name(&parent_sig);
+                                println!("      🔧 BUG #117r FIX: Output port '{}' → parent '{}' → internal '{}'",
+                                    local_target, parent_sig, resolved);
+                                resolved
+                            } else {
+                                // Not connected to parent - use hierarchical name
+                                self.translate_to_internal_name(&actual_target)
+                            };
 
                             // DEBUG: Trace FlipFlop creation for state_reg
                             if actual_target.contains("state") {
@@ -7609,14 +7676,52 @@ impl<'a> MirToSirConverter<'a> {
 
                             self.sir.sequential_nodes.push(ff_node);
 
-                            // Mark the signal as having this driver (use internal name)
-                            if let Some(sig) = self
+                            // BUG #117r FIX: Ensure the FlipFlop output signal is registered
+                            // as a state element so it can be found during simulation.
+                            // Sequential outputs from elaborated instances need to be in state_elements.
+                            let signal_exists_in_signals = self
                                 .sir
                                 .signals
-                                .iter_mut()
-                                .find(|s| s.name == internal_target)
-                            {
-                                sig.driver_node = Some(node_id);
+                                .iter()
+                                .any(|s| s.name == internal_target);
+                            let signal_exists_in_state = self
+                                .sir
+                                .state_elements
+                                .contains_key(&internal_target);
+
+                            if !signal_exists_in_signals && !signal_exists_in_state {
+                                // Get signal width from the target
+                                let width = self.get_signal_width(&actual_target);
+                                let sir_type = SirType::Bits(width);
+
+                                // Add to state_elements (FlipFlop outputs are state)
+                                self.sir.state_elements.insert(
+                                    internal_target.clone(),
+                                    StateElement {
+                                        name: internal_target.clone(),
+                                        width,
+                                        sir_type: Some(sir_type.clone()),
+                                        reset_value: None,
+                                        clock: clock_signal.clone(),
+                                        reset: None,
+                                        span: None,
+                                    },
+                                );
+
+                                println!(
+                                    "      🔧 BUG #117r FIX: Added state element '{}' (width={}) for FlipFlop output",
+                                    internal_target, width
+                                );
+                            } else if signal_exists_in_signals {
+                                // Mark the signal as having this driver (use internal name)
+                                if let Some(sig) = self
+                                    .sir
+                                    .signals
+                                    .iter_mut()
+                                    .find(|s| s.name == internal_target)
+                                {
+                                    sig.driver_node = Some(node_id);
+                                }
                             }
                         }
                     }
@@ -7971,7 +8076,14 @@ impl<'a> MirToSirConverter<'a> {
                                         );
 
                                         // Create current value node (keep current value if condition false)
-                                        let current_node = self.create_signal_ref(target);
+                                        // BUG #117r FIX: Use instance-aware SignalRef for output port resolution
+                                        let current_node = self.create_signal_ref_for_instance(
+                                            target,
+                                            inst_prefix,
+                                            port_mapping,
+                                            parent_module_for_signals,
+                                            parent_prefix,
+                                        );
 
                                         // Create MUX: cond ? value : current
                                         return self.create_mux_node(
@@ -8036,7 +8148,14 @@ impl<'a> MirToSirConverter<'a> {
         }
 
         // No assignment found - use signal ref (keep current value)
-        self.create_signal_ref(target)
+        // BUG #117r FIX: Use instance-aware SignalRef for output port resolution
+        self.create_signal_ref_for_instance(
+            target,
+            inst_prefix,
+            port_mapping,
+            parent_module_for_signals,
+            parent_prefix,
+        )
     }
 
     /// Synthesize conditional assignment for instance (creates MUX nodes)
@@ -8099,7 +8218,14 @@ impl<'a> MirToSirConverter<'a> {
                     parent_module_for_signals,
                     parent_prefix,
                 );
-                let keep_val = self.create_signal_ref(target);
+                // BUG #117r FIX: Use instance-aware SignalRef for output port resolution
+                let keep_val = self.create_signal_ref_for_instance(
+                    target,
+                    inst_prefix,
+                    port_mapping,
+                    parent_module_for_signals,
+                    parent_prefix,
+                );
                 self.create_mux_node(condition, then_val, keep_val)
             }
             (None, Some(else_val)) => {
@@ -8112,12 +8238,26 @@ impl<'a> MirToSirConverter<'a> {
                     parent_module_for_signals,
                     parent_prefix,
                 );
-                let keep_val = self.create_signal_ref(target);
+                // BUG #117r FIX: Use instance-aware SignalRef for output port resolution
+                let keep_val = self.create_signal_ref_for_instance(
+                    target,
+                    inst_prefix,
+                    port_mapping,
+                    parent_module_for_signals,
+                    parent_prefix,
+                );
                 self.create_mux_node(condition, keep_val, else_val)
             }
             (None, None) => {
                 // Neither assigns: keep current value
-                self.create_signal_ref(target)
+                // BUG #117r FIX: Use instance-aware SignalRef for output port resolution
+                self.create_signal_ref_for_instance(
+                    target,
+                    inst_prefix,
+                    port_mapping,
+                    parent_module_for_signals,
+                    parent_prefix,
+                )
             }
         }
     }
@@ -8163,7 +8303,16 @@ impl<'a> MirToSirConverter<'a> {
         };
 
         // Get the default node to use when this if doesn't assign
-        let default_node = default_result.unwrap_or_else(|| self.create_signal_ref(target));
+        // BUG #117r FIX: Use instance-aware SignalRef for output port resolution
+        let default_node = default_result.unwrap_or_else(|| {
+            self.create_signal_ref_for_instance(
+                target,
+                inst_prefix,
+                port_mapping,
+                parent_module_for_signals,
+                parent_prefix,
+            )
+        });
 
         // Build MUX based on what was found
         match (then_value, else_value) {
@@ -8570,9 +8719,16 @@ impl<'a> MirToSirConverter<'a> {
         }
 
         // Use default block value, or signal ref (keep current value)
+        // BUG #117r FIX: Use instance-aware SignalRef for output port resolution
         let mut current_mux = match default_block_value {
             Some(block_val) => block_val,  // Default block has assignment
-            None => self.create_signal_ref(target),  // Keep current value
+            None => self.create_signal_ref_for_instance(
+                target,
+                inst_prefix,
+                port_mapping,
+                parent_module_for_signals,
+                parent_prefix,
+            ),  // Keep current value
         };
 
         // Build mux chain from last case to first (so first has priority)
@@ -8711,13 +8867,20 @@ impl<'a> MirToSirConverter<'a> {
         // 1. No default block in the case statement, AND
         // 2. We have a default_result from a preceding unconditional assignment
         // Otherwise fall back to keeping current value
+        // BUG #117r FIX: Use instance-aware SignalRef for output port resolution
         let mut current_mux = match default_block_value {
             Some(block_val) => block_val,  // Default block has assignment
             None => {
                 // BUG #244 FIX: Use unconditional assignment if provided
                 match default_result {
                     Some(default_val) => default_val,
-                    None => self.create_signal_ref(target),  // Keep current value
+                    None => self.create_signal_ref_for_instance(
+                        target,
+                        inst_prefix,
+                        port_mapping,
+                        parent_module_for_signals,
+                        parent_prefix,
+                    ),  // Keep current value
                 }
             }
         };
@@ -9775,6 +9938,24 @@ impl<'a> MirToSirConverter<'a> {
                 // (ports have their own LValue::Port variant)
                 // First try child module
                 if let Some(signal) = child_module.signals.iter().find(|s| s.id == *sig_id) {
+                    // BUG #117r FIX PART 2: Check if this signal shares a name with an output port
+                    // that is in port_mapping. This happens when an output port is READ from
+                    // in an expression (not just written to). If the port is connected to a parent
+                    // signal, we need to use the parent signal name, not the hierarchical path.
+                    if let Some(parent_expr) = port_mapping.get(&signal.name) {
+                        // Signal name matches an output port in port_mapping - resolve to parent
+                        let mapped_name = self.get_signal_name_from_expression_with_context(
+                            parent_expr,
+                            parent_module_for_signals,
+                            parent_prefix,
+                        );
+                        println!(
+                            "🔍🔍🔍   -> BUG #117r FIX: Signal '{}' matches output port in port_mapping, resolved to '{}'",
+                            signal.name, mapped_name
+                        );
+                        return Some(mapped_name);
+                    }
+
                     // BUG FIX #113: Avoid double dots if inst_prefix ends with a dot
                     let result = if inst_prefix.is_empty() {
                         signal.name.clone()
