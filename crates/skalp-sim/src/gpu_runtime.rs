@@ -296,11 +296,19 @@ impl GpuRuntime {
             let mut signal_offset = 0usize;
             let mut output_offset = 0usize;
 
-            let debug = std::env::var("SKALP_DEBUG_OUTPUT").is_ok();
+            let _debug = std::env::var("SKALP_DEBUG_OUTPUT").is_ok();
 
-            // Unconditional debug to verify capture_outputs is being called
             // Outputs are at the beginning of the signal buffer
+            // BUG FIX: Skip state element outputs - they're NOT in the Signals struct
+            // (Metal shader generator skips them too, see metal_codegen.rs line ~256)
+            // State element outputs are read from register_buffer in get_output() fallback
             for output in &module.outputs {
+                // Skip state element outputs - they're in Registers, not Signals
+                // Don't advance output_offset either - get_output() also skips them
+                if module.state_elements.contains_key(&output.name) {
+                    continue;
+                }
+
                 let metal_size = self.get_metal_type_size(output.width);
                 let metal_align = self.get_metal_type_alignment(output.width);
 
@@ -1042,43 +1050,55 @@ impl SimulationRuntime for GpuRuntime {
 
     async fn get_output(&self, name: &str) -> SimulationResult<Vec<u8>> {
         if let Some(module) = &self.module {
-            // First try to read from output_buffer
-            if let Some(output_buffer) = &self.output_buffer {
-                let output_ptr = output_buffer.contents() as *const u8;
-                let mut offset = 0usize;
+            // BUG FIX: For state element outputs, skip output_buffer and read from register_buffer
+            // State element outputs are NOT in the Signals struct (Metal shader skips them)
+            // so output_buffer contains garbage for these outputs
+            let is_state_element_output = module.state_elements.contains_key(name);
 
-                // Find the output in the output buffer
-                // BUG FIX #182: Account for Metal struct alignment padding
-                for output in &module.outputs {
-                    let metal_size = self.get_metal_type_size(output.width);
-                    let metal_align = self.get_metal_type_alignment(output.width);
+            // First try to read from output_buffer (only for non-state-element outputs)
+            if !is_state_element_output {
+                if let Some(output_buffer) = &self.output_buffer {
+                    let output_ptr = output_buffer.contents() as *const u8;
+                    let mut offset = 0usize;
 
-                    // Align offset to the required alignment boundary
-                    let remainder = offset % metal_align;
-                    if remainder != 0 {
-                        offset += metal_align - remainder;
-                    }
-
-                    let bytes_needed = output.width.div_ceil(8);
-                    if output.name == name {
-                        let mut value = vec![0u8; bytes_needed];
-                        unsafe {
-                            std::ptr::copy_nonoverlapping(
-                                output_ptr.add(offset),
-                                value.as_mut_ptr(),
-                                bytes_needed.min(metal_size),
-                            );
+                    // Find the output in the output buffer
+                    // BUG FIX #182: Account for Metal struct alignment padding
+                    for output in &module.outputs {
+                        // Skip state element outputs in offset calculation
+                        if module.state_elements.contains_key(&output.name) {
+                            continue;
                         }
-                        // DEBUG: Print what we read for multi-clock debugging
-                        if std::env::var("SKALP_DEBUG_OUTPUT").is_ok() {
-                            eprintln!(
-                                "[DEBUG get_output] name='{}' width={} metal_size={} bytes_needed={} offset={} value={:?}",
-                                name, output.width, metal_size, bytes_needed, offset, value
-                            );
+
+                        let metal_size = self.get_metal_type_size(output.width);
+                        let metal_align = self.get_metal_type_alignment(output.width);
+
+                        // Align offset to the required alignment boundary
+                        let remainder = offset % metal_align;
+                        if remainder != 0 {
+                            offset += metal_align - remainder;
                         }
-                        return Ok(value);
+
+                        let bytes_needed = output.width.div_ceil(8);
+                        if output.name == name {
+                            let mut value = vec![0u8; bytes_needed];
+                            unsafe {
+                                std::ptr::copy_nonoverlapping(
+                                    output_ptr.add(offset),
+                                    value.as_mut_ptr(),
+                                    bytes_needed.min(metal_size),
+                                );
+                            }
+                            // DEBUG: Print what we read for multi-clock debugging
+                            if std::env::var("SKALP_DEBUG_OUTPUT").is_ok() {
+                                eprintln!(
+                                    "[DEBUG get_output] name='{}' width={} metal_size={} bytes_needed={} offset={} value={:?}",
+                                    name, output.width, metal_size, bytes_needed, offset, value
+                                );
+                            }
+                            return Ok(value);
+                        }
+                        offset += metal_size;
                     }
-                    offset += metal_size;
                 }
             }
 

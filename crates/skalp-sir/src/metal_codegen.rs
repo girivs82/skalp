@@ -1303,18 +1303,14 @@ impl<'a> MetalShaderGenerator<'a> {
                         } else {
                             self.get_metal_type_for_wide_bits(output_width).0
                         };
-                        // Initialize from registers if exists, otherwise 0
-                        if sir.state_elements.contains_key(&output.signal_id) {
-                            self.write_indented(&format!(
-                                "{} local_{} = registers->{};\n",
-                                base_type, sanitized, sanitized
-                            ));
-                        } else {
-                            self.write_indented(&format!(
-                                "{} local_{} = 0;\n",
-                                base_type, sanitized
-                            ));
-                        }
+                        // BUG FIX: Always initialize flip-flop outputs from registers
+                        // They are stored in the Registers struct even if not in state_elements
+                        // Previously these were initialized to 0, causing state machine outputs
+                        // to be lost between batched kernel invocations
+                        self.write_indented(&format!(
+                            "{} local_{} = registers->{};\n",
+                            base_type, sanitized, sanitized
+                        ));
                         declared_locals.insert(sanitized);
                     }
                 }
@@ -1382,6 +1378,38 @@ impl<'a> MetalShaderGenerator<'a> {
         // Update rising edge flip-flops (Rising and Both)
         self.write_indented("\n// Update rising edge flip-flops\n");
         self.generate_batched_sequential_updates(sir, Some(&ClockEdge::Rising));
+
+        // BUG FIX: Update state elements that are driven by Slice nodes of flip-flop outputs
+        // These state elements need to get the NEW flip-flop value (after it was updated above)
+        for node in &sir.combinational_nodes {
+            if let SirNodeKind::Slice { start, end } = &node.kind {
+                // Check if any additional outputs are state elements
+                for additional_output in node.outputs.iter().skip(1) {
+                    if sir.state_elements.contains_key(&additional_output.signal_id) {
+                        // Check if the slice's input comes from a flip-flop output
+                        if let Some(input) = node.inputs.first() {
+                            let is_ff_output = sir.sequential_nodes.iter().any(|n| {
+                                matches!(n.kind, SirNodeKind::FlipFlop { .. })
+                                    && n.outputs.first().map(|o| o.signal_id.as_str()) == Some(&input.signal_id)
+                            });
+                            if is_ff_output {
+                                // Compute the slice of the NEW flip-flop value (in local_* variable)
+                                let (high, low) = if start >= end { (*start, *end) } else { (*end, *start) };
+                                let width = high - low + 1;
+                                let mask = if width >= 64 { u64::MAX } else { (1u64 << width) - 1 };
+                                self.write_indented(&format!(
+                                    "local_{} = (local_{} >> {}) & 0x{:X};\n",
+                                    self.sanitize_name(&additional_output.signal_id),
+                                    self.sanitize_name(&input.signal_id),
+                                    low,
+                                    mask
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+        }
 
         // ===== FALLING EDGE PHASE (only if needed) =====
         if has_falling_edge_ffs {
@@ -1606,6 +1634,22 @@ impl<'a> MetalShaderGenerator<'a> {
             let first_output = &node.outputs[0].signal_id;
             for additional_output in &node.outputs[1..] {
                 let is_state_element = sir.state_elements.contains_key(&additional_output.signal_id);
+
+                // BUG FIX: Skip state elements driven by Slice of flip-flop outputs in batched combinational
+                // These are updated AFTER the flip-flop update, not during combinational evaluation
+                // (see the fix in generate_batched_kernel around line 1400)
+                if is_state_element && matches!(node.kind, SirNodeKind::Slice { .. }) {
+                    if let Some(input) = node.inputs.first() {
+                        let is_ff_output = sir.sequential_nodes.iter().any(|n| {
+                            matches!(n.kind, SirNodeKind::FlipFlop { .. })
+                                && n.outputs.first().map(|o| o.signal_id.as_str()) == Some(&input.signal_id)
+                        });
+                        if is_ff_output {
+                            // Skip - this will be handled after flip-flop update
+                            continue;
+                        }
+                    }
+                }
 
                 let output_width =
                     self.get_signal_width_from_sir(sir, &additional_output.signal_id);
