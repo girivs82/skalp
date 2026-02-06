@@ -6587,6 +6587,23 @@ impl HirBuilderContext {
             return None;
         }
 
+        // BUG FIX: Check if this is a wildcard (_) binding
+        // Wildcard bindings for output ports (e.g., `result: _`) should be skipped
+        // so that a local signal is created for the output instead
+        if let Some(ref child) = expr_child {
+            if child.kind() == SyntaxKind::IdentExpr {
+                if let Some(tok) = child.first_token_of_kind(SyntaxKind::Ident) {
+                    if tok.text() == "_" {
+                        trace!(
+                            "[HIR_FIELD_DEBUG] StructFieldInit '{}': SKIPPING wildcard binding",
+                            name
+                        );
+                        return None;
+                    }
+                }
+            }
+        }
+
         trace!(
             "[HIR_FIELD_DEBUG] StructFieldInit '{}': found expression child {:?}",
             name,
