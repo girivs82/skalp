@@ -71,7 +71,7 @@
 //! let result = sim.get_ncl_output("y", 8);
 //! ```
 
-use crate::cpu_runtime::CpuRuntime;
+use crate::compiled_cpu_runtime::CompiledCpuRuntime;
 use crate::ncl_sim::{NclSimConfig, NclSimStats, NclSimulator};
 use crate::simulator::SimulationRuntime;
 use indexmap::IndexMap;
@@ -227,8 +227,8 @@ pub struct UnifiedSimulator {
 enum SimulatorBackend {
     /// Not yet loaded
     Uninitialized,
-    /// Behavioral CPU simulation (uses SirModule)
-    BehavioralCpu(CpuRuntime),
+    /// Compiled CPU simulation (uses SirModule compiled to native C++)
+    CompiledCpu(CompiledCpuRuntime),
     /// Behavioral GPU simulation (macOS only, uses SirModule with Metal)
     #[cfg(target_os = "macos")]
     BehavioralGpu(GpuRuntime),
@@ -585,13 +585,14 @@ impl UnifiedSimulator {
             }
         }
 
-        // CPU fallback
-        let mut runtime = CpuRuntime::new();
+        // Use compiled CPU runtime
+        let mut runtime = CompiledCpuRuntime::new(module)
+            .map_err(|e| format!("{}", e))?;
         runtime
             .initialize(module)
             .await
-            .map_err(|e| format!("CPU behavioral init failed: {}", e))?;
-        self.backend = SimulatorBackend::BehavioralCpu(runtime);
+            .map_err(|e| format!("Compiled CPU init failed: {}", e))?;
+        self.backend = SimulatorBackend::CompiledCpu(runtime);
         Ok(())
     }
 
@@ -616,7 +617,7 @@ impl UnifiedSimulator {
     pub fn device_info(&self) -> String {
         match &self.backend {
             SimulatorBackend::Uninitialized => "Not initialized".to_string(),
-            SimulatorBackend::BehavioralCpu(_) => "CPU (Behavioral)".to_string(),
+            SimulatorBackend::CompiledCpu(_) => "CPU (Compiled C++)".to_string(),
             #[cfg(target_os = "macos")]
             SimulatorBackend::BehavioralGpu(_) => "GPU (Metal, Behavioral)".to_string(),
             SimulatorBackend::GateLevelCpu(_) => "CPU (Gate-level, Sync)".to_string(),
@@ -646,7 +647,7 @@ impl UnifiedSimulator {
             SimulatorBackend::Uninitialized => {
                 eprintln!("Warning: set_input called before loading design");
             }
-            SimulatorBackend::BehavioralCpu(runtime) => {
+            SimulatorBackend::CompiledCpu(runtime) => {
                 // Convert u64 to bytes (little-endian)
                 let bytes = value.to_le_bytes().to_vec();
                 let _ = runtime.set_input(&internal_name, &bytes).await;
@@ -931,6 +932,14 @@ impl UnifiedSimulator {
         self.get_output_raw(name).await
     }
 
+    /// Alias for get_output - returns the output value as u64
+    ///
+    /// This is a convenience method that matches the naming convention
+    /// used in many test files.
+    pub async fn get_output_u64(&self, name: &str) -> Option<u64> {
+        self.get_output(name).await
+    }
+
     /// Get the raw (non-delayed) output value
     ///
     /// This bypasses any latency adjustment and returns the actual
@@ -945,7 +954,7 @@ impl UnifiedSimulator {
 
         match &self.backend {
             SimulatorBackend::Uninitialized => None,
-            SimulatorBackend::BehavioralCpu(runtime) => {
+            SimulatorBackend::CompiledCpu(runtime) => {
                 // Get bytes from behavioral runtime and convert to u64
                 runtime.get_output(&internal_name).await.ok().map(|bytes| {
                     let mut value = 0u64;
@@ -1018,7 +1027,7 @@ impl UnifiedSimulator {
 
         let output_names: Vec<String> = match &self.backend {
             SimulatorBackend::Uninitialized => vec![],
-            SimulatorBackend::BehavioralCpu(_) => {
+            SimulatorBackend::CompiledCpu(_) => {
                 // Behavioral outputs - return empty for now, users should query specific outputs
                 vec![]
             }
@@ -1061,7 +1070,7 @@ impl UnifiedSimulator {
             SimulatorBackend::Uninitialized => {
                 eprintln!("Warning: step called before loading design");
             }
-            SimulatorBackend::BehavioralCpu(runtime) => {
+            SimulatorBackend::CompiledCpu(runtime) => {
                 let _ = runtime.step().await;
             }
             #[cfg(target_os = "macos")]
@@ -1133,7 +1142,7 @@ impl UnifiedSimulator {
         &mut self,
     ) -> Option<crate::simulator::SimulationState> {
         let result = match &mut self.backend {
-            SimulatorBackend::BehavioralCpu(runtime) => {
+            SimulatorBackend::CompiledCpu(runtime) => {
                 // step() returns SimulationState with signals and registers
                 runtime.step().await.ok()
             }
@@ -1403,7 +1412,7 @@ impl UnifiedSimulator {
     pub fn reset(&mut self) {
         match &mut self.backend {
             SimulatorBackend::Uninitialized => {}
-            SimulatorBackend::BehavioralCpu(_) => {
+            SimulatorBackend::CompiledCpu(_) => {
                 // Behavioral CPU runtime state is managed externally
                 // No direct reset needed - state resets when inputs change
             }
@@ -1469,7 +1478,7 @@ impl UnifiedSimulator {
     pub fn get_input_names(&self) -> Vec<String> {
         match &self.backend {
             SimulatorBackend::Uninitialized => vec![],
-            SimulatorBackend::BehavioralCpu(_) => self.behavioral_input_names.clone(),
+            SimulatorBackend::CompiledCpu(_) => self.behavioral_input_names.clone(),
             #[cfg(target_os = "macos")]
             SimulatorBackend::BehavioralGpu(_) => self.behavioral_input_names.clone(),
             SimulatorBackend::GateLevelCpu(sim) => sim.get_input_names(),
@@ -1503,7 +1512,7 @@ impl UnifiedSimulator {
             SimulatorBackend::Uninitialized => {
                 eprintln!("Warning: set_input_bytes called before loading design");
             }
-            SimulatorBackend::BehavioralCpu(runtime) => {
+            SimulatorBackend::CompiledCpu(runtime) => {
                 let _ = runtime.set_input(name, value).await;
             }
             #[cfg(target_os = "macos")]
@@ -1547,7 +1556,7 @@ impl UnifiedSimulator {
 
         match &self.backend {
             SimulatorBackend::Uninitialized => None,
-            SimulatorBackend::BehavioralCpu(runtime) => runtime.get_output(&internal_name).await.ok(),
+            SimulatorBackend::CompiledCpu(runtime) => runtime.get_output(&internal_name).await.ok(),
             #[cfg(target_os = "macos")]
             SimulatorBackend::BehavioralGpu(runtime) => runtime.get_output(&internal_name).await.ok(),
             // For non-behavioral backends, get u64 and convert to bytes
@@ -1562,7 +1571,7 @@ impl UnifiedSimulator {
     pub fn get_output_names(&self) -> Vec<String> {
         match &self.backend {
             SimulatorBackend::Uninitialized => vec![],
-            SimulatorBackend::BehavioralCpu(_) => self.behavioral_output_names.clone(),
+            SimulatorBackend::CompiledCpu(_) => self.behavioral_output_names.clone(),
             #[cfg(target_os = "macos")]
             SimulatorBackend::BehavioralGpu(_) => self.behavioral_output_names.clone(),
             SimulatorBackend::GateLevelCpu(sim) => sim.get_output_names(),

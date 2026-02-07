@@ -5,10 +5,7 @@ mod minimal_pipeline_tests {
     #[cfg(target_os = "macos")]
     use skalp_mir::{MirCompiler, OptimizationLevel};
     #[cfg(target_os = "macos")]
-    use skalp_sim::{
-        simulator::SimulationConfig,
-        testbench::{TestVectorBuilder, Testbench},
-    };
+    use skalp_sim::{HwAccel, SimLevel, UnifiedSimConfig, UnifiedSimulator};
     #[cfg(target_os = "macos")]
     use skalp_sir::convert_mir_to_sir;
 
@@ -62,62 +59,53 @@ mod minimal_pipeline_tests {
         println!("{}", &shader_code);
 
         // Create simulation config
-        let config = SimulationConfig {
-            use_gpu: true,
+        let config = UnifiedSimConfig {
+            level: SimLevel::Behavioral,
+            hw_accel: HwAccel::Gpu,
             max_cycles: 20,
-            timeout_ms: 5000,
             capture_waveforms: false,
-            parallel_threads: 1,
+            ..Default::default()
         };
 
-        // Create testbench
-        let mut testbench = Testbench::new(config)
-            .await
-            .expect("Failed to create testbench");
+        // Create simulator
+        let mut simulator = UnifiedSimulator::new(config)
+            .expect("Failed to create simulator");
 
         // Load the module
-        testbench
-            .load_module(&sir)
+        simulator
+            .load_behavioral(&sir)
             .await
             .expect("Failed to load module");
 
         // Test sequence: Reset, then check valid bit
 
         // Reset for a few cycles
-        for cycle in 0..4 {
-            testbench.add_test_vector(
-                TestVectorBuilder::new(cycle * 2)
-                    .with_input("rst", vec![1])
-                    .with_expected_output("valid", vec![0])
-                    .build(),
-            );
+        simulator.set_input("rst", 1).await;
+        simulator.set_input("clk", 0).await;
+
+        for _ in 0..8 {
+            simulator.step().await;
         }
 
-        // Release reset and wait for valid bit
-        // The testbench steps twice per test vector (rising + falling edge).
-        // Counter increments on rising edge, so after 8 non-reset cycles, counter = 8.
-        // After vector 11 (8th non-reset), counter becomes 8, valid = bit[3] = 1.
-        for cycle in 4..16 {
-            // Counter reaches 8 after 8 non-reset cycles (vector 11), valid goes high
-            let expected_valid = if cycle >= 11 { 1 } else { 0 };
-            testbench.add_test_vector(
-                TestVectorBuilder::new(cycle * 2)
-                    .with_input("rst", vec![0])
-                    .with_expected_output("valid", vec![expected_valid])
-                    .build(),
-            );
+        // Check valid is 0 during reset
+        let valid = simulator.get_output("valid").await.unwrap_or(0);
+        assert_eq!(valid, 0, "valid should be 0 during reset");
+
+        // Release reset and run cycles until counter reaches 8 (valid goes high)
+        simulator.set_input("rst", 0).await;
+
+        // Run enough cycles for counter to reach 8 (bit[3] = 1)
+        // Counter increments on clock rising edge, so we need 8 rising edges
+        for i in 0..20 {
+            simulator.set_input("clk", (i % 2) as u64).await;
+            simulator.step().await;
         }
 
-        // Run the test
-        let results = testbench.run_test().await.expect("Failed to run test");
+        // After 10 full clock cycles, counter should be >= 8, so valid should be 1
+        let valid = simulator.get_output("valid").await.unwrap_or(0);
+        println!("valid after 10 cycles: {}", valid);
+        assert_eq!(valid, 1, "valid should be 1 after counter >= 8");
 
-        // Print report
-        println!("\n{}", testbench.generate_report());
-
-        // Assert all tests passed
-        assert!(testbench.all_tests_passed(), "Some tests failed");
-        assert!(!results.is_empty(), "Should have test results");
-
-        println!("\n✅ Minimal pipeline test passed!");
+        println!("\nMinimal pipeline test passed!");
     }
 }

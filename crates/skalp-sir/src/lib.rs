@@ -4,6 +4,7 @@ macro_rules! eprintln {
     ($($arg:tt)*) => {{}};
 }
 
+pub mod codegen;
 pub mod metal_codegen;
 pub mod mir_to_sir;
 pub mod pipeline;
@@ -17,3 +18,6 @@ pub use sir::{
     BinaryOperation, ClockDomain, ClockEdge, CombinationalCone, SignalRef, SirModule, SirNode,
     SirNodeKind, SirPort, SirSignal, SirType, StateElement, UnaryOperation,
 };
+
+// Export new codegen module
+pub use codegen::{BackendTarget, CppBackend, MetalBackend, SharedCodegen, TypeInfo, TypeMapper};

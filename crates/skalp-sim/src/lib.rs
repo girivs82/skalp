@@ -20,9 +20,10 @@ macro_rules! eprintln {
 
 pub mod breakpoint;
 pub mod clock_manager;
+pub mod compiled_cpu_runtime;
 pub mod coverage_report;
 pub mod coverage_vecgen;
-pub mod cpu_runtime;
+pub mod cpp_compiler;
 pub mod gate_eval;
 pub mod gate_netlist_to_sir;
 pub mod gate_runtime;
@@ -39,7 +40,6 @@ pub mod ncl_sim;
 pub mod sim_coverage;
 pub mod simulator;
 pub mod sir;
-pub mod testbench;
 pub mod unified_runtime;
 pub mod waveform;
 
@@ -47,7 +47,8 @@ pub use breakpoint::{
     BreakpointAction, BreakpointCondition, BreakpointHit, BreakpointManager, SimBreakpoint,
 };
 pub use clock_manager::{ClockEdge, ClockInfo, ClockManager};
-pub use cpu_runtime::CpuRuntime;
+pub use compiled_cpu_runtime::CompiledCpuRuntime;
+pub use cpp_compiler::{compile_cpp_kernel, clear_cache as clear_cpp_cache, cache_stats as cpp_cache_stats, CacheStats, CompileError};
 pub use gate_eval::{
     bits_to_value, evaluate_primitive, evaluate_primitive_with_fault, value_to_bits,
 };
@@ -68,8 +69,6 @@ pub use gpu_gate_runtime::GpuGateRuntime;
 pub use gpu_ncl_runtime::GpuNclRuntime;
 #[cfg(target_os = "macos")]
 pub use gpu_runtime::{GpuDevice, GpuRuntime};
-pub use simulator::{SimulationConfig, SimulationResult, Simulator};
-pub use testbench::{TestResult, TestVector, Testbench};
 
 pub use ncl_sim::{
     evaluate_thmn_stateful, NclGateState, NclPhase, NclSimConfig, NclSimStats, NclSimulator,

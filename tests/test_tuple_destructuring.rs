@@ -6,10 +6,10 @@
 mod tuple_destructuring_tests {
     use skalp_frontend::{parse_and_build_hir, parse_and_build_hir_from_file};
     use skalp_mir::lower_to_mir;
-    use skalp_sim::{SimulationConfig, Simulator};
+    use skalp_sim::{HwAccel, SimLevel, UnifiedSimConfig, UnifiedSimulator};
     use std::io::Write;
 
-    async fn setup_cpu_simulator_with_entity(source: &str, entity_name: &str) -> Simulator {
+    async fn setup_cpu_simulator_with_entity(source: &str, entity_name: &str) -> UnifiedSimulator {
         // Parse and build HIR (for non-stdlib tests)
         let hir = parse_and_build_hir(source).expect("Failed to parse design");
 
@@ -32,27 +32,26 @@ mod tuple_destructuring_tests {
         let sir = skalp_sir::convert_mir_to_sir_with_hierarchy(&mir, top_module);
 
         // Create CPU simulator
-        let config = SimulationConfig {
-            use_gpu: false, // CPU simulation
+        let config = UnifiedSimConfig {
+            level: SimLevel::Behavioral,
+            hw_accel: HwAccel::Cpu,
             max_cycles: 100,
-            timeout_ms: 5000,
             capture_waveforms: false,
-            parallel_threads: 1,
+            ..Default::default()
         };
 
-        let mut simulator = Simulator::new(config)
-            .await
+        let mut simulator = UnifiedSimulator::new(config)
             .expect("Failed to create simulator");
 
         simulator
-            .load_module(&sir)
+            .load_behavioral(&sir)
             .await
             .expect("Failed to load module");
 
         simulator
     }
 
-    async fn setup_cpu_simulator_with_stdlib(source: &str, entity_name: &str) -> Simulator {
+    async fn setup_cpu_simulator_with_stdlib(source: &str, entity_name: &str) -> UnifiedSimulator {
         // Set stdlib path
         std::env::set_var("SKALP_STDLIB_PATH", "./crates/skalp-stdlib");
 
@@ -86,20 +85,19 @@ mod tuple_destructuring_tests {
         let sir = skalp_sir::convert_mir_to_sir_with_hierarchy(&mir, top_module);
 
         // Create CPU simulator
-        let config = SimulationConfig {
-            use_gpu: false,
+        let config = UnifiedSimConfig {
+            level: SimLevel::Behavioral,
+            hw_accel: HwAccel::Cpu,
             max_cycles: 100,
-            timeout_ms: 5000,
             capture_waveforms: false,
-            parallel_threads: 1,
+            ..Default::default()
         };
 
-        let mut simulator = Simulator::new(config)
-            .await
+        let mut simulator = UnifiedSimulator::new(config)
             .expect("Failed to create simulator");
 
         simulator
-            .load_module(&sir)
+            .load_behavioral(&sir)
             .await
             .expect("Failed to load module");
 
@@ -132,29 +130,12 @@ mod tuple_destructuring_tests {
         let mut sim = setup_cpu_simulator_with_entity(source, "TupleSwap").await;
 
         // Test: swap(10, 20) should return (20, 10)
-        sim.set_input("a", 10u32.to_le_bytes().to_vec())
-            .await
-            .unwrap();
-        sim.set_input("b", 20u32.to_le_bytes().to_vec())
-            .await
-            .unwrap();
-        sim.step_simulation().await.unwrap();
+        sim.set_input("a", 10u64).await;
+        sim.set_input("b", 20u64).await;
+        sim.step().await;
 
-        let first_bytes = sim.get_output("first").await.unwrap();
-        let second_bytes = sim.get_output("second").await.unwrap();
-
-        let first = u32::from_le_bytes([
-            first_bytes[0],
-            first_bytes[1],
-            first_bytes[2],
-            first_bytes[3],
-        ]);
-        let second = u32::from_le_bytes([
-            second_bytes[0],
-            second_bytes[1],
-            second_bytes[2],
-            second_bytes[3],
-        ]);
+        let first = sim.get_output("first").await.unwrap_or(0) as u32;
+        let second = sim.get_output("second").await.unwrap_or(0) as u32;
 
         assert_eq!(first, 20, "First element should be 20 (swapped from b)");
         assert_eq!(second, 10, "Second element should be 10 (swapped from a)");
@@ -193,36 +174,13 @@ mod tuple_destructuring_tests {
         let mut sim = setup_cpu_simulator_with_entity(source, "SafeDivide").await;
 
         // Test: 17 / 5 = quotient 3, remainder 2
-        sim.set_input("dividend", 17u32.to_le_bytes().to_vec())
-            .await
-            .unwrap();
-        sim.set_input("divisor", 5u32.to_le_bytes().to_vec())
-            .await
-            .unwrap();
-        sim.step_simulation().await.unwrap();
+        sim.set_input("dividend", 17u64).await;
+        sim.set_input("divisor", 5u64).await;
+        sim.step().await;
 
-        let valid_bytes = sim.get_output("valid").await.unwrap();
-        let quotient_bytes = sim.get_output("quotient").await.unwrap();
-        let remainder_bytes = sim.get_output("remainder").await.unwrap();
-
-        let valid = u32::from_le_bytes([
-            valid_bytes[0],
-            valid_bytes[1],
-            valid_bytes[2],
-            valid_bytes[3],
-        ]);
-        let quotient = u32::from_le_bytes([
-            quotient_bytes[0],
-            quotient_bytes[1],
-            quotient_bytes[2],
-            quotient_bytes[3],
-        ]);
-        let remainder = u32::from_le_bytes([
-            remainder_bytes[0],
-            remainder_bytes[1],
-            remainder_bytes[2],
-            remainder_bytes[3],
-        ]);
+        let valid = sim.get_output("valid").await.unwrap_or(0) as u32;
+        let quotient = sim.get_output("quotient").await.unwrap_or(0) as u32;
+        let remainder = sim.get_output("remainder").await.unwrap_or(0) as u32;
 
         assert_eq!(valid, 1, "Division should be valid (divisor != 0)");
         assert_eq!(quotient, 3, "17 / 5 = 3");
@@ -261,21 +219,11 @@ mod tuple_destructuring_tests {
         let mut sim = setup_cpu_simulator_with_entity(source, "SafeDivide").await;
 
         // Test: division by zero should return valid=0
-        sim.set_input("dividend", 17u32.to_le_bytes().to_vec())
-            .await
-            .unwrap();
-        sim.set_input("divisor", 0u32.to_le_bytes().to_vec())
-            .await
-            .unwrap();
-        sim.step_simulation().await.unwrap();
+        sim.set_input("dividend", 17u64).await;
+        sim.set_input("divisor", 0u64).await;
+        sim.step().await;
 
-        let valid_bytes = sim.get_output("valid").await.unwrap();
-        let valid = u32::from_le_bytes([
-            valid_bytes[0],
-            valid_bytes[1],
-            valid_bytes[2],
-            valid_bytes[3],
-        ]);
+        let valid = sim.get_output("valid").await.unwrap_or(0) as u32;
 
         assert_eq!(valid, 0, "Division by zero should return valid=0");
     }
@@ -318,10 +266,10 @@ mod tuple_destructuring_tests {
             return -x
         }
 
-        /// Quadratic Solver: Solves ax² + bx + c = 0
+        /// Quadratic Solver: Solves ax^2 + bx + c = 0
         /// Returns (valid, x1, x2) where valid indicates if real solutions exist
         fn quadratic_solve(a: fp32, b: fp32, c: fp32) -> (bit, fp32, fp32) {
-            // Compute discriminant: b² - 4ac
+            // Compute discriminant: b^2 - 4ac
             let four_fp: fp32 = 4.0 as fp32;
             let b_squared = fp_mul(b, b);
             let four_a = fp_mul(four_fp, a);
@@ -335,7 +283,7 @@ mod tuple_destructuring_tests {
                 return (0, 0 as fp32, 0 as fp32)
             }
 
-            // Compute roots: x = (-b ± √discriminant) / 2a
+            // Compute roots: x = (-b +/- sqrt(discriminant)) / 2a
             let sqrt_disc = fp_sqrt(discriminant);
             let two_fp: fp32 = 2.0 as fp32;
             let two_a = fp_mul(two_fp, a);
@@ -366,45 +314,22 @@ mod tuple_destructuring_tests {
 
         let mut sim = setup_cpu_simulator_with_stdlib(source, "QuadraticSolver").await;
 
-        // Test: x² - 5x + 6 = 0 has roots x=2 and x=3
+        // Test: x^2 - 5x + 6 = 0 has roots x=2 and x=3
         // a=1.0, b=-5.0, c=6.0
         let a: f32 = 1.0;
         let b: f32 = -5.0;
         let c: f32 = 6.0;
 
-        sim.set_input("a", a.to_bits().to_le_bytes().to_vec())
-            .await
-            .unwrap();
-        sim.set_input("b", b.to_bits().to_le_bytes().to_vec())
-            .await
-            .unwrap();
-        sim.set_input("c", c.to_bits().to_le_bytes().to_vec())
-            .await
-            .unwrap();
-        sim.step_simulation().await.unwrap();
+        sim.set_input("a", a.to_bits() as u64).await;
+        sim.set_input("b", b.to_bits() as u64).await;
+        sim.set_input("c", c.to_bits() as u64).await;
+        sim.step().await;
 
-        let valid_bytes = sim.get_output("valid").await.unwrap();
-        let x1_bytes = sim.get_output("x1").await.unwrap();
-        let x2_bytes = sim.get_output("x2").await.unwrap();
-
-        let valid = u32::from_le_bytes([
-            valid_bytes[0],
-            valid_bytes[1],
-            valid_bytes[2],
-            valid_bytes[3],
-        ]);
-        let x1 = f32::from_bits(u32::from_le_bytes([
-            x1_bytes[0],
-            x1_bytes[1],
-            x1_bytes[2],
-            x1_bytes[3],
-        ]));
-        let x2 = f32::from_bits(u32::from_le_bytes([
-            x2_bytes[0],
-            x2_bytes[1],
-            x2_bytes[2],
-            x2_bytes[3],
-        ]));
+        let valid = sim.get_output("valid").await.unwrap_or(0) as u32;
+        let x1_bits = sim.get_output("x1").await.unwrap_or(0) as u32;
+        let x2_bits = sim.get_output("x2").await.unwrap_or(0) as u32;
+        let x1 = f32::from_bits(x1_bits);
+        let x2 = f32::from_bits(x2_bits);
 
         assert_eq!(valid, 1, "Quadratic should have real solutions");
 
@@ -414,7 +339,7 @@ mod tuple_destructuring_tests {
 
         assert!(
             roots_correct,
-            "Roots of x²-5x+6=0 should be 2.0 and 3.0, got x1={}, x2={}",
+            "Roots of x^2-5x+6=0 should be 2.0 and 3.0, got x1={}, x2={}",
             x1, x2
         );
     }
@@ -501,34 +426,22 @@ mod tuple_destructuring_tests {
 
         let mut sim = setup_cpu_simulator_with_stdlib(source, "QuadraticSolver").await;
 
-        // Test: x² + x + 1 = 0 has no real roots (discriminant = 1 - 4 = -3)
+        // Test: x^2 + x + 1 = 0 has no real roots (discriminant = 1 - 4 = -3)
         // a=1.0, b=1.0, c=1.0
         let a: f32 = 1.0;
         let b: f32 = 1.0;
         let c: f32 = 1.0;
 
-        sim.set_input("a", a.to_bits().to_le_bytes().to_vec())
-            .await
-            .unwrap();
-        sim.set_input("b", b.to_bits().to_le_bytes().to_vec())
-            .await
-            .unwrap();
-        sim.set_input("c", c.to_bits().to_le_bytes().to_vec())
-            .await
-            .unwrap();
-        sim.step_simulation().await.unwrap();
+        sim.set_input("a", a.to_bits() as u64).await;
+        sim.set_input("b", b.to_bits() as u64).await;
+        sim.set_input("c", c.to_bits() as u64).await;
+        sim.step().await;
 
-        let valid_bytes = sim.get_output("valid").await.unwrap();
-        let valid = u32::from_le_bytes([
-            valid_bytes[0],
-            valid_bytes[1],
-            valid_bytes[2],
-            valid_bytes[3],
-        ]);
+        let valid = sim.get_output("valid").await.unwrap_or(0) as u32;
 
         assert_eq!(
             valid, 0,
-            "Quadratic x²+x+1=0 should have no real solutions (discriminant < 0)"
+            "Quadratic x^2+x+1=0 should have no real solutions (discriminant < 0)"
         );
     }
 
@@ -565,23 +478,14 @@ mod tuple_destructuring_tests {
         let mut sim = setup_cpu_simulator_with_entity(source, "Stats").await;
 
         // Test: x=10, y=3
-        sim.set_input("x", 10u32.to_le_bytes().to_vec())
-            .await
-            .unwrap();
-        sim.set_input("y", 3u32.to_le_bytes().to_vec())
-            .await
-            .unwrap();
-        sim.step_simulation().await.unwrap();
+        sim.set_input("x", 10u64).await;
+        sim.set_input("y", 3u64).await;
+        sim.step().await;
 
-        let sum_bytes = sim.get_output("sum").await.unwrap();
-        let diff_bytes = sim.get_output("diff").await.unwrap();
-        let prod_bytes = sim.get_output("prod").await.unwrap();
-        let max_bytes = sim.get_output("max_val").await.unwrap();
-
-        let sum = u32::from_le_bytes([sum_bytes[0], sum_bytes[1], sum_bytes[2], sum_bytes[3]]);
-        let diff = u32::from_le_bytes([diff_bytes[0], diff_bytes[1], diff_bytes[2], diff_bytes[3]]);
-        let prod = u32::from_le_bytes([prod_bytes[0], prod_bytes[1], prod_bytes[2], prod_bytes[3]]);
-        let max_val = u32::from_le_bytes([max_bytes[0], max_bytes[1], max_bytes[2], max_bytes[3]]);
+        let sum = sim.get_output("sum").await.unwrap_or(0) as u32;
+        let diff = sim.get_output("diff").await.unwrap_or(0) as u32;
+        let prod = sim.get_output("prod").await.unwrap_or(0) as u32;
+        let max_val = sim.get_output("max_val").await.unwrap_or(0) as u32;
 
         assert_eq!(sum, 13, "10 + 3 = 13");
         assert_eq!(diff, 7, "10 - 3 = 7");

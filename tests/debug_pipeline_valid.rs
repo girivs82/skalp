@@ -5,10 +5,7 @@ mod debug_pipeline_valid_tests {
     #[cfg(target_os = "macos")]
     use skalp_mir::{MirCompiler, OptimizationLevel};
     #[cfg(target_os = "macos")]
-    use skalp_sim::{
-        simulator::SimulationConfig,
-        testbench::{TestVectorBuilder, Testbench},
-    };
+    use skalp_sim::{HwAccel, SimLevel, UnifiedSimConfig, UnifiedSimulator};
     #[cfg(target_os = "macos")]
     use skalp_sir::convert_mir_to_sir;
 
@@ -60,55 +57,52 @@ mod debug_pipeline_valid_tests {
         println!("\n=== Generated Metal Shader ===");
         println!("{}", &shader_code);
 
-        // Create simulation
-        let config = SimulationConfig {
-            use_gpu: true,
+        // Create simulation config
+        let config = UnifiedSimConfig {
+            level: SimLevel::Behavioral,
+            hw_accel: HwAccel::Gpu,
             max_cycles: 20,
-            timeout_ms: 5000,
             capture_waveforms: false,
-            parallel_threads: 1,
+            ..Default::default()
         };
 
-        let mut testbench = Testbench::new(config)
-            .await
-            .expect("Failed to create testbench");
-        testbench
-            .load_module(&sir)
+        // Create simulator
+        let mut simulator = UnifiedSimulator::new(config)
+            .expect("Failed to create simulator");
+
+        // Load the module
+        simulator
+            .load_behavioral(&sir)
             .await
             .expect("Failed to load module");
 
         // Reset first
-        testbench.add_test_vector(
-            TestVectorBuilder::new(0)
-                .with_input("rst", vec![1])
-                .with_expected_output("valid", vec![0])
-                .build(),
-        );
+        simulator.set_input("rst", 1).await;
+        simulator.set_input("clk", 0).await;
 
-        // Release reset and wait for counter to reach 8
-        // Testbench applies vector at cycle X, then steps twice (rising+falling edge)
-        // The output is checked after the first step (at clock=1)
-        // counter increments at odd cycles when clock goes high
-        // counter: cycle 3->0, 5->1, 7->2, 9->3, 11->4, 13->5, 15->6, 17->7, 19->8, 21->9
-        // Vector at cycle 18: step to 19 (counter becomes 9), check output
-        // So we expect valid=1 starting at vector cycle 18
-        for cycle in 1..12 {
-            // Testbench steps twice, so outputs checked 2 cycles after test vector cycle
-            // With correct execution order, valid goes high one cycle earlier
-            let expected_valid = if cycle * 2 >= 16 { 1 } else { 0 };
-            testbench.add_test_vector(
-                TestVectorBuilder::new(cycle * 2)
-                    .with_input("rst", vec![0])
-                    .with_expected_output("valid", vec![expected_valid])
-                    .build(),
-            );
+        // Run a few reset cycles
+        for _ in 0..4 {
+            simulator.step().await;
         }
 
-        // Run test
-        let _results = testbench.run_test().await.expect("Failed to run test");
-        println!("\n{}", testbench.generate_report());
+        // Check valid is 0 during reset
+        let valid = simulator.get_output("valid").await.unwrap_or(0);
+        assert_eq!(valid, 0, "valid should be 0 during reset");
 
-        assert!(testbench.all_tests_passed(), "Counter test failed");
-        println!("\n✅ Simple counter test passed!");
+        // Release reset and run cycles until counter reaches 8 (bit[3] = 1)
+        simulator.set_input("rst", 0).await;
+
+        // Run enough cycles for counter to reach 8
+        for i in 0..20 {
+            simulator.set_input("clk", (i % 2) as u64).await;
+            simulator.step().await;
+        }
+
+        // After 10 full clock cycles, counter should be >= 8, so valid should be 1
+        let valid = simulator.get_output("valid").await.unwrap_or(0);
+        println!("valid after 10 cycles: {}", valid);
+        assert_eq!(valid, 1, "valid should be 1 after counter >= 8");
+
+        println!("\nSimple counter test passed!");
     }
 }

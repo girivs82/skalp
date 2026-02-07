@@ -49,6 +49,11 @@ impl ToggleCoverage {
 
     /// Register a signal to track
     fn add_signal(&mut self, name: &str, width_bits: usize) {
+        // BUG FIX: Check if signal already exists to avoid double-counting in total_bits
+        // This can happen if the same signal appears in both module.signals and module.outputs
+        if self.signal_widths.contains_key(name) {
+            return; // Already tracking this signal
+        }
         self.signal_widths.insert(name.to_string(), width_bits);
         self.seen_rise
             .insert(name.to_string(), vec![false; width_bits]);
@@ -474,8 +479,18 @@ impl SimCoverageDb {
         let mut mux = MuxArmCoverage::new();
         let mut comparison = ComparisonCoverage::new();
 
-        // Track only user-visible signals (those with entries in name_registry)
+        // Build set of input port names to exclude - inputs are driven by test harness,
+        // not the design, so their toggle behavior is controlled by the test, not the DUT
+        let input_names: std::collections::HashSet<_> =
+            module.inputs.iter().map(|i| i.name.as_str()).collect();
+
+        // Track only user-visible signals (those with entries in name_registry),
+        // excluding input ports
         for signal in &module.signals {
+            // Skip input ports - they're driven by test harness, not design
+            if input_names.contains(signal.name.as_str()) {
+                continue;
+            }
             // Check if signal has a user-visible name
             if module.name_registry.reverse_resolve(&signal.name).is_some() {
                 toggle.add_signal(&signal.name, signal.width);

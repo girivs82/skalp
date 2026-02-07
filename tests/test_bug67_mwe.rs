@@ -7,11 +7,11 @@
 async fn test_bug67_mwe_metal() {
     use skalp_frontend::parse_and_build_hir;
     use skalp_mir::{MirCompiler, OptimizationLevel};
-    use skalp_sim::{SimulationConfig, Simulator};
+    use skalp_sim::{HwAccel, SimLevel, UnifiedSimConfig, UnifiedSimulator};
     use skalp_sir::convert_mir_to_sir;
     use std::fs;
 
-    println!("\n🧪 Testing Bug #67 MWE - Does it reproduce the half vs uint error?");
+    println!("\n Testing Bug #67 MWE - Does it reproduce the half vs uint error?");
 
     // Read the MWE (entity-based version)
     let source =
@@ -36,33 +36,32 @@ async fn test_bug67_mwe_metal() {
     );
     let sir = convert_mir_to_sir(&mir.modules[0]);
 
-    println!("✅ Compiled to SIR successfully");
+    println!("Compiled to SIR successfully");
 
     // Create GPU simulation config - this will trigger Metal shader generation
-    let config = SimulationConfig {
-        use_gpu: true,
+    let config = UnifiedSimConfig {
+        level: SimLevel::Behavioral,
+        hw_accel: HwAccel::Gpu,
         max_cycles: 10,
-        timeout_ms: 5000,
         capture_waveforms: false,
-        parallel_threads: 1,
+        ..Default::default()
     };
 
-    println!("🔍 Creating GPU simulator - this will trigger Metal shader generation...");
+    println!("Creating GPU simulator - this will trigger Metal shader generation...");
 
     // Try to create GPU simulator
-    let mut simulator = Simulator::new(config)
-        .await
+    let mut simulator = UnifiedSimulator::new(config)
         .expect("Failed to create GPU simulator");
 
-    println!("✅ GPU simulator created");
+    println!("GPU simulator created");
 
     // Load the module - this is where Metal compilation happens
-    println!("🔍 Loading SIR module - this will compile Metal shader...");
-    let load_result = simulator.load_module(&sir).await;
+    println!("Loading SIR module - this will compile Metal shader...");
+    let load_result = simulator.load_behavioral(&sir).await;
 
     if let Err(e) = load_result {
         let error_msg = format!("{}", e);
-        println!("❌ Metal shader compilation failed (Bug #67 MWE):");
+        println!("Metal shader compilation failed (Bug #67 MWE):");
         println!("   {}", error_msg);
 
         // Check if this is the expected FP16 type mismatch error
@@ -70,10 +69,10 @@ async fn test_bug67_mwe_metal() {
             && (error_msg.contains("half") || error_msg.contains("ushort"))
             && error_msg.contains("uint")
         {
-            println!("\n🐛 Bug #67 REPRODUCED by MWE!");
+            println!("\n Bug #67 REPRODUCED by MWE!");
             println!("   Expected: Variables should be uint (32-bit)");
             println!("   Actual: Variables are half/ushort (16-bit)");
-            println!("\n   This MWE successfully reproduces Bug #67! ✅");
+            println!("\n   This MWE successfully reproduces Bug #67!");
             panic!("Bug #67 MWE: Reproduced FP16 type inference error in Metal shader generation");
         } else {
             panic!(
@@ -83,6 +82,6 @@ async fn test_bug67_mwe_metal() {
         }
     }
 
-    println!("✅ Metal shader compiled successfully");
+    println!("Metal shader compiled successfully");
     println!("   Bug #67 appears to be FIXED if this test passes!");
 }

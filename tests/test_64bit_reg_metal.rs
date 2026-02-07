@@ -6,7 +6,7 @@
 
 use skalp_frontend::parse_and_build_hir;
 use skalp_mir::{MirCompiler, OptimizationLevel};
-use skalp_sim::{SimulationConfig, Simulator};
+use skalp_sim::{HwAccel, SimLevel, UnifiedSimConfig, UnifiedSimulator};
 use skalp_sir::convert_mir_to_sir;
 use std::fs;
 
@@ -57,22 +57,21 @@ async fn test_64bit_register_metal_codegen() {
     let sir = convert_mir_to_sir(&mir.modules[0]);
 
     // Create simulation config for GPU
-    let config = SimulationConfig {
-        use_gpu: true,
+    let config = UnifiedSimConfig {
+        level: SimLevel::Behavioral,
+        hw_accel: HwAccel::Gpu,
         max_cycles: 10,
-        timeout_ms: 5000,
         capture_waveforms: true,
-        parallel_threads: 1,
+        ..Default::default()
     };
 
     // Create simulator - this generates the Metal shader
-    let mut simulator = Simulator::new(config)
-        .await
+    let mut simulator = UnifiedSimulator::new(config)
         .expect("Failed to create GPU simulator");
 
     // Load the module - this generates the Metal shader
     simulator
-        .load_module(&sir)
+        .load_behavioral(&sir)
         .await
         .expect("Failed to load SIR module");
 
@@ -84,30 +83,21 @@ async fn test_64bit_register_metal_codegen() {
             .unwrap_or_else(|| name.to_string())
     };
 
+    // Resolve names
+    let rst_name = resolve("rst");
+    let clk_name = resolve("clk");
+    let data_in_name = resolve("data_in");
+    let enable_name = resolve("enable");
+
     // Set initial inputs (using resolved internal names)
-    simulator
-        .set_input(&resolve("rst"), vec![1])
-        .await
-        .expect("Failed to set reset");
-    simulator
-        .set_input(&resolve("clk"), vec![0])
-        .await
-        .expect("Failed to set clock");
-    simulator
-        .set_input(&resolve("data_in"), vec![0; 8]) // 64 bits = 8 bytes
-        .await
-        .expect("Failed to set data_in");
-    simulator
-        .set_input(&resolve("enable"), vec![0])
-        .await
-        .expect("Failed to set enable");
+    simulator.set_input(&rst_name, 1).await;
+    simulator.set_input(&clk_name, 0).await;
+    simulator.set_input(&data_in_name, 0).await;
+    simulator.set_input(&enable_name, 0).await;
 
     // Run a few cycles
     for _ in 0..5 {
-        simulator
-            .step_simulation()
-            .await
-            .expect("Failed to step simulation");
+        simulator.step().await;
     }
 
     // Read and verify the Metal shader
