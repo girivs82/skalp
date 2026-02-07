@@ -1419,13 +1419,25 @@ impl GateNetlistToAig {
         }
 
         // Add primary outputs
+        // BUG #248 FIX: Resolve net aliases before looking up in net_map.
+        // Output port nets may have been merged into other nets during stitching,
+        // so we need to find the canonical net ID to get the correct literal.
         for &output_id in &netlist.outputs {
             let net = &netlist.nets[output_id.0 as usize];
+            // Resolve alias chain to find canonical net
+            let canonical_id = netlist.resolve_alias(output_id);
             let lit = self
                 .net_map
-                .get(&output_id.0)
+                .get(&canonical_id.0)
                 .copied()
-                .unwrap_or_else(|| self.aig.false_lit());
+                .unwrap_or_else(|| {
+                    // If still not found, log warning - this output will be constant 0
+                    log::warn!(
+                        "Output '{}' (id={}, canonical={}) not found in net_map, defaulting to false",
+                        net.name, output_id.0, canonical_id.0
+                    );
+                    self.aig.false_lit()
+                });
             self.aig.add_output(net.name.clone(), lit);
         }
 
@@ -1433,6 +1445,9 @@ impl GateNetlistToAig {
     }
 
     fn get_net(&self, net_id: skalp_lir::GateNetId) -> AigLit {
+        // Note: We don't resolve aliases here because cell connections should
+        // already point to the correct canonical net IDs after merge_nets_batched.
+        // But if lookup fails, we fall back to false_lit which indicates a bug.
         self.net_map
             .get(&net_id.0)
             .copied()
@@ -2180,13 +2195,22 @@ impl GateNetlistToAig {
         }
 
         // Add primary outputs
+        // BUG #248 FIX: Resolve net aliases before looking up in net_map.
         for &output_id in &netlist.outputs {
             let net = &netlist.nets[output_id.0 as usize];
+            // Resolve alias chain to find canonical net
+            let canonical_id = netlist.resolve_alias(output_id);
             let lit = self
                 .net_map
-                .get(&output_id.0)
+                .get(&canonical_id.0)
                 .copied()
-                .unwrap_or_else(|| self.aig.false_lit());
+                .unwrap_or_else(|| {
+                    log::warn!(
+                        "Output '{}' (id={}, canonical={}) not found in net_map, defaulting to false",
+                        net.name, output_id.0, canonical_id.0
+                    );
+                    self.aig.false_lit()
+                });
             self.aig.add_output(net.name.clone(), lit);
         }
 
