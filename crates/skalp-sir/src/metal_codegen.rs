@@ -2297,21 +2297,36 @@ impl<'a> MetalShaderGenerator<'a> {
                     );
 
                     // Helper to generate sign-extended expression for a signal
-                    let sign_extend_expr = |signal_name: &str, width: usize| -> String {
+                    // Returns (expression, is_64bit) to help with output handling
+                    let sign_extend_expr = |signal_name: &str, width: usize| -> (String, bool) {
                         let sanitized = self.sanitize_name(signal_name);
-                        if width >= 32 {
-                            // 32-bit or wider: simple cast (sign bit already at position 31)
-                            format!("(int)signals->{}", sanitized)
+                        if width > 32 && width <= 64 {
+                            // 33-64 bits: stored as uint2, combine into long for signed arithmetic
+                            // BUG FIX: Can't cast uint2 directly to int - must combine elements first
+                            (format!(
+                                "(long)((long)signals->{}[0] | ((long)signals->{}[1] << 32))",
+                                sanitized, sanitized
+                            ), true)
+                        } else if width == 32 {
+                            // 32-bit: simple cast (sign bit already at position 31)
+                            (format!("(int)signals->{}", sanitized), false)
+                        } else if width > 64 {
+                            // >64 bits: use element access (will need special handling in caller)
+                            (format!("signals->{}", sanitized), false)
                         } else {
                             // Narrower than 32 bits: sign extend from actual width
                             // (int)((int)(value << (32 - width)) >> (32 - width))
                             let shift = 32 - width;
-                            format!(
+                            (format!(
                                 "((int)((int)(signals->{} << {}) >> {}))",
                                 sanitized, shift, shift
-                            )
+                            ), false)
                         }
                     };
+
+                    // Track if either operand is 64-bit for proper output handling
+                    let mut left_is_64bit = false;
+                    let mut right_is_64bit = false;
 
                     let left_expr = if needs_float_comparison {
                         // Keep as float for proper IEEE 754 comparison
@@ -2319,8 +2334,10 @@ impl<'a> MetalShaderGenerator<'a> {
                     } else if left_is_float {
                         format!("as_type<uint>(signals->{})", self.sanitize_name(left))
                     } else if is_signed_comparison || is_signed_arithmetic {
-                        // Sign extend to int for proper signed comparison/arithmetic
-                        sign_extend_expr(left, left_width)
+                        // Sign extend to int/long for proper signed comparison/arithmetic
+                        let (expr, is_64) = sign_extend_expr(left, left_width);
+                        left_is_64bit = is_64;
+                        expr
                     } else {
                         format!("signals->{}", self.sanitize_name(left))
                     };
@@ -2331,11 +2348,16 @@ impl<'a> MetalShaderGenerator<'a> {
                     } else if right_is_float {
                         format!("as_type<uint>(signals->{})", self.sanitize_name(right))
                     } else if is_signed_comparison || is_signed_arithmetic {
-                        // Sign extend to int for proper signed comparison/arithmetic
-                        sign_extend_expr(right, right_width)
+                        // Sign extend to int/long for proper signed comparison/arithmetic
+                        let (expr, is_64) = sign_extend_expr(right, right_width);
+                        right_is_64bit = is_64;
+                        expr
                     } else {
                         format!("signals->{}", self.sanitize_name(right))
                     };
+
+                    // Check if signed arithmetic uses 64-bit operands - needs special output handling
+                    let needs_64bit_signed_output = is_signed_arithmetic && (left_is_64bit || right_is_64bit);
 
                     // BUG FIX #117c: Handle vector type mismatches (e.g., uint4 | uint2)
                     // When operands have different vector sizes, use element-wise operations
@@ -2706,6 +2728,30 @@ impl<'a> MetalShaderGenerator<'a> {
                                     right_expr
                                 ));
                             }
+                        } else if needs_64bit_signed_output && output_width > 32 && output_width <= 64 {
+                            // BUG FIX: 64-bit signed arithmetic (SDiv/SMod/Sar) with uint2 output
+                            // The operation result is a long, must be stored into uint2
+                            self.write_indented(&format!(
+                                "// BUG FIX: 64-bit signed {} result stored to uint2\n",
+                                op_str
+                            ));
+                            self.write_indented(&format!(
+                                "{{ long _signed_result = {} {} {}; signals->{}[0] = (uint)(ulong)_signed_result; signals->{}[1] = (uint)((ulong)_signed_result >> 32); }}\n",
+                                left_expr,
+                                op_str,
+                                right_expr,
+                                self.sanitize_name(output),
+                                self.sanitize_name(output)
+                            ));
+                        } else if needs_64bit_signed_output && output_width <= 32 {
+                            // 64-bit signed arithmetic with scalar output - truncate result
+                            self.write_indented(&format!(
+                                "signals->{} = (uint)({} {} {});\n",
+                                self.sanitize_name(output),
+                                left_expr,
+                                op_str,
+                                right_expr
+                            ));
                         } else {
                             // Scalar operation or non-comparison - direct assignment
                             self.write_indented(&format!(
