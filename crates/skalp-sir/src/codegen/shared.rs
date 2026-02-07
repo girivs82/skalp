@@ -381,6 +381,20 @@ impl<'a> SharedCodegen<'a> {
             return;
         }
 
+        // Check for signed comparison operations - need to cast to signed types
+        let is_signed_comparison = matches!(
+            op,
+            BinaryOperation::Slt
+                | BinaryOperation::Slte
+                | BinaryOperation::Sgt
+                | BinaryOperation::Sgte
+        );
+
+        if is_signed_comparison {
+            self.generate_signed_comparison(node, op_str, left_width, right_width);
+            return;
+        }
+
         // Standard scalar operation
         self.write_indented(&format!(
             "signals->{} = signals->{} {} signals->{};\n",
@@ -388,6 +402,54 @@ impl<'a> SharedCodegen<'a> {
             self.sanitize_name(left),
             op_str,
             self.sanitize_name(right)
+        ));
+    }
+
+    /// Generate signed comparison with proper type casting
+    fn generate_signed_comparison(
+        &mut self,
+        node: &SirNode,
+        op_str: &str,
+        left_width: usize,
+        right_width: usize,
+    ) {
+        let left = &node.inputs[0].signal_id;
+        let right = &node.inputs[1].signal_id;
+        let output = &node.outputs[0].signal_id;
+
+        // Helper to generate sign-extended expression
+        let sign_cast = |name: &str, width: usize, sanitized: &str| -> String {
+            if width > 32 && width <= 64 {
+                // 33-64 bits: stored as uint32_t[2], combine into int64_t
+                format!(
+                    "(int64_t)((uint64_t)signals->{}[0] | ((uint64_t)signals->{}[1] << 32))",
+                    sanitized, sanitized
+                )
+            } else if width == 32 {
+                // 32-bit: cast to int32_t
+                format!("(int32_t)signals->{}", sanitized)
+            } else {
+                // Narrower than 32 bits: sign extend from actual width
+                let shift = 32 - width;
+                format!(
+                    "((int32_t)((int32_t)(signals->{} << {}) >> {}))",
+                    sanitized, shift, shift
+                )
+            }
+        };
+
+        let left_sanitized = self.sanitize_name(left);
+        let right_sanitized = self.sanitize_name(right);
+
+        let left_expr = sign_cast(left, left_width, &left_sanitized);
+        let right_expr = sign_cast(right, right_width, &right_sanitized);
+
+        self.write_indented(&format!(
+            "signals->{} = {} {} {};\n",
+            self.sanitize_name(output),
+            left_expr,
+            op_str,
+            right_expr
         ));
     }
 
