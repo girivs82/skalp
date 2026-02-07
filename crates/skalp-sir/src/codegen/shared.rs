@@ -24,18 +24,165 @@ pub struct SharedCodegen<'a> {
     concat_recursion_depth: usize,
     /// Whether we're generating code for batched simulation mode
     in_batched_mode: bool,
+    /// Pre-computed signal widths (including intermediate node outputs)
+    /// This is the authoritative source for all signal widths - never guess or default to 32
+    signal_width_cache: HashMap<String, usize>,
 }
 
 impl<'a> SharedCodegen<'a> {
     /// Create a new shared codegen instance
     pub fn new(module: &'a SirModule, target: BackendTarget) -> Self {
-        Self {
+        let mut codegen = Self {
             module,
             type_mapper: TypeMapper::new(target),
             output: String::new(),
             indent: 0,
             concat_recursion_depth: 0,
             in_batched_mode: false,
+            signal_width_cache: HashMap::new(),
+        };
+        codegen.build_signal_width_cache();
+        codegen
+    }
+
+    /// Build the signal width cache by collecting widths from all sources
+    /// This must be called before any code generation to ensure accurate widths
+    fn build_signal_width_cache(&mut self) {
+        // 1. Add widths from declared signals
+        for signal in &self.module.signals {
+            self.signal_width_cache
+                .insert(signal.name.clone(), signal.width);
+        }
+
+        // 2. Add widths from inputs
+        for input in &self.module.inputs {
+            self.signal_width_cache
+                .insert(input.name.clone(), input.sir_type.width());
+        }
+
+        // 3. Add widths from outputs
+        for output in &self.module.outputs {
+            self.signal_width_cache
+                .insert(output.name.clone(), output.sir_type.width());
+        }
+
+        // 4. Add widths from state elements
+        for (name, elem) in &self.module.state_elements {
+            self.signal_width_cache.insert(name.clone(), elem.width);
+        }
+
+        // 5. Compute widths from combinational nodes (in topological order)
+        // Nodes should already be in topological order in the SIR
+        for node in &self.module.combinational_nodes {
+            let computed_width = self.compute_node_output_width_from_cache(node);
+            for output in &node.outputs {
+                self.signal_width_cache
+                    .insert(output.signal_id.clone(), computed_width);
+            }
+        }
+
+        // 6. Compute widths from sequential nodes
+        for node in &self.module.sequential_nodes {
+            let computed_width = self.compute_node_output_width_from_cache(node);
+            for output in &node.outputs {
+                self.signal_width_cache
+                    .insert(output.signal_id.clone(), computed_width);
+            }
+        }
+    }
+
+    /// Compute node output width using the cache for input widths
+    /// This version uses the cache instead of get_signal_width to avoid issues
+    /// during cache building when not all widths are known yet
+    fn compute_node_output_width_from_cache(&self, node: &SirNode) -> usize {
+        let get_input_width = |idx: usize| -> usize {
+            if idx < node.inputs.len() {
+                let signal_id = &node.inputs[idx].signal_id;
+                // First try the cache, then fall back to type_mapper
+                self.signal_width_cache
+                    .get(signal_id)
+                    .copied()
+                    .unwrap_or_else(|| self.type_mapper.get_signal_width(self.module, signal_id))
+            } else {
+                32 // Malformed node
+            }
+        };
+
+        match &node.kind {
+            SirNodeKind::BinaryOp(op) => {
+                let left_width = get_input_width(0);
+                let right_width = get_input_width(1);
+
+                match op {
+                    BinaryOperation::SMul | BinaryOperation::Mul => left_width + right_width,
+                    BinaryOperation::Sar | BinaryOperation::SDiv | BinaryOperation::SMod => {
+                        left_width
+                    }
+                    BinaryOperation::Shl | BinaryOperation::Shr => left_width,
+                    BinaryOperation::Div | BinaryOperation::Mod => left_width,
+                    BinaryOperation::Add | BinaryOperation::Sub => {
+                        std::cmp::max(left_width, right_width)
+                    }
+                    BinaryOperation::And | BinaryOperation::Or | BinaryOperation::Xor => {
+                        std::cmp::max(left_width, right_width)
+                    }
+                    BinaryOperation::Eq
+                    | BinaryOperation::Neq
+                    | BinaryOperation::Lt
+                    | BinaryOperation::Lte
+                    | BinaryOperation::Gt
+                    | BinaryOperation::Gte
+                    | BinaryOperation::Slt
+                    | BinaryOperation::Slte
+                    | BinaryOperation::Sgt
+                    | BinaryOperation::Sgte => 1,
+                    BinaryOperation::FAdd
+                    | BinaryOperation::FSub
+                    | BinaryOperation::FMul
+                    | BinaryOperation::FDiv
+                    | BinaryOperation::FMod => std::cmp::max(left_width, right_width),
+                    BinaryOperation::FEq
+                    | BinaryOperation::FNeq
+                    | BinaryOperation::FLt
+                    | BinaryOperation::FLte
+                    | BinaryOperation::FGt
+                    | BinaryOperation::FGte => 1,
+                }
+            }
+            SirNodeKind::UnaryOp(_) => get_input_width(0),
+            SirNodeKind::Mux => get_input_width(1),
+            SirNodeKind::ParallelMux { result_width, .. } => *result_width,
+            SirNodeKind::Concat => node
+                .inputs
+                .iter()
+                .map(|input| {
+                    self.signal_width_cache
+                        .get(&input.signal_id)
+                        .copied()
+                        .unwrap_or_else(|| {
+                            self.type_mapper.get_signal_width(self.module, &input.signal_id)
+                        })
+                })
+                .sum(),
+            SirNodeKind::Slice { start, end } => {
+                // Handle both orderings: [start:end] where start can be > or < end
+                if *end >= *start {
+                    end - start + 1
+                } else {
+                    start - end + 1
+                }
+            }
+            SirNodeKind::Constant { width, .. } => *width,
+            SirNodeKind::SignalRef { signal } => self
+                .signal_width_cache
+                .get(signal)
+                .copied()
+                .unwrap_or_else(|| self.type_mapper.get_signal_width(self.module, signal)),
+            SirNodeKind::FlipFlop { .. } | SirNodeKind::Latch { .. } => get_input_width(0),
+            SirNodeKind::Memory { width, .. } => *width,
+            SirNodeKind::ArrayRead => get_input_width(0),
+            SirNodeKind::ArrayWrite => get_input_width(0),
+            SirNodeKind::ClockGate | SirNodeKind::Reset => 1,
         }
     }
 
@@ -85,8 +232,14 @@ impl<'a> SharedCodegen<'a> {
         self.type_mapper.sanitize_name(name)
     }
 
-    /// Get signal width from SIR module (delegate to type mapper)
+    /// Get signal width - uses pre-computed cache for accurate widths
+    /// This is the authoritative source for all signal widths during code generation
     pub fn get_signal_width(&self, signal_name: &str) -> usize {
+        // First check the pre-computed cache (includes intermediate node outputs)
+        if let Some(&width) = self.signal_width_cache.get(signal_name) {
+            return width;
+        }
+        // Fall back to type_mapper for signals not in cache (shouldn't happen normally)
         self.type_mapper.get_signal_width(self.module, signal_name)
     }
 
@@ -274,14 +427,8 @@ impl<'a> SharedCodegen<'a> {
             }
         }
 
-        // Collect signals from combinational node outputs
-        let signal_widths: HashMap<String, usize> = self
-            .module
-            .signals
-            .iter()
-            .map(|s| (s.name.clone(), s.width))
-            .collect();
-
+        // Generate struct fields for combinational node outputs
+        // Widths are retrieved from the pre-computed signal_width_cache
         for node in &self.module.combinational_nodes {
             for output in &node.outputs {
                 let signal_id = &output.signal_id;
@@ -297,13 +444,14 @@ impl<'a> SharedCodegen<'a> {
                     continue;
                 }
 
-                let width = signal_widths.get(signal_id).copied().unwrap_or(32);
+                // Use cached width - computed from node operation during initialization
+                let width = self.get_signal_width(signal_id);
                 let sir_type = SirType::Bits(width);
                 self.generate_signal_field(signal_id, &sir_type);
             }
         }
 
-        // Collect signals from node inputs
+        // Collect signals from node inputs (these reference other node outputs)
         for node in &self.module.combinational_nodes {
             for input in &node.inputs {
                 let signal_id = &input.signal_id;
@@ -319,7 +467,8 @@ impl<'a> SharedCodegen<'a> {
                     continue;
                 }
 
-                let width = signal_widths.get(signal_id).copied().unwrap_or(32);
+                // Use cached width from the producing node
+                let width = self.get_signal_width(signal_id);
                 let sir_type = SirType::Bits(width);
                 self.generate_signal_field(signal_id, &sir_type);
             }
@@ -341,7 +490,8 @@ impl<'a> SharedCodegen<'a> {
                     continue;
                 }
 
-                let width = signal_widths.get(signal_id).copied().unwrap_or(32);
+                // Use cached width from the producing node
+                let width = self.get_signal_width(signal_id);
                 let sir_type = SirType::Bits(width);
                 self.generate_signal_field(signal_id, &sir_type);
             }
@@ -395,6 +545,20 @@ impl<'a> SharedCodegen<'a> {
             return;
         }
 
+        // Check for signed arithmetic operations - need to cast to signed types
+        let is_signed_arithmetic = matches!(
+            op,
+            BinaryOperation::SMul
+                | BinaryOperation::SDiv
+                | BinaryOperation::SMod
+                | BinaryOperation::Sar
+        );
+
+        if is_signed_arithmetic {
+            self.generate_signed_arithmetic(node, op, left_width, right_width, output_width);
+            return;
+        }
+
         // Standard scalar operation
         self.write_indented(&format!(
             "signals->{} = signals->{} {} signals->{};\n",
@@ -417,32 +581,20 @@ impl<'a> SharedCodegen<'a> {
         let right = &node.inputs[1].signal_id;
         let output = &node.outputs[0].signal_id;
 
-        // Helper to generate sign-extended expression
-        let sign_cast = |name: &str, width: usize, sanitized: &str| -> String {
-            if width > 32 && width <= 64 {
-                // 33-64 bits: stored as uint32_t[2], combine into int64_t
-                format!(
-                    "(int64_t)((uint64_t)signals->{}[0] | ((uint64_t)signals->{}[1] << 32))",
-                    sanitized, sanitized
-                )
-            } else if width == 32 {
-                // 32-bit: cast to int32_t
-                format!("(int32_t)signals->{}", sanitized)
-            } else {
-                // Narrower than 32 bits: sign extend from actual width
-                let shift = 32 - width;
-                format!(
-                    "((int32_t)((int32_t)(signals->{} << {}) >> {}))",
-                    sanitized, shift, shift
-                )
-            }
-        };
-
         let left_sanitized = self.sanitize_name(left);
         let right_sanitized = self.sanitize_name(right);
 
-        let left_expr = sign_cast(left, left_width, &left_sanitized);
-        let right_expr = sign_cast(right, right_width, &right_sanitized);
+        // Check array storage for each operand
+        let left_uses_array = self.uses_array_storage(left_width);
+        let right_uses_array = self.uses_array_storage(right_width);
+
+        // Generate signed expressions for comparison
+        // Using needs_64bit=true for comparisons involving 33-64 bit values
+        let needs_64bit = left_width > 32 || right_width > 32;
+        let left_expr =
+            self.generate_signed_operand_expr(&left_sanitized, left_width, left_uses_array, needs_64bit);
+        let right_expr =
+            self.generate_signed_operand_expr(&right_sanitized, right_width, right_uses_array, needs_64bit);
 
         self.write_indented(&format!(
             "signals->{} = {} {} {};\n",
@@ -451,6 +603,172 @@ impl<'a> SharedCodegen<'a> {
             op_str,
             right_expr
         ));
+    }
+
+    /// Generate signed arithmetic operation with proper type casting
+    /// Handles SMul, SDiv, SMod, and Sar (arithmetic shift right)
+    fn generate_signed_arithmetic(
+        &mut self,
+        node: &SirNode,
+        op: &BinaryOperation,
+        left_width: usize,
+        right_width: usize,
+        output_width: usize,
+    ) {
+        let left = &node.inputs[0].signal_id;
+        let right = &node.inputs[1].signal_id;
+        let output = &node.outputs[0].signal_id;
+
+        let left_sanitized = self.sanitize_name(left);
+        let right_sanitized = self.sanitize_name(right);
+        let output_sanitized = self.sanitize_name(output);
+
+        // For signed multiply, the result can be up to left_width + right_width bits
+        // For SMul of 16-bit x 32-bit, we need 48-bit result, use int64_t
+        let needs_64bit = matches!(op, BinaryOperation::SMul)
+            && (left_width + right_width > 32);
+
+        // Calculate the actual output width for SMul (may differ from stored signal width)
+        // SMul output is left_width + right_width bits
+        // For Sar, the output width is the same as the left operand width
+        // For SDiv/SMod, output width is typically the left operand width
+        let actual_output_width = match op {
+            BinaryOperation::SMul => left_width + right_width,
+            BinaryOperation::Sar | BinaryOperation::SDiv | BinaryOperation::SMod => left_width,
+            _ => output_width,
+        };
+
+        // Determine the operator string
+        let op_str = match op {
+            BinaryOperation::SMul => "*",
+            BinaryOperation::SDiv => "/",
+            BinaryOperation::SMod => "%",
+            BinaryOperation::Sar => ">>",
+            _ => unreachable!(),
+        };
+
+        // Check array storage for each operand
+        // For C++: width > 64 uses arrays, 33-64 uses uint64_t scalar, <= 32 uses uint32_t
+        // For Metal: width > 128 uses arrays
+        let left_uses_array = self.uses_array_storage(left_width);
+        let right_uses_array = self.uses_array_storage(right_width);
+        let output_uses_array = self.uses_array_storage(actual_output_width);
+
+        // Generate signed expression for left operand
+        let left_expr = self.generate_signed_operand_expr(
+            &left_sanitized,
+            left_width,
+            left_uses_array,
+            needs_64bit,
+        );
+
+        // For shift operations, the shift amount doesn't need sign extension
+        let right_expr = if matches!(op, BinaryOperation::Sar) {
+            format!("signals->{}", right_sanitized)
+        } else {
+            self.generate_signed_operand_expr(
+                &right_sanitized,
+                right_width,
+                right_uses_array,
+                needs_64bit,
+            )
+        };
+
+        // Generate the operation with proper casting
+        if output_uses_array {
+            // Output uses array storage (> 64 bits for C++, > 128 bits for Metal)
+            self.write_indented(&format!(
+                "{{ int64_t _tmp = {} {} {}; signals->{}[0] = (uint32_t)_tmp; signals->{}[1] = (uint32_t)((uint64_t)_tmp >> 32); }}\n",
+                left_expr,
+                op_str,
+                right_expr,
+                output_sanitized,
+                output_sanitized
+            ));
+        } else if actual_output_width > 32 && actual_output_width <= 64 {
+            // 33-64 bit output: stored as uint64_t scalar (C++) or vector type (Metal)
+            // For SMul, we compute a 64-bit result but need to mask to actual width
+            // to match gate-level behavior (which computes exactly actual_output_width bits)
+            if actual_output_width == 64 {
+                self.write_indented(&format!(
+                    "signals->{} = (uint64_t)({} {} {});\n",
+                    output_sanitized,
+                    left_expr,
+                    op_str,
+                    right_expr
+                ));
+            } else {
+                // Mask to actual width to ensure upper bits don't affect sign extension
+                let mask = (1u64 << actual_output_width) - 1;
+                self.write_indented(&format!(
+                    "signals->{} = (uint64_t)({} {} {}) & 0x{:X}ULL;\n",
+                    output_sanitized,
+                    left_expr,
+                    op_str,
+                    right_expr,
+                    mask
+                ));
+            }
+        } else {
+            // 32-bit or smaller output
+            self.write_indented(&format!(
+                "signals->{} = (uint32_t)({} {} {});\n",
+                output_sanitized,
+                left_expr,
+                op_str,
+                right_expr
+            ));
+        }
+    }
+
+    /// Generate a signed operand expression for reading a signal with proper sign extension
+    fn generate_signed_operand_expr(
+        &self,
+        sanitized: &str,
+        width: usize,
+        uses_array: bool,
+        needs_64bit: bool,
+    ) -> String {
+        if uses_array {
+            // > 64 bits (C++) or > 128 bits (Metal): stored as uint32_t[N]
+            // Combine low 64 bits into int64_t for signed operations
+            format!(
+                "(int64_t)((uint64_t)signals->{}[0] | ((uint64_t)signals->{}[1] << 32))",
+                sanitized, sanitized
+            )
+        } else if width == 64 {
+            // Exactly 64 bits: just cast to int64_t
+            format!("(int64_t)signals->{}", sanitized)
+        } else if width > 32 && width < 64 {
+            // 33-63 bits: stored as uint64_t scalar, but need sign extension from actual width
+            // Left shift to put sign bit at position 63, then arithmetic right shift to sign-extend
+            let shift = 64 - width;
+            format!(
+                "((int64_t)(signals->{} << {}) >> {})",
+                sanitized, shift, shift
+            )
+        } else if width == 32 {
+            // 32-bit: cast to int32_t (or int64_t if needed for multiply)
+            if needs_64bit {
+                format!("(int64_t)(int32_t)signals->{}", sanitized)
+            } else {
+                format!("(int32_t)signals->{}", sanitized)
+            }
+        } else {
+            // Narrower than 32 bits: sign extend from actual width
+            let shift = 32 - width;
+            if needs_64bit {
+                format!(
+                    "(int64_t)((int32_t)(signals->{} << {}) >> {})",
+                    sanitized, shift, shift
+                )
+            } else {
+                format!(
+                    "((int32_t)(signals->{} << {}) >> {})",
+                    sanitized, shift, shift
+                )
+            }
+        }
     }
 
     /// Get binary operation string

@@ -5354,7 +5354,6 @@ impl<'a> MirToSirConverter<'a> {
     fn connect_node_to_signal(&mut self, node_id: usize, signal_name: &str) {
         // Translate MIR name to internal name for SIR lookups
         let internal_name = self.translate_to_internal_name(signal_name);
-        println!("🔗 CONNECT: Node {} -> Signal '{}' (internal: '{}')", node_id, signal_name, internal_name);
 
         // BUG FIX #8: Get the node's output width BEFORE modifying the signal
         // The node was created with the correct expression width (e.g., 96 bits for concat of 3x32-bit values)
@@ -5366,26 +5365,16 @@ impl<'a> MirToSirConverter<'a> {
             .chain(self.sir.sequential_nodes.iter())
             .find(|n| n.id == node_id)
         {
-            println!("   🔍 Node {} has {} outputs", node_id, node.outputs.len());
             // Get the width of the node's output signal (node_X_out)
             if !node.outputs.is_empty() {
                 let output_signal_name = &node.outputs[0].signal_id;
-                let width = self.get_signal_width(output_signal_name);
-                println!(
-                    "   🔍 Node {} output signal '{}' has width {}",
-                    node_id, output_signal_name, width
-                );
-                Some(width)
+                Some(self.get_signal_width(output_signal_name))
             } else {
-                println!("   ⚠️  Node {} has no outputs!", node_id);
                 None
             }
         } else {
-            println!("   ❌ Node {} not found!", node_id);
             None
         };
-
-        println!("   🔍 node_output_width = {:?}", node_output_width);
 
         // Update signal to have this node as driver (using internal name for SIR lookup)
         // First check if the new node is a flip-flop (for state elements)
@@ -5408,18 +5397,10 @@ impl<'a> MirToSirConverter<'a> {
                 // This happens when a signal has an initialization value (continuous assign) but is also
                 // assigned in sequential logic (needs flip-flop). The flip-flop should be the driver.
                 if new_node_is_flipflop && signal.is_state {
-                    println!(
-                        "   🔄 BUG #117r FIX: Signal '{}' is state element - flip-flop node {} overwrites node {}",
-                        internal_name, node_id, existing_driver
-                    );
                     // Remember to remove the signal from the old driver's outputs
                     old_driver_to_update = Some(existing_driver);
                     // Continue to set the flip-flop as driver
                 } else {
-                    println!(
-                        "   ⚠️  WARNING: Signal '{}' already driven by node {} (NOT overwriting with node {})",
-                        internal_name, existing_driver, node_id
-                    );
                     // Don't overwrite - keep the first driver
                     return;
                 }
@@ -5428,29 +5409,14 @@ impl<'a> MirToSirConverter<'a> {
             // BUG FIX #117: Check if node output is wider than declared signal width.
             if let Some(output_width) = node_output_width {
                 if output_width > signal.width {
-                    println!(
-                        "   🔧 BUG #117 FIX: Signal '{}' width mismatch: declared {} bits, node outputs {} bits — will insert truncation",
-                        internal_name, signal.width, output_width
-                    );
                     needs_truncation = Some((signal.width, output_width));
-                } else if output_width < signal.width {
-                    println!(
-                        "   ⚠️  BUG #117: Signal '{}' width mismatch: declared {} bits, node outputs {} bits (node is narrower)",
-                        internal_name, signal.width, output_width
-                    );
                 }
             }
 
             if needs_truncation.is_none() {
                 // Normal case: no truncation needed, set driver directly
                 signal.driver_node = Some(node_id);
-                println!(
-                    "   ✅ Signal '{}' now driven by node {}",
-                    internal_name, node_id
-                );
             }
-        } else {
-            println!("   ❌ Signal '{}' (mir: '{}') not found!", internal_name, signal_name);
         }
 
         // BUG FIX #117: Insert truncation slice node when node output is wider than declared signal
@@ -5467,10 +5433,6 @@ impl<'a> MirToSirConverter<'a> {
                     bit_range: None,
                 });
             }
-            println!(
-                "   ✅ Signal '{}' now driven by slice node {} (truncated from {} to {} bits)",
-                internal_name, slice_node, output_width, declared_width
-            );
 
             // Handle old driver cleanup then return early (skip normal output wiring)
             if let Some(old_driver_id) = old_driver_to_update {
@@ -5496,15 +5458,7 @@ impl<'a> MirToSirConverter<'a> {
                 .iter_mut()
                 .find(|n| n.id == old_driver_id)
             {
-                let before_count = old_node.outputs.len();
                 old_node.outputs.retain(|o| o.signal_id != internal_name);
-                let after_count = old_node.outputs.len();
-                if before_count > after_count {
-                    println!(
-                        "   🗑️  BUG #117r: Removed '{}' from old driver node {} outputs",
-                        internal_name, old_driver_id
-                    );
-                }
             }
         }
 
@@ -5525,10 +5479,6 @@ impl<'a> MirToSirConverter<'a> {
                     signal_id: internal_name.clone(),
                     bit_range: None,
                 };
-                println!(
-                    "   🔄 SEQUENTIAL: Replaced output with state signal '{}'",
-                    internal_name
-                );
             } else {
                 // Check if this signal is already an output of this node to prevent duplicates
                 if !node.outputs.iter().any(|o| o.signal_id == internal_name) {
@@ -5536,12 +5486,6 @@ impl<'a> MirToSirConverter<'a> {
                         signal_id: internal_name.clone(),
                         bit_range: None,
                     });
-                    println!("   ✅ Added '{}' to node {} outputs", internal_name, node_id);
-                } else {
-                    println!(
-                        "   ⚠️  Signal '{}' already in node {} outputs (skipping duplicate)",
-                        internal_name, node_id
-                    );
                 }
             }
         }
