@@ -191,8 +191,8 @@ impl<'a> SignalTracer<'a> {
             cell_by_id.insert(cell.id.0, cell);
         }
 
-        // Build net ID -> driver cell map
-        let mut driver_map = IndexMap::new();
+        // Build net ID -> driver cell map (for forward tracing fanout)
+        let mut driver_map: IndexMap<u32, &Cell> = IndexMap::new();
         for cell in &netlist.cells {
             for output in &cell.outputs {
                 driver_map.insert(output.0, cell);
@@ -329,8 +329,10 @@ impl<'a> SignalTracer<'a> {
         let net = &self.netlist.nets[net_id.0 as usize];
 
         // Build driver cell info
+        // BUG #247 FIX: net.driver is a CellId, not a net ID!
+        // We must use cell_by_id (keyed by CellId) not driver_map (keyed by net ID)
         let driver_cell = if let Some(driver_id) = net.driver {
-            self.driver_map.get(&driver_id.0).map(|cell| {
+            self.cell_by_id.get(&driver_id.0).map(|cell| {
                 let inputs: Vec<_> = cell.inputs.iter().map(|&input_id| {
                     let input_net = &self.netlist.nets[input_id.0 as usize];
                     (input_net.name.clone(), input_id)
