@@ -651,28 +651,75 @@ impl<'a> SharedCodegen<'a> {
         let width = high - low + 1;
         let shift = low;
 
-        let mask = if width >= 64 {
-            u64::MAX
-        } else {
-            (1u64 << width) - 1
-        };
-
-        // Check if input is a state element
+        // Check if input/output are state elements or use arrays
         let is_state = self.module.state_elements.contains_key(input);
         let input_width = self.get_signal_width(input);
+        let output_width = self.get_signal_width(output);
         let input_uses_array = self.uses_array_storage(input_width);
+        let output_uses_array = self.uses_array_storage(output_width);
 
-        if input_uses_array {
-            // For array inputs, extract from the appropriate element
-            // Each element is 32 bits, so element_idx = low / 32
-            let element_idx = low / 32;
+        let input_base = if is_state {
+            self.get_register_accessor(input)
+        } else {
+            format!("signals->{}", self.sanitize_name(input))
+        };
+
+        if output_uses_array {
+            // Output is an array - need element-wise copy
+            let output_array_size = self.get_array_size(output_width);
+            let start_element = low / 32;
             let bit_in_element = low % 32;
 
-            let input_base = if is_state {
-                self.get_register_accessor(input)
+            if input_uses_array {
+                // Both input and output are arrays - copy elements with offset
+                if bit_in_element == 0 {
+                    // Aligned copy - just copy elements directly
+                    for i in 0..output_array_size {
+                        self.write_indented(&format!(
+                            "signals->{}[{}] = {}[{}];\n",
+                            self.sanitize_name(output),
+                            i,
+                            input_base,
+                            start_element + i
+                        ));
+                    }
+                } else {
+                    // Unaligned copy - need to shift and combine
+                    for i in 0..output_array_size {
+                        let src_idx = start_element + i;
+                        self.write_indented(&format!(
+                            "signals->{}[{}] = ({}[{}] >> {}) | ({}[{}] << {});\n",
+                            self.sanitize_name(output),
+                            i,
+                            input_base,
+                            src_idx,
+                            bit_in_element,
+                            input_base,
+                            src_idx + 1,
+                            32 - bit_in_element
+                        ));
+                    }
+                }
             } else {
-                format!("signals->{}", self.sanitize_name(input))
-            };
+                // Input is scalar, output is array - unusual case, zero-fill extra elements
+                self.write_indented(&format!(
+                    "signals->{}[0] = ({} >> {}) & 0xFFFFFFFF;\n",
+                    self.sanitize_name(output),
+                    input_base,
+                    shift
+                ));
+                for i in 1..output_array_size {
+                    self.write_indented(&format!(
+                        "signals->{}[{}] = 0;\n",
+                        self.sanitize_name(output),
+                        i
+                    ));
+                }
+            }
+        } else if input_uses_array {
+            // Input is array, output is scalar - extract from array elements
+            let element_idx = low / 32;
+            let bit_in_element = low % 32;
 
             if width <= 32 && bit_in_element + width <= 32 {
                 // Slice fits in single element
@@ -703,9 +750,20 @@ impl<'a> SharedCodegen<'a> {
                     second_mask,
                     bits_from_first
                 ));
+            } else if width <= 64 {
+                // 33-64 bit slice from array - combine two elements
+                self.write_indented(&format!(
+                    "signals->{} = ((uint64_t){}[{}] >> {}) | ((uint64_t){}[{}] << {});\n",
+                    self.sanitize_name(output),
+                    input_base,
+                    element_idx,
+                    bit_in_element,
+                    input_base,
+                    element_idx + 1,
+                    32 - bit_in_element
+                ));
             } else {
-                // Multi-element extraction - just extract the first element for now
-                // (this handles the common case of extracting a 32-bit chunk)
+                // Wide slice to scalar (shouldn't happen often)
                 self.write_indented(&format!(
                     "signals->{} = {}[{}];\n",
                     self.sanitize_name(output),
@@ -714,17 +772,17 @@ impl<'a> SharedCodegen<'a> {
                 ));
             }
         } else {
-            // Scalar input - use simple shift and mask
-            let input_ref = if is_state {
-                self.get_register_accessor(input)
+            // Both input and output are scalar - simple shift and mask
+            let mask = if width >= 64 {
+                u64::MAX
             } else {
-                format!("signals->{}", self.sanitize_name(input))
+                (1u64 << width) - 1
             };
 
             self.write_indented(&format!(
                 "signals->{} = ({} >> {}) & 0x{:X};\n",
                 self.sanitize_name(output),
-                input_ref,
+                input_base,
                 shift,
                 mask
             ));
