@@ -539,6 +539,39 @@ enum Commands {
         #[arg(long)]
         optimize: Option<String>,
     },
+
+    /// Trace a signal through the gate-level netlist
+    ///
+    /// Shows the complete driver chain from output to source, including all
+    /// gates, their types, inputs, and optionally simulated values.
+    /// Useful for debugging equivalence check mismatches.
+    Trace {
+        /// Source file (.sk) containing the RTL design
+        source: PathBuf,
+
+        /// Signal to trace (e.g., "lockstep_tx.state[0]" or "state_reg")
+        signal: String,
+
+        /// Entity name (if not specified, uses the top-level entity)
+        #[arg(short, long)]
+        entity: Option<String>,
+
+        /// Maximum depth to trace (default: 20)
+        #[arg(short, long, default_value = "20")]
+        depth: usize,
+
+        /// Run simulation and show actual values at cycle N
+        #[arg(long)]
+        cycle: Option<u64>,
+
+        /// Show fanout (forward trace) instead of driver (backward trace)
+        #[arg(long)]
+        fanout: bool,
+
+        /// Pre-compiled gate-level netlist (JSON) - skip synthesis
+        #[arg(short, long)]
+        netlist: Option<PathBuf>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -826,6 +859,26 @@ fn main() -> Result<()> {
                 key_file.as_deref(),
                 &library,
                 optimize.as_deref(),
+            )?;
+        }
+
+        Commands::Trace {
+            source,
+            signal,
+            entity,
+            depth,
+            cycle,
+            fanout,
+            netlist,
+        } => {
+            run_signal_trace(
+                &source,
+                &signal,
+                entity.as_deref(),
+                depth,
+                cycle,
+                fanout,
+                netlist.as_ref(),
             )?;
         }
     }
@@ -2188,8 +2241,7 @@ fn simulate_ncl(
 
 /// Run behavioral SIR simulation
 fn simulate_sir_behavioral(sir: &skalp_sir::SirModule, cycles: u64, use_gpu: bool) -> Result<()> {
-    use skalp_sim::waveform::Waveform;
-    use skalp_sim::{SimulationConfig, Simulator};
+    use skalp_sim::{HwAccel, SimLevel, UnifiedSimConfig, UnifiedSimulator};
     use tokio::runtime::Runtime;
 
     println!("🔧 Running behavioral simulation...");
@@ -2199,32 +2251,26 @@ fn simulate_sir_behavioral(sir: &skalp_sir::SirModule, cycles: u64, use_gpu: boo
 
     runtime.block_on(async {
         // Create simulation config
-        let config = SimulationConfig {
-            use_gpu,
+        let config = UnifiedSimConfig {
+            level: SimLevel::Behavioral,
+            hw_accel: if use_gpu { HwAccel::Gpu } else { HwAccel::Cpu },
             max_cycles: cycles,
-            timeout_ms: 60_000,
             capture_waveforms: true,
-            parallel_threads: 4,
+            ..Default::default()
         };
 
         // Create and initialize simulator
-        let mut simulator = Simulator::new(config).await?;
-        simulator.load_module(sir).await?;
+        let mut simulator = UnifiedSimulator::new(config)
+            .map_err(|e| anyhow::anyhow!("Failed to create simulator: {}", e))?;
+        simulator.load_behavioral(sir).await
+            .map_err(|e| anyhow::anyhow!("Failed to load module: {}", e))?;
+
+        println!("   Device: {}", simulator.device_info());
 
         // Run simulation
-        simulator.run_simulation().await?;
+        let result = simulator.run(cycles).await;
 
-        println!("   Completed {} cycles", cycles);
-
-        // Get simulation history and create waveform
-        let state_history = simulator.get_waveforms().await;
-        if !state_history.is_empty() {
-            let waveform = Waveform::from_simulation_states(&state_history);
-            waveform.export_vcd(&PathBuf::from("simulation.vcd"))?;
-            println!("\n📈 Waveform exported to simulation.vcd");
-            waveform.print_summary();
-        }
-
+        println!("   Completed {} cycles", result.cycles);
         println!("\n✅ Behavioral simulation complete!");
 
         Ok::<(), anyhow::Error>(())
@@ -6016,4 +6062,128 @@ fn run_cpu_fi_campaign(
 
     Ok(results)
     */
+}
+
+/// Trace a signal through the gate-level netlist
+fn run_signal_trace(
+    source: &Path,
+    signal: &str,
+    entity: Option<&str>,
+    max_depth: usize,
+    sim_cycle: Option<u64>,
+    fanout: bool,
+    netlist_path: Option<&PathBuf>,
+) -> Result<()> {
+    use skalp_frontend::parse_and_build_compilation_context;
+    use skalp_lir::{get_stdlib_library, lower_mir_hierarchical_with_top, map_hierarchical_to_gates};
+    use skalp_lir::signal_trace::{SignalTracer, TraceDirection};
+
+    println!("🔍 Signal Trace");
+    println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    println!("Source:  {:?}", source);
+    println!("Signal:  {}", signal);
+    println!("Depth:   {}", max_depth);
+    if let Some(cycle) = sim_cycle {
+        println!("Cycle:   {}", cycle);
+    }
+    println!();
+
+    // Step 1: Get or load gate-level netlist
+    let gate_netlist = if let Some(path) = netlist_path {
+        println!("📂 Loading gate-level netlist from {:?}...", path);
+        let json = fs::read_to_string(path)
+            .context("Failed to read netlist file")?;
+        serde_json::from_str::<skalp_lir::GateNetlist>(&json)
+            .context("Failed to parse gate-level netlist JSON")?
+    } else {
+        // Compile design to gate-level
+        println!("📖 Parsing source...");
+        let context = parse_and_build_compilation_context(source)
+            .context("Failed to parse source file")?;
+        let hir = context.main_hir;
+        let module_hirs = context.module_hirs;
+
+        println!("📐 Lowering to MIR...");
+        let compiler = skalp_mir::MirCompiler::new()
+            .with_optimization_level(skalp_mir::OptimizationLevel::None);
+        let mir = compiler
+            .compile_to_mir_with_modules(&hir, &module_hirs)
+            .map_err(|e| anyhow::anyhow!("Failed to compile to MIR: {}", e))?;
+
+        // Find target entity
+        let target_entity = if let Some(name) = entity {
+            if let Some(m) = mir.modules.iter().find(|m| m.name == name) {
+                if !m.instances.is_empty() || !m.processes.is_empty() {
+                    m
+                } else {
+                    let mono_prefix = format!("{}_", name);
+                    mir.modules
+                        .iter()
+                        .filter(|m| m.name.starts_with(&mono_prefix))
+                        .max_by_key(|m| m.instances.len() + m.processes.len())
+                        .unwrap_or(m)
+                }
+            } else {
+                let mono_prefix = format!("{}_", name);
+                mir.modules
+                    .iter()
+                    .filter(|m| m.name.starts_with(&mono_prefix))
+                    .max_by_key(|m| m.instances.len() + m.processes.len())
+                    .ok_or_else(|| anyhow::anyhow!("Entity '{}' not found in design", name))?
+            }
+        } else {
+            mir.modules
+                .first()
+                .ok_or_else(|| anyhow::anyhow!("No modules found in design"))?
+        };
+
+        println!("⚙️  Lowering to LIR...");
+        let hier_lir = lower_mir_hierarchical_with_top(&mir, Some(&target_entity.name));
+
+        println!("🔧 Synthesizing gate-level netlist...");
+        let library = get_stdlib_library("generic_asic")
+            .context("Failed to load technology library")?;
+        let hier_netlist = map_hierarchical_to_gates(&hier_lir, &library);
+        let netlist = hier_netlist.flatten();
+        println!("   Cells: {}", netlist.cells.len());
+        println!("   Nets: {}", netlist.nets.len());
+        netlist
+    };
+
+    // Step 2: Run signal trace
+    println!();
+    let direction = if fanout {
+        println!("📡 Tracing fanout (forward) from '{}'...", signal);
+        TraceDirection::Forward
+    } else {
+        println!("📡 Tracing driver (backward) from '{}'...", signal);
+        TraceDirection::Backward
+    };
+
+    let tracer = SignalTracer::new(&gate_netlist);
+    match tracer.trace(signal, direction, max_depth) {
+        Ok(trace) => {
+            println!();
+            trace.print();
+            println!();
+            println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+            println!("✅ Trace complete ({} nodes)", trace.nodes.len());
+        }
+        Err(e) => {
+            println!();
+            println!("❌ Trace failed: {}", e);
+            println!();
+            // Show available signals that match
+            let suggestions = tracer.find_matching_signals(signal, 10);
+            if !suggestions.is_empty() {
+                println!("Did you mean one of these?");
+                for s in suggestions {
+                    println!("  - {}", s);
+                }
+            }
+            anyhow::bail!("Signal trace failed");
+        }
+    }
+
+    Ok(())
 }

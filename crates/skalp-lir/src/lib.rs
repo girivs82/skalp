@@ -40,6 +40,7 @@ pub mod netlist;
 pub mod pattern_detector;
 pub mod pipeline_annotations;
 pub mod primitives;
+pub mod signal_trace;
 pub mod synth;
 pub mod tech_library;
 pub mod tech_mapper;
@@ -100,6 +101,9 @@ pub use pattern_detector::{
 
 // Gate optimizer
 pub use gate_optimizer::{GateOptimizer, OptimizationStats, PassStats};
+
+// Signal tracer
+pub use signal_trace::{SignalTrace, SignalTracer, TraceDirection, TraceError, TraceNode};
 
 // NCL optimizer
 pub use ncl_optimizer::{NclOptConfig, NclOptStats, NclOptimizer};
