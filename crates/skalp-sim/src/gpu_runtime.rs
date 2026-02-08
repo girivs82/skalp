@@ -3,7 +3,7 @@ use crate::simulator::{SimulationError, SimulationResult, SimulationRuntime, Sim
 use async_trait::async_trait;
 use indexmap::IndexMap;
 use metal::{Buffer, CommandQueue, ComputePipelineState, Device, MTLResourceOptions};
-use skalp_sir::{generate_metal_shader, SirModule};
+use skalp_sir::{MetalBackend, SirModule};
 use std::fs;
 
 pub struct GpuDevice {
@@ -300,7 +300,7 @@ impl GpuRuntime {
 
             // Outputs are at the beginning of the signal buffer
             // BUG FIX: Skip state element outputs - they're NOT in the Signals struct
-            // (Metal shader generator skips them too, see metal_codegen.rs line ~256)
+            // (Metal shader generator skips them too, see codegen/shared.rs)
             // State element outputs are read from register_buffer in get_output() fallback
             for output in &module.outputs {
                 // Skip state element outputs - they're in Registers, not Signals
@@ -757,7 +757,7 @@ impl SimulationRuntime for GpuRuntime {
         }
 
         // Generate Metal shader from SIR
-        let shader_source = generate_metal_shader(module);
+        let shader_source = MetalBackend::generate(module);
 
         // DEBUG: Write Metal shader source to file for inspection
         if let Err(e) = fs::write("/tmp/skalp_metal_shader.metal", &shader_source) {

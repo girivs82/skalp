@@ -372,10 +372,11 @@ impl<'a> SharedCodegen<'a> {
         }
 
         // Also add flip-flop outputs that aren't state elements
+        // BUG #254 FIX: Iterate over ALL outputs of flip-flops, not just first()
         let mut ff_output_names: HashSet<String> = HashSet::new();
         for node in &self.module.sequential_nodes {
             if let SirNodeKind::FlipFlop { .. } = &node.kind {
-                if let Some(output) = node.outputs.first() {
+                for output in &node.outputs {
                     if !self.module.state_elements.contains_key(&output.signal_id) {
                         ff_output_names.insert(output.signal_id.clone());
                     }

@@ -58,7 +58,7 @@ mod sequential_debug_tests {
         println!("Sequential nodes: {}", sir.sequential_nodes.len());
 
         // Generate and print Metal shader for debugging
-        let shader_code = skalp_sir::generate_metal_shader(&sir);
+        let shader_code = skalp_sir::MetalBackend::generate(&sir);
         println!("\n=== Generated Metal Shader ===");
         println!("{}", &shader_code);
 

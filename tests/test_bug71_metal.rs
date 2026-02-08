@@ -48,7 +48,7 @@ impl Test {
 
     // This is the critical test - generate Metal shader
     // Before the fix, this panics with: "Unsupported bit width 288 for Metal codegen"
-    let shader = skalp_sir::generate_metal_shader(&sir);
+    let shader = skalp_sir::MetalBackend::generate(&sir);
 
     assert!(!shader.is_empty(), "Metal shader should not be empty");
     assert!(

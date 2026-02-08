@@ -144,8 +144,13 @@ impl<'a> MetalBackend<'a> {
 
     /// Generate local copies of scalar state elements for batched mode
     fn generate_local_state_copies(&self, output: &mut String) {
+        use crate::sir::SirNodeKind;
+        use std::collections::HashSet;
+
         let mut sorted_states: Vec<_> = self.shared.module.state_elements.iter().collect();
         sorted_states.sort_by_key(|(name, _)| *name);
+
+        let mut declared_locals: HashSet<String> = HashSet::new();
 
         for (name, elem) in &sorted_states {
             // Only create local copies for scalar registers (≤128 bits)
@@ -158,16 +163,48 @@ impl<'a> MetalBackend<'a> {
                         "    {} local_{} = registers->{};\n",
                         base_type, sanitized, sanitized
                     ));
+                    declared_locals.insert(sanitized);
                 }
             }
         }
+
+        // BUG #254 FIX: Also declare local variables for FF outputs not in state_elements
+        for node in &self.shared.module.sequential_nodes {
+            if let SirNodeKind::FlipFlop { .. } = &node.kind {
+                for ff_output in &node.outputs {
+                    if !self.shared.module.state_elements.contains_key(&ff_output.signal_id) {
+                        let sanitized = self.shared.sanitize_name(&ff_output.signal_id);
+                        if declared_locals.contains(&sanitized) {
+                            continue;
+                        }
+                        let width = self.shared.get_signal_width(&ff_output.signal_id);
+                        if width <= 128 {
+                            let (base_type, array_size) = self.shared.type_mapper.get_type_for_width(width);
+                            if array_size.is_none() {
+                                output.push_str(&format!(
+                                    "    {} local_{} = registers->{};\n",
+                                    base_type, sanitized, sanitized
+                                ));
+                                declared_locals.insert(sanitized);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         output.push('\n');
     }
 
     /// Generate writeback of local state to registers after batched simulation
     fn generate_local_state_writeback(&self, output: &mut String) {
+        use crate::sir::SirNodeKind;
+        use std::collections::HashSet;
+
         let mut sorted_states: Vec<_> = self.shared.module.state_elements.iter().collect();
         sorted_states.sort_by_key(|(name, _)| *name);
+
+        let mut written_back: HashSet<String> = HashSet::new();
 
         output.push_str("\n    // Write back local state to registers\n");
         for (name, elem) in &sorted_states {
@@ -180,6 +217,32 @@ impl<'a> MetalBackend<'a> {
                         "    registers->{} = local_{};\n",
                         sanitized, sanitized
                     ));
+                    written_back.insert(sanitized);
+                }
+            }
+        }
+
+        // BUG #254 FIX: Also write back FF outputs not in state_elements
+        for node in &self.shared.module.sequential_nodes {
+            if let SirNodeKind::FlipFlop { .. } = &node.kind {
+                for ff_output in &node.outputs {
+                    if !self.shared.module.state_elements.contains_key(&ff_output.signal_id) {
+                        let sanitized = self.shared.sanitize_name(&ff_output.signal_id);
+                        if written_back.contains(&sanitized) {
+                            continue;
+                        }
+                        let width = self.shared.get_signal_width(&ff_output.signal_id);
+                        if width <= 128 {
+                            let (_, array_size) = self.shared.type_mapper.get_type_for_width(width);
+                            if array_size.is_none() {
+                                output.push_str(&format!(
+                                    "    registers->{} = local_{};\n",
+                                    sanitized, sanitized
+                                ));
+                                written_back.insert(sanitized);
+                            }
+                        }
+                    }
                 }
             }
         }

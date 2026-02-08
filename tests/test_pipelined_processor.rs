@@ -104,7 +104,7 @@ mod pipelined_processor_tests {
         }
 
         // Generate Metal shader for debugging
-        let shader_code = skalp_sir::generate_metal_shader(&sir);
+        let shader_code = skalp_sir::MetalBackend::generate(&sir);
         println!("\n=== Generated Metal Shader (first 2000 chars) ===");
         println!("{}", &shader_code[..shader_code.len().min(2000)]);
 
