@@ -1067,13 +1067,13 @@ impl MirToLirTransform {
                             target_signal // Feedback: keep current value
                         };
 
-                        // BUG FIX: When else_expr is None but else_has_nested is true,
-                        // we need to collect paths from nested else and build a MUX cascade
-                        // instead of just using feedback.
-                        let else_signal = if let Some(expr) = else_expr {
-                            self.transform_expression(expr, target_width)
-                        } else if else_has_nested {
-                            // Collect and process nested else paths (same logic as SDFF pattern)
+                        // BUG #255 FIX: When else_has_nested is true, we MUST collect paths
+                        // from nested case/if statements and build a MUX cascade.
+                        // Previously, if else_expr was Some (from flattened collect_assignments),
+                        // we used it directly, which is WRONG because it's just the first
+                        // assignment found, not the correct conditional assignment.
+                        let else_signal = if else_has_nested {
+                            // BUG #255 FIX: Collect and process nested else paths
                             if let Some(ref else_block) = if_stmt.else_block {
                                 // Transform blocking assignments first
                                 self.transform_blocking_assignments_recursive(else_block);
@@ -1120,6 +1120,9 @@ impl MirToLirTransform {
                             } else {
                                 target_signal
                             }
+                        } else if let Some(expr) = else_expr {
+                            // Simple else case: direct assignment
+                            self.transform_expression(expr, target_width)
                         } else {
                             target_signal // Feedback: keep current value
                         };
@@ -1229,8 +1232,9 @@ impl MirToLirTransform {
         let case_expr_signal = self.transform_expression(&case_stmt.expr, case_expr_width);
 
         // Collect all assignments from all case arms and default
+        // BUG #255 FIX: Also store the block for proper conditional synthesis
         let mut all_targets: Vec<LValue> = Vec::new();
-        let mut case_arms_assignments: Vec<(Vec<Expression>, Vec<(LValue, Expression)>)> = Vec::new();
+        let mut case_arms_data: Vec<(Vec<Expression>, &Block)> = Vec::new();
 
         for item in &case_stmt.items {
             let assigns = Self::collect_assignments(&item.block);
@@ -1239,7 +1243,7 @@ impl MirToLirTransform {
                     all_targets.push(lv.clone());
                 }
             }
-            case_arms_assignments.push((item.values.clone(), assigns));
+            case_arms_data.push((item.values.clone(), &item.block));
         }
 
         let default_assigns = if let Some(ref default_block) = case_stmt.default {
@@ -1282,10 +1286,17 @@ impl MirToLirTransform {
             // Build mux chain from last case to first (so first has priority)
             let mut current_result = default_signal;
 
-            for (case_values, assigns) in case_arms_assignments.iter().rev() {
-                // Get the expression for this target in this arm (or use current as feedback)
-                let arm_signal = if let Some(expr) = Self::find_assignment_expr(assigns, target) {
-                    self.transform_expression(expr, target_width)
+            for (case_values, arm_block) in case_arms_data.iter().rev() {
+                // BUG #255 FIX: Use synthesize_case_arm_for_target to properly handle
+                // conditional assignments inside case arms (e.g., if-else in match arms)
+                let has_target = Self::block_assigns_to_target(arm_block, target);
+                let arm_signal = if has_target {
+                    self.synthesize_case_arm_for_target(
+                        arm_block,
+                        target,
+                        target_width,
+                        current_result,
+                    )
                 } else {
                     current_result // Not assigned in this arm, use previous result
                 };
@@ -1617,6 +1628,48 @@ impl MirToLirTransform {
                             target,
                             else_condition.as_ref(),
                         ));
+                    } else {
+                        // BUG #255 FIX: If there's no else branch but the then branch assigns
+                        // to target, we need to add a "keep current value" path for the negated
+                        // condition. Without this, the mux chain falls through to the global
+                        // default instead of keeping the current state.
+                        //
+                        // Example: `Run => { if fault { state = Fault } }`
+                        // Should generate:
+                        //   - (state==Run && fault) → Fault
+                        //   - (state==Run && !fault) → feedback (keep Run)
+                        //
+                        // We add a special marker path with None as expression to indicate
+                        // "keep current value". The caller must handle this.
+                        let then_assigns_target = Self::block_assigns_to_target(&if_stmt.then_block, target);
+                        if then_assigns_target && outer_condition.is_some() {
+                            let negated_condition = Expression {
+                                kind: ExpressionKind::Unary {
+                                    op: UnaryOp::Not,
+                                    operand: Box::new(if_stmt.condition.clone()),
+                                },
+                                ty: skalp_frontend::types::Type::Bool,
+                                span: None,
+                            };
+
+                            let else_condition = Expression {
+                                kind: ExpressionKind::Binary {
+                                    op: BinaryOp::And,
+                                    left: Box::new(outer_condition.unwrap().clone()),
+                                    right: Box::new(negated_condition),
+                                },
+                                ty: skalp_frontend::types::Type::Bool,
+                                span: None,
+                            };
+
+                            // Add a SignalRef to target to indicate "keep current value"
+                            let keep_expr = Expression {
+                                kind: ExpressionKind::Ref(target.clone()),
+                                ty: skalp_frontend::types::Type::Unknown,
+                                span: None,
+                            };
+                            paths.push((Some(else_condition), keep_expr));
+                        }
                     }
                 }
                 Statement::Block(inner_block) => {
@@ -2056,6 +2109,124 @@ impl MirToLirTransform {
             .iter()
             .find(|(lv, _)| lv == target)
             .map(|(_, expr)| expr)
+    }
+
+    /// BUG #255 FIX: Synthesize a case arm block for a specific target, handling conditionals
+    /// Returns the signal representing the value of target after executing the block
+    fn synthesize_case_arm_for_target(
+        &mut self,
+        block: &Block,
+        target: &LValue,
+        target_width: u32,
+        feedback_signal: LirSignalId,
+    ) -> LirSignalId {
+        // Check if block contains direct assignment or conditional assignment
+        for stmt in &block.statements {
+            match stmt {
+                Statement::Assignment(assign)
+                    if matches!(assign.kind, AssignmentKind::NonBlocking) && &assign.lhs == target =>
+                {
+                    // Direct assignment - transform and return
+                    return self.transform_expression(&assign.rhs, target_width);
+                }
+                Statement::If(if_stmt) => {
+                    // Check if this if statement assigns to our target
+                    let then_has_target = Self::block_assigns_to_target(&if_stmt.then_block, target);
+                    let else_has_target = if_stmt.else_block.as_ref()
+                        .map(|b| Self::block_assigns_to_target(b, target))
+                        .unwrap_or(false);
+
+                    if then_has_target || else_has_target {
+                        // Synthesize the conditional assignment as a mux
+                        let cond_width = self.infer_expression_width(&if_stmt.condition);
+                        let cond_signal = self.transform_expression(&if_stmt.condition, cond_width);
+
+                        // Get then value (recursively handle nested conditionals)
+                        let then_signal = if then_has_target {
+                            self.synthesize_case_arm_for_target(
+                                &if_stmt.then_block,
+                                target,
+                                target_width,
+                                feedback_signal,
+                            )
+                        } else {
+                            feedback_signal
+                        };
+
+                        // Get else value
+                        let else_signal = if let Some(ref else_block) = if_stmt.else_block {
+                            if else_has_target {
+                                self.synthesize_case_arm_for_target(
+                                    else_block,
+                                    target,
+                                    target_width,
+                                    feedback_signal,
+                                )
+                            } else {
+                                feedback_signal
+                            }
+                        } else {
+                            feedback_signal
+                        };
+
+                        // Create mux: if cond then then_signal else else_signal
+                        let mux_out = self.alloc_temp_signal(target_width);
+                        let path = self.unique_node_path("arm_cond_mux");
+                        self.lir.add_node(
+                            LirOp::Mux2 { width: target_width },
+                            vec![cond_signal, else_signal, then_signal],
+                            mux_out,
+                            path,
+                        );
+                        return mux_out;
+                    }
+                }
+                Statement::Block(inner_block) => {
+                    // Recursively check inner block
+                    if Self::block_assigns_to_target(inner_block, target) {
+                        return self.synthesize_case_arm_for_target(
+                            inner_block,
+                            target,
+                            target_width,
+                            feedback_signal,
+                        );
+                    }
+                }
+                _ => {}
+            }
+        }
+        // No assignment found - return feedback
+        feedback_signal
+    }
+
+    /// Check if a block assigns to a target (non-recursively in conditionals)
+    fn block_assigns_to_target(block: &Block, target: &LValue) -> bool {
+        for stmt in &block.statements {
+            match stmt {
+                Statement::Assignment(assign)
+                    if matches!(assign.kind, AssignmentKind::NonBlocking) && &assign.lhs == target =>
+                {
+                    return true;
+                }
+                Statement::If(if_stmt) => {
+                    if Self::block_assigns_to_target(&if_stmt.then_block, target) {
+                        return true;
+                    }
+                    if let Some(ref else_block) = if_stmt.else_block {
+                        if Self::block_assigns_to_target(else_block, target) {
+                            return true;
+                        }
+                    }
+                }
+                Statement::Block(inner_block) => {
+                    if Self::block_assigns_to_target(inner_block, target) {
+                        return true;
+                    }
+                }
+                _ => {}
+            }
+        }
+        false
     }
 
     /// Transform a combinational block
