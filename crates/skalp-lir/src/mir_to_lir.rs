@@ -1410,6 +1410,15 @@ impl MirToLirTransform {
                         assigns.extend(Self::collect_assignments(default_block));
                     }
                 }
+                // BUG #253 FIX: Collect assignments from nested If statements
+                // This is needed for FSMs where case arms contain conditional assignments
+                // like: match state { Idle => if start { state = Active } }
+                Statement::If(if_stmt) => {
+                    assigns.extend(Self::collect_assignments(&if_stmt.then_block));
+                    if let Some(ref else_block) = if_stmt.else_block {
+                        assigns.extend(Self::collect_assignments(else_block));
+                    }
+                }
                 _ => {}
             }
         }
@@ -2520,6 +2529,7 @@ impl MirToLirTransform {
             }
 
             // BUG #245: Implement integer division
+            // BUG #250: Handle signed division correctly using sign-magnitude approach
             BinaryOp::Div => {
                 // Try to extract constant divisor for optimized division
                 if let Some(divisor) = extract_constant_value(right) {
@@ -2531,14 +2541,32 @@ impl MirToLirTransform {
                     }
 
                     let left_sig = self.transform_expression(left, operand_width);
+                    let is_signed = self.infer_expression_is_signed(left);
 
                     // Check if divisor is power of 2 - use right shift
                     if divisor.is_power_of_two() {
                         let shift_amount = divisor.trailing_zeros() as u64;
                         let shift_const = self.create_constant(&Value::Integer(shift_amount as i64), operand_width);
 
-                        return self.create_shift_right_node(left_sig, shift_const, operand_width);
+                        // BUG #250: Use arithmetic shift for signed operands
+                        if is_signed {
+                            return self.create_arithmetic_shift_right_node(left_sig, shift_const, operand_width);
+                        } else {
+                            return self.create_shift_right_node(left_sig, shift_const, operand_width);
+                        }
                     }
+
+                    // For signed division, use sign-magnitude approach:
+                    // 1. Get sign bit of dividend
+                    // 2. Compute absolute value
+                    // 3. Perform unsigned division
+                    // 4. Apply sign to result
+                    let dividend_for_div = if is_signed {
+                        // BUG #250: For signed division, compute absolute value first
+                        self.compute_absolute_value(left_sig, operand_width)
+                    } else {
+                        left_sig
+                    };
 
                     // For other constants, use magic number multiplication
                     // This implements: n / d ≈ (n * m) >> (32 + s)
@@ -2549,6 +2577,7 @@ impl MirToLirTransform {
                     let magic_const = self.create_constant(&Value::Integer(magic as i64), operand_width * 2);
 
                     // Step 2: Zero-extend dividend to double width for multiplication
+                    // (always zero-extend since we're working with absolute value for signed)
                     let extended_dividend = self.alloc_temp_signal(operand_width * 2);
                     let path = self.unique_node_path("div_zext");
                     self.lir.add_node(
@@ -2556,7 +2585,7 @@ impl MirToLirTransform {
                             from: operand_width,
                             to: operand_width * 2,
                         },
-                        vec![left_sig],
+                        vec![dividend_for_div],
                         extended_dividend,
                         path,
                     );
@@ -2590,7 +2619,7 @@ impl MirToLirTransform {
                     );
 
                     // Step 5: Extract lower bits (truncate back to original width)
-                    let result = self.alloc_temp_signal(operand_width);
+                    let unsigned_result = self.alloc_temp_signal(operand_width);
                     let path = self.unique_node_path("div_trunc");
                     self.lir.add_node(
                         LirOp::RangeSelect {
@@ -2599,11 +2628,16 @@ impl MirToLirTransform {
                             low: 0,
                         },
                         vec![shifted],
-                        result,
+                        unsigned_result,
                         path,
                     );
 
-                    return result;
+                    // BUG #250: For signed division, apply sign to result
+                    if is_signed {
+                        return self.apply_sign_to_result(left_sig, unsigned_result, operand_width);
+                    } else {
+                        return unsigned_result;
+                    }
                 } else {
                     // Variable divisor - not supported yet, emit warning
                     self.warnings.push(format!(
@@ -2670,25 +2704,48 @@ impl MirToLirTransform {
             ),
             UnaryOp::Negate => {
                 // Two's complement negation
+                // BUG #250 FIX: Use expected_width to ensure proper bit width for negation
+                // The operand literal might have fewer bits than the target context requires
+                let negate_width = expected_width.max(operand_width);
+
+                // If operand is narrower than target, we need to widen it first
+                let widened_operand = if operand_width < negate_width {
+                    // Zero-extend the operand to the target width
+                    let ext_out = self.alloc_temp_signal(negate_width);
+                    let path = self.unique_node_path("neg_zext");
+                    self.lir.add_node(
+                        LirOp::ZeroExtend {
+                            from: operand_width,
+                            to: negate_width,
+                        },
+                        vec![operand_signal],
+                        ext_out,
+                        path,
+                    );
+                    ext_out
+                } else {
+                    operand_signal
+                };
+
                 // First invert
-                let inv_out = self.alloc_temp_signal(operand_width);
+                let inv_out = self.alloc_temp_signal(negate_width);
                 let path = self.unique_node_path("neg_inv");
                 self.lir.add_node(
                     LirOp::Not {
-                        width: operand_width,
+                        width: negate_width,
                     },
-                    vec![operand_signal],
+                    vec![widened_operand],
                     inv_out,
                     path,
                 );
 
                 // Then add 1
-                let one = self.create_constant(&Value::Integer(1), operand_width);
-                let out = self.alloc_temp_signal(operand_width);
+                let one = self.create_constant(&Value::Integer(1), negate_width);
+                let out = self.alloc_temp_signal(negate_width);
                 let path = self.unique_node_path("neg_add");
                 self.lir.add_node(
                     LirOp::Add {
-                        width: operand_width,
+                        width: negate_width,
                         has_carry: false,
                     },
                     vec![inv_out, one],
@@ -2786,6 +2843,124 @@ impl MirToLirTransform {
             path,
         );
         out
+    }
+
+    /// Create an arithmetic right-shift node (for signed division by power-of-2)
+    /// BUG #250: Signed division by power-of-2 needs arithmetic shift, not logical shift
+    fn create_arithmetic_shift_right_node(&mut self, input: LirSignalId, shift: LirSignalId, width: u32) -> LirSignalId {
+        let out = self.alloc_temp_signal(width);
+        let path = self.unique_node_path("sar");
+        self.lir.add_node(
+            LirOp::Sar { width },
+            vec![input, shift],
+            out,
+            path,
+        );
+        out
+    }
+
+    /// Compute absolute value of a signed integer: abs(x) = x < 0 ? -x : x
+    /// BUG #250: Used for sign-magnitude approach to signed division
+    fn compute_absolute_value(&mut self, input: LirSignalId, width: u32) -> LirSignalId {
+        // Get sign bit (MSB)
+        let sign_bit = self.alloc_temp_signal(1);
+        let path = self.unique_node_path("abs_sign");
+        self.lir.add_node(
+            LirOp::RangeSelect {
+                width,
+                high: width - 1,
+                low: width - 1,
+            },
+            vec![input],
+            sign_bit,
+            path,
+        );
+
+        // Compute two's complement negation: -x = ~x + 1
+        // Step 1: NOT the input
+        let inverted = self.alloc_temp_signal(width);
+        let path = self.unique_node_path("abs_not");
+        self.lir.add_node(
+            LirOp::Not { width },
+            vec![input],
+            inverted,
+            path,
+        );
+
+        // Step 2: Add 1
+        let one = self.create_constant(&Value::Integer(1), width);
+        let negated = self.alloc_temp_signal(width);
+        let path = self.unique_node_path("abs_neg");
+        self.lir.add_node(
+            LirOp::Add { width, has_carry: false },
+            vec![inverted, one],
+            negated,
+            path,
+        );
+
+        // Mux2: select negated if sign bit is 1, else original
+        // Mux2 semantics: result = sel ? b : a, inputs are [sel, a, b]
+        let result = self.alloc_temp_signal(width);
+        let path = self.unique_node_path("abs_mux");
+        self.lir.add_node(
+            LirOp::Mux2 { width },
+            vec![sign_bit, input, negated], // if sign_bit then negated else input
+            result,
+            path,
+        );
+
+        result
+    }
+
+    /// Apply sign of original dividend to the quotient result
+    /// BUG #250: result = dividend_sign ? -quotient : quotient
+    fn apply_sign_to_result(&mut self, original: LirSignalId, quotient: LirSignalId, width: u32) -> LirSignalId {
+        // Get sign bit of original dividend (MSB)
+        let sign_bit = self.alloc_temp_signal(1);
+        let path = self.unique_node_path("div_sign");
+        self.lir.add_node(
+            LirOp::RangeSelect {
+                width,
+                high: width - 1,
+                low: width - 1,
+            },
+            vec![original],
+            sign_bit,
+            path,
+        );
+
+        // Compute two's complement negation of quotient: -q = ~q + 1
+        let inverted = self.alloc_temp_signal(width);
+        let path = self.unique_node_path("div_qnot");
+        self.lir.add_node(
+            LirOp::Not { width },
+            vec![quotient],
+            inverted,
+            path,
+        );
+
+        let one = self.create_constant(&Value::Integer(1), width);
+        let negated = self.alloc_temp_signal(width);
+        let path = self.unique_node_path("div_qneg");
+        self.lir.add_node(
+            LirOp::Add { width, has_carry: false },
+            vec![inverted, one],
+            negated,
+            path,
+        );
+
+        // Mux2: select negated quotient if sign bit is 1, else original quotient
+        // Mux2 semantics: result = sel ? b : a, inputs are [sel, a, b]
+        let result = self.alloc_temp_signal(width);
+        let path = self.unique_node_path("div_result");
+        self.lir.add_node(
+            LirOp::Mux2 { width },
+            vec![sign_bit, quotient, negated], // if sign_bit then negated else quotient
+            result,
+            path,
+        );
+
+        result
     }
 
     /// Get the name of a signal from its ID
@@ -3069,7 +3244,15 @@ impl MirToLirTransform {
                 // If either operand is signed, treat as signed comparison
                 self.infer_expression_is_signed(left) || self.infer_expression_is_signed(right)
             }
-            ExpressionKind::Unary { operand, .. } => self.infer_expression_is_signed(operand),
+            // BUG #250: Negation always produces a signed result, regardless of operand signedness
+            // -x can be negative even if x is unsigned
+            ExpressionKind::Unary { operand, op, .. } => {
+                if matches!(op, UnaryOp::Negate) {
+                    true // Negation always produces signed result
+                } else {
+                    self.infer_expression_is_signed(operand)
+                }
+            }
             ExpressionKind::Conditional {
                 then_expr,
                 else_expr,

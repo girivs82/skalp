@@ -962,35 +962,8 @@ impl GateLevelSimulator {
                     // Reset behavior is now handled by MUX in front of DFFs (tech_mapper change).
                     // The MUX selects the reset value when rst=1, and the DFF latches it.
                     // Previously, forcing all registers to 0 broke non-zero reset values.
+
                     for op in &block.operations {
-                        // Debug: trace state_reg DFF operations
-                        if let SirOperation::Primitive { outputs, inputs, ptype, path, .. } = op {
-                            let is_state_reg = path.contains("state_reg");
-                            let is_power_reg = path.contains("power_reg");
-                            if is_state_reg || is_power_reg {
-                                let input_details: Vec<_> = inputs
-                                    .iter()
-                                    .map(|sig_id| {
-                                        let name = self.signal_id_to_name.get(&sig_id.0).cloned().unwrap_or_else(|| format!("id{}", sig_id.0));
-                                        let value = self.state.signals.get(&sig_id.0).and_then(|v: &Vec<bool>| v.first().copied());
-                                        (name, sig_id.0, value)
-                                    })
-                                    .collect();
-                                let output_names: Vec<_> = outputs.iter()
-                                    .map(|o| self.signal_id_to_name.get(&o.0).cloned().unwrap_or_default())
-                                    .collect();
-                                if is_power_reg {
-                                    println!("[GATE_DFF_POWER] cycle={} path={}, outputs={:?}", self.state.cycle, path, output_names);
-                                    for (name, id, sig_val) in &input_details {
-                                        println!("[GATE_DFF_POWER]   d_input '{}' (id={}): value={:?}",
-                                            name, id, sig_val);
-                                    }
-                                } else if is_state_reg {
-                                    // Only log state_reg if needed
-                                    // println!("[GATE_DFF] state_reg: path={}, outputs={:?}", path, output_names);
-                                }
-                            }
-                        }
                         self.evaluate_operation(op);
                     }
                 }
