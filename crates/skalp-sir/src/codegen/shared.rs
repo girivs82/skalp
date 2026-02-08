@@ -178,7 +178,9 @@ impl<'a> SharedCodegen<'a> {
                 .get(signal)
                 .copied()
                 .unwrap_or_else(|| self.type_mapper.get_signal_width(self.module, signal)),
-            SirNodeKind::FlipFlop { .. } | SirNodeKind::Latch { .. } => get_input_width(0),
+            // FlipFlop inputs: [clock, data], so data is at index 1
+            // Latch inputs: [enable, data], so data is at index 1
+            SirNodeKind::FlipFlop { .. } | SirNodeKind::Latch { .. } => get_input_width(1),
             SirNodeKind::Memory { width, .. } => *width,
             SirNodeKind::ArrayRead => get_input_width(0),
             SirNodeKind::ArrayWrite => get_input_width(0),
