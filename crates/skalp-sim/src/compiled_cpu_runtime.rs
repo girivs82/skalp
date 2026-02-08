@@ -66,6 +66,10 @@ pub struct CompiledCpuRuntime {
     current_cycle: u64,
     /// Reference to the SIR module for metadata
     module: SirModule,
+    /// Clock signal name for edge detection
+    clock_name: Option<String>,
+    /// Previous clock value for edge detection
+    prev_clock: u64,
 }
 
 /// A mapping from field names to their offset and size in the buffer
@@ -188,6 +192,32 @@ impl CompiledCpuRuntime {
         let (input_fields, register_fields, signal_fields, output_mappings) =
             Self::build_field_maps(module);
 
+        // Find clock signal name from clock_domains, name_registry, or inputs
+        // First try clock_domains (key is the clock signal name)
+        let clock_name = module.clock_domains.keys()
+            .next()
+            .cloned()
+            .or_else(|| {
+                // Fall back to name_registry lookup for inputs containing clk/clock
+                module.inputs.iter()
+                    .find(|input| {
+                        // Check if the user-facing name (via name_registry) contains clk/clock
+                        if let Some(entry) = module.name_registry.get_entry_by_internal(&input.name) {
+                            let path = &entry.hierarchical_path;
+                            path.contains("clk") || path.contains("clock")
+                        } else {
+                            false
+                        }
+                    })
+                    .map(|p| p.name.clone())
+            })
+            .or_else(|| {
+                // Last resort: first input with width 1 (often clock in simple designs)
+                module.inputs.iter()
+                    .find(|p| p.sir_type.width() == 1)
+                    .map(|p| p.name.clone())
+            });
+
         Ok(Self {
             _library: library,
             kernel,
@@ -201,6 +231,8 @@ impl CompiledCpuRuntime {
             output_mappings,
             current_cycle: 0,
             module: module.clone(),
+            clock_name,
+            prev_clock: 0,
         })
     }
 
@@ -342,6 +374,7 @@ impl SimulationRuntime for CompiledCpuRuntime {
         self.registers.clear();
         self.signals.clear();
         self.current_cycle = 0;
+        self.prev_clock = 0;
         Ok(())
     }
 
@@ -349,8 +382,29 @@ impl SimulationRuntime for CompiledCpuRuntime {
         // Phase 1: Combinational evaluation
         self.eval_combinational();
 
-        // Phase 2: Sequential update
-        self.eval_sequential();
+        // Phase 2: Sequential update - only on rising edge of clock
+        // Get current clock value
+        let curr_clock = if let Some(ref clock_name) = self.clock_name {
+            let sanitized = clock_name.replace('.', "_");
+            if let Some(info) = self.input_fields.get(&sanitized) {
+                let bytes = self.inputs.read(info.offset, info.size);
+                if !bytes.is_empty() { bytes[0] as u64 & 1 } else { 0 }
+            } else {
+                // Clock not found in inputs, assume always rising
+                1
+            }
+        } else {
+            // No clock signal, assume always rising
+            1
+        };
+
+        // Only update on rising edge (0 -> 1)
+        let is_rising_edge = self.prev_clock == 0 && curr_clock == 1;
+
+        if is_rising_edge || self.clock_name.is_none() {
+            self.eval_sequential();
+        }
+        self.prev_clock = curr_clock;
 
         // Phase 3: Combinational evaluation again (to propagate new register values)
         self.eval_combinational();
@@ -388,6 +442,7 @@ impl SimulationRuntime for CompiledCpuRuntime {
         self.registers.clear();
         self.signals.clear();
         self.current_cycle = 0;
+        self.prev_clock = 0;
 
         // Run one combinational eval to propagate reset values
         self.eval_combinational();

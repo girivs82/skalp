@@ -82,11 +82,17 @@ impl<'a> SharedCodegen<'a> {
         }
 
         // 6. Compute widths from sequential nodes
+        // For FlipFlop/Latch outputs that are state elements, keep the state element width
+        // (which is the declared width) rather than the computed width from the data input.
+        // The data path may be wider, but the flip-flop should truncate to the declared width.
         for node in &self.module.sequential_nodes {
             let computed_width = self.compute_node_output_width_from_cache(node);
             for output in &node.outputs {
-                self.signal_width_cache
-                    .insert(output.signal_id.clone(), computed_width);
+                // Only insert if not already present (state elements already have correct widths)
+                if !self.signal_width_cache.contains_key(&output.signal_id) {
+                    self.signal_width_cache
+                        .insert(output.signal_id.clone(), computed_width);
+                }
             }
         }
     }
@@ -1549,13 +1555,16 @@ impl<'a> SharedCodegen<'a> {
         sorted_states.sort_by_key(|(name, _)| *name);
 
         // Initialize next registers from current
-        self.write_indented(&format!("// Initialize {} from {}\n", next_reg, current_reg));
-        for (state_name, _) in &sorted_states {
-            let sanitized = self.sanitize_name(state_name);
-            self.write_indented(&format!(
-                "{}->{} = {}->{};\n",
-                next_reg, sanitized, current_reg, sanitized
-            ));
+        // In batched mode with local variables, skip this - locals already have current values
+        if !self.in_batched_mode {
+            self.write_indented(&format!("// Initialize {} from {}\n", next_reg, current_reg));
+            for (state_name, _) in &sorted_states {
+                let sanitized = self.sanitize_name(state_name);
+                self.write_indented(&format!(
+                    "{}->{} = {}->{};\n",
+                    next_reg, sanitized, current_reg, sanitized
+                ));
+            }
         }
 
         // Sort sequential nodes by output name
@@ -1595,10 +1604,23 @@ impl<'a> SharedCodegen<'a> {
             String::new()
         };
 
+        // In batched mode, write to local variable for scalar registers (≤64 bits)
+        // This matches generate_local_state_copies which creates local_X for width ≤ 64
+        let target = if self.in_batched_mode && output_width <= 64 {
+            // Check if this is a scalar type (not an array)
+            let (_, array_size) = self.type_mapper.get_type_for_width(output_width);
+            if array_size.is_none() {
+                format!("local_{}", sanitized_output)
+            } else {
+                format!("{}->{}", next_reg, sanitized_output)
+            }
+        } else {
+            format!("{}->{}", next_reg, sanitized_output)
+        };
+
         self.write_indented(&format!(
-            "{}->{} = signals->{}{};\n",
-            next_reg,
-            sanitized_output,
+            "{} = signals->{}{};\n",
+            target,
             sanitized_data,
             mask
         ));
