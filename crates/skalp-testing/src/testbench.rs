@@ -985,7 +985,10 @@ impl Testbench {
     async fn step_with_coverage_update(&mut self) {
         let snapshot = self.sim.step_with_snapshot().await;
         if let (Some(state), Some(ref mut cov_db)) = (snapshot, &mut self.coverage_db) {
+            // Update toggle coverage from both signals and registers
+            // State elements are in registers (from on(clk.rise) blocks)
             cov_db.update_toggle(&state.signals);
+            cov_db.update_toggle(&state.registers);
             if let Some(ref sir) = self.sir_module {
                 cov_db.update_nodes(&state.signals, sir);
             }
@@ -1315,7 +1318,7 @@ impl Testbench {
     /// Use 1 for maximum coverage accuracy (samples every cycle, slower).
     ///
     /// # Example
-    /// ```rust
+    /// ```rust,ignore
     /// // Sample every 100 cycles for fast execution on long tests
     /// tb.set_coverage_sample_rate(100);
     /// ```

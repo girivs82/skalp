@@ -192,8 +192,8 @@ pub fn compile_cpp_kernel(source: &str) -> CompileResult<PathBuf> {
         )));
     }
 
-    // Clean up source file (keep library)
-    let _ = fs::remove_file(&src_path);
+    // Keep source file for debugging
+    // let _ = fs::remove_file(&src_path);
 
     tracing::info!("Compiled C++ kernel: {}", lib_path.display());
     Ok(lib_path)
