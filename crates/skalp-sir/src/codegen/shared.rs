@@ -1091,18 +1091,30 @@ impl<'a> SharedCodegen<'a> {
                 }
             } else {
                 // Input is scalar, output is array - unusual case, zero-fill extra elements
-                self.write_indented(&format!(
-                    "signals->{}[0] = ({} >> {}) & 0xFFFFFFFF;\n",
-                    self.sanitize_name(output),
-                    input_base,
-                    shift
-                ));
-                for i in 1..output_array_size {
+                // BUG FIX: If shift exceeds input width, the result is 0 (not undefined behavior)
+                if shift >= input_width {
+                    // Shift exceeds input width - all bits are 0
+                    for i in 0..output_array_size {
+                        self.write_indented(&format!(
+                            "signals->{}[{}] = 0;\n",
+                            self.sanitize_name(output),
+                            i
+                        ));
+                    }
+                } else {
                     self.write_indented(&format!(
-                        "signals->{}[{}] = 0;\n",
+                        "signals->{}[0] = ({} >> {}) & 0xFFFFFFFF;\n",
                         self.sanitize_name(output),
-                        i
+                        input_base,
+                        shift
                     ));
+                    for i in 1..output_array_size {
+                        self.write_indented(&format!(
+                            "signals->{}[{}] = 0;\n",
+                            self.sanitize_name(output),
+                            i
+                        ));
+                    }
                 }
             }
         } else if input_uses_array {
@@ -1162,19 +1174,27 @@ impl<'a> SharedCodegen<'a> {
             }
         } else {
             // Both input and output are scalar - simple shift and mask
-            let mask = if width >= 64 {
-                u64::MAX
+            // BUG FIX: If shift exceeds input width, the result is 0
+            if shift >= input_width {
+                self.write_indented(&format!(
+                    "signals->{} = 0;\n",
+                    self.sanitize_name(output)
+                ));
             } else {
-                (1u64 << width) - 1
-            };
+                let mask = if width >= 64 {
+                    u64::MAX
+                } else {
+                    (1u64 << width) - 1
+                };
 
-            self.write_indented(&format!(
-                "signals->{} = ({} >> {}) & 0x{:X};\n",
-                self.sanitize_name(output),
-                input_base,
-                shift,
-                mask
-            ));
+                self.write_indented(&format!(
+                    "signals->{} = ({} >> {}) & 0x{:X};\n",
+                    self.sanitize_name(output),
+                    input_base,
+                    shift,
+                    mask
+                ));
+            }
         }
     }
 
