@@ -1565,9 +1565,12 @@ impl<'a> MirToSirConverter<'a> {
 
         // BUG FIX: Filter out output ports that are NOT state elements
         // Registered outputs (assigned in on(clk.rise)) need FlipFlops, not continuous assignments
+        // BUG #249 FIX: Must translate target name to internal name before checking state_elements
+        // because state_elements uses internal names (_s123) not MIR names (state_reg)
         targets.retain(|target| {
             let is_output = self.is_output_port(target);
-            let is_state_element = self.sir.state_elements.contains_key(target);
+            let internal_target = self.translate_to_internal_name(target);
+            let is_state_element = self.sir.state_elements.contains_key(&internal_target);
             // Keep if: not an output, OR is an output that's also a state element (registered)
             !is_output || is_state_element
         });
@@ -1575,16 +1578,22 @@ impl<'a> MirToSirConverter<'a> {
         // BUG #227 FIX: Filter out variables (let bindings) - they should remain combinational
         // Variables inside sequential blocks are temporary values computed each cycle, not state.
         // We'll handle them separately with continuous assignments, not flip-flops.
+        // BUG #249 FIX: Must translate target name to internal name before checking state_elements
         let variable_targets: Vec<String> = targets.iter()
             .filter(|target| {
                 // Check if this is NOT a state element (variables are never state elements)
-                !self.sir.state_elements.contains_key(*target)
+                let internal_target = self.translate_to_internal_name(*target);
+                !self.sir.state_elements.contains_key(&internal_target)
             })
             .cloned()
             .collect();
 
         // Remove variables from flip-flop creation
-        targets.retain(|target| self.sir.state_elements.contains_key(target));
+        // BUG #249 FIX: Translate to internal name before checking
+        targets.retain(|target| {
+            let internal_target = self.translate_to_internal_name(target);
+            self.sir.state_elements.contains_key(&internal_target)
+        });
 
         println!("   📋 COLLECTED TARGETS (after filtering): {:?}", targets);
         println!("   📋 VARIABLE TARGETS (will be combinational): {:?}", variable_targets);
@@ -1682,9 +1691,12 @@ impl<'a> MirToSirConverter<'a> {
 
         // BUG FIX: Filter out output ports that are NOT state elements
         // Registered outputs (assigned in on(clk.rise)) need FlipFlops, not continuous assignments
+        // BUG #249 FIX: Must translate target name to internal name before checking state_elements
+        // because state_elements uses internal names (_s123) not MIR names (state_reg)
         all_targets.retain(|target| {
             let is_output = self.is_output_port(target);
-            let is_state_element = self.sir.state_elements.contains_key(target);
+            let internal_target = self.translate_to_internal_name(target);
+            let is_state_element = self.sir.state_elements.contains_key(&internal_target);
             !is_output || is_state_element
         });
 
@@ -5420,33 +5432,43 @@ impl<'a> MirToSirConverter<'a> {
         }
 
         // BUG FIX #117: Insert truncation slice node when node output is wider than declared signal
-        if let Some((declared_width, output_width)) = needs_truncation {
-            let slice_node = self.create_slice_node(node_id, declared_width - 1, 0);
-            // Set the signal's driver to the slice node
-            if let Some(signal) = self.sir.signals.iter_mut().find(|s| s.name == internal_name) {
-                signal.driver_node = Some(slice_node);
-            }
-            // Add the signal name to the slice node's outputs
-            if let Some(slice) = self.sir.combinational_nodes.iter_mut().find(|n| n.id == slice_node) {
-                slice.outputs.push(SignalRef {
-                    signal_id: internal_name.clone(),
-                    bit_range: None,
-                });
-            }
-
-            // Handle old driver cleanup then return early (skip normal output wiring)
-            if let Some(old_driver_id) = old_driver_to_update {
-                if let Some(old_node) = self
-                    .sir
-                    .combinational_nodes
-                    .iter_mut()
-                    .chain(self.sir.sequential_nodes.iter_mut())
-                    .find(|n| n.id == old_driver_id)
-                {
-                    old_node.outputs.retain(|o| o.signal_id != internal_name);
+        // BUG #249 FIX: For FlipFlops, don't use a slice - the codegen already handles masking.
+        // The FlipFlop output should be the state signal so sequential codegen works correctly.
+        if let Some((declared_width, _output_width)) = needs_truncation {
+            if !new_node_is_flipflop {
+                // Only create slice for combinational nodes, not FlipFlops
+                let slice_node = self.create_slice_node(node_id, declared_width - 1, 0);
+                // Set the signal's driver to the slice node
+                if let Some(signal) = self.sir.signals.iter_mut().find(|s| s.name == internal_name) {
+                    signal.driver_node = Some(slice_node);
                 }
+                // Add the signal name to the slice node's outputs
+                if let Some(slice) = self.sir.combinational_nodes.iter_mut().find(|n| n.id == slice_node) {
+                    slice.outputs.push(SignalRef {
+                        signal_id: internal_name.clone(),
+                        bit_range: None,
+                    });
+                }
+
+                // Handle old driver cleanup then return early (skip normal output wiring)
+                if let Some(old_driver_id) = old_driver_to_update {
+                    if let Some(old_node) = self
+                        .sir
+                        .combinational_nodes
+                        .iter_mut()
+                        .chain(self.sir.sequential_nodes.iter_mut())
+                        .find(|n| n.id == old_driver_id)
+                    {
+                        old_node.outputs.retain(|o| o.signal_id != internal_name);
+                    }
+                }
+                return;
             }
-            return;
+            // For FlipFlops, fall through to update the FlipFlop output directly
+            // The codegen will apply the appropriate width mask
+            if let Some(signal) = self.sir.signals.iter_mut().find(|s| s.name == internal_name) {
+                signal.driver_node = Some(node_id);
+            }
         }
 
         // BUG FIX #117r: Remove signal from old driver's outputs when flip-flop takes over
@@ -6824,23 +6846,45 @@ impl<'a> MirToSirConverter<'a> {
                 // For flattened ports like "faults_bms_fault", we need to check if any parent
                 // prefix (e.g., "faults" or "faults_bms") is in connections.
                 // This handles nested struct flattening where names have multiple underscores.
+                //
+                // BUG #249 FIX: Also check for double underscore "__" which is used for struct flattening
                 let is_connected = if instance.connections.contains_key(&port.name) {
                     true
                 } else {
-                    // Check if any prefix ending with "_" matches a connection
-                    // For "faults_bms_fault", check: "faults", "faults_bms"
+                    // Check if any prefix ending with "_" or "__" matches a connection
+                    // For "faults__bms_fault", check: "faults", "faults__bms"
                     let mut found = false;
-                    let mut remaining = &port.name[..];
-                    while let Some(underscore_pos) = remaining.find('_') {
-                        let prefix = &port.name[..port.name.len() - remaining.len() + underscore_pos];
+
+                    // First check double underscore (struct flattening)
+                    if let Some(pos) = port.name.find("__") {
+                        let prefix = &port.name[..pos];
                         if instance.connections.contains_key(prefix) {
                             found = true;
-                            break;
                         }
-                        remaining = &remaining[underscore_pos + 1..];
+                    }
+
+                    // Also check single underscore for backward compatibility
+                    if !found {
+                        let mut remaining = &port.name[..];
+                        while let Some(underscore_pos) = remaining.find('_') {
+                            let prefix = &port.name[..port.name.len() - remaining.len() + underscore_pos];
+                            if instance.connections.contains_key(prefix) {
+                                found = true;
+                                break;
+                            }
+                            remaining = &remaining[underscore_pos + 1..];
+                        }
                     }
                     found
                 };
+
+                // BUG #249 DEBUG: Log connection status for faults ports
+                if port.name.contains("faults") || inst_prefix.contains("protection") {
+                    println!("  🔵 BUG #249 OUTPUT PORT: port.name='{}', hierarchical='{}', is_connected={}",
+                        port.name, hierarchical_path, is_connected);
+                    println!("  🔵 BUG #249: instance.connections keys: {:?}",
+                        instance.connections.keys().collect::<Vec<_>>());
+                }
 
                 // Only create if not connected to parent (handled via port_mapping)
                 if !is_connected {
@@ -7321,22 +7365,47 @@ impl<'a> MirToSirConverter<'a> {
             "⚡⚡⚡ CONVERT_CHILD_ASSIGN_WITH_CTX: inst_prefix='{}', child_module='{}'",
             inst_prefix, child_module.name
         );
+
+        // BUG #249 DEBUG: Trace FaultLatch output port assignments
+        if child_module.name.contains("FaultLatch") {
+            println!("  🔴 BUG #249 DEBUG: FaultLatch assignment, LHS={:?}", assign.lhs);
+            println!("  🔴 BUG #249 DEBUG: port_mapping keys: {:?}", port_mapping.keys().collect::<Vec<_>>());
+            println!("  🔴 BUG #249 DEBUG: child_module.signals: {:?}",
+                child_module.signals.iter().map(|s| (&s.id, &s.name)).collect::<Vec<_>>());
+            println!("  🔴 BUG #249 DEBUG: child_module.ports: {:?}",
+                child_module.ports.iter().map(|p| (&p.id, &p.name, &p.direction)).collect::<Vec<_>>());
+        }
+
         // Translate LHS: if it's a port (output), map to parent signal
         // Otherwise prefix with instance name
         let lhs_signal = match &assign.lhs {
             LValue::Signal(sig_id) => {
                 if let Some(signal) = child_module.signals.iter().find(|s| s.id == *sig_id) {
+                    // BUG #249 DEBUG: Trace signal-to-port mapping
+                    if child_module.name.contains("FaultLatch") {
+                        println!("  🔴 BUG #249: LHS is Signal, found signal.name='{}', checking port_mapping", signal.name);
+                        println!("  🔴 BUG #249: port_mapping.contains_key('{}') = {}", signal.name, port_mapping.contains_key(&signal.name));
+                    }
+
                     // BUG #185 FIX: Check if this signal shares a name with a port that is in port_mapping
                     // This happens when an output port like 'result' is used as assignment LHS.
                     // If the port is mapped to a parent signal, use that instead of the instance-prefixed name.
                     if let Some(parent_expr) = port_mapping.get(&signal.name) {
-                        self.get_signal_name_from_expression_with_context(
+                        let resolved = self.get_signal_name_from_expression_with_context(
                             parent_expr,
                             parent_module_for_signals,
                             parent_prefix,
-                        )
+                        );
+                        if child_module.name.contains("FaultLatch") {
+                            println!("  🔴 BUG #249: ✅ Found in port_mapping! Resolved to '{}'", resolved);
+                        }
+                        resolved
                     } else {
-                        format!("{}.{}", inst_prefix, signal.name)
+                        let fallback = format!("{}.{}", inst_prefix, signal.name);
+                        if child_module.name.contains("FaultLatch") {
+                            println!("  🔴 BUG #249: ⚠️ NOT in port_mapping, using fallback '{}'", fallback);
+                        }
+                        fallback
                     }
                 } else if let Some(port) = child_module.ports.iter().find(|p| p.id.0 == sig_id.0) {
                     // Output port - this connects to parent signal
