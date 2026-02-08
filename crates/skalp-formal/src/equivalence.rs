@@ -10294,8 +10294,13 @@ impl SimBasedEquivalenceChecker {
                 // Check if this is a single-bit signal (gate_bits has one entry with no bit index)
                 let is_single_bit = gate_bits.len() == 1 && gate_bits[0].1.is_none();
 
-                // For single-bit signals, use only bit 0; for multi-bit, use full value
-                let mir_value = if is_single_bit { value & 1 } else { value };
+                // BUG #250 FIX: Mask the value to the actual port width
+                // The gate_bits length tells us the port width in bits
+                let port_width = gate_bits.len() as u32;
+                let width_mask = if port_width >= 64 { u64::MAX } else { (1u64 << port_width) - 1 };
+
+                // For single-bit signals, use only bit 0; for multi-bit, mask to port width
+                let mir_value = if is_single_bit { value & 1 } else { value & width_mask };
 
                 // Debug: Print hw_oc and fault-related inputs for cycle 0
                 // BUG #246 DEBUG: Also trace bms.fault which directly drives any_fault_flag
@@ -10335,6 +10340,84 @@ impl SimBasedEquivalenceChecker {
             gate_sim.set_input(&gate_clock_name, 1).await;
             mir_sim.step().await;
             gate_sim.step().await;
+
+            // BUG #249 DEBUG: Trace any_fault_flag and enable at cycle 0 to understand
+            // why Gate transitions but MIR doesn't
+            if cycle == 0 {
+                // MIR signals - use internal names from name_registry
+                let mir_any_fault = mir_sim.get_output_raw("any_fault_flag").await;
+                let mir_enable = mir_sim.get_output_raw("enable").await;
+                let mir_state = mir_sim.get_output_raw("state_reg").await;
+                let mir_prot_ov = mir_sim.get_output_raw("prot_faults__ov").await;
+                let mir_prot_uv = mir_sim.get_output_raw("prot_faults__uv").await;
+                let mir_prot_oc = mir_sim.get_output_raw("prot_faults__oc").await;
+                let mir_prot_ot = mir_sim.get_output_raw("prot_faults__ot").await;
+
+                // BUG #249: Also trace the other components of any_fault_flag
+                let mir_prot_desat = mir_sim.get_output_raw("prot_faults__desat").await;
+                let mir_bms_fault_flag = mir_sim.get_output_raw("bms_fault_flag").await;
+                let mir_bms_timeout = mir_sim.get_output_raw("bms_timeout").await;
+                let mir_lockstep_fault = mir_sim.get_output_raw("lockstep_fault").await;
+                let mir_bms_watchdog = mir_sim.get_output_raw("bms_watchdog").await;
+
+                // Gate signals - try different naming conventions
+                let gate_any_fault = gate_sim.get_output_raw("any_fault_flag").await;
+                let gate_any_fault_top = gate_sim.get_output_raw("top.any_fault_flag").await;
+                let gate_enable = gate_sim.get_output_raw("enable").await;
+                let gate_state = gate_sim.get_output_raw("lockstep_tx__state[0]").await;
+                // Assemble gate prot_faults from bits
+                let gate_prot_ov = gate_sim.get_output_raw("prot_faults__ov").await;
+                let gate_prot_uv = gate_sim.get_output_raw("prot_faults__uv").await;
+                let gate_prot_oc = gate_sim.get_output_raw("prot_faults__oc").await;
+                let gate_prot_ot = gate_sim.get_output_raw("prot_faults__ot").await;
+
+                // Gate: Also trace the other components
+                let gate_t31 = gate_sim.get_output_raw("top._t31").await;
+                let gate_t29 = gate_sim.get_output_raw("top._t29").await;
+                let gate_bms_timeout = gate_sim.get_output_raw("top.bms_timeout").await;
+                let gate_lockstep_fault = gate_sim.get_output_raw("top.lockstep_fault").await;
+
+                // BUG #249: Trace individual fault components in Gate
+                let gate_prot_ov_top = gate_sim.get_output_raw("top.prot_faults__ov").await;
+                let gate_prot_uv_top = gate_sim.get_output_raw("top.prot_faults__uv").await;
+                let gate_prot_oc_top = gate_sim.get_output_raw("top.prot_faults__oc").await;
+                let gate_prot_ot_top = gate_sim.get_output_raw("top.prot_faults__ot").await;
+                let gate_prot_desat_top = gate_sim.get_output_raw("top.prot_faults__desat").await;
+                let gate_bms_fault = gate_sim.get_output_raw("top.bms__fault").await;
+                let gate_t25 = gate_sim.get_output_raw("top._t25").await;
+                let gate_t26 = gate_sim.get_output_raw("top._t26").await;
+                let gate_t27 = gate_sim.get_output_raw("top._t27").await;
+                let gate_t28 = gate_sim.get_output_raw("top._t28").await;
+
+                println!("[BUG249] Cycle 0 after clock high:");
+                println!("[BUG249]   MIR: any_fault={:?}, enable={:?}, state_reg={:?}",
+                    mir_any_fault, mir_enable, mir_state);
+                println!("[BUG249]   MIR prot_faults: ov={:?}, uv={:?}, oc={:?}, ot={:?}, desat={:?}",
+                    mir_prot_ov, mir_prot_uv, mir_prot_oc, mir_prot_ot, mir_prot_desat);
+                println!("[BUG249]   MIR other: bms_fault_flag={:?}, bms_timeout={:?}, lockstep_fault={:?}, bms_watchdog={:?}",
+                    mir_bms_fault_flag, mir_bms_timeout, mir_lockstep_fault, mir_bms_watchdog);
+                println!("[BUG249]   Gate: any_fault={:?}, top.any_fault={:?}, enable={:?}, state[0]={:?}",
+                    gate_any_fault, gate_any_fault_top, gate_enable, gate_state);
+                println!("[BUG249]   Gate prot_faults: ov={:?}, uv={:?}, oc={:?}, ot={:?}",
+                    gate_prot_ov, gate_prot_uv, gate_prot_oc, gate_prot_ot);
+                println!("[BUG249]   Gate other: _t31={:?}, _t29={:?}, bms_timeout={:?}, lockstep_fault={:?}",
+                    gate_t31, gate_t29, gate_bms_timeout, gate_lockstep_fault);
+                println!("[BUG249]   Gate prot_faults (top.): ov={:?}, uv={:?}, oc={:?}, ot={:?}, desat={:?}",
+                    gate_prot_ov_top, gate_prot_uv_top, gate_prot_oc_top, gate_prot_ot_top, gate_prot_desat_top);
+                println!("[BUG249]   Gate bms__fault={:?}, OR chain: _t25={:?}, _t26={:?}, _t27={:?}, _t28={:?}",
+                    gate_bms_fault, gate_t25, gate_t26, gate_t27, gate_t28);
+
+                // BUG #249: Trace the FSM condition logic
+                let gate_t269 = gate_sim.get_output_raw("top._t269").await;
+                let gate_t270 = gate_sim.get_output_raw("top._t270").await;  // LogicalAnd output
+                let gate_t272 = gate_sim.get_output_raw("top._t272[0]").await;  // FSM next state
+                let gate_state_reg_0 = gate_sim.get_output_raw("top.state_reg[0]").await;
+                let gate_rst = gate_sim.get_output_raw("top.rst").await;
+                println!("[BUG249]   Gate FSM: _t269(NOT _t31)={:?}, _t270(AND)={:?}, _t272[0](next)={:?}",
+                    gate_t269, gate_t270, gate_t272);
+                println!("[BUG249]   Gate FSM: state_reg[0]={:?}, rst={:?}",
+                    gate_state_reg_0, gate_rst);
+            }
 
             // Collect cycle trace for diagnostics
             let mut trace_entry = CycleTraceEntry {

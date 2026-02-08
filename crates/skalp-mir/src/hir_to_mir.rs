@@ -1172,6 +1172,10 @@ impl<'hir> HirToMir<'hir> {
 
                             // Create signals for each output port
                             // BUG FIX: Flatten struct-typed ports into multiple scalar signals
+                            // BUG #249 FIX: Check if output port is connected to a parent signal.
+                            // If connected, use the parent's signal IDs instead of creating new signals.
+                            // This prevents duplicate signals (e.g., protection_faults__* vs prot_faults__*)
+                            // where one set is driven and the other is not.
                             for port in &entity.ports {
                                 if matches!(port.direction, hir::HirPortDirection::Output) {
                                     trace!(
@@ -1179,41 +1183,109 @@ impl<'hir> HirToMir<'hir> {
                                         port.name,
                                         port.is_detection_signal()
                                     );
-                                    let signal_name =
-                                        format!("{}_{}", hir_instance.name, port.name);
-                                    let signal_type = self.convert_type(&port.port_type);
 
-                                    // Use flatten_signal to properly handle struct types
-                                    let (flattened_signals, flattened_fields) = self.flatten_signal(
-                                        &signal_name,
-                                        &signal_type,
-                                        None,
-                                        None,
-                                        None,
-                                    );
+                                    // BUG #249 FIX: Check if this output port is connected to a parent signal
+                                    let connected_parent_signal = hir_instance.connections.iter()
+                                        .find(|conn| conn.port == port.name)
+                                        .and_then(|conn| {
+                                            if let hir::HirExpression::Signal(hir_sig_id) = &conn.expr {
+                                                self.signal_map.get(hir_sig_id).copied()
+                                            } else {
+                                                None
+                                            }
+                                        });
 
-                                    // Add all flattened signals to the module
-                                    for mut signal in flattened_signals {
-                                        // Propagate detection signal config from sub-module port
-                                        signal.detection_config = port.detection_config.clone();
-                                        signal.power_domain = port
-                                            .power_domain_config
-                                            .as_ref()
-                                            .map(|c| c.domain_name.clone());
-                                        module.signals.push(signal);
-                                    }
+                                    if let Some(parent_mir_signal_id) = connected_parent_signal {
+                                        // BUG #249 FIX: Output port is connected to a parent signal.
+                                        // Use the parent's flattened signal IDs for the output_ports map
+                                        // instead of creating new (duplicate, undriven) signals.
+                                        trace!(
+                                            "🔍 BUG #249 FIX: Output port '{}' connected to parent signal id={}",
+                                            port.name, parent_mir_signal_id.0
+                                        );
 
-                                    // Map each flattened field with its full path
-                                    // For scalar ports: "result" -> signal_id
-                                    // For struct ports: "gates__high_a" -> signal_id, "gates__low_a" -> signal_id, ...
-                                    for field in &flattened_fields {
-                                        // Build the key: port_name + field_path joined by FIELD_SEPARATOR
-                                        let key = if field.field_path.is_empty() {
-                                            port.name.clone()
+                                        // Find the parent signal's name to look up flattened fields
+                                        if let Some(parent_signal) = module.signals.iter().find(|s| s.id == parent_mir_signal_id) {
+                                            // For scalar types, just map directly
+                                            output_ports.insert(port.name.clone(), parent_mir_signal_id);
+                                            trace!(
+                                                "🔍 BUG #249 FIX: Mapped '{}' -> parent signal '{}' (id={})",
+                                                port.name, parent_signal.name, parent_mir_signal_id.0
+                                            );
                                         } else {
-                                            format!("{}{}{}", port.name, FIELD_SEPARATOR, field.field_path.join(FIELD_SEPARATOR))
-                                        };
-                                        output_ports.insert(key, SignalId(field.id));
+                                            // Parent signal may be flattened - look for flattened siblings
+                                            // Find all signals whose name starts with parent signal's base name
+                                            if let Some((hir_sig_id, _)) = hir_instance.connections.iter()
+                                                .find(|conn| conn.port == port.name)
+                                                .and_then(|conn| {
+                                                    if let hir::HirExpression::Signal(id) = &conn.expr {
+                                                        Some((*id, ()))
+                                                    } else {
+                                                        None
+                                                    }
+                                                })
+                                            {
+                                                // Look up the flattened signals from the parent
+                                                if let Some(flattened_fields) = self.flattened_signals.get(&hir_sig_id) {
+                                                    for field in flattened_fields {
+                                                        let key = if field.field_path.is_empty() {
+                                                            port.name.clone()
+                                                        } else {
+                                                            format!("{}{}{}", port.name, FIELD_SEPARATOR, field.field_path.join(FIELD_SEPARATOR))
+                                                        };
+                                                        output_ports.insert(key.clone(), SignalId(field.id));
+                                                        trace!(
+                                                            "🔍 BUG #249 FIX: Mapped '{}' -> parent flattened field id={}",
+                                                            key, field.id
+                                                        );
+                                                    }
+                                                    continue; // Skip the normal signal creation below
+                                                }
+                                            }
+                                            // Fallback: just map the port directly
+                                            output_ports.insert(port.name.clone(), parent_mir_signal_id);
+                                        }
+
+                                        // Skip creating new signals - use parent's signals
+                                        // But still propagate detection flags if needed (handled below)
+                                    } else {
+                                        // Output port is NOT connected - create new signals as before
+                                        let signal_name =
+                                            format!("{}_{}", hir_instance.name, port.name);
+                                        let signal_type = self.convert_type(&port.port_type);
+
+                                        // Use flatten_signal to properly handle struct types
+                                        let (flattened_signals, flattened_fields) = self.flatten_signal(
+                                            &signal_name,
+                                            &signal_type,
+                                            None,
+                                            None,
+                                            None,
+                                        );
+
+                                        // Add all flattened signals to the module
+                                        for mut signal in flattened_signals {
+                                            // Propagate detection signal config from sub-module port
+                                            signal.detection_config = port.detection_config.clone();
+                                            signal.power_domain = port
+                                                .power_domain_config
+                                                .as_ref()
+                                                .map(|c| c.domain_name.clone());
+                                            module.signals.push(signal);
+                                        }
+
+                                        // Map each flattened field with its full path
+                                        // For scalar ports: "result" -> signal_id
+                                        // For struct ports: "gates__high_a" -> signal_id, "gates__low_a" -> signal_id, ...
+                                        for field in &flattened_fields {
+                                            // Build the key: port_name + field_path joined by FIELD_SEPARATOR
+                                            let key = if field.field_path.is_empty() {
+                                                port.name.clone()
+                                            } else {
+                                                format!("{}{}{}", port.name, FIELD_SEPARATOR, field.field_path.join(FIELD_SEPARATOR))
+                                            };
+                                            output_ports.insert(key, SignalId(field.id));
+                                        }
                                     }
 
                                     // BUG FIX: Also propagate detection flag to the connected signal
