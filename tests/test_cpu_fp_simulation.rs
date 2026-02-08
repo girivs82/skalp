@@ -5,10 +5,10 @@
 mod cpu_fp_simulation_tests {
     use skalp_frontend::parse_and_build_hir_from_file;
     use skalp_mir::lower_to_mir;
-    use skalp_sim::{SimulationConfig, Simulator};
+    use skalp_sim::{HwAccel, SimLevel, UnifiedSimConfig, UnifiedSimulator};
     use std::io::Write;
 
-    async fn setup_cpu_simulator(source: &str) -> Simulator {
+    async fn setup_cpu_simulator(source: &str) -> UnifiedSimulator {
         // Set stdlib path
         std::env::set_var("SKALP_STDLIB_PATH", "./crates/skalp-stdlib");
 
@@ -31,21 +31,20 @@ mod cpu_fp_simulation_tests {
         let top_module = &mir.modules[mir.modules.len() - 1];
         let sir = skalp_sir::convert_mir_to_sir_with_hierarchy(&mir, top_module);
 
-        // Create CPU simulator
-        let config = SimulationConfig {
-            use_gpu: false, // CPU simulation
+        // Create CPU simulator using UnifiedSimulator
+        let config = UnifiedSimConfig {
+            level: SimLevel::Behavioral,
+            hw_accel: HwAccel::Cpu,
             max_cycles: 100,
-            timeout_ms: 5000,
             capture_waveforms: false,
-            parallel_threads: 1,
+            ..Default::default()
         };
 
-        let mut simulator = Simulator::new(config)
-            .await
+        let mut simulator = UnifiedSimulator::new(config)
             .expect("Failed to create simulator");
 
         simulator
-            .load_module(&sir)
+            .load_behavioral(&sir)
             .await
             .expect("Failed to load module");
 
@@ -77,17 +76,12 @@ mod cpu_fp_simulation_tests {
         let b: f32 = 3.5;
         let expected: f32 = 6.0;
 
-        sim.set_input("a", a.to_le_bytes().to_vec()).await.unwrap();
-        sim.set_input("b", b.to_le_bytes().to_vec()).await.unwrap();
-        sim.step_simulation().await.unwrap();
+        sim.set_input("a", u32::from_le_bytes(a.to_le_bytes()) as u64).await;
+        sim.set_input("b", u32::from_le_bytes(b.to_le_bytes()) as u64).await;
+        sim.run(1).await;
 
-        let result_bytes = sim.get_output("result").await.unwrap();
-        let result = f32::from_le_bytes([
-            result_bytes[0],
-            result_bytes[1],
-            result_bytes[2],
-            result_bytes[3],
-        ]);
+        let result_u64 = sim.get_output_u64("result").await.unwrap_or(0);
+        let result = f32::from_le_bytes((result_u64 as u32).to_le_bytes());
 
         assert_eq!(
             result, expected,
@@ -120,17 +114,12 @@ mod cpu_fp_simulation_tests {
         let b: f32 = 4.0;
         let expected: f32 = 12.0;
 
-        sim.set_input("a", a.to_le_bytes().to_vec()).await.unwrap();
-        sim.set_input("b", b.to_le_bytes().to_vec()).await.unwrap();
-        sim.step_simulation().await.unwrap();
+        sim.set_input("a", u32::from_le_bytes(a.to_le_bytes()) as u64).await;
+        sim.set_input("b", u32::from_le_bytes(b.to_le_bytes()) as u64).await;
+        sim.run(1).await;
 
-        let result_bytes = sim.get_output("result").await.unwrap();
-        let result = f32::from_le_bytes([
-            result_bytes[0],
-            result_bytes[1],
-            result_bytes[2],
-            result_bytes[3],
-        ]);
+        let result_u64 = sim.get_output_u64("result").await.unwrap_or(0);
+        let result = f32::from_le_bytes((result_u64 as u32).to_le_bytes());
 
         assert_eq!(
             result, expected,
@@ -166,17 +155,17 @@ mod cpu_fp_simulation_tests {
         let a: f32 = 2.5;
         let b: f32 = 3.5;
 
-        sim.set_input("a", a.to_le_bytes().to_vec()).await.unwrap();
-        sim.set_input("b", b.to_le_bytes().to_vec()).await.unwrap();
-        sim.step_simulation().await.unwrap();
+        sim.set_input("a", u32::from_le_bytes(a.to_le_bytes()) as u64).await;
+        sim.set_input("b", u32::from_le_bytes(b.to_le_bytes()) as u64).await;
+        sim.run(1).await;
 
-        let lt_bytes = sim.get_output("lt").await.unwrap();
-        let eq_bytes = sim.get_output("eq").await.unwrap();
-        let gt_bytes = sim.get_output("gt").await.unwrap();
+        let lt = sim.get_output_u64("lt").await.unwrap_or(0);
+        let eq = sim.get_output_u64("eq").await.unwrap_or(0);
+        let gt = sim.get_output_u64("gt").await.unwrap_or(0);
 
-        assert_eq!(lt_bytes[0], 1, "2.5 < 3.5 should be true");
-        assert_eq!(eq_bytes[0], 0, "2.5 == 3.5 should be false");
-        assert_eq!(gt_bytes[0], 0, "2.5 > 3.5 should be false");
+        assert_eq!(lt, 1, "2.5 < 3.5 should be true");
+        assert_eq!(eq, 0, "2.5 == 3.5 should be false");
+        assert_eq!(gt, 0, "2.5 > 3.5 should be false");
     }
 
     #[ignore = "requires stdlib parsing support for fp.sk advanced syntax"]
@@ -201,12 +190,12 @@ mod cpu_fp_simulation_tests {
         // Test with x = -9.0
         let x: f32 = -9.0;
 
-        sim.set_input("x", x.to_le_bytes().to_vec()).await.unwrap();
-        sim.step_simulation().await.unwrap();
+        sim.set_input("x", u32::from_le_bytes(x.to_le_bytes()) as u64).await;
+        sim.run(1).await;
 
         // Negation: -(-9.0) = 9.0
-        let neg_bytes = sim.get_output("neg").await.unwrap();
-        let neg = f32::from_le_bytes([neg_bytes[0], neg_bytes[1], neg_bytes[2], neg_bytes[3]]);
+        let neg_u64 = sim.get_output_u64("neg").await.unwrap_or(0);
+        let neg = f32::from_le_bytes((neg_u64 as u32).to_le_bytes());
         assert_eq!(neg, 9.0, "Negation of -9.0 should be 9.0");
     }
 }
