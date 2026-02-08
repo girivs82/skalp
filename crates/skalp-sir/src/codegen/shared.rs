@@ -266,6 +266,46 @@ impl<'a> SharedCodegen<'a> {
         }
     }
 
+    /// Check if a given bit width uses vector storage (Metal only: uint2/uint4)
+    /// For C++, always returns false (no vector types used)
+    /// For Metal: 33-64 bits uses uint2, 65-128 bits uses uint4
+    pub fn uses_vector_storage(&self, width: usize) -> bool {
+        match self.type_mapper.target {
+            BackendTarget::Cpp => false,
+            BackendTarget::Metal => width > 32 && width <= 128,
+        }
+    }
+
+    /// Get the number of 32-bit components in a Metal vector type
+    /// Returns 1 for scalar (<=32 bits), 2 for uint2, 4 for uint4, or array size for >128 bits
+    pub fn get_vector_size(&self, width: usize) -> usize {
+        match self.type_mapper.target {
+            BackendTarget::Cpp => 1, // C++ doesn't use vector types
+            BackendTarget::Metal => {
+                if width <= 32 {
+                    1
+                } else if width <= 64 {
+                    2
+                } else if width <= 128 {
+                    4
+                } else {
+                    width.div_ceil(32) // Array
+                }
+            }
+        }
+    }
+
+    /// Get the component accessor for a Metal vector index (0='x', 1='y', 2='z', 3='w')
+    pub fn get_vector_component(&self, idx: usize) -> &'static str {
+        match idx {
+            0 => ".x",
+            1 => ".y",
+            2 => ".z",
+            3 => ".w",
+            _ => panic!("Invalid vector component index: {}", idx),
+        }
+    }
+
     /// Get the number of 32-bit array elements for a given width
     pub fn get_array_size(&self, width: usize) -> usize {
         width.div_ceil(32)
@@ -415,24 +455,33 @@ impl<'a> SharedCodegen<'a> {
             self.module.inputs.iter().map(|i| i.name.clone()).collect();
 
         // Add outputs first (skip state elements)
+        // Use cached width to ensure consistency with node output widths
         for output in &self.module.outputs {
             if self.module.state_elements.contains_key(&output.name) {
                 continue;
             }
             let sanitized_name = self.sanitize_name(&output.name);
             if added_names.insert(sanitized_name.clone()) {
-                self.generate_signal_field(&output.name, &output.sir_type);
+                // Use cache width which may differ from declared width for node outputs
+                let width = self.get_signal_width(&output.name);
+                let sir_type = SirType::Bits(width);
+                self.generate_signal_field(&output.name, &sir_type);
             }
         }
 
         // Add intermediate signals
+        // Note: Use cached width instead of declared sir_type to ensure consistency
+        // with how nodes compute their output widths (especially for concat nodes)
         for signal in &self.module.signals {
             let sanitized_name = self.sanitize_name(&signal.name);
             if !signal.is_state
                 && !input_names.contains(&signal.name)
                 && added_names.insert(sanitized_name.clone())
             {
-                self.generate_signal_field(&signal.name, &signal.sir_type);
+                // Use cache width which may differ from declared width for node outputs
+                let width = self.get_signal_width(&signal.name);
+                let sir_type = SirType::Bits(width);
+                self.generate_signal_field(&signal.name, &sir_type);
             }
         }
 
@@ -568,6 +617,48 @@ impl<'a> SharedCodegen<'a> {
             return;
         }
 
+        // Check if either operand uses vector storage (Metal uint2/uint4)
+        // Vector comparisons produce vector bool results, so we need to compare as scalars
+        let left_uses_vector = self.uses_vector_storage(left_width);
+        let right_uses_vector = self.uses_vector_storage(right_width);
+        let is_comparison = matches!(
+            op,
+            BinaryOperation::Eq
+                | BinaryOperation::Neq
+                | BinaryOperation::Lt
+                | BinaryOperation::Lte
+                | BinaryOperation::Gt
+                | BinaryOperation::Gte
+        );
+
+        if is_comparison && (left_uses_vector || right_uses_vector) {
+            // For comparisons involving vector types, convert to 64-bit scalars first
+            let left_expr = if left_uses_vector {
+                format!(
+                    "((uint64_t)signals->{}.x | ((uint64_t)signals->{}.y << 32))",
+                    self.sanitize_name(left), self.sanitize_name(left)
+                )
+            } else {
+                format!("(uint64_t)signals->{}", self.sanitize_name(left))
+            };
+            let right_expr = if right_uses_vector {
+                format!(
+                    "((uint64_t)signals->{}.x | ((uint64_t)signals->{}.y << 32))",
+                    self.sanitize_name(right), self.sanitize_name(right)
+                )
+            } else {
+                format!("(uint64_t)signals->{}", self.sanitize_name(right))
+            };
+            self.write_indented(&format!(
+                "signals->{} = {} {} {};\n",
+                self.sanitize_name(output),
+                left_expr,
+                op_str,
+                right_expr
+            ));
+            return;
+        }
+
         // Standard scalar operation
         self.write_indented(&format!(
             "signals->{} = signals->{} {} signals->{};\n",
@@ -695,10 +786,23 @@ impl<'a> SharedCodegen<'a> {
                 output_sanitized
             ));
         } else if actual_output_width > 32 && actual_output_width <= 64 {
-            // 33-64 bit output: stored as uint64_t scalar (C++) or vector type (Metal)
-            // For SMul, we compute a 64-bit result but need to mask to actual width
-            // to match gate-level behavior (which computes exactly actual_output_width bits)
-            if actual_output_width == 64 {
+            // 33-64 bit output: stored as uint64_t scalar (C++) or uint2 vector (Metal)
+            let is_metal = matches!(self.type_mapper.target, BackendTarget::Metal);
+
+            if is_metal {
+                // Metal: Pack 64-bit result into uint2 (.x = low 32 bits, .y = high 32 bits)
+                let mask = if actual_output_width == 64 {
+                    "".to_string()
+                } else {
+                    format!(" & 0x{:X}ULL", (1u64 << actual_output_width) - 1)
+                };
+                self.write_indented(&format!(
+                    "{{ uint64_t _tmp = (uint64_t)({} {} {}){}; signals->{}.x = (uint)_tmp; signals->{}.y = (uint)(_tmp >> 32); }}\n",
+                    left_expr, op_str, right_expr, mask,
+                    output_sanitized, output_sanitized
+                ));
+            } else if actual_output_width == 64 {
+                // C++: Direct assignment to uint64_t
                 self.write_indented(&format!(
                     "signals->{} = (uint64_t)({} {} {});\n",
                     output_sanitized,
@@ -707,7 +811,7 @@ impl<'a> SharedCodegen<'a> {
                     right_expr
                 ));
             } else {
-                // Mask to actual width to ensure upper bits don't affect sign extension
+                // C++: Mask to actual width to ensure upper bits don't affect sign extension
                 let mask = (1u64 << actual_output_width) - 1;
                 self.write_indented(&format!(
                     "signals->{} = (uint64_t)({} {} {}) & 0x{:X}ULL;\n",
@@ -745,11 +849,27 @@ impl<'a> SharedCodegen<'a> {
                 "(int64_t)((uint64_t)signals->{}[0] | ((uint64_t)signals->{}[1] << 32))",
                 sanitized, sanitized
             )
+        } else if self.uses_vector_storage(width) {
+            // Metal vector types (uint2/uint4): need to extract components
+            if width <= 64 {
+                // uint2: combine .x and .y into 64-bit value for signed operations
+                let shift = 64 - width;
+                format!(
+                    "((int64_t)(((uint64_t)signals->{}.x | ((uint64_t)signals->{}.y << 32)) << {}) >> {})",
+                    sanitized, sanitized, shift, shift
+                )
+            } else {
+                // uint4: combine first two components for 64-bit signed operation
+                format!(
+                    "(int64_t)((uint64_t)signals->{}.x | ((uint64_t)signals->{}.y << 32))",
+                    sanitized, sanitized
+                )
+            }
         } else if width == 64 {
             // Exactly 64 bits: just cast to int64_t
             format!("(int64_t)signals->{}", sanitized)
         } else if width > 32 && width < 64 {
-            // 33-63 bits: stored as uint64_t scalar, but need sign extension from actual width
+            // 33-63 bits: stored as uint64_t scalar (C++ only, Metal uses vectors)
             // Left shift to put sign bit at position 63, then arithmetic right shift to sign-extend
             let shift = 64 - width;
             format!(
@@ -870,10 +990,20 @@ impl<'a> SharedCodegen<'a> {
         let right = &node.inputs[1].signal_id;
         let output = &node.outputs[0].signal_id;
 
+        let is_metal = matches!(self.type_mapper.target, BackendTarget::Metal);
+
         // Convert operands to uint64_t
         let left_expr = if left_width <= 32 {
             format!("(uint64_t)signals->{}", self.sanitize_name(left))
+        } else if is_metal {
+            // Metal: uint2 with .x and .y components
+            format!(
+                "((uint64_t)signals->{}.x | ((uint64_t)signals->{}.y << 32))",
+                self.sanitize_name(left),
+                self.sanitize_name(left)
+            )
         } else {
+            // C++: uint32_t[2] array
             format!(
                 "((uint64_t)signals->{}[0] | ((uint64_t)signals->{}[1] << 32))",
                 self.sanitize_name(left),
@@ -883,7 +1013,15 @@ impl<'a> SharedCodegen<'a> {
 
         let right_expr = if right_width <= 32 {
             format!("(uint64_t)signals->{}", self.sanitize_name(right))
+        } else if is_metal {
+            // Metal: uint2 with .x and .y components
+            format!(
+                "((uint64_t)signals->{}.x | ((uint64_t)signals->{}.y << 32))",
+                self.sanitize_name(right),
+                self.sanitize_name(right)
+            )
         } else {
+            // C++: uint32_t[2] array
             format!(
                 "((uint64_t)signals->{}[0] | ((uint64_t)signals->{}[1] << 32))",
                 self.sanitize_name(right),
@@ -891,14 +1029,23 @@ impl<'a> SharedCodegen<'a> {
             )
         };
 
-        self.write_indented(&format!(
-            "{{ uint64_t _tmp = {} {} {}; signals->{}[0] = (uint32_t)_tmp; signals->{}[1] = (uint32_t)(_tmp >> 32); }}\n",
-            left_expr,
-            op_str,
-            right_expr,
-            self.sanitize_name(output),
-            self.sanitize_name(output)
-        ));
+        if is_metal {
+            // Metal: Pack result into uint2 (.x = low 32 bits, .y = high 32 bits)
+            self.write_indented(&format!(
+                "{{ uint64_t _tmp = {} {} {}; signals->{}.x = (uint)_tmp; signals->{}.y = (uint)(_tmp >> 32); }}\n",
+                left_expr, op_str, right_expr,
+                self.sanitize_name(output),
+                self.sanitize_name(output)
+            ));
+        } else {
+            // C++: Pack result into uint32_t[2] array
+            self.write_indented(&format!(
+                "{{ uint64_t _tmp = {} {} {}; signals->{}[0] = (uint32_t)_tmp; signals->{}[1] = (uint32_t)(_tmp >> 32); }}\n",
+                left_expr, op_str, right_expr,
+                self.sanitize_name(output),
+                self.sanitize_name(output)
+            ));
+        }
     }
 
     /// Generate unary operation
@@ -1172,6 +1319,58 @@ impl<'a> SharedCodegen<'a> {
                     element_idx
                 ));
             }
+        } else if self.uses_vector_storage(input_width) {
+            // Input is a Metal vector type (uint2/uint4), output is scalar
+            // Need to extract from the appropriate vector component(s)
+            let component_idx = low / 32;
+            let bit_in_component = low % 32;
+            let input_vec_size = self.get_vector_size(input_width);
+
+            if component_idx >= input_vec_size {
+                // Shift exceeds input width - result is 0
+                self.write_indented(&format!(
+                    "signals->{} = 0;\n",
+                    self.sanitize_name(output)
+                ));
+            } else if width <= 32 && bit_in_component + width <= 32 {
+                // Slice fits in single component
+                let comp = self.get_vector_component(component_idx);
+                let mask = if width >= 32 { 0xFFFFFFFF_u32 } else { (1u32 << width) - 1 };
+                self.write_indented(&format!(
+                    "signals->{} = ({}{} >> {}) & 0x{:X};\n",
+                    self.sanitize_name(output),
+                    input_base,
+                    comp,
+                    bit_in_component,
+                    mask
+                ));
+            } else if width <= 32 && component_idx + 1 < input_vec_size {
+                // Slice spans two components
+                let comp1 = self.get_vector_component(component_idx);
+                let comp2 = self.get_vector_component(component_idx + 1);
+                let bits_from_first = 32 - bit_in_component;
+                let bits_from_second = width - bits_from_first;
+                let first_mask = (1u32 << bits_from_first) - 1;
+                let second_mask = (1u32 << bits_from_second) - 1;
+                self.write_indented(&format!(
+                    "signals->{} = (({}{} >> {}) & 0x{:X}) | (({}{} & 0x{:X}) << {});\n",
+                    self.sanitize_name(output),
+                    input_base, comp1, bit_in_component, first_mask,
+                    input_base, comp2, second_mask, bits_from_first
+                ));
+            } else {
+                // Extract from first matching component only (fallback)
+                let comp = self.get_vector_component(component_idx.min(input_vec_size - 1));
+                let mask = if width >= 32 { 0xFFFFFFFF_u32 } else { (1u32 << width.min(32)) - 1 };
+                self.write_indented(&format!(
+                    "signals->{} = ({}{} >> {}) & 0x{:X};\n",
+                    self.sanitize_name(output),
+                    input_base,
+                    comp,
+                    bit_in_component,
+                    mask
+                ));
+            }
         } else {
             // Both input and output are scalar - simple shift and mask
             // BUG FIX: If shift exceeds input width, the result is 0
@@ -1269,8 +1468,8 @@ impl<'a> SharedCodegen<'a> {
                 bit_offset += width;
             }
         } else if output_width > 64 {
-            // Wide vector concat (65-128 bits) - use array access
-            // For both C++ and Metal, this range uses arrays (uint32_t[N] or uint4)
+            // Wide vector concat (65-128 bits)
+            // C++ uses uint32_t[N] arrays, Metal uses uint4 with .x/.y/.z/.w components
             let num_elements = output_width.div_ceil(32);
             let mut components = vec!["0".to_string(); num_elements];
             let mut bit_offset = 0;
@@ -1290,14 +1489,26 @@ impl<'a> SharedCodegen<'a> {
                 bit_offset += width;
             }
 
-            // Generate array assignment
+            // Generate component/array assignment based on backend
+            let is_cpp = matches!(self.type_mapper.target, BackendTarget::Cpp);
             for (i, comp) in components.iter().enumerate() {
-                self.write_indented(&format!(
-                    "signals->{}[{}] = {};\n",
-                    self.sanitize_name(output),
-                    i,
-                    comp
-                ));
+                if is_cpp {
+                    self.write_indented(&format!(
+                        "signals->{}[{}] = {};\n",
+                        self.sanitize_name(output),
+                        i,
+                        comp
+                    ));
+                } else {
+                    // Metal: use vector component accessors
+                    let component = self.get_vector_component(i);
+                    self.write_indented(&format!(
+                        "signals->{}{} = {};\n",
+                        self.sanitize_name(output),
+                        component,
+                        comp
+                    ));
+                }
             }
         } else if output_width > 32 {
             // Medium vector concat (33-64 bits)
@@ -1333,8 +1544,8 @@ impl<'a> SharedCodegen<'a> {
                     self.sanitize_name(output),
                     concat_expr
                 ));
-            } else {
-                // For Metal: Use vector component access (uint2[0], uint2[1])
+            } else if self.uses_vector_storage(output_width) {
+                // For Metal: Use vector component access (uint2.x, uint2.y)
                 let num_elements = output_width.div_ceil(32);
                 let mut components = vec!["0".to_string(); num_elements];
                 let mut bit_offset = 0;
@@ -1354,15 +1565,46 @@ impl<'a> SharedCodegen<'a> {
                     bit_offset += width;
                 }
 
-                // Generate vector component assignment
+                // Generate Metal vector component assignment (.x, .y)
                 for (i, comp) in components.iter().enumerate() {
+                    let vec_comp = self.get_vector_component(i);
                     self.write_indented(&format!(
-                        "signals->{}[{}] = {};\n",
+                        "signals->{}{} = {};\n",
                         self.sanitize_name(output),
-                        i,
+                        vec_comp,
                         comp
                     ));
                 }
+            } else {
+                // Metal: output_width > 32 but not using vector storage (shouldn't happen normally)
+                // Fall back to scalar expression for safety
+                let mut concat_expr = String::new();
+                let mut shift = 0;
+
+                for (input_name, width) in input_widths.iter().rev() {
+                    if shift >= 32 {
+                        break; // Only take first 32 bits for scalar
+                    }
+
+                    let input_ref = format!("signals->{}", self.sanitize_name(input_name));
+
+                    if !concat_expr.is_empty() {
+                        concat_expr.push_str(" | ");
+                    }
+
+                    if shift > 0 {
+                        concat_expr.push_str(&format!("({} << {})", input_ref, shift));
+                    } else {
+                        concat_expr.push_str(&input_ref);
+                    }
+                    shift += width;
+                }
+
+                self.write_indented(&format!(
+                    "signals->{} = {};\n",
+                    self.sanitize_name(output),
+                    concat_expr
+                ));
             }
         } else {
             // Scalar concat (1-32 bits)
