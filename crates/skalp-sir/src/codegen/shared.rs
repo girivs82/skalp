@@ -292,6 +292,18 @@ impl<'a> SharedCodegen<'a> {
         }
     }
 
+    /// Create the appropriate SirType for a given width, using array types for wide signals
+    /// This ensures signals that require array storage are declared with array types in structs.
+    pub fn create_sir_type_for_width(&self, width: usize) -> SirType {
+        if self.uses_array_storage(width) {
+            // Wide signal - needs array storage
+            let array_size = width.div_ceil(32);
+            SirType::Array(Box::new(SirType::Bits(32)), array_size)
+        } else {
+            SirType::Bits(width)
+        }
+    }
+
     /// Check if a given bit width uses vector storage (Metal only: uint2/uint4)
     /// For C++, always returns false (no vector types used)
     /// For Metal: 33-64 bits uses uint2, 65-128 bits uses uint4
@@ -456,6 +468,44 @@ impl<'a> SharedCodegen<'a> {
         None
     }
 
+    /// Check if a signal is used as the array source (first input) for any ArrayRead node
+    fn is_array_read_source(&self, signal: &str) -> bool {
+        for node in &self.module.combinational_nodes {
+            if matches!(node.kind, SirNodeKind::ArrayRead) && !node.inputs.is_empty() {
+                if node.inputs[0].signal_id == signal {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// Get the array size for a signal that is used as ArrayRead source
+    /// Returns the array size from the ArrayRead operation's context, or None if not found
+    fn get_array_read_source_size(&self, signal: &str) -> Option<usize> {
+        for node in &self.module.combinational_nodes {
+            if matches!(node.kind, SirNodeKind::ArrayRead) && !node.inputs.is_empty() {
+                if node.inputs[0].signal_id == signal {
+                    // Try to get array size from the source signal's type
+                    if let Some(array_type) = self.get_array_type_for_signal(signal) {
+                        if let SirType::Array(_, size) = array_type {
+                            return Some(size);
+                        }
+                    }
+                    // Fall back to checking the source of this signal
+                    // via SignalRef chain
+                    let resolved = self.resolve_array_source(signal);
+                    if let Some(state_elem) = self.module.state_elements.get(&resolved) {
+                        if let Some(SirType::Array(_, size)) = &state_elem.sir_type {
+                            return Some(*size);
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
     /// Generate struct field definition for a signal
     /// Returns true if the signal was decomposed
     pub fn generate_signal_field(&mut self, name: &str, sir_type: &SirType) -> bool {
@@ -607,6 +657,21 @@ impl<'a> SharedCodegen<'a> {
             }
         }
 
+        // Pre-collect signals that are used as array sources in ArrayRead nodes
+        // These MUST be declared as arrays regardless of width
+        let mut array_source_signals: HashSet<String> = HashSet::new();
+        for node in &self.module.combinational_nodes {
+            if matches!(node.kind, SirNodeKind::ArrayRead) && !node.inputs.is_empty() {
+                let array_signal = &node.inputs[0].signal_id;
+                // Only track if not a state element (state elements are in Registers)
+                if !self.module.state_elements.contains_key(array_signal)
+                    && !input_names.contains(array_signal)
+                {
+                    array_source_signals.insert(array_signal.clone());
+                }
+            }
+        }
+
         // Add intermediate signals
         // Note: Use cached width instead of declared sir_type to ensure consistency
         // with how nodes compute their output widths (especially for concat nodes)
@@ -617,12 +682,25 @@ impl<'a> SharedCodegen<'a> {
                 && !input_names.contains(&signal.name)
                 && added_names.insert(sanitized_name.clone())
             {
-                // Check if this signal is produced by an array-related node
-                let sir_type = self.get_array_type_for_signal_output(&signal.name)
-                    .unwrap_or_else(|| {
-                        let width = self.get_signal_width(&signal.name);
-                        SirType::Bits(width)
-                    });
+                // Check if this signal is used as an array source - force array type
+                let is_array_source = array_source_signals.contains(&signal.name);
+
+                let sir_type = if is_array_source {
+                    // This signal is used as an array source - must be array type
+                    self.get_array_type_for_signal(&signal.name)
+                        .unwrap_or_else(|| {
+                            // Create a minimum array if we can't determine the type
+                            SirType::Array(Box::new(SirType::Bits(32)), 16)
+                        })
+                } else {
+                    // Check if this signal is produced by an array-related node
+                    // Fall back to create_sir_type_for_width for proper array type handling
+                    self.get_array_type_for_signal_output(&signal.name)
+                        .unwrap_or_else(|| {
+                            let width = self.get_signal_width(&signal.name);
+                            self.create_sir_type_for_width(width)
+                        })
+                };
                 self.generate_signal_field(&signal.name, &sir_type);
             }
         }
@@ -645,37 +723,52 @@ impl<'a> SharedCodegen<'a> {
                 }
 
                 // For array-related nodes, preserve the array type
-                let sir_type = match &node.kind {
-                    // ArrayWrite outputs should be array type (same as input array)
-                    SirNodeKind::ArrayWrite => {
-                        if !node.inputs.is_empty() {
-                            let array_signal = &node.inputs[0].signal_id;
-                            self.get_array_type_for_signal(array_signal)
-                                .unwrap_or_else(|| SirType::Bits(self.get_signal_width(signal_id)))
-                        } else {
-                            SirType::Bits(self.get_signal_width(signal_id))
+                // All fallback cases use create_sir_type_for_width for proper array handling
+                // Also check if this output is used as an array source in ArrayRead
+                let is_array_source = array_source_signals.contains(signal_id);
+
+                let sir_type = if is_array_source {
+                    // This signal is used as an array source - must be array type
+                    self.get_array_type_for_signal(signal_id)
+                        .unwrap_or_else(|| {
+                            // Create a minimum array if we can't determine the type
+                            SirType::Array(Box::new(SirType::Bits(32)), 16)
+                        })
+                } else {
+                    match &node.kind {
+                        // ArrayWrite outputs should be array type (same as input array)
+                        SirNodeKind::ArrayWrite => {
+                            if !node.inputs.is_empty() {
+                                let array_signal = &node.inputs[0].signal_id;
+                                self.get_array_type_for_signal(array_signal)
+                                    .unwrap_or_else(|| self.create_sir_type_for_width(self.get_signal_width(signal_id)))
+                            } else {
+                                self.create_sir_type_for_width(self.get_signal_width(signal_id))
+                            }
                         }
-                    }
-                    // SignalRef to array state element should preserve array type
-                    SirNodeKind::SignalRef { signal } => {
-                        if let Some(state_elem) = self.module.state_elements.get(signal) {
-                            if let Some(ref sir_type) = state_elem.sir_type {
-                                if matches!(sir_type, SirType::Array(_, _)) {
-                                    sir_type.clone()
+                        // SignalRef to array state element should preserve array type
+                        SirNodeKind::SignalRef { signal } => {
+                            if let Some(state_elem) = self.module.state_elements.get(signal) {
+                                if let Some(ref sir_type) = state_elem.sir_type {
+                                    if matches!(sir_type, SirType::Array(_, _)) {
+                                        sir_type.clone()
+                                    } else {
+                                        self.create_sir_type_for_width(self.get_signal_width(signal_id))
+                                    }
                                 } else {
-                                    SirType::Bits(self.get_signal_width(signal_id))
+                                    self.create_sir_type_for_width(self.get_signal_width(signal_id))
                                 }
                             } else {
-                                SirType::Bits(self.get_signal_width(signal_id))
+                                // Not a state element - fall back to width-based type
+                                // This handles intermediate signals that reference other wide signals
+                                self.create_sir_type_for_width(self.get_signal_width(signal_id))
                             }
-                        } else {
-                            SirType::Bits(self.get_signal_width(signal_id))
                         }
-                    }
-                    // Default: use cached width
-                    _ => {
-                        let width = self.get_signal_width(signal_id);
-                        SirType::Bits(width)
+                        // Default: use cached width, with array type for wide signals
+                        _ => {
+                            let width = self.get_signal_width(signal_id);
+                            self.create_sir_type_for_width(width)
+                        }
                     }
                 };
                 self.generate_signal_field(signal_id, &sir_type);
@@ -698,9 +791,30 @@ impl<'a> SharedCodegen<'a> {
                     continue;
                 }
 
-                // Use cached width from the producing node
-                let width = self.get_signal_width(signal_id);
-                let sir_type = SirType::Bits(width);
+                // Check if this signal is used as an array source - if so, force array type
+                let sir_type = if array_source_signals.contains(signal_id) {
+                    // This signal is used as an array source - get its array type
+                    // Try to find the array type from the producer node or state element
+                    self.get_array_type_for_signal(signal_id)
+                        .unwrap_or_else(|| {
+                            // Fall back to creating array based on width
+                            // Use a minimum array size that can be subscripted
+                            let width = self.get_signal_width(signal_id);
+                            // If width is small, we still need an array - use the width as element count
+                            if width <= 32 {
+                                // Can't subscript a scalar - this is likely an error in the SIR
+                                // For now, create a small array
+                                SirType::Array(Box::new(SirType::Bits(32)), 16)
+                            } else {
+                                self.create_sir_type_for_width(width)
+                            }
+                        })
+                } else {
+                    // Use cached width from the producing node
+                    // Use array type for wide signals that require array storage
+                    let width = self.get_signal_width(signal_id);
+                    self.create_sir_type_for_width(width)
+                };
                 self.generate_signal_field(signal_id, &sir_type);
             }
         }
@@ -722,8 +836,9 @@ impl<'a> SharedCodegen<'a> {
                 }
 
                 // Use cached width from the producing node
+                // Use array type for wide signals that require array storage
                 let width = self.get_signal_width(signal_id);
-                let sir_type = SirType::Bits(width);
+                let sir_type = self.create_sir_type_for_width(width);
                 self.generate_signal_field(signal_id, &sir_type);
             }
         }
@@ -752,6 +867,15 @@ impl<'a> SharedCodegen<'a> {
         // Check for wide bit operations that need element-wise handling
         if output_width > 128 {
             self.generate_wide_binary_op(node, op, &op_str);
+            return;
+        }
+
+        // Check for widening multiplication where output needs different storage than inputs
+        // This happens when Mul produces a result wider than either operand (e.g., 32x32->64, 64x64->128)
+        let is_mul = matches!(op, BinaryOperation::Mul);
+        let max_input_width = std::cmp::max(left_width, right_width);
+        if is_mul && output_width > max_input_width {
+            self.generate_widening_multiply(node, left_width, right_width, output_width);
             return;
         }
 
@@ -1157,6 +1281,172 @@ impl<'a> SharedCodegen<'a> {
         self.write_indented("}\n");
     }
 
+    /// Generate widening multiplication where output is wider than inputs
+    /// This handles cases like 32*32->64, 64*64->128, etc.
+    fn generate_widening_multiply(
+        &mut self,
+        node: &SirNode,
+        left_width: usize,
+        right_width: usize,
+        output_width: usize,
+    ) {
+        let left = &node.inputs[0].signal_id;
+        let right = &node.inputs[1].signal_id;
+        let output = &node.outputs[0].signal_id;
+
+        let left_sanitized = self.sanitize_name(left);
+        let right_sanitized = self.sanitize_name(right);
+        let output_sanitized = self.sanitize_name(output);
+
+        let is_metal = matches!(self.type_mapper.target, BackendTarget::Metal);
+
+        self.write_indented(&format!(
+            "// Widening multiply: {}x{} -> {}\n",
+            left_width, right_width, output_width
+        ));
+
+        // Determine how the output signal is actually stored
+        let output_uses_array = self.uses_array_storage(output_width);
+        let output_uses_vector = self.uses_vector_storage(output_width);
+
+        // For outputs up to 64 bits, we can use uint64_t arithmetic
+        if output_width <= 64 {
+            // Convert both operands to uint64_t and multiply
+            let left_expr = self.get_64bit_operand_expr(&left_sanitized, left_width, is_metal);
+            let right_expr = self.get_64bit_operand_expr(&right_sanitized, right_width, is_metal);
+
+            self.write_indented("{\n");
+            self.indent();
+            self.write_indented(&format!(
+                "uint64_t _result = {} * {};\n",
+                left_expr, right_expr
+            ));
+
+            if output_width <= 32 {
+                // Output fits in a scalar - just take low bits
+                let mask = if output_width == 32 { "".to_string() } else { format!(" & 0x{:X}", (1u64 << output_width) - 1) };
+                self.write_indented(&format!(
+                    "signals->{} = (uint32_t)_result{};\n",
+                    output_sanitized, mask
+                ));
+            } else if is_metal && output_uses_vector {
+                // Metal: output is uint2
+                self.write_indented(&format!(
+                    "signals->{} = uint2((uint)_result, (uint)(_result >> 32));\n",
+                    output_sanitized
+                ));
+            } else if output_uses_array {
+                // C++: output is uint32_t[2] array (width > 64)
+                self.write_indented(&format!("signals->{}[0] = (uint32_t)_result;\n", output_sanitized));
+                self.write_indented(&format!("signals->{}[1] = (uint32_t)(_result >> 32);\n", output_sanitized));
+            } else {
+                // C++: output is uint64_t scalar
+                self.write_indented(&format!(
+                    "signals->{} = _result;\n",
+                    output_sanitized
+                ));
+            }
+
+            self.dedent();
+            self.write_indented("}\n");
+        } else if output_width <= 128 {
+            // For 65-128 bit outputs, we need to do 64-bit * 64-bit -> 128-bit
+            // This requires decomposition into 32-bit parts
+            self.write_indented("{\n");
+            self.indent();
+
+            // Get the low 32 bits and high 32 bits of each operand
+            let (left_lo, left_hi) = self.get_32bit_parts_expr(&left_sanitized, left_width, is_metal);
+            let (right_lo, right_hi) = self.get_32bit_parts_expr(&right_sanitized, right_width, is_metal);
+
+            // Schoolbook multiplication:
+            // (a_hi * 2^32 + a_lo) * (b_hi * 2^32 + b_lo)
+            // = a_hi * b_hi * 2^64 + (a_hi * b_lo + a_lo * b_hi) * 2^32 + a_lo * b_lo
+            self.write_indented(&format!("uint64_t _ll = (uint64_t){} * (uint64_t){};\n", left_lo, right_lo));
+            self.write_indented(&format!("uint64_t _lh = (uint64_t){} * (uint64_t){};\n", left_lo, right_hi));
+            self.write_indented(&format!("uint64_t _hl = (uint64_t){} * (uint64_t){};\n", left_hi, right_lo));
+            self.write_indented(&format!("uint64_t _hh = (uint64_t){} * (uint64_t){};\n", left_hi, right_hi));
+
+            // Combine: result_lo64 = _ll + ((_lh + _hl) << 32)
+            //          result_hi64 = _hh + ((_lh + _hl) >> 32) + carry
+            self.write_indented("uint64_t _mid = _lh + _hl;\n");
+            self.write_indented("uint64_t _result_lo = _ll + (_mid << 32);\n");
+            self.write_indented("uint64_t _carry = (_result_lo < _ll) ? 1 : 0;\n");
+            self.write_indented("uint64_t _result_hi = _hh + (_mid >> 32) + _carry;\n");
+
+            // Write output based on actual array size
+            let num_elements = output_width.div_ceil(32);
+
+            if is_metal && num_elements == 4 {
+                // Metal: output is uint4
+                self.write_indented(&format!(
+                    "signals->{} = uint4((uint)_result_lo, (uint)(_result_lo >> 32), (uint)_result_hi, (uint)(_result_hi >> 32));\n",
+                    output_sanitized
+                ));
+            } else {
+                // C++: output is uint32_t[N] array - only write elements that exist
+                self.write_indented(&format!("signals->{}[0] = (uint32_t)_result_lo;\n", output_sanitized));
+                if num_elements > 1 {
+                    self.write_indented(&format!("signals->{}[1] = (uint32_t)(_result_lo >> 32);\n", output_sanitized));
+                }
+                if num_elements > 2 {
+                    self.write_indented(&format!("signals->{}[2] = (uint32_t)_result_hi;\n", output_sanitized));
+                }
+                if num_elements > 3 {
+                    self.write_indented(&format!("signals->{}[3] = (uint32_t)(_result_hi >> 32);\n", output_sanitized));
+                }
+            }
+
+            self.dedent();
+            self.write_indented("}\n");
+        } else {
+            // For outputs > 128 bits, fall back to element-wise (which won't be mathematically correct
+            // for full widening multiply, but handles the common case of wide bitwise ops)
+            self.generate_wide_binary_op(node, &BinaryOperation::Mul, "*");
+        }
+    }
+
+    /// Get a 64-bit expression for an operand, handling different storage types
+    fn get_64bit_operand_expr(&self, name: &str, width: usize, is_metal: bool) -> String {
+        if width <= 32 {
+            format!("(uint64_t)signals->{}", name)
+        } else if is_metal {
+            // Metal: uint2 with .x and .y components
+            format!(
+                "((uint64_t)signals->{}.x | ((uint64_t)signals->{}.y << 32))",
+                name, name
+            )
+        } else if width <= 64 {
+            // C++: uint64_t scalar
+            format!("signals->{}", name)
+        } else {
+            // C++: uint32_t array - take first 64 bits
+            format!(
+                "((uint64_t)signals->{}[0] | ((uint64_t)signals->{}[1] << 32))",
+                name, name
+            )
+        }
+    }
+
+    /// Get the low and high 32-bit parts of an operand
+    fn get_32bit_parts_expr(&self, name: &str, width: usize, is_metal: bool) -> (String, String) {
+        if width <= 32 {
+            (format!("signals->{}", name), "0".to_string())
+        } else if is_metal {
+            // Metal: uint2 with .x and .y components
+            (format!("signals->{}.x", name), format!("signals->{}.y", name))
+        } else if width <= 64 {
+            // C++: uint64_t scalar
+            (
+                format!("(uint32_t)signals->{}", name),
+                format!("(uint32_t)(signals->{} >> 32)", name),
+            )
+        } else {
+            // C++: uint32_t array
+            (format!("signals->{}[0]", name), format!("signals->{}[1]", name))
+        }
+    }
+
     /// Generate 64-bit add/sub with proper carry propagation
     fn generate_64bit_add_sub(&mut self, node: &SirNode, op_str: &str, left_width: usize, right_width: usize) {
         let left = &node.inputs[0].signal_id;
@@ -1266,12 +1556,22 @@ impl<'a> SharedCodegen<'a> {
         let is_function = matches!(op, UnaryOperation::FAbs | UnaryOperation::FSqrt);
 
         if is_function {
-            self.write_indented(&format!(
-                "signals->{} = {}(signals->{});\n",
-                self.sanitize_name(output),
-                op_str,
-                self.sanitize_name(input)
-            ));
+            // For sqrt/fabs, cast input to float to avoid Metal ambiguity between half and float
+            let is_metal = matches!(self.type_mapper.target, BackendTarget::Metal);
+            if is_metal && matches!(op, UnaryOperation::FSqrt) {
+                self.write_indented(&format!(
+                    "signals->{} = sqrt((float)signals->{});\n",
+                    self.sanitize_name(output),
+                    self.sanitize_name(input)
+                ));
+            } else {
+                self.write_indented(&format!(
+                    "signals->{} = {}(signals->{});\n",
+                    self.sanitize_name(output),
+                    op_str,
+                    self.sanitize_name(input)
+                ));
+            }
         } else {
             self.write_indented(&format!(
                 "signals->{} = {}signals->{};\n",
@@ -1639,23 +1939,43 @@ impl<'a> SharedCodegen<'a> {
                         bit_in_element
                     ));
                 } else if *width <= 64 {
-                    // 33-64 bit input: stored as uint64_t scalar in C++
+                    // 33-64 bit input: stored as uint64_t scalar in C++, uint2 in Metal
                     // Copy low 32 bits to first element, high 32 bits to second element
                     let dest_elem_lo = bit_offset / 32;
                     let dest_elem_hi = (bit_offset + 32) / 32;
-                    self.write_indented(&format!(
-                        "signals->{}[{}] = (uint32_t)signals->{};\n",
-                        self.sanitize_name(output),
-                        dest_elem_lo,
-                        self.sanitize_name(input_name)
-                    ));
-                    if dest_elem_hi < output_width.div_ceil(32) {
+                    let is_metal = matches!(self.type_mapper.target, BackendTarget::Metal);
+                    if is_metal {
+                        // Metal: use .x and .y components
                         self.write_indented(&format!(
-                            "signals->{}[{}] = (uint32_t)(signals->{} >> 32);\n",
+                            "signals->{}[{}] = signals->{}.x;\n",
                             self.sanitize_name(output),
-                            dest_elem_hi,
+                            dest_elem_lo,
                             self.sanitize_name(input_name)
                         ));
+                        if dest_elem_hi < output_width.div_ceil(32) {
+                            self.write_indented(&format!(
+                                "signals->{}[{}] = signals->{}.y;\n",
+                                self.sanitize_name(output),
+                                dest_elem_hi,
+                                self.sanitize_name(input_name)
+                            ));
+                        }
+                    } else {
+                        // C++: use cast and shift
+                        self.write_indented(&format!(
+                            "signals->{}[{}] = (uint32_t)signals->{};\n",
+                            self.sanitize_name(output),
+                            dest_elem_lo,
+                            self.sanitize_name(input_name)
+                        ));
+                        if dest_elem_hi < output_width.div_ceil(32) {
+                            self.write_indented(&format!(
+                                "signals->{}[{}] = (uint32_t)(signals->{} >> 32);\n",
+                                self.sanitize_name(output),
+                                dest_elem_hi,
+                                self.sanitize_name(input_name)
+                            ));
+                        }
                     }
                 } else {
                     // Wide input (>64 bits) - copy element by element from array
@@ -1908,7 +2228,11 @@ impl<'a> SharedCodegen<'a> {
         let output_uses_array = self.uses_array_storage(output_width);
         let output_uses_vector = self.uses_vector_storage(output_width);
 
-        if source_uses_array && output_uses_array {
+        // Check if output is declared as array in Signals struct (e.g., used as ArrayRead source)
+        // even if width doesn't require array storage
+        let output_is_array_source = self.is_array_read_source(output);
+
+        if source_uses_array && (output_uses_array || output_is_array_source) {
             // Both are arrays - element-wise copy
             let array_size = self.get_array_size(output_width);
             self.write_indented(&format!("for (uint32_t i = 0; i < {}; i++) {{\n", array_size));
@@ -1944,6 +2268,23 @@ impl<'a> SharedCodegen<'a> {
                 self.sanitize_name(output),
                 source_location
             ));
+        } else if output_is_array_source && !source_uses_array {
+            // Output is forced to be array (ArrayRead source) but source is scalar
+            // Initialize the array with the scalar value in the first element, zeros elsewhere
+            // Get the array size from the ArrayRead source info or use default
+            let array_size = self.get_array_read_source_size(output).unwrap_or(16);
+            self.write_indented(&format!(
+                "signals->{}[0] = {};\n",
+                self.sanitize_name(output),
+                source_location
+            ));
+            if array_size > 1 {
+                self.write_indented(&format!(
+                    "for (uint32_t i = 1; i < {}; i++) signals->{}[i] = 0;\n",
+                    array_size,
+                    self.sanitize_name(output)
+                ));
+            }
         } else {
             // Scalar/vector copy (no arrays involved)
             self.write_indented(&format!(
