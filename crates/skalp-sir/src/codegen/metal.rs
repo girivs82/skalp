@@ -144,7 +144,7 @@ impl<'a> MetalBackend<'a> {
 
     /// Generate local copies of scalar state elements for batched mode
     fn generate_local_state_copies(&self, output: &mut String) {
-        use crate::sir::SirNodeKind;
+        use crate::sir::{SirNodeKind, SirType};
         use std::collections::HashSet;
 
         let mut sorted_states: Vec<_> = self.shared.module.state_elements.iter().collect();
@@ -153,6 +153,17 @@ impl<'a> MetalBackend<'a> {
         let mut declared_locals: HashSet<String> = HashSet::new();
 
         for (name, elem) in &sorted_states {
+            // Skip array-type state elements (use sir_type to detect)
+            let is_array = if let Some(ref sir_type) = elem.sir_type {
+                matches!(sir_type, SirType::Array(_, _))
+            } else {
+                false
+            };
+
+            if is_array {
+                continue; // Arrays don't get local copies
+            }
+
             // Only create local copies for scalar registers (≤128 bits)
             if elem.width <= 128 {
                 let sanitized = self.shared.sanitize_name(name);
@@ -198,7 +209,7 @@ impl<'a> MetalBackend<'a> {
 
     /// Generate writeback of local state to registers after batched simulation
     fn generate_local_state_writeback(&self, output: &mut String) {
-        use crate::sir::SirNodeKind;
+        use crate::sir::{SirNodeKind, SirType};
         use std::collections::HashSet;
 
         let mut sorted_states: Vec<_> = self.shared.module.state_elements.iter().collect();
@@ -208,6 +219,17 @@ impl<'a> MetalBackend<'a> {
 
         output.push_str("\n    // Write back local state to registers\n");
         for (name, elem) in &sorted_states {
+            // Skip array-type state elements (use sir_type to detect)
+            let is_array = if let Some(ref sir_type) = elem.sir_type {
+                matches!(sir_type, SirType::Array(_, _))
+            } else {
+                false
+            };
+
+            if is_array {
+                continue; // Arrays don't have local copies
+            }
+
             if elem.width <= 128 {
                 let sanitized = self.shared.sanitize_name(name);
                 let (_, array_size) = self.shared.type_mapper.get_type_for_width(elem.width);

@@ -316,10 +316,24 @@ impl<'a> SharedCodegen<'a> {
     pub fn get_register_accessor(&self, name: &str) -> String {
         let sanitized = self.sanitize_name(name);
         if self.in_batched_mode {
-            // Check if this is an array type - array registers don't have local copies
-            let width = self.get_signal_width(name);
-            let (_, array_size) = self.type_mapper.get_type_for_width(width);
-            if array_size.is_some() {
+            // Check if this is an array type using sir_type - array registers don't have local copies
+            let is_array = if let Some(state_elem) = self.module.state_elements.get(name) {
+                if let Some(ref sir_type) = state_elem.sir_type {
+                    matches!(sir_type, SirType::Array(_, _))
+                } else {
+                    // Fall back to width-based check
+                    let width = self.get_signal_width(name);
+                    let (_, array_size) = self.type_mapper.get_type_for_width(width);
+                    array_size.is_some()
+                }
+            } else {
+                // Not a state element, check by width
+                let width = self.get_signal_width(name);
+                let (_, array_size) = self.type_mapper.get_type_for_width(width);
+                array_size.is_some()
+            };
+
+            if is_array {
                 // Array type - access directly from registers buffer
                 format!("registers->{}", sanitized)
             } else {
@@ -329,6 +343,28 @@ impl<'a> SharedCodegen<'a> {
         } else {
             format!("registers->{}", sanitized)
         }
+    }
+
+    /// Resolve array source through SignalRef chains
+    /// If a signal comes from a SignalRef to an array state element, return the state element name
+    fn resolve_array_source(&self, signal: &str) -> String {
+        // Check if this signal is produced by a SignalRef node pointing to an array state element
+        for node in &self.module.combinational_nodes {
+            if let SirNodeKind::SignalRef { signal: source } = &node.kind {
+                // Check if this node outputs to our signal
+                if node.outputs.iter().any(|o| o.signal_id == signal) {
+                    // Check if source is an array-type state element
+                    if let Some(state_elem) = self.module.state_elements.get(source) {
+                        if let Some(ref sir_type) = state_elem.sir_type {
+                            if matches!(sir_type, SirType::Array(_, _)) {
+                                return source.clone();
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        signal.to_string()
     }
 
     /// Generate struct field definition for a signal
@@ -406,10 +442,14 @@ impl<'a> SharedCodegen<'a> {
         sorted_states.sort_by_key(|(name, _)| *name);
 
         for (name, elem) in sorted_states.iter() {
-            // Look up the signal to get its type
+            // Use sir_type from state element if available (for arrays), else look up signal
             let default_type = SirType::Bits(elem.width);
-            let found_signal = self.module.signals.iter().find(|s| &s.name == *name);
-            let sir_type = found_signal.map(|s| &s.sir_type).unwrap_or(&default_type);
+            let sir_type = if let Some(ref t) = elem.sir_type {
+                t
+            } else {
+                let found_signal = self.module.signals.iter().find(|s| &s.name == *name);
+                found_signal.map(|s| &s.sir_type).unwrap_or(&default_type)
+            };
 
             let (base_type, array_suffix) = self.type_mapper.get_struct_field_parts(sir_type);
             self.write_indented(&format!(
@@ -1705,6 +1745,17 @@ impl<'a> SharedCodegen<'a> {
             return;
         }
 
+        // Check if source is an array-type state element
+        // If so, skip generating code - ArrayRead will access the state element directly
+        if let Some(state_elem) = self.module.state_elements.get(signal) {
+            if let Some(ref sir_type) = state_elem.sir_type {
+                if matches!(sir_type, SirType::Array(_, _)) {
+                    // Array state element - skip SignalRef, ArrayRead handles it
+                    return;
+                }
+            }
+        }
+
         let is_input = self.module.inputs.iter().any(|i| i.name == signal);
         let is_state = self.module.state_elements.contains_key(signal);
 
@@ -1720,9 +1771,10 @@ impl<'a> SharedCodegen<'a> {
         let output_width = self.get_signal_width(output);
         let source_uses_array = self.uses_array_storage(source_width);
         let output_uses_array = self.uses_array_storage(output_width);
+        let output_uses_vector = self.uses_vector_storage(output_width);
 
         if source_uses_array && output_uses_array {
-            // Array copy
+            // Both are arrays - element-wise copy
             let array_size = self.get_array_size(output_width);
             self.write_indented(&format!("for (uint32_t i = 0; i < {}; i++) {{\n", array_size));
             self.indent();
@@ -1733,8 +1785,32 @@ impl<'a> SharedCodegen<'a> {
             ));
             self.dedent();
             self.write_indented("}\n");
+        } else if source_uses_array && output_uses_vector {
+            // Metal-specific: source is array (uint[N]), output is vector (uint2/uint4)
+            // Copy first elements from array to construct the vector
+            let output_sanitized = self.sanitize_name(output);
+            if output_width <= 64 {
+                // uint2 - copy 2 elements
+                self.write_indented(&format!(
+                    "signals->{} = uint2({}[0], {}[1]);\n",
+                    output_sanitized, source_location, source_location
+                ));
+            } else {
+                // uint4 - copy 4 elements
+                self.write_indented(&format!(
+                    "signals->{} = uint4({}[0], {}[1], {}[2], {}[3]);\n",
+                    output_sanitized, source_location, source_location, source_location, source_location
+                ));
+            }
+        } else if source_uses_array {
+            // Source is array but output is scalar - copy first element
+            self.write_indented(&format!(
+                "signals->{} = {}[0];\n",
+                self.sanitize_name(output),
+                source_location
+            ));
         } else {
-            // Scalar/vector copy
+            // Scalar/vector copy (no arrays involved)
             self.write_indented(&format!(
                 "signals->{} = {};\n",
                 self.sanitize_name(output),
@@ -1756,10 +1832,18 @@ impl<'a> SharedCodegen<'a> {
         let output_width = self.get_signal_width(output);
         let (_, output_array_size) = self.type_mapper.get_type_for_width(output_width);
 
+        // Check if array_signal is the output of a SignalRef to an array state element
+        // (which we skipped generating). If so, use the state element directly.
         let array_location = if self.module.state_elements.contains_key(array_signal) {
             self.get_register_accessor(array_signal)
         } else {
-            format!("signals->{}", self.sanitize_name(array_signal))
+            // Check if this signal comes from a SignalRef to an array state element
+            let resolved_signal = self.resolve_array_source(array_signal);
+            if self.module.state_elements.contains_key(&resolved_signal) {
+                self.get_register_accessor(&resolved_signal)
+            } else {
+                format!("signals->{}", self.sanitize_name(array_signal))
+            }
         };
 
         if let Some(size) = output_array_size {
@@ -1891,9 +1975,23 @@ impl<'a> SharedCodegen<'a> {
             self.write_indented(&format!("// Initialize {} from {}\n", next_reg, current_reg));
             for (state_name, elem) in &sorted_states {
                 let sanitized = self.sanitize_name(state_name);
-                let (_, array_size) = self.type_mapper.get_type_for_width(elem.width);
-                if let Some(size) = array_size {
-                    // Array type - use memcpy for C++, element-wise copy for Metal
+
+                // Check if this is an array type using sir_type
+                let is_array = if let Some(ref sir_type) = elem.sir_type {
+                    matches!(sir_type, SirType::Array(_, _))
+                } else {
+                    false
+                };
+
+                if is_array {
+                    // Array type - get size from sir_type
+                    let array_size = if let Some(SirType::Array(_, size)) = &elem.sir_type {
+                        *size
+                    } else {
+                        1
+                    };
+
+                    // Use memcpy for C++, element-wise copy for Metal
                     if self.type_mapper.target == BackendTarget::Cpp {
                         self.write_indented(&format!(
                             "memcpy({}->{}, {}->{}, sizeof({}->{}));\n",
@@ -1903,7 +2001,7 @@ impl<'a> SharedCodegen<'a> {
                         // Metal: element-wise copy
                         self.write_indented(&format!(
                             "for (uint i = 0; i < {}; i++) {}->{}[i] = {}->{}[i];\n",
-                            size, next_reg, sanitized, current_reg, sanitized
+                            array_size, next_reg, sanitized, current_reg, sanitized
                         ));
                     }
                 } else {
@@ -1953,12 +2051,34 @@ impl<'a> SharedCodegen<'a> {
             String::new()
         };
 
-        // In batched mode, write to local variable for scalar registers (≤64 bits)
-        // This matches generate_local_state_copies which creates local_X for width ≤ 64
-        // Check if this is an array type
-        let (_, array_size) = self.type_mapper.get_type_for_width(output_width);
+        // Check if this is an array type using state element's sir_type
+        let is_array = if let Some(state_elem) = self.module.state_elements.get(output_signal) {
+            if let Some(ref sir_type) = state_elem.sir_type {
+                matches!(sir_type, SirType::Array(_, _))
+            } else {
+                false
+            }
+        } else {
+            // Fall back to width-based check
+            let (_, array_size) = self.type_mapper.get_type_for_width(output_width);
+            array_size.is_some()
+        };
 
-        if let Some(size) = array_size {
+        let array_size = if is_array {
+            if let Some(state_elem) = self.module.state_elements.get(output_signal) {
+                if let Some(SirType::Array(_, size)) = &state_elem.sir_type {
+                    *size
+                } else {
+                    self.get_array_size(output_width)
+                }
+            } else {
+                self.get_array_size(output_width)
+            }
+        } else {
+            0
+        };
+
+        if is_array && array_size > 0 {
             // Array type - use memcpy for C++, element-wise copy for Metal
             let target = format!("{}->{}", next_reg, sanitized_output);
             if self.type_mapper.target == BackendTarget::Cpp {
@@ -1970,7 +2090,7 @@ impl<'a> SharedCodegen<'a> {
                 // Metal: element-wise copy
                 self.write_indented(&format!(
                     "for (uint i = 0; i < {}; i++) {}[i] = signals->{}[i];\n",
-                    size, target, sanitized_data
+                    array_size, target, sanitized_data
                 ));
             }
         } else {
