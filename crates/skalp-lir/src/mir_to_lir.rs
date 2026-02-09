@@ -4070,6 +4070,14 @@ impl HierarchicalMirToLirResult {
                         let is_output = lir.outputs.contains(&child_port_id);
 
                         if is_output {
+                            // BUG #257 FIX: Skip creating a buffer if the output port was already
+                            // handled by output_remap_map in the third pass.
+                            // The output_remap_map redirects node outputs directly to the parent signal,
+                            // so we don't need a separate buffer node.
+                            if output_remap_map.contains_key(&(inst_path.clone(), child_port_id)) {
+                                continue;
+                            }
+
                             let parent_signal_name = format!("{}{}", parent_prefix, parent_signal_base);
 
                             // Get the flattened child output signal
