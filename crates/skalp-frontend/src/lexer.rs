@@ -319,8 +319,8 @@ pub enum Token {
     PreferredRegion,
     #[token("io_defaults")]
     IoDefaults,
-    #[token("voltage")]
-    Voltage,
+    // NOTE: 'voltage' removed as reserved keyword - now parsed as identifier
+    // to allow use as port/signal names (common in power electronics designs)
     #[token("device")]
     Device,
     #[token("group")]

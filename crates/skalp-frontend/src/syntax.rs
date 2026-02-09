@@ -175,7 +175,7 @@ pub enum SyntaxKind {
     KeepTogetherKw,
     PreferredRegionKw,
     IoDefaultsKw,
-    VoltageKw,
+    // VoltageKw removed - now parsed as identifier
     DeviceKw,
     GroupKw,
     FastKw,
@@ -587,7 +587,7 @@ impl SyntaxKind {
             | ConstraintKw | PhysicalKw | PinKw | PinsKw | PinPKw | PinNKw
             | IoStandardKw | DriveKw | SlewKw | PullKw | DiffTermKw | SchmittKw
             | BankKw | FloorplanKw | RegionKw | AreaKw | InstancesKw | BoundaryKw
-            | KeepTogetherKw | PreferredRegionKw | IoDefaultsKw | VoltageKw
+            | KeepTogetherKw | PreferredRegionKw | IoDefaultsKw
             | DeviceKw | GroupKw | FastKw | SlowKw | MediumKw
             | UpKw | DownKw | NoneKw | KeeperKw
         )
@@ -802,7 +802,6 @@ impl SyntaxKind {
             KeepTogetherKw => "'keep_together'",
             PreferredRegionKw => "'preferred_region'",
             IoDefaultsKw => "'io_defaults'",
-            VoltageKw => "'voltage'",
             DeviceKw => "'device'",
             GroupKw => "'group'",
             FastKw => "'fast'",
@@ -1140,7 +1139,7 @@ impl From<crate::lexer::Token> for SyntaxKind {
             Token::KeepTogether => KeepTogetherKw,
             Token::PreferredRegion => PreferredRegionKw,
             Token::IoDefaults => IoDefaultsKw,
-            Token::Voltage => VoltageKw,
+            // Token::Voltage removed - now parsed as identifier
             Token::Device => DeviceKw,
             Token::Group => GroupKw,
             Token::Fast => FastKw,

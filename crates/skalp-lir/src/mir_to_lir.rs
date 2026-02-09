@@ -2701,6 +2701,7 @@ impl MirToLirTransform {
 
             // BUG #245: Implement integer division
             // BUG #250: Handle signed division correctly using sign-magnitude approach
+            // BUG #12 FIX: Handle 64-bit division by using expected_width when possible
             BinaryOp::Div => {
                 // Try to extract constant divisor for optimized division
                 if let Some(divisor) = extract_constant_value(right) {
@@ -2711,19 +2712,58 @@ impl MirToLirTransform {
                         return zero; // Return 0 for div by 0
                     }
 
+                    // BUG #12 FIX: The magic number division algorithm only works correctly
+                    // for widths up to 32 bits (magic number overflows u64 for larger widths).
+                    // For cases like (a * b) / 1000 where intermediate result is 64-bit but
+                    // target is 32-bit, truncate the dividend first to avoid overflow.
+                    // This matches the semantics of the workaround: separate signals.
+                    let div_width = if operand_width > 32 && expected_width <= 32 {
+                        // Use target width - truncate first, then divide
+                        expected_width
+                    } else if operand_width > 32 {
+                        // True 64-bit division needed but not supported, warn and use 32
+                        self.warnings.push(format!(
+                            "Division with {} bit operand exceeds 32-bit magic number limit at {}, truncating to 32 bits",
+                            operand_width, self.hierarchy_path
+                        ));
+                        32
+                    } else {
+                        operand_width
+                    };
+
+                    // Transform left expression with full width, then truncate if needed
                     let left_sig = self.transform_expression(left, operand_width);
+                    let dividend_sig = if div_width < operand_width {
+                        // Truncate the dividend to the division width
+                        let truncated = self.alloc_temp_signal(div_width);
+                        let path = self.unique_node_path("div_trunc_input");
+                        self.lir.add_node(
+                            LirOp::RangeSelect {
+                                width: operand_width,
+                                high: div_width - 1,
+                                low: 0,
+                            },
+                            vec![left_sig],
+                            truncated,
+                            path,
+                        );
+                        truncated
+                    } else {
+                        left_sig
+                    };
+
                     let is_signed = self.infer_expression_is_signed(left);
 
                     // Check if divisor is power of 2 - use right shift
                     if divisor.is_power_of_two() {
                         let shift_amount = divisor.trailing_zeros() as u64;
-                        let shift_const = self.create_constant(&Value::Integer(shift_amount as i64), operand_width);
+                        let shift_const = self.create_constant(&Value::Integer(shift_amount as i64), div_width);
 
                         // BUG #250: Use arithmetic shift for signed operands
                         if is_signed {
-                            return self.create_arithmetic_shift_right_node(left_sig, shift_const, operand_width);
+                            return self.create_arithmetic_shift_right_node(dividend_sig, shift_const, div_width);
                         } else {
-                            return self.create_shift_right_node(left_sig, shift_const, operand_width);
+                            return self.create_shift_right_node(dividend_sig, shift_const, div_width);
                         }
                     }
 
@@ -2734,27 +2774,28 @@ impl MirToLirTransform {
                     // 4. Apply sign to result
                     let dividend_for_div = if is_signed {
                         // BUG #250: For signed division, compute absolute value first
-                        self.compute_absolute_value(left_sig, operand_width)
+                        self.compute_absolute_value(dividend_sig, div_width)
                     } else {
-                        left_sig
+                        dividend_sig
                     };
 
                     // For other constants, use magic number multiplication
-                    // This implements: n / d ≈ (n * m) >> (32 + s)
-                    // where m is the magic multiplier and s is the extra shift
-                    let (magic, shift) = compute_magic_number(divisor as u64, operand_width);
+                    // This implements: n / d ≈ (n * m) >> (N + s)
+                    // where m is the magic multiplier, N is the bit width, and s is extra shift
+                    // BUG #12 FIX: Use div_width (not operand_width) to avoid magic overflow
+                    let (magic, shift) = compute_magic_number(divisor as u64, div_width);
 
                     // Step 1: Create the magic constant
-                    let magic_const = self.create_constant(&Value::Integer(magic as i64), operand_width * 2);
+                    let magic_const = self.create_constant(&Value::Integer(magic as i64), div_width * 2);
 
                     // Step 2: Zero-extend dividend to double width for multiplication
                     // (always zero-extend since we're working with absolute value for signed)
-                    let extended_dividend = self.alloc_temp_signal(operand_width * 2);
+                    let extended_dividend = self.alloc_temp_signal(div_width * 2);
                     let path = self.unique_node_path("div_zext");
                     self.lir.add_node(
                         LirOp::ZeroExtend {
-                            from: operand_width,
-                            to: operand_width * 2,
+                            from: div_width,
+                            to: div_width * 2,
                         },
                         vec![dividend_for_div],
                         extended_dividend,
@@ -2762,12 +2803,12 @@ impl MirToLirTransform {
                     );
 
                     // Step 3: Multiply by magic number (unsigned for division optimization)
-                    let product = self.alloc_temp_signal(operand_width * 2);
+                    let product = self.alloc_temp_signal(div_width * 2);
                     let path = self.unique_node_path("div_mul");
                     self.lir.add_node(
                         LirOp::Mul {
-                            width: operand_width * 2,
-                            result_width: operand_width * 2,
+                            width: div_width * 2,
+                            result_width: div_width * 2,
                             signed: false, // Magic number multiplication is unsigned
                         },
                         vec![extended_dividend, magic_const],
@@ -2776,26 +2817,26 @@ impl MirToLirTransform {
                     );
 
                     // Step 4: Right shift to get quotient
-                    let total_shift = operand_width + shift;
-                    let shift_const = self.create_constant(&Value::Integer(total_shift as i64), operand_width * 2);
-                    let shifted = self.alloc_temp_signal(operand_width * 2);
+                    let total_shift = div_width + shift;
+                    let shift_const = self.create_constant(&Value::Integer(total_shift as i64), div_width * 2);
+                    let shifted = self.alloc_temp_signal(div_width * 2);
                     let path = self.unique_node_path("div_shr");
                     self.lir.add_node(
                         LirOp::Shr {
-                            width: operand_width * 2,
+                            width: div_width * 2,
                         },
                         vec![product, shift_const],
                         shifted,
                         path,
                     );
 
-                    // Step 5: Extract lower bits (truncate back to original width)
-                    let unsigned_result = self.alloc_temp_signal(operand_width);
+                    // Step 5: Extract lower bits (truncate back to division width)
+                    let unsigned_result = self.alloc_temp_signal(div_width);
                     let path = self.unique_node_path("div_trunc");
                     self.lir.add_node(
                         LirOp::RangeSelect {
-                            width: operand_width * 2,
-                            high: operand_width - 1,
+                            width: div_width * 2,
+                            high: div_width - 1,
                             low: 0,
                         },
                         vec![shifted],
@@ -2805,7 +2846,7 @@ impl MirToLirTransform {
 
                     // BUG #250: For signed division, apply sign to result
                     if is_signed {
-                        return self.apply_sign_to_result(left_sig, unsigned_result, operand_width);
+                        return self.apply_sign_to_result(dividend_sig, unsigned_result, div_width);
                     } else {
                         return unsigned_result;
                     }

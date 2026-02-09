@@ -6029,6 +6029,7 @@ impl<'a> ParseState<'a> {
         self.start_node(SyntaxKind::ConstraintPair);
 
         // Key (identifier or keyword)
+        // Note: 'voltage' and other constraint keys can now be identifiers
         match self.current_kind() {
             Some(SyntaxKind::PinKw)
             | Some(SyntaxKind::PinsKw)
@@ -6041,7 +6042,8 @@ impl<'a> ParseState<'a> {
             | Some(SyntaxKind::DiffTermKw)
             | Some(SyntaxKind::SchmittKw)
             | Some(SyntaxKind::BankKw)
-            | Some(SyntaxKind::VoltageKw) => {
+            | Some(SyntaxKind::Ident) => {
+                // Accept identifiers as constraint keys (e.g., "voltage")
                 self.bump();
             }
             _ => {
