@@ -991,8 +991,10 @@ impl<'a> SharedCodegen<'a> {
         let output = &node.outputs[0].signal_id;
 
         let is_metal = matches!(self.type_mapper.target, BackendTarget::Metal);
+        let output_width = std::cmp::max(left_width, right_width);
 
         // Convert operands to uint64_t
+        // For C++: 33-64 bits use uint64_t scalar, >64 bits use uint32_t[N] array
         let left_expr = if left_width <= 32 {
             format!("(uint64_t)signals->{}", self.sanitize_name(left))
         } else if is_metal {
@@ -1002,8 +1004,11 @@ impl<'a> SharedCodegen<'a> {
                 self.sanitize_name(left),
                 self.sanitize_name(left)
             )
+        } else if left_width <= 64 {
+            // C++: 33-64 bits stored as uint64_t scalar
+            format!("signals->{}", self.sanitize_name(left))
         } else {
-            // C++: uint32_t[2] array
+            // C++: > 64 bits stored as uint32_t[N] array
             format!(
                 "((uint64_t)signals->{}[0] | ((uint64_t)signals->{}[1] << 32))",
                 self.sanitize_name(left),
@@ -1020,8 +1025,11 @@ impl<'a> SharedCodegen<'a> {
                 self.sanitize_name(right),
                 self.sanitize_name(right)
             )
+        } else if right_width <= 64 {
+            // C++: 33-64 bits stored as uint64_t scalar
+            format!("signals->{}", self.sanitize_name(right))
         } else {
-            // C++: uint32_t[2] array
+            // C++: > 64 bits stored as uint32_t[N] array
             format!(
                 "((uint64_t)signals->{}[0] | ((uint64_t)signals->{}[1] << 32))",
                 self.sanitize_name(right),
@@ -1037,8 +1045,15 @@ impl<'a> SharedCodegen<'a> {
                 self.sanitize_name(output),
                 self.sanitize_name(output)
             ));
+        } else if output_width <= 64 {
+            // C++: 33-64 bits stored as uint64_t scalar
+            self.write_indented(&format!(
+                "signals->{} = {} {} {};\n",
+                self.sanitize_name(output),
+                left_expr, op_str, right_expr
+            ));
         } else {
-            // C++: Pack result into uint32_t[2] array
+            // C++: > 64 bits stored as uint32_t[N] array
             self.write_indented(&format!(
                 "{{ uint64_t _tmp = {} {} {}; signals->{}[0] = (uint32_t)_tmp; signals->{}[1] = (uint32_t)(_tmp >> 32); }}\n",
                 left_expr, op_str, right_expr,
