@@ -188,7 +188,33 @@ impl<'a> SharedCodegen<'a> {
             // Latch inputs: [enable, data], so data is at index 1
             SirNodeKind::FlipFlop { .. } | SirNodeKind::Latch { .. } => get_input_width(1),
             SirNodeKind::Memory { width, .. } => *width,
-            SirNodeKind::ArrayRead => get_input_width(0),
+            SirNodeKind::ArrayRead => {
+                // ArrayRead output is the ELEMENT width, not the total array width
+                // Get the array signal from input 0
+                if !node.inputs.is_empty() {
+                    let array_signal = &node.inputs[0].signal_id;
+                    // Check if this is an array state element
+                    if let Some(state_elem) = self.module.state_elements.get(array_signal) {
+                        if let Some(SirType::Array(elem_type, _)) = &state_elem.sir_type {
+                            return elem_type.width();
+                        }
+                    }
+                    // Check if the signal comes from a SignalRef to an array state element
+                    for comb_node in &self.module.combinational_nodes {
+                        if let SirNodeKind::SignalRef { signal } = &comb_node.kind {
+                            if comb_node.outputs.iter().any(|o| o.signal_id == *array_signal) {
+                                if let Some(state_elem) = self.module.state_elements.get(signal) {
+                                    if let Some(SirType::Array(elem_type, _)) = &state_elem.sir_type {
+                                        return elem_type.width();
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                // Fallback to input width (may be incorrect for arrays)
+                get_input_width(0)
+            }
             SirNodeKind::ArrayWrite => get_input_width(0),
             SirNodeKind::ClockGate | SirNodeKind::Reset => 1,
         }
@@ -367,6 +393,69 @@ impl<'a> SharedCodegen<'a> {
         signal.to_string()
     }
 
+    /// Get the array type for a signal, resolving through SignalRef chains if needed
+    /// Returns Some(SirType::Array) if the signal is an array, None otherwise
+    fn get_array_type_for_signal(&self, signal: &str) -> Option<SirType> {
+        // Direct state element lookup
+        if let Some(state_elem) = self.module.state_elements.get(signal) {
+            if let Some(ref sir_type) = state_elem.sir_type {
+                if matches!(sir_type, SirType::Array(_, _)) {
+                    return Some(sir_type.clone());
+                }
+            }
+        }
+
+        // Check if signal comes from a SignalRef to an array state element
+        for node in &self.module.combinational_nodes {
+            if let SirNodeKind::SignalRef { signal: source } = &node.kind {
+                if node.outputs.iter().any(|o| o.signal_id == signal) {
+                    if let Some(state_elem) = self.module.state_elements.get(source) {
+                        if let Some(ref sir_type) = state_elem.sir_type {
+                            if matches!(sir_type, SirType::Array(_, _)) {
+                                return Some(sir_type.clone());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        None
+    }
+
+    /// Check if a signal (by output name) is produced by an array-related node
+    /// Returns Some(array_type) if it's from SignalRef to array or ArrayWrite
+    fn get_array_type_for_signal_output(&self, output_name: &str) -> Option<SirType> {
+        // Find the node that produces this output
+        for node in &self.module.combinational_nodes {
+            for output in &node.outputs {
+                if output.signal_id == output_name {
+                    match &node.kind {
+                        // SignalRef to array state element
+                        SirNodeKind::SignalRef { signal } => {
+                            if let Some(state_elem) = self.module.state_elements.get(signal) {
+                                if let Some(ref sir_type) = state_elem.sir_type {
+                                    if matches!(sir_type, SirType::Array(_, _)) {
+                                        return Some(sir_type.clone());
+                                    }
+                                }
+                            }
+                        }
+                        // ArrayWrite outputs same type as input array
+                        SirNodeKind::ArrayWrite => {
+                            if !node.inputs.is_empty() {
+                                let array_signal = &node.inputs[0].signal_id;
+                                return self.get_array_type_for_signal(array_signal);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        None
+    }
+
     /// Generate struct field definition for a signal
     /// Returns true if the signal was decomposed
     pub fn generate_signal_field(&mut self, name: &str, sir_type: &SirType) -> bool {
@@ -521,15 +610,19 @@ impl<'a> SharedCodegen<'a> {
         // Add intermediate signals
         // Note: Use cached width instead of declared sir_type to ensure consistency
         // with how nodes compute their output widths (especially for concat nodes)
+        // However, for array-producing nodes, preserve the array type
         for signal in &self.module.signals {
             let sanitized_name = self.sanitize_name(&signal.name);
             if !signal.is_state
                 && !input_names.contains(&signal.name)
                 && added_names.insert(sanitized_name.clone())
             {
-                // Use cache width which may differ from declared width for node outputs
-                let width = self.get_signal_width(&signal.name);
-                let sir_type = SirType::Bits(width);
+                // Check if this signal is produced by an array-related node
+                let sir_type = self.get_array_type_for_signal_output(&signal.name)
+                    .unwrap_or_else(|| {
+                        let width = self.get_signal_width(&signal.name);
+                        SirType::Bits(width)
+                    });
                 self.generate_signal_field(&signal.name, &sir_type);
             }
         }
@@ -551,9 +644,40 @@ impl<'a> SharedCodegen<'a> {
                     continue;
                 }
 
-                // Use cached width - computed from node operation during initialization
-                let width = self.get_signal_width(signal_id);
-                let sir_type = SirType::Bits(width);
+                // For array-related nodes, preserve the array type
+                let sir_type = match &node.kind {
+                    // ArrayWrite outputs should be array type (same as input array)
+                    SirNodeKind::ArrayWrite => {
+                        if !node.inputs.is_empty() {
+                            let array_signal = &node.inputs[0].signal_id;
+                            self.get_array_type_for_signal(array_signal)
+                                .unwrap_or_else(|| SirType::Bits(self.get_signal_width(signal_id)))
+                        } else {
+                            SirType::Bits(self.get_signal_width(signal_id))
+                        }
+                    }
+                    // SignalRef to array state element should preserve array type
+                    SirNodeKind::SignalRef { signal } => {
+                        if let Some(state_elem) = self.module.state_elements.get(signal) {
+                            if let Some(ref sir_type) = state_elem.sir_type {
+                                if matches!(sir_type, SirType::Array(_, _)) {
+                                    sir_type.clone()
+                                } else {
+                                    SirType::Bits(self.get_signal_width(signal_id))
+                                }
+                            } else {
+                                SirType::Bits(self.get_signal_width(signal_id))
+                            }
+                        } else {
+                            SirType::Bits(self.get_signal_width(signal_id))
+                        }
+                    }
+                    // Default: use cached width
+                    _ => {
+                        let width = self.get_signal_width(signal_id);
+                        SirType::Bits(width)
+                    }
+                };
                 self.generate_signal_field(signal_id, &sir_type);
             }
         }
@@ -1746,13 +1870,24 @@ impl<'a> SharedCodegen<'a> {
         }
 
         // Check if source is an array-type state element
-        // If so, skip generating code - ArrayRead will access the state element directly
+        // If so, generate array copy code
         if let Some(state_elem) = self.module.state_elements.get(signal) {
-            if let Some(ref sir_type) = state_elem.sir_type {
-                if matches!(sir_type, SirType::Array(_, _)) {
-                    // Array state element - skip SignalRef, ArrayRead handles it
-                    return;
-                }
+            if let Some(SirType::Array(_, array_size)) = &state_elem.sir_type {
+                // Generate array copy from state element to output signal
+                let output_name = self.sanitize_name(output);
+                let source_accessor = self.get_register_accessor(signal);
+                self.write_indented(&format!(
+                    "for (uint32_t i = 0; i < {}; i++) {{\n",
+                    array_size
+                ));
+                self.indent();
+                self.write_indented(&format!(
+                    "signals->{}[i] = {}[i];\n",
+                    output_name, source_accessor
+                ));
+                self.dedent();
+                self.write_indented("}\n");
+                return;
             }
         }
 

@@ -769,25 +769,15 @@ impl SimulationRuntime for GpuRuntime {
             eprintln!("✅ Metal shader written to /tmp/skalp_metal_shader.metal");
         }
 
-        // Get the number of combinational cones and cache it
-        // PERF: Only call extract_combinational_cones() once during init, not every step
-        let cones = module.extract_combinational_cones();
-        self.cached_cone_count = if cones.is_empty() { 1 } else { cones.len() };
+        // The Metal backend generates a single combined `combinational_cone_0` kernel
+        // that evaluates all combinational logic in topological order.
+        // We always use this single kernel regardless of how many cones exist.
+        self.cached_cone_count = 1;
 
-        // Compile combinational cone kernels
-        if cones.is_empty() {
-            // If no cones, compile the empty kernel
-            let pipeline = self.compile_shader(&shader_source, "combinational_cone_0")?;
-            self.pipelines
-                .insert("combinational_0".to_string(), pipeline);
-        } else {
-            for (i, _cone) in cones.iter().enumerate() {
-                let function_name = format!("combinational_cone_{}", i);
-                let pipeline = self.compile_shader(&shader_source, &function_name)?;
-                self.pipelines
-                    .insert(format!("combinational_{}", i), pipeline);
-            }
-        }
+        // Compile the single combinational kernel
+        let pipeline = self.compile_shader(&shader_source, "combinational_cone_0")?;
+        self.pipelines
+            .insert("combinational_0".to_string(), pipeline);
 
         // Compile sequential kernel if there are sequential nodes
         if !module.sequential_nodes.is_empty() {
