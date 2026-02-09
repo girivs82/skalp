@@ -101,8 +101,9 @@ async fn test_64bit_register_metal_codegen() {
     }
 
     // Read and verify the Metal shader
+    // Note: The GPU runtime writes to /tmp/skalp_metal_shader.metal (not skalp_shader.metal)
     let shader_content =
-        fs::read_to_string("/tmp/skalp_shader.metal").expect("Metal shader should exist");
+        fs::read_to_string("/tmp/skalp_metal_shader.metal").expect("Metal shader should exist");
 
     // Resolve the internal name for reg64
     let reg64_internal = resolve("reg64");

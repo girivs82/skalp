@@ -316,7 +316,16 @@ impl<'a> SharedCodegen<'a> {
     pub fn get_register_accessor(&self, name: &str) -> String {
         let sanitized = self.sanitize_name(name);
         if self.in_batched_mode {
-            format!("local_{}", sanitized)
+            // Check if this is an array type - array registers don't have local copies
+            let width = self.get_signal_width(name);
+            let (_, array_size) = self.type_mapper.get_type_for_width(width);
+            if array_size.is_some() {
+                // Array type - access directly from registers buffer
+                format!("registers->{}", sanitized)
+            } else {
+                // Scalar type - use local variable
+                format!("local_{}", sanitized)
+            }
         } else {
             format!("registers->{}", sanitized)
         }
@@ -1744,18 +1753,34 @@ impl<'a> SharedCodegen<'a> {
         let index_signal = &node.inputs[1].signal_id;
         let output = &node.outputs[0].signal_id;
 
+        let output_width = self.get_signal_width(output);
+        let (_, output_array_size) = self.type_mapper.get_type_for_width(output_width);
+
         let array_location = if self.module.state_elements.contains_key(array_signal) {
             self.get_register_accessor(array_signal)
         } else {
             format!("signals->{}", self.sanitize_name(array_signal))
         };
 
-        self.write_indented(&format!(
-            "signals->{} = {}[signals->{}];\n",
-            self.sanitize_name(output),
-            array_location,
-            self.sanitize_name(index_signal)
-        ));
+        if let Some(size) = output_array_size {
+            // Output is an array type (multi-word value)
+            // This means each array element spans multiple words
+            // Index * words_per_element gives the starting offset
+            let sanitized_output = self.sanitize_name(output);
+            let sanitized_index = self.sanitize_name(index_signal);
+            self.write_indented(&format!(
+                "for (uint32_t i = 0; i < {}; i++) signals->{}[i] = {}[signals->{} * {} + i];\n",
+                size, sanitized_output, array_location, sanitized_index, size
+            ));
+        } else {
+            // Simple scalar index - single word result
+            self.write_indented(&format!(
+                "signals->{} = {}[signals->{}];\n",
+                self.sanitize_name(output),
+                array_location,
+                self.sanitize_name(index_signal)
+            ));
+        }
     }
 
     /// Generate array write operation
@@ -1864,12 +1889,30 @@ impl<'a> SharedCodegen<'a> {
         // In batched mode with local variables, skip this - locals already have current values
         if !self.in_batched_mode {
             self.write_indented(&format!("// Initialize {} from {}\n", next_reg, current_reg));
-            for (state_name, _) in &sorted_states {
+            for (state_name, elem) in &sorted_states {
                 let sanitized = self.sanitize_name(state_name);
-                self.write_indented(&format!(
-                    "{}->{} = {}->{};\n",
-                    next_reg, sanitized, current_reg, sanitized
-                ));
+                let (_, array_size) = self.type_mapper.get_type_for_width(elem.width);
+                if let Some(size) = array_size {
+                    // Array type - use memcpy for C++, element-wise copy for Metal
+                    if self.type_mapper.target == BackendTarget::Cpp {
+                        self.write_indented(&format!(
+                            "memcpy({}->{}, {}->{}, sizeof({}->{}));\n",
+                            next_reg, sanitized, current_reg, sanitized, current_reg, sanitized
+                        ));
+                    } else {
+                        // Metal: element-wise copy
+                        self.write_indented(&format!(
+                            "for (uint i = 0; i < {}; i++) {}->{}[i] = {}->{}[i];\n",
+                            size, next_reg, sanitized, current_reg, sanitized
+                        ));
+                    }
+                } else {
+                    // Scalar type - direct assignment
+                    self.write_indented(&format!(
+                        "{}->{} = {}->{};\n",
+                        next_reg, sanitized, current_reg, sanitized
+                    ));
+                }
             }
         }
 
@@ -1912,23 +1955,38 @@ impl<'a> SharedCodegen<'a> {
 
         // In batched mode, write to local variable for scalar registers (≤64 bits)
         // This matches generate_local_state_copies which creates local_X for width ≤ 64
-        let target = if self.in_batched_mode && output_width <= 64 {
-            // Check if this is a scalar type (not an array)
-            let (_, array_size) = self.type_mapper.get_type_for_width(output_width);
-            if array_size.is_none() {
+        // Check if this is an array type
+        let (_, array_size) = self.type_mapper.get_type_for_width(output_width);
+
+        if let Some(size) = array_size {
+            // Array type - use memcpy for C++, element-wise copy for Metal
+            let target = format!("{}->{}", next_reg, sanitized_output);
+            if self.type_mapper.target == BackendTarget::Cpp {
+                self.write_indented(&format!(
+                    "memcpy({}, signals->{}, sizeof({}));\n",
+                    target, sanitized_data, target
+                ));
+            } else {
+                // Metal: element-wise copy
+                self.write_indented(&format!(
+                    "for (uint i = 0; i < {}; i++) {}[i] = signals->{}[i];\n",
+                    size, target, sanitized_data
+                ));
+            }
+        } else {
+            // Scalar type
+            let target = if self.in_batched_mode && output_width <= 64 {
                 format!("local_{}", sanitized_output)
             } else {
                 format!("{}->{}", next_reg, sanitized_output)
-            }
-        } else {
-            format!("{}->{}", next_reg, sanitized_output)
-        };
+            };
 
-        self.write_indented(&format!(
-            "{} = signals->{}{};\n",
-            target,
-            sanitized_data,
-            mask
-        ));
+            self.write_indented(&format!(
+                "{} = signals->{}{};\n",
+                target,
+                sanitized_data,
+                mask
+            ));
+        }
     }
 }
