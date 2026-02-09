@@ -1011,6 +1011,11 @@ impl MirToLirTransform {
                                                 path,
                                             );
                                             current_value = mux_out;
+                                        } else {
+                                            // BUG #256 FIX: Unconditional assignment becomes the new base value
+                                            // This handles leading assignments like `counter = counter + 1`
+                                            // that appear before conditional statements in the else block.
+                                            current_value = expr_signal;
                                         }
                                     }
                                 }
@@ -1112,6 +1117,11 @@ impl MirToLirTransform {
                                                 path,
                                             );
                                             current_value = mux_out;
+                                        } else {
+                                            // BUG #256 FIX: Unconditional assignment becomes the new base value
+                                            // This handles leading assignments like `counter = counter + 1`
+                                            // that appear before conditional statements in the else block.
+                                            current_value = expr_signal;
                                         }
                                     }
                                 }
