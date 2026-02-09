@@ -3644,6 +3644,7 @@ impl<'a> MirToSirConverter<'a> {
     fn is_expression_signed(&self, expr: &Expression) -> bool {
         // First check the expression's type field
         if Self::is_type_signed(&expr.ty) {
+            println!("[IS_SIGNED_TYPE] expr.ty={:?} is signed, expr.kind={:?}", expr.ty, std::mem::discriminant(&expr.kind));
             return true;
         }
 
@@ -3651,7 +3652,11 @@ impl<'a> MirToSirConverter<'a> {
         match &expr.kind {
             ExpressionKind::Ref(lvalue) => {
                 // Look up the signal/port type from the MIR module
-                self.is_lvalue_signed(lvalue)
+                let result = self.is_lvalue_signed(lvalue);
+                if result {
+                    println!("[IS_SIGNED] lvalue={:?} is signed", lvalue);
+                }
+                result
             }
             ExpressionKind::Binary { left, right, .. } => {
                 // Recurse into binary operands
@@ -3691,12 +3696,22 @@ impl<'a> MirToSirConverter<'a> {
             LValue::Port(port_id) => {
                 // First try current module
                 if let Some(p) = self.mir.ports.iter().find(|p| &p.id == port_id) {
-                    return matches!(p.port_type, DataType::Int(_) | DataType::IntParam { .. } | DataType::IntExpr { .. });
+                    let is_signed = matches!(p.port_type, DataType::Int(_) | DataType::IntParam { .. } | DataType::IntExpr { .. });
+                    if is_signed {
+                        println!("[IS_LVALUE_SIGNED] PortId({}) found in self.mir='{}': name='{}', type={:?}",
+                            port_id.0, self.mir.name, p.name, p.port_type);
+                    }
+                    return is_signed;
                 }
                 // Search across all modules in the design
                 for module in &self.mir_design.modules {
                     if let Some(p) = module.ports.iter().find(|p| &p.id == port_id) {
-                        return matches!(p.port_type, DataType::Int(_) | DataType::IntParam { .. } | DataType::IntExpr { .. });
+                        let is_signed = matches!(p.port_type, DataType::Int(_) | DataType::IntParam { .. } | DataType::IntExpr { .. });
+                        if is_signed {
+                            println!("[IS_LVALUE_SIGNED] PortId({}) found in module='{}': name='{}', type={:?}",
+                                port_id.0, module.name, p.name, p.port_type);
+                        }
+                        return is_signed;
                     }
                 }
                 false
@@ -4394,6 +4409,18 @@ impl<'a> MirToSirConverter<'a> {
         // The is_signed_from_mir flag is determined from the original MIR Expression.ty field,
         // which is more reliable than looking at intermediate SIR signal types.
         let is_signed = is_signed_from_mir || left_type.is_signed() || right_type.is_signed();
+
+        // Debug: trace signed comparison decisions
+        if matches!(op, skalp_mir::BinaryOp::Greater | skalp_mir::BinaryOp::Less |
+                       skalp_mir::BinaryOp::GreaterEqual | skalp_mir::BinaryOp::LessEqual) {
+            if is_signed {
+                println!("[SIGNED_CMP_DEBUG] op={:?} is_signed=true, is_signed_from_mir={}, left_type={:?}, right_type={:?}",
+                    op, is_signed_from_mir, left_type, right_type);
+                println!("[SIGNED_CMP_DEBUG]   left_signal='{}', right_signal='{}'",
+                    left_signal.signal_id, right_signal.signal_id);
+            }
+        }
+
         let bin_op = self.convert_binary_op_with_signedness(op, is_signed);
 
         // BUG DEBUG #65: Log signal names being looked up
@@ -5629,6 +5656,66 @@ impl<'a> MirToSirConverter<'a> {
             },
             inputs: vec![SignalRef {
                 signal_id: internal_name.clone(),
+                bit_range: None,
+            }],
+            outputs: vec![output_signal],
+            clock_domain: None,
+            impl_style_hint: ImplStyleHint::default(),
+            span: None,
+        };
+
+        self.sir.combinational_nodes.push(node);
+        node_id
+    }
+
+    /// BUG #255 FIX: Create a SignalRef node that reads from a child input port signal.
+    ///
+    /// This is different from `get_or_create_signal_driver` because we ALWAYS create a
+    /// new SignalRef node, even if the signal already has a driver. This ensures the
+    /// output type comes from the signal's declared type (which matches the child port),
+    /// not from the driver's type (which may come from a parent expression with different
+    /// signedness).
+    ///
+    /// Example: If parent passes `current_magnitude as nat[16]` to child port `value: nat[16]`,
+    /// the driver might be signed (from current which is int[16]), but the child port is unsigned.
+    /// By creating a fresh SignalRef with the signal's declared type, comparisons in the child
+    /// module will use unsigned operations as expected.
+    fn create_signal_reader_for_child_port(&mut self, signal_name: &str) -> usize {
+        let node_id = self.next_node_id();
+
+        // Create output signal for this node
+        let output_signal_name = format!("node_{}_out", node_id);
+        let output_signal = SignalRef {
+            signal_id: output_signal_name.clone(),
+            bit_range: None,
+        };
+
+        // Get the signal's declared type (NOT the driver's type)
+        let sir_type = if let Some(signal) = self.sir.signals.iter().find(|s| s.name == signal_name) {
+            signal.sir_type.clone()
+        } else {
+            SirType::Bits(16) // Default fallback
+        };
+        let width = sir_type.width();
+
+        self.sir.signals.push(SirSignal {
+            name: output_signal_name.clone(),
+            width,
+            sir_type,
+            is_state: false,
+            driver_node: Some(node_id),
+            fanout_nodes: Vec::new(),
+            span: None,
+        });
+
+        // Create a signal reader node
+        let node = SirNode {
+            id: node_id,
+            kind: SirNodeKind::SignalRef {
+                signal: signal_name.to_string(),
+            },
+            inputs: vec![SignalRef {
+                signal_id: signal_name.to_string(),
                 bit_range: None,
             }],
             outputs: vec![output_signal],
@@ -9123,21 +9210,13 @@ impl<'a> MirToSirConverter<'a> {
         parent_module_for_signals: Option<&Module>,
         parent_prefix: &str,
     ) -> usize {
-        println!(
-            "🎨🎨🎨 CREATE_EXPR_NODE_FOR_INSTANCE: expr.kind={:?}, inst_prefix='{}'",
-            std::mem::discriminant(&expr.kind),
-            inst_prefix
-        );
-        let result = match &expr.kind {
+        match &expr.kind {
             ExpressionKind::Literal(value) => self.create_literal_node(value),
             ExpressionKind::Ref(lvalue) => {
-                println!("🎨🎨🎨   -> ExpressionKind::Ref({:?})", lvalue);
-
                 // BUG FIX #85: Handle RangeSelect and BitSelect specially
                 // For these, we need to create a node that selects bits from the base signal
                 match lvalue {
                     LValue::RangeSelect { base, high, low } => {
-                        println!("🎨🎨🎨   -> RangeSelect on base {:?} [high:low]", base);
                         // First, get the base signal node
                         let base_expr =
                             Expression::with_unknown_type(ExpressionKind::Ref((**base).clone()));
@@ -9152,14 +9231,9 @@ impl<'a> MirToSirConverter<'a> {
                         // Now create a range select node on top
                         let high_val = self.evaluate_const_expr(high);
                         let low_val = self.evaluate_const_expr(low);
-                        println!(
-                            "🎨🎨🎨   -> Creating RangeSelect node [{}:{}] on base_node={}",
-                            high_val, low_val, base_node
-                        );
                         self.create_range_select_node_on_base(base_node, high_val, low_val)
                     }
                     LValue::BitSelect { base, index } => {
-                        println!("🎨🎨🎨   -> BitSelect on base {:?} [index]", base);
                         // First, get the base signal node
                         let base_expr =
                             Expression::with_unknown_type(ExpressionKind::Ref((**base).clone()));
@@ -9173,10 +9247,6 @@ impl<'a> MirToSirConverter<'a> {
                         );
                         // Now create a bit select node on top
                         let index_val = self.evaluate_const_expr(index);
-                        println!(
-                            "🎨🎨🎨   -> Creating BitSelect node [{}] on base_node={}",
-                            index_val, base_node
-                        );
                         self.create_bit_select_node_on_base(base_node, index_val)
                     }
                     // BUG FIX #113: Handle Port specially to preserve RangeSelect in port_mapping
@@ -9184,63 +9254,41 @@ impl<'a> MirToSirConverter<'a> {
                     // we need to recursively create a node for that expression, not just extract
                     // the base signal name.
                     LValue::Port(port_id) => {
-                        println!(
-                            "🎨🎨🎨   -> LValue::Port({}), checking port_mapping in child_module='{}' (has {} ports)",
-                            port_id.0, child_module.name, child_module.ports.len()
-                        );
-
-                        // BUG #223 DEBUG: Print all ports in child_module for debugging
-                        if child_module.name.contains("Comparator") || child_module.name.contains("Threshold") {
-                            println!("🔍🔍🔍 BUG #223 DEBUG: All ports in '{}':", child_module.name);
-                            for (i, p) in child_module.ports.iter().enumerate() {
-                                println!("🔍🔍🔍    [{}] id={} name='{}'", i, p.id.0, p.name);
-                            }
-                        }
-
                         // Look up the port name in child_module
                         let port_name = if let Some(port) =
                             child_module.ports.iter().find(|p| p.id == *port_id)
                         {
-                            println!("🎨🎨🎨   -> Found port by ID: id={} name='{}'", port.id.0, port.name);
                             Some(port.name.clone())
                         } else {
                             // Try by index (BUG #24 fallback)
                             let port_index = port_id.0 as usize;
-                            println!("🎨🎨🎨   -> ⚠️ Port ID {} NOT FOUND by id, falling back to index={}", port_id.0, port_index);
                             if port_index < child_module.ports.len() {
-                                let fallback_port = &child_module.ports[port_index];
-                                println!("🎨🎨🎨   -> ⚠️ BUG #24 FALLBACK: Using ports[{}].name='{}' (actual id={})",
-                                    port_index, fallback_port.name, fallback_port.id.0);
                                 Some(child_module.ports[port_index].name.clone())
                             } else {
-                                println!("🎨🎨🎨   -> ❌ Index {} out of bounds (len={})", port_index, child_module.ports.len());
                                 None
                             }
                         };
 
                         if let Some(ref name) = port_name {
-                            println!("🎨🎨🎨   -> Port name: '{}', looking in port_mapping", name);
-
                             // BUG #236 FIX PART 2: For child input ports, use the SIR signal we created
                             // instead of following port_mapping to the parent's signal.
                             // The external name format is "{inst_prefix}.{port_name}"
+                            //
+                            // BUG #255 FIX: We must create a NEW SignalRef that reads from the child input
+                            // port signal, rather than returning the driver node. The driver might have
+                            // a different type (e.g., signed) than the child port's declared type (unsigned).
+                            // By creating a new SignalRef with the child signal's type, we ensure comparisons
+                            // use the correct signedness.
                             if !inst_prefix.is_empty() {
                                 let child_port_external_name = format!("{}.{}", inst_prefix.trim_end_matches('.'), name);
                                 if let Some(internal_name) = self.mir_to_internal_name.get(&child_port_external_name).cloned() {
-                                    println!(
-                                        "🎨🎨🎨   -> BUG #236 FIX: Found child input port SIR signal '{}' for '{}', using it instead of port_mapping",
-                                        internal_name, child_port_external_name
-                                    );
-                                    return self.get_or_create_signal_driver(&internal_name);
+                                    // BUG #255 FIX: Create a fresh SignalRef to read from the child port signal
+                                    // with the signal's declared type, NOT the driver's type.
+                                    return self.create_signal_reader_for_child_port(&internal_name);
                                 }
                             }
 
                             if let Some(parent_expr) = port_mapping.get(name) {
-                                println!(
-                                    "🎨🎨🎨   -> Found mapping for '{}': {:?}",
-                                    name,
-                                    std::mem::discriminant(&parent_expr.kind)
-                                );
                                 // BUG #113: Recursively create node for the mapped expression
                                 // This properly handles RangeSelect in the mapped expression
                                 // IMPORTANT: The mapped expression is in PARENT context.
@@ -9257,8 +9305,6 @@ impl<'a> MirToSirConverter<'a> {
                                     .cloned()
                                     .unwrap_or_default();
                                 if let Some(parent_module) = parent_module_for_signals {
-                                    println!("🎨🎨🎨   -> Recursing with parent_module='{}' as child_module, parent_prefix='{}', parent_port_mapping.len()={}", parent_module.name, parent_prefix, parent_port_mapping.len());
-
                                     // BUG FIX #209: Look up the correct grandparent module for 3+ level hierarchies
                                     // instead of always using self.mir. The grandparent is the module that owns
                                     // the SignalIds in parent_port_mapping.
@@ -9282,16 +9328,13 @@ impl<'a> MirToSirConverter<'a> {
                                             } else {
                                                 String::new()
                                             };
-                                            println!("🎨🎨🎨   -> BUG #209 FIX: Using grandparent '{}' with prefix '{}' (from instance_parent_module_ids)", gp_module.name, gp_prefix);
                                             (gp_module.clone(), gp_prefix)
                                         } else {
                                             // Fallback to self.mir if module not found
-                                            println!("🎨🎨🎨   -> BUG #209: Grandparent ID {:?} not found, falling back to self.mir", grandparent_id);
                                             (self.mir.clone(), String::new())
                                         }
                                     } else {
                                         // No stored parent - we're at first level nesting, use self.mir
-                                        println!("🎨🎨🎨   -> BUG #209: No grandparent stored for '{}', using self.mir", parent_key);
                                         (self.mir.clone(), String::new())
                                     };
 
@@ -9324,9 +9367,6 @@ impl<'a> MirToSirConverter<'a> {
                         // instance, not the current child_module. So we should look up ports in
                         // parent_module_for_signals FIRST, then self.mir, then child_module as last resort.
                         if port_mapping.is_empty() {
-                            println!("🎨🎨🎨   -> Empty port_mapping, looking up port {} (inst_prefix='{}', parent_prefix='{}')",
-                                     port_id.0, inst_prefix, parent_prefix);
-
                             // BUG #114 FIX: We already resolved the port_name from child_module above.
                             // If we have a port_name, use it directly to look up the signal!
                             // Don't try to re-lookup by port_id in parent_module/self.mir since those
@@ -9341,41 +9381,26 @@ impl<'a> MirToSirConverter<'a> {
                                         self.mir.ports.iter().find(|p| p.name == *name)
                                     {
                                         // Found in top-level - use the signal directly (no prefix)
-                                        println!("🎨🎨🎨   -> BUG #118 FIX: At TOP LEVEL, found port '{}' by NAME in self.mir, using signal directly", name);
                                         return self.get_or_create_signal_driver(&mir_port.name);
                                     }
                                     // Try to find as a signal in self.mir by name
-                                    if let Some(_mir_signal) =
-                                        self.mir.signals.iter().find(|s| s.name == *name)
-                                    {
-                                        println!("🎨🎨🎨   -> BUG #118 FIX: At TOP LEVEL, found signal '{}' by NAME in self.mir, using it directly", name);
+                                    if self.mir.signals.iter().any(|s| s.name == *name) {
                                         return self.get_or_create_signal_driver(name);
                                     }
                                     // At top-level, just try the name directly
-                                    println!("🎨🎨🎨   -> BUG #118 FIX: At TOP LEVEL, using port name '{}' directly", name);
                                     return self.get_or_create_signal_driver(name);
                                 }
                                 // For nested instances, continue to the parent_module lookup below
-                                println!("🎨🎨🎨   -> BUG #118 FIX: In NESTED context (inst='{}', parent='{}'), skipping top-level lookup for '{}'",
-                                         inst_prefix, parent_prefix, name);
                             }
 
                             // BUG #113 FIX: After recursion, inst_prefix is from the PARENT context.
                             // The Port reference is from child_module, but we need to look it up using
                             // parent context. Try parent_module_for_signals FIRST.
                             if let Some(parent_module) = parent_module_for_signals {
-                                println!(
-                                    "🎨🎨🎨   -> Trying parent_module '{}' first",
-                                    parent_module.name
-                                );
                                 if let Some(port) =
                                     parent_module.ports.iter().find(|p| p.id == *port_id)
                                 {
                                     let sig_name = format!("{}{}", parent_prefix, port.name);
-                                    println!(
-                                        "🎨🎨🎨   -> Found port '{}' in parent_module, signal='{}'",
-                                        port.name, sig_name
-                                    );
                                     return self.get_or_create_signal_driver(&sig_name);
                                 }
                                 // BUG #114 FIX: Also try by NAME in parent_module
@@ -9388,7 +9413,6 @@ impl<'a> MirToSirConverter<'a> {
                                         } else {
                                             format!("{}{}", parent_prefix, port.name)
                                         };
-                                        println!("🎨🎨🎨   -> BUG #114 FIX: Found port '{}' by NAME in parent_module, signal='{}'", port.name, sig_name);
                                         return self.get_or_create_signal_driver(&sig_name);
                                     }
                                 }
@@ -9397,27 +9421,17 @@ impl<'a> MirToSirConverter<'a> {
                                 if port_index < parent_module.ports.len() {
                                     let port = &parent_module.ports[port_index];
                                     let sig_name = format!("{}{}", parent_prefix, port.name);
-                                    println!("🎨🎨🎨   -> Found port '{}' by index in parent_module, signal='{}'", port.name, sig_name);
                                     return self.get_or_create_signal_driver(&sig_name);
                                 }
                             }
 
                             // Try self.mir (top-level module) - ports here don't need prefix
-                            println!("🎨🎨🎨   -> Trying self.mir '{}'", self.mir.name);
                             if let Some(port) = self.mir.ports.iter().find(|p| p.id == *port_id) {
-                                println!(
-                                    "🎨🎨🎨   -> Found port '{}' in self.mir (no prefix)",
-                                    port.name
-                                );
                                 return self.get_or_create_signal_driver(&port.name);
                             }
                             let port_index = port_id.0 as usize;
                             if port_index < self.mir.ports.len() {
                                 let port = &self.mir.ports[port_index];
-                                println!(
-                                    "🎨🎨🎨   -> Found port '{}' by index in self.mir (no prefix)",
-                                    port.name
-                                );
                                 return self.get_or_create_signal_driver(&port.name);
                             }
 
@@ -9426,11 +9440,9 @@ impl<'a> MirToSirConverter<'a> {
                             // child_module. Using child_module.ports with inst_prefix creates
                             // wrong signal names like "exec_l4_l5_inst_233.param_1".
                             // Let it fall through to the fallback lookup below instead.
-                            println!("🎨🎨🎨   -> NOT using child_module '{}' with inst_prefix (Bug #113 fix)", child_module.name);
                         }
 
                         // Fallback to original behavior
-                        println!("🎨🎨🎨   -> Port not in port_mapping, using fallback lookup");
                         if let Some(sig_name) = self.get_signal_from_lvalue_with_context(
                             lvalue,
                             inst_prefix,
@@ -9451,25 +9463,13 @@ impl<'a> MirToSirConverter<'a> {
                                     } else {
                                         format!("{}{}", parent_prefix, parent_port.name)
                                     };
-                                    println!(
-                                        "🎨🎨🎨   -> BUG #237 FIX: Found port '{}' in parent_module '{}', signal='{}'",
-                                        parent_port.name, parent_module.name, sig_name
-                                    );
                                     return self.get_or_create_signal_driver(&sig_name);
                                 }
                             }
                             // Also try self.mir (top-level)
                             if let Some(mir_port) = self.mir.ports.iter().find(|p| p.id == *port_id) {
-                                println!(
-                                    "🎨🎨🎨   -> BUG #237 FIX: Found port '{}' in top-level mir, using signal directly",
-                                    mir_port.name
-                                );
                                 return self.get_or_create_signal_driver(&mir_port.name);
                             }
-                            println!(
-                                "🎨🎨🎨   -> FALLBACK: port {:?} not found, creating Constant(0,1)",
-                                port_id
-                            );
                             self.create_constant_node(0, 1)
                         }
                     }
@@ -9486,7 +9486,6 @@ impl<'a> MirToSirConverter<'a> {
                             self.get_or_create_signal_driver(&sig_name)
                         } else {
                             // Fallback: create a zero constant
-                            println!("🎨🎨🎨   -> FALLBACK: lvalue {:?} not found, creating Constant(0,1)", lvalue);
                             self.create_constant_node(0, 1)
                         }
                     }
@@ -9770,8 +9769,6 @@ impl<'a> MirToSirConverter<'a> {
             ExpressionKind::Cast { expr: inner_expr, target_type } => {
                 // BUG #245 FIX: Widening casts need sign/zero extension
                 // BUG #186 NOTE: For same-width casts (e.g., bit[32] to fp32), this is still a no-op
-                println!("🎨🎨🎨   -> ExpressionKind::Cast - processing with width handling");
-
                 let cast_target_width = Self::datatype_to_width(target_type);
 
                 // Create node for the inner expression first
@@ -9824,12 +9821,7 @@ impl<'a> MirToSirConverter<'a> {
                 // For unsupported expressions, create a zero constant
                 self.create_constant_node(0, 1)
             }
-        };
-        println!(
-            "🔧 create_expression_node_for_instance: returning node {}",
-            result
-        );
-        result
+        }
     }
 
     /// Collect input signal references from expression
