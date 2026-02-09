@@ -67,8 +67,15 @@ impl<'a> SharedCodegen<'a> {
         }
 
         // 4. Add widths from state elements
+        // For array types, use sir_type.width() to get the total width,
+        // not elem.width which may be just the element width
         for (name, elem) in &self.module.state_elements {
-            self.signal_width_cache.insert(name.clone(), elem.width);
+            let width = if let Some(ref sir_type) = elem.sir_type {
+                sir_type.width()
+            } else {
+                elem.width
+            };
+            self.signal_width_cache.insert(name.clone(), width);
         }
 
         // 5. Compute widths from combinational nodes (in topological order)
@@ -349,26 +356,82 @@ impl<'a> SharedCodegen<'a> {
         width.div_ceil(32)
     }
 
+    /// Check if a signal is stored as an array of vectors in Metal.
+    /// This happens when we have Array(Bits(N), M) where 32 < N <= 128.
+    /// In Metal, each element becomes uint2 (for 33-64 bits) or uint4 (for 65-128 bits).
+    /// Returns (is_array_of_vectors, element_bits, vector_size) where:
+    /// - element_bits is the width of each array element
+    /// - vector_size is 2 for uint2, 4 for uint4
+    pub fn is_array_of_vectors(&self, signal: &str) -> (bool, usize, usize) {
+        // Only relevant for Metal
+        if self.type_mapper.target != BackendTarget::Metal {
+            return (false, 0, 0);
+        }
+
+        // Check if this signal comes from an array-type state element
+        if let Some(state_elem) = self.module.state_elements.get(signal) {
+            if let Some(SirType::Array(elem_type, _)) = &state_elem.sir_type {
+                let elem_width = elem_type.width();
+                // Check if element uses vector storage (33-128 bits in Metal)
+                if elem_width > 32 && elem_width <= 128 {
+                    let vector_size = if elem_width <= 64 { 2 } else { 4 };
+                    return (true, elem_width, vector_size);
+                }
+            }
+        }
+
+        // Also check if this is a signal that was copied from an array of vectors
+        // We can detect this by checking the signal width and if it's a multiple of vector element size
+        // For now, use a heuristic: if signal name starts with "node_" and ends with "_out",
+        // check if there's a SignalRef that points to an array state element
+        // This is complex, so we'll rely on the state element check above for now
+
+        (false, 0, 0)
+    }
+
+    /// Resolve a signal to its source array if it came from a SignalRef to an array state element.
+    /// Returns the source signal name if found, otherwise the original signal name.
+    pub fn resolve_to_array_source(&self, signal: &str) -> Option<String> {
+        // Look for a SignalRef node that outputs this signal
+        for node in &self.module.combinational_nodes {
+            if let SirNodeKind::SignalRef { signal: source } = &node.kind {
+                if node.outputs.iter().any(|o| o.signal_id == signal) {
+                    // Check if source is an array state element
+                    if let Some(state_elem) = self.module.state_elements.get(source) {
+                        if let Some(SirType::Array(_, _)) = &state_elem.sir_type {
+                            return Some(source.clone());
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
     /// Get the accessor string for a register
     /// In batched mode, returns `local_X`, otherwise returns `registers->X`
     pub fn get_register_accessor(&self, name: &str) -> String {
         let sanitized = self.sanitize_name(name);
         if self.in_batched_mode {
-            // Check if this is an array type using sir_type - array registers don't have local copies
+            // Check if this is an array type - array registers don't have local copies
+            // First try sir_type, but ALWAYS fall back to width-based check for non-array types
+            // because sir_type might be Bits(N) for wide signals that need array storage
+            let width = self.get_signal_width(name);
+            let (_, array_size_by_width) = self.type_mapper.get_type_for_width(width);
+            let width_needs_array = array_size_by_width.is_some();
+
             let is_array = if let Some(state_elem) = self.module.state_elements.get(name) {
                 if let Some(ref sir_type) = state_elem.sir_type {
-                    matches!(sir_type, SirType::Array(_, _))
+                    // If sir_type says Array, it's definitely an array
+                    // If sir_type is NOT Array but width requires array storage, treat as array
+                    matches!(sir_type, SirType::Array(_, _)) || width_needs_array
                 } else {
-                    // Fall back to width-based check
-                    let width = self.get_signal_width(name);
-                    let (_, array_size) = self.type_mapper.get_type_for_width(width);
-                    array_size.is_some()
+                    // No sir_type, use width-based check
+                    width_needs_array
                 }
             } else {
-                // Not a state element, check by width
-                let width = self.get_signal_width(name);
-                let (_, array_size) = self.type_mapper.get_type_for_width(width);
-                array_size.is_some()
+                // Not a state element, use width-based check
+                width_needs_array
             };
 
             if is_array {
@@ -1754,58 +1817,113 @@ impl<'a> SharedCodegen<'a> {
             }
         } else if input_uses_array {
             // Input is array, output is scalar - extract from array elements
-            let element_idx = low / 32;
-            let bit_in_element = low % 32;
+            // Check if this is an array-of-vectors in Metal (e.g., uint2[8] for Array(Bits(64), 8))
+            let source_signal = self.resolve_to_array_source(input).unwrap_or_else(|| input.to_string());
+            let (is_array_of_vectors, elem_bits, vector_size) = self.is_array_of_vectors(&source_signal);
 
-            if width <= 32 && bit_in_element + width <= 32 {
-                // Slice fits in single element
-                let elem_mask = if width >= 32 { 0xFFFFFFFF } else { (1u32 << width) - 1 };
-                self.write_indented(&format!(
-                    "signals->{} = ({}[{}] >> {}) & 0x{:X};\n",
-                    self.sanitize_name(output),
-                    input_base,
-                    element_idx,
-                    bit_in_element,
-                    elem_mask
-                ));
-            } else if width <= 32 {
-                // Slice spans two elements
-                let bits_from_first = 32 - bit_in_element;
-                let bits_from_second = width - bits_from_first;
-                let first_mask = (1u32 << bits_from_first) - 1;
-                let second_mask = (1u32 << bits_from_second) - 1;
-                self.write_indented(&format!(
-                    "signals->{} = (({}[{}] >> {}) & 0x{:X}) | (({}[{}] & 0x{:X}) << {});\n",
-                    self.sanitize_name(output),
-                    input_base,
-                    element_idx,
-                    bit_in_element,
-                    first_mask,
-                    input_base,
-                    element_idx + 1,
-                    second_mask,
-                    bits_from_first
-                ));
-            } else if width <= 64 {
-                // 33-64 bit slice from array - combine two elements
-                self.write_indented(&format!(
-                    "signals->{} = ((uint64_t){}[{}] >> {}) | ((uint64_t){}[{}] << {});\n",
-                    self.sanitize_name(output),
-                    input_base,
-                    element_idx,
-                    bit_in_element,
-                    input_base,
-                    element_idx + 1,
-                    32 - bit_in_element
-                ));
+            if is_array_of_vectors && self.type_mapper.target == BackendTarget::Metal {
+                // Metal array of vectors: need to access array[i].x/y/z/w
+                let array_idx = low / elem_bits;
+                let bit_in_elem = low % elem_bits;
+                let component_idx = bit_in_elem / 32;
+                let bit_in_component = bit_in_elem % 32;
+
+                if width <= 32 && bit_in_component + width <= 32 {
+                    // Slice fits in single component
+                    let comp = self.get_vector_component(component_idx);
+                    let mask = if width >= 32 { 0xFFFFFFFF_u32 } else { (1u32 << width) - 1 };
+                    self.write_indented(&format!(
+                        "signals->{} = ({}[{}]{} >> {}) & 0x{:X};\n",
+                        self.sanitize_name(output),
+                        input_base,
+                        array_idx,
+                        comp,
+                        bit_in_component,
+                        mask
+                    ));
+                } else if width <= 32 && component_idx + 1 < vector_size {
+                    // Slice spans two components within same vector element
+                    let comp1 = self.get_vector_component(component_idx);
+                    let comp2 = self.get_vector_component(component_idx + 1);
+                    let bits_from_first = 32 - bit_in_component;
+                    let bits_from_second = width - bits_from_first;
+                    let first_mask = (1u32 << bits_from_first) - 1;
+                    let second_mask = (1u32 << bits_from_second) - 1;
+                    self.write_indented(&format!(
+                        "signals->{} = (({}[{}]{} >> {}) & 0x{:X}) | (({}[{}]{} & 0x{:X}) << {});\n",
+                        self.sanitize_name(output),
+                        input_base, array_idx, comp1, bit_in_component, first_mask,
+                        input_base, array_idx, comp2, second_mask, bits_from_first
+                    ));
+                } else {
+                    // Fallback: just use first component
+                    let comp = self.get_vector_component(component_idx.min(vector_size - 1));
+                    let mask = if width >= 32 { 0xFFFFFFFF_u32 } else { (1u32 << width.min(32)) - 1 };
+                    self.write_indented(&format!(
+                        "signals->{} = ({}[{}]{} >> {}) & 0x{:X};\n",
+                        self.sanitize_name(output),
+                        input_base,
+                        array_idx,
+                        comp,
+                        bit_in_component,
+                        mask
+                    ));
+                }
             } else {
-                // Wide slice to scalar (shouldn't happen often)
-                self.write_indented(&format!(
-                    "signals->{} = {}[{}];\n",
-                    self.sanitize_name(output),
-                    input_base,
-                    element_idx
-                ));
+                // Regular array with 32-bit elements (C++ or Metal with >128-bit elements)
+                let element_idx = low / 32;
+                let bit_in_element = low % 32;
+
+                if width <= 32 && bit_in_element + width <= 32 {
+                    // Slice fits in single element
+                    let elem_mask = if width >= 32 { 0xFFFFFFFF } else { (1u32 << width) - 1 };
+                    self.write_indented(&format!(
+                        "signals->{} = ({}[{}] >> {}) & 0x{:X};\n",
+                        self.sanitize_name(output),
+                        input_base,
+                        element_idx,
+                        bit_in_element,
+                        elem_mask
+                    ));
+                } else if width <= 32 {
+                    // Slice spans two elements
+                    let bits_from_first = 32 - bit_in_element;
+                    let bits_from_second = width - bits_from_first;
+                    let first_mask = (1u32 << bits_from_first) - 1;
+                    let second_mask = (1u32 << bits_from_second) - 1;
+                    self.write_indented(&format!(
+                        "signals->{} = (({}[{}] >> {}) & 0x{:X}) | (({}[{}] & 0x{:X}) << {});\n",
+                        self.sanitize_name(output),
+                        input_base,
+                        element_idx,
+                        bit_in_element,
+                        first_mask,
+                        input_base,
+                        element_idx + 1,
+                        second_mask,
+                        bits_from_first
+                    ));
+                } else if width <= 64 {
+                    // 33-64 bit slice from array - combine two elements
+                    self.write_indented(&format!(
+                        "signals->{} = ((uint64_t){}[{}] >> {}) | ((uint64_t){}[{}] << {});\n",
+                        self.sanitize_name(output),
+                        input_base,
+                        element_idx,
+                        bit_in_element,
+                        input_base,
+                        element_idx + 1,
+                        32 - bit_in_element
+                    ));
+                } else {
+                    // Wide slice to scalar (shouldn't happen often)
+                    self.write_indented(&format!(
+                        "signals->{} = {}[{}];\n",
+                        self.sanitize_name(output),
+                        input_base,
+                        element_idx
+                    ));
+                }
             }
         } else if self.uses_vector_storage(input_width) {
             // Input is a Metal vector type (uint2/uint4), output is scalar
@@ -2192,21 +2310,67 @@ impl<'a> SharedCodegen<'a> {
         // Check if source is an array-type state element
         // If so, generate array copy code
         if let Some(state_elem) = self.module.state_elements.get(signal) {
-            if let Some(SirType::Array(_, array_size)) = &state_elem.sir_type {
-                // Generate array copy from state element to output signal
+            if let Some(SirType::Array(elem_type, outer_size)) = &state_elem.sir_type {
                 let output_name = self.sanitize_name(output);
                 let source_accessor = self.get_register_accessor(signal);
-                self.write_indented(&format!(
-                    "for (uint32_t i = 0; i < {}; i++) {{\n",
-                    array_size
-                ));
-                self.indent();
-                self.write_indented(&format!(
-                    "signals->{}[i] = {}[i];\n",
-                    output_name, source_accessor
-                ));
-                self.dedent();
-                self.write_indented("}\n");
+
+                // Check if this is effectively a 2D array:
+                // Case 1: Explicit 2D - Array(Array(...), N)
+                // Case 2: Width-based 2D - Array(Bits(N), M) where N > 64 (C++) or N > 128 (Metal)
+                let elem_width = elem_type.width();
+                let (_, elem_array_size) = self.type_mapper.get_type_for_width(elem_width);
+                let is_effectively_2d = matches!(elem_type.as_ref(), SirType::Array(_, _))
+                    || elem_array_size.is_some();
+
+                if is_effectively_2d {
+                    // Get inner size either from explicit Array or from width-based storage
+                    let inner_size = if let SirType::Array(_, inner_sz) = elem_type.as_ref() {
+                        *inner_sz
+                    } else {
+                        elem_array_size.unwrap_or(8)
+                    };
+
+                    // 2D array - use memcpy for C++, nested loops for Metal
+                    if self.type_mapper.target == BackendTarget::Cpp {
+                        self.write_indented(&format!(
+                            "memcpy(signals->{}, {}, sizeof(signals->{}));\n",
+                            output_name, source_accessor, output_name
+                        ));
+                    } else {
+                        // Metal: nested loops
+                        self.write_indented(&format!(
+                            "for (uint i = 0; i < {}; i++) {{\n",
+                            outer_size
+                        ));
+                        self.indent();
+                        self.write_indented(&format!(
+                            "for (uint j = 0; j < {}; j++) {{\n",
+                            inner_size
+                        ));
+                        self.indent();
+                        self.write_indented(&format!(
+                            "signals->{}[i][j] = {}[i][j];\n",
+                            output_name, source_accessor
+                        ));
+                        self.dedent();
+                        self.write_indented("}\n");
+                        self.dedent();
+                        self.write_indented("}\n");
+                    }
+                } else {
+                    // True 1D array - simple loop
+                    self.write_indented(&format!(
+                        "for (uint32_t i = 0; i < {}; i++) {{\n",
+                        outer_size
+                    ));
+                    self.indent();
+                    self.write_indented(&format!(
+                        "signals->{}[i] = {}[i];\n",
+                        output_name, source_accessor
+                    ));
+                    self.dedent();
+                    self.write_indented("}\n");
+                }
                 return;
             }
         }
@@ -2295,6 +2459,53 @@ impl<'a> SharedCodegen<'a> {
         }
     }
 
+    /// Check if a state element is a 2D array (array of arrays) or
+    /// is effectively stored as a 2D array due to element width.
+    /// For example, Array(Bits(256), 8) is stored as uint32_t[8][8] in C++.
+    fn is_2d_array(&self, signal: &str) -> bool {
+        if let Some(state_elem) = self.module.state_elements.get(signal) {
+            if let Some(SirType::Array(elem_type, _)) = &state_elem.sir_type {
+                // Case 1: Explicit 2D array - Array(Array(...), N)
+                if matches!(elem_type.as_ref(), SirType::Array(_, _)) {
+                    return true;
+                }
+                // Case 2: Array of wide elements - Array(Bits(N), M) where N requires array storage
+                // This is stored as uint32_t[M][K] where K = ceil(N/32)
+                let elem_width = elem_type.width();
+                let (_, elem_array_size) = self.type_mapper.get_type_for_width(elem_width);
+                return elem_array_size.is_some();
+            }
+        }
+        false
+    }
+
+    /// Get the inner array size for a 2D array (either explicit or width-based)
+    fn get_2d_inner_size(&self, signal: &str) -> Option<usize> {
+        if let Some(state_elem) = self.module.state_elements.get(signal) {
+            if let Some(SirType::Array(elem_type, _)) = &state_elem.sir_type {
+                // Case 1: Explicit 2D array
+                if let SirType::Array(_, inner_size) = elem_type.as_ref() {
+                    return Some(*inner_size);
+                }
+                // Case 2: Width-based 2D - inner size from element width
+                let elem_width = elem_type.width();
+                let (_, elem_array_size) = self.type_mapper.get_type_for_width(elem_width);
+                return elem_array_size;
+            }
+        }
+        None
+    }
+
+    /// Get the outer array size for a 2D array
+    fn get_2d_outer_size(&self, signal: &str) -> Option<usize> {
+        if let Some(state_elem) = self.module.state_elements.get(signal) {
+            if let Some(SirType::Array(_, outer_size)) = &state_elem.sir_type {
+                return Some(*outer_size);
+            }
+        }
+        None
+    }
+
     /// Generate array read operation
     pub fn generate_array_read(&mut self, node: &SirNode) {
         if node.inputs.len() < 2 || node.outputs.is_empty() {
@@ -2310,28 +2521,40 @@ impl<'a> SharedCodegen<'a> {
 
         // Check if array_signal is the output of a SignalRef to an array state element
         // (which we skipped generating). If so, use the state element directly.
-        let array_location = if self.module.state_elements.contains_key(array_signal) {
-            self.get_register_accessor(array_signal)
+        let resolved_signal = if self.module.state_elements.contains_key(array_signal) {
+            array_signal.clone()
         } else {
-            // Check if this signal comes from a SignalRef to an array state element
-            let resolved_signal = self.resolve_array_source(array_signal);
-            if self.module.state_elements.contains_key(&resolved_signal) {
-                self.get_register_accessor(&resolved_signal)
-            } else {
-                format!("signals->{}", self.sanitize_name(array_signal))
-            }
+            self.resolve_array_source(array_signal)
         };
+
+        let array_location = if self.module.state_elements.contains_key(&resolved_signal) {
+            self.get_register_accessor(&resolved_signal)
+        } else {
+            format!("signals->{}", self.sanitize_name(array_signal))
+        };
+
+        // Check if the source array is a 2D array (array of arrays)
+        let is_2d = self.is_2d_array(&resolved_signal);
 
         if let Some(size) = output_array_size {
             // Output is an array type (multi-word value)
             // This means each array element spans multiple words
-            // Index * words_per_element gives the starting offset
             let sanitized_output = self.sanitize_name(output);
             let sanitized_index = self.sanitize_name(index_signal);
-            self.write_indented(&format!(
-                "for (uint32_t i = 0; i < {}; i++) signals->{}[i] = {}[signals->{} * {} + i];\n",
-                size, sanitized_output, array_location, sanitized_index, size
-            ));
+
+            if is_2d {
+                // For 2D arrays, use 2D indexing: array[outer_index][inner_index]
+                self.write_indented(&format!(
+                    "for (uint32_t i = 0; i < {}; i++) signals->{}[i] = {}[signals->{}][i];\n",
+                    size, sanitized_output, array_location, sanitized_index
+                ));
+            } else {
+                // 1D array with linear indexing
+                self.write_indented(&format!(
+                    "for (uint32_t i = 0; i < {}; i++) signals->{}[i] = {}[signals->{} * {} + i];\n",
+                    size, sanitized_output, array_location, sanitized_index, size
+                ));
+            }
         } else {
             // Simple scalar index - single word result
             self.write_indented(&format!(
@@ -2356,25 +2579,78 @@ impl<'a> SharedCodegen<'a> {
 
         let array_type = self.get_signal_type(old_array);
 
-        if let Some(SirType::Array(_, size)) = array_type {
-            // Copy old array to output
-            self.write_indented(&format!("for (uint32_t i = 0; i < {}; i++) {{\n", size));
-            self.indent();
-            self.write_indented(&format!(
-                "signals->{}[i] = signals->{}[i];\n",
-                self.sanitize_name(output),
-                self.sanitize_name(old_array)
-            ));
-            self.dedent();
-            self.write_indented("}\n");
+        if let Some(SirType::Array(elem_type, outer_size)) = array_type {
+            let output_name = self.sanitize_name(output);
+            let old_name = self.sanitize_name(old_array);
+            let index_name = self.sanitize_name(index_signal);
+            let value_name = self.sanitize_name(value_signal);
 
-            // Update the specific element
-            self.write_indented(&format!(
-                "signals->{}[signals->{}] = signals->{};\n",
-                self.sanitize_name(output),
-                self.sanitize_name(index_signal),
-                self.sanitize_name(value_signal)
-            ));
+            // Check if this is effectively a 2D array:
+            // Case 1: Explicit 2D - Array(Array(...), N)
+            // Case 2: Width-based 2D - Array(Bits(N), M) where N > 64 (C++) or N > 128 (Metal)
+            let elem_width = elem_type.width();
+            let (_, elem_array_size) = self.type_mapper.get_type_for_width(elem_width);
+            let is_explicit_2d = matches!(elem_type.as_ref(), SirType::Array(_, _));
+            let is_width_based_2d = elem_array_size.is_some();
+            let is_effectively_2d = is_explicit_2d || is_width_based_2d;
+
+            if is_effectively_2d {
+                // Get inner size from explicit Array or from width-based storage
+                let inner_size = if let SirType::Array(_, sz) = elem_type.as_ref() {
+                    *sz
+                } else {
+                    elem_array_size.unwrap_or(8)
+                };
+
+                // 2D array - use memcpy for C++, nested loops for Metal
+                if self.type_mapper.target == BackendTarget::Cpp {
+                    // C++: memcpy for bulk copy
+                    self.write_indented(&format!(
+                        "memcpy(signals->{}, signals->{}, sizeof(signals->{}));\n",
+                        output_name, old_name, output_name
+                    ));
+                    // Update the specific row by copying value array
+                    self.write_indented(&format!(
+                        "for (uint32_t i = 0; i < {}; i++) signals->{}[signals->{}][i] = signals->{}[i];\n",
+                        inner_size, output_name, index_name, value_name
+                    ));
+                } else {
+                    // Metal: nested loops for copy
+                    self.write_indented(&format!("for (uint i = 0; i < {}; i++) {{\n", outer_size));
+                    self.indent();
+                    self.write_indented(&format!("for (uint j = 0; j < {}; j++) {{\n", inner_size));
+                    self.indent();
+                    self.write_indented(&format!(
+                        "signals->{}[i][j] = signals->{}[i][j];\n",
+                        output_name, old_name
+                    ));
+                    self.dedent();
+                    self.write_indented("}\n");
+                    self.dedent();
+                    self.write_indented("}\n");
+                    // Update specific row
+                    self.write_indented(&format!(
+                        "for (uint j = 0; j < {}; j++) signals->{}[signals->{}][j] = signals->{}[j];\n",
+                        inner_size, output_name, index_name, value_name
+                    ));
+                }
+            } else {
+                // True 1D array - simple loop
+                self.write_indented(&format!("for (uint32_t i = 0; i < {}; i++) {{\n", outer_size));
+                self.indent();
+                self.write_indented(&format!(
+                    "signals->{}[i] = signals->{}[i];\n",
+                    output_name, old_name
+                ));
+                self.dedent();
+                self.write_indented("}\n");
+
+                // Update the specific element
+                self.write_indented(&format!(
+                    "signals->{}[signals->{}] = signals->{};\n",
+                    output_name, index_name, value_name
+                ));
+            }
         }
     }
 
@@ -2452,33 +2728,109 @@ impl<'a> SharedCodegen<'a> {
             for (state_name, elem) in &sorted_states {
                 let sanitized = self.sanitize_name(state_name);
 
-                // Check if this is an array type using sir_type
+                // Check if this is an array type using sir_type with width-based fallback
+                // IMPORTANT: Always check width-based array requirement even when sir_type exists
+                // because sir_type might be Bits(256) which requires uint32_t[8] storage
+                let width = self.get_signal_width(state_name);
+                let (_, width_based_array_size) = self.type_mapper.get_type_for_width(width);
+                let width_needs_array = width_based_array_size.is_some();
+
                 let is_array = if let Some(ref sir_type) = elem.sir_type {
-                    matches!(sir_type, SirType::Array(_, _))
+                    // If sir_type says Array, it's definitely an array
+                    // If sir_type is NOT Array but width requires array storage, treat as array
+                    matches!(sir_type, SirType::Array(_, _)) || width_needs_array
                 } else {
-                    false
+                    width_needs_array
                 };
 
                 if is_array {
-                    // Array type - get size from sir_type
-                    let array_size = if let Some(SirType::Array(_, size)) = &elem.sir_type {
-                        *size
-                    } else {
-                        1
-                    };
+                    // Array type - check for 2D arrays
+                    if let Some(SirType::Array(elem_type, outer_size)) = &elem.sir_type {
+                        // Check if inner element is also an array (2D array)
+                        if let SirType::Array(_, inner_size) = elem_type.as_ref() {
+                            // 2D array
+                            if self.type_mapper.target == BackendTarget::Cpp {
+                                self.write_indented(&format!(
+                                    "memcpy({}->{}, {}->{}, sizeof({}->{}));\n",
+                                    next_reg, sanitized, current_reg, sanitized, current_reg, sanitized
+                                ));
+                            } else {
+                                // Metal: nested loops
+                                self.write_indented(&format!(
+                                    "for (uint i = 0; i < {}; i++) {{\n",
+                                    outer_size
+                                ));
+                                self.indent();
+                                self.write_indented(&format!(
+                                    "for (uint j = 0; j < {}; j++) {{\n",
+                                    inner_size
+                                ));
+                                self.indent();
+                                self.write_indented(&format!(
+                                    "{}->{}[i][j] = {}->{}[i][j];\n",
+                                    next_reg, sanitized, current_reg, sanitized
+                                ));
+                                self.dedent();
+                                self.write_indented("}\n");
+                                self.dedent();
+                                self.write_indented("}\n");
+                            }
+                        } else {
+                            // Check if element type requires array storage (width-based 2D)
+                            let elem_width = elem_type.width();
+                            let (_, elem_array_size) = self.type_mapper.get_type_for_width(elem_width);
+                            let is_width_based_2d = elem_array_size.is_some();
 
-                    // Use memcpy for C++, element-wise copy for Metal
-                    if self.type_mapper.target == BackendTarget::Cpp {
-                        self.write_indented(&format!(
-                            "memcpy({}->{}, {}->{}, sizeof({}->{}));\n",
-                            next_reg, sanitized, current_reg, sanitized, current_reg, sanitized
-                        ));
+                            if self.type_mapper.target == BackendTarget::Cpp {
+                                // C++: memcpy works for both 1D and 2D
+                                self.write_indented(&format!(
+                                    "memcpy({}->{}, {}->{}, sizeof({}->{}));\n",
+                                    next_reg, sanitized, current_reg, sanitized, current_reg, sanitized
+                                ));
+                            } else if is_width_based_2d {
+                                // Metal width-based 2D: nested loops
+                                let inner_size = elem_array_size.unwrap_or(8);
+                                self.write_indented(&format!(
+                                    "for (uint i = 0; i < {}; i++) {{\n",
+                                    outer_size
+                                ));
+                                self.indent();
+                                self.write_indented(&format!(
+                                    "for (uint j = 0; j < {}; j++) {{\n",
+                                    inner_size
+                                ));
+                                self.indent();
+                                self.write_indented(&format!(
+                                    "{}->{}[i][j] = {}->{}[i][j];\n",
+                                    next_reg, sanitized, current_reg, sanitized
+                                ));
+                                self.dedent();
+                                self.write_indented("}\n");
+                                self.dedent();
+                                self.write_indented("}\n");
+                            } else {
+                                // Metal 1D array: element-wise copy
+                                self.write_indented(&format!(
+                                    "for (uint i = 0; i < {}; i++) {}->{}[i] = {}->{}[i];\n",
+                                    outer_size, next_reg, sanitized, current_reg, sanitized
+                                ));
+                            }
+                        }
                     } else {
-                        // Metal: element-wise copy
-                        self.write_indented(&format!(
-                            "for (uint i = 0; i < {}; i++) {}->{}[i] = {}->{}[i];\n",
-                            array_size, next_reg, sanitized, current_reg, sanitized
-                        ));
+                        // Width-based array (sir_type is Bits(N) but N requires array storage)
+                        let array_size = width_based_array_size.unwrap_or(8);
+                        if self.type_mapper.target == BackendTarget::Cpp {
+                            self.write_indented(&format!(
+                                "memcpy({}->{}, {}->{}, sizeof({}->{}));\n",
+                                next_reg, sanitized, current_reg, sanitized, current_reg, sanitized
+                            ));
+                        } else {
+                            // Metal: element-wise copy
+                            self.write_indented(&format!(
+                                "for (uint i = 0; i < {}; i++) {}->{}[i] = {}->{}[i];\n",
+                                array_size, next_reg, sanitized, current_reg, sanitized
+                            ));
+                        }
                     }
                 } else {
                     // Scalar type - direct assignment
@@ -2527,17 +2879,22 @@ impl<'a> SharedCodegen<'a> {
             String::new()
         };
 
-        // Check if this is an array type using state element's sir_type
+        // Check if this is an array type using state element's sir_type with width-based fallback
+        // IMPORTANT: Always check width-based array requirement even when sir_type exists
+        // because sir_type might be Bits(256) which requires uint32_t[8] storage
+        let (_, width_based_array_size) = self.type_mapper.get_type_for_width(output_width);
+        let width_needs_array = width_based_array_size.is_some();
+
         let is_array = if let Some(state_elem) = self.module.state_elements.get(output_signal) {
             if let Some(ref sir_type) = state_elem.sir_type {
-                matches!(sir_type, SirType::Array(_, _))
+                // If sir_type says Array, it's definitely an array
+                // If sir_type is NOT Array but width requires array storage, treat as array
+                matches!(sir_type, SirType::Array(_, _)) || width_needs_array
             } else {
-                false
+                width_needs_array
             }
         } else {
-            // Fall back to width-based check
-            let (_, array_size) = self.type_mapper.get_type_for_width(output_width);
-            array_size.is_some()
+            width_needs_array
         };
 
         let array_size = if is_array {
@@ -2555,15 +2912,48 @@ impl<'a> SharedCodegen<'a> {
         };
 
         if is_array && array_size > 0 {
-            // Array type - use memcpy for C++, element-wise copy for Metal
+            // Array type - check for 2D arrays (explicit or width-based)
+            let (is_2d, inner_size) = if let Some(state_elem) = self.module.state_elements.get(output_signal) {
+                if let Some(SirType::Array(elem_type, _)) = &state_elem.sir_type {
+                    // Case 1: Explicit 2D array
+                    if let SirType::Array(_, inner_sz) = elem_type.as_ref() {
+                        (true, *inner_sz)
+                    } else {
+                        // Case 2: Width-based 2D - element width requires array storage
+                        let elem_width = elem_type.width();
+                        let (_, elem_array_size) = self.type_mapper.get_type_for_width(elem_width);
+                        if let Some(inner_sz) = elem_array_size {
+                            (true, inner_sz)
+                        } else {
+                            (false, 1)
+                        }
+                    }
+                } else {
+                    (false, 1)
+                }
+            } else {
+                (false, 1)
+            };
+
             let target = format!("{}->{}", next_reg, sanitized_output);
             if self.type_mapper.target == BackendTarget::Cpp {
+                // C++: use memcpy which works for both 1D and 2D arrays
                 self.write_indented(&format!(
                     "memcpy({}, signals->{}, sizeof({}));\n",
                     target, sanitized_data, target
                 ));
+            } else if is_2d {
+                // Metal 2D array: nested loops
+                self.write_indented(&format!("for (uint i = 0; i < {}; i++) {{\n", array_size));
+                self.indent();
+                self.write_indented(&format!(
+                    "for (uint j = 0; j < {}; j++) {}[i][j] = signals->{}[i][j];\n",
+                    inner_size, target, sanitized_data
+                ));
+                self.dedent();
+                self.write_indented("}\n");
             } else {
-                // Metal: element-wise copy
+                // Metal 1D array: simple loop
                 self.write_indented(&format!(
                     "for (uint i = 0; i < {}; i++) {}[i] = signals->{}[i];\n",
                     array_size, target, sanitized_data

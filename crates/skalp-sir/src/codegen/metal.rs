@@ -153,11 +153,14 @@ impl<'a> MetalBackend<'a> {
         let mut declared_locals: HashSet<String> = HashSet::new();
 
         for (name, elem) in &sorted_states {
-            // Skip array-type state elements (use sir_type to detect)
+            // Skip array-type state elements (use sir_type or width-based detection)
+            let signal_width = self.shared.get_signal_width(name);
             let is_array = if let Some(ref sir_type) = elem.sir_type {
                 matches!(sir_type, SirType::Array(_, _))
             } else {
-                false
+                // Fall back to width-based check
+                let (_, array_size) = self.shared.type_mapper.get_type_for_width(signal_width);
+                array_size.is_some()
             };
 
             if is_array {
@@ -165,9 +168,9 @@ impl<'a> MetalBackend<'a> {
             }
 
             // Only create local copies for scalar registers (≤128 bits)
-            if elem.width <= 128 {
+            if signal_width <= 128 {
                 let sanitized = self.shared.sanitize_name(name);
-                let (base_type, array_size) = self.shared.type_mapper.get_type_for_width(elem.width);
+                let (base_type, array_size) = self.shared.type_mapper.get_type_for_width(signal_width);
 
                 if array_size.is_none() {
                     output.push_str(&format!(

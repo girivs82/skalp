@@ -177,11 +177,14 @@ extern "C" void batched_simulation(
         let mut declared_locals: HashSet<String> = HashSet::new();
 
         for (name, elem) in &sorted_states {
-            // Skip array-type state elements (use sir_type to detect)
+            // Skip array-type state elements (use sir_type or width-based detection)
+            let signal_width = self.shared.get_signal_width(name);
             let is_array = if let Some(ref sir_type) = elem.sir_type {
                 matches!(sir_type, SirType::Array(_, _))
             } else {
-                false
+                // Fall back to width-based check
+                let (_, array_size) = self.shared.type_mapper.get_type_for_width(signal_width);
+                array_size.is_some()
             };
 
             if is_array {
@@ -189,9 +192,9 @@ extern "C" void batched_simulation(
             }
 
             // Only create local copies for scalar registers (≤64 bits for C++)
-            if elem.width <= 64 {
+            if signal_width <= 64 {
                 let sanitized = self.shared.sanitize_name(name);
-                let (base_type, array_size) = self.shared.type_mapper.get_type_for_width(elem.width);
+                let (base_type, array_size) = self.shared.type_mapper.get_type_for_width(signal_width);
 
                 if array_size.is_none() {
                     output.push_str(&format!(
