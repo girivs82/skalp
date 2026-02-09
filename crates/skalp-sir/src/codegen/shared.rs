@@ -1465,8 +1465,27 @@ impl<'a> SharedCodegen<'a> {
                         self.sanitize_name(input_name),
                         bit_in_element
                     ));
+                } else if *width <= 64 {
+                    // 33-64 bit input: stored as uint64_t scalar in C++
+                    // Copy low 32 bits to first element, high 32 bits to second element
+                    let dest_elem_lo = bit_offset / 32;
+                    let dest_elem_hi = (bit_offset + 32) / 32;
+                    self.write_indented(&format!(
+                        "signals->{}[{}] = (uint32_t)signals->{};\n",
+                        self.sanitize_name(output),
+                        dest_elem_lo,
+                        self.sanitize_name(input_name)
+                    ));
+                    if dest_elem_hi < output_width.div_ceil(32) {
+                        self.write_indented(&format!(
+                            "signals->{}[{}] = (uint32_t)(signals->{} >> 32);\n",
+                            self.sanitize_name(output),
+                            dest_elem_hi,
+                            self.sanitize_name(input_name)
+                        ));
+                    }
                 } else {
-                    // Wide input - copy element by element
+                    // Wide input (>64 bits) - copy element by element from array
                     let input_array_size = width.div_ceil(32);
                     for i in 0..input_array_size {
                         let dest_elem = (bit_offset + i * 32) / 32;
@@ -1488,6 +1507,7 @@ impl<'a> SharedCodegen<'a> {
             let num_elements = output_width.div_ceil(32);
             let mut components = vec!["0".to_string(); num_elements];
             let mut bit_offset = 0;
+            let is_cpp = matches!(self.type_mapper.target, BackendTarget::Cpp);
 
             for (input_name, width) in input_widths.iter().rev() {
                 let component_idx = bit_offset / 32;
@@ -1499,13 +1519,21 @@ impl<'a> SharedCodegen<'a> {
                         components[component_idx] = input_ref;
                     } else if *width <= 32 {
                         components[component_idx] = format!("({} | ({} << {}))", components[component_idx], input_ref, bit_in_component);
+                    } else if *width <= 64 && is_cpp {
+                        // 33-64 bit input stored as uint64_t scalar in C++
+                        // Split into low and high 32-bit parts
+                        if bit_in_component == 0 {
+                            components[component_idx] = format!("(uint32_t){}", input_ref);
+                            if component_idx + 1 < num_elements {
+                                components[component_idx + 1] = format!("(uint32_t)({} >> 32)", input_ref);
+                            }
+                        }
                     }
                 }
                 bit_offset += width;
             }
 
             // Generate component/array assignment based on backend
-            let is_cpp = matches!(self.type_mapper.target, BackendTarget::Cpp);
             for (i, comp) in components.iter().enumerate() {
                 if is_cpp {
                     self.write_indented(&format!(
