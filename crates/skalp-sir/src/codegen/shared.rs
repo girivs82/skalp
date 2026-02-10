@@ -977,6 +977,37 @@ impl<'a> SharedCodegen<'a> {
             return;
         }
 
+        // Check for floating-point operations - need to cast bit patterns to float types
+        let is_fp_arithmetic = matches!(
+            op,
+            BinaryOperation::FAdd
+                | BinaryOperation::FSub
+                | BinaryOperation::FMul
+                | BinaryOperation::FDiv
+                | BinaryOperation::FMod
+        );
+
+        if is_fp_arithmetic {
+            self.generate_fp_binary_op(node, op, left_width, right_width, output_width);
+            return;
+        }
+
+        // Check for floating-point comparisons
+        let is_fp_comparison = matches!(
+            op,
+            BinaryOperation::FEq
+                | BinaryOperation::FNeq
+                | BinaryOperation::FLt
+                | BinaryOperation::FLte
+                | BinaryOperation::FGt
+                | BinaryOperation::FGte
+        );
+
+        if is_fp_comparison {
+            self.generate_fp_comparison(node, op, left_width, right_width);
+            return;
+        }
+
         // Check if either operand uses vector storage (Metal uint2/uint4)
         // Vector comparisons produce vector bool results, so we need to compare as scalars
         let left_uses_vector = self.uses_vector_storage(left_width);
@@ -1256,6 +1287,180 @@ impl<'a> SharedCodegen<'a> {
                     "((int32_t)(signals->{} << {}) >> {})",
                     sanitized, shift, shift
                 )
+            }
+        }
+    }
+
+    /// Generate floating-point binary operation with proper type casting
+    /// FP operations require reinterpreting bit patterns as float/half types
+    fn generate_fp_binary_op(
+        &mut self,
+        node: &SirNode,
+        op: &BinaryOperation,
+        left_width: usize,
+        right_width: usize,
+        output_width: usize,
+    ) {
+        let left = &node.inputs[0].signal_id;
+        let right = &node.inputs[1].signal_id;
+        let output = &node.outputs[0].signal_id;
+
+        let left_sanitized = self.sanitize_name(left);
+        let right_sanitized = self.sanitize_name(right);
+        let output_sanitized = self.sanitize_name(output);
+
+        let is_metal = matches!(self.type_mapper.target, BackendTarget::Metal);
+
+        // Determine the operator string
+        let op_str = match op {
+            BinaryOperation::FAdd => "+",
+            BinaryOperation::FSub => "-",
+            BinaryOperation::FMul => "*",
+            BinaryOperation::FDiv => "/",
+            BinaryOperation::FMod => "%", // Note: fmod for C++
+            _ => unreachable!(),
+        };
+
+        // Determine float type based on OUTPUT width (semantic type)
+        // FP16 = 16-bit half, FP32 = 32-bit float
+        // We use output_width because SIR may widen operands to 32-bit for storage
+        // but the semantic FP width is preserved in the output
+        let fp_width = output_width;
+
+        if is_metal {
+            // Metal Shading Language: use as_type<> for bit reinterpretation
+            if fp_width <= 16 {
+                // FP16: reinterpret ushort as half, operate, reinterpret back
+                self.write_indented(&format!(
+                    "signals->{} = as_type<ushort>(as_type<half>((ushort)signals->{}) {} as_type<half>((ushort)signals->{}));\n",
+                    output_sanitized,
+                    left_sanitized,
+                    op_str,
+                    right_sanitized
+                ));
+            } else {
+                // FP32: reinterpret uint as float, operate, reinterpret back
+                self.write_indented(&format!(
+                    "signals->{} = as_type<uint>(as_type<float>(signals->{}) {} as_type<float>(signals->{}));\n",
+                    output_sanitized,
+                    left_sanitized,
+                    op_str,
+                    right_sanitized
+                ));
+            }
+        } else {
+            // C++: use union-based reinterpretation or memcpy
+            // For portability, we use a simple cast approach that most compilers optimize well
+            if fp_width <= 16 {
+                // FP16 in C++ - need to convert to float, operate, convert back
+                // Most C++ compilers don't have native half type, so we use fp16 library functions
+                // For now, use the __fp16 type if available (clang/gcc), otherwise fall back to float
+                self.write_indented("{\n");
+                self.indent();
+                self.write_indented(&format!(
+                    "// FP16 operation: convert to float, operate, convert back\n"
+                ));
+                self.write_indented(&format!(
+                    "uint32_t _a = signals->{};\n", left_sanitized
+                ));
+                self.write_indented(&format!(
+                    "uint32_t _b = signals->{};\n", right_sanitized
+                ));
+                // Use the fp16 to fp32 conversion formula
+                self.write_indented("float _fa = _fp16_to_fp32(_a);\n");
+                self.write_indented(&format!("float _fb = _fp16_to_fp32(_b);\n"));
+                self.write_indented(&format!("float _fr = _fa {} _fb;\n", op_str));
+                self.write_indented(&format!(
+                    "signals->{} = _fp32_to_fp16(_fr);\n", output_sanitized
+                ));
+                self.dedent();
+                self.write_indented("}\n");
+            } else {
+                // FP32 in C++: use union for type punning
+                self.write_indented("{\n");
+                self.indent();
+                self.write_indented("union { uint32_t u; float f; } _a, _b, _r;\n");
+                self.write_indented(&format!("_a.u = signals->{};\n", left_sanitized));
+                self.write_indented(&format!("_b.u = signals->{};\n", right_sanitized));
+                self.write_indented(&format!("_r.f = _a.f {} _b.f;\n", op_str));
+                self.write_indented(&format!("signals->{} = _r.u;\n", output_sanitized));
+                self.dedent();
+                self.write_indented("}\n");
+            }
+        }
+    }
+
+    /// Generate floating-point comparison operation
+    fn generate_fp_comparison(
+        &mut self,
+        node: &SirNode,
+        op: &BinaryOperation,
+        left_width: usize,
+        right_width: usize,
+    ) {
+        let left = &node.inputs[0].signal_id;
+        let right = &node.inputs[1].signal_id;
+        let output = &node.outputs[0].signal_id;
+
+        let left_sanitized = self.sanitize_name(left);
+        let right_sanitized = self.sanitize_name(right);
+        let output_sanitized = self.sanitize_name(output);
+
+        let is_metal = matches!(self.type_mapper.target, BackendTarget::Metal);
+
+        // Determine the comparison operator
+        let op_str = match op {
+            BinaryOperation::FEq => "==",
+            BinaryOperation::FNeq => "!=",
+            BinaryOperation::FLt => "<",
+            BinaryOperation::FLte => "<=",
+            BinaryOperation::FGt => ">",
+            BinaryOperation::FGte => ">=",
+            _ => unreachable!(),
+        };
+
+        let max_width = std::cmp::max(left_width, right_width);
+
+        if is_metal {
+            if max_width <= 16 {
+                self.write_indented(&format!(
+                    "signals->{} = as_type<half>((ushort)signals->{}) {} as_type<half>((ushort)signals->{}) ? 1u : 0u;\n",
+                    output_sanitized,
+                    left_sanitized,
+                    op_str,
+                    right_sanitized
+                ));
+            } else {
+                self.write_indented(&format!(
+                    "signals->{} = as_type<float>(signals->{}) {} as_type<float>(signals->{}) ? 1u : 0u;\n",
+                    output_sanitized,
+                    left_sanitized,
+                    op_str,
+                    right_sanitized
+                ));
+            }
+        } else {
+            // C++
+            if max_width <= 16 {
+                self.write_indented(&format!(
+                    "signals->{} = (_fp16_to_fp32(signals->{}) {} _fp16_to_fp32(signals->{})) ? 1u : 0u;\n",
+                    output_sanitized,
+                    left_sanitized,
+                    op_str,
+                    right_sanitized
+                ));
+            } else {
+                self.write_indented("{\n");
+                self.indent();
+                self.write_indented("union { uint32_t u; float f; } _a, _b;\n");
+                self.write_indented(&format!("_a.u = signals->{};\n", left_sanitized));
+                self.write_indented(&format!("_b.u = signals->{};\n", right_sanitized));
+                self.write_indented(&format!(
+                    "signals->{} = (_a.f {} _b.f) ? 1u : 0u;\n",
+                    output_sanitized, op_str
+                ));
+                self.dedent();
+                self.write_indented("}\n");
             }
         }
     }

@@ -59,6 +59,67 @@ struct float2 { float x, y; };
 struct float3 { float x, y, z; };
 struct float4 { float x, y, z, w; };
 
+// FP16 conversion helpers (IEEE 754 half-precision)
+static inline float _fp16_to_fp32(uint32_t h) {
+    uint32_t sign = (h & 0x8000) << 16;
+    uint32_t exp = (h >> 10) & 0x1F;
+    uint32_t mant = h & 0x3FF;
+
+    if (exp == 0) {
+        // Denormalized or zero
+        if (mant == 0) {
+            // Zero
+            return *(float*)&sign;
+        } else {
+            // Denormalized: convert to normalized
+            while (!(mant & 0x400)) {
+                mant <<= 1;
+                exp--;
+            }
+            exp++;
+            mant &= 0x3FF;
+            exp = exp + (127 - 15);
+            uint32_t result = sign | (exp << 23) | (mant << 13);
+            return *(float*)&result;
+        }
+    } else if (exp == 31) {
+        // Inf or NaN
+        uint32_t result = sign | 0x7F800000 | (mant << 13);
+        return *(float*)&result;
+    } else {
+        // Normalized
+        exp = exp + (127 - 15);
+        uint32_t result = sign | (exp << 23) | (mant << 13);
+        return *(float*)&result;
+    }
+}
+
+static inline uint32_t _fp32_to_fp16(float f) {
+    uint32_t x = *(uint32_t*)&f;
+    uint32_t sign = (x >> 16) & 0x8000;
+    int32_t exp = ((x >> 23) & 0xFF) - 127 + 15;
+    uint32_t mant = x & 0x7FFFFF;
+
+    if (exp <= 0) {
+        // Underflow to zero or denormalized
+        if (exp < -10) {
+            return sign; // Zero
+        }
+        // Denormalized
+        mant = (mant | 0x800000) >> (1 - exp);
+        return sign | (mant >> 13);
+    } else if (exp >= 31) {
+        // Overflow to infinity or NaN
+        if (exp == 31 && mant != 0) {
+            return sign | 0x7C00 | (mant >> 13); // NaN
+        }
+        return sign | 0x7C00; // Infinity
+    } else {
+        // Normalized
+        return sign | (exp << 10) | (mant >> 13);
+    }
+}
+
 "#);
 
         // Generate struct definitions using shared codegen
