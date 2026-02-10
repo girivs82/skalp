@@ -459,6 +459,56 @@ impl<'hir> MonomorphizationEngine<'hir> {
             }
         }
 
+        // BUG #207 FIX: Update struct literals in trait implementation method bodies
+        // Trait implementations use HirExpression::StructLiteral with type_name (string) to reference
+        // entities, not EntityId. After specialization, we need to update these struct literals to
+        // reference the specialized entity names instead of the generic entity names with generic_args.
+        //
+        // Build a map from mangled_name → specialized_entity_name for lookup
+        // (Using mangled_name as key since IndexMap<String, ConstValue> doesn't implement Hash)
+        let mut struct_literal_update_map: IndexMap<String, String> = IndexMap::new();
+        for (instantiation, specialized_id) in &specialization_map {
+            // Find the specialized entity to get its name
+            if let Some(specialized_entity) = all_specialized_entities
+                .iter()
+                .find(|e| e.id == *specialized_id)
+            {
+                struct_literal_update_map.insert(
+                    instantiation.mangled_name(),
+                    specialized_entity.name.clone(),
+                );
+            }
+        }
+
+        // Update trait implementations
+        let new_trait_implementations: Vec<crate::hir::HirTraitImplementation> = hir
+            .trait_implementations
+            .iter()
+            .map(|trait_impl| {
+                let mut new_trait_impl = trait_impl.clone();
+                new_trait_impl.method_implementations = trait_impl
+                    .method_implementations
+                    .iter()
+                    .map(|method| {
+                        let mut new_method = method.clone();
+                        new_method.body = method
+                            .body
+                            .iter()
+                            .map(|stmt| {
+                                self.update_struct_literals_in_statement(
+                                    stmt,
+                                    &struct_literal_update_map,
+                                    &entity_map,
+                                )
+                            })
+                            .collect();
+                        new_method
+                    })
+                    .collect();
+                new_trait_impl
+            })
+            .collect();
+
         // Build new HIR - keep ALL entities (including generic templates) for HIR→MIR conversion
         // Generic templates will be filtered out during SystemVerilog codegen
         // This ensures entity_map in HIR→MIR has entries for all entity IDs referenced by instances
@@ -480,7 +530,7 @@ impl<'hir> MonomorphizationEngine<'hir> {
             intents: hir.intents.clone(),
             requirements: hir.requirements.clone(),
             trait_definitions: hir.trait_definitions.clone(),
-            trait_implementations: hir.trait_implementations.clone(),
+            trait_implementations: new_trait_implementations,
             type_aliases: hir.type_aliases.clone(),
             distinct_types: hir.distinct_types.clone(),
             user_defined_types: hir.user_defined_types.clone(),
@@ -2182,6 +2232,253 @@ impl<'hir> MonomorphizationEngine<'hir> {
                 Self::collect_port_ids_from_expr(&let_stmt.value, port_ids);
             }
             _ => {}
+        }
+    }
+
+    /// BUG #207 FIX: Update struct literals in a statement to reference specialized entities
+    fn update_struct_literals_in_statement(
+        &self,
+        stmt: &crate::hir::HirStatement,
+        update_map: &IndexMap<String, String>,
+        entity_map: &IndexMap<crate::hir::EntityId, HirEntity>,
+    ) -> crate::hir::HirStatement {
+        use crate::hir::HirStatement;
+
+        match stmt {
+            HirStatement::Let(let_stmt) => {
+                let mut new_let = let_stmt.clone();
+                new_let.value =
+                    self.update_struct_literals_in_expression(&let_stmt.value, update_map, entity_map);
+                HirStatement::Let(new_let)
+            }
+            HirStatement::Assignment(assign) => {
+                let mut new_assign = assign.clone();
+                new_assign.rhs =
+                    self.update_struct_literals_in_expression(&assign.rhs, update_map, entity_map);
+                HirStatement::Assignment(new_assign)
+            }
+            HirStatement::If(if_stmt) => {
+                let mut new_if = if_stmt.clone();
+                new_if.condition =
+                    self.update_struct_literals_in_expression(&if_stmt.condition, update_map, entity_map);
+                new_if.then_statements = if_stmt
+                    .then_statements
+                    .iter()
+                    .map(|s| self.update_struct_literals_in_statement(s, update_map, entity_map))
+                    .collect();
+                new_if.else_statements = if_stmt.else_statements.as_ref().map(|stmts| {
+                    stmts
+                        .iter()
+                        .map(|s| self.update_struct_literals_in_statement(s, update_map, entity_map))
+                        .collect()
+                });
+                HirStatement::If(new_if)
+            }
+            HirStatement::Match(match_stmt) => {
+                let mut new_match = match_stmt.clone();
+                new_match.expr =
+                    self.update_struct_literals_in_expression(&match_stmt.expr, update_map, entity_map);
+                new_match.arms = match_stmt
+                    .arms
+                    .iter()
+                    .map(|arm| {
+                        let mut new_arm = arm.clone();
+                        new_arm.statements = arm
+                            .statements
+                            .iter()
+                            .map(|s| self.update_struct_literals_in_statement(s, update_map, entity_map))
+                            .collect();
+                        new_arm
+                    })
+                    .collect();
+                HirStatement::Match(new_match)
+            }
+            HirStatement::For(for_stmt) => {
+                let mut new_for = for_stmt.clone();
+                new_for.body = for_stmt
+                    .body
+                    .iter()
+                    .map(|s| self.update_struct_literals_in_statement(s, update_map, entity_map))
+                    .collect();
+                HirStatement::For(new_for)
+            }
+            HirStatement::Return(Some(expr)) => HirStatement::Return(Some(
+                self.update_struct_literals_in_expression(expr, update_map, entity_map),
+            )),
+            // Other statement types pass through unchanged
+            _ => stmt.clone(),
+        }
+    }
+
+    /// BUG #207 FIX: Update struct literals in an expression to reference specialized entities
+    fn update_struct_literals_in_expression(
+        &self,
+        expr: &HirExpression,
+        update_map: &IndexMap<String, String>,
+        entity_map: &IndexMap<crate::hir::EntityId, HirEntity>,
+    ) -> HirExpression {
+        match expr {
+            HirExpression::StructLiteral(struct_lit) => {
+                // Check if this struct literal references a generic entity
+                // Find the entity by name
+                let entity_opt = entity_map.values().find(|e| e.name == struct_lit.type_name);
+
+                if let Some(entity) = entity_opt {
+                    if !entity.generics.is_empty() {
+                        // Evaluate the generic arguments to get const_args
+                        let mut evaluator = self.create_evaluator_with_constants();
+                        let mut const_args = IndexMap::new();
+
+                        for (i, arg) in struct_lit.generic_args.iter().enumerate() {
+                            if i >= entity.generics.len() {
+                                break;
+                            }
+                            let generic = &entity.generics[i];
+                            if let crate::hir::HirGenericType::Const(_) = generic.param_type {
+                                if let Ok(value) = evaluator.eval(arg) {
+                                    const_args.insert(generic.name.clone(), value);
+                                }
+                            }
+                        }
+
+                        // Build a mangled name for lookup (same algorithm as Instantiation::mangled_name)
+                        let mangled_name = {
+                            use crate::monomorphization::collector::mangle_const_value;
+                            let mut parts = vec![struct_lit.type_name.clone()];
+                            // Sort const_args by key for determinism
+                            let mut const_keys: Vec<_> = const_args.keys().collect();
+                            const_keys.sort();
+                            for key in const_keys {
+                                if let Some(value) = const_args.get(key) {
+                                    parts.push(mangle_const_value(value));
+                                }
+                            }
+                            parts.join("_")
+                        };
+
+                        // Look up the specialized entity name
+                        if let Some(specialized_name) = update_map.get(&mangled_name) {
+                            // Create new struct literal with specialized name and no generic args
+                            return HirExpression::StructLiteral(crate::hir::HirStructLiteral {
+                                type_name: specialized_name.clone(),
+                                generic_args: vec![], // Specialized entity has no generics
+                                fields: struct_lit
+                                    .fields
+                                    .iter()
+                                    .map(|f| {
+                                        let mut new_field = f.clone();
+                                        new_field.value = self.update_struct_literals_in_expression(
+                                            &f.value,
+                                            update_map,
+                                            entity_map,
+                                        );
+                                        new_field
+                                    })
+                                    .collect(),
+                            });
+                        }
+                    }
+                }
+
+                // Not a generic entity or not found in update_map - recurse into fields
+                HirExpression::StructLiteral(crate::hir::HirStructLiteral {
+                    type_name: struct_lit.type_name.clone(),
+                    generic_args: struct_lit.generic_args.clone(),
+                    fields: struct_lit
+                        .fields
+                        .iter()
+                        .map(|f| {
+                            let mut new_field = f.clone();
+                            new_field.value = self.update_struct_literals_in_expression(
+                                &f.value,
+                                update_map,
+                                entity_map,
+                            );
+                            new_field
+                        })
+                        .collect(),
+                })
+            }
+            HirExpression::Binary(binary) => {
+                let mut new_binary = binary.clone();
+                new_binary.left =
+                    Box::new(self.update_struct_literals_in_expression(&binary.left, update_map, entity_map));
+                new_binary.right =
+                    Box::new(self.update_struct_literals_in_expression(&binary.right, update_map, entity_map));
+                HirExpression::Binary(new_binary)
+            }
+            HirExpression::Unary(unary) => {
+                let mut new_unary = unary.clone();
+                new_unary.operand =
+                    Box::new(self.update_struct_literals_in_expression(&unary.operand, update_map, entity_map));
+                HirExpression::Unary(new_unary)
+            }
+            HirExpression::Ternary {
+                condition,
+                true_expr,
+                false_expr,
+            } => HirExpression::Ternary {
+                condition: Box::new(self.update_struct_literals_in_expression(
+                    condition,
+                    update_map,
+                    entity_map,
+                )),
+                true_expr: Box::new(self.update_struct_literals_in_expression(
+                    true_expr,
+                    update_map,
+                    entity_map,
+                )),
+                false_expr: Box::new(self.update_struct_literals_in_expression(
+                    false_expr,
+                    update_map,
+                    entity_map,
+                )),
+            },
+            HirExpression::Index(base, idx) => HirExpression::Index(
+                Box::new(self.update_struct_literals_in_expression(base, update_map, entity_map)),
+                Box::new(self.update_struct_literals_in_expression(idx, update_map, entity_map)),
+            ),
+            HirExpression::Call(call) => {
+                let mut new_call = call.clone();
+                new_call.args = call
+                    .args
+                    .iter()
+                    .map(|a| self.update_struct_literals_in_expression(a, update_map, entity_map))
+                    .collect();
+                HirExpression::Call(new_call)
+            }
+            HirExpression::Cast(cast) => {
+                let mut new_cast = cast.clone();
+                new_cast.expr =
+                    Box::new(self.update_struct_literals_in_expression(&cast.expr, update_map, entity_map));
+                HirExpression::Cast(new_cast)
+            }
+            HirExpression::Concat(elements) => {
+                HirExpression::Concat(
+                    elements
+                        .iter()
+                        .map(|e| self.update_struct_literals_in_expression(e, update_map, entity_map))
+                        .collect(),
+                )
+            }
+            HirExpression::ArrayLiteral(elements) => {
+                HirExpression::ArrayLiteral(
+                    elements
+                        .iter()
+                        .map(|e| self.update_struct_literals_in_expression(e, update_map, entity_map))
+                        .collect(),
+                )
+            }
+            HirExpression::TupleLiteral(elements) => {
+                HirExpression::TupleLiteral(
+                    elements
+                        .iter()
+                        .map(|e| self.update_struct_literals_in_expression(e, update_map, entity_map))
+                        .collect(),
+                )
+            }
+            // Other expression types pass through unchanged
+            _ => expr.clone(),
         }
     }
 }

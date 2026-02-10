@@ -9,5 +9,5 @@
 pub mod collector;
 pub mod engine;
 
-pub use collector::{Instantiation, InstantiationCollector};
+pub use collector::{mangle_const_value, Instantiation, InstantiationCollector};
 pub use engine::MonomorphizationEngine;

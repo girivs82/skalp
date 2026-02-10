@@ -104,7 +104,7 @@ impl Instantiation {
 }
 
 /// Mangle a const value into a string
-fn mangle_const_value(value: &ConstValue) -> String {
+pub fn mangle_const_value(value: &ConstValue) -> String {
     match value {
         ConstValue::Nat(n) => n.to_string(),
         ConstValue::Int(i) => {
