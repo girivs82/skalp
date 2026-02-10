@@ -160,6 +160,12 @@ impl TypeSubstitution {
 
     /// Substitute types in a statement
     fn substitute_statement(&self, stmt: &hir::HirStatement) -> hir::HirStatement {
+        stacker::maybe_grow(256 * 1024, 8 * 1024 * 1024, || {
+            self.substitute_statement_impl(stmt)
+        })
+    }
+
+    fn substitute_statement_impl(&self, stmt: &hir::HirStatement) -> hir::HirStatement {
         match stmt {
             hir::HirStatement::Expression(expr) => {
                 hir::HirStatement::Expression(self.substitute_expression(expr))
@@ -213,8 +219,14 @@ impl TypeSubstitution {
         }
     }
 
-    /// Substitute types in an expression
+    /// Substitute types in an expression (stacker-protected)
     fn substitute_expression(&self, expr: &hir::HirExpression) -> hir::HirExpression {
+        stacker::maybe_grow(256 * 1024, 8 * 1024 * 1024, || {
+            self.substitute_expression_impl(expr)
+        })
+    }
+
+    fn substitute_expression_impl(&self, expr: &hir::HirExpression) -> hir::HirExpression {
         match expr {
             hir::HirExpression::Call(call) => hir::HirExpression::Call(hir::HirCallExpr {
                 function: call.function.clone(),

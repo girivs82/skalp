@@ -2739,6 +2739,17 @@ impl<'hir> HirToMir<'hir> {
                                 // For tuple types, use the HIR placeholder directly
                                 // Don't convert to MIR and back - preserve the original tuple type
                                 hir_placeholder_type.clone()
+                            } else if let hir::HirExpression::Cast(cast_expr) = &let_stmt.value {
+                                // BUG #207 FIX: For Cast expressions, ALWAYS use the Cast's target_type
+                                // This ensures `let a_fp = a as fp16` gets type Custom("fp16"), not Bit(16)
+                                // Critical for FP trait resolution to work correctly.
+                                // Without this fix, convert_type loses the distinct type identity:
+                                // Custom("fp16") -> convert_type -> Bit(16) -> convert_mir_to_hir -> HirType::Bit(16)
+                                trace!(
+                                    "[BUG #207 FIX] Variable '{}': Using Cast target_type {:?} instead of converting through MIR",
+                                    var_name, cast_expr.target_type
+                                );
+                                cast_expr.target_type.clone()
                             } else {
                                 // For other types, convert through MIR to ensure consistency
                                 let converted_hir_type = self.convert_type(hir_placeholder_type);
@@ -2752,8 +2763,8 @@ impl<'hir> HirToMir<'hir> {
                             // Critical for FP trait resolution to work correctly
                             if let hir::HirExpression::Cast(cast_expr) = &let_stmt.value {
                                 trace!(
-                                    "[BUG #FP_TRAIT] Variable '{}': Using Cast target_type {:?} instead of HIR placeholder {:?}",
-                                    var_name, cast_expr.target_type, let_stmt.var_type
+                                    "[BUG #207 FIX] Variable '{}': Using Cast target_type {:?} (needs_type_inference=false)",
+                                    var_name, cast_expr.target_type
                                 );
                                 cast_expr.target_type.clone()
                             } else {
@@ -5648,6 +5659,16 @@ impl<'hir> HirToMir<'hir> {
         expr: &hir::HirExpression,
         depth: usize,
     ) -> Option<Expression> {
+        stacker::maybe_grow(STACK_RED_ZONE, STACK_GROW_SIZE, || {
+            self.convert_expression_iterative(expr, depth)
+        })
+    }
+
+    fn convert_expression_iterative(
+        &mut self,
+        expr: &hir::HirExpression,
+        depth: usize,
+    ) -> Option<Expression> {
         // Work item for iterative expression conversion
         enum ExprWork<'a> {
             // Convert this expression (result goes on result_stack)
@@ -5958,6 +5979,16 @@ impl<'hir> HirToMir<'hir> {
 
     /// Implementation of HIR expression to MIR conversion
     fn convert_expression_impl(
+        &mut self,
+        expr: &hir::HirExpression,
+        depth: usize,
+    ) -> Option<Expression> {
+        stacker::maybe_grow(STACK_RED_ZONE, STACK_GROW_SIZE, || {
+            self.convert_expression_impl_inner(expr, depth)
+        })
+    }
+
+    fn convert_expression_impl_inner(
         &mut self,
         expr: &hir::HirExpression,
         depth: usize,
@@ -9565,6 +9596,12 @@ impl<'hir> HirToMir<'hir> {
     /// Convert a statement-based function body (possibly with if-returns) into an expression
     /// This handles the case where early returns have been transformed into nested if-else
     fn convert_body_to_expression(&self, body: &[hir::HirStatement]) -> Option<hir::HirExpression> {
+        stacker::maybe_grow(STACK_RED_ZONE, STACK_GROW_SIZE, || {
+            self.convert_body_to_expression_impl(body)
+        })
+    }
+
+    fn convert_body_to_expression_impl(&self, body: &[hir::HirStatement]) -> Option<hir::HirExpression> {
         if body.is_empty() {
             trace!("[DEBUG] convert_body_to_expression: empty body");
             return None;
@@ -14095,89 +14132,87 @@ impl<'hir> HirToMir<'hir> {
         current
     }
 
-    /// Count how many Variables from the given set appear in the expression
+    /// Count how many Variables from the given set appear in the expression (iterative)
     fn count_variables_from_set(
         expr: &hir::HirExpression,
         var_ids: &std::collections::HashSet<hir::VariableId>,
     ) -> usize {
-        match expr {
-            hir::HirExpression::Variable(var_id) => {
-                if var_ids.contains(var_id) {
-                    1
-                } else {
-                    0
+        let mut stack: Vec<&hir::HirExpression> = vec![expr];
+        let mut count = 0;
+        while let Some(e) = stack.pop() {
+            match e {
+                hir::HirExpression::Variable(var_id) => {
+                    if var_ids.contains(var_id) {
+                        count += 1;
+                    }
                 }
-            }
-            hir::HirExpression::TupleLiteral(elements) => elements
-                .iter()
-                .map(|e| Self::count_variables_from_set(e, var_ids))
-                .sum(),
-            hir::HirExpression::Call(call) => call
-                .args
-                .iter()
-                .map(|a| Self::count_variables_from_set(a, var_ids))
-                .sum(),
-            hir::HirExpression::Binary(bin) => {
-                Self::count_variables_from_set(&bin.left, var_ids)
-                    + Self::count_variables_from_set(&bin.right, var_ids)
-            }
-            hir::HirExpression::Unary(unary) => {
-                Self::count_variables_from_set(&unary.operand, var_ids)
-            }
-            hir::HirExpression::If(if_expr) => {
-                Self::count_variables_from_set(&if_expr.condition, var_ids)
-                    + Self::count_variables_from_set(&if_expr.then_expr, var_ids)
-                    + Self::count_variables_from_set(&if_expr.else_expr, var_ids)
-            }
-            hir::HirExpression::Cast(cast) => Self::count_variables_from_set(&cast.expr, var_ids),
-            hir::HirExpression::Concat(parts) => parts
-                .iter()
-                .map(|p| Self::count_variables_from_set(p, var_ids))
-                .sum(),
-            hir::HirExpression::FieldAccess { base, .. } => {
-                Self::count_variables_from_set(base, var_ids)
-            }
-            hir::HirExpression::Index(base, index) => {
-                Self::count_variables_from_set(base, var_ids)
-                    + Self::count_variables_from_set(index, var_ids)
-            }
-            hir::HirExpression::Block {
-                statements,
-                result_expr,
-            } => {
-                let stmt_count: usize = statements
-                    .iter()
-                    .map(|s| match s {
-                        hir::HirStatement::Let(let_stmt) => {
-                            Self::count_variables_from_set(&let_stmt.value, var_ids)
+                hir::HirExpression::TupleLiteral(elements) => {
+                    for elem in elements {
+                        stack.push(elem);
+                    }
+                }
+                hir::HirExpression::Call(call) => {
+                    for arg in &call.args {
+                        stack.push(arg);
+                    }
+                }
+                hir::HirExpression::Binary(bin) => {
+                    stack.push(&bin.left);
+                    stack.push(&bin.right);
+                }
+                hir::HirExpression::Unary(unary) => {
+                    stack.push(&unary.operand);
+                }
+                hir::HirExpression::If(if_expr) => {
+                    stack.push(&if_expr.condition);
+                    stack.push(&if_expr.then_expr);
+                    stack.push(&if_expr.else_expr);
+                }
+                hir::HirExpression::Cast(cast) => {
+                    stack.push(&cast.expr);
+                }
+                hir::HirExpression::Concat(parts) => {
+                    for p in parts {
+                        stack.push(p);
+                    }
+                }
+                hir::HirExpression::FieldAccess { base, .. } => {
+                    stack.push(base);
+                }
+                hir::HirExpression::Index(base, index) => {
+                    stack.push(base);
+                    stack.push(index);
+                }
+                hir::HirExpression::Block {
+                    statements,
+                    result_expr,
+                } => {
+                    for s in statements {
+                        match s {
+                            hir::HirStatement::Let(let_stmt) => {
+                                stack.push(&let_stmt.value);
+                            }
+                            hir::HirStatement::Assignment(assign) => {
+                                stack.push(&assign.rhs);
+                            }
+                            _ => {}
                         }
-                        hir::HirStatement::Assignment(assign) => {
-                            Self::count_variables_from_set(&assign.rhs, var_ids)
+                    }
+                    stack.push(result_expr);
+                }
+                hir::HirExpression::Match(match_expr) => {
+                    stack.push(&match_expr.expr);
+                    for arm in &match_expr.arms {
+                        if let Some(g) = &arm.guard {
+                            stack.push(g);
                         }
-                        _ => 0,
-                    })
-                    .sum();
-                stmt_count + Self::count_variables_from_set(result_expr, var_ids)
+                        stack.push(&arm.expr);
+                    }
+                }
+                _ => {}
             }
-            hir::HirExpression::Match(match_expr) => {
-                let expr_count = Self::count_variables_from_set(&match_expr.expr, var_ids);
-                let arm_count: usize = match_expr
-                    .arms
-                    .iter()
-                    .map(|arm| {
-                        let guard_count = arm
-                            .guard
-                            .as_ref()
-                            .map(|g| Self::count_variables_from_set(g, var_ids))
-                            .unwrap_or(0);
-                        guard_count + Self::count_variables_from_set(&arm.expr, var_ids)
-                    })
-                    .sum();
-                expr_count + arm_count
-            }
-            // Literals and GenericParams don't contain Variables
-            _ => 0,
         }
+        count
     }
 
     /// BUG FIX #103: Substitute Variables by VariableId, but ONLY if the VariableId is in the
@@ -14373,54 +14408,57 @@ impl<'hir> HirToMir<'hir> {
         expr: &hir::HirExpression,
         var_ids: &mut std::collections::HashSet<hir::VariableId>,
     ) {
-        match expr {
-            hir::HirExpression::Variable(var_id) => {
-                var_ids.insert(*var_id);
-            }
-            hir::HirExpression::TupleLiteral(elements) => {
-                for elem in elements {
-                    Self::collect_variable_ids_from_expr(elem, var_ids);
+        let mut stack: Vec<&hir::HirExpression> = vec![expr];
+        while let Some(e) = stack.pop() {
+            match e {
+                hir::HirExpression::Variable(var_id) => {
+                    var_ids.insert(*var_id);
                 }
-            }
-            hir::HirExpression::Call(call) => {
-                for arg in &call.args {
-                    Self::collect_variable_ids_from_expr(arg, var_ids);
+                hir::HirExpression::TupleLiteral(elements) => {
+                    for elem in elements {
+                        stack.push(elem);
+                    }
                 }
-            }
-            hir::HirExpression::Binary(bin) => {
-                Self::collect_variable_ids_from_expr(&bin.left, var_ids);
-                Self::collect_variable_ids_from_expr(&bin.right, var_ids);
-            }
-            hir::HirExpression::If(if_expr) => {
-                Self::collect_variable_ids_from_expr(&if_expr.condition, var_ids);
-                Self::collect_variable_ids_from_expr(&if_expr.then_expr, var_ids);
-                Self::collect_variable_ids_from_expr(&if_expr.else_expr, var_ids);
-            }
-            hir::HirExpression::Concat(parts) => {
-                for part in parts {
-                    Self::collect_variable_ids_from_expr(part, var_ids);
+                hir::HirExpression::Call(call) => {
+                    for arg in &call.args {
+                        stack.push(arg);
+                    }
                 }
+                hir::HirExpression::Binary(bin) => {
+                    stack.push(&bin.left);
+                    stack.push(&bin.right);
+                }
+                hir::HirExpression::If(if_expr) => {
+                    stack.push(&if_expr.condition);
+                    stack.push(&if_expr.then_expr);
+                    stack.push(&if_expr.else_expr);
+                }
+                hir::HirExpression::Concat(parts) => {
+                    for part in parts {
+                        stack.push(part);
+                    }
+                }
+                hir::HirExpression::Cast(cast) => {
+                    stack.push(&cast.expr);
+                }
+                hir::HirExpression::FieldAccess { base, .. } => {
+                    stack.push(base);
+                }
+                hir::HirExpression::Unary(unary) => {
+                    stack.push(&unary.operand);
+                }
+                hir::HirExpression::Index(base, index) => {
+                    stack.push(base);
+                    stack.push(index);
+                }
+                // BUG FIX #146: Range - collect from base, high, and low
+                hir::HirExpression::Range(base, high, low) => {
+                    stack.push(base);
+                    stack.push(high);
+                    stack.push(low);
+                }
+                _ => {}
             }
-            hir::HirExpression::Cast(cast) => {
-                Self::collect_variable_ids_from_expr(&cast.expr, var_ids);
-            }
-            hir::HirExpression::FieldAccess { base, .. } => {
-                Self::collect_variable_ids_from_expr(base, var_ids);
-            }
-            hir::HirExpression::Unary(unary) => {
-                Self::collect_variable_ids_from_expr(&unary.operand, var_ids);
-            }
-            hir::HirExpression::Index(base, index) => {
-                Self::collect_variable_ids_from_expr(base, var_ids);
-                Self::collect_variable_ids_from_expr(index, var_ids);
-            }
-            // BUG FIX #146: Range - collect from base, high, and low
-            hir::HirExpression::Range(base, high, low) => {
-                Self::collect_variable_ids_from_expr(base, var_ids);
-                Self::collect_variable_ids_from_expr(high, var_ids);
-                Self::collect_variable_ids_from_expr(low, var_ids);
-            }
-            _ => {}
         }
     }
 
@@ -15263,236 +15301,259 @@ impl<'hir> HirToMir<'hir> {
     }
 
     /// Convert HIR binary op to MIR
-    /// Infer HIR expression type
+    /// Infer HIR expression type (iterative)
     fn infer_hir_type(&self, expr: &hir::HirExpression) -> Option<hir::HirType> {
         let hir = self.hir?;
-        trace!(
-            "[INFER_TYPE_DEBUG] infer_hir_type called with expr type: {:?}",
-            std::mem::discriminant(expr)
-        );
-        match expr {
-            hir::HirExpression::Literal(lit) => match lit {
-                hir::HirLiteral::Integer(_) => Some(hir::HirType::Bit(32)), // Default integer width
-                hir::HirLiteral::Boolean(_) => Some(hir::HirType::Bool),
-                hir::HirLiteral::Float(_) => Some(hir::HirType::Float32), // Default float type
-                hir::HirLiteral::String(_) => None,
-                hir::HirLiteral::BitVector(bits) => Some(hir::HirType::Bit(bits.len() as u32)),
-            },
-            hir::HirExpression::Signal(signal_id) => {
-                // Look up signal in current entity's implementation
-                let entity_id = self.current_entity_id?;
-                let impl_block = hir.implementations.iter().find(|i| i.entity == entity_id)?;
-                let signal = impl_block.signals.iter().find(|s| s.id == *signal_id)?;
-                Some(signal.signal_type.clone())
-            }
-            hir::HirExpression::Port(port_id) => {
-                // Look up port in current entity
-                let entity_id = self.current_entity_id?;
-                let entity = hir.entities.iter().find(|e| e.id == entity_id)?;
-                let port = entity.ports.iter().find(|p| p.id == *port_id)?;
-                trace!(
-                    "[TYPE_DEBUG] Port '{}' has type: {:?}",
-                    port.name,
-                    port.port_type
-                );
-                Some(port.port_type.clone())
-            }
-            hir::HirExpression::Variable(var_id) => {
-                // Look up variable in current entity's implementation
-                if let Some(entity_id) = self.current_entity_id {
-                    if let Some(impl_block) =
-                        hir.implementations.iter().find(|i| i.entity == entity_id)
-                    {
-                        if let Some(var) = impl_block.variables.iter().find(|v| v.id == *var_id) {
-                            trace!(
-                                "[INFER_TYPE_DEBUG] Variable {:?} found in impl_block: {:?}",
-                                var_id,
-                                var.var_type
-                            );
-                            return Some(var.var_type.clone());
-                        }
-                    }
-                }
-                trace!(
-                    "[INFER_TYPE_DEBUG] Variable {:?} NOT found in impl_block, checking dynamic_variables (len={})",
-                    var_id, self.dynamic_variables.len()
-                );
 
-                // CRITICAL FIX #IMPORT_MATCH: Check context_variable_map first when in ANY context
-                // to avoid finding wrong variable type due to HIR VariableId collisions
-                if let Some(context) = self.get_current_context() {
-                    let context_key = (Some(context.clone()), *var_id);
-                    if let Some(&mir_id) = self.context_variable_map.get(&context_key) {
-                        // Found context-aware mapping - get type from mir_variable_types
-                        if let Some(var_type) = self.mir_variable_types.get(&mir_id) {
-                            trace!(
-                                "[BUG #IMPORT_MATCH] infer_hir_type: Found context-aware type for HIR {:?} via MIR {:?}: {:?}",
-                                var_id, mir_id, var_type
-                            );
-                            return Some(var_type.clone());
-                        }
-                    }
-                }
-
-                // Fall back to dynamic_variables (for let-bound variables from inlined functions)
-                // But this will be wrong if there are collisions!
-                if let Some((mir_id, _, var_type)) = self.dynamic_variables.get(var_id) {
-                    // Also check mir_variable_types to see if there's a more accurate type
-                    if let Some(accurate_type) = self.mir_variable_types.get(mir_id) {
-                        trace!(
-                            "[BUG #IMPORT_MATCH] infer_hir_type: Using mir_variable_types for HIR {:?} -> MIR {:?}: {:?}",
-                            var_id, mir_id, accurate_type
-                        );
-                        return Some(accurate_type.clone());
-                    }
-                    trace!(
-                        "[INFER_TYPE_DEBUG] Variable {:?} found in dynamic_variables: {:?}",
-                        var_id,
-                        var_type
-                    );
-                    return Some(var_type.clone());
-                }
-
-                trace!(
-                    "[INFER_TYPE_DEBUG] Variable {:?} NOT found anywhere, returning None",
-                    var_id
-                );
-                None
-            }
-            hir::HirExpression::Constant(const_id) => {
-                // Look up constant in current entity's implementation
-                if let Some(entity_id) = self.current_entity_id {
-                    if let Some(impl_block) =
-                        hir.implementations.iter().find(|i| i.entity == entity_id)
-                    {
-                        if let Some(constant) =
-                            impl_block.constants.iter().find(|c| c.id == *const_id)
-                        {
-                            return Some(constant.const_type.clone());
-                        }
-                    }
-                }
-                // Constants are typically integer types (nat, uint, etc.)
-                // Default to Bit(32) for arithmetic if not found
-                Some(hir::HirType::Bit(32))
-            }
-            hir::HirExpression::GenericParam(name) => {
-                // WORKAROUND for Bug #42/43: Parser creates malformed cast expression AST,
-                // causing some variable references to appear as GenericParam instead of Variable
-                // Try to resolve the name to a variable (should not be needed after parser fix)
-
-                // BUG FIX #7: First check dynamic_variables (from inlined functions)
-                if let Some((_, _, var_type)) = self
-                    .dynamic_variables
-                    .values()
-                    .find(|(_, var_name, _)| var_name == name)
-                {
-                    return Some(var_type.clone());
-                }
-
-                // Then check entity implementation variables
-                let entity_id = self.current_entity_id?;
-                let impl_block = hir.implementations.iter().find(|i| i.entity == entity_id)?;
-                if let Some(var) = impl_block.variables.iter().find(|v| v.name == *name) {
-                    return Some(var.var_type.clone());
-                }
-                None
-            }
-            hir::HirExpression::Binary(binary) => {
-                // For binary expressions, infer from operands
-                self.infer_hir_type(&binary.left)
-            }
-            hir::HirExpression::FieldAccess { base, field } => {
-                // Infer from base expression and field
-                let base_type = self.infer_hir_type(base)?;
-
-                // BUG FIX #46: Handle Custom("vec2/3/4") which should be Vec2/3/4(Float32)
-                // This is needed because Bug #45 causes HIR to store vec2<fp32> as Custom("vec2")
-                if let hir::HirType::Custom(type_name) = &base_type {
-                    if type_name.starts_with("vec")
-                        && matches!(field.as_str(), "x" | "y" | "z" | "w")
-                    {
-                        // Vec components are Float32 by default (matching convert_type workaround)
-                        return Some(hir::HirType::Float32);
-                    }
-                }
-
-                // For vector types, return element type
-                match base_type {
-                    hir::HirType::Vec2(element_type)
-                    | hir::HirType::Vec3(element_type)
-                    | hir::HirType::Vec4(element_type) => {
-                        // Vector component access returns element type
-                        Some(*element_type)
-                    }
-                    hir::HirType::Struct(ref struct_type) => {
-                        // Look up field type in struct definition
-                        for struct_field in &struct_type.fields {
-                            if struct_field.name == *field {
-                                return Some(struct_field.field_type.clone());
-                            }
-                        }
-                        None
-                    }
-                    _ => None,
-                }
-            }
-            hir::HirExpression::Index(base, _) => {
-                // For array indexing, infer element type
-                let base_type = self.infer_hir_type(base)?;
-                match base_type {
-                    hir::HirType::Array(elem_type, _) => Some(*elem_type),
-                    _ => Some(hir::HirType::Bit(1)), // Bit select
-                }
-            }
-            hir::HirExpression::Range(base, high, low) => {
-                // For range/bit slice, calculate the width from high and low indices
-                // The result is Bit(high - low + 1)
-                // Try to evaluate high and low as constants using the frontend's const_eval
-                use skalp_frontend::const_eval::{ConstEvaluator, ConstValue};
-                let mut evaluator = ConstEvaluator::new();
-
-                // Register constants from current entity implementation
-                if let Some(entity_id) = self.current_entity_id {
-                    if let Some(hir) = self.hir {
-                        for implementation in &hir.implementations {
-                            if implementation.entity == entity_id {
-                                evaluator.register_constants(&implementation.constants);
-                            }
-                        }
-                    }
-                }
-
-                if let (Ok(high_val), Ok(low_val)) = (evaluator.eval(high), evaluator.eval(low)) {
-                    if let (ConstValue::Nat(h), ConstValue::Nat(l)) = (high_val, low_val) {
-                        let width = (h - l + 1) as u32;
-                        return Some(hir::HirType::Bit(width));
-                    }
-                }
-
-                // Can't determine width statically - fall back to base type
-                // For bit vectors, a range still produces a bit type
-                let base_type = self.infer_hir_type(base);
-                match base_type {
-                    Some(hir::HirType::Bit(_)) => Some(hir::HirType::Bit(32)), // Default width
-                    Some(hir::HirType::Custom(_)) => Some(hir::HirType::Bit(32)),
-                    _ => Some(hir::HirType::Bit(32)),
-                }
-            }
-            hir::HirExpression::Cast(cast) => {
-                // Cast expression: return the target type
-                Some(cast.target_type.clone())
-            }
-            hir::HirExpression::Call(call) => {
-                // Infer type from function return type
-                if let Some(func) = self.find_function(&call.function) {
-                    func.return_type.clone()
-                } else {
-                    None
-                }
-            }
-            _ => None,
+        // Work items for iterative traversal
+        enum InferWork<'a> {
+            // Infer type for this expression
+            Infer(&'a hir::HirExpression),
+            // Apply FieldAccess post-processing: pop base_type from results, resolve field
+            ApplyFieldAccess { field: &'a str },
+            // Apply Index post-processing: pop base_type from results, resolve element type
+            ApplyIndex,
+            // Apply Range post-processing: pop base_type from results (fallback only)
+            ApplyRange,
         }
+
+        let mut work_stack: Vec<InferWork<'_>> = vec![InferWork::Infer(expr)];
+        let mut result_stack: Vec<Option<hir::HirType>> = Vec::new();
+
+        while let Some(work) = work_stack.pop() {
+            match work {
+                InferWork::Infer(e) => {
+                    trace!(
+                        "[INFER_TYPE_DEBUG] infer_hir_type called with expr type: {:?}",
+                        std::mem::discriminant(e)
+                    );
+                    match e {
+                        hir::HirExpression::Literal(lit) => {
+                            result_stack.push(match lit {
+                                hir::HirLiteral::Integer(_) => Some(hir::HirType::Bit(32)),
+                                hir::HirLiteral::Boolean(_) => Some(hir::HirType::Bool),
+                                hir::HirLiteral::Float(_) => Some(hir::HirType::Float32),
+                                hir::HirLiteral::String(_) => None,
+                                hir::HirLiteral::BitVector(bits) => Some(hir::HirType::Bit(bits.len() as u32)),
+                            });
+                        }
+                        hir::HirExpression::Signal(signal_id) => {
+                            let result = (|| {
+                                let entity_id = self.current_entity_id?;
+                                let impl_block = hir.implementations.iter().find(|i| i.entity == entity_id)?;
+                                let signal = impl_block.signals.iter().find(|s| s.id == *signal_id)?;
+                                Some(signal.signal_type.clone())
+                            })();
+                            result_stack.push(result);
+                        }
+                        hir::HirExpression::Port(port_id) => {
+                            let result = (|| {
+                                let entity_id = self.current_entity_id?;
+                                let entity = hir.entities.iter().find(|e| e.id == entity_id)?;
+                                let port = entity.ports.iter().find(|p| p.id == *port_id)?;
+                                trace!(
+                                    "[TYPE_DEBUG] Port '{}' has type: {:?}",
+                                    port.name,
+                                    port.port_type
+                                );
+                                Some(port.port_type.clone())
+                            })();
+                            result_stack.push(result);
+                        }
+                        hir::HirExpression::Variable(var_id) => {
+                            let result = (|| {
+                                if let Some(entity_id) = self.current_entity_id {
+                                    if let Some(impl_block) =
+                                        hir.implementations.iter().find(|i| i.entity == entity_id)
+                                    {
+                                        if let Some(var) = impl_block.variables.iter().find(|v| v.id == *var_id) {
+                                            trace!(
+                                                "[INFER_TYPE_DEBUG] Variable {:?} found in impl_block: {:?}",
+                                                var_id,
+                                                var.var_type
+                                            );
+                                            return Some(var.var_type.clone());
+                                        }
+                                    }
+                                }
+                                trace!(
+                                    "[INFER_TYPE_DEBUG] Variable {:?} NOT found in impl_block, checking dynamic_variables (len={})",
+                                    var_id, self.dynamic_variables.len()
+                                );
+
+                                if let Some(context) = self.get_current_context() {
+                                    let context_key = (Some(context.clone()), *var_id);
+                                    if let Some(&mir_id) = self.context_variable_map.get(&context_key) {
+                                        if let Some(var_type) = self.mir_variable_types.get(&mir_id) {
+                                            trace!(
+                                                "[BUG #IMPORT_MATCH] infer_hir_type: Found context-aware type for HIR {:?} via MIR {:?}: {:?}",
+                                                var_id, mir_id, var_type
+                                            );
+                                            return Some(var_type.clone());
+                                        }
+                                    }
+                                }
+
+                                if let Some((mir_id, _, var_type)) = self.dynamic_variables.get(var_id) {
+                                    if let Some(accurate_type) = self.mir_variable_types.get(mir_id) {
+                                        trace!(
+                                            "[BUG #IMPORT_MATCH] infer_hir_type: Using mir_variable_types for HIR {:?} -> MIR {:?}: {:?}",
+                                            var_id, mir_id, accurate_type
+                                        );
+                                        return Some(accurate_type.clone());
+                                    }
+                                    trace!(
+                                        "[INFER_TYPE_DEBUG] Variable {:?} found in dynamic_variables: {:?}",
+                                        var_id,
+                                        var_type
+                                    );
+                                    return Some(var_type.clone());
+                                }
+
+                                trace!(
+                                    "[INFER_TYPE_DEBUG] Variable {:?} NOT found anywhere, returning None",
+                                    var_id
+                                );
+                                None
+                            })();
+                            result_stack.push(result);
+                        }
+                        hir::HirExpression::Constant(const_id) => {
+                            let result = (|| {
+                                if let Some(entity_id) = self.current_entity_id {
+                                    if let Some(impl_block) =
+                                        hir.implementations.iter().find(|i| i.entity == entity_id)
+                                    {
+                                        if let Some(constant) =
+                                            impl_block.constants.iter().find(|c| c.id == *const_id)
+                                        {
+                                            return Some(constant.const_type.clone());
+                                        }
+                                    }
+                                }
+                                Some(hir::HirType::Bit(32))
+                            })();
+                            result_stack.push(result);
+                        }
+                        hir::HirExpression::GenericParam(name) => {
+                            let result = (|| {
+                                if let Some((_, _, var_type)) = self
+                                    .dynamic_variables
+                                    .values()
+                                    .find(|(_, var_name, _)| var_name == name)
+                                {
+                                    return Some(var_type.clone());
+                                }
+
+                                let entity_id = self.current_entity_id?;
+                                let impl_block = hir.implementations.iter().find(|i| i.entity == entity_id)?;
+                                if let Some(var) = impl_block.variables.iter().find(|v| v.name == *name) {
+                                    return Some(var.var_type.clone());
+                                }
+                                None
+                            })();
+                            result_stack.push(result);
+                        }
+                        hir::HirExpression::Binary(binary) => {
+                            // Infer from left operand - push continuation then child
+                            work_stack.push(InferWork::Infer(&binary.left));
+                        }
+                        hir::HirExpression::FieldAccess { base, field } => {
+                            // Push post-processing, then recurse on base
+                            work_stack.push(InferWork::ApplyFieldAccess { field });
+                            work_stack.push(InferWork::Infer(base));
+                        }
+                        hir::HirExpression::Index(base, _) => {
+                            // Push post-processing, then recurse on base
+                            work_stack.push(InferWork::ApplyIndex);
+                            work_stack.push(InferWork::Infer(base));
+                        }
+                        hir::HirExpression::Range(base, high, low) => {
+                            use skalp_frontend::const_eval::{ConstEvaluator, ConstValue};
+                            let mut evaluator = ConstEvaluator::new();
+
+                            if let Some(entity_id) = self.current_entity_id {
+                                if let Some(hir) = self.hir {
+                                    for implementation in &hir.implementations {
+                                        if implementation.entity == entity_id {
+                                            evaluator.register_constants(&implementation.constants);
+                                        }
+                                    }
+                                }
+                            }
+
+                            if let (Ok(high_val), Ok(low_val)) = (evaluator.eval(high), evaluator.eval(low)) {
+                                if let (ConstValue::Nat(h), ConstValue::Nat(l)) = (high_val, low_val) {
+                                    let width = (h - l + 1) as u32;
+                                    result_stack.push(Some(hir::HirType::Bit(width)));
+                                    continue;
+                                }
+                            }
+
+                            // Can't determine width statically - fall back to base type
+                            work_stack.push(InferWork::ApplyRange);
+                            work_stack.push(InferWork::Infer(base));
+                        }
+                        hir::HirExpression::Cast(cast) => {
+                            result_stack.push(Some(cast.target_type.clone()));
+                        }
+                        hir::HirExpression::Call(call) => {
+                            let result = if let Some(func) = self.find_function(&call.function) {
+                                func.return_type.clone()
+                            } else {
+                                None
+                            };
+                            result_stack.push(result);
+                        }
+                        _ => {
+                            result_stack.push(None);
+                        }
+                    }
+                }
+                InferWork::ApplyFieldAccess { field } => {
+                    let base_type = result_stack.pop().unwrap_or(None);
+                    let result = base_type.and_then(|bt| {
+                        // BUG FIX #46: Handle Custom("vec2/3/4")
+                        if let hir::HirType::Custom(ref type_name) = bt {
+                            if type_name.starts_with("vec")
+                                && matches!(field, "x" | "y" | "z" | "w")
+                            {
+                                return Some(hir::HirType::Float32);
+                            }
+                        }
+                        match bt {
+                            hir::HirType::Vec2(element_type)
+                            | hir::HirType::Vec3(element_type)
+                            | hir::HirType::Vec4(element_type) => Some(*element_type),
+                            hir::HirType::Struct(ref struct_type) => {
+                                for struct_field in &struct_type.fields {
+                                    if struct_field.name == field {
+                                        return Some(struct_field.field_type.clone());
+                                    }
+                                }
+                                None
+                            }
+                            _ => None,
+                        }
+                    });
+                    result_stack.push(result);
+                }
+                InferWork::ApplyIndex => {
+                    let base_type = result_stack.pop().unwrap_or(None);
+                    let result = base_type.map(|bt| match bt {
+                        hir::HirType::Array(elem_type, _) => *elem_type,
+                        _ => hir::HirType::Bit(1),
+                    });
+                    result_stack.push(result);
+                }
+                InferWork::ApplyRange => {
+                    let _base_type = result_stack.pop().unwrap_or(None);
+                    // Regardless of base type, range produces Bit(32) as default width
+                    result_stack.push(Some(hir::HirType::Bit(32)));
+                }
+            }
+        }
+        result_stack.pop().unwrap_or(None)
     }
 
     /// Find a trait method implementation for a given type, trait name, and method name
@@ -16748,105 +16809,88 @@ impl<'hir> HirToMir<'hir> {
     }
 
     /// Internal implementation of expression type inference
-    /// module_opt: Optional module for looking up variable types
-    #[allow(clippy::only_used_in_recursion)]
+    /// module_opt: Optional module for looking up variable types (iterative)
     fn infer_expression_type_internal(
         &self,
         expr: &Expression,
         module_opt: Option<&Module>,
     ) -> DataType {
-        match &expr.kind {
-            ExpressionKind::Literal(value) => match value {
-                Value::Integer(_) => DataType::Int(32),
-                Value::Float(_) => DataType::Float32,
-                Value::BitVector { width, .. } => DataType::Bit(*width),
-                Value::String(_) => DataType::Nat(32), // Fallback
-                Value::HighZ => DataType::Logic(1),
-                Value::Unknown => DataType::Logic(1), // Unknown value
-            },
-            ExpressionKind::Ref(lval) => {
-                // Look up the signal/port/variable type
-                match lval {
-                    LValue::Signal(sig_id) => {
-                        // TODO: Look up signal type from mir.signals
-                        // For now, default to 32-bit natural
-                        DataType::Nat(32)
-                    }
-                    LValue::Port(port_id) => {
-                        // TODO: Look up port type
-                        DataType::Nat(32)
-                    }
-                    LValue::Variable(var_id) => {
-                        // BUG #65/#66 FIX: Look up variable type from module if available
-                        if let Some(module) = module_opt {
-                            module
-                                .variables
-                                .iter()
-                                .find(|v| v.id == *var_id)
-                                .map(|v| v.var_type.clone())
-                                .unwrap_or(DataType::Nat(32))
-                        } else {
-                            // Fallback when no module available
-                            DataType::Nat(32)
-                        }
-                    }
-                    LValue::BitSelect { .. } => DataType::Bit(1),
-                    LValue::RangeSelect { high, low, .. } => {
-                        // Width is (high - low + 1) - but these are expressions, so estimate
-                        DataType::Nat(32)
-                    }
-                    LValue::Concat(_) => DataType::Nat(32),
+        // Follow the chain of Binary.left / Conditional.then_expr / FieldAccess.base
+        // iteratively until we hit a leaf or Concat
+        let mut current = expr;
+        loop {
+            match &current.kind {
+                ExpressionKind::Literal(value) => {
+                    return match value {
+                        Value::Integer(_) => DataType::Int(32),
+                        Value::Float(_) => DataType::Float32,
+                        Value::BitVector { width, .. } => DataType::Bit(*width),
+                        Value::String(_) => DataType::Nat(32),
+                        Value::HighZ => DataType::Logic(1),
+                        Value::Unknown => DataType::Logic(1),
+                    };
                 }
-            }
-            ExpressionKind::Binary { left, .. } => {
-                // Infer type from left operand (binary ops preserve operand type)
-                self.infer_expression_type_internal(left, module_opt)
-            }
-            ExpressionKind::Unary { .. } => DataType::Nat(32),
-            ExpressionKind::Conditional { then_expr, .. } => {
-                // Infer from then branch
-                self.infer_expression_type_internal(then_expr, module_opt)
-            }
-            ExpressionKind::FunctionCall { .. } => DataType::Nat(32), // Default for function calls
-            // BUG #125 FIX: Concat width is sum of element widths, not fixed 32-bit
-            ExpressionKind::Concat(parts) => {
-                use skalp_frontend::types::Width;
-                let total_width: usize = parts
-                    .iter()
-                    .map(|p| {
-                        // First try the expression's own type (Type uses Width enum)
-                        let part_width = match &p.ty {
-                            Type::Bit(Width::Fixed(w)) => Some(*w as usize),
-                            Type::Nat(Width::Fixed(w)) | Type::Int(Width::Fixed(w)) => {
-                                Some(*w as usize)
+                ExpressionKind::Ref(lval) => {
+                    return match lval {
+                        LValue::Signal(_) => DataType::Nat(32),
+                        LValue::Port(_) => DataType::Nat(32),
+                        LValue::Variable(var_id) => {
+                            if let Some(module) = module_opt {
+                                module
+                                    .variables
+                                    .iter()
+                                    .find(|v| v.id == *var_id)
+                                    .map(|v| v.var_type.clone())
+                                    .unwrap_or(DataType::Nat(32))
+                            } else {
+                                DataType::Nat(32)
                             }
-                            Type::Unknown => None,
-                            _ => None,
-                        };
-                        // If type is Unknown or not Fixed, recursively infer
-                        part_width.unwrap_or_else(|| {
-                            match self.infer_expression_type_internal(p, module_opt) {
-                                DataType::Bit(w) => w,
-                                DataType::Nat(w) => w,
-                                DataType::Int(w) => w,
-                                _ => 32, // fallback
-                            }
+                        }
+                        LValue::BitSelect { .. } => DataType::Bit(1),
+                        LValue::RangeSelect { .. } => DataType::Nat(32),
+                        LValue::Concat(_) => DataType::Nat(32),
+                    };
+                }
+                ExpressionKind::Binary { left, .. } => {
+                    current = left;
+                }
+                ExpressionKind::Unary { .. } => return DataType::Nat(32),
+                ExpressionKind::Conditional { then_expr, .. } => {
+                    current = then_expr;
+                }
+                ExpressionKind::FunctionCall { .. } => return DataType::Nat(32),
+                // BUG #125 FIX: Concat width is sum of element widths, not fixed 32-bit
+                ExpressionKind::Concat(parts) => {
+                    use skalp_frontend::types::Width;
+                    let total_width: usize = parts
+                        .iter()
+                        .map(|p| {
+                            let part_width = match &p.ty {
+                                Type::Bit(Width::Fixed(w)) => Some(*w as usize),
+                                Type::Nat(Width::Fixed(w)) | Type::Int(Width::Fixed(w)) => {
+                                    Some(*w as usize)
+                                }
+                                Type::Unknown => None,
+                                _ => None,
+                            };
+                            part_width.unwrap_or_else(|| {
+                                match self.infer_expression_type_internal(p, module_opt) {
+                                    DataType::Bit(w) => w,
+                                    DataType::Nat(w) => w,
+                                    DataType::Int(w) => w,
+                                    _ => 32,
+                                }
+                            })
                         })
-                    })
-                    .sum();
-                DataType::Bit(total_width)
-            }
-            ExpressionKind::Replicate { .. } => DataType::Nat(32),
-            ExpressionKind::Cast { target_type, .. } => target_type.clone(),
-            // BUG FIX #85: Handle tuple/field access
-            ExpressionKind::TupleFieldAccess { base, index } => {
-                // For tuple element access, try to infer element type
-                // For now, assume 32-bit elements
-                DataType::Nat(32)
-            }
-            ExpressionKind::FieldAccess { base, .. } => {
-                // For struct field access, fall back to base type inference
-                self.infer_expression_type_internal(base, module_opt)
+                        .sum();
+                    return DataType::Bit(total_width);
+                }
+                ExpressionKind::Replicate { .. } => return DataType::Nat(32),
+                ExpressionKind::Cast { target_type, .. } => return target_type.clone(),
+                ExpressionKind::TupleFieldAccess { .. } => return DataType::Nat(32),
+                ExpressionKind::FieldAccess { base, .. } => {
+                    current = base;
+                }
             }
         }
     }
@@ -18898,103 +18942,101 @@ impl<'hir> HirToMir<'hir> {
         false
     }
 
-    /// Helper to check if an expression involves float types (recursively)
-    #[allow(clippy::only_used_in_recursion)]
+    /// Helper to check if an expression involves float types (iterative)
     fn expression_involves_float_type(&self, expr: &hir::HirExpression) -> bool {
-        match expr {
-            hir::HirExpression::Cast(cast_expr) => {
-                matches!(
-                    cast_expr.target_type,
-                    hir::HirType::Float16 | hir::HirType::Float32 | hir::HirType::Float64
-                ) || matches!(cast_expr.target_type, hir::HirType::Custom(ref s) if s.starts_with("fp"))
+        let mut stack = vec![expr];
+        while let Some(e) = stack.pop() {
+            match e {
+                hir::HirExpression::Cast(cast_expr) => {
+                    if matches!(
+                        cast_expr.target_type,
+                        hir::HirType::Float16 | hir::HirType::Float32 | hir::HirType::Float64
+                    ) || matches!(cast_expr.target_type, hir::HirType::Custom(ref s) if s.starts_with("fp"))
+                    {
+                        return true;
+                    }
+                }
+                hir::HirExpression::Binary(bin) => {
+                    stack.push(&bin.left);
+                    stack.push(&bin.right);
+                }
+                hir::HirExpression::Unary(un) => {
+                    stack.push(&un.operand);
+                }
+                hir::HirExpression::FieldAccess { base, .. } => {
+                    stack.push(base);
+                }
+                _ => {}
             }
-            hir::HirExpression::Binary(bin) => {
-                self.expression_involves_float_type(&bin.left)
-                    || self.expression_involves_float_type(&bin.right)
-            }
-            hir::HirExpression::Unary(un) => self.expression_involves_float_type(&un.operand),
-            hir::HirExpression::Variable(_) => {
-                // For variables, we can't determine without type info
-                // Check if the variable name hints at float type
-                false
-            }
-            hir::HirExpression::FieldAccess { base, .. } => {
-                self.expression_involves_float_type(base)
-            }
-            _ => false,
         }
+        false
     }
 
-    /// Helper to count calls in a statement
+    /// Helper to count calls in a statement (iterative over nested statements)
     fn count_calls_in_statement(&self, stmt: &hir::HirStatement) -> usize {
-        let result = match stmt {
-            hir::HirStatement::Let(let_stmt) => {
-                trace!("[COUNT_CALLS_STMT] Let statement: {}", let_stmt.name);
-                self.count_function_calls(&let_stmt.value)
-            }
-            hir::HirStatement::Assignment(assign) => {
-                trace!("[COUNT_CALLS_STMT] Assignment statement");
-                self.count_function_calls(&assign.rhs)
-            }
-            hir::HirStatement::Expression(expr) => {
-                trace!(
-                    "[COUNT_CALLS_STMT] Expression statement: {:?}",
-                    std::mem::discriminant(expr)
-                );
-                self.count_function_calls(expr)
-            }
-            hir::HirStatement::If(if_stmt) => {
-                trace!("[COUNT_CALLS_STMT] If statement");
-                let cond_calls = self.count_function_calls(&if_stmt.condition);
-                let then_calls: usize = if_stmt
-                    .then_statements
-                    .iter()
-                    .map(|s| self.count_calls_in_statement(s))
-                    .sum();
-                let else_calls: usize = if_stmt
-                    .else_statements
-                    .as_ref()
-                    .map(|stmts| stmts.iter().map(|s| self.count_calls_in_statement(s)).sum())
-                    .unwrap_or(0);
-                cond_calls + then_calls + else_calls
-            }
-            hir::HirStatement::Match(match_stmt) => {
-                trace!("[COUNT_CALLS_STMT] Match statement");
-                let scrut_calls = self.count_function_calls(&match_stmt.expr);
-                let arm_calls: usize = match_stmt
-                    .arms
-                    .iter()
-                    .flat_map(|arm| &arm.statements)
-                    .map(|stmt| self.count_calls_in_statement(stmt))
-                    .sum();
-                scrut_calls + arm_calls
-            }
-            hir::HirStatement::Return(value_opt) => {
-                trace!(
-                    "[COUNT_CALLS_STMT] Return statement: value_opt.is_some()={}",
-                    value_opt.is_some()
-                );
-                if let Some(e) = value_opt.as_ref() {
+        let mut stmt_stack: Vec<&hir::HirStatement> = vec![stmt];
+        let mut total = 0;
+        while let Some(s) = stmt_stack.pop() {
+            match s {
+                hir::HirStatement::Let(let_stmt) => {
+                    trace!("[COUNT_CALLS_STMT] Let statement: {}", let_stmt.name);
+                    total += self.count_function_calls(&let_stmt.value);
+                }
+                hir::HirStatement::Assignment(assign) => {
+                    trace!("[COUNT_CALLS_STMT] Assignment statement");
+                    total += self.count_function_calls(&assign.rhs);
+                }
+                hir::HirStatement::Expression(expr) => {
                     trace!(
-                        "[COUNT_CALLS_STMT] Return value expr type: {:?}",
-                        std::mem::discriminant(e)
+                        "[COUNT_CALLS_STMT] Expression statement: {:?}",
+                        std::mem::discriminant(expr)
+                    );
+                    total += self.count_function_calls(expr);
+                }
+                hir::HirStatement::If(if_stmt) => {
+                    trace!("[COUNT_CALLS_STMT] If statement");
+                    total += self.count_function_calls(&if_stmt.condition);
+                    for s in &if_stmt.then_statements {
+                        stmt_stack.push(s);
+                    }
+                    if let Some(stmts) = &if_stmt.else_statements {
+                        for s in stmts {
+                            stmt_stack.push(s);
+                        }
+                    }
+                }
+                hir::HirStatement::Match(match_stmt) => {
+                    trace!("[COUNT_CALLS_STMT] Match statement");
+                    total += self.count_function_calls(&match_stmt.expr);
+                    for arm in &match_stmt.arms {
+                        for s in &arm.statements {
+                            stmt_stack.push(s);
+                        }
+                    }
+                }
+                hir::HirStatement::Return(value_opt) => {
+                    trace!(
+                        "[COUNT_CALLS_STMT] Return statement: value_opt.is_some()={}",
+                        value_opt.is_some()
+                    );
+                    if let Some(e) = value_opt.as_ref() {
+                        trace!(
+                            "[COUNT_CALLS_STMT] Return value expr type: {:?}",
+                            std::mem::discriminant(e)
+                        );
+                        total += self.count_function_calls(e);
+                    }
+                }
+                _ => {
+                    trace!(
+                        "[COUNT_CALLS_STMT] Other statement type: {:?}",
+                        std::mem::discriminant(s)
                     );
                 }
-                value_opt
-                    .as_ref()
-                    .map(|e| self.count_function_calls(e))
-                    .unwrap_or(0)
             }
-            _ => {
-                trace!(
-                    "[COUNT_CALLS_STMT] Other statement type: {:?}",
-                    std::mem::discriminant(stmt)
-                );
-                0
-            }
-        };
-        trace!("[COUNT_CALLS_STMT] Result: {}", result);
-        result
+        }
+        trace!("[COUNT_CALLS_STMT] Result: {}", total);
+        total
     }
 
     /// BUG FIX #85: Extract let bindings from an HIR expression recursively
@@ -19050,6 +19092,18 @@ impl<'hir> HirToMir<'hir> {
     /// This is used in MODULE_BLOCK to convert result_expr while using the already-converted
     /// let binding values instead of doing HIR substitution (which changes Call args and breaks caching).
     fn convert_hir_expr_with_mir_cache(
+        &mut self,
+        expr: &hir::HirExpression,
+        ctx: &ModuleSynthesisContext,
+        mir_cache: &IndexMap<hir::VariableId, Expression>,
+        depth: usize,
+    ) -> Option<Expression> {
+        stacker::maybe_grow(STACK_RED_ZONE, STACK_GROW_SIZE, || {
+            self.convert_hir_expr_with_mir_cache_impl(expr, ctx, mir_cache, depth)
+        })
+    }
+
+    fn convert_hir_expr_with_mir_cache_impl(
         &mut self,
         expr: &hir::HirExpression,
         ctx: &ModuleSynthesisContext,
