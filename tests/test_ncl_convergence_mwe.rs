@@ -1,6 +1,6 @@
 //! MWE for debugging NCL convergence issues
 //!
-//! This test creates a circuit similar to the CLE (function selection + routing)
+//! This test creates a circuit similar to a dispatch unit (function selection + routing)
 //! but at a smaller scale to debug convergence issues.
 
 use indexmap::IndexMap;
@@ -9,7 +9,7 @@ use skalp_lir::{get_stdlib_library, lower_mir_hierarchical, map_hierarchical_to_
 use skalp_mir::MirCompiler;
 use skalp_sim::{CircuitMode, HwAccel, SimLevel, UnifiedSimConfig, UnifiedSimulator};
 
-/// Simple CLE-like circuit with function selection
+/// Simple dispatch-style circuit with function selection
 const CLE_MWE_SOURCE: &str = r#"
 /// L0: Basic ALU operations
 fn alu_l0(a: bit[8], b: bit[8], op: bit[2]) -> bit[8] {
@@ -39,7 +39,7 @@ fn cmp_l1(a: bit[8], b: bit[8], op: bit[2]) -> bit[8] {
     }
 }
 
-/// MWE CLE: selects between ALU and comparison units
+/// MWE dispatch unit: selects between ALU and comparison units
 async entity CleMwe {
     in data1: bit[8]
     in data2: bit[8]
@@ -73,7 +73,7 @@ async fn test_ncl_convergence_mwe() {
         .compile(&hir)
         .expect("Failed to compile to MIR");
 
-    // Use hierarchical compilation like CLE
+    // Use hierarchical compilation like dispatch unit
     let hier_lir = lower_mir_hierarchical(&mir);
     let library = get_stdlib_library("generic_asic").expect("Failed to load library");
     let hier_result = map_hierarchical_to_gates(&hier_lir, &library);
@@ -920,7 +920,7 @@ async fn test_simple_ncl_add() {
 }
 
 // =============================================================================
-// Additional MWEs to capture CLE-like issues
+// Additional MWEs to capture dispatch-style issues
 // =============================================================================
 
 /// Test multiply operation
@@ -1145,7 +1145,7 @@ async fn test_simple_ncl_shr() {
     println!("Simple NCL shift right test complete (convergence verified)\n");
 }
 
-/// Test nested function calls (like CLE structure)
+/// Test nested function calls (like dispatch unit structure)
 const NESTED_FUNC_SOURCE: &str = r#"
 fn add_wrap(a: bit[8], b: bit[8]) -> bit[8] {
     a + b
@@ -1251,7 +1251,7 @@ async fn test_nested_func_ncl() {
     println!("Nested function NCL test PASSED!\n");
 }
 
-/// Test 32-bit operations (matching CLE width)
+/// Test 32-bit operations (matching target width)
 const WIDE_OPS_SOURCE: &str = r#"
 async entity WideOps {
     in a: bit[32]
@@ -1332,7 +1332,7 @@ async fn test_wide_ops_ncl() {
     println!("32-bit wide ops NCL test PASSED!\n");
 }
 
-/// Test multiple comparisons with mux selection (CLE L1-like structure)
+/// Test multiple comparisons with mux selection (L1-like structure)
 const MULTI_CMP_SOURCE: &str = r#"
 async entity MultiCmp {
     in a: bit[32]
@@ -1559,10 +1559,10 @@ async fn test_bitwise_ops_ncl() {
 }
 
 // =============================================================================
-// New MWE tests for CLE operations not yet covered
+// New MWE tests for dispatch operations not yet covered
 // =============================================================================
 
-/// Test match expression with enum-like opcodes (CLE structure)
+/// Test match expression with enum-like opcodes (dispatch structure)
 const MATCH_OPCODE_SOURCE: &str = r#"
 async entity MatchOpcode {
     in a: bit[8]
@@ -1572,7 +1572,7 @@ async entity MatchOpcode {
 }
 
 impl MatchOpcode {
-    // Match on opcode like CLE function unit
+    // Match on opcode like dispatch unit function unit
     result = match opcode {
         0 => a + b,           // ADD
         1 => a - b,           // SUB
@@ -2040,7 +2040,7 @@ async fn test_ge_ne_ncl() {
     println!("GE/NE comparison NCL test PASSED!\n");
 }
 
-/// Test multi-level function selection (like CLE L0-L3)
+/// Test multi-level function selection (like dispatch unit L0-L3)
 const MULTI_LEVEL_SOURCE: &str = r#"
 fn level0_add(a: bit[8], b: bit[8]) -> bit[8] {
     a + b
@@ -3862,7 +3862,7 @@ async fn test_c_element_iteration_trace() {
 // =============================================================================
 // MWE: MUL inside match/mux structure oscillation
 // =============================================================================
-// The CLE uses a match statement to select between operations.
+// The design uses a match statement to select between operations.
 // MUL inside this match causes oscillation (2000+ iterations).
 // This test isolates the issue.
 
@@ -4184,7 +4184,7 @@ async fn test_mul_in_match_8way() {
     println!("\nMUL-in-Match 8-way test completed");
 }
 
-/// Test: MUL with 10-way match and 4-bit selector (like original CLE test)
+/// Test: MUL with 10-way match and 4-bit selector (like original dispatch test)
 const MUL_IN_MATCH_10WAY: &str = r#"
 async entity MulInMatch10Way {
     in a: bit[8]
@@ -4481,7 +4481,7 @@ async fn test_mul_in_match_9way() {
     println!("\nMUL-in-Match 9-way test completed");
 }
 
-/// Test for nested if/else in match arms (like SRA in CLE)
+/// Test for nested if/else in match arms (like SRA in dispatch units)
 /// This pattern: match { ... => { let x = ...; if cond { ... } else { ... } } }
 const NESTED_IF_IN_MATCH: &str = r#"
 async entity NestedIfInMatch {

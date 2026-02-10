@@ -1,6 +1,6 @@
 //! L0-L5 Operation Gate-Level Simulation Tests
 //!
-//! Tests individual operations from the CLE hierarchy using boundary-only NCL.
+//! Tests individual operations from a function unit hierarchy using boundary-only NCL.
 //! Each test creates a minimal async entity and verifies correct simulation results.
 
 #![cfg(not(debug_assertions))]

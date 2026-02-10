@@ -269,7 +269,7 @@ async fn test_func_in_match() {
     }
 }
 
-// Test CLE-like structure with enum opcodes
+// Test dispatch-style structure with enum opcodes
 const CLE_LIKE: &str = r#"
 pub enum L5Opcode: bit[6] {
     POPCOUNT    = 57,
@@ -327,7 +327,7 @@ impl CleLikeBitreverse {
 
 #[tokio::test]
 async fn test_cle_like_popcount() {
-    println!("\n=== Testing CLE-like POPCOUNT ===");
+    println!("\n=== Testing dispatch-style POPCOUNT ===");
 
     let hir = parse_and_build_hir(CLE_LIKE).expect("Failed to parse");
     let mir_compiler = MirCompiler::new();
@@ -388,7 +388,7 @@ async fn test_cle_like_popcount() {
                 println!("PASS");
             } else {
                 println!("FAIL");
-                panic!("CLE-like POPCOUNT test failed");
+                panic!("dispatch-style POPCOUNT test failed");
             }
         }
         None => {
@@ -400,7 +400,7 @@ async fn test_cle_like_popcount() {
 
 #[tokio::test]
 async fn test_cle_like_bitreverse() {
-    println!("\n=== Testing CLE-like BITREVERSE ===");
+    println!("\n=== Testing dispatch-style BITREVERSE ===");
 
     let hir = parse_and_build_hir(CLE_LIKE).expect("Failed to parse");
     let mir_compiler = MirCompiler::new();
@@ -450,7 +450,7 @@ async fn test_cle_like_bitreverse() {
                 println!("PASS");
             } else {
                 println!("FAIL");
-                panic!("CLE-like BITREVERSE test failed");
+                panic!("dispatch-style BITREVERSE test failed");
             }
         }
         None => {
@@ -462,7 +462,7 @@ async fn test_cle_like_bitreverse() {
 
 #[tokio::test]
 async fn test_cle_like_signals_debug() {
-    println!("\n=== Testing CLE-like signals debug ===");
+    println!("\n=== Testing dispatch-style signals debug ===");
 
     let hir = parse_and_build_hir(CLE_LIKE).expect("Failed to parse");
     let mir_compiler = MirCompiler::new();
@@ -591,7 +591,7 @@ impl CleLikeSwapped {
 
 #[tokio::test]
 async fn test_cle_like_swapped() {
-    println!("\n=== Testing CLE-like SWAPPED order ===");
+    println!("\n=== Testing dispatch-style SWAPPED order ===");
 
     let hir = parse_and_build_hir(CLE_LIKE_SWAPPED).expect("Failed to parse");
     let mir_compiler = MirCompiler::new();
@@ -1105,7 +1105,7 @@ async fn test_constant_concat_64() {
     }
 }
 
-// Test with #[parallel] attribute like the CLE
+// Test with #[parallel] attribute for dispatch units
 const PARALLEL_MUX: &str = r#"
 pub fn bitreverse32(value: bit[32]) -> bit[32] {
     let mut x = value;
@@ -1130,7 +1130,7 @@ pub fn popcount32(value: bit[32]) -> bit[32] {
 pub fn exec_test(opcode: bit[6], data1: bit[32]) -> bit[32] {
     #[parallel]
     return match opcode {
-        // Add several arms like CLE
+        // Add several arms in dispatch units
         50 => data1 + 1,
         51 => data1 + 2,
         52 => data1 + 3,

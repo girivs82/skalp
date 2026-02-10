@@ -86,7 +86,7 @@ mod test_trait_method_call_e2e {
     }
 
     // Generic function with trait bound
-    // This is the Karythra use case!
+    // This is the target use case!
     fn fp_convert<T: FloatingPoint>(bits: bit[32]) -> bit[32] {
         let fp_val = T::from_bits(bits);  // Associated function call
         return fp_val.to_bits()            // Method call

@@ -1,9 +1,9 @@
-//! Test: Match arms with let bindings - Karythra Blocker
+//! Test: Match arms with let bindings - Critical Blocker
 //!
 //! This tests the critical blocker described in SKALP_FEATURE_REQUESTS.md:
 //! "Match arms containing block expressions with `let` bindings fail to inline"
 //!
-//! If this test passes, Karythra CLE can use all 41 function units!
+//! If this test passes, the design can use all 41 function units!
 
 #[cfg(test)]
 mod test_match_let_blocker {
@@ -49,7 +49,7 @@ mod test_match_let_blocker {
     #[test]
     fn test_arithmetic_right_shift() {
         let skalp_code = r#"
-    // The actual Karythra L0-L1 blocker pattern
+    // The actual target L0-L1 blocker pattern
     fn exec_sra(a: bit[32], b: bit[32]) -> bit[32] {
         return match 1 {
             1 => {
@@ -68,7 +68,7 @@ mod test_match_let_blocker {
     }
         "#;
 
-        println!("\n=== Test 2: Arithmetic Right Shift (Karythra Pattern) ===");
+        println!("\n=== Test 2: Arithmetic Right Shift (target Pattern) ===");
         println!("Code:\n{}", skalp_code);
 
         match parse_and_build_hir(skalp_code) {
@@ -80,11 +80,11 @@ mod test_match_let_blocker {
 
                 println!("✅ Monomorphization succeeded");
                 println!("Functions: {}", monomorphized_hir.functions.len());
-                println!("✅ Test 2 PASSED - Karythra SRA pattern works!");
+                println!("✅ Test 2 PASSED - target SRA pattern works!");
             }
             Err(e) => {
                 println!("❌ Test 2 FAILED: {:?}", e);
-                panic!("Karythra SRA pattern failed - BLOCKER STILL EXISTS");
+                panic!("target SRA pattern failed - BLOCKER STILL EXISTS");
             }
         }
     }
@@ -92,7 +92,7 @@ mod test_match_let_blocker {
     #[test]
     fn test_unsigned_compare() {
         let skalp_code = r#"
-    // Another Karythra L0-L1 blocker pattern
+    // Another target L0-L1 blocker pattern
     fn exec_ltu(a: bit[32], b: bit[32]) -> bit[32] {
         return match 1 {
             1 => {
@@ -105,7 +105,7 @@ mod test_match_let_blocker {
     }
         "#;
 
-        println!("\n=== Test 3: Unsigned Compare (Karythra Pattern) ===");
+        println!("\n=== Test 3: Unsigned Compare (target Pattern) ===");
         println!("Code:\n{}", skalp_code);
 
         match parse_and_build_hir(skalp_code) {
@@ -117,11 +117,11 @@ mod test_match_let_blocker {
 
                 println!("✅ Monomorphization succeeded");
                 println!("Functions: {}", monomorphized_hir.functions.len());
-                println!("✅ Test 3 PASSED - Karythra LTU pattern works!");
+                println!("✅ Test 3 PASSED - target LTU pattern works!");
             }
             Err(e) => {
                 println!("❌ Test 3 FAILED: {:?}", e);
-                panic!("Karythra LTU pattern failed - BLOCKER STILL EXISTS");
+                panic!("target LTU pattern failed - BLOCKER STILL EXISTS");
             }
         }
     }
@@ -129,7 +129,7 @@ mod test_match_let_blocker {
     #[test]
     fn test_fp_operation() {
         let skalp_code = r#"
-    // Karythra L2 FP operation pattern
+    // target L2 FP operation pattern
     fn fp16_sqrt(x: bit[16]) -> bit[16] {
         return match 1 {
             1 => {
@@ -156,7 +156,7 @@ mod test_match_let_blocker {
     }
         "#;
 
-        println!("\n=== Test 4: FP16 SQRT (Karythra L2 Pattern) ===");
+        println!("\n=== Test 4: FP16 SQRT (target L2 Pattern) ===");
         println!("Code:\n{}", skalp_code);
 
         match parse_and_build_hir(skalp_code) {
@@ -168,11 +168,11 @@ mod test_match_let_blocker {
 
                 println!("✅ Monomorphization succeeded");
                 println!("Functions: {}", monomorphized_hir.functions.len());
-                println!("✅ Test 4 PASSED - Karythra FP16 sqrt pattern works!");
+                println!("✅ Test 4 PASSED - target FP16 sqrt pattern works!");
             }
             Err(e) => {
                 println!("❌ Test 4 FAILED: {:?}", e);
-                panic!("Karythra FP16 sqrt pattern failed - BLOCKER STILL EXISTS");
+                panic!("target FP16 sqrt pattern failed - BLOCKER STILL EXISTS");
             }
         }
     }
@@ -180,7 +180,7 @@ mod test_match_let_blocker {
     #[test]
     fn test_vector_operation() {
         let skalp_code = r#"
-    // Karythra L3 vector operation pattern
+    // target L3 vector operation pattern
     fn vec4_dot(a: bit[128], b: bit[128]) -> bit[32] {
         return match 1 {
             1 => {
@@ -206,7 +206,7 @@ mod test_match_let_blocker {
     }
         "#;
 
-        println!("\n=== Test 5: Vec4 Dot Product (Karythra L3 Pattern) ===");
+        println!("\n=== Test 5: Vec4 Dot Product (target L3 Pattern) ===");
         println!("Code:\n{}", skalp_code);
 
         match parse_and_build_hir(skalp_code) {
@@ -218,11 +218,11 @@ mod test_match_let_blocker {
 
                 println!("✅ Monomorphization succeeded");
                 println!("Functions: {}", monomorphized_hir.functions.len());
-                println!("✅ Test 5 PASSED - Karythra vec4 dot pattern works!");
+                println!("✅ Test 5 PASSED - target vec4 dot pattern works!");
             }
             Err(e) => {
                 println!("❌ Test 5 FAILED: {:?}", e);
-                panic!("Karythra vec4 dot pattern failed - BLOCKER STILL EXISTS");
+                panic!("target vec4 dot pattern failed - BLOCKER STILL EXISTS");
             }
         }
     }

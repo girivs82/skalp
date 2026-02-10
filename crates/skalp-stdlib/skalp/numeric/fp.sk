@@ -105,10 +105,9 @@ impl FpAdd<const F: FloatFormat> {
     signal sum_sign: bit = large_sign
 
     // Normalize (find leading one)
-    // Pad sum_raw to 32 bits (MSB-aligned) for clz32
-    // After padding: bit 31 = sum_raw[27] (overflow bit)
-    // clz32 returns 0 for overflow, 1 for normal, 2+ for underflow from subtraction
-    signal sum_lz: nat = clz32({sum_raw, 4'b0000})
+    // Pad sum_raw to 32 bits at LSB for clz32 (LSB padding doesn't affect leading zeros)
+    const CLZ_PAD: nat = 32 - (ALIGNED_BITS + 1)
+    signal sum_lz: nat = clz32({sum_raw, {CLZ_PAD{1'b0}}})
     signal sum_normalized: bit[ALIGNED_BITS+1] = sum_raw << sum_lz
     // Exponent adjustment: +1 base (accounts for normalization), -sum_lz (leading zeros)
     // Overflow (sum_lz=0): exp = large_exp + 1
@@ -116,8 +115,8 @@ impl FpAdd<const F: FloatFormat> {
     // Underflow (sum_lz=2): exp = large_exp - 1
     // Note: Zero-extend large_exp before casting to int to avoid sign extension
     // (e.g., exp=128 in 8 bits = 0x80 would become -128 if sign-extended)
-    signal large_exp_wide: bit[32] = {24'b0, large_exp}
-    signal result_exp_raw: int = (large_exp_wide as int) + 1 - (sum_lz as int)
+    signal large_exp_ext: bit[E+1] = {1'b0, large_exp}
+    signal result_exp_raw: int = (large_exp_ext as int) + 1 - (sum_lz as int)
 
     // Extract mantissa and round bits
     // After normalization, bit ALIGNED_BITS (27) is the implicit 1

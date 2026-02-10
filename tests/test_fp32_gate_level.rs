@@ -1,5 +1,5 @@
 // Test FP32 operations at gate level in NCL mode
-// This isolates the FP32 logic from the full CLE
+// This isolates the FP32 logic from a full design
 
 use skalp_frontend::parse_and_build_hir;
 use skalp_lir::{get_stdlib_library, lower_mir_hierarchical, map_hierarchical_to_gates};

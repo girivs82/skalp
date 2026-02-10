@@ -82,7 +82,7 @@ async fn test_vec3_functional() {
         println!("✅ Vec3 add functional test PASSES - computation is correct");
     } else {
         println!("❌ Vec3 add functional test FAILS - got zeros or wrong values");
-        println!("   This indicates a SKALP compiler bug (not Karythra-specific)");
+        println!("   This indicates a SKALP compiler bug (not design-specific)");
         panic!(
             "Functional test failed: got ({}, {}, {}), expected (5.0, 7.0, 9.0)",
             rx, ry, rz

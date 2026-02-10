@@ -6255,9 +6255,13 @@ impl<'a> MirToSirConverter<'a> {
             }
         };
 
-        // Convert inputs
+        // Convert inputs - strip incorrect FP casts for non-FP32 widths
+        // The MIR compiler may resolve fp<IEEE754_16> as Float32 instead of Float16,
+        // causing incorrect zero-extension. Strip the cast when we know the correct width.
+        let a_input = self.strip_fp_cast_if_needed(a_expr, fp_width);
+        let b_input = self.strip_fp_cast_if_needed(b_expr, fp_width);
         let a_node = self.create_expression_node_for_instance_with_context(
-            a_expr,
+            &a_input,
             inst_prefix,
             port_mapping,
             child_module,
@@ -6265,7 +6269,7 @@ impl<'a> MirToSirConverter<'a> {
             parent_prefix,
         );
         let b_node = self.create_expression_node_for_instance_with_context(
-            b_expr,
+            &b_input,
             inst_prefix,
             port_mapping,
             child_module,
@@ -6273,12 +6277,13 @@ impl<'a> MirToSirConverter<'a> {
             parent_prefix,
         );
 
-        // Get output signal name
-        let output_signal_name = self
+        // Get output signal name (MIR name) and translate to SIR internal name
+        let output_signal_name_mir = self
             .get_output_signal_name(result_expr, module_for_lookup, parent_prefix)
             .unwrap_or_else(|| {
                 self.create_fallback_signal(inst_prefix, "result", fp_width, &sir_type)
             });
+        let output_signal_name = self.translate_to_internal_name(&output_signal_name_mir);
 
         // Create the native FP binary operation node
         let a_signal = self.node_to_signal_ref(a_node);
@@ -6354,9 +6359,10 @@ impl<'a> MirToSirConverter<'a> {
             }
         };
 
-        // Convert input
+        // Convert input - strip incorrect FP casts for non-FP32 widths
+        let x_input = self.strip_fp_cast_if_needed(x_expr, fp_width);
         let x_node = self.create_expression_node_for_instance_with_context(
-            x_expr,
+            &x_input,
             inst_prefix,
             port_mapping,
             child_module,
@@ -6364,12 +6370,13 @@ impl<'a> MirToSirConverter<'a> {
             parent_prefix,
         );
 
-        // Get output signal name
-        let output_signal_name = self
+        // Get output signal name (MIR name) and translate to SIR internal name
+        let output_signal_name_mir = self
             .get_output_signal_name(result_expr, module_for_lookup, parent_prefix)
             .unwrap_or_else(|| {
                 self.create_fallback_signal(inst_prefix, "result", fp_width, &sir_type)
             });
+        let output_signal_name = self.translate_to_internal_name(&output_signal_name_mir);
 
         // Create the native FSqrt unary operation node
         let x_signal = self.node_to_signal_ref(x_node);
@@ -6439,9 +6446,11 @@ impl<'a> MirToSirConverter<'a> {
             }
         };
 
-        // Convert inputs
+        // Convert inputs - strip incorrect FP casts for non-FP32 widths
+        let a_input = self.strip_fp_cast_if_needed(a_expr, _fp_width);
+        let b_input = self.strip_fp_cast_if_needed(b_expr, _fp_width);
         let a_node = self.create_expression_node_for_instance_with_context(
-            a_expr,
+            &a_input,
             inst_prefix,
             port_mapping,
             child_module,
@@ -6449,7 +6458,7 @@ impl<'a> MirToSirConverter<'a> {
             parent_prefix,
         );
         let b_node = self.create_expression_node_for_instance_with_context(
-            b_expr,
+            &b_input,
             inst_prefix,
             port_mapping,
             child_module,
@@ -6465,9 +6474,10 @@ impl<'a> MirToSirConverter<'a> {
         // Create comparison operations for each connected output
         // lt output -> FLt
         if let Some(lt_expr) = instance.connections.get("lt") {
-            if let Some(output_name) =
+            if let Some(output_name_mir) =
                 self.get_output_signal_name(lt_expr, module_for_lookup, parent_prefix)
             {
+                let output_name = self.translate_to_internal_name(&output_name_mir);
                 let output_signal = SignalRef {
                     signal_id: output_name.clone(),
                     bit_range: None,
@@ -6496,9 +6506,10 @@ impl<'a> MirToSirConverter<'a> {
 
         // eq output -> FEq
         if let Some(eq_expr) = instance.connections.get("eq") {
-            if let Some(output_name) =
+            if let Some(output_name_mir) =
                 self.get_output_signal_name(eq_expr, module_for_lookup, parent_prefix)
             {
+                let output_name = self.translate_to_internal_name(&output_name_mir);
                 let output_signal = SignalRef {
                     signal_id: output_name.clone(),
                     bit_range: None,
@@ -6527,9 +6538,10 @@ impl<'a> MirToSirConverter<'a> {
 
         // gt output -> FGt
         if let Some(gt_expr) = instance.connections.get("gt") {
-            if let Some(output_name) =
+            if let Some(output_name_mir) =
                 self.get_output_signal_name(gt_expr, module_for_lookup, parent_prefix)
             {
+                let output_name = self.translate_to_internal_name(&output_name_mir);
                 let output_signal = SignalRef {
                     signal_id: output_name.clone(),
                     bit_range: None,
@@ -6574,6 +6586,27 @@ impl<'a> MirToSirConverter<'a> {
             );
         }
         true
+    }
+
+    /// Helper: Strip incorrect FP casts from connection expressions
+    /// The MIR compiler may resolve fp<IEEE754_16> as Float32 instead of Float16,
+    /// causing widening casts that zero-extend 16-bit values to 32 bits.
+    /// When we know the correct FP width from the module name, strip these casts.
+    fn strip_fp_cast_if_needed(&self, expr: &Expression, fp_width: usize) -> Expression {
+        if let ExpressionKind::Cast { expr: inner, target_type } = &expr.kind {
+            let cast_width = match target_type {
+                DataType::Float16 => 16,
+                DataType::Float32 => 32,
+                DataType::Float64 => 64,
+                DataType::Bit(w) => *w,
+                _ => 0,
+            };
+            // If the cast is to a wider FP type than the actual FP width, strip it
+            if cast_width > fp_width && fp_width > 0 {
+                return (**inner).clone();
+            }
+        }
+        expr.clone()
     }
 
     /// Helper: Get output signal name from an expression

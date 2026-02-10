@@ -69,7 +69,7 @@ async fn test_bug67_nested_metal() {
         {
             println!("\n Bug #67 REPRODUCED with nested if-else!");
             println!("   The bug IS triggered by calling exec_l3 from within if-else chain!");
-            println!("   This matches the Karythra pattern exactly!");
+            println!("   This matches the expected pattern exactly!");
             panic!("Bug #67: FP16 type error reproduced with nested if-else pattern");
         } else {
             panic!("Unexpected error: {}", error_msg);

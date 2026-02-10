@@ -1,5 +1,5 @@
 //! Test for wide (256-bit) NCL operations
-//! This helps diagnose oscillation issues in the Karythra CLE
+//! This helps diagnose oscillation issues in large designs
 
 use skalp_lir::gate_netlist::GateNetlist;
 use skalp_sim::GpuNclRuntime;

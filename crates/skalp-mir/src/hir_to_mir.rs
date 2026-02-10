@@ -5722,15 +5722,22 @@ impl<'hir> HirToMir<'hir> {
                             result_stack.push(self.convert_expression_impl(e, depth));
                         }
 
-                        // Binary - process iteratively
+                        // Binary - check for trait-based resolution first (FP types, custom types)
                         hir::HirExpression::Binary(bin) => {
-                            // Push continuation first, then operands (right, then left for LIFO order)
-                            work_stack.push(ExprWork::BuildBinary {
-                                op: bin.op.clone(),
-                                left_expr: &bin.left,
-                            });
-                            work_stack.push(ExprWork::Convert(&bin.right));
-                            work_stack.push(ExprWork::Convert(&bin.left));
+                            let has_trait = self.try_resolve_trait_operator(&bin.op, &bin.left).is_some();
+                            if has_trait {
+                                // Delegate to impl path which handles trait method inlining
+                                // (e.g., fp32 + fp32 -> FpAdd entity instantiation)
+                                result_stack.push(self.convert_expression_impl(e, depth));
+                            } else {
+                                // Primitive types: use iterative path
+                                work_stack.push(ExprWork::BuildBinary {
+                                    op: bin.op.clone(),
+                                    left_expr: &bin.left,
+                                });
+                                work_stack.push(ExprWork::Convert(&bin.right));
+                                work_stack.push(ExprWork::Convert(&bin.left));
+                            }
                         }
 
                         // Unary - process iteratively
@@ -5993,7 +6000,6 @@ impl<'hir> HirToMir<'hir> {
         expr: &hir::HirExpression,
         depth: usize,
     ) -> Option<Expression> {
-        // TEMP DEBUG: Always log what expressions are being converted
         if depth == 0 {
             trace!(
                 "[CONVERT_EXPR_DEBUG] depth=0, expr_type={:?}",
