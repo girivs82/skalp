@@ -123,14 +123,11 @@ async fn simulate_fp32_add(netlist: &skalp_lir::GateNetlist, a: f32, b: f32) -> 
 
 #[tokio::test]
 async fn test_fp32_add_simple() {
-    let source_path = Path::new("/tmp/test_fpadd_sim.sk");
-
-    if !source_path.exists() {
-        panic!("Test source file not found: {:?}", source_path);
-    }
+    let source_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/test_fpadd_sim.sk");
 
     println!("Compiling FP32 add test...");
-    let netlist = compile_fp32_test(source_path);
+    let netlist = compile_fp32_test(&source_path);
     println!(
         "Compiled: {} cells, {} nets",
         netlist.cells.len(),
@@ -185,13 +182,10 @@ async fn test_fp32_add_simple() {
 
 #[tokio::test]
 async fn test_fp32_add_edge_cases() {
-    let source_path = Path::new("/tmp/test_fpadd_sim.sk");
+    let source_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/test_fpadd_sim.sk");
 
-    if !source_path.exists() {
-        panic!("Test source file not found: {:?}", source_path);
-    }
-
-    let netlist = compile_fp32_test(source_path);
+    let netlist = compile_fp32_test(&source_path);
 
     // Edge cases
     let test_cases = [
