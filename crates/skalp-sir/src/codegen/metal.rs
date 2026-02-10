@@ -137,6 +137,12 @@ impl<'a> MetalBackend<'a> {
         // Copy local state back to registers
         self.generate_local_state_writeback(&mut output);
 
+        // Final combinational pass: propagate updated register values to output signals
+        // Without this, output signals are stale by one cycle (reflect pre-update state)
+        output.push_str("\n    // Final combinational pass (FWFT: outputs reflect latest register state)\n");
+        self.shared.generate_combinational_body();
+        output.push_str(&self.shared.take_output());
+
         self.shared.dedent();
         output.push_str("}\n");
         output
