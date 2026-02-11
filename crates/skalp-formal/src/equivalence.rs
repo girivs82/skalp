@@ -5289,9 +5289,13 @@ impl<'a> MirToAig<'a> {
         block: &Block,
         next_state_map: &mut HashMap<(MirSignalRef, u32), AigLit>,
     ) {
-        for stmt in &block.statements {
-            self.convert_statement_for_bmc(stmt, next_state_map);
-        }
+        const STACK_RED_ZONE: usize = 256 * 1024;
+        const STACK_GROW_SIZE: usize = 8 * 1024 * 1024;
+        stacker::maybe_grow(STACK_RED_ZONE, STACK_GROW_SIZE, || {
+            for stmt in &block.statements {
+                self.convert_statement_for_bmc(stmt, next_state_map);
+            }
+        });
     }
 
     fn convert_statement_for_bmc(
@@ -5299,6 +5303,9 @@ impl<'a> MirToAig<'a> {
         stmt: &Statement,
         next_state_map: &mut HashMap<(MirSignalRef, u32), AigLit>,
     ) {
+        const STACK_RED_ZONE: usize = 256 * 1024;
+        const STACK_GROW_SIZE: usize = 8 * 1024 * 1024;
+        stacker::maybe_grow(STACK_RED_ZONE, STACK_GROW_SIZE, || {
         match stmt {
             Statement::Assignment(assign) => {
                 // Check if this is a register assignment
@@ -5494,6 +5501,7 @@ impl<'a> MirToAig<'a> {
                 self.convert_statement(stmt, &HashMap::new());
             }
         }
+        });
     }
 
     /// Compute the condition for a case item (pattern match)
@@ -5964,9 +5972,13 @@ impl<'a> MirToAig<'a> {
         block: &Block,
         conditions: &HashMap<MirSignalRef, Vec<AigLit>>,
     ) {
-        for stmt in &block.statements {
-            self.convert_statement(stmt, conditions);
-        }
+        const STACK_RED_ZONE: usize = 256 * 1024;
+        const STACK_GROW_SIZE: usize = 8 * 1024 * 1024;
+        stacker::maybe_grow(STACK_RED_ZONE, STACK_GROW_SIZE, || {
+            for stmt in &block.statements {
+                self.convert_statement(stmt, conditions);
+            }
+        });
     }
 
     fn convert_statement(
@@ -5974,6 +5986,9 @@ impl<'a> MirToAig<'a> {
         stmt: &Statement,
         conditions: &HashMap<MirSignalRef, Vec<AigLit>>,
     ) {
+        const STACK_RED_ZONE: usize = 256 * 1024;
+        const STACK_GROW_SIZE: usize = 8 * 1024 * 1024;
+        stacker::maybe_grow(STACK_RED_ZONE, STACK_GROW_SIZE, || {
         match stmt {
             Statement::Assignment(assign) => {
                 self.convert_assignment(assign, conditions);
@@ -6003,6 +6018,7 @@ impl<'a> MirToAig<'a> {
             }
             _ => {} // Assert, Assume, Cover, Loop - skip for now
         }
+        });
     }
 
     fn convert_assignment(
@@ -6019,6 +6035,9 @@ impl<'a> MirToAig<'a> {
         if_stmt: &IfStatement,
         conditions: &HashMap<MirSignalRef, Vec<AigLit>>,
     ) {
+        const STACK_RED_ZONE: usize = 256 * 1024;
+        const STACK_GROW_SIZE: usize = 8 * 1024 * 1024;
+        stacker::maybe_grow(STACK_RED_ZONE, STACK_GROW_SIZE, || {
         // Convert condition to single bit
         let cond_lits = self.convert_expression(&if_stmt.condition);
         let cond = if !cond_lits.is_empty() {
@@ -6088,6 +6107,7 @@ impl<'a> MirToAig<'a> {
             let mux_result = self.aig.add_mux(cond, else_lit, then_lit);
             self.signal_map.insert((sig_ref, bit), mux_result);
         }
+        });
     }
 
     fn convert_case_statement(
@@ -6095,6 +6115,9 @@ impl<'a> MirToAig<'a> {
         case_stmt: &CaseStatement,
         conditions: &HashMap<MirSignalRef, Vec<AigLit>>,
     ) {
+        const STACK_RED_ZONE: usize = 256 * 1024;
+        const STACK_GROW_SIZE: usize = 8 * 1024 * 1024;
+        stacker::maybe_grow(STACK_RED_ZONE, STACK_GROW_SIZE, || {
         let selector_lits = self.convert_expression(&case_stmt.expr);
         let _selector_width = selector_lits.len();
 
@@ -6156,6 +6179,7 @@ impl<'a> MirToAig<'a> {
         for (key, lit) in result_map {
             self.signal_map.insert(key, lit);
         }
+        });
     }
 
     fn build_equality(&mut self, lhs: &[AigLit], rhs: &[AigLit]) -> AigLit {
@@ -6378,6 +6402,9 @@ impl<'a> MirToAig<'a> {
 
     /// Convert an expression to AIG literals (one per bit)
     fn convert_expression(&mut self, expr: &Expression) -> Vec<AigLit> {
+        const STACK_RED_ZONE: usize = 256 * 1024;
+        const STACK_GROW_SIZE: usize = 8 * 1024 * 1024;
+        stacker::maybe_grow(STACK_RED_ZONE, STACK_GROW_SIZE, || {
         match &expr.kind {
             ExpressionKind::Literal(value) => self.convert_literal(value),
 
@@ -6386,8 +6413,9 @@ impl<'a> MirToAig<'a> {
             ExpressionKind::Binary { op, left, right } => {
                 let left_lits = self.convert_expression(left);
                 let right_lits = self.convert_expression(right);
-                // Determine signedness from operand types for comparison operations
-                let signed = self.is_signed_type(&left.ty) || self.is_signed_type(&right.ty);
+                // Determine signedness by recursively inspecting operand expression trees.
+                // Cannot use left.ty/right.ty because compound expressions have Type::Unknown.
+                let signed = self.infer_expression_is_signed(left) || self.infer_expression_is_signed(right);
                 self.convert_binary_op(*op, &left_lits, &right_lits, signed)
             }
 
@@ -6438,8 +6466,9 @@ impl<'a> MirToAig<'a> {
             ExpressionKind::Cast { expr, target_type } => {
                 let expr_lits = self.convert_expression(expr);
                 let target_width = self.get_type_width(target_type);
-                // Sign-extend for signed source types, zero-extend for unsigned
-                let source_signed = self.is_signed_type(&expr.ty);
+                // Sign-extend for signed source types, zero-extend for unsigned.
+                // Use recursive inference since expr.ty is often Type::Unknown.
+                let source_signed = self.infer_expression_is_signed(expr);
                 let extend_bit = if source_signed && !expr_lits.is_empty() {
                     *expr_lits.last().unwrap() // MSB = sign bit
                 } else {
@@ -6548,6 +6577,7 @@ impl<'a> MirToAig<'a> {
 
             _ => vec![self.aig.false_lit()],
         }
+        })
     }
 
     fn convert_literal(&mut self, value: &Value) -> Vec<AigLit> {
@@ -6701,6 +6731,70 @@ impl<'a> MirToAig<'a> {
             // Struct, Tuple, Enum, etc. - default to unsigned for comparisons
             _ => false,
         }
+    }
+
+    /// Check if a MIR DataType is signed
+    fn is_datatype_signed(dt: &DataType) -> bool {
+        matches!(dt, DataType::Int(_) | DataType::IntParam { .. } | DataType::IntExpr { .. })
+    }
+
+    /// Check if an lvalue references a signed signal/port/variable
+    fn is_lvalue_signed(&self, lvalue: &LValue) -> bool {
+        match lvalue {
+            LValue::Port(id) => {
+                self.find_port(*id)
+                    .map(|p| Self::is_datatype_signed(&p.port_type))
+                    .unwrap_or(false)
+            }
+            LValue::Signal(id) => {
+                self.find_signal(*id)
+                    .map(|s| Self::is_datatype_signed(&s.signal_type))
+                    .unwrap_or(false)
+            }
+            LValue::Variable(id) => {
+                self.find_variable(*id)
+                    .map(|v| Self::is_datatype_signed(&v.var_type))
+                    .unwrap_or(false)
+            }
+            LValue::BitSelect { base, .. } => self.is_lvalue_signed(base),
+            LValue::RangeSelect { base, .. } => self.is_lvalue_signed(base),
+            LValue::Concat(_) => false,
+        }
+    }
+
+    /// Recursively infer signedness from an expression tree.
+    ///
+    /// This fixes the bug where `Expression.ty` is `Type::Unknown` for all
+    /// compound expressions (created by `Expression::with_unknown_type()` in
+    /// hir_to_mir.rs), causing signed operations to be treated as unsigned.
+    /// Instead of checking the unreliable frontend type, we recursively traverse
+    /// the expression tree to find leaf references (ports/signals/variables)
+    /// whose MIR DataType correctly records signedness.
+    fn infer_expression_is_signed(&self, expr: &Expression) -> bool {
+        const STACK_RED_ZONE: usize = 256 * 1024;
+        const STACK_GROW_SIZE: usize = 8 * 1024 * 1024;
+        stacker::maybe_grow(STACK_RED_ZONE, STACK_GROW_SIZE, || {
+            match &expr.kind {
+                ExpressionKind::Literal(Value::Integer(_)) => false,
+                ExpressionKind::Ref(lvalue) => self.is_lvalue_signed(lvalue),
+                ExpressionKind::Binary { left, right, .. } => {
+                    self.infer_expression_is_signed(left) || self.infer_expression_is_signed(right)
+                }
+                ExpressionKind::Unary { operand, op, .. } => {
+                    if matches!(op, UnaryOp::Negate) {
+                        true // Negation always produces signed result
+                    } else {
+                        self.infer_expression_is_signed(operand)
+                    }
+                }
+                ExpressionKind::Conditional { then_expr, else_expr, .. } => {
+                    self.infer_expression_is_signed(then_expr)
+                        || self.infer_expression_is_signed(else_expr)
+                }
+                ExpressionKind::Cast { target_type, .. } => Self::is_datatype_signed(target_type),
+                _ => false,
+            }
+        })
     }
 
     fn convert_binary_op(

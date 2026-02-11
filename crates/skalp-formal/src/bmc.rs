@@ -143,6 +143,9 @@ impl BoundedModelChecker {
     }
 
     fn negate_property(&self, formula: &TemporalFormula) -> String {
+        const STACK_RED_ZONE: usize = 256 * 1024;
+        const STACK_GROW_SIZE: usize = 8 * 1024 * 1024;
+        stacker::maybe_grow(STACK_RED_ZONE, STACK_GROW_SIZE, || {
         match formula {
             TemporalFormula::Always(inner) => {
                 // ¬G(φ) = F(¬φ)
@@ -154,9 +157,13 @@ impl BoundedModelChecker {
             }
             _ => format!("(not {})", self.formula_to_smt(formula)),
         }
+        })
     }
 
     fn formula_to_smt(&self, formula: &TemporalFormula) -> String {
+        const STACK_RED_ZONE: usize = 256 * 1024;
+        const STACK_GROW_SIZE: usize = 8 * 1024 * 1024;
+        stacker::maybe_grow(STACK_RED_ZONE, STACK_GROW_SIZE, || {
         match formula {
             TemporalFormula::Atomic(prop) => prop.clone(),
             TemporalFormula::Bool(b) => b.to_string(),
@@ -173,6 +180,7 @@ impl BoundedModelChecker {
             }
             _ => "true".to_string(), // Simplified
         }
+        })
     }
 
     fn instantiate_at_step(&self, formula: &str, step: u32) -> String {

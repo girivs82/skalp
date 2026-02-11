@@ -3123,6 +3123,7 @@ dependencies = [
  "skalp-mir",
  "skalp-sim",
  "skalp-sir",
+ "stacker",
  "tempfile",
  "thiserror 1.0.69",
  "tokio",

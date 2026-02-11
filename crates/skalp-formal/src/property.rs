@@ -246,6 +246,9 @@ impl Property {
 
 /// Parse temporal logic formula from string
 fn parse_temporal_formula(spec: &str) -> Result<TemporalFormula, String> {
+    const STACK_RED_ZONE: usize = 256 * 1024;
+    const STACK_GROW_SIZE: usize = 8 * 1024 * 1024;
+    stacker::maybe_grow(STACK_RED_ZONE, STACK_GROW_SIZE, || {
     // Simplified parser - would need full grammar in production
     let spec = spec.trim();
 
@@ -314,10 +317,14 @@ fn parse_temporal_formula(spec: &str) -> Result<TemporalFormula, String> {
 
     // Otherwise treat as atomic proposition
     Ok(TemporalFormula::Atomic(spec.to_string()))
+    })
 }
 
 /// Convert formula to SMT-LIB format
 fn formula_to_smt(formula: &TemporalFormula) -> String {
+    const STACK_RED_ZONE: usize = 256 * 1024;
+    const STACK_GROW_SIZE: usize = 8 * 1024 * 1024;
+    stacker::maybe_grow(STACK_RED_ZONE, STACK_GROW_SIZE, || {
     match formula {
         TemporalFormula::Atomic(prop) => prop.clone(),
         TemporalFormula::Bool(b) => b.to_string(),
@@ -342,10 +349,14 @@ fn formula_to_smt(formula: &TemporalFormula) -> String {
         }
         _ => "unsupported".to_string(), // Simplified for now
     }
+    })
 }
 
 /// Convert formula to NuSMV format
 fn formula_to_nusmv(formula: &TemporalFormula) -> String {
+    const STACK_RED_ZONE: usize = 256 * 1024;
+    const STACK_GROW_SIZE: usize = 8 * 1024 * 1024;
+    stacker::maybe_grow(STACK_RED_ZONE, STACK_GROW_SIZE, || {
     match formula {
         TemporalFormula::Atomic(prop) => prop.clone(),
         TemporalFormula::Bool(b) => if *b { "TRUE" } else { "FALSE" }.to_string(),
@@ -376,6 +387,7 @@ fn formula_to_nusmv(formula: &TemporalFormula) -> String {
         }
         _ => "unsupported".to_string(),
     }
+    })
 }
 
 /// Property library with common hardware verification properties

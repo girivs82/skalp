@@ -269,6 +269,9 @@ impl ModelChecker {
 
     /// Convert temporal formula to string
     fn formula_to_string(&self, formula: &TemporalFormula) -> String {
+        const STACK_RED_ZONE: usize = 256 * 1024;
+        const STACK_GROW_SIZE: usize = 8 * 1024 * 1024;
+        stacker::maybe_grow(STACK_RED_ZONE, STACK_GROW_SIZE, || {
         match formula {
             TemporalFormula::Atomic(s) => s.clone(),
             TemporalFormula::Always(f) => format!("G({})", self.formula_to_string(f)),
@@ -286,6 +289,7 @@ impl ModelChecker {
             TemporalFormula::Not(f) => format!("!({})", self.formula_to_string(f)),
             _ => "true".to_string(),
         }
+        })
     }
 
     /// Parse temporal formula
