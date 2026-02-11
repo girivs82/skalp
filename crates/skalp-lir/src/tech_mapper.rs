@@ -977,12 +977,14 @@ impl<'a> TechMapper<'a> {
         // Otherwise, decompose to half adder + full adders
         let ha_info = self.get_cell_info(&CellFunction::HalfAdder);
         let fa_info = self.get_cell_info(&CellFunction::FullAdder);
+        // Use TIE_LOW for bits beyond input width (zero-extension for unsigned)
+        let tie_low = self.get_tie_low();
 
         let mut carry_net: Option<GateNetId> = None;
 
         for bit in 0..width as usize {
-            let a = inputs[0].get(bit).copied().unwrap_or(inputs[0][0]);
-            let b = inputs[1].get(bit).copied().unwrap_or(inputs[1][0]);
+            let a = inputs[0].get(bit).copied().unwrap_or(tie_low);
+            let b = inputs[1].get(bit).copied().unwrap_or(tie_low);
             let sum = outputs.get(bit).copied().unwrap_or(outputs[0]);
 
             // Create carry output net
@@ -1042,12 +1044,14 @@ impl<'a> TechMapper<'a> {
     ) {
         let carry_info = LibraryCellInfo::from_library_cell(carry_cell);
         let xor_info = self.get_cell_info(&CellFunction::Xor2);
+        // Use TIE_LOW for bits beyond input width (zero-extension for unsigned)
+        let tie_low_fpga = self.get_tie_low();
 
         let mut carry_net: Option<GateNetId> = None;
 
         for bit in 0..width as usize {
-            let a = inputs[0].get(bit).copied().unwrap_or(inputs[0][0]);
-            let b = inputs[1].get(bit).copied().unwrap_or(inputs[1][0]);
+            let a = inputs[0].get(bit).copied().unwrap_or(tie_low_fpga);
+            let b = inputs[1].get(bit).copied().unwrap_or(tie_low_fpga);
             let sum = outputs.get(bit).copied().unwrap_or(outputs[0]);
 
             // Create carry output net
@@ -1158,11 +1162,13 @@ impl<'a> TechMapper<'a> {
         // Invert b, then add with carry_in=1
         let inv_info = self.get_cell_info(&CellFunction::Inv);
         let fa_info = self.get_cell_info(&CellFunction::FullAdder);
+        // Use TIE_LOW for bits beyond input width (zero-extension for unsigned)
+        let sub_tie_low = self.get_tie_low();
 
         // Create inverted b nets
         let mut inv_b: Vec<GateNetId> = Vec::new();
         for bit in 0..width as usize {
-            let b = inputs[1].get(bit).copied().unwrap_or(inputs[1][0]);
+            let b = inputs[1].get(bit).copied().unwrap_or(sub_tie_low);
             let not_b = self.alloc_net_id();
             self.netlist
                 .add_net(GateNet::new(not_b, format!("{}.not_b{}", path, bit)));
@@ -1205,7 +1211,7 @@ impl<'a> TechMapper<'a> {
         let mut carry_net = const_1;
 
         for (bit, &not_b) in inv_b.iter().enumerate().take(width as usize) {
-            let a = inputs[0].get(bit).copied().unwrap_or(inputs[0][0]);
+            let a = inputs[0].get(bit).copied().unwrap_or(sub_tie_low);
             let diff = outputs.get(bit).copied().unwrap_or(outputs[0]);
 
             let cout = self.alloc_net_id();

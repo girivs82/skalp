@@ -886,9 +886,26 @@ impl UnifiedSimulator {
     /// Get raw net value by name (for debugging NCL simulation)
     pub fn get_net_value(&self, name: &str) -> Option<bool> {
         match &self.backend {
+            SimulatorBackend::NclCpu(ncl_sim) => ncl_sim.get_net_value_by_name(name),
             #[cfg(target_os = "macos")]
             SimulatorBackend::NclGpu(runtime) => runtime.get_net_by_name(name),
             _ => None,
+        }
+    }
+
+    /// Dump all nets matching a pattern (for debugging NCL simulation)
+    pub fn dump_nets_matching(&self, pattern: &str) {
+        match &self.backend {
+            SimulatorBackend::NclCpu(ncl_sim) => ncl_sim.dump_nets_matching(pattern),
+            _ => println!("  dump_nets_matching: not in NclCpu mode"),
+        }
+    }
+
+    /// Count undriven-but-used nets (for debugging NCL simulation)
+    pub fn count_undriven_nets(&self) -> (usize, Vec<String>) {
+        match &self.backend {
+            SimulatorBackend::NclCpu(ncl_sim) => ncl_sim.count_undriven_nets(),
+            _ => (0, Vec::new()),
         }
     }
 

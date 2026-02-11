@@ -252,6 +252,12 @@ pub struct HirToMir<'hir> {
     /// BUG #201 FIX: Now includes Type for correct type propagation.
     placeholder_hir_signal_to_entity_output: IndexMap<hir::SignalId, (SignalId, Type)>,
 
+    /// BUG #256 FIX: Pending temp signals for bit-indexing on Concat expressions
+    /// When a constant bit-index is applied to a Concat expression (from function inlining),
+    /// we create a temp signal to hold the Concat and use BitSelect on it.
+    /// Format: (SignalId, signal_name, DataType, rhs_expression)
+    pending_temp_signals: Vec<(SignalId, String, DataType, Expression)>,
+
     /// BUG #200 FIX: Current module synthesis context's var_to_signal mapping
     /// This is set when synthesizing a function as a module and is used by convert_expression
     /// to resolve Variable references to Signal references for entity struct literal fields.
@@ -377,6 +383,7 @@ impl<'hir> HirToMir<'hir> {
             pending_param_var_to_name: IndexMap::new(),
             placeholder_signal_to_entity_output: IndexMap::new(),
             placeholder_hir_signal_to_entity_output: IndexMap::new(),
+            pending_temp_signals: Vec::new(), // BUG #256 FIX
             current_module_var_to_signal: None, // BUG #200 FIX
             current_module_param_to_port: None, // BUG #205 FIX
             entity_scope_cache: IndexMap::new(), // BUG #237 FIX
@@ -703,6 +710,7 @@ impl<'hir> HirToMir<'hir> {
 
                 // Clear any pending statements from previous assignments
                 self.pending_statements.clear();
+                self.pending_temp_signals.clear();
 
                 // Convert the assignment
                 let mir_assigns = self.convert_continuous_assignment_expanded(hir_assign);
@@ -717,6 +725,31 @@ impl<'hir> HirToMir<'hir> {
                         };
                         module.assignments.push(continuous);
                     }
+                }
+
+                // BUG #256 FIX: Drain pending temp signals (from bit-indexing on Concat)
+                for (sig_id, name, dtype, rhs) in self.pending_temp_signals.drain(..) {
+                    module.signals.push(Signal {
+                        id: sig_id,
+                        name,
+                        signal_type: dtype,
+                        initial: None,
+                        clock_domain: None,
+                        span: None,
+                        memory_config: None,
+                        trace_config: None,
+                        cdc_config: None,
+                        breakpoint_config: None,
+                        power_config: None,
+                        safety_context: None,
+                        detection_config: None,
+                        power_domain: None,
+                    });
+                    module.assignments.push(ContinuousAssign {
+                        lhs: LValue::Signal(sig_id),
+                        rhs,
+                        span: None,
+                    });
                 }
 
                 // Drain pending module instances (from complex function calls)
@@ -1009,6 +1042,32 @@ impl<'hir> HirToMir<'hir> {
                                             "[HIR→MIR] Created ContinuousAssign for impl signal '{}' -> SignalId({:?})",
                                             hir_signal.name, mir_signal_id
                                         );
+
+                                        // BUG #256 FIX: Drain pending temp signals created during
+                                        // signal initializer conversion (e.g., clz32 inlining in FpAdd)
+                                        for (sig_id, name, dtype, rhs) in self.pending_temp_signals.drain(..) {
+                                            module.signals.push(Signal {
+                                                id: sig_id,
+                                                name,
+                                                signal_type: dtype,
+                                                initial: None,
+                                                clock_domain: None,
+                                                span: None,
+                                                memory_config: None,
+                                                trace_config: None,
+                                                cdc_config: None,
+                                                breakpoint_config: None,
+                                                power_config: None,
+                                                safety_context: None,
+                                                detection_config: None,
+                                                power_domain: None,
+                                            });
+                                            module.assignments.push(ContinuousAssign {
+                                                lhs: LValue::Signal(sig_id),
+                                                rhs,
+                                                span: None,
+                                            });
+                                        }
                                     }
                                 } else {
                                     // BUG #207: Signal initializer conversion FAILED
@@ -1367,6 +1426,7 @@ impl<'hir> HirToMir<'hir> {
                         );
                         // Clear any pending statements from previous assignments
                         self.pending_statements.clear();
+                        self.pending_temp_signals.clear();
 
                         // Convert the assignment (may generate pending statements from block expressions)
                         let assigns = self.convert_continuous_assignment_expanded(hir_assign);
@@ -1586,6 +1646,31 @@ impl<'hir> HirToMir<'hir> {
                                 };
                                 module.assignments.push(continuous);
                             }
+                        }
+
+                        // BUG #256 FIX: Drain pending temp signals (from bit-indexing on Concat)
+                        for (sig_id, name, dtype, rhs) in self.pending_temp_signals.drain(..) {
+                            module.signals.push(Signal {
+                                id: sig_id,
+                                name,
+                                signal_type: dtype,
+                                initial: None,
+                                clock_domain: None,
+                                span: None,
+                                memory_config: None,
+                                trace_config: None,
+                                cdc_config: None,
+                                breakpoint_config: None,
+                                power_config: None,
+                                safety_context: None,
+                                detection_config: None,
+                                power_domain: None,
+                            });
+                            module.assignments.push(ContinuousAssign {
+                                lhs: LValue::Signal(sig_id),
+                                rhs,
+                                span: None,
+                            });
                         }
 
                         // Drain pending module instances (from complex function calls)
@@ -5922,12 +6007,49 @@ impl<'hir> HirToMir<'hir> {
                                 }),
                             )));
                         } else if let ExpressionKind::Concat(elements) = &base.kind {
-                            // BUG #34 FIX: Handle constant array indexing
-                            // Arrays are represented as Concat in MIR
-                            // Build MUX tree: (index == 0) ? elem_0 : ((index == 1) ? elem_1 : ...)
+                            // Concat is used for both arrays and bit concatenation in MIR.
+                            // We need to distinguish: if the constant index >= element count,
+                            // it's a bit index into a bit-concatenation (not array indexing).
+
+                            // Extract constant index value if available
+                            let const_index = match &index.kind {
+                                ExpressionKind::Literal(Value::Integer(n)) => Some(*n as u64),
+                                ExpressionKind::Literal(Value::BitVector { value: n, .. }) => Some(*n),
+                                _ => None,
+                            };
+
+                            let is_bit_index = match const_index {
+                                Some(idx) => idx >= elements.len() as u64,
+                                None => false,
+                            };
+
                             if elements.is_empty() {
                                 result_stack.push(None);
+                            } else if is_bit_index {
+                                // BUG #256 FIX: This is bit-indexing on a bit-concatenation
+                                // (e.g., {sum_raw, {4{1'b0}}}[31] from inlined clz32).
+                                // Create a temp signal to hold the Concat, then BitSelect from it.
+                                let concat_expr = base; // already the Concat expression
+                                let total_width = self.try_mir_expr_width(&concat_expr);
+                                let width = total_width.unwrap_or(32) as usize;
+                                let temp_id = self.next_signal_id();
+                                let temp_name = format!("__concat_bitidx_{}", temp_id.0);
+                                self.pending_temp_signals.push((
+                                    temp_id,
+                                    temp_name,
+                                    DataType::Bit(width),
+                                    concat_expr,
+                                ));
+                                result_stack.push(Some(Expression::with_unknown_type(
+                                    ExpressionKind::Ref(LValue::BitSelect {
+                                        base: Box::new(LValue::Signal(temp_id)),
+                                        index: Box::new(index),
+                                    }),
+                                )));
                             } else {
+                                // BUG #34 FIX: Handle constant array indexing
+                                // Arrays are represented as Concat in MIR
+                                // Build MUX tree: (index == 0) ? elem_0 : ((index == 1) ? elem_1 : ...)
                                 let mut mux_expr: Option<Expression> = None;
                                 for (i, elem_expr) in elements.iter().enumerate().rev() {
                                     if let Some(else_expr) = mux_expr {
@@ -12089,6 +12211,37 @@ impl<'hir> HirToMir<'hir> {
             | Type::Int(Width::Fixed(w))
             | Type::Nat(Width::Fixed(w)) => Some(*w),
             Type::Bool => Some(1),
+            _ => None,
+        }
+    }
+
+    /// BUG #256 FIX: Try to infer the bit width of an MIR Expression
+    /// Used to determine Concat element widths for bit-indexing resolution
+    fn try_mir_expr_width(&self, expr: &Expression) -> Option<u32> {
+        // First try the frontend type on the expression
+        if let Some(w) = self.get_type_width(&expr.ty) {
+            return Some(w);
+        }
+        // Then try expression-kind-specific inference
+        match &expr.kind {
+            ExpressionKind::Literal(Value::BitVector { width, .. }) => Some(*width as u32),
+            ExpressionKind::Literal(Value::Integer(_)) => None, // ambiguous width
+            ExpressionKind::Concat(elements) => {
+                let mut total = 0u32;
+                for elem in elements {
+                    total += self.try_mir_expr_width(elem)?;
+                }
+                Some(total)
+            }
+            ExpressionKind::Replicate { count, value } => {
+                let count_val = match &count.kind {
+                    ExpressionKind::Literal(Value::Integer(n)) => Some(*n as u32),
+                    ExpressionKind::Literal(Value::BitVector { value: n, .. }) => Some(*n as u32),
+                    _ => None,
+                }?;
+                let value_width = self.try_mir_expr_width(value)?;
+                Some(count_val * value_width)
+            }
             _ => None,
         }
     }

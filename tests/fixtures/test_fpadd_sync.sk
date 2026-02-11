@@ -1,0 +1,16 @@
+// Synchronous FP32 add test (no NCL)
+// Used to isolate whether gate-level FP32 bugs are in synthesis vs NCL
+use skalp::numeric::fp::*;
+
+entity FP32AddTestSync {
+    in a: bit[32]
+    in b: bit[32]
+    out result: bit[32]
+}
+
+impl FP32AddTestSync {
+    signal a_fp: fp32 = a as fp32
+    signal b_fp: fp32 = b as fp32
+    signal sum: fp32 = a_fp + b_fp
+    result = sum as bit[32]
+}

@@ -2452,7 +2452,84 @@ impl MirToLirTransform {
                 ));
                 self.create_constant(&Value::Integer(0), expected_width)
             }
+            ExpressionKind::Replicate { count, value } => {
+                // Replicate: {N{value}} = value repeated N times
+                let count_val = match &count.kind {
+                    ExpressionKind::Literal(Value::Integer(n)) => *n as u32,
+                    ExpressionKind::Literal(Value::BitVector { value: n, .. }) => *n as u32,
+                    _ => {
+                        eprintln!("[LIR] Replicate: non-constant count {:?}, treating as 1", count.kind);
+                        1
+                    }
+                };
+                let value_width = self.infer_expression_width(value);
+                let total_width = value_width * count_val;
+
+                if count_val == 0 {
+                    return self.alloc_temp_signal(expected_width);
+                }
+
+                // Evaluate the value expression once
+                let value_signal = self.transform_expression(value, value_width);
+
+                if count_val == 1 {
+                    // Single copy — just return the value
+                    return value_signal;
+                }
+
+                // Build a Concat of count copies of value
+                let signals: Vec<LirSignalId> = (0..count_val).map(|_| value_signal).collect();
+                let widths: Vec<u32> = (0..count_val).map(|_| value_width).collect();
+
+                let out = self.alloc_temp_signal(total_width);
+                let path = self.unique_node_path("replicate");
+                self.lir.add_node(
+                    LirOp::Concat { widths },
+                    signals,
+                    out,
+                    path,
+                );
+
+                // If expected width differs from total, truncate or extend
+                if expected_width < total_width {
+                    let trunc_out = self.alloc_temp_signal(expected_width);
+                    let trunc_path = self.unique_node_path("rep_trunc");
+                    self.lir.add_node(
+                        LirOp::RangeSelect {
+                            width: total_width,
+                            high: expected_width - 1,
+                            low: 0,
+                        },
+                        vec![out],
+                        trunc_out,
+                        trunc_path,
+                    );
+                    trunc_out
+                } else if expected_width > total_width {
+                    let ext_out = self.alloc_temp_signal(expected_width);
+                    let ext_path = self.unique_node_path("rep_zext");
+                    self.lir.add_node(
+                        LirOp::ZeroExtend {
+                            from: total_width,
+                            to: expected_width,
+                        },
+                        vec![out],
+                        ext_out,
+                        ext_path,
+                    );
+                    ext_out
+                } else {
+                    out
+                }
+            }
+            ExpressionKind::FieldAccess { base, field } => {
+                eprintln!("[LIR] WARNING: Unsupported FieldAccess expression: field='{}', treating as zero", field);
+                self.warnings
+                    .push(format!("Unsupported FieldAccess expression: field='{}'", field));
+                self.create_constant(&Value::Integer(0), expected_width)
+            }
             _ => {
+                eprintln!("[LIR] WARNING: Unsupported expression kind: {:?}", expr.kind);
                 self.warnings
                     .push(format!("Unsupported expression kind: {:?}", expr.kind));
                 self.alloc_temp_signal(expected_width)
@@ -3278,8 +3355,24 @@ impl MirToLirTransform {
                         path,
                     );
                     out
+                } else if let ExpressionKind::Literal(Value::BitVector { value: i, .. }) = &index.kind {
+                    // BitVector literal index - also static
+                    let out = self.alloc_temp_signal(1);
+                    let path = self.unique_node_path("bit_sel");
+                    self.lir.add_node(
+                        LirOp::RangeSelect {
+                            width: base_width,
+                            high: *i as u32,
+                            low: *i as u32,
+                        },
+                        vec![base_signal],
+                        out,
+                        path,
+                    );
+                    out
                 } else {
                     // Dynamic bit select
+                    println!("[LIR_DIAG] Dynamic BitSelect on {}-bit signal, index kind: {:?}", base_width, index.kind);
                     let idx_signal = self.transform_expression(index, 32);
                     let out = self.alloc_temp_signal(1);
                     let path = self.unique_node_path("dyn_bit_sel");
@@ -3449,6 +3542,14 @@ impl MirToLirTransform {
             }
             // BUG #164 FIX: Cast expressions should return target type width
             ExpressionKind::Cast { target_type, .. } => self.get_datatype_width(target_type),
+            ExpressionKind::Replicate { count, value } => {
+                let count_val = match &count.kind {
+                    ExpressionKind::Literal(Value::Integer(n)) => *n as u32,
+                    ExpressionKind::Literal(Value::BitVector { value: n, .. }) => *n as u32,
+                    _ => 1,
+                };
+                count_val * self.infer_expression_width(value)
+            }
             _ => 1,
         }
     }

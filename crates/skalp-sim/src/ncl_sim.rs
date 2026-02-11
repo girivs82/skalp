@@ -492,6 +492,73 @@ impl NclSimulator {
         self.output_nets.keys().collect()
     }
 
+    /// Dump all net names and values matching a pattern (substring match)
+    /// Useful for debugging internal signal propagation
+    pub fn dump_nets_matching(&self, pattern: &str) {
+        let mut matches = Vec::new();
+        for net in &self.netlist.nets {
+            if net.name.contains(pattern) {
+                let resolved = self.netlist.resolve_alias(net.id);
+                let value = self.net_values.get(resolved.0 as usize).copied().unwrap_or(false);
+                let alias_info = if resolved != net.id {
+                    format!(" (alias->{})", resolved.0)
+                } else {
+                    String::new()
+                };
+                matches.push((net.name.clone(), net.id.0, value, alias_info));
+            }
+        }
+        matches.sort_by(|a, b| a.0.cmp(&b.0));
+        println!("  [NETS matching '{}'] {} matches:", pattern, matches.len());
+        for (name, id, value, alias) in &matches {
+            println!("    net[{}]{} '{}' = {}", id, alias, name, if *value { "1" } else { "0" });
+        }
+    }
+
+    /// Get the boolean value of a net by exact name (resolves aliases)
+    /// Returns None if the net name is not found
+    pub fn get_net_value_by_name(&self, name: &str) -> Option<bool> {
+        for net in &self.netlist.nets {
+            if net.name == name {
+                let resolved = self.netlist.resolve_alias(net.id);
+                return self.net_values.get(resolved.0 as usize).copied();
+            }
+        }
+        None
+    }
+
+    /// Collect multi-bit single-rail value from nets matching a pattern
+    /// Looks for nets named "{prefix}[0]", "{prefix}[1]", etc.
+    /// Returns the value as u64 and the width found
+    pub fn collect_single_rail_value(&self, prefix: &str, max_width: usize) -> (u64, usize) {
+        let mut value = 0u64;
+        let mut width = 0usize;
+        for bit in 0..max_width {
+            let name = format!("{}[{}]", prefix, bit);
+            if let Some(v) = self.get_net_value_by_name(&name) {
+                if v && bit < 64 {
+                    value |= 1u64 << bit;
+                }
+                width = bit + 1;
+            } else {
+                break;
+            }
+        }
+        (value, width)
+    }
+
+    /// Count undriven-but-used nets (nets that have fanout but no driver and aren't inputs)
+    pub fn count_undriven_nets(&self) -> (usize, Vec<String>) {
+        let mut undriven = Vec::new();
+        for net in &self.netlist.nets {
+            if !net.is_input && net.driver.is_none() && !net.fanout.is_empty() && net.alias_of.is_none() {
+                undriven.push(net.name.clone());
+            }
+        }
+        let count = undriven.len();
+        (count, undriven)
+    }
+
     /// Get the current phase based on output state
     pub fn get_phase(&self) -> NclPhase {
         if self.is_complete() {
