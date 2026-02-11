@@ -3936,11 +3936,13 @@ impl HirBuilderContext {
         }
     }
 
-    /// Elaborate a generate for loop by expanding it at compile time
+    /// Elaborate a generate for loop by expanding it at compile time.
+    /// For each iteration, clones the body and substitutes the iterator variable
+    /// (both Variable(id) and GenericParam(name) forms) with the iteration value.
     fn elaborate_generate_for(
         &mut self,
-        _iterator: &str,
-        _iterator_var_id: VariableId,
+        iterator: &str,
+        iterator_var_id: VariableId,
         range: &HirRange,
         body_stmts: &[HirStatement],
     ) -> Option<HirStatement> {
@@ -3955,11 +3957,10 @@ impl HirBuilderContext {
             end_val
         };
 
-        for _i in start_val..end_exclusive {
-            // For each iteration, clone the body statements
-            // TODO: Implement proper iterator substitution
+        for i in start_val..end_exclusive {
             for stmt in body_stmts {
-                expanded_stmts.push(stmt.clone());
+                let substituted = Self::substitute_in_stmt(stmt, iterator_var_id, iterator, i);
+                expanded_stmts.push(substituted);
             }
         }
 
@@ -3969,6 +3970,281 @@ impl HirBuilderContext {
             Some(expanded_stmts.into_iter().next().unwrap())
         } else {
             Some(HirStatement::Block(expanded_stmts))
+        }
+    }
+
+    /// Substitute all occurrences of an iterator variable in an HIR expression.
+    /// Matches both Variable(id) and GenericParam(name) forms, and constant-folds
+    /// binary operations on two integer literals.
+    fn substitute_in_expr(
+        expr: &HirExpression,
+        var_id: VariableId,
+        var_name: &str,
+        value: i64,
+    ) -> HirExpression {
+        match expr {
+            HirExpression::Variable(id) if *id == var_id => {
+                HirExpression::Literal(HirLiteral::Integer(value as u64))
+            }
+            HirExpression::GenericParam(name) if name == var_name => {
+                HirExpression::Literal(HirLiteral::Integer(value as u64))
+            }
+            HirExpression::Binary(bin) => {
+                let left = Self::substitute_in_expr(&bin.left, var_id, var_name, value);
+                let right = Self::substitute_in_expr(&bin.right, var_id, var_name, value);
+                // Constant fold Binary(Literal, op, Literal)
+                if let (
+                    HirExpression::Literal(HirLiteral::Integer(l)),
+                    HirExpression::Literal(HirLiteral::Integer(r)),
+                ) = (&left, &right) {
+                    let folded = match bin.op {
+                        HirBinaryOp::Add => Some(l.wrapping_add(*r)),
+                        HirBinaryOp::Sub => Some(l.wrapping_sub(*r)),
+                        HirBinaryOp::Mul => Some(l.wrapping_mul(*r)),
+                        HirBinaryOp::Div if *r != 0 => Some(l / r),
+                        HirBinaryOp::Mod if *r != 0 => Some(l % r),
+                        HirBinaryOp::And => Some(l & r),
+                        HirBinaryOp::Or => Some(l | r),
+                        HirBinaryOp::Xor => Some(l ^ r),
+                        HirBinaryOp::LeftShift => Some(l << r),
+                        HirBinaryOp::RightShift => Some(l >> r),
+                        _ => None,
+                    };
+                    if let Some(val) = folded {
+                        return HirExpression::Literal(HirLiteral::Integer(val));
+                    }
+                }
+                HirExpression::Binary(HirBinaryExpr {
+                    left: Box::new(left),
+                    op: bin.op.clone(),
+                    right: Box::new(right),
+                    is_trait_op: bin.is_trait_op,
+                })
+            }
+            HirExpression::Unary(un) => {
+                HirExpression::Unary(HirUnaryExpr {
+                    op: un.op.clone(),
+                    operand: Box::new(Self::substitute_in_expr(&un.operand, var_id, var_name, value)),
+                })
+            }
+            HirExpression::Index(base, idx) => {
+                HirExpression::Index(
+                    Box::new(Self::substitute_in_expr(base, var_id, var_name, value)),
+                    Box::new(Self::substitute_in_expr(idx, var_id, var_name, value)),
+                )
+            }
+            HirExpression::Range(base, lo, hi) => {
+                HirExpression::Range(
+                    Box::new(Self::substitute_in_expr(base, var_id, var_name, value)),
+                    Box::new(Self::substitute_in_expr(lo, var_id, var_name, value)),
+                    Box::new(Self::substitute_in_expr(hi, var_id, var_name, value)),
+                )
+            }
+            HirExpression::Cast(cast) => {
+                HirExpression::Cast(HirCastExpr {
+                    expr: Box::new(Self::substitute_in_expr(&cast.expr, var_id, var_name, value)),
+                    target_type: cast.target_type.clone(),
+                })
+            }
+            HirExpression::Call(call) => {
+                HirExpression::Call(HirCallExpr {
+                    function: call.function.clone(),
+                    type_args: call.type_args.clone(),
+                    named_type_args: call.named_type_args.clone(),
+                    args: call.args.iter().map(|a| Self::substitute_in_expr(a, var_id, var_name, value)).collect(),
+                    impl_style: call.impl_style.clone(),
+                })
+            }
+            HirExpression::If(if_expr) => {
+                HirExpression::If(HirIfExpr {
+                    condition: Box::new(Self::substitute_in_expr(&if_expr.condition, var_id, var_name, value)),
+                    then_expr: Box::new(Self::substitute_in_expr(&if_expr.then_expr, var_id, var_name, value)),
+                    else_expr: Box::new(Self::substitute_in_expr(&if_expr.else_expr, var_id, var_name, value)),
+                })
+            }
+            HirExpression::Ternary { condition, true_expr, false_expr } => {
+                HirExpression::Ternary {
+                    condition: Box::new(Self::substitute_in_expr(condition, var_id, var_name, value)),
+                    true_expr: Box::new(Self::substitute_in_expr(true_expr, var_id, var_name, value)),
+                    false_expr: Box::new(Self::substitute_in_expr(false_expr, var_id, var_name, value)),
+                }
+            }
+            HirExpression::Concat(exprs) => {
+                HirExpression::Concat(
+                    exprs.iter().map(|e| Self::substitute_in_expr(e, var_id, var_name, value)).collect(),
+                )
+            }
+            HirExpression::TupleLiteral(exprs) => {
+                HirExpression::TupleLiteral(
+                    exprs.iter().map(|e| Self::substitute_in_expr(e, var_id, var_name, value)).collect(),
+                )
+            }
+            HirExpression::ArrayLiteral(exprs) => {
+                HirExpression::ArrayLiteral(
+                    exprs.iter().map(|e| Self::substitute_in_expr(e, var_id, var_name, value)).collect(),
+                )
+            }
+            HirExpression::ArrayRepeat { value: val, count } => {
+                HirExpression::ArrayRepeat {
+                    value: Box::new(Self::substitute_in_expr(val, var_id, var_name, value)),
+                    count: Box::new(Self::substitute_in_expr(count, var_id, var_name, value)),
+                }
+            }
+            HirExpression::FieldAccess { base, field } => {
+                HirExpression::FieldAccess {
+                    base: Box::new(Self::substitute_in_expr(base, var_id, var_name, value)),
+                    field: field.clone(),
+                }
+            }
+            HirExpression::StructLiteral(lit) => {
+                HirExpression::StructLiteral(HirStructLiteral {
+                    type_name: lit.type_name.clone(),
+                    generic_args: lit.generic_args.iter().map(|e| Self::substitute_in_expr(e, var_id, var_name, value)).collect(),
+                    fields: lit.fields.iter().map(|f| HirStructFieldInit {
+                        name: f.name.clone(),
+                        value: Self::substitute_in_expr(&f.value, var_id, var_name, value),
+                    }).collect(),
+                })
+            }
+            HirExpression::Match(match_expr) => {
+                HirExpression::Match(HirMatchExpr {
+                    expr: Box::new(Self::substitute_in_expr(&match_expr.expr, var_id, var_name, value)),
+                    arms: match_expr.arms.iter().map(|arm| HirMatchArmExpr {
+                        pattern: arm.pattern.clone(),
+                        guard: arm.guard.as_ref().map(|g| Self::substitute_in_expr(g, var_id, var_name, value)),
+                        expr: Self::substitute_in_expr(&arm.expr, var_id, var_name, value),
+                    }).collect(),
+                    mux_style: match_expr.mux_style.clone(),
+                })
+            }
+            HirExpression::Block { statements, result_expr } => {
+                HirExpression::Block {
+                    statements: statements.iter().map(|s| Self::substitute_in_stmt(s, var_id, var_name, value)).collect(),
+                    result_expr: Box::new(Self::substitute_in_expr(result_expr, var_id, var_name, value)),
+                }
+            }
+            // Leaf nodes: Literal, Signal, Port, Constant, other GenericParam, EnumVariant, AssociatedConstant
+            _ => expr.clone(),
+        }
+    }
+
+    /// Substitute all occurrences of an iterator variable in an HIR lvalue.
+    fn substitute_in_lvalue(
+        lvalue: &HirLValue,
+        var_id: VariableId,
+        var_name: &str,
+        value: i64,
+    ) -> HirLValue {
+        match lvalue {
+            HirLValue::Index(base, idx) => {
+                HirLValue::Index(
+                    Box::new(Self::substitute_in_lvalue(base, var_id, var_name, value)),
+                    Self::substitute_in_expr(idx, var_id, var_name, value),
+                )
+            }
+            HirLValue::Range(base, lo, hi) => {
+                HirLValue::Range(
+                    Box::new(Self::substitute_in_lvalue(base, var_id, var_name, value)),
+                    Self::substitute_in_expr(lo, var_id, var_name, value),
+                    Self::substitute_in_expr(hi, var_id, var_name, value),
+                )
+            }
+            HirLValue::FieldAccess { base, field } => {
+                HirLValue::FieldAccess {
+                    base: Box::new(Self::substitute_in_lvalue(base, var_id, var_name, value)),
+                    field: field.clone(),
+                }
+            }
+            _ => lvalue.clone(),
+        }
+    }
+
+    /// Substitute all occurrences of an iterator variable in an HIR statement.
+    fn substitute_in_stmt(
+        stmt: &HirStatement,
+        var_id: VariableId,
+        var_name: &str,
+        value: i64,
+    ) -> HirStatement {
+        match stmt {
+            HirStatement::Assignment(assign) => {
+                HirStatement::Assignment(HirAssignment {
+                    id: assign.id,
+                    lhs: Self::substitute_in_lvalue(&assign.lhs, var_id, var_name, value),
+                    assignment_type: assign.assignment_type.clone(),
+                    rhs: Self::substitute_in_expr(&assign.rhs, var_id, var_name, value),
+                })
+            }
+            HirStatement::If(if_stmt) => {
+                HirStatement::If(HirIfStatement {
+                    condition: Self::substitute_in_expr(&if_stmt.condition, var_id, var_name, value),
+                    then_statements: if_stmt.then_statements.iter().map(|s| Self::substitute_in_stmt(s, var_id, var_name, value)).collect(),
+                    else_statements: if_stmt.else_statements.as_ref().map(|stmts| stmts.iter().map(|s| Self::substitute_in_stmt(s, var_id, var_name, value)).collect()),
+                    mux_style: if_stmt.mux_style.clone(),
+                })
+            }
+            HirStatement::Match(match_stmt) => {
+                HirStatement::Match(HirMatchStatement {
+                    expr: Self::substitute_in_expr(&match_stmt.expr, var_id, var_name, value),
+                    arms: match_stmt.arms.iter().map(|arm| HirMatchArm {
+                        pattern: arm.pattern.clone(),
+                        guard: arm.guard.as_ref().map(|g| Self::substitute_in_expr(g, var_id, var_name, value)),
+                        statements: arm.statements.iter().map(|s| Self::substitute_in_stmt(s, var_id, var_name, value)).collect(),
+                    }).collect(),
+                    mux_style: match_stmt.mux_style.clone(),
+                })
+            }
+            HirStatement::Let(let_stmt) => {
+                HirStatement::Let(HirLetStatement {
+                    id: let_stmt.id,
+                    name: let_stmt.name.clone(),
+                    mutable: let_stmt.mutable,
+                    var_type: let_stmt.var_type.clone(),
+                    value: Self::substitute_in_expr(&let_stmt.value, var_id, var_name, value),
+                })
+            }
+            HirStatement::Return(Some(expr)) => {
+                HirStatement::Return(Some(Self::substitute_in_expr(expr, var_id, var_name, value)))
+            }
+            HirStatement::Expression(expr) => {
+                HirStatement::Expression(Self::substitute_in_expr(expr, var_id, var_name, value))
+            }
+            HirStatement::For(for_stmt) => {
+                HirStatement::For(HirForStatement {
+                    id: for_stmt.id,
+                    iterator: for_stmt.iterator.clone(),
+                    iterator_var_id: for_stmt.iterator_var_id,
+                    range: HirRange {
+                        start: Self::substitute_in_expr(&for_stmt.range.start, var_id, var_name, value),
+                        end: Self::substitute_in_expr(&for_stmt.range.end, var_id, var_name, value),
+                        inclusive: for_stmt.range.inclusive,
+                        step: for_stmt.range.step.as_ref().map(|s| Box::new(Self::substitute_in_expr(s, var_id, var_name, value))),
+                    },
+                    body: for_stmt.body.iter().map(|s| Self::substitute_in_stmt(s, var_id, var_name, value)).collect(),
+                    unroll: for_stmt.unroll.clone(),
+                })
+            }
+            HirStatement::Block(stmts) => {
+                HirStatement::Block(
+                    stmts.iter().map(|s| Self::substitute_in_stmt(s, var_id, var_name, value)).collect(),
+                )
+            }
+            HirStatement::Assert(assert_stmt) => {
+                HirStatement::Assert(HirAssertStatement {
+                    id: assert_stmt.id,
+                    condition: Self::substitute_in_expr(&assert_stmt.condition, var_id, var_name, value),
+                    message: assert_stmt.message.clone(),
+                    severity: assert_stmt.severity.clone(),
+                })
+            }
+            HirStatement::Assume(assume_stmt) => {
+                HirStatement::Assume(HirAssumeStatement {
+                    id: assume_stmt.id,
+                    condition: Self::substitute_in_expr(&assume_stmt.condition, var_id, var_name, value),
+                    message: assume_stmt.message.clone(),
+                })
+            }
+            _ => stmt.clone(),
         }
     }
 
