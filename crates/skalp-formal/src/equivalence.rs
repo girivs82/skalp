@@ -2563,14 +2563,36 @@ fn build_sequential_miter(aig1: &Aig, aig2: &Aig) -> FormalResult<Aig> {
 
     let mut diff_gates: Vec<(String, AigLit)> = Vec::new();
 
-    // 1. Check output equivalence
-    for (i, (out1, out2)) in aig1.outputs.iter().zip(aig2.outputs.iter()).enumerate() {
-        let lit1 = remap_lit(*out1, &map1);
-        let lit2 = remap_lit(*out2, &map2);
-        let diff = miter.add_xor(lit1, lit2);
-        diff_gates.push((format!("output[{}]", i), diff));
-        miter_output = miter.add_or(miter_output, diff);
+    // 1. Check output equivalence (by normalized name matching)
+    let mut out1_by_name: HashMap<String, AigLit> = HashMap::new();
+    for (i, out1) in aig1.outputs.iter().enumerate() {
+        let name = aig1.output_names.get(i).cloned().unwrap_or_else(|| format!("output_{}", i));
+        let normalized = normalize_signal_name_for_matching(&name);
+        let lit = remap_lit(*out1, &map1);
+        out1_by_name.insert(normalized, lit);
     }
+    let mut out2_by_name: HashMap<String, AigLit> = HashMap::new();
+    for (i, out2) in aig2.outputs.iter().enumerate() {
+        let name = aig2.output_names.get(i).cloned().unwrap_or_else(|| format!("output_{}", i));
+        let normalized = normalize_signal_name_for_matching(&name);
+        let lit = remap_lit(*out2, &map2);
+        out2_by_name.insert(normalized, lit);
+    }
+
+    // Match outputs by name and compare
+    let mut matched_outputs = 0;
+    for (name, lit1) in &out1_by_name {
+        if let Some(lit2) = out2_by_name.get(name) {
+            let diff = miter.add_xor(*lit1, *lit2);
+            diff_gates.push((format!("output[{}]", name), diff));
+            miter_output = miter.add_or(miter_output, diff);
+            matched_outputs += 1;
+        }
+    }
+    let unmatched_out1 = out1_by_name.keys().filter(|n| !out2_by_name.contains_key(*n)).count();
+    let unmatched_out2 = out2_by_name.keys().filter(|n| !out1_by_name.contains_key(*n)).count();
+    eprintln!("   Outputs: {} matched, {} unmatched (MIR: {}, Gate: {})",
+        matched_outputs, unmatched_out1 + unmatched_out2, unmatched_out1, unmatched_out2);
 
     // 2. Check next-state (latch D input) equivalence
     // Match latches by normalized name
@@ -2592,6 +2614,25 @@ fn build_sequential_miter(aig1: &Aig, aig2: &Aig) -> FormalResult<Aig> {
         }
     }
 
+    // Report latch matching
+    let mut matched_latches = 0;
+    let mut unmatched_mir = 0;
+    let mut unmatched_gate = 0;
+    for name in latch1_by_name.keys() {
+        if latch2_by_name.contains_key(name) {
+            matched_latches += 1;
+        } else {
+            unmatched_mir += 1;
+        }
+    }
+    for name in latch2_by_name.keys() {
+        if !latch1_by_name.contains_key(name) {
+            unmatched_gate += 1;
+        }
+    }
+    eprintln!("   Latches: {} matched, {} unmatched (MIR: {}, Gate: {})",
+        matched_latches, unmatched_mir + unmatched_gate, unmatched_mir, unmatched_gate);
+
     // Compare next-state for matching latches
     for (name, next1) in &latch1_by_name {
         if let Some(next2) = latch2_by_name.get(name) {
@@ -2612,19 +2653,16 @@ fn build_sequential_miter(aig1: &Aig, aig2: &Aig) -> FormalResult<Aig> {
 
 /// Normalize signal name for matching between designs
 fn normalize_signal_name_for_matching(name: &str) -> String {
-    // Remove module prefix (e.g., "FsmA.state" -> "state")
-    let without_prefix = if let Some(pos) = name.rfind('.') {
-        &name[pos + 1..]
-    } else {
-        name
-    };
-
-    // Remove __reg_cur_ prefix
-    let without_reg = without_prefix
+    // Remove __reg_cur_ or __dff_cur_ prefix first (internal AIG naming for state inputs)
+    let without_reg = name
         .strip_prefix("__reg_cur_")
-        .unwrap_or(without_prefix);
+        .or_else(|| name.strip_prefix("__dff_cur_"))
+        .unwrap_or(name);
 
-    without_reg.to_string()
+    // Strip "top." prefix (gate netlist uses "top." prefix for all signals)
+    let without_top = without_reg.strip_prefix("top.").unwrap_or(without_reg);
+
+    without_top.to_string()
 }
 
 /// Extract counterexample from SAT model
@@ -6131,10 +6169,16 @@ impl<'a> MirToAig<'a> {
             ExpressionKind::Cast { expr, target_type } => {
                 let expr_lits = self.convert_expression(expr);
                 let target_width = self.get_type_width(target_type);
-                // Sign or zero extend
+                // Sign-extend for signed source types, zero-extend for unsigned
+                let source_signed = self.is_signed_type(&expr.ty);
+                let extend_bit = if source_signed && !expr_lits.is_empty() {
+                    *expr_lits.last().unwrap() // MSB = sign bit
+                } else {
+                    self.aig.false_lit() // zero
+                };
                 let mut result = expr_lits;
                 while result.len() < target_width {
-                    result.push(self.aig.false_lit());
+                    result.push(extend_bit);
                 }
                 result.truncate(target_width);
                 result
