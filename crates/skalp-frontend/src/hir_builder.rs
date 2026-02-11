@@ -1207,6 +1207,7 @@ impl HirBuilderContext {
         let mut event_blocks = Vec::new();
         let mut assignments = Vec::new();
         let mut statements: Vec<HirStatement> = Vec::new();
+        let mut instances = Vec::new();
 
         // Build implementation items
         let children_count = node.children().count();
@@ -1326,13 +1327,24 @@ impl HirBuilderContext {
                         statements.push(HirStatement::Cover(stmt));
                     }
                 }
+                SyntaxKind::GenerateForStmt => {
+                    // Elaborate generate-for at the impl level: expand the loop
+                    // and directly add signals, instances, and assignments.
+                    self.elaborate_generate_for_in_impl(
+                        &child,
+                        &mut signals,
+                        &mut instances,
+                        &mut assignments,
+                        &mut variables,
+                        &mut statements,
+                    );
+                }
                 _ => {}
             }
         }
 
         // Build instances BEFORE exiting scope so signals are still accessible
         // Process Attributes again in this loop for #[implements(...)] on instances
-        let mut instances = Vec::new();
         for child in node.children() {
             match child.kind() {
                 SyntaxKind::Attribute => {
@@ -3970,6 +3982,190 @@ impl HirBuilderContext {
             Some(expanded_stmts.into_iter().next().unwrap())
         } else {
             Some(HirStatement::Block(expanded_stmts))
+        }
+    }
+
+    /// Elaborate a generate-for loop at the impl body level.
+    /// Instead of producing HirStatements, this directly populates the impl's
+    /// signals, instances, assignments, variables, and statements collections.
+    /// This is necessary because entity instantiations (InstanceDecl) are not
+    /// representable as HirStatements and must be added to the instances list.
+    fn elaborate_generate_for_in_impl(
+        &mut self,
+        node: &SyntaxNode,
+        signals: &mut Vec<HirSignal>,
+        instances: &mut Vec<HirInstance>,
+        assignments: &mut Vec<HirAssignment>,
+        variables: &mut Vec<HirVariable>,
+        statements: &mut Vec<HirStatement>,
+    ) {
+        // Parse iterator variable name
+        let iterator = match node
+            .children_with_tokens()
+            .filter_map(|e| e.into_token())
+            .find(|t| t.kind() == SyntaxKind::Ident)
+        {
+            Some(t) => t.text().to_string(),
+            None => return,
+        };
+
+        // Create a variable ID for the iterator
+        let iterator_var_id = self.next_variable_id();
+        self.symbols
+            .variables
+            .insert(iterator.clone(), iterator_var_id);
+
+        // Parse range
+        let range_node = match node
+            .children()
+            .find(|c| c.kind() == SyntaxKind::RangeExpr)
+        {
+            Some(n) => n,
+            None => return,
+        };
+        let range = match self.build_range_expression_with_step(&range_node, node) {
+            Some(r) => r,
+            None => return,
+        };
+
+        // Evaluate range bounds
+        let start_val = match self.try_eval_const_expr(&range.start) {
+            Some(v) => v,
+            None => return,
+        };
+        let end_val = match self.try_eval_const_expr(&range.end) {
+            Some(v) => v,
+            None => return,
+        };
+        let end_exclusive = if range.inclusive {
+            end_val + 1
+        } else {
+            end_val
+        };
+
+        // Collect body child nodes (between { and })
+        let mut body_children = Vec::new();
+        let mut in_body = false;
+        for child in node.children_with_tokens() {
+            match &child {
+                rowan::NodeOrToken::Token(t) if t.kind() == SyntaxKind::LBrace => {
+                    in_body = true;
+                }
+                rowan::NodeOrToken::Token(t) if t.kind() == SyntaxKind::RBrace => {
+                    in_body = false;
+                }
+                rowan::NodeOrToken::Node(n) if in_body => {
+                    body_children.push(n.clone());
+                }
+                _ => {}
+            }
+        }
+
+        // For each iteration, process each body child
+        for i in start_val..end_exclusive {
+            for child_node in &body_children {
+                match child_node.kind() {
+                    SyntaxKind::InstanceDecl => {
+                        if let Some(mut instance) = self.build_instance(child_node) {
+                            // Substitute iterator in all connection expressions
+                            for conn in &mut instance.connections {
+                                conn.expr = Self::substitute_in_expr(
+                                    &conn.expr,
+                                    iterator_var_id,
+                                    &iterator,
+                                    i,
+                                );
+                            }
+                            // Substitute in generic args too
+                            instance.generic_args = instance
+                                .generic_args
+                                .iter()
+                                .map(|e| {
+                                    Self::substitute_in_expr(e, iterator_var_id, &iterator, i)
+                                })
+                                .collect();
+                            instances.push(instance);
+                        }
+                    }
+                    SyntaxKind::AssignmentStmt => {
+                        if let Some(mut assignment) = self.build_assignment(
+                            child_node,
+                            HirAssignmentType::Combinational,
+                        ) {
+                            assignment.lhs = Self::substitute_in_lvalue(
+                                &assignment.lhs,
+                                iterator_var_id,
+                                &iterator,
+                                i,
+                            );
+                            assignment.rhs = Self::substitute_in_expr(
+                                &assignment.rhs,
+                                iterator_var_id,
+                                &iterator,
+                                i,
+                            );
+                            assignments.push(assignment);
+                        }
+                    }
+                    SyntaxKind::SignalDecl => {
+                        if let Some(mut signal) = self.build_signal(child_node) {
+                            if let Some(init) = &signal.initial_value {
+                                signal.initial_value = Some(Self::substitute_in_expr(
+                                    init,
+                                    iterator_var_id,
+                                    &iterator,
+                                    i,
+                                ));
+                            }
+                            signals.push(signal);
+                        }
+                    }
+                    SyntaxKind::LetStmt => {
+                        let let_stmts = self.build_let_statements_from_node(child_node);
+                        for stmt in let_stmts {
+                            if let HirStatement::Let(let_stmt) = stmt {
+                                let variable = HirVariable {
+                                    id: let_stmt.id,
+                                    name: let_stmt.name.clone(),
+                                    var_type: let_stmt.var_type.clone(),
+                                    initial_value: Some(Self::substitute_in_expr(
+                                        &let_stmt.value,
+                                        iterator_var_id,
+                                        &iterator,
+                                        i,
+                                    )),
+                                    span: None,
+                                };
+                                variables.push(variable);
+                                let assignment = HirAssignment {
+                                    id: self.next_assignment_id(),
+                                    lhs: HirLValue::Variable(let_stmt.id),
+                                    assignment_type: HirAssignmentType::Combinational,
+                                    rhs: Self::substitute_in_expr(
+                                        &let_stmt.value,
+                                        iterator_var_id,
+                                        &iterator,
+                                        i,
+                                    ),
+                                };
+                                assignments.push(assignment);
+                            }
+                        }
+                    }
+                    _ => {
+                        // For other statement types, use the standard path
+                        if let Some(stmt) = self.build_statement(child_node) {
+                            let substituted = Self::substitute_in_stmt(
+                                &stmt,
+                                iterator_var_id,
+                                &iterator,
+                                i,
+                            );
+                            statements.push(substituted);
+                        }
+                    }
+                }
+            }
         }
     }
 
