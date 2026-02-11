@@ -925,6 +925,34 @@ impl<'hir> MonomorphizationEngine<'hir> {
                     .collect();
                 HirStatement::Block(substituted_stmts)
             }
+            HirStatement::For(for_stmt) => {
+                let mut new_for = for_stmt.clone();
+                new_for.range.start = self.substitute_expr(&for_stmt.range.start, const_args);
+                new_for.range.start = self.remap_expr_ports(&new_for.range.start, port_id_map);
+                new_for.range.end = self.substitute_expr(&for_stmt.range.end, const_args);
+                new_for.range.end = self.remap_expr_ports(&new_for.range.end, port_id_map);
+                if let Some(step) = &for_stmt.range.step {
+                    let mut new_step = self.substitute_expr(step, const_args);
+                    new_step = self.remap_expr_ports(&new_step, port_id_map);
+                    new_for.range.step = Some(Box::new(new_step));
+                }
+                new_for.body = for_stmt
+                    .body
+                    .iter()
+                    .map(|s| self.substitute_statement_with_ports(s, const_args, port_id_map))
+                    .collect();
+                HirStatement::For(new_for)
+            }
+            HirStatement::Return(Some(expr)) => {
+                let mut new_expr = self.substitute_expr(expr, const_args);
+                new_expr = self.remap_expr_ports(&new_expr, port_id_map);
+                HirStatement::Return(Some(new_expr))
+            }
+            HirStatement::Expression(expr) => {
+                let mut new_expr = self.substitute_expr(expr, const_args);
+                new_expr = self.remap_expr_ports(&new_expr, port_id_map);
+                HirStatement::Expression(new_expr)
+            }
             // Other statement types pass through (for now)
             _ => stmt.clone(),
         }

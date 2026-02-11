@@ -1,6 +1,5 @@
 //! Standalone FpAdd test - tests FP32 and FP16 addition directly
 
-#![cfg(not(debug_assertions))]
 
 use skalp_testing::Testbench;
 

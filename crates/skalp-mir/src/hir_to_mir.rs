@@ -5413,8 +5413,353 @@ impl<'hir> HirToMir<'hir> {
                     _ => return None,
                 })
             }
+            hir::HirExpression::Unary(unary_expr) => {
+                let val = self.eval_const_hir_expression(&unary_expr.operand)?;
+                match unary_expr.op {
+                    hir::HirUnaryOp::Negate => Some(-val),
+                    hir::HirUnaryOp::Not => Some(if val == 0 { 1 } else { 0 }),
+                    hir::HirUnaryOp::BitwiseNot => Some(!val),
+                    _ => None,
+                }
+            }
+            hir::HirExpression::GenericParam(name) => {
+                // Look up in current entity's generics (monomorphized value)
+                if let Some(hir) = self.hir {
+                    if let Some(entity_id) = self.current_entity_id {
+                        for entity in &hir.entities {
+                            if entity.id == entity_id {
+                                for generic in &entity.generics {
+                                    if generic.name == *name {
+                                        if let Some(default_expr) = &generic.default_value {
+                                            return self.eval_const_hir_expression(default_expr);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    // Also check implementation constants
+                    for imp in &hir.implementations {
+                        for constant in &imp.constants {
+                            if constant.name == *name {
+                                return self.eval_const_hir_expression(&constant.value);
+                            }
+                        }
+                    }
+                }
+                None
+            }
             _ => None,
         }
+    }
+
+    /// Substitute all occurrences of a variable in an HIR expression with a constant integer value.
+    /// Used for compile-time for-loop unrolling at the HIR level.
+    fn substitute_hir_variable_in_expr_named(
+        expr: &hir::HirExpression,
+        var_id: hir::VariableId,
+        var_name: &str,
+        value: i64,
+    ) -> hir::HirExpression {
+        match expr {
+            hir::HirExpression::Variable(id) if *id == var_id => {
+                hir::HirExpression::Literal(hir::HirLiteral::Integer(value as u64))
+            }
+            // The parser may represent the loop variable as GenericParam(name) in the body
+            hir::HirExpression::GenericParam(name) if name == var_name => {
+                hir::HirExpression::Literal(hir::HirLiteral::Integer(value as u64))
+            }
+            hir::HirExpression::Binary(bin) => {
+                let left = Self::substitute_hir_variable_in_expr_named(&bin.left, var_id, var_name, value);
+                let right = Self::substitute_hir_variable_in_expr_named(&bin.right, var_id, var_name, value);
+                // Constant fold when both sides are integer literals
+                if let (
+                    hir::HirExpression::Literal(hir::HirLiteral::Integer(l)),
+                    hir::HirExpression::Literal(hir::HirLiteral::Integer(r)),
+                ) = (&left, &right) {
+                    let result = match bin.op {
+                        hir::HirBinaryOp::Add => Some(l.wrapping_add(*r)),
+                        hir::HirBinaryOp::Sub => Some(l.wrapping_sub(*r)),
+                        hir::HirBinaryOp::Mul => Some(l.wrapping_mul(*r)),
+                        hir::HirBinaryOp::Div if *r != 0 => Some(l / r),
+                        hir::HirBinaryOp::Mod if *r != 0 => Some(l % r),
+                        hir::HirBinaryOp::And => Some(l & r),
+                        hir::HirBinaryOp::Or => Some(l | r),
+                        hir::HirBinaryOp::Xor => Some(l ^ r),
+                        hir::HirBinaryOp::LeftShift => Some(l << r),
+                        hir::HirBinaryOp::RightShift => Some(l >> r),
+                        _ => None,
+                    };
+                    if let Some(val) = result {
+                        return hir::HirExpression::Literal(hir::HirLiteral::Integer(val));
+                    }
+                }
+                hir::HirExpression::Binary(hir::HirBinaryExpr {
+                    left: Box::new(left),
+                    op: bin.op.clone(),
+                    right: Box::new(right),
+                    is_trait_op: bin.is_trait_op,
+                })
+            }
+            hir::HirExpression::Unary(un) => {
+                hir::HirExpression::Unary(hir::HirUnaryExpr {
+                    op: un.op.clone(),
+                    operand: Box::new(Self::substitute_hir_variable_in_expr_named(&un.operand, var_id, var_name, value)),
+                })
+            }
+            hir::HirExpression::Index(base, idx) => {
+                hir::HirExpression::Index(
+                    Box::new(Self::substitute_hir_variable_in_expr_named(base, var_id, var_name, value)),
+                    Box::new(Self::substitute_hir_variable_in_expr_named(idx, var_id, var_name, value)),
+                )
+            }
+            hir::HirExpression::Range(base, lo, hi) => {
+                hir::HirExpression::Range(
+                    Box::new(Self::substitute_hir_variable_in_expr_named(base, var_id, var_name, value)),
+                    Box::new(Self::substitute_hir_variable_in_expr_named(lo, var_id, var_name, value)),
+                    Box::new(Self::substitute_hir_variable_in_expr_named(hi, var_id, var_name, value)),
+                )
+            }
+            hir::HirExpression::Cast(cast) => {
+                hir::HirExpression::Cast(hir::HirCastExpr {
+                    expr: Box::new(Self::substitute_hir_variable_in_expr_named(&cast.expr, var_id, var_name, value)),
+                    target_type: cast.target_type.clone(),
+                })
+            }
+            hir::HirExpression::Call(call) => {
+                hir::HirExpression::Call(hir::HirCallExpr {
+                    function: call.function.clone(),
+                    type_args: call.type_args.clone(),
+                    named_type_args: call.named_type_args.clone(),
+                    args: call.args.iter().map(|a| Self::substitute_hir_variable_in_expr_named(a, var_id, var_name, value)).collect(),
+                    impl_style: call.impl_style.clone(),
+                })
+            }
+            hir::HirExpression::If(if_expr) => {
+                hir::HirExpression::If(hir::HirIfExpr {
+                    condition: Box::new(Self::substitute_hir_variable_in_expr_named(&if_expr.condition, var_id, var_name, value)),
+                    then_expr: Box::new(Self::substitute_hir_variable_in_expr_named(&if_expr.then_expr, var_id, var_name, value)),
+                    else_expr: Box::new(Self::substitute_hir_variable_in_expr_named(&if_expr.else_expr, var_id, var_name, value)),
+                })
+            }
+            hir::HirExpression::Ternary { condition, true_expr, false_expr } => {
+                hir::HirExpression::Ternary {
+                    condition: Box::new(Self::substitute_hir_variable_in_expr_named(condition, var_id, var_name, value)),
+                    true_expr: Box::new(Self::substitute_hir_variable_in_expr_named(true_expr, var_id, var_name, value)),
+                    false_expr: Box::new(Self::substitute_hir_variable_in_expr_named(false_expr, var_id, var_name, value)),
+                }
+            }
+            hir::HirExpression::Concat(exprs) => {
+                hir::HirExpression::Concat(
+                    exprs.iter().map(|e| Self::substitute_hir_variable_in_expr_named(e, var_id, var_name, value)).collect(),
+                )
+            }
+            hir::HirExpression::TupleLiteral(exprs) => {
+                hir::HirExpression::TupleLiteral(
+                    exprs.iter().map(|e| Self::substitute_hir_variable_in_expr_named(e, var_id, var_name, value)).collect(),
+                )
+            }
+            hir::HirExpression::ArrayLiteral(exprs) => {
+                hir::HirExpression::ArrayLiteral(
+                    exprs.iter().map(|e| Self::substitute_hir_variable_in_expr_named(e, var_id, var_name, value)).collect(),
+                )
+            }
+            hir::HirExpression::ArrayRepeat { value: val, count } => {
+                hir::HirExpression::ArrayRepeat {
+                    value: Box::new(Self::substitute_hir_variable_in_expr_named(val, var_id, var_name, value)),
+                    count: Box::new(Self::substitute_hir_variable_in_expr_named(count, var_id, var_name, value)),
+                }
+            }
+            hir::HirExpression::FieldAccess { base, field } => {
+                hir::HirExpression::FieldAccess {
+                    base: Box::new(Self::substitute_hir_variable_in_expr_named(base, var_id, var_name, value)),
+                    field: field.clone(),
+                }
+            }
+            hir::HirExpression::StructLiteral(lit) => {
+                hir::HirExpression::StructLiteral(hir::HirStructLiteral {
+                    type_name: lit.type_name.clone(),
+                    generic_args: lit.generic_args.iter().map(|e| Self::substitute_hir_variable_in_expr_named(e, var_id, var_name, value)).collect(),
+                    fields: lit.fields.iter().map(|f| hir::HirStructFieldInit {
+                        name: f.name.clone(),
+                        value: Self::substitute_hir_variable_in_expr_named(&f.value, var_id, var_name, value),
+                    }).collect(),
+                })
+            }
+            hir::HirExpression::Match(match_expr) => {
+                hir::HirExpression::Match(hir::HirMatchExpr {
+                    expr: Box::new(Self::substitute_hir_variable_in_expr_named(&match_expr.expr, var_id, var_name, value)),
+                    arms: match_expr.arms.iter().map(|arm| hir::HirMatchArmExpr {
+                        pattern: arm.pattern.clone(),
+                        guard: arm.guard.as_ref().map(|g| Self::substitute_hir_variable_in_expr_named(g, var_id, var_name, value)),
+                        expr: Self::substitute_hir_variable_in_expr_named(&arm.expr, var_id, var_name, value),
+                    }).collect(),
+                    mux_style: match_expr.mux_style.clone(),
+                })
+            }
+            hir::HirExpression::Block { statements, result_expr } => {
+                hir::HirExpression::Block {
+                    statements: statements.iter().map(|s| Self::substitute_hir_variable_in_stmt(s, var_id, var_name, value)).collect(),
+                    result_expr: Box::new(Self::substitute_hir_variable_in_expr_named(result_expr, var_id, var_name, value)),
+                }
+            }
+            // Leaf nodes that don't contain sub-expressions or the target variable
+            _ => expr.clone(),
+        }
+    }
+
+    /// Substitute all occurrences of a variable in an HIR lvalue with a constant integer value.
+    fn substitute_hir_variable_in_lvalue(
+        lvalue: &hir::HirLValue,
+        var_id: hir::VariableId,
+        var_name: &str,
+        value: i64,
+    ) -> hir::HirLValue {
+        match lvalue {
+            hir::HirLValue::Index(base, idx) => {
+                hir::HirLValue::Index(
+                    Box::new(Self::substitute_hir_variable_in_lvalue(base, var_id, var_name, value)),
+                    Self::substitute_hir_variable_in_expr_named(idx, var_id, var_name, value),
+                )
+            }
+            hir::HirLValue::Range(base, lo, hi) => {
+                hir::HirLValue::Range(
+                    Box::new(Self::substitute_hir_variable_in_lvalue(base, var_id, var_name, value)),
+                    Self::substitute_hir_variable_in_expr_named(lo, var_id, var_name, value),
+                    Self::substitute_hir_variable_in_expr_named(hi, var_id, var_name, value),
+                )
+            }
+            hir::HirLValue::FieldAccess { base, field } => {
+                hir::HirLValue::FieldAccess {
+                    base: Box::new(Self::substitute_hir_variable_in_lvalue(base, var_id, var_name, value)),
+                    field: field.clone(),
+                }
+            }
+            _ => lvalue.clone(),
+        }
+    }
+
+    /// Substitute all occurrences of a variable in an HIR statement with a constant integer value.
+    /// Used for compile-time for-loop unrolling at the HIR level.
+    fn substitute_hir_variable_in_stmt(
+        stmt: &hir::HirStatement,
+        var_id: hir::VariableId,
+        var_name: &str,
+        value: i64,
+    ) -> hir::HirStatement {
+        match stmt {
+            hir::HirStatement::Assignment(assign) => {
+                hir::HirStatement::Assignment(hir::HirAssignment {
+                    id: assign.id,
+                    lhs: Self::substitute_hir_variable_in_lvalue(&assign.lhs, var_id, var_name, value),
+                    assignment_type: assign.assignment_type.clone(),
+                    rhs: Self::substitute_hir_variable_in_expr_named(&assign.rhs, var_id, var_name, value),
+                })
+            }
+            hir::HirStatement::If(if_stmt) => {
+                hir::HirStatement::If(hir::HirIfStatement {
+                    condition: Self::substitute_hir_variable_in_expr_named(&if_stmt.condition, var_id, var_name, value),
+                    then_statements: if_stmt.then_statements.iter().map(|s| Self::substitute_hir_variable_in_stmt(s, var_id, var_name, value)).collect(),
+                    else_statements: if_stmt.else_statements.as_ref().map(|stmts| stmts.iter().map(|s| Self::substitute_hir_variable_in_stmt(s, var_id, var_name, value)).collect()),
+                    mux_style: if_stmt.mux_style.clone(),
+                })
+            }
+            hir::HirStatement::Match(match_stmt) => {
+                hir::HirStatement::Match(hir::HirMatchStatement {
+                    expr: Self::substitute_hir_variable_in_expr_named(&match_stmt.expr, var_id, var_name, value),
+                    arms: match_stmt.arms.iter().map(|arm| hir::HirMatchArm {
+                        pattern: arm.pattern.clone(),
+                        guard: arm.guard.as_ref().map(|g| Self::substitute_hir_variable_in_expr_named(g, var_id, var_name, value)),
+                        statements: arm.statements.iter().map(|s| Self::substitute_hir_variable_in_stmt(s, var_id, var_name, value)).collect(),
+                    }).collect(),
+                    mux_style: match_stmt.mux_style.clone(),
+                })
+            }
+            hir::HirStatement::Let(let_stmt) => {
+                hir::HirStatement::Let(hir::HirLetStatement {
+                    id: let_stmt.id,
+                    name: let_stmt.name.clone(),
+                    mutable: let_stmt.mutable,
+                    var_type: let_stmt.var_type.clone(),
+                    value: Self::substitute_hir_variable_in_expr_named(&let_stmt.value, var_id, var_name, value),
+                })
+            }
+            hir::HirStatement::Return(Some(expr)) => {
+                hir::HirStatement::Return(Some(Self::substitute_hir_variable_in_expr_named(expr, var_id, var_name, value)))
+            }
+            hir::HirStatement::Expression(expr) => {
+                hir::HirStatement::Expression(Self::substitute_hir_variable_in_expr_named(expr, var_id, var_name, value))
+            }
+            hir::HirStatement::For(for_stmt) => {
+                hir::HirStatement::For(hir::HirForStatement {
+                    id: for_stmt.id,
+                    iterator: for_stmt.iterator.clone(),
+                    iterator_var_id: for_stmt.iterator_var_id,
+                    range: hir::HirRange {
+                        start: Self::substitute_hir_variable_in_expr_named(&for_stmt.range.start, var_id, var_name, value),
+                        end: Self::substitute_hir_variable_in_expr_named(&for_stmt.range.end, var_id, var_name, value),
+                        inclusive: for_stmt.range.inclusive,
+                        step: for_stmt.range.step.as_ref().map(|s| Box::new(Self::substitute_hir_variable_in_expr_named(s, var_id, var_name, value))),
+                    },
+                    body: for_stmt.body.iter().map(|s| Self::substitute_hir_variable_in_stmt(s, var_id, var_name, value)).collect(),
+                    unroll: for_stmt.unroll.clone(),
+                })
+            }
+            hir::HirStatement::Block(stmts) => {
+                hir::HirStatement::Block(
+                    stmts.iter().map(|s| Self::substitute_hir_variable_in_stmt(s, var_id, var_name, value)).collect(),
+                )
+            }
+            // Leaf statement types that don't need variable substitution
+            _ => stmt.clone(),
+        }
+    }
+
+    /// Unroll compile-time constant-bounded for loops in a function body at the HIR level.
+    /// This transforms `for i in 0..N { body }` into N copies of `body` with `i` replaced by the iteration value.
+    /// Must be called before `transform_early_returns()` so that early returns inside the loop are properly handled.
+    fn unroll_const_for_loops_in_body(
+        &self,
+        body: Vec<hir::HirStatement>,
+    ) -> Vec<hir::HirStatement> {
+        let mut result = Vec::new();
+        for stmt in body {
+            match &stmt {
+                hir::HirStatement::For(for_stmt) => {
+                    // Try to evaluate range bounds at compile time
+                    let start = self.eval_const_hir_expression(&for_stmt.range.start);
+                    let end = self.eval_const_hir_expression(&for_stmt.range.end);
+                    if let (Some(start), Some(end)) = (start, end) {
+                        let range_end = if for_stmt.range.inclusive { end + 1 } else { end };
+                        // Unroll: for each iteration, clone body and substitute iterator variable
+                        for i in start..range_end {
+                            for body_stmt in &for_stmt.body {
+                                let substituted = Self::substitute_hir_variable_in_stmt(
+                                    body_stmt,
+                                    for_stmt.iterator_var_id,
+                                    &for_stmt.iterator,
+                                    i,
+                                );
+                                // Recursively unroll nested for loops
+                                match substituted {
+                                    hir::HirStatement::For(_) => {
+                                        result.extend(
+                                            self.unroll_const_for_loops_in_body(vec![substituted])
+                                        );
+                                    }
+                                    other => result.push(other),
+                                }
+                            }
+                        }
+                    } else {
+                        // Non-const bounds: leave as-is (will fail later, as before)
+                        result.push(stmt);
+                    }
+                }
+                _ => result.push(stmt),
+            }
+        }
+        result
     }
 
     /// Convert a statement with iterator substitution for loop unrolling
@@ -12716,6 +13061,9 @@ impl<'hir> HirToMir<'hir> {
         let params = func.params.clone();
         let body = func.body.clone();
 
+        // Unroll const-bounded for loops before early-return transformation
+        let body = self.unroll_const_for_loops_in_body(body);
+
         // Transform early returns
         let body = self.transform_early_returns(body);
 
@@ -12853,6 +13201,9 @@ impl<'hir> HirToMir<'hir> {
             var_id_to_name.len(),
             params.len()
         );
+
+        // Unroll const-bounded for loops before early-return transformation
+        let body = self.unroll_const_for_loops_in_body(body);
 
         // Transform early returns
         let body = self.transform_early_returns(body);
@@ -14821,6 +15172,9 @@ impl<'hir> HirToMir<'hir> {
             }
         }
 
+        // Unroll const-bounded for loops before early-return transformation
+        let body = self.unroll_const_for_loops_in_body(body);
+
         // Transform early returns into nested if-else before processing
         let body = self.transform_early_returns(body);
 
@@ -15069,6 +15423,9 @@ impl<'hir> HirToMir<'hir> {
         for (param, mir_expr) in params.iter().zip(mir_args.iter()) {
             param_to_mir.insert(param.name.clone(), mir_expr.clone());
         }
+
+        // Unroll const-bounded for loops before early-return transformation
+        let body = self.unroll_const_for_loops_in_body(body);
 
         // Transform early returns
         let body = self.transform_early_returns(body);
@@ -21046,7 +21403,8 @@ impl<'hir> HirToMir<'hir> {
                 trace!("        ^^^^ THIS IS AN IF STATEMENT!");
             }
         }
-        let body = self.transform_early_returns(func.body.clone());
+        let body = self.unroll_const_for_loops_in_body(func.body.clone());
+        let body = self.transform_early_returns(body);
         trace!(
             "🔄 AFTER transform_early_returns: {} statements",
             body.len()

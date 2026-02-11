@@ -3,7 +3,6 @@
 //! Tests individual operations from a function unit hierarchy using boundary-only NCL.
 //! Each test creates a minimal async entity and verifies correct simulation results.
 
-#![cfg(not(debug_assertions))]
 
 use skalp_frontend::parse_and_build_compilation_context;
 use skalp_lir::{

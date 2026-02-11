@@ -1,6 +1,5 @@
 //! Simple FP32 multiply test via Metal simulator
 
-#![cfg(not(debug_assertions))]
 
 use skalp_testing::Testbench;
 

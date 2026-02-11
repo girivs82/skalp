@@ -1,5 +1,4 @@
 // Skip in debug mode due to stack overflow (complex FP32 expansion)
-#![cfg(not(debug_assertions))]
 
 // Test FpMul entity directly
 use skalp_frontend::parse_and_build_compilation_context;

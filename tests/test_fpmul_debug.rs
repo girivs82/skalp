@@ -1,6 +1,5 @@
 // Minimal FP32 mul debug test
 // Skip in debug mode due to stack overflow (complex FP32 expansion)
-#![cfg(not(debug_assertions))]
 
 use skalp_frontend::parse_and_build_compilation_context;
 use skalp_lir::gate_netlist::GateNetlist;

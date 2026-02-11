@@ -3,7 +3,6 @@
 //! Verifies that FP32 operations produce correct arithmetic results
 //! after gate-level synthesis and optimization.
 
-#![cfg(not(debug_assertions))]
 
 use skalp_frontend::parse_and_build_compilation_context;
 use skalp_lir::{

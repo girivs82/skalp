@@ -3,7 +3,6 @@
 //! Tests that fp_min and fp_max correctly select the minimum/maximum value
 //! when compiled to NCL gate-level simulation.
 
-#![cfg(not(debug_assertions))]
 
 use skalp_frontend::parse_and_build_compilation_context;
 use skalp_lir::{get_stdlib_library, lower_mir_hierarchical, map_hierarchical_to_gates};
