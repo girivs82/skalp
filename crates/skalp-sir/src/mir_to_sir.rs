@@ -196,75 +196,20 @@ impl<'a> MirToSirConverter<'a> {
     fn build_tuple_source_mapping(mir: &Module) -> HashMap<SignalId, String> {
         let mut mapping = HashMap::new();
 
-        println!(
-            "🔍🔍🔍 build_tuple_source_mapping: scanning {} assignments, {} signals",
-            mir.assignments.len(),
-            mir.signals.len()
-        );
-        for sig in &mir.signals {
-            if sig.name.contains("_tuple_tmp") {
-                println!(
-                    "🔍🔍🔍   Found tuple_tmp signal: {} (id={})",
-                    sig.name, sig.id.0
-                );
-            }
-        }
-
-        for (idx, assign) in mir.assignments.iter().enumerate() {
+        for assign in &mir.assignments {
             // Check if LHS is a signal
             if let LValue::Signal(lhs_id) = &assign.lhs {
-                let lhs_signal_name = mir
-                    .signals
-                    .iter()
-                    .find(|s| s.id == *lhs_id)
-                    .map(|s| s.name.as_str())
-                    .unwrap_or("unknown");
-
-                // Only print tuple_tmp assignments for debugging
-                if lhs_signal_name.contains("_tuple_tmp") {
-                    println!(
-                        "🔍🔍🔍   TUPLE_TMP Assignment {}: {} (id={}) = {:?}",
-                        idx,
-                        lhs_signal_name,
-                        lhs_id.0,
-                        std::mem::discriminant(&assign.rhs.kind)
-                    );
-                    // Print more details about RHS
-                    match &assign.rhs.kind {
-                        ExpressionKind::Ref(lv) => println!("🔍🔍🔍     RHS: Ref({:?})", lv),
-                        ExpressionKind::Concat(parts) => {
-                            println!("🔍🔍🔍     RHS: Concat with {} parts:", parts.len());
-                            for (i, part) in parts.iter().enumerate() {
-                                println!(
-                                    "🔍🔍🔍       Part {}: {:?}",
-                                    i,
-                                    std::mem::discriminant(&part.kind)
-                                );
-                            }
-                        }
-                        ExpressionKind::FunctionCall { name, .. } => {
-                            println!("🔍🔍🔍     RHS: FunctionCall({})", name);
-                        }
-                        _ => println!("🔍🔍🔍     RHS: Other expression"),
-                    }
-                }
-
                 // Case 1: RHS is a reference to another signal
                 if let ExpressionKind::Ref(LValue::Signal(rhs_id)) = &assign.rhs.kind {
                     // Check if RHS signal name contains "_inst_" and "_result_"
                     // This indicates it's a module instance result signal
                     if let Some(rhs_signal) = mir.signals.iter().find(|s| s.id == *rhs_id) {
-                        println!("🔍🔍🔍     RHS is signal ref: '{}'", rhs_signal.name);
                         if rhs_signal.name.contains("_inst_")
                             && rhs_signal.name.contains("_result_")
                         {
                             // Extract the prefix (everything before "_result_N")
                             if let Some(pos) = rhs_signal.name.rfind("_result_") {
                                 let prefix = &rhs_signal.name[..pos];
-                                println!(
-                                    "🔍🔍🔍     -> Adding mapping: {} -> '{}'",
-                                    lhs_id.0, prefix
-                                );
                                 mapping.insert(*lhs_id, prefix.to_string());
                             }
                         }
@@ -273,22 +218,16 @@ impl<'a> MirToSirConverter<'a> {
 
                 // Case 2: RHS is a Concat - check if first element is a module instance result
                 if let ExpressionKind::Concat(parts) = &assign.rhs.kind {
-                    println!("🔍🔍🔍     RHS is Concat with {} parts", parts.len());
                     if let Some(first) = parts.first() {
                         if let ExpressionKind::Ref(LValue::Signal(first_sig_id)) = &first.kind {
                             if let Some(first_signal) =
                                 mir.signals.iter().find(|s| s.id == *first_sig_id)
                             {
-                                println!("🔍🔍🔍     First concat part: '{}'", first_signal.name);
                                 if first_signal.name.contains("_inst_")
                                     && first_signal.name.contains("_result_")
                                 {
                                     if let Some(pos) = first_signal.name.rfind("_result_") {
                                         let prefix = &first_signal.name[..pos];
-                                        println!(
-                                            "🔍🔍🔍     -> Adding mapping from Concat: {} -> '{}'",
-                                            lhs_id.0, prefix
-                                        );
                                         mapping.insert(*lhs_id, prefix.to_string());
                                     }
                                 }
@@ -299,10 +238,6 @@ impl<'a> MirToSirConverter<'a> {
             }
         }
 
-        println!(
-            "🔍🔍🔍 build_tuple_source_mapping: found {} mappings",
-            mapping.len()
-        );
         mapping
     }
 
@@ -3037,8 +2972,6 @@ impl<'a> MirToSirConverter<'a> {
                     // This handles _tuple_tmp signals that are assigned from module results
                     if let Some(inst_prefix) = self.tuple_source_map.get(sig_id) {
                         let target_signal_name = format!("{}_result_{}", inst_prefix, index);
-                        println!("🔍🔍🔍 TUPLE_FIELD_ACCESS (via mapping): signal {} index={} -> target='{}'",
-                                sig_id.0, index, target_signal_name);
                         return self.get_or_create_signal_driver(&target_signal_name);
                     }
 
@@ -3055,10 +2988,6 @@ impl<'a> MirToSirConverter<'a> {
                                 &signal.name[..]
                             };
                             let target_signal_name = format!("{}_result_{}", base_name, index);
-                            println!(
-                                "🔍🔍🔍 TUPLE_FIELD_ACCESS: base='{}' index={} -> target='{}'",
-                                signal.name, index, target_signal_name
-                            );
 
                             // Look up or create a reference to the target signal
                             return self.get_or_create_signal_driver(&target_signal_name);
@@ -3427,22 +3356,6 @@ impl<'a> MirToSirConverter<'a> {
             std::mem::discriminant(&value.kind)
         );
 
-        // Debug: print details for tuple_tmp and tuple-related assignments
-        if target.contains("_tuple_tmp")
-            || target.contains("valid")
-            || target.contains("x1_")
-            || target.contains("x2_")
-        {
-            println!(
-                "🔍🔍🔍 TUPLE-RELATED ASSIGNMENT: {} = {:?}",
-                target, &value.kind
-            );
-            // Print more detail about Ref type
-            if let ExpressionKind::Ref(lv) = &value.kind {
-                println!("🔍🔍🔍   Ref LValue: {:?}", lv);
-            }
-        }
-
         let node_id = self.create_expression_node_with_width(value, Some(target_width));
 
         // BUG FIX: Truncate expression result if it's wider than target
@@ -3451,10 +3364,6 @@ impl<'a> MirToSirConverter<'a> {
         // The result must be truncated to match the declared target type.
         let expr_width = self.get_node_output_width(node_id);
         let final_node_id = if expr_width > target_width && target_width > 0 {
-            println!(
-                "  ✂️ BUG FIX: Truncating expression from {} bits to {} bits for target '{}'",
-                expr_width, target_width, target
-            );
             self.create_slice_node(node_id, target_width - 1, 0)
         } else {
             node_id
@@ -3808,8 +3717,6 @@ impl<'a> MirToSirConverter<'a> {
                 self.create_mux_node(cond_node, then_node, else_node)
             }
             ExpressionKind::Concat(parts) => {
-                println!("🔍 [BUG #76] Converting Concat with type: {:?}", expr.ty);
-
                 // Extract element widths from tuple type
                 let part_widths: Vec<Option<usize>> =
                     if let skalp_frontend::types::Type::Tuple(element_types) = &expr.ty {
@@ -3908,11 +3815,6 @@ impl<'a> MirToSirConverter<'a> {
                 if let ExpressionKind::Ref(LValue::Signal(sig_id)) = &base.kind {
                     // Look up the signal name
                     if let Some(signal) = self.mir.signals.iter().find(|s| s.id == *sig_id) {
-                        println!(
-                            "🔍🔍🔍 TUPLE_FIELD_ACCESS (node): checking base='{}' (id={}) index={}",
-                            signal.name, sig_id.0, index
-                        );
-
                         // Check if this is a module instance result signal
                         if signal.name.ends_with("_result_0") || signal.name.contains("_inst_") {
                             let base_name = if let Some(pos) = signal.name.rfind("_result_") {
@@ -3921,24 +3823,15 @@ impl<'a> MirToSirConverter<'a> {
                                 &signal.name[..]
                             };
                             let target_signal_name = format!("{}_result_{}", base_name, index);
-                            println!("🔍🔍🔍   -> Direct match: target='{}'", target_signal_name);
                             return self.get_or_create_signal_driver(&target_signal_name);
                         }
 
                         // BUG FIX #85: Check if this is a _tuple_tmp signal assigned from a module result
                         // Look at the assignment to this signal to find the source
                         if signal.name.contains("_tuple_tmp") {
-                            println!(
-                                "🔍🔍🔍   -> _tuple_tmp detected, scanning {} assignments",
-                                self.mir.assignments.len()
-                            );
                             for assign in &self.mir.assignments {
                                 if let LValue::Signal(lhs_id) = &assign.lhs {
                                     if lhs_id == sig_id {
-                                        println!(
-                                            "🔍🔍🔍     Found assignment: RHS kind={:?}",
-                                            std::mem::discriminant(&assign.rhs.kind)
-                                        );
                                         if let ExpressionKind::Ref(LValue::Signal(rhs_sig_id)) =
                                             &assign.rhs.kind
                                         {
@@ -3948,10 +3841,6 @@ impl<'a> MirToSirConverter<'a> {
                                                 .iter()
                                                 .find(|s| s.id == *rhs_sig_id)
                                             {
-                                                println!(
-                                                    "🔍🔍🔍     RHS signal: '{}'",
-                                                    rhs_signal.name
-                                                );
                                                 if rhs_signal.name.contains("_result_") {
                                                     // Extract the base name (everything before _result_N)
                                                     if let Some(pos) =
@@ -3962,7 +3851,6 @@ impl<'a> MirToSirConverter<'a> {
                                                             "{}_result_{}",
                                                             base_name, index
                                                         );
-                                                        println!("🔍🔍🔍   -> Via assignment: target='{}'", target_signal_name);
                                                         return self.get_or_create_signal_driver(
                                                             &target_signal_name,
                                                         );
@@ -3977,7 +3865,6 @@ impl<'a> MirToSirConverter<'a> {
                     }
                 }
                 // Fallback: bit slicing
-                println!("🔍🔍🔍   -> Fallback to bit slicing for index={}", index);
                 let base_node = self.create_expression_node_with_width(base, None);
                 let element_width = 32;
                 let low_bit = (*index) * element_width;
@@ -4172,9 +4059,6 @@ impl<'a> MirToSirConverter<'a> {
             LValue::Signal(sig_id) => {
                 // First try to find signal in current (top-level) module
                 if let Some(signal) = self.mir.signals.iter().find(|s| s.id == *sig_id) {
-                    // BUG #220 DEBUG: Trace signal reference resolution
-                    eprintln!("🔍🔍🔍 LVALUE_REF: Signal({}) -> '{}' in module '{}'",
-                        sig_id.0, signal.name, self.mir.name);
                     // Pass MIR name - get_or_create_signal_driver will translate to internal name
                     return self.get_or_create_signal_driver(&signal.name);
                 }
@@ -4280,16 +4164,8 @@ impl<'a> MirToSirConverter<'a> {
                 if let LValue::Variable(var_id) = base.as_ref() {
                     // Get variable name
                     if let Some(var) = self.mir.variables.iter().find(|v| v.id == *var_id) {
-                        let var_name = format!("{}_{}", var.name, var_id.0);
-                        println!(
-                            "🔍🔍🔍 RangeSelect on variable: {} (id={})",
-                            var_name, var_id.0
-                        );
-
                         // Check if this is a _tuple_tmp variable
                         if var.name.contains("_tuple_tmp") {
-                            println!("🔍🔍🔍   Detected _tuple_tmp variable, searching for source assignment");
-
                             // Look for assignment to this VARIABLE (not signal) to find source
                             // MIR assignments can have LValue::Variable as LHS
                             for assign in &self.mir.assignments {
@@ -4300,7 +4176,6 @@ impl<'a> MirToSirConverter<'a> {
                                 };
 
                                 if is_this_var {
-                                    println!("🔍🔍🔍   Found assignment to variable {:?}", var_id);
                                     // Check if RHS is a signal reference
                                     if let ExpressionKind::Ref(LValue::Signal(rhs_sig_id)) =
                                         &assign.rhs.kind
@@ -4308,13 +4183,9 @@ impl<'a> MirToSirConverter<'a> {
                                         if let Some(rhs_sig) =
                                             self.mir.signals.iter().find(|s| s.id == *rhs_sig_id)
                                         {
-                                            println!(
-                                                "🔍🔍🔍   Assignment RHS is signal: {}",
-                                                rhs_sig.name
-                                            );
                                             if rhs_sig.name.contains("_result_") {
                                                 // Extract base name and compute index from range
-                                                let high_val = self
+                                                let _high_val = self
                                                     .evaluate_constant_expression(high)
                                                     .unwrap_or(0)
                                                     as usize;
@@ -4335,7 +4206,6 @@ impl<'a> MirToSirConverter<'a> {
                                                     let base_name = &rhs_sig.name[..pos];
                                                     let target_signal_name =
                                                         format!("{}_result_{}", base_name, index);
-                                                    println!("🔍🔍🔍   -> Mapping range [{}:{}] to: '{}'", high_val, low_val, target_signal_name);
                                                     return self.get_or_create_signal_driver(
                                                         &target_signal_name,
                                                     );
@@ -4345,7 +4215,6 @@ impl<'a> MirToSirConverter<'a> {
                                     }
                                 }
                             }
-                            println!("🔍🔍🔍   No matching assignment found for variable");
                         }
                     }
                 }
@@ -6901,10 +6770,6 @@ impl<'a> MirToSirConverter<'a> {
                 // we need to create a driver that routes the parent's signal to the child's input.
                 // Without this, the child's input port signal remains undriven (always 0).
                 if let Some(parent_expr) = instance.connections.get(&port.name) {
-                    println!(
-                        "         🔌 BUG #236 FIX: Creating driver for child input port '{}' from parent expr",
-                        port.name
-                    );
                     // Create a node for the parent expression
                     let parent_node = self.create_expression_node_for_instance_with_context(
                         parent_expr,
@@ -9587,58 +9452,31 @@ impl<'a> MirToSirConverter<'a> {
             }
             // BUG FIX #85: Handle tuple field access for module synthesis
             ExpressionKind::TupleFieldAccess { base, index } => {
-                println!(
-                    "🔍🔍🔍 TUPLE_FIELD_ACCESS (inst): ENTERING with index={}, base.kind={:?}",
-                    index,
-                    std::mem::discriminant(&base.kind)
-                );
                 // Check if the base is a Signal reference (module instance result)
                 if let ExpressionKind::Ref(LValue::Signal(sig_id)) = &base.kind {
-                    println!(
-                        "🔍🔍🔍   Base is Signal({}), looking in child_module with {} signals",
-                        sig_id.0,
-                        child_module.signals.len()
-                    );
                     // Look up the signal name in child module
                     if let Some(signal) = child_module.signals.iter().find(|s| s.id == *sig_id) {
-                        println!(
-                            "🔍🔍🔍   Found signal: '{}' (checking pattern)",
-                            signal.name
-                        );
-
                         // BUG FIX #85: Check for _tuple_tmp_ pattern - this is a tuple temporary
                         // The _tuple_tmp_XX signals are intermediates that need to find the actual result signals
                         // For example, _tuple_tmp_76_76 -> look for assignments FROM quadratic_solve_inst_145_result_N
                         if signal.name.contains("_tuple_tmp_") {
-                            println!("🔍🔍🔍   Detected _tuple_tmp_ pattern - looking for module instance result");
-                            println!(
-                                "🔍🔍🔍   Looking for assignment to signal {} in {} assignments",
-                                sig_id.0,
-                                child_module.assignments.len()
-                            );
                             // Find the assignment to this signal to determine the source module instance
                             // The assignment should be: _tuple_tmp_76_76 = quadratic_solve_inst_145_result_0
                             // From that we can derive quadratic_solve_inst_145_result_N for index N
-                            for (assign_idx, assign) in child_module.assignments.iter().enumerate()
+                            for assign in &child_module.assignments
                             {
                                 if let LValue::Signal(assign_sig_id) = &assign.lhs {
                                     if assign_sig_id == sig_id {
-                                        println!("🔍🔍🔍   Found assignment #{} to signal {}, RHS kind: {:?}", assign_idx, sig_id.0, std::mem::discriminant(&assign.rhs.kind));
                                         // Found the assignment to this _tuple_tmp_ signal
                                         // Check if RHS is a reference to another signal
                                         if let ExpressionKind::Ref(LValue::Signal(src_sig_id)) =
                                             &assign.rhs.kind
                                         {
-                                            println!("🔍🔍🔍   RHS is Signal({})", src_sig_id.0);
                                             if let Some(src_signal) = child_module
                                                 .signals
                                                 .iter()
                                                 .find(|s| s.id == *src_sig_id)
                                             {
-                                                println!(
-                                                    "🔍🔍🔍   Source signal name: '{}'",
-                                                    src_signal.name
-                                                );
                                                 if src_signal.name.contains("_inst_")
                                                     && src_signal.name.contains("_result_")
                                                 {
@@ -9655,30 +9493,19 @@ impl<'a> MirToSirConverter<'a> {
                                                         "{}.{}_result_{}",
                                                         inst_prefix, base_name, index
                                                     );
-                                                    println!("🔍🔍🔍   Found source: '{}' -> target: '{}'", src_signal.name, target_signal_name);
                                                     return self.get_or_create_signal_driver(
                                                         &target_signal_name,
                                                     );
-                                                } else {
-                                                    println!("🔍🔍🔍   Source signal doesn't match _inst_/_result_ pattern");
                                                 }
-                                            } else {
-                                                println!("🔍🔍🔍   Source signal {} not found in child_module.signals", src_sig_id.0);
                                             }
                                         // BUG FIX #85: Handle Concat RHS - tuple is built from concatenated results
                                         } else if let ExpressionKind::Concat(concat_parts) =
                                             &assign.rhs.kind
                                         {
-                                            println!("🔍🔍🔍   RHS is Concat with {} parts, looking for index {}", concat_parts.len(), index);
                                             // The tuple is a concatenation of result signals
                                             // Index 0 -> first part, Index 1 -> second part, etc.
                                             if *index < concat_parts.len() {
                                                 let target_part = &concat_parts[*index];
-                                                println!(
-                                                    "🔍🔍🔍   Concat part {} kind: {:?}",
-                                                    index,
-                                                    std::mem::discriminant(&target_part.kind)
-                                                );
                                                 if let ExpressionKind::Ref(LValue::Signal(
                                                     part_sig_id,
                                                 )) = &target_part.kind
@@ -9688,15 +9515,10 @@ impl<'a> MirToSirConverter<'a> {
                                                         .iter()
                                                         .find(|s| s.id == *part_sig_id)
                                                     {
-                                                        println!("🔍🔍🔍   Found concat part signal: '{}' for index {}", part_signal.name, index);
                                                         // Found the signal for this index in the concat
                                                         let target_signal_name = format!(
                                                             "{}.{}",
                                                             inst_prefix, part_signal.name
-                                                        );
-                                                        println!(
-                                                            "🔍🔍🔍   Resolved to: '{}'",
-                                                            target_signal_name
                                                         );
                                                         return self.get_or_create_signal_driver(
                                                             &target_signal_name,
@@ -9704,18 +9526,10 @@ impl<'a> MirToSirConverter<'a> {
                                                     }
                                                 }
                                             }
-                                            println!("🔍🔍🔍   Could not resolve concat part at index {}", index);
-                                        } else {
-                                            println!(
-                                                "🔍🔍🔍   RHS is not a Signal reference or Concat"
-                                            );
                                         }
                                     }
                                 }
                             }
-                            println!(
-                                "🔍🔍🔍   Could not find source assignment for _tuple_tmp_ signal"
-                            );
                         } else if signal.name.ends_with("_result_0")
                             || signal.name.contains("_inst_")
                         {
@@ -9726,20 +9540,9 @@ impl<'a> MirToSirConverter<'a> {
                             };
                             let target_signal_name =
                                 format!("{}.{}_result_{}", inst_prefix, base_name, index);
-                            println!("🔍🔍🔍 TUPLE_FIELD_ACCESS (inst): base='{}' index={} -> target='{}'",
-                                    signal.name, index, target_signal_name);
                             return self.get_or_create_signal_driver(&target_signal_name);
-                        } else {
-                            println!("🔍🔍🔍   Signal name doesn't match pattern");
                         }
-                    } else {
-                        println!(
-                            "🔍🔍🔍   Signal {} NOT FOUND in child_module.signals",
-                            sig_id.0
-                        );
                     }
-                } else {
-                    println!("🔍🔍🔍   Base is NOT a Signal reference, falling back");
                 }
                 // Fallback: bit slicing
                 let base_node = self.create_expression_node_for_instance_with_context(
@@ -9944,13 +9747,8 @@ impl<'a> MirToSirConverter<'a> {
         parent_module_for_signals: Option<&Module>,
         parent_prefix: &str,
     ) -> Option<String> {
-        println!(
-            "🔍🔍🔍 GET_SIGNAL_FROM_LVALUE: lvalue={:?}, inst_prefix='{}'",
-            lvalue, inst_prefix
-        );
         match lvalue {
             LValue::Signal(sig_id) => {
-                println!("🔍🔍🔍   -> LValue::Signal({})", sig_id.0);
                 // LValue::Signal should only match signals, not ports
                 // (ports have their own LValue::Port variant)
                 // First try child module
@@ -9966,10 +9764,6 @@ impl<'a> MirToSirConverter<'a> {
                             parent_module_for_signals,
                             parent_prefix,
                         );
-                        println!(
-                            "🔍🔍🔍   -> BUG #117r FIX: Signal '{}' matches output port in port_mapping, resolved to '{}'",
-                            signal.name, mapped_name
-                        );
                         return Some(mapped_name);
                     }
 
@@ -9981,7 +9775,6 @@ impl<'a> MirToSirConverter<'a> {
                     } else {
                         format!("{}.{}", inst_prefix, signal.name)
                     };
-                    println!("🔍🔍🔍   -> Found in child module: '{}'", result);
                     return Some(result);
                 }
                 // BUG #186 FIX: If not found in child module, try parent module
@@ -9996,50 +9789,24 @@ impl<'a> MirToSirConverter<'a> {
                         } else {
                             format!("{}.{}", parent_prefix, signal.name)
                         };
-                        println!("🔍🔍🔍   -> Found in parent module: '{}'", result);
                         return Some(result);
                     }
                 }
-                println!(
-                    "🔍🔍🔍   -> Signal {} NOT FOUND in child or parent module",
-                    sig_id.0
-                );
                 None
             }
             LValue::Port(port_id) => {
                 // Direct port reference - map to parent signal through port connections
                 // First try direct ID lookup
-                println!("🔌🔌🔌 PORT LOOKUP: Looking for port_id={} in child_module '{}' (has {} ports)", port_id.0, child_module.name, child_module.ports.len());
-                for p in &child_module.ports {
-                    println!("🔌🔌🔌   Child port: id={}, name='{}'", p.id.0, p.name);
-                }
-                println!(
-                    "🔌🔌🔌 PORT MAPPING keys: {:?}",
-                    port_mapping.keys().collect::<Vec<_>>()
-                );
                 if let Some(port) = child_module.ports.iter().find(|p| p.id == *port_id) {
-                    println!(
-                        "🔌🔌🔌 PORT LOOKUP: Found port '{}' by id={}",
-                        port.name, port_id.0
-                    );
                     if let Some(parent_expr) = port_mapping.get(&port.name) {
-                        println!(
-                            "🔌🔌🔌 PORT LOOKUP: Found mapping for '{}' -> {:?}",
-                            port.name, parent_expr.kind
-                        );
                         // Use context-aware lookup for nested instances
                         let mapped_name = self.get_signal_name_from_expression_with_context(
                             parent_expr,
                             parent_module_for_signals,
                             parent_prefix,
                         );
-                        println!("🔌🔌🔌 PORT LOOKUP: Mapped to '{}'", mapped_name);
                         Some(mapped_name)
                     } else {
-                        println!(
-                            "🔌🔌🔌 PORT LOOKUP: NO mapping for '{}' - using fallback",
-                            port.name
-                        );
                         // No mapping - use prefixed port name as fallback
                         // BUG FIX #113: Avoid double dots if inst_prefix ends with a dot
                         let prefixed = if inst_prefix.is_empty() {
@@ -10052,16 +9819,6 @@ impl<'a> MirToSirConverter<'a> {
                         Some(prefixed)
                     }
                 } else {
-                    println!(
-                        "🔌🔌🔌 PORT LOOKUP: Port id={} NOT FOUND by direct lookup in module '{}' (has {} ports)",
-                        port_id.0, child_module.name, child_module.ports.len()
-                    );
-                    // BUG #223 DEBUG: Print all actual port IDs in the module
-                    println!("🔌🔌🔌 BUG #223 DEBUG: All ports in '{}':", child_module.name);
-                    for (i, p) in child_module.ports.iter().enumerate() {
-                        println!("🔌🔌🔌    [{}] id={} name='{}'", i, p.id.0, p.name);
-                    }
-
                     // BUG #223 FIX: Try to find port by scanning for any port that could match
                     // If the port_id is much larger than the number of ports, the old index fallback won't work.
                     // Instead, try to use the port_mapping keys to guide the lookup.
@@ -10091,6 +9848,66 @@ impl<'a> MirToSirConverter<'a> {
                                 format!("{}.{}", inst_prefix, port.name)
                             };
                             Some(prefixed)
+                        }
+                    } else if let Some(parent_mod) = parent_module_for_signals {
+                        // BUG FIX: Port might belong to the parent module (func_quadratic_solve)
+                        // when nested entity instances (FpSqrt) reference ports from the enclosing
+                        // function module. Try parent module's ports.
+                        if let Some(port) = parent_mod.ports.iter().find(|p| p.id == *port_id) {
+                            // Resolve through parent's port mapping (stored in instance_port_mappings)
+                            let parent_key = parent_prefix.trim_end_matches('.');
+                            if let Some(parent_port_mapping) =
+                                self.instance_port_mappings.get(parent_key)
+                            {
+                                if let Some(grandparent_expr) =
+                                    parent_port_mapping.get(&port.name)
+                                {
+                                    let mapped_name =
+                                        self.get_signal_name_from_expression(grandparent_expr);
+                                    return Some(mapped_name);
+                                }
+                            }
+                            // Fallback: use parent-prefixed port name
+                            let result = if parent_prefix.is_empty() {
+                                port.name.clone()
+                            } else {
+                                format!(
+                                    "{}.{}",
+                                    parent_prefix.trim_end_matches('.'),
+                                    port.name
+                                )
+                            };
+                            Some(result)
+                        } else {
+                            // Also try parent module's ports by index as last resort
+                            let port_index = port_id.0 as usize;
+                            if port_index < parent_mod.ports.len() {
+                                let port = &parent_mod.ports[port_index];
+                                let parent_key = parent_prefix.trim_end_matches('.');
+                                if let Some(parent_port_mapping) =
+                                    self.instance_port_mappings.get(parent_key)
+                                {
+                                    if let Some(grandparent_expr) =
+                                        parent_port_mapping.get(&port.name)
+                                    {
+                                        let mapped_name =
+                                            self.get_signal_name_from_expression(grandparent_expr);
+                                        return Some(mapped_name);
+                                    }
+                                }
+                                let result = if parent_prefix.is_empty() {
+                                    port.name.clone()
+                                } else {
+                                    format!(
+                                        "{}.{}",
+                                        parent_prefix.trim_end_matches('.'),
+                                        port.name
+                                    )
+                                };
+                                Some(result)
+                            } else {
+                                None
+                            }
                         }
                     } else {
                         None

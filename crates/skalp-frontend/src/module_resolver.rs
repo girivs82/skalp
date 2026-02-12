@@ -764,15 +764,18 @@ impl ModuleResolver {
         // BUG #170 FIX: Also merge constants from the source module's global impl blocks
         // This is critical for const generic resolution: FpAdd<IEEE754_32> needs IEEE754_32
         // to be available when fp.sk is parsed, not just when the user's module is parsed.
-        // For glob imports, merge ALL global constants. For specific imports, merge by name.
+        // Always merge all GLOBAL_IMPL constants — imported entities may reference them
+        // (e.g., CordicRotate16 uses CORDIC_GAIN_INV_16 from cordic.sk's GLOBAL_IMPL).
         let is_glob = matches!(import.path, HirImportPath::Glob { .. });
 
         for impl_block in &source.implementations {
             if impl_block.entity == crate::hir::EntityId::GLOBAL_IMPL {
                 for constant in &impl_block.constants {
-                    // For glob imports, include all constants
-                    // For specific imports, only include if the constant name is in the import list
-                    if is_glob || symbol_names.contains(&constant.name) {
+                    // Always merge GLOBAL_IMPL constants — imported entities may reference them.
+                    // E.g., fp.sk imports CordicSqrt from cordic.sk (Simple import), and
+                    // CordicRotate16's impl uses CORDIC_GAIN_INV_16 from cordic.sk's GLOBAL_IMPL.
+                    // Constants are deduplicated by name below, so this is safe.
+                    {
                         // Ensure target has a global impl block
                         if target.implementations.is_empty()
                             || !target

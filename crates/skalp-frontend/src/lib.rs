@@ -1601,6 +1601,44 @@ fn merge_symbol(target: &mut Hir, source: &Hir, symbol_name: &str) -> Result<()>
             target.implementations.push(imported_impl);
         }
 
+        // Also merge GLOBAL_IMPL constants from source — imported entities may reference them.
+        // E.g., CordicRotate16's impl uses CORDIC_GAIN_INV_16 from cordic.sk's GLOBAL_IMPL.
+        for src_impl in &source.implementations {
+            if src_impl.entity == hir::EntityId::GLOBAL_IMPL {
+                for constant in &src_impl.constants {
+                    // Ensure target has a GLOBAL_IMPL block
+                    if !target
+                        .implementations
+                        .iter()
+                        .any(|i| i.entity == hir::EntityId::GLOBAL_IMPL)
+                    {
+                        target.implementations.push(hir::HirImplementation {
+                            entity: hir::EntityId::GLOBAL_IMPL,
+                            signals: Vec::new(),
+                            variables: Vec::new(),
+                            constants: Vec::new(),
+                            functions: Vec::new(),
+                            event_blocks: Vec::new(),
+                            assignments: Vec::new(),
+                            instances: Vec::new(),
+                            covergroups: Vec::new(),
+                            formal_blocks: Vec::new(),
+                            statements: Vec::new(),
+                        });
+                    }
+                    if let Some(global_impl) = target
+                        .implementations
+                        .iter_mut()
+                        .find(|i| i.entity == hir::EntityId::GLOBAL_IMPL)
+                    {
+                        if !global_impl.constants.iter().any(|c| c.name == constant.name) {
+                            global_impl.constants.push(constant.clone());
+                        }
+                    }
+                }
+            }
+        }
+
         return Ok(());
     }
 
