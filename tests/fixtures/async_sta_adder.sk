@@ -1,0 +1,10 @@
+
+async entity NclAdd8 {
+    in a: bit[8]
+    in b: bit[8]
+    out sum: bit[8]
+}
+
+impl NclAdd8 {
+    sum = a + b
+}

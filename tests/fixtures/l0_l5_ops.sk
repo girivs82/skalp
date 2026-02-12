@@ -1,0 +1,9 @@
+
+        async entity Add8 {
+            in a: bit[8]
+            in b: bit[8]
+            out result: bit[8]
+        }
+        impl Add8 {
+            result = a + b
+        }

@@ -5,20 +5,13 @@ use skalp_lir::gate_netlist::GateNetlist;
 use skalp_sim::GpuNclRuntime;
 use std::process::Command;
 
+fn fixture_path(name: &str) -> String {
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    format!("{}/tests/fixtures/{}", manifest_dir, name)
+}
+
 fn compile_wide_ncl() -> GateNetlist {
-    let sk_code = r#"
-async entity WideNcl {
-    in a: bit[256]
-    in b: bit[256]
-    out sum: bit[256]
-}
-
-impl WideNcl {
-    sum = a + b
-}
-"#;
-
-    std::fs::write("/tmp/test_wide_ncl.sk", sk_code).unwrap();
+    let source_path = fixture_path("wide_ncl.sk");
 
     // Use --no-synth-opt to preserve NCL gate structure for simulation
     let output = Command::new("./target/release/skalp")
@@ -26,7 +19,7 @@ impl WideNcl {
         .args([
             "build",
             "-s",
-            "/tmp/test_wide_ncl.sk",
+            &source_path,
             "-o",
             "/tmp/wide_ncl_out",
             "--target",

@@ -15,35 +15,10 @@ fn setup_stdlib_path() {
     );
 }
 
-const SOURCE: &str = r#"
-use skalp::numeric::partitionable_adder::*;
-
-pub entity TestPartitionableAdder {
-    in a: bit[28]
-    in b: bit[28]
-    in cin: bit[4]
-    in mode: bit[2]
-    out sum: bit[28]
-    out cout: bit[4]
+fn fixture_path(name: &str) -> String {
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    format!("{}/tests/fixtures/{}", manifest_dir, name)
 }
-
-impl TestPartitionableAdder {
-    signal sum_out: bit[28]
-    signal cout_out: bit[4]
-
-    let adder = PartitionableMantissaAdder {
-        a: a,
-        b: b,
-        cin: cin,
-        mode: mode as AdderMode,
-        sum: sum_out,
-        cout: cout_out
-    }
-
-    sum = sum_out
-    cout = cout_out
-}
-"#;
 
 /// Mode constants matching AdderMode enum
 const MODE_SINGLE: u64 = 0; // FP32×1
@@ -53,9 +28,8 @@ const MODE_QUAD: u64 = 2; // FP8×4
 #[tokio::test]
 async fn test_single_mode_basic() {
     setup_stdlib_path();
-    std::fs::write("/tmp/test_part_adder.sk", SOURCE).unwrap();
 
-    let mut tb = Testbench::with_top_module("/tmp/test_part_adder.sk", "TestPartitionableAdder")
+    let mut tb = Testbench::with_top_module(&fixture_path("partitionable_adder_test.sk"), "TestPartitionableAdder")
         .await
         .expect("Failed to create testbench");
 
@@ -116,9 +90,8 @@ async fn test_single_mode_basic() {
 #[tokio::test]
 async fn test_dual_mode_independent() {
     setup_stdlib_path();
-    std::fs::write("/tmp/test_part_adder.sk", SOURCE).unwrap();
 
-    let mut tb = Testbench::with_top_module("/tmp/test_part_adder.sk", "TestPartitionableAdder")
+    let mut tb = Testbench::with_top_module(&fixture_path("partitionable_adder_test.sk"), "TestPartitionableAdder")
         .await
         .expect("Failed to create testbench");
 
@@ -196,9 +169,8 @@ async fn test_dual_mode_independent() {
 #[tokio::test]
 async fn test_quad_mode_independent() {
     setup_stdlib_path();
-    std::fs::write("/tmp/test_part_adder.sk", SOURCE).unwrap();
 
-    let mut tb = Testbench::with_top_module("/tmp/test_part_adder.sk", "TestPartitionableAdder")
+    let mut tb = Testbench::with_top_module(&fixture_path("partitionable_adder_test.sk"), "TestPartitionableAdder")
         .await
         .expect("Failed to create testbench");
 
@@ -273,9 +245,8 @@ async fn test_quad_mode_independent() {
 #[tokio::test]
 async fn test_mode_switching() {
     setup_stdlib_path();
-    std::fs::write("/tmp/test_part_adder.sk", SOURCE).unwrap();
 
-    let mut tb = Testbench::with_top_module("/tmp/test_part_adder.sk", "TestPartitionableAdder")
+    let mut tb = Testbench::with_top_module(&fixture_path("partitionable_adder_test.sk"), "TestPartitionableAdder")
         .await
         .expect("Failed to create testbench");
 

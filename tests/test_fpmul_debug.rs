@@ -12,21 +12,22 @@ use skalp_mir::MirCompiler;
 use skalp_sim::ncl_sim::{NclSimConfig, NclSimulator};
 use std::io::Write;
 
-fn compile_to_gates(source: &str) -> GateNetlist {
-    std::env::set_var(
-        "SKALP_STDLIB_PATH",
-        "/Users/girivs/src/hw/hls/crates/skalp-stdlib",
-    );
+fn setup_stdlib_path() {
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let stdlib_path = format!("{}/crates/skalp-stdlib", manifest_dir);
+    std::env::set_var("SKALP_STDLIB_PATH", &stdlib_path);
+}
 
-    let thread_id = std::thread::current().id();
-    let temp_path_str = format!("/tmp/test_fpmul_debug_{:?}.sk", thread_id);
-    let temp_path = std::path::Path::new(&temp_path_str);
-    let mut file = std::fs::File::create(temp_path).expect("Failed to create temp file");
-    file.write_all(source.as_bytes())
-        .expect("Failed to write temp file");
-    drop(file);
+fn fixture_path(name: &str) -> String {
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    format!("{}/tests/fixtures/{}", manifest_dir, name)
+}
 
-    let context = parse_and_build_compilation_context(temp_path).expect("Failed to parse");
+fn compile_to_gates(fixture_name: &str) -> GateNetlist {
+    setup_stdlib_path();
+
+    let source_path = fixture_path(fixture_name);
+    let context = parse_and_build_compilation_context(std::path::Path::new(&source_path)).expect("Failed to parse");
     let mir_compiler = MirCompiler::new();
     let mir = mir_compiler
         .compile_to_mir_with_modules(&context.main_hir, &context.module_hirs)
@@ -48,23 +49,7 @@ fn compile_to_gates(source: &str) -> GateNetlist {
 
 #[test]
 fn test_fpmul_2x3() {
-    let source = r#"
-        use skalp::numeric::fp::*;
-
-        async entity TestMul {
-            in a: bit[32]
-            in b: bit[32]
-            out result: bit[32]
-        }
-        impl TestMul {
-            signal a_fp: fp32 = a as fp32
-            signal b_fp: fp32 = b as fp32
-            signal prod: fp32 = a_fp * b_fp
-            result = prod as bit[32]
-        }
-    "#;
-
-    let netlist = compile_to_gates(source);
+    let netlist = compile_to_gates("fpmul_debug.sk");
     eprintln!("Cells: {}", netlist.cells.len());
 
     let config = NclSimConfig {

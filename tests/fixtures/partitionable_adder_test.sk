@@ -1,0 +1,28 @@
+
+use skalp::numeric::partitionable_adder::*;
+
+pub entity TestPartitionableAdder {
+    in a: bit[28]
+    in b: bit[28]
+    in cin: bit[4]
+    in mode: bit[2]
+    out sum: bit[28]
+    out cout: bit[4]
+}
+
+impl TestPartitionableAdder {
+    signal sum_out: bit[28]
+    signal cout_out: bit[4]
+
+    let adder = PartitionableMantissaAdder {
+        a: a,
+        b: b,
+        cin: cin,
+        mode: mode as AdderMode,
+        sum: sum_out,
+        cout: cout_out
+    }
+
+    sum = sum_out
+    cout = cout_out
+}

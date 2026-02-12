@@ -1,0 +1,10 @@
+
+async entity WideNcl {
+    in a: bit[256]
+    in b: bit[256]
+    out sum: bit[256]
+}
+
+impl WideNcl {
+    sum = a + b
+}

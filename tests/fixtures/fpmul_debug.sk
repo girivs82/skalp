@@ -1,0 +1,14 @@
+
+        use skalp::numeric::fp::*;
+
+        async entity TestMul {
+            in a: bit[32]
+            in b: bit[32]
+            out result: bit[32]
+        }
+        impl TestMul {
+            signal a_fp: fp32 = a as fp32
+            signal b_fp: fp32 = b as fp32
+            signal prod: fp32 = a_fp * b_fp
+            result = prod as bit[32]
+        }

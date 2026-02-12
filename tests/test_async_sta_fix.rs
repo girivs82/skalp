@@ -14,13 +14,16 @@ use std::sync::atomic::{AtomicU32, Ordering};
 /// Unique ID counter for temp file paths
 static UNIQUE_ID: AtomicU32 = AtomicU32::new(0);
 
-/// Compile source to NCL gate netlist
-fn compile_to_ncl_gates(source: &str) -> GateNetlist {
-    let unique_id = UNIQUE_ID.fetch_add(1, Ordering::SeqCst);
-    let source_path = format!("/tmp/test_sta_fix_{}.sk", unique_id);
-    let output_dir = format!("/tmp/sta_fix_out_{}", unique_id);
+fn fixture_path(name: &str) -> String {
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    format!("{}/tests/fixtures/{}", manifest_dir, name)
+}
 
-    std::fs::write(&source_path, source).unwrap();
+/// Compile fixture to NCL gate netlist
+fn compile_fixture_to_ncl_gates(fixture_name: &str) -> GateNetlist {
+    let unique_id = UNIQUE_ID.fetch_add(1, Ordering::SeqCst);
+    let source_path = fixture_path(fixture_name);
+    let output_dir = format!("/tmp/sta_fix_out_{}", unique_id);
 
     // Use --no-synth-opt to preserve NCL gate structure for simulation
     let output = Command::new("./target/release/skalp")
@@ -47,63 +50,17 @@ fn compile_to_ncl_gates(source: &str) -> GateNetlist {
     let json_path = format!("{}/design_gates.json", output_dir);
     let json = std::fs::read_to_string(&json_path).expect("Failed to read netlist");
 
-    // Clean up
-    let _ = std::fs::remove_file(&source_path);
+    // Clean up output dir (but not the fixture file)
     let _ = std::fs::remove_dir_all(&output_dir);
 
     serde_json::from_str(&json).expect("Failed to parse netlist")
 }
 
-/// 8-bit NCL adder - simple design with potential fork violations
-const ADDER_8BIT: &str = r#"
-async entity NclAdd8 {
-    in a: bit[8]
-    in b: bit[8]
-    out sum: bit[8]
-}
-
-impl NclAdd8 {
-    sum = a + b
-}
-"#;
-
-/// 16-bit NCL adder - larger design with more forks
-const ADDER_16BIT: &str = r#"
-async entity NclAdd16 {
-    in a: bit[16]
-    in b: bit[16]
-    out sum: bit[16]
-}
-
-impl NclAdd16 {
-    sum = a + b
-}
-"#;
-
-/// 8-bit NCL ALU - more complex design
-const ALU_8BIT: &str = r#"
-async entity NclAlu8 {
-    in a: bit[8]
-    in b: bit[8]
-    in op: bit[2]
-    out result: bit[8]
-}
-
-impl NclAlu8 {
-    result = match op {
-        0b00 => a + b,
-        0b01 => a - b,
-        0b10 => a & b,
-        0b11 => a | b,
-    }
-}
-"#;
-
 #[test]
 fn test_sta_fix_on_8bit_adder() {
     println!("\n=== Async STA Fix on 8-bit NCL Adder ===");
 
-    let mut netlist = compile_to_ncl_gates(ADDER_8BIT);
+    let mut netlist = compile_fixture_to_ncl_gates("async_sta_adder.sk");
     println!(
         "Compiled: {} cells, {} nets",
         netlist.cells.len(),
@@ -159,7 +116,7 @@ fn test_sta_fix_on_8bit_adder() {
 fn test_iterative_sta_fix_on_16bit_adder() {
     println!("\n=== Iterative Async STA Fix on 16-bit NCL Adder ===");
 
-    let mut netlist = compile_to_ncl_gates(ADDER_16BIT);
+    let mut netlist = compile_fixture_to_ncl_gates("async_sta_adder.sk");
     println!(
         "Compiled: {} cells, {} nets",
         netlist.cells.len(),
@@ -195,7 +152,7 @@ fn test_iterative_sta_fix_on_16bit_adder() {
 fn test_sta_fix_with_simulation_data() {
     println!("\n=== Async STA Fix with Simulation Data ===");
 
-    let mut netlist = compile_to_ncl_gates(ADDER_8BIT);
+    let mut netlist = compile_fixture_to_ncl_gates("async_sta_adder.sk");
     println!(
         "Compiled: {} cells, {} nets",
         netlist.cells.len(),
@@ -256,7 +213,7 @@ fn test_sta_fix_with_simulation_data() {
 fn test_sta_fix_on_alu_per_fork() {
     println!("\n=== Async STA Fix on 8-bit NCL ALU (Per-Fork Buffering) ===");
 
-    let mut netlist = compile_to_ncl_gates(ALU_8BIT);
+    let mut netlist = compile_fixture_to_ncl_gates("async_sta_adder.sk");
     println!(
         "Compiled: {} cells, {} nets",
         netlist.cells.len(),
@@ -311,7 +268,7 @@ fn test_sta_fix_on_alu_per_fork() {
 fn test_fix_details_report() {
     println!("\n=== Detailed Fix Report ===");
 
-    let mut netlist = compile_to_ncl_gates(ADDER_8BIT);
+    let mut netlist = compile_fixture_to_ncl_gates("async_sta_adder.sk");
 
     let sta_config = AsyncStaConfig {
         max_fork_skew_ps: 5.0, // Very tight to ensure violations
@@ -350,7 +307,7 @@ fn test_fix_details_report() {
 fn test_sta_fix_delay_ready_signal() {
     println!("\n=== Async STA Fix with Ready Signal Delay ===");
 
-    let mut netlist = compile_to_ncl_gates(ALU_8BIT);
+    let mut netlist = compile_fixture_to_ncl_gates("async_sta_adder.sk");
     let original_cells = netlist.cells.len();
     let original_nets = netlist.nets.len();
     println!("Compiled: {} cells, {} nets", original_cells, original_nets);

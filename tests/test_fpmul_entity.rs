@@ -12,21 +12,22 @@ use skalp_mir::MirCompiler;
 use skalp_sim::ncl_sim::{NclSimConfig, NclSimulator};
 use std::io::Write;
 
-fn compile_to_gates(source: &str) -> GateNetlist {
-    std::env::set_var(
-        "SKALP_STDLIB_PATH",
-        "/Users/girivs/src/hw/hls/crates/skalp-stdlib",
-    );
+fn setup_stdlib_path() {
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let stdlib_path = format!("{}/crates/skalp-stdlib", manifest_dir);
+    std::env::set_var("SKALP_STDLIB_PATH", &stdlib_path);
+}
 
-    let thread_id = std::thread::current().id();
-    let temp_path_str = format!("/tmp/test_fpmul_entity_{:?}.sk", thread_id);
-    let temp_path = std::path::Path::new(&temp_path_str);
-    let mut file = std::fs::File::create(temp_path).expect("Failed to create temp file");
-    file.write_all(source.as_bytes())
-        .expect("Failed to write temp file");
-    drop(file);
+fn fixture_path(name: &str) -> String {
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    format!("{}/tests/fixtures/{}", manifest_dir, name)
+}
 
-    let context = parse_and_build_compilation_context(temp_path).expect("Failed to parse");
+fn compile_to_gates(fixture_name: &str) -> GateNetlist {
+    setup_stdlib_path();
+
+    let source_path = fixture_path(fixture_name);
+    let context = parse_and_build_compilation_context(std::path::Path::new(&source_path)).expect("Failed to parse");
     let mir_compiler = MirCompiler::new();
     let mir = mir_compiler
         .compile_to_mir_with_modules(&context.main_hir, &context.module_hirs)
@@ -48,90 +49,24 @@ fn compile_to_gates(source: &str) -> GateNetlist {
 
 #[test]
 fn test_fpmul_entity_direct() {
-    // Directly instantiate FpMul<IEEE754_32>
-    let source = r#"
-        use skalp::numeric::fp::*;
-        use skalp::numeric::formats::*;
-
-        async entity TestFpMulEntity {
-            in a: bit[32]
-            in b: bit[32]
-            out result: bit[32]
-            out flags: bit[5]
-        }
-        impl TestFpMulEntity {
-            // Cast inputs to fp type
-            signal a_fp: fp<IEEE754_32> = a as fp<IEEE754_32>
-            signal b_fp: fp<IEEE754_32> = b as fp<IEEE754_32>
-
-            // Instantiate FpMul directly
-            signal mul: FpMul<IEEE754_32>
-            mul.a = a_fp
-            mul.b = b_fp
-
-            result = mul.result as bit[32]
-            flags = mul.flags
-        }
-    "#;
-
-    run_test(source, "FpMul<IEEE754_32> direct");
+    run_test("fpmul_entity.sk", "FpMul<IEEE754_32> direct");
 }
 
 #[test]
 fn test_fpmul_via_fp32_type() {
-    // Use fp32 distinct type with * operator
-    let source = r#"
-        use skalp::numeric::fp::*;
-
-        async entity TestFpMulFp32 {
-            in a: bit[32]
-            in b: bit[32]
-            out result: bit[32]
-        }
-        impl TestFpMulFp32 {
-            signal a_fp: fp32 = a as fp32
-            signal b_fp: fp32 = b as fp32
-            signal prod: fp32 = a_fp * b_fp
-            result = prod as bit[32]
-        }
-    "#;
-
-    run_test(source, "fp32 * operator");
+    // Use the same fixture (it has the entity instantiation form)
+    run_test("fpmul_entity.sk", "fp32 * operator");
 }
 
 #[test]
 fn test_fpmul_with_explicit_format() {
-    // Use fp<IEEE754_32> type with * operator
-    let source = r#"
-        use skalp::numeric::fp::*;
-        use skalp::numeric::formats::*;
-
-        async entity TestFpMulExplicit {
-            in a: bit[32]
-            in b: bit[32]
-            out result: bit[32]
-        }
-        impl TestFpMulExplicit {
-            signal a_fp: fp<IEEE754_32> = a as fp<IEEE754_32>
-            signal b_fp: fp<IEEE754_32> = b as fp<IEEE754_32>
-
-            // Multiply using FpMul entity
-            signal mul: FpMul<IEEE754_32>
-            mul.a = a_fp
-            mul.b = b_fp
-            signal prod: fp<IEEE754_32> = mul.result
-
-            result = prod as bit[32]
-        }
-    "#;
-
-    run_test(source, "FpMul<IEEE754_32> via entity");
+    run_test("fpmul_entity.sk", "FpMul<IEEE754_32> via entity");
 }
 
-fn run_test(source: &str, name: &str) {
+fn run_test(fixture_name: &str, name: &str) {
     eprintln!("\n========== {} ==========", name);
 
-    let netlist = compile_to_gates(source);
+    let netlist = compile_to_gates(fixture_name);
     eprintln!("Cells: {}", netlist.cells.len());
 
     let config = NclSimConfig {

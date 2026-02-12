@@ -15,32 +15,7 @@ fn fixture_path(name: &str) -> String {
 async fn test_submodule_multiplication() {
     setup_stdlib_path();
 
-    // Create a test with a simple sub-module instantiation
-    let source = r#"
-pub entity Mult6x6 {
-    in a: bit[6]
-    in b: bit[6]
-    out product: bit[12]
-}
-
-impl Mult6x6 {
-    product = a * b
-}
-
-pub entity WrapperMult {
-    in x: bit[6]
-    in y: bit[6]
-    out z: bit[12]
-}
-
-impl WrapperMult {
-    let m = Mult6x6 { a: x, b: y, product: z }
-}
-"#;
-
-    std::fs::write("/tmp/submodule_mult_test.sk", source).unwrap();
-
-    let mut tb = Testbench::with_top_module("/tmp/submodule_mult_test.sk", "WrapperMult")
+    let mut tb = Testbench::with_top_module(&fixture_path("submodule_mult_test.sk"), "WrapperMult")
         .await
         .expect("Failed to create testbench");
 
@@ -63,36 +38,7 @@ impl WrapperMult {
 async fn test_multiple_multiplier_instances() {
     setup_stdlib_path();
 
-    // Create a test with multiple multiplier instances
-    let source = r#"
-pub entity Mult6x6 {
-    in a: bit[6]
-    in b: bit[6]
-    out product: bit[12]
-}
-
-impl Mult6x6 {
-    product = a * b
-}
-
-pub entity DualMult {
-    in a0: bit[6]
-    in b0: bit[6]
-    in a1: bit[6]
-    in b1: bit[6]
-    out p0: bit[12]
-    out p1: bit[12]
-}
-
-impl DualMult {
-    let m0 = Mult6x6 { a: a0, b: b0, product: p0 }
-    let m1 = Mult6x6 { a: a1, b: b1, product: p1 }
-}
-"#;
-
-    std::fs::write("/tmp/dual_mult_test.sk", source).unwrap();
-
-    let mut tb = Testbench::with_top_module("/tmp/dual_mult_test.sk", "DualMult")
+    let mut tb = Testbench::with_top_module(&fixture_path("dual_mult_test.sk"), "DualMult")
         .await
         .expect("Failed to create testbench");
 

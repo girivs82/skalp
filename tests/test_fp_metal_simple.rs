@@ -3,34 +3,22 @@
 
 use skalp_testing::Testbench;
 
-const SOURCE: &str = r#"
-use skalp::numeric::fp::*;
-
-entity FpMulTest {
-    in a: bit[32]
-    in b: bit[32]
-    out result: bit[32]
+fn setup_stdlib_path() {
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let stdlib_path = format!("{}/crates/skalp-stdlib", manifest_dir);
+    std::env::set_var("SKALP_STDLIB_PATH", &stdlib_path);
 }
 
-impl FpMulTest {
-    signal a_fp: fp32 = a as fp32
-    signal b_fp: fp32 = b as fp32
-    signal prod: fp32 = a_fp * b_fp
-    result = prod as bit[32]
+fn fixture_path(name: &str) -> String {
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    format!("{}/tests/fixtures/{}", manifest_dir, name)
 }
-"#;
 
 #[tokio::test]
 async fn test_fp_metal_mul() {
-    std::env::set_var(
-        "SKALP_STDLIB_PATH",
-        "/Users/girivs/src/hw/hls/crates/skalp-stdlib",
-    );
+    setup_stdlib_path();
 
-    // Write source to temp file
-    std::fs::write("/tmp/test_fp_metal.sk", SOURCE).unwrap();
-
-    let mut tb = Testbench::with_top_module("/tmp/test_fp_metal.sk", "FpMulTest")
+    let mut tb = Testbench::with_top_module(&fixture_path("fp_mul_test.sk"), "FpMulTest")
         .await
         .expect("Failed to create testbench");
 

@@ -12,21 +12,22 @@ use skalp_mir::MirCompiler;
 use skalp_sim::ncl_sim::{NclSimConfig, NclSimulator};
 use std::io::Write;
 
-fn compile_to_gates(source: &str) -> GateNetlist {
-    std::env::set_var(
-        "SKALP_STDLIB_PATH",
-        "/Users/girivs/src/hw/hls/crates/skalp-stdlib",
-    );
+fn setup_stdlib_path() {
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let stdlib_path = format!("{}/crates/skalp-stdlib", manifest_dir);
+    std::env::set_var("SKALP_STDLIB_PATH", &stdlib_path);
+}
 
-    let thread_id = std::thread::current().id();
-    let temp_path_str = format!("/tmp/test_fpmul_trace_{:?}.sk", thread_id);
-    let temp_path = std::path::Path::new(&temp_path_str);
-    let mut file = std::fs::File::create(temp_path).expect("Failed to create temp file");
-    file.write_all(source.as_bytes())
-        .expect("Failed to write temp file");
-    drop(file);
+fn fixture_path(name: &str) -> String {
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    format!("{}/tests/fixtures/{}", manifest_dir, name)
+}
 
-    let context = parse_and_build_compilation_context(temp_path).expect("Failed to parse");
+fn compile_to_gates(fixture_name: &str) -> GateNetlist {
+    setup_stdlib_path();
+
+    let source_path = fixture_path(fixture_name);
+    let context = parse_and_build_compilation_context(std::path::Path::new(&source_path)).expect("Failed to parse");
     let mir_compiler = MirCompiler::new();
     let mir = mir_compiler
         .compile_to_mir_with_modules(&context.main_hir, &context.module_hirs)
@@ -48,56 +49,7 @@ fn compile_to_gates(source: &str) -> GateNetlist {
 
 #[test]
 fn test_fpmul_trace_internals() {
-    // Expose internal signals for debugging
-    let source = r#"
-        use skalp::numeric::fp::*;
-
-        async entity TestMulTrace {
-            in a: bit[32]
-            in b: bit[32]
-            out result: bit[32]
-            out product_lo: bit[32]
-            out product_hi: bit[16]
-            out mant_debug: bit[26]
-            out mant_raw_out: bit[23]
-        }
-        impl TestMulTrace {
-            signal a_fp: fp32 = a as fp32
-            signal b_fp: fp32 = b as fp32
-
-            // Extract mantissa with implicit 1
-            signal a_mant: bit[23] = a[22:0]
-            signal b_mant: bit[23] = b[22:0]
-            signal a_frac: bit[24] = {1'b1, a_mant}
-            signal b_frac: bit[24] = {1'b1, b_mant}
-
-            // Multiply - should be 48 bits
-            signal product: bit[48] = a_frac * b_frac
-
-            // Check overflow (bit 47)
-            signal prod_overflow: bit = product[47]
-            signal product_norm: bit[48] = prod_overflow ? (product >> 1) : product
-
-            // Extract mantissa - skip implicit 1 at bit 46
-            // We want bits [45:20] for M+GUARD_BITS=26 bits
-            signal mant_with_guard: bit[26] = product_norm[45:20]
-
-            // Extract raw mantissa [25:3] from mant_with_guard
-            signal mant_raw: bit[23] = mant_with_guard[25:3]
-
-            // Now do the full FP mul
-            signal prod: fp32 = a_fp * b_fp
-
-            // Outputs
-            result = prod as bit[32]
-            product_lo = product[31:0]
-            product_hi = product[47:32]
-            mant_debug = mant_with_guard
-            mant_raw_out = mant_raw
-        }
-    "#;
-
-    let netlist = compile_to_gates(source);
+    let netlist = compile_to_gates("fpmul_trace.sk");
     eprintln!("Cells: {}", netlist.cells.len());
 
     let config = NclSimConfig {

@@ -1,0 +1,23 @@
+
+        use skalp::numeric::fp::*;
+        use skalp::numeric::formats::*;
+
+        async entity TestFpMulEntity {
+            in a: bit[32]
+            in b: bit[32]
+            out result: bit[32]
+            out flags: bit[5]
+        }
+        impl TestFpMulEntity {
+            // Cast inputs to fp type
+            signal a_fp: fp<IEEE754_32> = a as fp<IEEE754_32>
+            signal b_fp: fp<IEEE754_32> = b as fp<IEEE754_32>
+
+            // Instantiate FpMul directly
+            signal mul: FpMul<IEEE754_32>
+            mul.a = a_fp
+            mul.b = b_fp
+
+            result = mul.result as bit[32]
+            flags = mul.flags
+        }

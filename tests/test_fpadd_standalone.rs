@@ -9,48 +9,16 @@ fn setup_stdlib_path() {
     std::env::set_var("SKALP_STDLIB_PATH", &stdlib_path);
 }
 
-const FP32_SOURCE: &str = r#"
-use skalp::numeric::fp::*;
-
-pub entity FpAddTest32 {
-    in a: bit[32]
-    in b: bit[32]
-    out result: bit[32]
+fn fixture_path(name: &str) -> String {
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    format!("{}/tests/fixtures/{}", manifest_dir, name)
 }
-
-impl FpAddTest32 {
-    signal a_fp: fp32 = a as fp32
-    signal b_fp: fp32 = b as fp32
-    signal sum: fp32 = a_fp + b_fp
-    result = sum as bit[32]
-}
-"#;
-
-const FP16_SOURCE: &str = r#"
-use skalp::numeric::fp::*;
-
-pub entity FpAddTest16 {
-    in a: bit[16]
-    in b: bit[16]
-    out result: bit[16]
-}
-
-impl FpAddTest16 {
-    signal a_fp: fp16 = a as fp16
-    signal b_fp: fp16 = b as fp16
-    signal sum: fp16 = a_fp + b_fp
-    result = sum as bit[16]
-}
-"#;
 
 #[tokio::test]
 async fn test_fp32_add_standalone() {
     setup_stdlib_path();
 
-    let temp_file = std::env::temp_dir().join("test_fpadd32.sk");
-    std::fs::write(&temp_file, FP32_SOURCE).expect("write temp file");
-
-    let mut tb = Testbench::with_top_module(temp_file.to_str().unwrap(), "FpAddTest32")
+    let mut tb = Testbench::with_top_module(&fixture_path("fpadd_fp32.sk"), "FpAddTest32")
         .await
         .expect("Failed to create testbench");
 
@@ -84,10 +52,7 @@ async fn test_fp32_add_standalone() {
 async fn test_fp16_add_standalone() {
     setup_stdlib_path();
 
-    let temp_file = std::env::temp_dir().join("test_fpadd16.sk");
-    std::fs::write(&temp_file, FP16_SOURCE).expect("write temp file");
-
-    let mut tb = Testbench::with_top_module(temp_file.to_str().unwrap(), "FpAddTest16")
+    let mut tb = Testbench::with_top_module(&fixture_path("fpadd_fp16.sk"), "FpAddTest16")
         .await
         .expect("Failed to create testbench");
 

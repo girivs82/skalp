@@ -1,0 +1,20 @@
+
+pub entity Mult6x6 {
+    in a: bit[6]
+    in b: bit[6]
+    out product: bit[12]
+}
+
+impl Mult6x6 {
+    product = a * b
+}
+
+pub entity WrapperMult {
+    in x: bit[6]
+    in y: bit[6]
+    out z: bit[12]
+}
+
+impl WrapperMult {
+    let m = Mult6x6 { a: x, b: y, product: z }
+}

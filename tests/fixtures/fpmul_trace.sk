@@ -1,0 +1,46 @@
+
+        use skalp::numeric::fp::*;
+
+        async entity TestMulTrace {
+            in a: bit[32]
+            in b: bit[32]
+            out result: bit[32]
+            out product_lo: bit[32]
+            out product_hi: bit[16]
+            out mant_debug: bit[26]
+            out mant_raw_out: bit[23]
+        }
+        impl TestMulTrace {
+            signal a_fp: fp32 = a as fp32
+            signal b_fp: fp32 = b as fp32
+
+            // Extract mantissa with implicit 1
+            signal a_mant: bit[23] = a[22:0]
+            signal b_mant: bit[23] = b[22:0]
+            signal a_frac: bit[24] = {1'b1, a_mant}
+            signal b_frac: bit[24] = {1'b1, b_mant}
+
+            // Multiply - should be 48 bits
+            signal product: bit[48] = a_frac * b_frac
+
+            // Check overflow (bit 47)
+            signal prod_overflow: bit = product[47]
+            signal product_norm: bit[48] = prod_overflow ? (product >> 1) : product
+
+            // Extract mantissa - skip implicit 1 at bit 46
+            // We want bits [45:20] for M+GUARD_BITS=26 bits
+            signal mant_with_guard: bit[26] = product_norm[45:20]
+
+            // Extract raw mantissa [25:3] from mant_with_guard
+            signal mant_raw: bit[23] = mant_with_guard[25:3]
+
+            // Now do the full FP mul
+            signal prod: fp32 = a_fp * b_fp
+
+            // Outputs
+            result = prod as bit[32]
+            product_lo = product[31:0]
+            product_hi = product[47:32]
+            mant_debug = mant_with_guard
+            mant_raw_out = mant_raw
+        }

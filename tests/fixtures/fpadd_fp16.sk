@@ -1,0 +1,15 @@
+
+use skalp::numeric::fp::*;
+
+pub entity FpAddTest16 {
+    in a: bit[16]
+    in b: bit[16]
+    out result: bit[16]
+}
+
+impl FpAddTest16 {
+    signal a_fp: fp16 = a as fp16
+    signal b_fp: fp16 = b as fp16
+    signal sum: fp16 = a_fp + b_fp
+    result = sum as bit[16]
+}

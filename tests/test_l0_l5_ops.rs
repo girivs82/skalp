@@ -13,12 +13,15 @@ use skalp_mir::MirCompiler;
 use skalp_sim::{CircuitMode, HwAccel, SimLevel, UnifiedSimConfig, UnifiedSimulator};
 use std::io::Write;
 
+fn setup_stdlib_path() {
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let stdlib_path = format!("{}/crates/skalp-stdlib", manifest_dir);
+    std::env::set_var("SKALP_STDLIB_PATH", &stdlib_path);
+}
+
 /// Compile source code to gate netlist
 fn compile_to_gates(source: &str) -> GateNetlist {
-    std::env::set_var(
-        "SKALP_STDLIB_PATH",
-        "/Users/girivs/src/hw/hls/crates/skalp-stdlib",
-    );
+    setup_stdlib_path();
 
     // Write source to unique temp file (use thread ID + timestamp for uniqueness)
     let thread_id = std::thread::current().id();
