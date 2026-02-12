@@ -7466,7 +7466,6 @@ impl<'hir> HirToMir<'hir> {
                     );
 
                     if result.is_none() {
-                        eprintln!("[DEBUG #85] Inlining FAILED for '{}' - falling back to module synthesis!", call.function);
                         trace!(
                             "⚠️ [BUG #85 FIX] Call '{}' inlining FAILED - falling back to module synthesis!",
                             call.function
@@ -13336,6 +13335,42 @@ impl<'hir> HirToMir<'hir> {
         let mut mutable_var_names: std::collections::HashSet<String> =
             std::collections::HashSet::new();
 
+        // Identify entity output placeholder variables that must NOT be substituted.
+        // When a trait method body contains entity instantiation with placeholder signals:
+        //   signal result: fp32;  // Let(result, Literal(0))
+        //   let sqrt = FpSqrt { x: a, result: result, flags: flags };
+        //   result  // Return value references the placeholder
+        // We must NOT substitute Variable(result) → Literal(0), because `result` is an entity
+        // output port placeholder that will be wired to the entity's actual output during
+        // convert_statement processing.
+        let mut entity_output_var_names: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
+        for (_name, value, _is_mutable) in &collected_lets {
+            if let hir::HirExpression::StructLiteral(struct_lit) = value {
+                if self.is_entity_or_alias(&struct_lit.type_name) {
+                    for field in &struct_lit.fields {
+                        // Extract variable names referenced in entity output port fields
+                        let maybe_var_id = match &field.value {
+                            hir::HirExpression::Variable(var_id) => Some(*var_id),
+                            hir::HirExpression::Cast(cast_expr) => {
+                                if let hir::HirExpression::Variable(var_id) = &*cast_expr.expr {
+                                    Some(*var_id)
+                                } else {
+                                    None
+                                }
+                            }
+                            _ => None,
+                        };
+                        if let Some(var_id) = maybe_var_id {
+                            if let Some(var_name) = var_id_to_name.get(&var_id) {
+                                entity_output_var_names.insert(var_name.clone());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         // Now process them in order, substituting as we go
         for (name, value, is_mutable) in collected_lets {
             if is_mutable {
@@ -13353,10 +13388,15 @@ impl<'hir> HirToMir<'hir> {
                 // BUG #137 FIX: Only add IMMUTABLE variables to let_bindings.
                 // Mutable variables should NOT be substituted - we need to preserve the Variable references
                 // so that the mutable var pattern handler can see them and convert to SSA form.
-                if !is_mutable {
-                    let_bindings.insert(name, rhs);
+                // Also skip entity output placeholder variables to preserve their Variable references.
+                if is_mutable || entity_output_var_names.contains(&name) {
+                    if is_mutable {
+                        trace!("[BUG #137 FIX] NOT adding mutable var '{}' to let_bindings - preserving Variable reference", name);
+                    } else {
+                        trace!("[ENTITY_PLACEHOLDER] NOT adding entity output placeholder '{}' to let_bindings", name);
+                    }
                 } else {
-                    trace!("[BUG #137 FIX] NOT adding mutable var '{}' to let_bindings - preserving Variable reference", name);
+                    let_bindings.insert(name, rhs);
                 }
             }
         }
@@ -13374,13 +13414,74 @@ impl<'hir> HirToMir<'hir> {
             std::mem::discriminant(&body_expr)
         );
 
-        // Substitute both parameters and let bindings in the result expression
-        let substituted_expr = self.substitute_hir_expr_recursively(
-            &body_expr,
-            &substitution_map,
-            &let_bindings,
-            &var_id_to_name,
-        )?;
+        // When entity output placeholders are present, we CANNOT do full let-binding
+        // substitution because substitute_hir_expr_recursively's Block handler creates
+        // its own nested_lets from intra-block Let statements, which would replace
+        // Variable(result) → Literal(0) (the signal initial value), destroying the
+        // entity output reference. Instead, we only apply parameter substitution to
+        // each part of the Block individually, preserving entity output Variable refs.
+        // The Block handler in convert_hir_expr_for_module_impl has the BUG #212 FIX
+        // which correctly processes entity StructLiterals and wires entity output
+        // signals to the result expression Variables.
+        let substituted_expr = if !entity_output_var_names.is_empty() {
+            trace!(
+                "[ENTITY_PLACEHOLDER] Applying parameter-only substitution due to entity output placeholders: {:?}",
+                entity_output_var_names
+            );
+            // Apply parameter substitution to each statement and result_expr individually,
+            // without let-binding resolution (so entity output Variables survive)
+            let empty_lets = IndexMap::new();
+            if let hir::HirExpression::Block { statements, result_expr } = &body_expr {
+                let mut substituted_stmts = Vec::new();
+                for stmt in statements {
+                    match stmt {
+                        hir::HirStatement::Let(let_stmt) => {
+                            let rhs_sub = self.substitute_hir_expr_recursively(
+                                &let_stmt.value,
+                                &substitution_map,
+                                &empty_lets,
+                                &var_id_to_name,
+                            ).unwrap_or_else(|| let_stmt.value.clone());
+                            substituted_stmts.push(hir::HirStatement::Let(hir::HirLetStatement {
+                                id: let_stmt.id,
+                                name: let_stmt.name.clone(),
+                                value: rhs_sub,
+                                var_type: let_stmt.var_type.clone(),
+                                mutable: let_stmt.mutable,
+                            }));
+                        }
+                        other => substituted_stmts.push(other.clone()),
+                    }
+                }
+                // result_expr: only substitute parameters, NOT let bindings
+                let result_sub = self.substitute_hir_expr_recursively(
+                    result_expr,
+                    &substitution_map,
+                    &empty_lets,
+                    &var_id_to_name,
+                ).unwrap_or_else(|| (**result_expr).clone());
+                hir::HirExpression::Block {
+                    statements: substituted_stmts,
+                    result_expr: Box::new(result_sub),
+                }
+            } else {
+                // Non-Block with entity placeholders — shouldn't happen, fall back
+                self.substitute_hir_expr_recursively(
+                    &body_expr,
+                    &substitution_map,
+                    &let_bindings,
+                    &var_id_to_name,
+                )?
+            }
+        } else {
+            // Substitute both parameters and let bindings in the result expression
+            self.substitute_hir_expr_recursively(
+                &body_expr,
+                &substitution_map,
+                &let_bindings,
+                &var_id_to_name,
+            )?
+        };
 
         trace!(
             "[BUG #74 INLINE_WITH_LETS] Final expression after substitution: {:?}",
@@ -20378,14 +20479,6 @@ impl<'hir> HirToMir<'hir> {
                 // BUG FIX #91: If not a module synthesis case, INLINE within module context
                 // Previously we fell back to convert_expression which lost the module context.
                 // Now we inline the function body and convert it within the module context.
-                {
-                    use std::io::Write;
-                    let _ = writeln!(
-                        std::io::stderr(),
-                        "[DEBUG CALL] Trying to inline '{}' within module context",
-                        call.function
-                    );
-                }
                 trace!(
                     "    🔄🔄🔄 BUG91_INLINE: Inlining '{}' within module context 🔄🔄🔄",
                     call.function
@@ -20405,36 +20498,16 @@ impl<'hir> HirToMir<'hir> {
                 // This produces a fully-expanded HIR expression with NO Variable references,
                 // which can then be safely converted within the module context.
                 if let Some(inlined_hir) = self.inline_function_call_to_hir_with_lets(call) {
-                    {
-                        use std::io::Write;
-                        let _ = writeln!(
-                            std::io::stderr(),
-                            "[DEBUG CALL] ✓ inline_function_call_to_hir_with_lets SUCCESS for '{}'",
-                            call.function
-                        );
-                    }
                     trace!("    🔄🔄🔄 BUG118_INLINE: inline_function_call_to_hir_with_lets SUCCESS for '{}', type: {:?}",
                              call.function, std::mem::discriminant(&inlined_hir));
 
                     // Convert the fully-inlined HIR expression within module context
                     return self.convert_hir_expr_for_module(&inlined_hir, ctx, depth + 1);
                 } else {
-                    {
-                        use std::io::Write;
-                        let _ = writeln!(std::io::stderr(), "[DEBUG CALL] ❌ inline_function_call_to_hir_with_lets FAILED for '{}'!", call.function);
-                    }
                     trace!("    🔄🔄🔄 BUG118_INLINE: inline_function_call_to_hir_with_lets FAILED for '{}'!", call.function);
                 }
 
                 // Last resort fallback if inlining fails
-                {
-                    use std::io::Write;
-                    let _ = writeln!(
-                        std::io::stderr(),
-                        "[DEBUG CALL] Falling back to convert_expression for '{}'",
-                        call.function
-                    );
-                }
                 trace!(
                     "    ⚠️ BUG91_INLINE: Falling back to regular convert_expression for '{}'",
                     call.function
@@ -20779,6 +20852,36 @@ impl<'hir> HirToMir<'hir> {
                                 self.current_module_param_to_port = saved_param_to_port;
                                 self.current_module_var_to_signal = saved_var_to_signal;
 
+                                // After entity instantiation, update var_id_to_mir with entity output signals.
+                                // Signal declarations (e.g., `signal result: fp32`) are initially Literal(0),
+                                // but after entity instantiation they become entity output wires.
+                                // Without this update, result_expr Variable references resolve to Literal(0).
+                                let prefix = self.match_arm_prefix.clone().unwrap_or_default();
+                                for field in &struct_lit.fields {
+                                    let maybe_var_id = match &field.value {
+                                        hir::HirExpression::Variable(var_id) => Some(*var_id),
+                                        hir::HirExpression::Cast(cast_expr) => {
+                                            if let hir::HirExpression::Variable(var_id) = &*cast_expr.expr {
+                                                Some(*var_id)
+                                            } else {
+                                                None
+                                            }
+                                        }
+                                        _ => None,
+                                    };
+                                    if let Some(var_id) = maybe_var_id {
+                                        let key = (prefix.clone(), var_id);
+                                        if let Some((signal_id, signal_type)) =
+                                            self.placeholder_signal_to_entity_output.get(&key)
+                                        {
+                                            var_id_to_mir.insert(var_id, Expression::new(
+                                                ExpressionKind::Ref(LValue::Signal(*signal_id)),
+                                                signal_type.clone(),
+                                            ));
+                                        }
+                                    }
+                                }
+
                                 // Skip normal processing - convert_statement handled it
                                 let_substitutions
                                     .insert(let_stmt.name.clone(), substituted_value.clone());
@@ -21013,6 +21116,78 @@ impl<'hir> HirToMir<'hir> {
                     };
 
                     Some(result)
+                }
+            }
+
+            // Entity StructLiteral returned from trait method inlining
+            // (e.g., fp_sqrt inlines to Call("sqrt") -> trait resolution returns StructLiteral("FpSqrt", {x: disc}))
+            // Must be handled here with module context to ensure entity port connections resolve correctly.
+            hir::HirExpression::StructLiteral(struct_lit) => {
+                let is_entity = self.is_entity_or_alias(&struct_lit.type_name);
+                if is_entity {
+                    // Same pattern as BUG #212 FIX: set up module context maps before convert_statement
+                    let saved_param_to_port = self.current_module_param_to_port.take();
+                    let saved_var_to_signal = self.current_module_var_to_signal.take();
+                    self.current_module_param_to_port = Some(ctx.param_to_port.clone());
+                    self.current_module_var_to_signal = Some(ctx.var_to_signal.clone());
+
+                    // Create a unique HIR VariableId for the synthetic let statement
+                    let temp_var_raw = self.next_variable_id;
+                    self.next_variable_id += 1;
+                    let temp_var_id = hir::VariableId(temp_var_raw);
+
+                    trace!(
+                        "[MODULE_EXPR] Entity StructLiteral '{}': creating synthetic let with temp_var_id={:?}",
+                        struct_lit.type_name,
+                        temp_var_id
+                    );
+
+                    // Create a synthetic let statement to trigger entity instantiation
+                    let temp_let = hir::HirLetStatement {
+                        id: temp_var_id,
+                        name: format!("__entity_inline_tmp_{}", temp_var_raw),
+                        value: expr.clone(),
+                        var_type: hir::HirType::Custom(struct_lit.type_name.clone()),
+                        mutable: false,
+                    };
+                    let _ = self.convert_statement(&hir::HirStatement::Let(temp_let));
+
+                    // Restore module context
+                    self.current_module_param_to_port = saved_param_to_port;
+                    self.current_module_var_to_signal = saved_var_to_signal;
+
+                    // Retrieve entity output from placeholder mapping
+                    let prefix = self.match_arm_prefix.clone().unwrap_or_default();
+                    let key = (prefix, temp_var_id);
+                    if let Some((output_signal_id, signal_type)) =
+                        self.placeholder_signal_to_entity_output.get(&key)
+                    {
+                        Some(Expression::new(
+                            ExpressionKind::Ref(LValue::Signal(*output_signal_id)),
+                            signal_type.clone(),
+                        ))
+                    } else if let Some(output_ports) =
+                        self.entity_instance_outputs.get(&temp_var_id)
+                    {
+                        // For single-output entities like FpSqrt, get "result" port
+                        if let Some(&signal_id) = output_ports.get("result") {
+                            Some(Expression::with_unknown_type(
+                                ExpressionKind::Ref(LValue::Signal(signal_id)),
+                            ))
+                        } else if output_ports.len() == 1 {
+                            let &signal_id = output_ports.values().next().unwrap();
+                            Some(Expression::with_unknown_type(
+                                ExpressionKind::Ref(LValue::Signal(signal_id)),
+                            ))
+                        } else {
+                            self.convert_expression(expr, depth)
+                        }
+                    } else {
+                        self.convert_expression(expr, depth)
+                    }
+                } else {
+                    // Regular struct literal - fall back to main converter
+                    self.convert_expression(expr, depth)
                 }
             }
 
