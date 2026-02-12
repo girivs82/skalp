@@ -343,4 +343,176 @@ mod generate_block_tests {
 
         println!("generate with arithmetic test passed!");
     }
+
+    #[test]
+    fn test_generate_for_with_compile_time_if() {
+        // Test compile-time if inside generate-for in impl block
+        // The if condition depends on the iterator and is evaluated at elaboration time
+        let source = r#"
+        entity CompTimeIf {
+            in a: bit[8]
+            out b: bit[8]
+        }
+
+        impl CompTimeIf {
+            signal x: bit[8][4]
+            x[0] = a
+            generate for i in 0..3 {
+                if i == 1 {
+                    x[i + 1] = x[i] + 1 as bit[8]
+                } else {
+                    x[i + 1] = x[i]
+                }
+            }
+            b = x[3]
+        }
+        "#;
+
+        let hir = parse_and_build_hir(source)
+            .expect("Failed to parse generate-for with compile-time if");
+
+        let implementation = &hir.implementations[0];
+        // x[0]=a (1) + 3 from if branches (i=0,1,2) + b=x[3] (1) = 5 assignments
+        assert_eq!(
+            implementation.assignments.len(),
+            5,
+            "Expected 5 assignments: x[0]=a + 3 from if branches + b=x[3]"
+        );
+
+        let compiler = MirCompiler::new().with_optimization_level(OptimizationLevel::None);
+        let _mir = compiler
+            .compile_to_mir(&hir)
+            .expect("Failed to compile to MIR");
+
+        println!("generate-for with compile-time if test passed!");
+    }
+
+    #[test]
+    fn test_generate_for_with_compile_time_if_no_else() {
+        // Test compile-time if without else branch — only taken iterations produce statements
+        let source = r#"
+        entity CompTimeIfNoElse {
+            in a: bit[8]
+            out b: bit[8]
+        }
+
+        impl CompTimeIfNoElse {
+            signal x: bit[8][4]
+            x[0] = a
+            x[1] = a
+            x[2] = a
+            x[3] = a
+            generate for i in 0..4 {
+                if i == 2 {
+                    x[i] = a + 1 as bit[8]
+                }
+            }
+            b = x[3]
+        }
+        "#;
+
+        let hir = parse_and_build_hir(source)
+            .expect("Failed to parse generate-for with compile-time if (no else)");
+
+        let implementation = &hir.implementations[0];
+        // x[0..3]=a (4) + 1 from if branch (only i=2) + b=x[3] (1) = 6 assignments
+        assert_eq!(
+            implementation.assignments.len(),
+            6,
+            "Expected 6 assignments: 4 defaults + 1 conditional (i==2) + b=x[3]"
+        );
+
+        let compiler = MirCompiler::new().with_optimization_level(OptimizationLevel::None);
+        let _mir = compiler
+            .compile_to_mir(&hir)
+            .expect("Failed to compile to MIR");
+
+        println!("generate-for with compile-time if (no else) test passed!");
+    }
+
+    #[test]
+    fn test_generate_for_with_compile_time_else_if() {
+        // Test compile-time if/else-if/else chain inside generate-for
+        let source = r#"
+        entity CompTimeElseIf {
+            in a: bit[8]
+            out b: bit[8]
+        }
+
+        impl CompTimeElseIf {
+            signal x: bit[8][5]
+            x[0] = a
+            generate for i in 0..4 {
+                if i == 0 {
+                    x[i + 1] = x[i] + 1 as bit[8]
+                } else if i == 2 {
+                    x[i + 1] = x[i] + 2 as bit[8]
+                } else {
+                    x[i + 1] = x[i]
+                }
+            }
+            b = x[4]
+        }
+        "#;
+
+        let hir = parse_and_build_hir(source)
+            .expect("Failed to parse generate-for with compile-time else-if");
+
+        let implementation = &hir.implementations[0];
+        // x[0]=a (1) + 4 from if/else-if/else (one per iteration) + b=x[4] (1) = 6
+        assert_eq!(
+            implementation.assignments.len(),
+            6,
+            "Expected 6 assignments: x[0]=a + 4 from if chain + b=x[4]"
+        );
+
+        let compiler = MirCompiler::new().with_optimization_level(OptimizationLevel::None);
+        let _mir = compiler
+            .compile_to_mir(&hir)
+            .expect("Failed to compile to MIR");
+
+        println!("generate-for with compile-time else-if test passed!");
+    }
+
+    #[test]
+    fn test_generate_for_with_modulo_condition() {
+        // Test compile-time if with modulo — e.g., repeat every Nth iteration
+        let source = r#"
+        entity ModuloCondition {
+            in a: bit[8]
+            out b: bit[8]
+        }
+
+        impl ModuloCondition {
+            signal x: bit[8][5]
+            x[0] = a
+            generate for i in 0..4 {
+                if i % 2 == 0 {
+                    x[i + 1] = x[i] + 1 as bit[8]
+                } else {
+                    x[i + 1] = x[i]
+                }
+            }
+            b = x[4]
+        }
+        "#;
+
+        let hir = parse_and_build_hir(source)
+            .expect("Failed to parse generate-for with modulo condition");
+
+        let implementation = &hir.implementations[0];
+        // x[0]=a (1) + 4 from generate-for + b=x[4] (1) = 6
+        assert_eq!(
+            implementation.assignments.len(),
+            6,
+            "Expected 6 assignments"
+        );
+
+        let compiler = MirCompiler::new().with_optimization_level(OptimizationLevel::None);
+        let _mir = compiler
+            .compile_to_mir(&hir)
+            .expect("Failed to compile to MIR");
+
+        println!("generate-for with modulo condition test passed!");
+    }
 }
