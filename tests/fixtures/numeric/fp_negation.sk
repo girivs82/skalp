@@ -1,0 +1,10 @@
+// Test fixture for fp32 negation
+
+entity FpNegation {
+    in x: fp32
+    out neg: fp32
+}
+
+impl FpNegation {
+    neg = -x
+}
