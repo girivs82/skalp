@@ -2812,10 +2812,6 @@ impl<'a> MirToSirConverter<'a> {
                 }
                 Statement::If(nested_if) => {
                     // Handle nested if/else-if chains
-                    println!(
-                        "         🔁 NESTED IF found in branch for target={}",
-                        target
-                    );
                     // BUG #222 FIX: Pass current_default to use as the "keep" value
                     let nested_result = self.synthesize_conditional_assignment_with_default(
                         nested_if,
@@ -2836,23 +2832,16 @@ impl<'a> MirToSirConverter<'a> {
                 Statement::Block(block) => {
                     // CRITICAL FIX: Recurse into nested blocks (same bug as Bug #19)
                     // Expanded array assignments are wrapped in Block statements
-                    println!(
-                        "         📦 BLOCK found in branch for target={}, recursing...",
-                        target
-                    );
                     if let Some(result) =
                         self.process_branch_with_dependencies(&block.statements, target)
                     {
                         // BUG #222 FIX: Don't return early - update current_default instead
                         current_default = Some(result);
+                        has_direct_assignment = true; // Block contains real assignment to target
                     }
                 }
                 Statement::Case(case_stmt) => {
                     // BUG #117r FIX: Handle case/match statements in sequential branches
-                    println!(
-                        "         📋 CASE found in branch for target={}, synthesizing...",
-                        target
-                    );
                     // BUG #222 FIX: Pass current_default to case synthesis
                     if let Some(result) = self.synthesize_case_for_target_with_default(
                         case_stmt,
