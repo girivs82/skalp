@@ -1590,18 +1590,22 @@ impl HirBuilderContext {
         }
 
         // Also scan signal initial values for output field accesses
+        // Can't push to signals while iterating, so collect separately then append
+        let mut init_signals = Vec::new();
         for signal in signals.iter() {
             if let Some(ref init) = signal.initial_value {
                 self.collect_output_field_accesses(
                     init,
                     entity_signal_map,
                     &mut output_replacements,
-                    // Can't push to signals while iterating — we'll collect separately
-                    &mut Vec::new(),
+                    &mut init_signals,
                     &mut connections_map,
                 );
             }
         }
+        // Prepend init_signals so they're registered in MIR signal_map before
+        // any signals whose initial_value references them (ordering matters).
+        signals.splice(0..0, init_signals);
 
         // Now rewrite remaining assignment RHS expressions
         for (idx, assignment) in assignments.iter_mut().enumerate() {
