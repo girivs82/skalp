@@ -233,7 +233,6 @@ async fn test_function_with_match_expr() {
 /// Phase 5 Tests: Edge Cases and Limitations
 
 #[tokio::test]
-#[ignore = "Bug: Recursive functions cause stack overflow instead of proper error detection"]
 #[should_panic(expected = "Recursive function calls are not supported")]
 async fn test_recursive_function_errors() {
     // fn factorial(n) { if n == 0 { return 1 } else { return n * factorial(n-1) } }

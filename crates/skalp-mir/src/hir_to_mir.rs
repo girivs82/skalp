@@ -38,6 +38,11 @@ const MAX_EXPRESSION_RECURSION_DEPTH: usize = 32768;
 /// - Complex functions (quadratic_solve, etc.) become modules for correctness and scalability
 const MAX_INLINE_CALL_COUNT: usize = 5;
 
+/// Maximum function inlining depth before aborting with a recursion error.
+/// This catches direct and indirect recursion (e.g., f() calls g() calls f()).
+/// Kept low because each inlining level expands the full function body.
+const MAX_FUNCTION_INLINING_DEPTH: usize = 64;
+
 /// Information about a flattened port or signal field
 #[derive(Debug, Clone)]
 struct FlattenedField {
@@ -13172,6 +13177,15 @@ impl<'hir> HirToMir<'hir> {
 
         // The params and body are now available from either source
 
+        // Guard against recursive function calls (direct or indirect recursion)
+        if self.inlining_context_stack.len() > MAX_FUNCTION_INLINING_DEPTH {
+            panic!(
+                "Recursive function calls are not supported (function '{}', inlining depth {})",
+                call.function,
+                self.inlining_context_stack.len()
+            );
+        }
+
         // Build a map from VariableId to variable name by walking through the function body
         // BUG FIX #123: Use actual VariableIds from HIR, not sequential assumptions!
         // The HIR builder assigns VariableIds which may not be sequential per function.
@@ -15267,13 +15281,11 @@ impl<'hir> HirToMir<'hir> {
         let mut saved_placeholder_hir_signal_map =
             std::mem::take(&mut self.placeholder_hir_signal_to_entity_output);
 
-        // Guard against excessive function inlining depth (indirect recursion)
-        if self.inlining_context_stack.len() > MAX_EXPRESSION_RECURSION_DEPTH {
+        // Guard against recursive function calls (direct or indirect recursion)
+        if self.inlining_context_stack.len() > MAX_FUNCTION_INLINING_DEPTH {
             panic!(
-                "[HIR_TO_MIR] Function inlining depth exceeded {} - likely indirect recursion in function calls (function '{}', inlining context {}, call chain depth: {})",
-                MAX_EXPRESSION_RECURSION_DEPTH,
+                "Recursive function calls are not supported (function '{}', inlining depth {})",
                 call.function,
-                inlining_context_id,
                 self.inlining_context_stack.len()
             );
         }
