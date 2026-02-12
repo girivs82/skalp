@@ -246,7 +246,6 @@ async fn test_timer_reset_on_state_change() {
 
 /// Debug test to understand gate-level netlist structure
 #[tokio::test]
-#[ignore = "Debug test for gate-level investigation"]
 async fn test_debug_gate_level_structure() {
     use skalp_frontend::parse_and_build_hir_from_file;
     use skalp_lir::{get_stdlib_library, lower_mir_hierarchical_with_top, map_hierarchical_to_gates};

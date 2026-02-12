@@ -95,7 +95,6 @@ async fn test_intent_conditional() {
 // ============================================================================
 
 /// Test FP32 basic arithmetic operations
-#[ignore = "Bug #188: FpAdd_fp32 missing signal assignments (clz, reduction ops, multi-line ternary codegen)"]
 #[tokio::test]
 async fn test_fp32_arithmetic() {
     let mut tb = Testbench::new("tests/fixtures/numeric/fp_arithmetic.sk")
