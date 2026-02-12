@@ -6232,9 +6232,14 @@ impl<'hir> HirToMir<'hir> {
 
                         // Index - process iteratively
                         hir::HirExpression::Index(base, index) => {
-                            work_stack.push(ExprWork::BuildIndex);
-                            work_stack.push(ExprWork::Convert(index));
-                            work_stack.push(ExprWork::Convert(base));
+                            // Check flattened array element access before iterative path
+                            if let Some(expr) = self.try_resolve_flattened_array_index(base, index) {
+                                result_stack.push(Some(expr));
+                            } else {
+                                work_stack.push(ExprWork::BuildIndex);
+                                work_stack.push(ExprWork::Convert(index));
+                                work_stack.push(ExprWork::Convert(base));
+                            }
                         }
 
                         // Range - process iteratively
@@ -6826,6 +6831,55 @@ impl<'hir> HirToMir<'hir> {
                     // If no constant evaluated successfully, try recursive conversion on the first one
                     if let Some((constant, _)) = matching_constants.first() {
                         return self.convert_expression(&constant.value, depth + 1);
+                    }
+
+                    // Third pass: search module HIRs for constants not in main HIR
+                    // This handles module-level constants (e.g., CORDIC_GAIN_INV_16 from cordic.sk)
+                    // that weren't explicitly imported into the main HIR.
+                    // Only search module HIRs for constants belonging to GLOBAL_IMPL entities
+                    // to avoid picking up constants from unrelated entity impl blocks.
+                    let mut module_const_result: Option<Result<ConstValue, hir::HirExpression>> = None;
+                    for (_path, module_hir) in &self.module_hirs {
+                        let mut module_eval = ConstEvaluator::new();
+                        for implementation in &module_hir.implementations {
+                            if implementation.entity == hir::EntityId(u32::MAX) {
+                                module_eval.register_constants(&implementation.constants);
+                            }
+                        }
+                        for implementation in &module_hir.implementations {
+                            if implementation.entity != hir::EntityId(u32::MAX) {
+                                continue;
+                            }
+                            for constant in &implementation.constants {
+                                if constant.id == *id {
+                                    match module_eval.eval(&constant.value) {
+                                        Ok(const_value) => {
+                                            module_const_result = Some(Ok(const_value));
+                                        }
+                                        Err(_) => {
+                                            module_const_result = Some(Err(constant.value.clone()));
+                                        }
+                                    }
+                                    break;
+                                }
+                            }
+                            if module_const_result.is_some() {
+                                break;
+                            }
+                        }
+                        if module_const_result.is_some() {
+                            break;
+                        }
+                    }
+                    if let Some(result) = module_const_result {
+                        match result {
+                            Ok(const_value) => {
+                                return Some(self.const_value_to_mir_expression(&const_value));
+                            }
+                            Err(expr) => {
+                                return self.convert_expression(&expr, depth + 1);
+                            }
+                        }
                     }
 
                     // BUG FIX: Constant ID not found after module merging
@@ -7657,60 +7711,7 @@ impl<'hir> HirToMir<'hir> {
             hir::HirExpression::Index(base, index) => {
                 // BUG #27 FIX: Check if this is a constant index into a flattened array
                 // If so, directly reference the flattened signal instead of creating BitSelect
-                let mut try_const_array_index = || -> Option<Expression> {
-                    // Check if base is a flattened signal or port
-                    let (base_hir_id, is_signal) = match base.as_ref() {
-                        hir::HirExpression::Signal(id) => {
-                            if self.flattened_signals.contains_key(id) {
-                                (id.0, true)
-                            } else {
-                                return None;
-                            }
-                        }
-                        hir::HirExpression::Port(id) => {
-                            // BUG #237 FIX: Only use flattened_ports if port belongs to current entity
-                            if self.flattened_ports.contains_key(id) && self.port_belongs_to_current_entity(id) {
-                                (id.0, false)
-                            } else {
-                                return None;
-                            }
-                        }
-                        _ => return None,
-                    };
-
-                    // Try to evaluate index as constant
-                    let index_val = self.try_eval_const_expr(index)?;
-
-                    // Get flattened fields (ownership already verified above)
-                    let fields = if is_signal {
-                        self.flattened_signals.get(&hir::SignalId(base_hir_id))?
-                    } else {
-                        self.flattened_ports.get(&hir::PortId(base_hir_id))?
-                    };
-
-                    // Find the field with matching index
-                    let index_str = index_val.to_string();
-                    for field in fields {
-                        if field.field_path.first() == Some(&index_str)
-                            && field.field_path.len() == 1
-                        {
-                            // Found it! Return direct signal/port reference
-                            return if is_signal {
-                                Some(Expression::with_unknown_type(ExpressionKind::Ref(
-                                    LValue::Signal(SignalId(field.id)),
-                                )))
-                            } else {
-                                Some(Expression::with_unknown_type(ExpressionKind::Ref(
-                                    LValue::Port(PortId(field.id)),
-                                )))
-                            };
-                        }
-                    }
-                    None
-                };
-
-                // Try constant array index optimization
-                if let Some(expr) = try_const_array_index() {
+                if let Some(expr) = self.try_resolve_flattened_array_index(base, index) {
                     return Some(expr);
                 }
 
@@ -22669,6 +22670,56 @@ impl<'hir> HirToMir<'hir> {
 
         println!("[REMAP_OK] Remapped '{}': {:?} → {:?}", foreign_port.name, foreign_port_id, mir_port_id);
         Some(LValue::Port(*mir_port_id))
+    }
+
+    /// Resolve constant index into flattened signal/port array.
+    /// Returns direct reference to the element signal (e.g., x[2] → Signal(x_2_mir_id))
+    fn try_resolve_flattened_array_index(
+        &mut self,
+        base: &hir::HirExpression,
+        index: &hir::HirExpression,
+    ) -> Option<Expression> {
+        let (base_hir_id, is_signal) = match base {
+            hir::HirExpression::Signal(id) => {
+                if self.flattened_signals.contains_key(id) {
+                    (id.0, true)
+                } else {
+                    return None;
+                }
+            }
+            hir::HirExpression::Port(id) => {
+                if self.flattened_ports.contains_key(id) && self.port_belongs_to_current_entity(id) {
+                    (id.0, false)
+                } else {
+                    return None;
+                }
+            }
+            _ => return None,
+        };
+
+        let index_val = self.try_eval_const_expr(index)?;
+
+        let fields = if is_signal {
+            self.flattened_signals.get(&hir::SignalId(base_hir_id))?
+        } else {
+            self.flattened_ports.get(&hir::PortId(base_hir_id))?
+        };
+
+        let index_str = index_val.to_string();
+        for field in fields {
+            if field.field_path.first() == Some(&index_str) && field.field_path.len() == 1 {
+                return if is_signal {
+                    Some(Expression::with_unknown_type(ExpressionKind::Ref(
+                        LValue::Signal(SignalId(field.id)),
+                    )))
+                } else {
+                    Some(Expression::with_unknown_type(ExpressionKind::Ref(
+                        LValue::Port(PortId(field.id)),
+                    )))
+                };
+            }
+        }
+        None
     }
 
     ///

@@ -117,191 +117,29 @@ pub entity CordicRotate16 {
 }
 
 impl CordicRotate16 {
+    // Signal arrays for CORDIC chain: 17 elements (input + 16 iterations)
+    signal x: fp32[17]
+    signal y: fp32[17]
+    signal z: fp32[17]
+
     // Initialize: x = 1/K (pre-scaled), y = 0, z = angle
-    // Using 1/K means output doesn't need post-scaling
-    signal x0: fp32 = CORDIC_GAIN_INV_16
-    signal y0: fp32 = 0.0fp32
-    signal z0: fp32 = angle
+    x[0] = CORDIC_GAIN_INV_16
+    y[0] = 0.0fp32
+    z[0] = angle
 
-    // Iteration 0
-    signal x1: fp32
-    signal y1: fp32
-    signal z1: fp32
-    let iter0 = CordicRotateIteration {
-        x: x0, y: y0, z: z0,
-        shift_factor: POW2_NEG_TABLE[0],
-        atan_val: ATAN_TABLE[0],
-        x_out: x1, y_out: y1, z_out: z1
-    }
-
-    // Iteration 1
-    signal x2: fp32
-    signal y2: fp32
-    signal z2: fp32
-    let iter1 = CordicRotateIteration {
-        x: x1, y: y1, z: z1,
-        shift_factor: POW2_NEG_TABLE[1],
-        atan_val: ATAN_TABLE[1],
-        x_out: x2, y_out: y2, z_out: z2
-    }
-
-    // Iteration 2
-    signal x3: fp32
-    signal y3: fp32
-    signal z3: fp32
-    let iter2 = CordicRotateIteration {
-        x: x2, y: y2, z: z2,
-        shift_factor: POW2_NEG_TABLE[2],
-        atan_val: ATAN_TABLE[2],
-        x_out: x3, y_out: y3, z_out: z3
-    }
-
-    // Iteration 3
-    signal x4: fp32
-    signal y4: fp32
-    signal z4: fp32
-    let iter3 = CordicRotateIteration {
-        x: x3, y: y3, z: z3,
-        shift_factor: POW2_NEG_TABLE[3],
-        atan_val: ATAN_TABLE[3],
-        x_out: x4, y_out: y4, z_out: z4
-    }
-
-    // Iteration 4
-    signal x5: fp32
-    signal y5: fp32
-    signal z5: fp32
-    let iter4 = CordicRotateIteration {
-        x: x4, y: y4, z: z4,
-        shift_factor: POW2_NEG_TABLE[4],
-        atan_val: ATAN_TABLE[4],
-        x_out: x5, y_out: y5, z_out: z5
-    }
-
-    // Iteration 5
-    signal x6: fp32
-    signal y6: fp32
-    signal z6: fp32
-    let iter5 = CordicRotateIteration {
-        x: x5, y: y5, z: z5,
-        shift_factor: POW2_NEG_TABLE[5],
-        atan_val: ATAN_TABLE[5],
-        x_out: x6, y_out: y6, z_out: z6
-    }
-
-    // Iteration 6
-    signal x7: fp32
-    signal y7: fp32
-    signal z7: fp32
-    let iter6 = CordicRotateIteration {
-        x: x6, y: y6, z: z6,
-        shift_factor: POW2_NEG_TABLE[6],
-        atan_val: ATAN_TABLE[6],
-        x_out: x7, y_out: y7, z_out: z7
-    }
-
-    // Iteration 7
-    signal x8: fp32
-    signal y8: fp32
-    signal z8: fp32
-    let iter7 = CordicRotateIteration {
-        x: x7, y: y7, z: z7,
-        shift_factor: POW2_NEG_TABLE[7],
-        atan_val: ATAN_TABLE[7],
-        x_out: x8, y_out: y8, z_out: z8
-    }
-
-    // Iteration 8
-    signal x9: fp32
-    signal y9: fp32
-    signal z9: fp32
-    let iter8 = CordicRotateIteration {
-        x: x8, y: y8, z: z8,
-        shift_factor: POW2_NEG_TABLE[8],
-        atan_val: ATAN_TABLE[8],
-        x_out: x9, y_out: y9, z_out: z9
-    }
-
-    // Iteration 9
-    signal x10: fp32
-    signal y10: fp32
-    signal z10: fp32
-    let iter9 = CordicRotateIteration {
-        x: x9, y: y9, z: z9,
-        shift_factor: POW2_NEG_TABLE[9],
-        atan_val: ATAN_TABLE[9],
-        x_out: x10, y_out: y10, z_out: z10
-    }
-
-    // Iteration 10
-    signal x11: fp32
-    signal y11: fp32
-    signal z11: fp32
-    let iter10 = CordicRotateIteration {
-        x: x10, y: y10, z: z10,
-        shift_factor: POW2_NEG_TABLE[10],
-        atan_val: ATAN_TABLE[10],
-        x_out: x11, y_out: y11, z_out: z11
-    }
-
-    // Iteration 11
-    signal x12: fp32
-    signal y12: fp32
-    signal z12: fp32
-    let iter11 = CordicRotateIteration {
-        x: x11, y: y11, z: z11,
-        shift_factor: POW2_NEG_TABLE[11],
-        atan_val: ATAN_TABLE[11],
-        x_out: x12, y_out: y12, z_out: z12
-    }
-
-    // Iteration 12
-    signal x13: fp32
-    signal y13: fp32
-    signal z13: fp32
-    let iter12 = CordicRotateIteration {
-        x: x12, y: y12, z: z12,
-        shift_factor: POW2_NEG_TABLE[12],
-        atan_val: ATAN_TABLE[12],
-        x_out: x13, y_out: y13, z_out: z13
-    }
-
-    // Iteration 13
-    signal x14: fp32
-    signal y14: fp32
-    signal z14: fp32
-    let iter13 = CordicRotateIteration {
-        x: x13, y: y13, z: z13,
-        shift_factor: POW2_NEG_TABLE[13],
-        atan_val: ATAN_TABLE[13],
-        x_out: x14, y_out: y14, z_out: z14
-    }
-
-    // Iteration 14
-    signal x15: fp32
-    signal y15: fp32
-    signal z15: fp32
-    let iter14 = CordicRotateIteration {
-        x: x14, y: y14, z: z14,
-        shift_factor: POW2_NEG_TABLE[14],
-        atan_val: ATAN_TABLE[14],
-        x_out: x15, y_out: y15, z_out: z15
-    }
-
-    // Iteration 15 (final)
-    signal x16: fp32
-    signal y16: fp32
-    signal z16: fp32
-    let iter15 = CordicRotateIteration {
-        x: x15, y: y15, z: z15,
-        shift_factor: POW2_NEG_TABLE[15],
-        atan_val: ATAN_TABLE[15],
-        x_out: x16, y_out: y16, z_out: z16
+    // Unroll 16 CORDIC rotation iterations
+    generate for i in 0..16 {
+        let iter = CordicRotateIteration {
+            x: x[i], y: y[i], z: z[i],
+            shift_factor: POW2_NEG_TABLE[i],
+            atan_val: ATAN_TABLE[i],
+            x_out: x[i + 1], y_out: y[i + 1], z_out: z[i + 1]
+        }
     }
 
     // Final results
-    cos_out = x16
-    sin_out = y16
+    cos_out = x[16]
+    sin_out = y[16]
 }
 
 // ============================================================================
@@ -349,173 +187,28 @@ pub entity CordicVector16 {
 }
 
 impl CordicVector16 {
-    signal x0: fp32 = x_in
-    signal y0: fp32 = y_in
-    signal z0: fp32 = 0.0fp32
+    // Signal arrays for CORDIC chain: 17 elements (input + 16 iterations)
+    signal x: fp32[17]
+    signal y: fp32[17]
+    signal z: fp32[17]
 
-    // Unroll 16 iterations
-    signal x1: fp32
-    signal y1: fp32
-    signal z1: fp32
-    let iter0 = CordicVectorIteration {
-        x: x0, y: y0, z: z0,
-        shift_factor: POW2_NEG_TABLE[0],
-        atan_val: ATAN_TABLE[0],
-        x_out: x1, y_out: y1, z_out: z1
+    // Initialize: x = x_in, y = y_in, z = 0
+    x[0] = x_in
+    y[0] = y_in
+    z[0] = 0.0fp32
+
+    // Unroll 16 CORDIC vectoring iterations
+    generate for i in 0..16 {
+        let iter = CordicVectorIteration {
+            x: x[i], y: y[i], z: z[i],
+            shift_factor: POW2_NEG_TABLE[i],
+            atan_val: ATAN_TABLE[i],
+            x_out: x[i + 1], y_out: y[i + 1], z_out: z[i + 1]
+        }
     }
 
-    signal x2: fp32
-    signal y2: fp32
-    signal z2: fp32
-    let iter1 = CordicVectorIteration {
-        x: x1, y: y1, z: z1,
-        shift_factor: POW2_NEG_TABLE[1],
-        atan_val: ATAN_TABLE[1],
-        x_out: x2, y_out: y2, z_out: z2
-    }
-
-    signal x3: fp32
-    signal y3: fp32
-    signal z3: fp32
-    let iter2 = CordicVectorIteration {
-        x: x2, y: y2, z: z2,
-        shift_factor: POW2_NEG_TABLE[2],
-        atan_val: ATAN_TABLE[2],
-        x_out: x3, y_out: y3, z_out: z3
-    }
-
-    signal x4: fp32
-    signal y4: fp32
-    signal z4: fp32
-    let iter3 = CordicVectorIteration {
-        x: x3, y: y3, z: z3,
-        shift_factor: POW2_NEG_TABLE[3],
-        atan_val: ATAN_TABLE[3],
-        x_out: x4, y_out: y4, z_out: z4
-    }
-
-    signal x5: fp32
-    signal y5: fp32
-    signal z5: fp32
-    let iter4 = CordicVectorIteration {
-        x: x4, y: y4, z: z4,
-        shift_factor: POW2_NEG_TABLE[4],
-        atan_val: ATAN_TABLE[4],
-        x_out: x5, y_out: y5, z_out: z5
-    }
-
-    signal x6: fp32
-    signal y6: fp32
-    signal z6: fp32
-    let iter5 = CordicVectorIteration {
-        x: x5, y: y5, z: z5,
-        shift_factor: POW2_NEG_TABLE[5],
-        atan_val: ATAN_TABLE[5],
-        x_out: x6, y_out: y6, z_out: z6
-    }
-
-    signal x7: fp32
-    signal y7: fp32
-    signal z7: fp32
-    let iter6 = CordicVectorIteration {
-        x: x6, y: y6, z: z6,
-        shift_factor: POW2_NEG_TABLE[6],
-        atan_val: ATAN_TABLE[6],
-        x_out: x7, y_out: y7, z_out: z7
-    }
-
-    signal x8: fp32
-    signal y8: fp32
-    signal z8: fp32
-    let iter7 = CordicVectorIteration {
-        x: x7, y: y7, z: z7,
-        shift_factor: POW2_NEG_TABLE[7],
-        atan_val: ATAN_TABLE[7],
-        x_out: x8, y_out: y8, z_out: z8
-    }
-
-    signal x9: fp32
-    signal y9: fp32
-    signal z9: fp32
-    let iter8 = CordicVectorIteration {
-        x: x8, y: y8, z: z8,
-        shift_factor: POW2_NEG_TABLE[8],
-        atan_val: ATAN_TABLE[8],
-        x_out: x9, y_out: y9, z_out: z9
-    }
-
-    signal x10: fp32
-    signal y10: fp32
-    signal z10: fp32
-    let iter9 = CordicVectorIteration {
-        x: x9, y: y9, z: z9,
-        shift_factor: POW2_NEG_TABLE[9],
-        atan_val: ATAN_TABLE[9],
-        x_out: x10, y_out: y10, z_out: z10
-    }
-
-    signal x11: fp32
-    signal y11: fp32
-    signal z11: fp32
-    let iter10 = CordicVectorIteration {
-        x: x10, y: y10, z: z10,
-        shift_factor: POW2_NEG_TABLE[10],
-        atan_val: ATAN_TABLE[10],
-        x_out: x11, y_out: y11, z_out: z11
-    }
-
-    signal x12: fp32
-    signal y12: fp32
-    signal z12: fp32
-    let iter11 = CordicVectorIteration {
-        x: x11, y: y11, z: z11,
-        shift_factor: POW2_NEG_TABLE[11],
-        atan_val: ATAN_TABLE[11],
-        x_out: x12, y_out: y12, z_out: z12
-    }
-
-    signal x13: fp32
-    signal y13: fp32
-    signal z13: fp32
-    let iter12 = CordicVectorIteration {
-        x: x12, y: y12, z: z12,
-        shift_factor: POW2_NEG_TABLE[12],
-        atan_val: ATAN_TABLE[12],
-        x_out: x13, y_out: y13, z_out: z13
-    }
-
-    signal x14: fp32
-    signal y14: fp32
-    signal z14: fp32
-    let iter13 = CordicVectorIteration {
-        x: x13, y: y13, z: z13,
-        shift_factor: POW2_NEG_TABLE[13],
-        atan_val: ATAN_TABLE[13],
-        x_out: x14, y_out: y14, z_out: z14
-    }
-
-    signal x15: fp32
-    signal y15: fp32
-    signal z15: fp32
-    let iter14 = CordicVectorIteration {
-        x: x14, y: y14, z: z14,
-        shift_factor: POW2_NEG_TABLE[14],
-        atan_val: ATAN_TABLE[14],
-        x_out: x15, y_out: y15, z_out: z15
-    }
-
-    signal x16: fp32
-    signal y16: fp32
-    signal z16: fp32
-    let iter15 = CordicVectorIteration {
-        x: x15, y: y15, z: z15,
-        shift_factor: POW2_NEG_TABLE[15],
-        atan_val: ATAN_TABLE[15],
-        x_out: x16, y_out: y16, z_out: z16
-    }
-
-    magnitude = x16
-    angle = z16
+    magnitude = x[16]
+    angle = z[16]
 }
 
 // ============================================================================
