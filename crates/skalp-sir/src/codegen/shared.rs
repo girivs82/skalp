@@ -1050,6 +1050,20 @@ impl<'a> SharedCodegen<'a> {
             return;
         }
 
+        // Guard unsigned division/modulo against division by zero (C++ UB)
+        let is_div_mod = matches!(op, BinaryOperation::Div | BinaryOperation::Mod);
+        if is_div_mod {
+            self.write_indented(&format!(
+                "signals->{} = (signals->{} != 0) ? (signals->{} {} signals->{}) : 0;\n",
+                self.sanitize_name(output),
+                self.sanitize_name(right),
+                self.sanitize_name(left),
+                op_str,
+                self.sanitize_name(right)
+            ));
+            return;
+        }
+
         // Standard scalar operation
         self.write_indented(&format!(
             "signals->{} = signals->{} {} signals->{};\n",
@@ -1164,6 +1178,21 @@ impl<'a> SharedCodegen<'a> {
                 needs_64bit,
             )
         };
+
+        // Guard signed division/modulo against division by zero (C++ UB)
+        let is_signed_div_mod = matches!(op, BinaryOperation::SDiv | BinaryOperation::SMod);
+        if is_signed_div_mod {
+            // Check the raw right operand signal for zero before performing the operation
+            self.write_indented(&format!(
+                "signals->{} = (signals->{} != 0) ? (uint32_t)({} {} {}) : 0;\n",
+                output_sanitized,
+                right_sanitized,
+                left_expr,
+                op_str,
+                right_expr
+            ));
+            return;
+        }
 
         // Generate the operation with proper casting
         if output_uses_array {
@@ -1821,24 +1850,82 @@ impl<'a> SharedCodegen<'a> {
             UnaryOperation::FSqrt => "sqrt",
         };
 
-        let is_function = matches!(op, UnaryOperation::FAbs | UnaryOperation::FSqrt);
-
-        if is_function {
-            // For sqrt/fabs, cast input to float to avoid Metal ambiguity between half and float
+        // FNeg on fp32: flip the IEEE754 sign bit (XOR with 0x80000000)
+        // NOT integer negation which gives wrong results
+        if matches!(op, UnaryOperation::FNeg) {
             let is_metal = matches!(self.type_mapper.target, BackendTarget::Metal);
-            if is_metal && matches!(op, UnaryOperation::FSqrt) {
+            if is_metal {
+                // Metal: use as_type for proper bit manipulation
                 self.write_indented(&format!(
-                    "signals->{} = sqrt((float)signals->{});\n",
+                    "signals->{} = as_type<uint>(-(as_type<float>(signals->{})));\n",
+                    self.sanitize_name(output),
+                    self.sanitize_name(input)
+                ));
+            } else {
+                // C++: XOR sign bit for both fp32 and fp16
+                if input_width <= 16 {
+                    self.write_indented(&format!(
+                        "signals->{} = signals->{} ^ 0x8000;\n",
+                        self.sanitize_name(output),
+                        self.sanitize_name(input)
+                    ));
+                } else {
+                    self.write_indented(&format!(
+                        "signals->{} = signals->{} ^ 0x80000000;\n",
+                        self.sanitize_name(output),
+                        self.sanitize_name(input)
+                    ));
+                }
+            }
+            return;
+        }
+
+        // FAbs on fp: clear the IEEE754 sign bit
+        if matches!(op, UnaryOperation::FAbs) {
+            let is_metal = matches!(self.type_mapper.target, BackendTarget::Metal);
+            if is_metal {
+                self.write_indented(&format!(
+                    "signals->{} = as_type<uint>(fabs(as_type<float>(signals->{})));\n",
+                    self.sanitize_name(output),
+                    self.sanitize_name(input)
+                ));
+            } else if input_width <= 16 {
+                self.write_indented(&format!(
+                    "signals->{} = signals->{} & 0x7FFF;\n",
                     self.sanitize_name(output),
                     self.sanitize_name(input)
                 ));
             } else {
                 self.write_indented(&format!(
-                    "signals->{} = {}(signals->{});\n",
+                    "signals->{} = signals->{} & 0x7FFFFFFF;\n",
                     self.sanitize_name(output),
-                    op_str,
                     self.sanitize_name(input)
                 ));
+            }
+            return;
+        }
+
+        // FSqrt on fp: need explicit float bitcast
+        let is_function = matches!(op, UnaryOperation::FSqrt);
+
+        if is_function {
+            let is_metal = matches!(self.type_mapper.target, BackendTarget::Metal);
+            if is_metal {
+                self.write_indented(&format!(
+                    "signals->{} = as_type<uint>(sqrt(as_type<float>(signals->{})));\n",
+                    self.sanitize_name(output),
+                    self.sanitize_name(input)
+                ));
+            } else {
+                // C++: use union for bitcast
+                self.write_indented("{\n");
+                self.indent();
+                self.write_indented("union { uint32_t u; float f; } _in, _out;\n");
+                self.write_indented(&format!("_in.u = signals->{};\n", self.sanitize_name(input)));
+                self.write_indented("_out.f = sqrtf(_in.f);\n");
+                self.write_indented(&format!("signals->{} = _out.u;\n", self.sanitize_name(output)));
+                self.dedent();
+                self.write_indented("}\n");
             }
         } else {
             self.write_indented(&format!(

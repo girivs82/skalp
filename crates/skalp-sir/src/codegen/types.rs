@@ -147,6 +147,9 @@ impl TypeMapper {
     }
 
     /// Get C++ struct field type parts
+    /// NOTE: FP types use integer storage (uint32_t for fp32, etc.) to ensure
+    /// bit-level semantics when copying between inputs/signals/registers.
+    /// FP arithmetic uses explicit union-based bitcasts for float operations.
     fn get_cpp_struct_field_parts(&self, sir_type: &SirType) -> (String, String) {
         match sir_type {
             SirType::Bits(width) | SirType::SignedBits(width) => {
@@ -157,9 +160,9 @@ impl TypeMapper {
                     (base, String::new())
                 }
             }
-            SirType::Float16 => ("uint16_t".to_string(), String::new()), // C++ uses uint16_t for fp16 storage
-            SirType::Float32 => ("float".to_string(), String::new()),
-            SirType::Float64 => ("double".to_string(), String::new()),
+            SirType::Float16 => ("uint16_t".to_string(), String::new()),
+            SirType::Float32 => ("uint32_t".to_string(), String::new()),
+            SirType::Float64 => ("uint64_t".to_string(), String::new()),
             SirType::Vec2(elem) => {
                 let elem_width = elem.width();
                 let total_width = elem_width * 2;

@@ -45,9 +45,7 @@ mod tuple_destructuring_sim_tests {
     ///   - valid from result_0
     ///   - x1 from result_1
     ///   - x2 from result_2
-    /// Known bug: tuple destructuring with FP values returns wrong results
     #[tokio::test]
-    #[ignore]
     async fn test_tuple_destructuring_three_elements() {
         // A function that returns a 3-tuple (bool, f32, f32)
         // This mimics a quadratic solve that returns (valid, x1, x2)
@@ -117,7 +115,6 @@ mod tuple_destructuring_sim_tests {
     /// Test simpler 2-tuple case
     /// Known bug: tuple destructuring with FP values returns wrong results
     #[tokio::test]
-    #[ignore]
     async fn test_tuple_destructuring_two_elements() {
         let source = r#"
         fn swap_values(x: fp32, y: fp32) -> (fp32, fp32) {
