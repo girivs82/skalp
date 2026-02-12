@@ -605,6 +605,7 @@ impl<'hir> HirToMir<'hir> {
                     initial,
                     clock_domain,
                     hir_signal.span.clone(),
+                    hir_signal.memory_config.is_some(),
                 );
 
                 // BUG #117r DEBUG: Log flattening result
@@ -882,6 +883,7 @@ impl<'hir> HirToMir<'hir> {
                             initial,
                             clock_domain,
                             hir_signal.span.clone(),
+                            hir_signal.memory_config.is_some(),
                         );
 
                         // BUG #117r DEBUG: Log flattening result for impl block
@@ -1320,6 +1322,7 @@ impl<'hir> HirToMir<'hir> {
                                             None,
                                             None,
                                             None,
+                                            false,
                                         );
 
                                         // Add all flattened signals to the module
@@ -4421,6 +4424,7 @@ impl<'hir> HirToMir<'hir> {
                                         None,
                                         None,
                                         None,
+                                        false,
                                     );
 
                                     // Add all flattened signals to output_signals for later processing
@@ -4486,6 +4490,19 @@ impl<'hir> HirToMir<'hir> {
                     }
                 }
             }
+        }
+
+        // Expand array index WRITE assignments for flattened signal arrays
+        // This handles cases like: x[0] = val where x is a flattened array
+        if let Some(assigns) = self.try_expand_array_index_assignment(assign) {
+            return assigns
+                .into_iter()
+                .map(|a| ContinuousAssign {
+                    lhs: a.lhs,
+                    rhs: a.rhs,
+                    span: a.span,
+                })
+                .collect();
         }
 
         // CRITICAL FIX for Bug #9: Try to expand array index read assignments first
@@ -23145,11 +23162,12 @@ impl<'hir> HirToMir<'hir> {
         initial: Option<Value>,
         clock_domain: Option<ClockDomainId>,
         span: Option<SourceSpan>,
+        is_memory: bool,
     ) -> (Vec<Signal>, Vec<FlattenedField>) {
         // Use shared TypeFlattener with current signal ID counter
         let mut flattener = TypeFlattener::new(self.next_signal_id);
         let (signals, type_fields) =
-            flattener.flatten_signal_with_span(base_name, signal_type, initial, clock_domain, span);
+            flattener.flatten_signal_with_span(base_name, signal_type, initial, clock_domain, span, is_memory);
 
         // Update our signal ID counter based on how many signals were created
         self.next_signal_id += signals.len() as u32;

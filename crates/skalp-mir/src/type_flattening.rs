@@ -175,7 +175,7 @@ impl TypeFlattener {
         initial: Option<Value>,
         clock_domain: Option<ClockDomainId>,
     ) -> (Vec<Signal>, Vec<FlattenedField>) {
-        self.flatten_signal_with_span(base_name, signal_type, initial, clock_domain, None)
+        self.flatten_signal_with_span(base_name, signal_type, initial, clock_domain, None, false)
     }
 
     /// Flatten a signal with composite type into multiple scalar signals, with source span
@@ -197,6 +197,7 @@ impl TypeFlattener {
         initial: Option<Value>,
         clock_domain: Option<ClockDomainId>,
         span: Option<SourceSpan>,
+        is_memory: bool,
     ) -> (Vec<Signal>, Vec<FlattenedField>) {
         let mut signals = Vec::new();
         let mut fields = Vec::new();
@@ -209,6 +210,7 @@ impl TypeFlattener {
             vec![],
             &mut signals,
             &mut fields,
+            is_memory,
         );
         (signals, fields)
     }
@@ -490,6 +492,7 @@ impl TypeFlattener {
         field_path: Vec<String>,
         signals: &mut Vec<Signal>,
         fields: &mut Vec<FlattenedField>,
+        is_memory: bool,
     ) {
         // Use explicit work stack instead of call stack
         let mut work_stack = vec![SignalWorkItem {
@@ -540,8 +543,9 @@ impl TypeFlattener {
                     }
                 }
                 DataType::Array(element_type, size) => {
-                    // Preserve arrays of scalar types for synthesis flexibility
-                    if Self::should_preserve_array(element_type) {
+                    // Only preserve scalar arrays for memory signals (BRAM/SRAM synthesis)
+                    // Non-memory scalar arrays expand into individual signals for combinational use
+                    if is_memory && Self::should_preserve_array(element_type) {
                         // Keep array intact - create signal with array type
                         self.create_leaf_signal(
                             &work.name,
