@@ -59,6 +59,16 @@ enum BuilderContext {
     FunctionBody,
 }
 
+/// BUG #85: Info about a signal whose type resolves to an entity name.
+/// These are converted to HirInstance objects during post-processing.
+struct EntitySignalInfo {
+    name: String,
+    entity_id: EntityId,
+    entity_name: String,
+    generic_args: Vec<HirExpression>,
+    named_generic_args: IndexMap<String, HirExpression>,
+}
+
 /// HIR builder context
 pub struct HirBuilderContext {
     /// Next IDs for various HIR elements
@@ -686,10 +696,6 @@ impl HirBuilderContext {
                         pending_visibility = HirVisibility::Private; // Reset after use
                         // Register distinct type in user_types for type lookup
                         // Store as HirType::Custom so trait resolution can work
-                        println!(
-                            "[DISTINCT_DEBUG] Registering distinct type '{}' in user_types",
-                            distinct_type.name
-                        );
                         self.symbols.user_types.insert(
                             distinct_type.name.clone(),
                             HirType::Custom(distinct_type.name.clone()),
@@ -1120,16 +1126,6 @@ impl HirBuilderContext {
 
         // Consume pending detection_config from #[detection_signal(...)] attribute
         let detection_config = self.pending_detection_config.take();
-        let is_detection = detection_config.is_some();
-        let mode_str = detection_config
-            .as_ref()
-            .map(|c| format!("{:?}", c.mode))
-            .unwrap_or_else(|| "none".to_string());
-        println!(
-            "🔍 [BUILD_PORT] Port '{}' direction={:?} is_detection={} mode={}",
-            name, direction, is_detection, mode_str
-        );
-
         // Consume pending power_domain_config from #[power_domain("name")] attribute
         let power_domain_config = self.pending_power_domain_config.take();
 
@@ -1209,6 +1205,10 @@ impl HirBuilderContext {
         let mut statements: Vec<HirStatement> = Vec::new();
         let mut instances = Vec::new();
 
+        // BUG #85 FIX: Track signals whose type is an entity name (e.g., `signal mul: FpMul<Fp32Format>`)
+        // These will be converted to HirInstance objects in a post-processing step.
+        let mut entity_signal_map: IndexMap<SignalId, EntitySignalInfo> = IndexMap::new();
+
         // Build implementation items
         let children_count = node.children().count();
         trace!(
@@ -1225,6 +1225,23 @@ impl HirBuilderContext {
                 }
                 SyntaxKind::SignalDecl => {
                     if let Some(signal) = self.build_signal(&child) {
+                        // BUG #85 FIX: Check if this signal's type is actually an entity name.
+                        // If so, store it in entity_signal_map for later conversion to HirInstance.
+                        if let HirType::Custom(ref type_name) = signal.signal_type {
+                            if let Some(&entity_id) = self.symbols.entities.get(type_name) {
+                                let (generic_args, named_generic_args) =
+                                    self.extract_entity_generic_args_from_signal_node(&child, type_name);
+                                entity_signal_map.insert(signal.id, EntitySignalInfo {
+                                    name: signal.name.clone(),
+                                    entity_id,
+                                    entity_name: type_name.clone(),
+                                    generic_args,
+                                    named_generic_args,
+                                });
+                                // Don't push to signals — will become an instance
+                                continue;
+                            }
+                        }
                         signals.push(signal);
                     }
                 }
@@ -1343,6 +1360,16 @@ impl HirBuilderContext {
             }
         }
 
+        // BUG #85 FIX: Convert entity-typed signals to instances
+        if !entity_signal_map.is_empty() {
+            self.convert_entity_signals_to_instances(
+                &entity_signal_map,
+                &mut signals,
+                &mut assignments,
+                &mut instances,
+            );
+        }
+
         // Build instances BEFORE exiting scope so signals are still accessible
         // Process Attributes again in this loop for #[implements(...)] on instances
         for child in node.children() {
@@ -1419,6 +1446,464 @@ impl HirBuilderContext {
                 expr
             }
             _ => expr, // Other parameter types pass through unchanged
+        }
+    }
+
+    /// BUG #85: Extract generic arguments from a signal type annotation like `FpMul<Fp32Format>`.
+    /// Walks: SignalDecl → TypeAnnotation → IdentType/CustomType → ArgList → Arg → expression.
+    fn extract_entity_generic_args_from_signal_node(
+        &mut self,
+        signal_node: &SyntaxNode,
+        entity_name: &str,
+    ) -> (Vec<HirExpression>, IndexMap<String, HirExpression>) {
+        let mut generic_args = Vec::new();
+        let mut named_generic_args = IndexMap::new();
+
+        // Get entity generics for type conversion
+        let entity_generics = self
+            .built_entities
+            .get(entity_name)
+            .map(|e| e.generics.clone())
+            .unwrap_or_default();
+
+        // Navigate: SignalDecl → TypeAnnotation → IdentType/CustomType → ArgList
+        let type_annotation = signal_node.first_child_of_kind(SyntaxKind::TypeAnnotation);
+        let ident_type_node = type_annotation.as_ref().and_then(|ta| {
+            ta.first_child_of_kind(SyntaxKind::IdentType)
+                .or_else(|| ta.first_child_of_kind(SyntaxKind::CustomType))
+        });
+        let arg_list = ident_type_node
+            .as_ref()
+            .and_then(|it| it.first_child_of_kind(SyntaxKind::ArgList));
+
+        if let Some(arg_list) = arg_list {
+            let mut arg_index = 0;
+            for arg_node in arg_list.children() {
+                if arg_node.kind() == SyntaxKind::NamedArg {
+                    let name = arg_node
+                        .first_token_of_kind(SyntaxKind::Ident)
+                        .map(|t| t.text().to_string());
+                    if let Some(name) = name {
+                        if let Some(expr_node) = arg_node.children().next() {
+                            let expr = if expr_node.kind() == SyntaxKind::TypeAnnotation {
+                                let ty = self.extract_hir_type(&expr_node);
+                                Some(HirExpression::Cast(HirCastExpr {
+                                    expr: Box::new(HirExpression::Literal(HirLiteral::Integer(0))),
+                                    target_type: ty,
+                                }))
+                            } else {
+                                self.build_expression(&expr_node)
+                            };
+                            if let Some(mut e) = expr {
+                                if let Some(param) =
+                                    entity_generics.iter().find(|g| g.name == name)
+                                {
+                                    e = self.convert_generic_arg_expr(e, &param.param_type);
+                                }
+                                named_generic_args.insert(name, e);
+                            }
+                        }
+                    }
+                } else if arg_node.kind() == SyntaxKind::Arg {
+                    if let Some(expr_node) = arg_node.children().next() {
+                        let expr = if expr_node.kind() == SyntaxKind::TypeAnnotation {
+                            let ty = self.extract_hir_type(&expr_node);
+                            Some(HirExpression::Cast(HirCastExpr {
+                                expr: Box::new(HirExpression::Literal(HirLiteral::Integer(0))),
+                                target_type: ty,
+                            }))
+                        } else {
+                            self.build_expression(&expr_node)
+                        };
+                        if let Some(mut e) = expr {
+                            if arg_index < entity_generics.len() {
+                                let param = &entity_generics[arg_index];
+                                e = self.convert_generic_arg_expr(e, &param.param_type);
+                            }
+                            generic_args.push(e);
+                        }
+                    }
+                    arg_index += 1;
+                }
+            }
+        }
+
+        (generic_args, named_generic_args)
+    }
+
+    /// BUG #85: Convert entity-typed signals and their field-access assignments into HirInstances.
+    ///
+    /// Scans assignments for:
+    /// - LHS field access (`mul.a = expr`) → input port connections
+    /// - RHS field access (`expr = mul.result`) → output port connections (creates intermediate signals)
+    fn convert_entity_signals_to_instances(
+        &mut self,
+        entity_signal_map: &IndexMap<SignalId, EntitySignalInfo>,
+        signals: &mut Vec<HirSignal>,
+        assignments: &mut Vec<HirAssignment>,
+        instances: &mut Vec<HirInstance>,
+    ) {
+        // For each entity signal, collect connections
+        let mut connections_map: IndexMap<SignalId, Vec<HirConnection>> = IndexMap::new();
+        for &sig_id in entity_signal_map.keys() {
+            connections_map.insert(sig_id, Vec::new());
+        }
+
+        // Track which assignments to remove (indices)
+        let mut remove_indices = Vec::new();
+
+        // Pass 1: Find LHS field access assignments (input ports)
+        for (idx, assignment) in assignments.iter().enumerate() {
+            if let HirLValue::FieldAccess { ref base, ref field } = assignment.lhs {
+                if let HirLValue::Signal(sig_id) = **base {
+                    if entity_signal_map.contains_key(&sig_id) {
+                        connections_map
+                            .get_mut(&sig_id)
+                            .unwrap()
+                            .push(HirConnection {
+                                port: field.clone(),
+                                expr: assignment.rhs.clone(),
+                            });
+                        remove_indices.push(idx);
+                    }
+                }
+            }
+        }
+
+        // Pass 2: Find RHS field access expressions (output ports)
+        // We need to create intermediate signals for output ports and replace the
+        // FieldAccess expressions in the remaining assignments + signal initial values.
+        let mut output_replacements: IndexMap<(SignalId, String), SignalId> = IndexMap::new();
+
+        // Scan remaining assignments for RHS field accesses
+        for (idx, assignment) in assignments.iter().enumerate() {
+            if remove_indices.contains(&idx) {
+                continue;
+            }
+            self.collect_output_field_accesses(
+                &assignment.rhs,
+                entity_signal_map,
+                &mut output_replacements,
+                signals,
+                &mut connections_map,
+            );
+        }
+
+        // Also scan signal initial values for output field accesses
+        for signal in signals.iter() {
+            if let Some(ref init) = signal.initial_value {
+                self.collect_output_field_accesses(
+                    init,
+                    entity_signal_map,
+                    &mut output_replacements,
+                    // Can't push to signals while iterating — we'll collect separately
+                    &mut Vec::new(),
+                    &mut connections_map,
+                );
+            }
+        }
+
+        // Now rewrite remaining assignment RHS expressions
+        for (idx, assignment) in assignments.iter_mut().enumerate() {
+            if remove_indices.contains(&idx) {
+                continue;
+            }
+            assignment.rhs = Self::rewrite_entity_field_accesses(
+                &assignment.rhs,
+                entity_signal_map,
+                &output_replacements,
+            );
+        }
+
+        // Rewrite signal initial values
+        for signal in signals.iter_mut() {
+            if let Some(ref init) = signal.initial_value {
+                let rewritten = Self::rewrite_entity_field_accesses(
+                    init,
+                    entity_signal_map,
+                    &output_replacements,
+                );
+                signal.initial_value = Some(rewritten);
+            }
+        }
+
+        // Remove consumed assignments (in reverse order to preserve indices)
+        remove_indices.sort();
+        for idx in remove_indices.into_iter().rev() {
+            assignments.remove(idx);
+        }
+
+        // Build HirInstance for each entity signal
+        for (sig_id, info) in entity_signal_map.iter() {
+            let connections = connections_map.shift_remove(sig_id).unwrap_or_default();
+            instances.push(HirInstance {
+                id: InstanceId(0),
+                name: info.name.clone(),
+                entity: info.entity_id,
+                generic_args: info.generic_args.clone(),
+                named_generic_args: info.named_generic_args.clone(),
+                connections,
+                safety_config: None,
+            });
+        }
+    }
+
+    /// BUG #85 helper: Collect output field accesses in an expression and register
+    /// intermediate signals + connections for them.
+    fn collect_output_field_accesses(
+        &mut self,
+        expr: &HirExpression,
+        entity_signal_map: &IndexMap<SignalId, EntitySignalInfo>,
+        output_replacements: &mut IndexMap<(SignalId, String), SignalId>,
+        new_signals: &mut Vec<HirSignal>,
+        connections_map: &mut IndexMap<SignalId, Vec<HirConnection>>,
+    ) {
+        match expr {
+            HirExpression::FieldAccess { base, field } => {
+                if let HirExpression::Signal(sig_id) = **base {
+                    if let Some(info) = entity_signal_map.get(&sig_id) {
+                        let key = (sig_id, field.clone());
+                        if !output_replacements.contains_key(&key) {
+                            // Find port type from entity definition
+                            let port_type = self
+                                .built_entities
+                                .get(&info.entity_name)
+                                .and_then(|e| e.ports.iter().find(|p| p.name == *field))
+                                .map(|p| p.port_type.clone())
+                                .unwrap_or(HirType::Bit(1));
+
+                            // Create intermediate signal
+                            let intermediate_id = self.next_signal_id();
+                            let intermediate_name =
+                                format!("__{}__{}", info.name, field);
+                            self.symbols
+                                .signals
+                                .insert(intermediate_name.clone(), intermediate_id);
+                            self.symbols
+                                .signal_types
+                                .insert(intermediate_id, port_type.clone());
+                            self.symbols.add_to_scope(
+                                &intermediate_name,
+                                SymbolId::Signal(intermediate_id),
+                            );
+
+                            new_signals.push(HirSignal {
+                                id: intermediate_id,
+                                name: intermediate_name,
+                                signal_type: port_type,
+                                initial_value: None,
+                                clock_domain: None,
+                                span: None,
+                                memory_config: None,
+                                trace_config: None,
+                                cdc_config: None,
+                                breakpoint_config: None,
+                                power_config: None,
+                                safety_config: None,
+                                power_domain: None,
+                            });
+
+                            // Add output connection
+                            if let Some(conns) = connections_map.get_mut(&sig_id) {
+                                conns.push(HirConnection {
+                                    port: field.clone(),
+                                    expr: HirExpression::Signal(intermediate_id),
+                                });
+                            }
+
+                            output_replacements.insert(key, intermediate_id);
+                        }
+                    }
+                }
+                // Also recurse into base
+                self.collect_output_field_accesses(
+                    base,
+                    entity_signal_map,
+                    output_replacements,
+                    new_signals,
+                    connections_map,
+                );
+            }
+            HirExpression::Cast(cast) => {
+                self.collect_output_field_accesses(
+                    &cast.expr,
+                    entity_signal_map,
+                    output_replacements,
+                    new_signals,
+                    connections_map,
+                );
+            }
+            HirExpression::Binary(bin) => {
+                self.collect_output_field_accesses(
+                    &bin.left,
+                    entity_signal_map,
+                    output_replacements,
+                    new_signals,
+                    connections_map,
+                );
+                self.collect_output_field_accesses(
+                    &bin.right,
+                    entity_signal_map,
+                    output_replacements,
+                    new_signals,
+                    connections_map,
+                );
+            }
+            HirExpression::Unary(un) => {
+                self.collect_output_field_accesses(
+                    &un.operand,
+                    entity_signal_map,
+                    output_replacements,
+                    new_signals,
+                    connections_map,
+                );
+            }
+            HirExpression::Ternary { condition, true_expr, false_expr } => {
+                self.collect_output_field_accesses(
+                    condition,
+                    entity_signal_map,
+                    output_replacements,
+                    new_signals,
+                    connections_map,
+                );
+                self.collect_output_field_accesses(
+                    true_expr,
+                    entity_signal_map,
+                    output_replacements,
+                    new_signals,
+                    connections_map,
+                );
+                self.collect_output_field_accesses(
+                    false_expr,
+                    entity_signal_map,
+                    output_replacements,
+                    new_signals,
+                    connections_map,
+                );
+            }
+            HirExpression::Index(base_expr, idx_expr) => {
+                self.collect_output_field_accesses(
+                    base_expr,
+                    entity_signal_map,
+                    output_replacements,
+                    new_signals,
+                    connections_map,
+                );
+                self.collect_output_field_accesses(
+                    idx_expr,
+                    entity_signal_map,
+                    output_replacements,
+                    new_signals,
+                    connections_map,
+                );
+            }
+            _ => {}
+        }
+    }
+
+    /// BUG #85 helper: Recursively rewrite entity field access expressions to use intermediate signals.
+    fn rewrite_entity_field_accesses(
+        expr: &HirExpression,
+        entity_signal_map: &IndexMap<SignalId, EntitySignalInfo>,
+        output_replacements: &IndexMap<(SignalId, String), SignalId>,
+    ) -> HirExpression {
+        match expr {
+            HirExpression::FieldAccess { base, field } => {
+                if let HirExpression::Signal(sig_id) = **base {
+                    if entity_signal_map.contains_key(&sig_id) {
+                        let key = (sig_id, field.clone());
+                        if let Some(&intermediate_id) = output_replacements.get(&key) {
+                            return HirExpression::Signal(intermediate_id);
+                        }
+                    }
+                }
+                // Recurse into base
+                let new_base = Self::rewrite_entity_field_accesses(
+                    base,
+                    entity_signal_map,
+                    output_replacements,
+                );
+                HirExpression::FieldAccess {
+                    base: Box::new(new_base),
+                    field: field.clone(),
+                }
+            }
+            HirExpression::Cast(cast) => {
+                let new_inner = Self::rewrite_entity_field_accesses(
+                    &cast.expr,
+                    entity_signal_map,
+                    output_replacements,
+                );
+                HirExpression::Cast(HirCastExpr {
+                    expr: Box::new(new_inner),
+                    target_type: cast.target_type.clone(),
+                })
+            }
+            HirExpression::Binary(bin) => {
+                let new_left = Self::rewrite_entity_field_accesses(
+                    &bin.left,
+                    entity_signal_map,
+                    output_replacements,
+                );
+                let new_right = Self::rewrite_entity_field_accesses(
+                    &bin.right,
+                    entity_signal_map,
+                    output_replacements,
+                );
+                HirExpression::Binary(HirBinaryExpr {
+                    left: Box::new(new_left),
+                    op: bin.op.clone(),
+                    right: Box::new(new_right),
+                    is_trait_op: bin.is_trait_op,
+                })
+            }
+            HirExpression::Unary(un) => {
+                let new_operand = Self::rewrite_entity_field_accesses(
+                    &un.operand,
+                    entity_signal_map,
+                    output_replacements,
+                );
+                HirExpression::Unary(HirUnaryExpr {
+                    op: un.op.clone(),
+                    operand: Box::new(new_operand),
+                })
+            }
+            HirExpression::Ternary { condition, true_expr, false_expr } => {
+                let new_cond = Self::rewrite_entity_field_accesses(
+                    condition,
+                    entity_signal_map,
+                    output_replacements,
+                );
+                let new_true = Self::rewrite_entity_field_accesses(
+                    true_expr,
+                    entity_signal_map,
+                    output_replacements,
+                );
+                let new_false = Self::rewrite_entity_field_accesses(
+                    false_expr,
+                    entity_signal_map,
+                    output_replacements,
+                );
+                HirExpression::Ternary {
+                    condition: Box::new(new_cond),
+                    true_expr: Box::new(new_true),
+                    false_expr: Box::new(new_false),
+                }
+            }
+            HirExpression::Index(base_expr, idx_expr) => {
+                let new_base = Self::rewrite_entity_field_accesses(
+                    base_expr,
+                    entity_signal_map,
+                    output_replacements,
+                );
+                let new_idx = Self::rewrite_entity_field_accesses(
+                    idx_expr,
+                    entity_signal_map,
+                    output_replacements,
+                );
+                HirExpression::Index(Box::new(new_base), Box::new(new_idx))
+            }
+            _ => expr.clone(),
         }
     }
 
@@ -3706,11 +4191,6 @@ impl HirBuilderContext {
     /// Build a for loop statement from a ForStmt node
     /// Parser creates: ForStmt -> ForKw -> Ident -> InKw -> RangeExpr -> LBrace -> [body] -> RBrace
     fn build_for_statement(&mut self, node: &SyntaxNode) -> Option<HirForStatement> {
-        println!("[build_for_statement] Starting - node children:");
-        for child in node.children() {
-            println!("  child: {:?}", child.kind());
-        }
-
         // Extract the iterator variable name (Ident token that is a direct child)
         let iterator = node
             .children_with_tokens()
@@ -3718,7 +4198,6 @@ impl HirBuilderContext {
             .find(|t| t.kind() == SyntaxKind::Ident)?
             .text()
             .to_string();
-        println!("[build_for_statement] Iterator variable: {}", iterator);
 
         // Create a variable ID for the iterator
         let iterator_var_id = self.next_variable_id();
@@ -3732,10 +4211,6 @@ impl HirBuilderContext {
             .children()
             .find(|c| c.kind() == SyntaxKind::RangeExpr)?;
         let range = self.build_range_expression(&range_node)?;
-        println!(
-            "[build_for_statement] Built range: inclusive={}",
-            range.inclusive
-        );
 
         // Build the body statements from child statements within the for loop
         // The body statements are between LBrace and RBrace
@@ -3758,7 +4233,6 @@ impl HirBuilderContext {
                 _ => {}
             }
         }
-        println!("[build_for_statement] Built {} body statements", body.len());
 
         // Check for unroll attribute (will be set by process_attribute if #[unroll] was present)
         // For now, unroll is None - we'll add attribute handling later
@@ -3796,10 +4270,6 @@ impl HirBuilderContext {
             .collect();
 
         if expr_nodes.len() < 2 {
-            println!(
-                "[build_range_expression] Expected 2 expressions, found {}",
-                expr_nodes.len()
-            );
             return None;
         }
 
@@ -7225,18 +7695,6 @@ impl HirBuilderContext {
 
     /// Build binary expression
     fn build_binary_expr(&mut self, node: &SyntaxNode) -> Option<HirExpression> {
-        // Debug: Show all children before filtering
-        let node_text = node.text().to_string();
-
-        if node_text.contains("swap?a_exp_eff") || node_text.contains("swap ? a_exp_eff") {
-            println!(
-                "[BUILD_BINARY_DEBUG] BinaryExpr text: {}, all children: {:?}",
-                node_text,
-                node.children()
-                    .map(|c| (c.kind(), c.text().to_string()))
-                    .collect::<Vec<_>>()
-            );
-        }
         // Find all expression children (filter out tokens and other nodes)
         let mut expr_children: Vec<_> = node
             .children()
@@ -7489,10 +7947,7 @@ impl HirBuilderContext {
 
                         if let Some(op_tok) = op_token {
                             let op = self.token_to_binary_op(op_tok.kind())?;
-                            println!("[BUG220_CHAIN] Building right operand from {:?}, text='{}'",
-                                right_node.kind(), right_node.text());
                             let right_expr = self.build_expression(right_node)?;
-                            println!("[BUG220_CHAIN] Right operand built: {:?}", std::mem::discriminant(&right_expr));
                             let right = Box::new(right_expr);
 
                             if let Some(left_expr) = result_expr {
@@ -9340,10 +9795,6 @@ impl HirBuilderContext {
 
             // Check for #[detection_signal] or #[detection_signal(mode = "...")] attribute on ports
             if let Some(config) = self.extract_detection_config_from_intent_value(&intent_value) {
-                println!(
-                    "✅ [DETECTION_ATTR] Setting pending_detection_config mode={:?}",
-                    config.mode
-                );
                 self.pending_detection_config = Some(config);
                 return;
             }

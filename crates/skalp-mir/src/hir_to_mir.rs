@@ -1250,7 +1250,8 @@ impl<'hir> HirToMir<'hir> {
                                         .find(|conn| conn.port == port.name)
                                         .and_then(|conn| {
                                             if let hir::HirExpression::Signal(hir_sig_id) = &conn.expr {
-                                                self.signal_map.get(hir_sig_id).copied()
+                                                let mir_id = self.signal_map.get(hir_sig_id).copied();
+                                                mir_id
                                             } else {
                                                 None
                                             }
@@ -5026,7 +5027,12 @@ impl<'hir> HirToMir<'hir> {
     /// Convert module instance
     fn convert_instance(&mut self, instance: &hir::HirInstance) -> Option<ModuleInstance> {
         // Map entity ID to module ID
-        let module_id = *self.entity_map.get(&instance.entity)?;
+        let module_id = match self.entity_map.get(&instance.entity) {
+            Some(&id) => id,
+            None => {
+                return None;
+            }
+        };
 
         // DEBUG: Check entity_map lookup for FpSub's adder
         if instance.name == "adder" {

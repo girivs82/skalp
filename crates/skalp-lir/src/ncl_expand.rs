@@ -2844,6 +2844,7 @@ pub fn apply_boundary_ncl_to_hierarchy(
     hier_lir: &crate::HierarchicalMirToLirResult,
     config: &NclConfig,
 ) -> crate::HierarchicalMirToLirResult {
+    use crate::mir_to_lir::PortConnectionInfo;
     use crate::{HierarchicalMirToLirResult, InstanceLirResult, MirToLirResult};
     use skalp_mir::NclBoundaryMode;
 
@@ -2870,6 +2871,9 @@ pub fn apply_boundary_ncl_to_hierarchy(
     };
 
     let mut new_instances = IndexMap::new();
+
+    // Track which instances got NCL boundary applied, so we can update children's port_connections
+    let mut ncl_boundary_instances: Vec<String> = Vec::new();
 
     // Sort instance paths for deterministic iteration order
     let mut sorted_instance_paths: Vec<_> = hier_lir.instances.keys().collect();
@@ -2900,6 +2904,8 @@ pub fn apply_boundary_ncl_to_hierarchy(
         };
 
         if needs_ncl_boundary {
+            ncl_boundary_instances.push(path.clone());
+
             // Apply boundary NCL
             let ncl_result = expand_to_ncl_boundary(&instance.lir_result.lir, config);
             trace!(
@@ -2955,6 +2961,49 @@ pub fn apply_boundary_ncl_to_hierarchy(
                     ncl_boundary_mode: instance.ncl_boundary_mode,
                 },
             );
+        }
+    }
+
+    // Post-process: when a parent instance got NCL boundary applied, its internal
+    // signal names change (inputs: X → X_dec, outputs: X → X_sr). Children's
+    // port_connections reference the OLD names, so we need to update them.
+    for parent_path in &ncl_boundary_instances {
+        // Get the ORIGINAL (pre-NCL) parent LIR to identify input/output port names
+        let original_parent = hier_lir.instances.get(parent_path).unwrap();
+        let original_lir = &original_parent.lir_result.lir;
+
+        let input_names: std::collections::HashSet<String> = original_lir
+            .inputs
+            .iter()
+            .map(|&id| original_lir.signals[id.0 as usize].name.clone())
+            .collect();
+        let output_names: std::collections::HashSet<String> = original_lir
+            .outputs
+            .iter()
+            .map(|&id| original_lir.signals[id.0 as usize].name.clone())
+            .collect();
+
+        // Update each child's port_connections
+        if let Some(children) = hier_lir.hierarchy.get(parent_path) {
+            for child_path in children {
+                if let Some(child) = new_instances.get_mut(child_path) {
+                    for (_port_name, conn) in child.port_connections.iter_mut() {
+                        let signal_name = match conn {
+                            PortConnectionInfo::Signal(ref mut name) => Some(name),
+                            PortConnectionInfo::Range(ref mut name, _, _) => Some(name),
+                            PortConnectionInfo::BitSelect(ref mut name, _) => Some(name),
+                            _ => None,
+                        };
+                        if let Some(name) = signal_name {
+                            if input_names.contains(name.as_str()) {
+                                *name = format!("{}_dec", name);
+                            } else if output_names.contains(name.as_str()) {
+                                *name = format!("{}_sr", name);
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 

@@ -80,7 +80,7 @@ fn test_fpmul_direct_instantiation() {
             out result: fp32
         }
         impl TestMulDirect {
-            signal mul: FpMul<Fp32Format>
+            signal mul: FpMul<IEEE754_32>
             mul.a = a
             mul.b = b
             result = mul.result
