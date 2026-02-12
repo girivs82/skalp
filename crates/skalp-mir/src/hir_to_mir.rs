@@ -7070,21 +7070,21 @@ impl<'hir> HirToMir<'hir> {
                         return Some(result);
                     }
 
-                    // If inlining fails, fall back to FunctionCall (for debugging)
+                    // If inlining fails, fall back to primitive binary operation.
+                    // The SIR converter will detect float signal types and use
+                    // FLt/FGt/FEq/FAdd/etc. operations accordingly.
                     trace!(
-                        "[TRAIT_OP] Failed to inline {}::{}, falling back to FunctionCall",
+                        "[TRAIT_OP] Failed to inline {}::{}, falling back to Binary",
                         trait_name,
                         method_name
                     );
-                    let func_name = format!("{}::{}", trait_name, method_name);
                     let left = self.convert_expression(&binary.left, depth + 1)?;
                     let right = self.convert_expression(&binary.right, depth + 1)?;
-
+                    let left = Box::new(left);
+                    let right = Box::new(right);
+                    let op = self.convert_binary_op(&binary.op, &binary.left);
                     return Some(Expression::new(
-                        ExpressionKind::FunctionCall {
-                            name: func_name,
-                            args: vec![left, right],
-                        },
+                        ExpressionKind::Binary { op, left, right },
                         ty,
                     ));
                 }

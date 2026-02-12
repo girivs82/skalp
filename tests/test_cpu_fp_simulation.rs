@@ -34,7 +34,6 @@ mod cpu_fp_simulation_tests {
     }
 
     #[tokio::test]
-    #[ignore = "MIR bug: fp32 comparisons constant-fold to 0 instead of generating comparison ops"]
     async fn test_fp32_comparison_cpu() {
         let mut tb = cpu_testbench("tests/fixtures/numeric/fp_comparison.sk").await;
 

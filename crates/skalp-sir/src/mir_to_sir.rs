@@ -4398,43 +4398,13 @@ impl<'a> MirToSirConverter<'a> {
         // The is_signed_from_mir flag is determined from the original MIR Expression.ty field,
         // which is more reliable than looking at intermediate SIR signal types.
         let is_signed = is_signed_from_mir || left_type.is_signed() || right_type.is_signed();
+        let is_float = left_type.is_float() || right_type.is_float();
 
-        // Debug: trace signed comparison decisions
-        if matches!(op, skalp_mir::BinaryOp::Greater | skalp_mir::BinaryOp::Less |
-                       skalp_mir::BinaryOp::GreaterEqual | skalp_mir::BinaryOp::LessEqual) {
-            if is_signed {
-                println!("[SIGNED_CMP_DEBUG] op={:?} is_signed=true, is_signed_from_mir={}, left_type={:?}, right_type={:?}",
-                    op, is_signed_from_mir, left_type, right_type);
-                println!("[SIGNED_CMP_DEBUG]   left_signal='{}', right_signal='{}'",
-                    left_signal.signal_id, right_signal.signal_id);
-            }
-        }
-
-        let bin_op = self.convert_binary_op_with_signedness(op, is_signed);
-
-        // BUG DEBUG #65: Log signal names being looked up
-        if bin_op.is_float_op() {
-            println!(
-                "  🔍 Looking up types: left='{}', right='{}'",
-                left_signal.signal_id, right_signal.signal_id
-            );
-            println!(
-                "  🔍 Type results: left_type={:?} (width={}), right_type={:?} (width={})",
-                left_type,
-                left_type.width(),
-                right_type,
-                right_type.width()
-            );
-            if left_type.width() > 256 || right_type.width() > 256 {
-                println!(
-                    "  ❌ BUG #71: Signal with width > 256 found! left='{}' ({}), right='{}' ({})",
-                    left_signal.signal_id,
-                    left_type.width(),
-                    right_signal.signal_id,
-                    right_type.width()
-                );
-            }
-        }
+        let bin_op = if is_float {
+            self.convert_binary_op_for_float(op)
+        } else {
+            self.convert_binary_op_with_signedness(op, is_signed)
+        };
 
         let sir_type = if bin_op.is_float_op() {
             // BUG FIX #65: FP operations ALWAYS return float types
@@ -5868,6 +5838,26 @@ impl<'a> MirToSirConverter<'a> {
             RightShift => if is_signed { BinaryOperation::Sar } else { BinaryOperation::Shr },
             LogicalAnd => BinaryOperation::And, // Boolean AND
             LogicalOr => BinaryOperation::Or,   // Boolean OR
+        }
+    }
+
+    /// Convert MIR BinaryOp to SIR float BinaryOperation
+    fn convert_binary_op_for_float(&self, op: &skalp_mir::BinaryOp) -> BinaryOperation {
+        use skalp_mir::BinaryOp::*;
+        match op {
+            Add => BinaryOperation::FAdd,
+            Sub => BinaryOperation::FSub,
+            Mul => BinaryOperation::FMul,
+            Div => BinaryOperation::FDiv,
+            Mod => BinaryOperation::FMod,
+            Equal => BinaryOperation::FEq,
+            NotEqual => BinaryOperation::FNeq,
+            Less => BinaryOperation::FLt,
+            LessEqual => BinaryOperation::FLte,
+            Greater => BinaryOperation::FGt,
+            GreaterEqual => BinaryOperation::FGte,
+            // Bitwise/logical/shift ops don't have float variants — fall back to integer
+            _ => self.convert_binary_op_with_signedness(op, false),
         }
     }
 
