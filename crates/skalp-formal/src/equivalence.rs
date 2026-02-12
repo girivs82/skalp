@@ -31,7 +31,7 @@ use skalp_lir::synth::{
     Fraig, FraigConfig, Pass, Strash,
 };
 use skalp_mir::Type;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicBool, Ordering};
 use crate::sat_solver::{CnfFormula, ExtendFormula, Lit, Solver, Var};
 
@@ -2335,8 +2335,8 @@ pub struct SymbolicCounterexample {
 /// Pre-compute structural latch matching between two AIGs.
 /// Returns a map from gate latch normalized name → MIR latch normalized name
 /// for latches that can't be matched by name but can be matched by output connectivity.
-fn compute_structural_latch_matches(aig1: &Aig, aig2: &Aig) -> HashMap<String, String> {
-    let mut result: HashMap<String, String> = HashMap::new();
+fn compute_structural_latch_matches(aig1: &Aig, aig2: &Aig) -> BTreeMap<String, String> {
+    let mut result: BTreeMap<String, String> = BTreeMap::new();
 
     // First pass: find name-matched latches
     let mut mir_latch_names: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -2721,14 +2721,16 @@ fn build_sequential_miter(aig1: &Aig, aig2: &Aig) -> FormalResult<Aig> {
     let mut diff_gates: Vec<(String, AigLit)> = Vec::new();
 
     // 1. Check output equivalence (by normalized name matching)
-    let mut out1_by_name: HashMap<String, AigLit> = HashMap::new();
+    // Use BTreeMap for deterministic iteration order (HashMap randomizes per-process,
+    // causing different miter AIG structures and non-deterministic SAT results).
+    let mut out1_by_name: BTreeMap<String, AigLit> = BTreeMap::new();
     for (i, out1) in aig1.outputs.iter().enumerate() {
         let name = aig1.output_names.get(i).cloned().unwrap_or_else(|| format!("output_{}", i));
         let normalized = normalize_signal_name_for_matching(&name);
         let lit = remap_lit(*out1, &map1);
         out1_by_name.insert(normalized, lit);
     }
-    let mut out2_by_name: HashMap<String, AigLit> = HashMap::new();
+    let mut out2_by_name: BTreeMap<String, AigLit> = BTreeMap::new();
     for (i, out2) in aig2.outputs.iter().enumerate() {
         let name = aig2.output_names.get(i).cloned().unwrap_or_else(|| format!("output_{}", i));
         let normalized = normalize_signal_name_for_matching(&name);
@@ -2752,8 +2754,8 @@ fn build_sequential_miter(aig1: &Aig, aig2: &Aig) -> FormalResult<Aig> {
         matched_outputs, unmatched_out1 + unmatched_out2, unmatched_out1, unmatched_out2);
 
     // 2. Check next-state (latch D input) equivalence
-    // Match latches by normalized name
-    let mut latch1_by_name: HashMap<String, AigLit> = HashMap::new();
+    // Match latches by normalized name (BTreeMap for deterministic iteration)
+    let mut latch1_by_name: BTreeMap<String, AigLit> = BTreeMap::new();
     for &latch_id in &aig1.latches {
         if let AigNode::Latch { name, next, .. } = &aig1.nodes[latch_id.0 as usize] {
             let normalized = normalize_signal_name_for_matching(name);
@@ -2762,7 +2764,7 @@ fn build_sequential_miter(aig1: &Aig, aig2: &Aig) -> FormalResult<Aig> {
         }
     }
 
-    let mut latch2_by_name: HashMap<String, AigLit> = HashMap::new();
+    let mut latch2_by_name: BTreeMap<String, AigLit> = BTreeMap::new();
     for &latch_id in &aig2.latches {
         if let AigNode::Latch { name, next, .. } = &aig2.nodes[latch_id.0 as usize] {
             let normalized = normalize_signal_name_for_matching(name);
