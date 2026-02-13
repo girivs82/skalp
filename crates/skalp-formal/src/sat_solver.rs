@@ -174,6 +174,34 @@ impl Solver {
         }
     }
 
+    /// Solve with assumptions (assumptions are cleared after solve)
+    pub fn solve_with(&mut self, assumptions: &[Lit]) -> Result<bool, SolverError> {
+        let cadical_assumptions: Vec<i32> = assumptions.iter().map(|lit| lit.to_cadical()).collect();
+        match self.solver.solve_with(cadical_assumptions) {
+            Some(true) => {
+                let mut model = Vec::new();
+                for var_idx in 0..=self.max_var {
+                    let var = Var(var_idx);
+                    let cadical_var = (var_idx + 1) as i32;
+                    match self.solver.value(cadical_var) {
+                        Some(true) => model.push(Lit::positive(var)),
+                        Some(false) => model.push(Lit::negative(var)),
+                        None => model.push(Lit::positive(var)),
+                    }
+                }
+                self.model = Some(model);
+                Ok(true)
+            }
+            Some(false) => {
+                self.model = None;
+                Ok(false)
+            }
+            None => {
+                Err(SolverError::Unknown)
+            }
+        }
+    }
+
     /// Set conflict limit for SAT solving.
     /// When the limit is exceeded, solve() returns Err(SolverError::Unknown).
     pub fn set_conflict_limit(&mut self, limit: i32) {

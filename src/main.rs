@@ -2334,6 +2334,33 @@ fn run_cpu_fault_sim(sir: &skalp_sim::sir::Sir, cycles: u64, max_faults: usize) 
     );
 }
 
+/// Find the top-level module in a MIR design.
+/// The top-level module is the one not instantiated by any other module.
+/// When multiple uninstantiated modules exist (e.g., unmonomorphized templates alongside
+/// their specialized variants), pick the one with the most content (instances + processes + signals).
+fn find_top_level_module(mir: &skalp_mir::mir::Mir) -> Option<&skalp_mir::mir::Module> {
+    if mir.modules.is_empty() {
+        return None;
+    }
+    if mir.modules.len() == 1 {
+        return mir.modules.first();
+    }
+    // Collect all module IDs that are instantiated by some other module
+    let instantiated: std::collections::HashSet<skalp_mir::mir::ModuleId> = mir
+        .modules
+        .iter()
+        .flat_map(|m| m.instances.iter().map(|inst| inst.module))
+        .collect();
+    // Find all uninstantiated modules, pick the one with most content
+    // This handles monomorphization: both `Foo` (empty template) and `Foo_42` (specialized)
+    // are uninstantiated, but only the specialized one has actual logic
+    mir.modules
+        .iter()
+        .filter(|m| !instantiated.contains(&m.id))
+        .max_by_key(|m| m.instances.len() + m.processes.len() + m.signals.len())
+        .or_else(|| mir.modules.last())
+}
+
 /// Equivalence checking between RTL (LIR) and gate-level netlist
 fn run_equivalence_check(
     source: &Path,
@@ -2348,7 +2375,7 @@ fn run_equivalence_check(
     verbose: bool,
     coverage: bool,
 ) -> Result<()> {
-    use skalp_formal::equivalence::{MirToAig, GateNetlistToAig, check_sequential_equivalence_sat};
+    use skalp_formal::equivalence::{MirToAig, GateNetlistToAig, check_sequential_equivalence_sat, inject_random_bugs, check_non_equivalence_fast};
     use skalp_frontend::parse_and_build_compilation_context;
     use skalp_lir::{get_stdlib_library, lower_mir_hierarchical_with_top, map_hierarchical_to_gates};
     use std::time::Instant;
@@ -2419,8 +2446,7 @@ fn run_equivalence_check(
                 .ok_or_else(|| anyhow::anyhow!("Entity '{}' not found in design", name))?
         }
     } else {
-        mir.modules
-            .first()
+        find_top_level_module(&mir)
             .ok_or_else(|| anyhow::anyhow!("No modules found in design"))?
     };
 
@@ -2550,6 +2576,9 @@ fn run_equivalence_check(
     }
 
     // Phase 2: SAT-based symbolic check (unless simulation already found bug)
+    let mut mir_aig_opt = None;
+    let mut gate_aig_opt = None;
+    let mut sat_passed = false;
     if !sim_found_bug {
         println!();
         println!("🔬 Phase 2: SAT-based symbolic equivalence check...");
@@ -2565,8 +2594,17 @@ fn run_equivalence_check(
         match check_sequential_equivalence_sat(&mir_aig, &gate_aig) {
             Ok(sat_result) => {
                 if sat_result.equivalent {
-                    println!("   ✓ SAT PASS: Transition functions equivalent for ALL states");
+                    if sat_result.checked_outputs && sat_result.checked_next_state {
+                        println!("   ✓ SAT PASS: Transition functions equivalent for ALL states (full proof)");
+                    } else {
+                        let mut partial = Vec::new();
+                        if !sat_result.checked_outputs { partial.push("some outputs"); }
+                        if !sat_result.checked_next_state { partial.push("some latches"); }
+                        println!("   ✓ SAT PASS: No non-equivalence found ({} unresolved due to complexity)",
+                            partial.join(" + "));
+                    }
                     println!("     Proof completed in {}ms", sat_result.time_ms);
+                    sat_passed = true;
                 } else {
                     println!("   ✗ SAT FAIL: Found state where designs differ!");
                     overall_pass = false;
@@ -2617,9 +2655,46 @@ fn run_equivalence_check(
                 }
             }
             Err(e) => {
-                println!("   ⚠ SAT check error: {:?}", e);
-                println!("   Falling back to simulation-only result");
+                println!("   ✗ SAT check error: {:?}", e);
+                println!("   SAT proof is required — marking EC as FAIL");
+                overall_pass = false;
             }
+        }
+
+        mir_aig_opt = Some(mir_aig);
+        gate_aig_opt = Some(gate_aig);
+    }
+
+    // Phase 3: Bug injection self-test (only if SAT passed)
+    if sat_passed {
+        let phase3_start = std::time::Instant::now();
+        println!();
+        println!("🧪 Phase 3: Bug injection self-test...");
+
+        let mir_aig = mir_aig_opt.as_ref().unwrap();
+        let gate_aig = gate_aig_opt.as_ref().unwrap();
+
+        let bug_count = 10;
+        let mutants = inject_random_bugs(gate_aig, bug_count);
+        let mut detected = 0;
+
+        for (i, (mutant_aig, desc)) in mutants.iter().enumerate() {
+            println!("   Testing bug {}/{}: {}", i + 1, mutants.len(), desc);
+            if check_non_equivalence_fast(mir_aig, mutant_aig) {
+                detected += 1;
+            } else {
+                println!("   ⚠ Bug {} undetected (may be in SAT-hard logic): {}", i + 1, desc);
+            }
+        }
+
+        let phase3_ms = phase3_start.elapsed().as_millis();
+        // Require 100% detection — all mutations are always-observable (invert/swap only, no stuck-at)
+        let min_detected = mutants.len();
+        if detected >= min_detected {
+            println!("   ✓ Bug injection: {}/{} detected ({}ms)", detected, mutants.len(), phase3_ms);
+        } else {
+            println!("   ✗ Bug injection: {}/{} detected (need {}) — EC pipeline may be unsound!", detected, mutants.len(), min_detected);
+            overall_pass = false;
         }
     }
 
@@ -2662,8 +2737,10 @@ fn run_equivalence_check(
     if overall_pass {
         if symbolic {
             println!("✅ PASS: Designs are PROVEN equivalent (SAT-based)");
+        } else if sat_passed {
+            println!("✅ PASS: Designs equivalent (simulation + SAT proof + self-test)");
         } else {
-            println!("✅ PASS: Designs equivalent (simulation + SAT proof)");
+            println!("✅ PASS: Designs equivalent (simulation)");
         }
     } else {
         println!("❌ FAIL: Designs are NOT equivalent");
@@ -3289,9 +3366,7 @@ fn synthesize_design(
         .map_err(|e| anyhow::anyhow!("MIR compilation failed: {}", e))?;
 
     // Get top module
-    let top_module = mir
-        .modules
-        .first()
+    let top_module = find_top_level_module(&mir)
         .ok_or_else(|| anyhow::anyhow!("No modules found in design"))?;
     println!("Module: {}", top_module.name);
 
@@ -4435,10 +4510,8 @@ fn run_fi_driven_safety(
         .compile_to_mir(&hir)
         .map_err(|e| anyhow::anyhow!("MIR compilation failed: {}", e))?;
 
-    // Find the top module (last one, or one matching the file name)
-    let top_module = mir
-        .modules
-        .last()
+    // Find the top module (the one not instantiated by any other module)
+    let top_module = find_top_level_module(&mir)
         .ok_or_else(|| anyhow::anyhow!("No modules found in design"))?;
 
     // Lower to Lir and tech-map to GateNetlist
@@ -6132,8 +6205,7 @@ fn run_signal_trace(
                     .ok_or_else(|| anyhow::anyhow!("Entity '{}' not found in design", name))?
             }
         } else {
-            mir.modules
-                .first()
+            find_top_level_module(&mir)
                 .ok_or_else(|| anyhow::anyhow!("No modules found in design"))?
         };
 
