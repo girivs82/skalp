@@ -259,9 +259,7 @@ async fn test_fp32_sqrt_small_values() {
 
 /// Test quadratic formula: x^2 - 5x + 6 = 0 has roots x=2, x=3
 /// Using (-b + sqrt(b^2 - 4ac)) / 2a
-/// IGNORED: Chained FP multiplication bug - `4.0fp32 * a * c` drops second operand
 #[tokio::test]
-#[ignore]
 async fn test_fp32_quadratic_simple() {
     let mut tb = Testbench::new("tests/fixtures/numeric/fp_quadratic.sk")
         .await
@@ -278,9 +276,7 @@ async fn test_fp32_quadratic_simple() {
 }
 
 /// Test quadratic formula: x^2 - 4x + 4 = 0 has double root x=2
-/// IGNORED: Chained FP multiplication bug - `4.0fp32 * a * c` drops second operand
 #[tokio::test]
-#[ignore]
 async fn test_fp32_quadratic_double_root() {
     let mut tb = Testbench::new("tests/fixtures/numeric/fp_quadratic.sk")
         .await
@@ -297,9 +293,7 @@ async fn test_fp32_quadratic_double_root() {
 }
 
 /// Test quadratic formula: 2x^2 - 8x + 6 = 0 has roots x=1, x=3
-/// IGNORED: Chained FP multiplication bug - `4.0fp32 * a * c` drops second operand
 #[tokio::test]
-#[ignore]
 async fn test_fp32_quadratic_non_unit_a() {
     let mut tb = Testbench::new("tests/fixtures/numeric/fp_quadratic.sk")
         .await

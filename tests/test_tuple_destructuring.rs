@@ -8,6 +8,9 @@ mod tuple_destructuring_tests {
     use skalp_mir::lower_to_mir;
     use skalp_sim::{HwAccel, SimLevel, UnifiedSimConfig, UnifiedSimulator};
     use std::io::Write;
+    use std::sync::Once;
+
+    static INIT_STDLIB: Once = Once::new();
 
     async fn setup_cpu_simulator_with_entity(source: &str, entity_name: &str) -> UnifiedSimulator {
         // Parse and build HIR (for non-stdlib tests)
@@ -52,12 +55,18 @@ mod tuple_destructuring_tests {
     }
 
     async fn setup_cpu_simulator_with_stdlib(source: &str, entity_name: &str) -> UnifiedSimulator {
-        // Set stdlib path
-        std::env::set_var("SKALP_STDLIB_PATH", "./crates/skalp-stdlib");
+        // Set stdlib path (thread-safe: only set once)
+        INIT_STDLIB.call_once(|| {
+            std::env::set_var("SKALP_STDLIB_PATH", "./crates/skalp-stdlib");
+        });
 
-        // Write source to temp file for module resolution
+        // Write source to unique temp file for module resolution (avoid race conditions)
         let temp_dir = std::env::temp_dir();
-        let temp_file = temp_dir.join("tuple_fp_test.sk");
+        let unique_id = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let temp_file = temp_dir.join(format!("tuple_fp_test_{}_{}.sk", entity_name, unique_id));
         let mut file = std::fs::File::create(&temp_file).expect("Failed to create temp file");
         file.write_all(source.as_bytes())
             .expect("Failed to write temp file");

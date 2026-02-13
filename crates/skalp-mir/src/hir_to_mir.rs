@@ -2179,6 +2179,13 @@ impl<'hir> HirToMir<'hir> {
 
                                 // Create signals for output ports and track them
                                 let mut output_ports = IndexMap::new();
+                                // BUG #260 FIX: Collect output port placeholder mappings so we can
+                                // re-insert them after field conversion. Nested trait method inlining
+                                // (e.g., chained `a * b * c`) clones the same method body with identical
+                                // variable IDs, so the inner inline's placeholder mapping can overwrite
+                                // the outer's. Re-inserting after field conversion restores correctness.
+                                let mut saved_var_mappings: Vec<((String, hir::VariableId), (SignalId, Type))> = Vec::new();
+                                let mut saved_hir_signal_mappings: Vec<(hir::SignalId, (SignalId, Type))> = Vec::new();
                                 trace!(
                                     "[HIER_PORTS] Entity '{}' has {} ports",
                                     entity.name,
@@ -2270,10 +2277,14 @@ impl<'hir> HirToMir<'hir> {
                                                 );
                                                 // BUG #201 FIX: Store Type along with signal_id for correct type propagation
                                                 // BUG #209 FIX: Use (prefix, var_id) as key for uniqueness per context
+                                                let key = (prefix, var_id);
+                                                let value = (signal_id, expr_type);
                                                 self.placeholder_signal_to_entity_output.insert(
-                                                    (prefix, var_id),
-                                                    (signal_id, expr_type),
+                                                    key.clone(),
+                                                    value.clone(),
                                                 );
+                                                // BUG #260 FIX: Save for re-insertion after field conversion
+                                                saved_var_mappings.push((key, value));
                                             }
 
                                             // BUG #190 FIX: Also handle Signal and Cast(Signal)
@@ -2321,8 +2332,11 @@ impl<'hir> HirToMir<'hir> {
                                                     hir_sig_id, signal_id, signal_name, expr_type
                                                 );
                                                 // BUG #201 FIX: Store Type along with signal_id for correct type propagation
+                                                let hir_sig_value = (signal_id, expr_type);
                                                 self.placeholder_hir_signal_to_entity_output
-                                                    .insert(hir_sig_id, (signal_id, expr_type));
+                                                    .insert(hir_sig_id, hir_sig_value.clone());
+                                                // BUG #260 FIX: Save for re-insertion after field conversion
+                                                saved_hir_signal_mappings.push((hir_sig_id, hir_sig_value));
                                             }
                                         }
 
@@ -2524,6 +2538,19 @@ impl<'hir> HirToMir<'hir> {
                                             );
                                         }
                                     }
+                                }
+
+                                // BUG #260 FIX: Re-insert output port placeholder mappings that may
+                                // have been overwritten by nested trait method inlining during field
+                                // conversion. For chained FP ops like `a * b * c`, converting the
+                                // inner `a * b` port expression triggers a recursive inline_trait_method
+                                // that uses the same cloned method body with identical variable IDs,
+                                // overwriting the outer multiply's result → signal mapping.
+                                for (key, value) in &saved_var_mappings {
+                                    self.placeholder_signal_to_entity_output.insert(key.clone(), value.clone());
+                                }
+                                for (key, value) in &saved_hir_signal_mappings {
+                                    self.placeholder_hir_signal_to_entity_output.insert(*key, value.clone());
                                 }
 
                                 // Store the output port mappings for field access resolution
@@ -17163,6 +17190,17 @@ impl<'hir> HirToMir<'hir> {
                 DataType::Array(Box::new(self.convert_type(inner_type)), *size as usize)
             }
             hir::HirType::Custom(name) => {
+                // BUG FIX #260: Recognize fp32/fp16/fp64 as Float types before
+                // distinct type resolution strips them to Bit(N).
+                // fp32 is defined as a distinct type with base Bit(32), but we need
+                // to preserve the Float32 semantic type for SIR codegen (FNeg, etc.)
+                match name.as_str() {
+                    "fp32" | "Float32" => return DataType::Float32,
+                    "fp16" | "Float16" => return DataType::Float16,
+                    "fp64" | "Float64" => return DataType::Float64,
+                    _ => {}
+                }
+
                 // BUG FIX #45: HIR builder stores vec2<fp32> as Custom("vec2") instead of Vec2(Float32)
                 // Recognize built-in vector types before looking up user types
                 if name.starts_with("vec") {

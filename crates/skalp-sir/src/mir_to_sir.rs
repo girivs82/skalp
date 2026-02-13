@@ -3355,7 +3355,6 @@ impl<'a> MirToSirConverter<'a> {
             target_width,
             std::mem::discriminant(&value.kind)
         );
-
         let node_id = self.create_expression_node_with_width(value, Some(target_width));
 
         // BUG FIX: Truncate expression result if it's wider than target
