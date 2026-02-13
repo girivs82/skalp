@@ -6037,7 +6037,7 @@ impl<'a> MirToSirConverter<'a> {
                 fp_width,
                 sir_type,
             );
-        } else if module_name.starts_with("FpSqrt") {
+        } else if module_name.starts_with("FpSqrt") || module_name.starts_with("CordicSqrt") {
             // Unary FP operation: FpSqrt
             return self.specialize_fp_sqrt(
                 instance,
@@ -6193,8 +6193,9 @@ impl<'a> MirToSirConverter<'a> {
         );
 
         // FpSqrt has: in x, out result, out flags
+        // CordicSqrt uses "value" instead of "x" for the input port
         let (x_expr, result_expr) = match (
-            instance.connections.get("x"),
+            instance.connections.get("x").or_else(|| instance.connections.get("value")),
             instance.connections.get("result"),
         ) {
             (Some(x), Some(r)) => (x, r),

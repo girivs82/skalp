@@ -2743,11 +2743,33 @@ impl<'a> SharedCodegen<'a> {
             }
         } else {
             // Scalar/vector copy (no arrays involved)
-            self.write_indented(&format!(
-                "signals->{} = {};\n",
-                self.sanitize_name(output),
-                source_location
-            ));
+            // On Metal, FP inputs are declared as float/half/double in the Inputs struct,
+            // but signals use uint storage. Use as_type<> to preserve IEEE 754 bit patterns.
+            let is_metal = matches!(self.type_mapper.target, BackendTarget::Metal);
+            let input_fp_cast = if is_metal && is_input {
+                self.module.inputs.iter()
+                    .find(|i| i.name == signal)
+                    .and_then(|i| match &i.sir_type {
+                        SirType::Float16 => Some("ushort"),
+                        SirType::Float32 => Some("uint"),
+                        SirType::Float64 => Some("ulong"),
+                        _ => None,
+                    })
+            } else {
+                None
+            };
+            if let Some(cast_type) = input_fp_cast {
+                self.write_indented(&format!(
+                    "signals->{} = as_type<{}>({});\n",
+                    self.sanitize_name(output), cast_type, source_location
+                ));
+            } else {
+                self.write_indented(&format!(
+                    "signals->{} = {};\n",
+                    self.sanitize_name(output),
+                    source_location
+                ));
+            }
         }
     }
 

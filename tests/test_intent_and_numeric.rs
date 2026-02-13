@@ -122,9 +122,7 @@ async fn test_fp32_arithmetic() {
 }
 
 /// Test FP32 comparison operations
-/// IGNORED: Metal shader gen bug - bitwise ops on fp32 comparison results
 #[tokio::test]
-#[ignore]
 async fn test_fp32_comparison_less() {
     let mut tb = Testbench::new("tests/fixtures/numeric/fp_comparison.sk")
         .await
@@ -146,9 +144,7 @@ async fn test_fp32_comparison_less() {
 }
 
 /// Test FP32 comparison with equal values
-/// IGNORED: Metal shader gen bug - bitwise ops on fp32 comparison results
 #[tokio::test]
-#[ignore]
 async fn test_fp32_comparison_equal() {
     let mut tb = Testbench::new("tests/fixtures/numeric/fp_comparison.sk")
         .await
@@ -184,7 +180,6 @@ async fn test_fp32_comparison_equal() {
 ///            Workaround: Use explicit entity instantiation (FpAdd<IEEE754_32>{...}) instead
 ///            of trait operators (a + b).
 #[tokio::test]
-#[ignore]
 async fn test_fp32_sqrt_perfect_squares() {
     let mut tb = Testbench::new("tests/fixtures/numeric/fp_sqrt_simple.sk")
         .await
@@ -212,9 +207,7 @@ async fn test_fp32_sqrt_perfect_squares() {
 }
 
 /// Test FP32 sqrt with non-perfect squares
-/// IGNORED: Port ID remapping issue in SIR conversion for nested entity instances
 #[tokio::test]
-#[ignore]
 async fn test_fp32_sqrt_non_perfect() {
     let mut tb = Testbench::new("tests/fixtures/numeric/fp_sqrt_simple.sk")
         .await
@@ -238,9 +231,7 @@ async fn test_fp32_sqrt_non_perfect() {
 }
 
 /// Test FP32 sqrt with small values
-/// IGNORED: Port ID remapping issue in SIR conversion for nested entity instances
 #[tokio::test]
-#[ignore]
 async fn test_fp32_sqrt_small_values() {
     let mut tb = Testbench::new("tests/fixtures/numeric/fp_sqrt_simple.sk")
         .await
@@ -268,7 +259,7 @@ async fn test_fp32_sqrt_small_values() {
 
 /// Test quadratic formula: x^2 - 5x + 6 = 0 has roots x=2, x=3
 /// Using (-b + sqrt(b^2 - 4ac)) / 2a
-/// IGNORED: sqrt() on intermediate computations returns 0 in Metal shader gen
+/// IGNORED: Chained FP multiplication bug - `4.0fp32 * a * c` drops second operand
 #[tokio::test]
 #[ignore]
 async fn test_fp32_quadratic_simple() {
@@ -287,7 +278,7 @@ async fn test_fp32_quadratic_simple() {
 }
 
 /// Test quadratic formula: x^2 - 4x + 4 = 0 has double root x=2
-/// IGNORED: sqrt() on intermediate computations returns 0 in Metal shader gen
+/// IGNORED: Chained FP multiplication bug - `4.0fp32 * a * c` drops second operand
 #[tokio::test]
 #[ignore]
 async fn test_fp32_quadratic_double_root() {
@@ -306,7 +297,7 @@ async fn test_fp32_quadratic_double_root() {
 }
 
 /// Test quadratic formula: 2x^2 - 8x + 6 = 0 has roots x=1, x=3
-/// IGNORED: sqrt() on intermediate computations returns 0 in Metal shader gen
+/// IGNORED: Chained FP multiplication bug - `4.0fp32 * a * c` drops second operand
 #[tokio::test]
 #[ignore]
 async fn test_fp32_quadratic_non_unit_a() {
@@ -329,9 +320,7 @@ async fn test_fp32_quadratic_non_unit_a() {
 // ============================================================================
 
 /// Test 2D distance calculation: distance between (0,0) and (3,4) = 5
-/// IGNORED: sqrt() on intermediate computations returns 0 in Metal shader gen
 #[tokio::test]
-#[ignore]
 async fn test_fp32_distance_345_triangle() {
     let mut tb = Testbench::new("tests/fixtures/numeric/fp_distance.sk")
         .await
@@ -348,9 +337,7 @@ async fn test_fp32_distance_345_triangle() {
 }
 
 /// Test 2D distance calculation: distance between (1,1) and (4,5) = 5
-/// IGNORED: sqrt() on intermediate computations returns 0 in Metal shader gen
 #[tokio::test]
-#[ignore]
 async fn test_fp32_distance_offset_345_triangle() {
     let mut tb = Testbench::new("tests/fixtures/numeric/fp_distance.sk")
         .await
@@ -367,9 +354,7 @@ async fn test_fp32_distance_offset_345_triangle() {
 }
 
 /// Test 2D distance calculation: distance along x-axis
-/// IGNORED: sqrt() on intermediate computations returns 0 in Metal shader gen
 #[tokio::test]
-#[ignore]
 async fn test_fp32_distance_horizontal() {
     let mut tb = Testbench::new("tests/fixtures/numeric/fp_distance.sk")
         .await
@@ -386,9 +371,7 @@ async fn test_fp32_distance_horizontal() {
 }
 
 /// Test 2D distance calculation: distance along y-axis
-/// IGNORED: sqrt() on intermediate computations returns 0 in Metal shader gen
 #[tokio::test]
-#[ignore]
 async fn test_fp32_distance_vertical() {
     let mut tb = Testbench::new("tests/fixtures/numeric/fp_distance.sk")
         .await
@@ -405,9 +388,7 @@ async fn test_fp32_distance_vertical() {
 }
 
 /// Test 2D distance calculation: distance = 0 (same point)
-/// IGNORED: Port ID remapping issue in SIR conversion for nested entity instances
 #[tokio::test]
-#[ignore]
 async fn test_fp32_distance_zero() {
     let mut tb = Testbench::new("tests/fixtures/numeric/fp_distance.sk")
         .await
@@ -424,9 +405,7 @@ async fn test_fp32_distance_zero() {
 }
 
 /// Test 2D distance with irrational result
-/// IGNORED: sqrt() on intermediate computations returns 0 in Metal shader gen
 #[tokio::test]
-#[ignore]
 async fn test_fp32_distance_irrational() {
     let mut tb = Testbench::new("tests/fixtures/numeric/fp_distance.sk")
         .await
