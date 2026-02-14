@@ -2129,9 +2129,15 @@ impl HirBuilderContext {
         }
 
         // Prefer IndexExpr/FieldExpr/CastExpr over IdentExpr when both exist
+        // BUG #264 FIX: Use .rev().find() to get the LAST matching node.
+        // For chained field access like `config.voltage_loop.kp`, parser creates
+        // flat siblings [IdentExpr, FieldExpr("voltage_loop"), FieldExpr("kp")].
+        // build_field_expr chains backward through preceding siblings, so the LAST
+        // FieldExpr ("kp") correctly builds the full nested chain.
         let expr_node = if expr_children.len() > 1 {
             expr_children
                 .iter()
+                .rev()
                 .find(|n| {
                     matches!(
                         n.kind(),
@@ -6565,29 +6571,71 @@ impl HirBuilderContext {
                 } else {
                     // No binary expressions - just unwrap to the single expression inside
                     // BUG #188 FIX: Include TernaryExpr, ConcatExpr, ReplicateExpr
-                    node.children()
-                        .find(|n| {
-                            matches!(
-                                n.kind(),
-                                SyntaxKind::LiteralExpr
-                                    | SyntaxKind::IdentExpr
-                                    | SyntaxKind::UnaryExpr
-                                    | SyntaxKind::CallExpr
-                                    | SyntaxKind::FieldExpr
-                                    | SyntaxKind::IndexExpr
-                                    | SyntaxKind::ArrayLiteral
-                                    | SyntaxKind::TupleExpr
-                                    | SyntaxKind::PathExpr
-                                    | SyntaxKind::ParenExpr
-                                    | SyntaxKind::IfExpr
-                                    | SyntaxKind::MatchExpr
-                                    | SyntaxKind::CastExpr // BUG #7: Support cast expressions in parentheses
-                                    | SyntaxKind::TernaryExpr // BUG #188: Support ternary expressions in parentheses
-                                    | SyntaxKind::ConcatExpr // BUG #188: Support concat expressions in parentheses
-                                    | SyntaxKind::ReplicateExpr // BUG #188: Support replicate expressions in parentheses
-                            )
-                        })
-                        .and_then(|n| self.build_expression(&n))
+                    // BUG #261 FIX: Handle sibling expression + CastExpr pattern
+                    // Parser creates "(expr as Type)" as ParenExpr with two siblings:
+                    //   ParenExpr (or other expr)  +  CastExpr (with only TypeAnnotation)
+                    // Without this fix, find() returns the first child (the expression),
+                    // completely ignoring the CastExpr → cast is dropped
+                    let children: Vec<_> = node.children().collect();
+                    let has_cast = children.iter().any(|n| n.kind() == SyntaxKind::CastExpr);
+                    let non_cast_expr = children.iter().find(|n| {
+                        matches!(
+                            n.kind(),
+                            SyntaxKind::LiteralExpr
+                                | SyntaxKind::IdentExpr
+                                | SyntaxKind::UnaryExpr
+                                | SyntaxKind::CallExpr
+                                | SyntaxKind::FieldExpr
+                                | SyntaxKind::IndexExpr
+                                | SyntaxKind::ArrayLiteral
+                                | SyntaxKind::TupleExpr
+                                | SyntaxKind::PathExpr
+                                | SyntaxKind::ParenExpr
+                                | SyntaxKind::IfExpr
+                                | SyntaxKind::MatchExpr
+                                | SyntaxKind::TernaryExpr
+                                | SyntaxKind::ConcatExpr
+                                | SyntaxKind::ReplicateExpr
+                        )
+                    });
+
+                    if let (true, Some(expr_node)) = (has_cast, non_cast_expr) {
+                        let cast_node = children.iter().find(|n| n.kind() == SyntaxKind::CastExpr);
+                        if let Some(cast) = cast_node {
+                            if let Some(built_cast) = self.build_expression(cast) {
+                                Some(built_cast)
+                            } else {
+                                self.build_cast_from_parts(expr_node, cast)
+                            }
+                        } else {
+                            self.build_expression(expr_node)
+                        }
+                    } else {
+                        // No cast sibling - find single expression child
+                        children.iter()
+                            .find(|n| {
+                                matches!(
+                                    n.kind(),
+                                    SyntaxKind::LiteralExpr
+                                        | SyntaxKind::IdentExpr
+                                        | SyntaxKind::UnaryExpr
+                                        | SyntaxKind::CallExpr
+                                        | SyntaxKind::FieldExpr
+                                        | SyntaxKind::IndexExpr
+                                        | SyntaxKind::ArrayLiteral
+                                        | SyntaxKind::TupleExpr
+                                        | SyntaxKind::PathExpr
+                                        | SyntaxKind::ParenExpr
+                                        | SyntaxKind::IfExpr
+                                        | SyntaxKind::MatchExpr
+                                        | SyntaxKind::CastExpr
+                                        | SyntaxKind::TernaryExpr
+                                        | SyntaxKind::ConcatExpr
+                                        | SyntaxKind::ReplicateExpr
+                                )
+                            })
+                            .and_then(|n| self.build_expression(n))
+                    }
                 }
             }
             _ => None,
@@ -9300,8 +9348,28 @@ impl HirBuilderContext {
             })
             .collect();
 
-        let expr_node = expr_nodes_after_arrow.last()?;
-        let expr = self.build_expression(expr_node)?;
+        // BUG FIX: Handle split CastExpr in match arms
+        // The parser may create sibling nodes for cast expressions in match arms:
+        //   ParenExpr("(i_charge_max >> 2)")  CastExpr("as int[16]")
+        // Instead of the expected nested structure:
+        //   CastExpr(ParenExpr("(i_charge_max >> 2)"), TypeAnnotation("int[16]"))
+        // When this happens, use build_cast_from_parts to combine them.
+        let expr = if expr_nodes_after_arrow.len() >= 2
+            && expr_nodes_after_arrow.last().map(|n| n.kind()) == Some(SyntaxKind::CastExpr)
+        {
+            let cast_node = &expr_nodes_after_arrow[expr_nodes_after_arrow.len() - 1];
+            let inner_node = &expr_nodes_after_arrow[expr_nodes_after_arrow.len() - 2];
+            // Try building the CastExpr directly first (in case it does contain its operand)
+            if let Some(e) = self.build_expression(cast_node) {
+                e
+            } else {
+                // CastExpr is incomplete — combine with the preceding expression node
+                self.build_cast_from_parts(inner_node, cast_node)?
+            }
+        } else {
+            let expr_node = expr_nodes_after_arrow.last()?;
+            self.build_expression(expr_node)?
+        };
 
         Some(HirMatchArmExpr {
             pattern,

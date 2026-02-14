@@ -2275,9 +2275,10 @@ pub fn check_sequential_equivalence_sat(aig1: &Aig, aig2: &Aig) -> FormalResult<
             };
             if diff_name.starts_with("diff_next_state[") {
                 latch_gates.push((idx, diff_name, sat_lit));
-            } else {
+            } else if diff_name.starts_with("diff_") {
                 output_gates.push((idx, diff_name, sat_lit));
             }
+            // Skip mir_next[*] and gate_next[*] diagnostic outputs
         }
     }
 
@@ -3102,6 +3103,10 @@ fn build_sequential_miter(aig1: &Aig, aig2: &Aig) -> FormalResult<Aig> {
     for (i, out1) in aig1.outputs.iter().enumerate() {
         let name = aig1.output_names.get(i).cloned().unwrap_or_else(|| format!("output_{}", i));
         let normalized = normalize_signal_name_for_matching(&name);
+        if name.contains("phase_shift") || name.contains("phase_limited") {
+            eprintln!("[MITER_DEBUG] AIG1 output[{}]: raw='{}' normalized='{}' lit=({},{})",
+                i, name, normalized, out1.node.0, out1.inverted);
+        }
         let lit = remap_lit(*out1, &map1);
         out1_by_name.insert(normalized, lit);
     }
@@ -3109,6 +3114,10 @@ fn build_sequential_miter(aig1: &Aig, aig2: &Aig) -> FormalResult<Aig> {
     for (i, out2) in aig2.outputs.iter().enumerate() {
         let name = aig2.output_names.get(i).cloned().unwrap_or_else(|| format!("output_{}", i));
         let normalized = normalize_signal_name_for_matching(&name);
+        if name.contains("phase_shift") || name.contains("phase_limited") {
+            eprintln!("[MITER_DEBUG] AIG2 output[{}]: raw='{}' normalized='{}' lit=({},{})",
+                i, name, normalized, out2.node.0, out2.inverted);
+        }
         let lit = remap_lit(*out2, &map2);
         out2_by_name.insert(normalized, lit);
     }
@@ -3117,6 +3126,12 @@ fn build_sequential_miter(aig1: &Aig, aig2: &Aig) -> FormalResult<Aig> {
     let mut matched_outputs = 0;
     for (name, lit1) in &out1_by_name {
         if let Some(lit2) = out2_by_name.get(name) {
+            // Debug: dump lockstep_tx__phase_shift outputs
+            if name.contains("phase_shift") || name.contains("phase_limited") {
+                eprintln!("[MITER_DEBUG] Output '{}': MIR_lit=({},{}) Gate_lit=({},{}) same={}",
+                    name, lit1.node.0, lit1.inverted, lit2.node.0, lit2.inverted,
+                    lit1 == lit2);
+            }
             let diff = miter.add_xor(*lit1, *lit2);
             diff_gates.push((format!("output[{}]", name), diff));
             miter_output = miter.add_or(miter_output, diff);
@@ -3185,6 +3200,9 @@ fn build_sequential_miter(aig1: &Aig, aig2: &Aig) -> FormalResult<Aig> {
             let diff = miter.add_xor(*next1, *next2);
             diff_gates.push((format!("next_state[{}]", name), diff));
             miter_output = miter.add_or(miter_output, diff);
+            // BUG #271 DEBUG: Add individual model outputs for diagnostic evaluation
+            miter.add_output(format!("mir_next[{}]", name), *next1);
+            miter.add_output(format!("gate_next[{}]", name), *next2);
         }
     }
 
@@ -5237,6 +5255,52 @@ impl<'a> MirToAig<'a> {
             }
         }
 
+        // BUG #263 FIX: Struct port flattening for RangeSelect access.
+        // MIR flattens struct ports (e.g., `config`) into individual ports with `__` separator:
+        //   config__tap_48v (PortId 365), config__voltage_loop__kp (PortId 366), etc.
+        // Connection expressions use RangeSelect(Port(first_field_id), high, low) to extract
+        // struct fields by bit offset from the concatenated struct. But the primary input loop
+        // above only creates signal_map entries for each port's OWN bits, so RangeSelect beyond
+        // the first port's width returns false_lit() (zeros).
+        // Fix: detect struct port groups by name prefix and populate the first port's signal_map
+        // entries with concatenated bits from all ports in the group.
+        {
+            let mut struct_groups: BTreeMap<String, Vec<(PortId, u32)>> = BTreeMap::new();
+            for port in &self.module.ports {
+                if port.direction == PortDirection::Input {
+                    if let Some(prefix_end) = port.name.find("__") {
+                        let prefix = port.name[..prefix_end].to_string();
+                        let width = self.get_type_width(&port.port_type) as u32;
+                        struct_groups.entry(prefix).or_default().push((port.id, width));
+                    }
+                }
+            }
+
+            for (_prefix, ports) in &struct_groups {
+                if ports.len() < 2 {
+                    continue;
+                }
+                // First port in the group is the RangeSelect base
+                let base_port_id = ports[0].0;
+                let mut cumulative_offset = ports[0].1; // skip first port's own bits (already mapped)
+                for &(port_id, width) in &ports[1..] {
+                    for bit in 0..width {
+                        if let Some(&lit) = self.signal_map.get(&(MirSignalRef::Port(port_id), bit)) {
+                            self.signal_map.insert(
+                                (MirSignalRef::Port(base_port_id), cumulative_offset + bit),
+                                lit,
+                            );
+                        }
+                    }
+                    cumulative_offset += width;
+                }
+                log::debug!(
+                    "[HIER_AIG] Struct port group '{}': {} ports, {} total bits mapped to base {:?}",
+                    _prefix, ports.len(), cumulative_offset, base_port_id
+                );
+            }
+        }
+
         // Create temporary input nodes for all register current values
         let mut reg_current_lits: HashMap<(String, MirSignalRef, u32), AigLit> = HashMap::new();
         for (inst_path, sig_ref, name, width) in &all_registers {
@@ -5251,7 +5315,125 @@ impl<'a> MirToAig<'a> {
             }
         }
 
-        // Process each instance in the hierarchy
+        // BUG FIX: Pre-pass — process each module's continuous assignments and
+        // combinational processes in PRE-ORDER (parent before children).
+        // This ensures that signals like `bms_i_charge_max = bms.i_charge_max` are
+        // available in the signal_map before child instances try to use them via
+        // connect_instance_inputs. Without this, child input ports would be stuck
+        // at constant 0 because parent signals hadn't been computed yet.
+        //
+        // The all_instances list is in POST-ORDER (children first). We iterate
+        // in reverse to get pre-order (parent first).
+        for (inst_path, module) in all_instances.iter().rev() {
+            self.current_module = Some(*module);
+
+            // Set up register state for this module
+            for (path, sig_ref, _, width) in &all_registers {
+                if path == inst_path {
+                    for bit in 0..*width {
+                        if let Some(&lit) = reg_current_lits.get(&(path.clone(), *sig_ref, bit)) {
+                            self.signal_map.insert((*sig_ref, bit), lit);
+                        }
+                    }
+                }
+            }
+
+            // Track which signals are registers in this module
+            self.register_outputs.clear();
+            for (path, sig_ref, _, _) in &all_registers {
+                if path == inst_path {
+                    self.register_outputs.push(*sig_ref);
+                }
+            }
+
+            // Connect INPUT ports from parent (parent's signals are available from
+            // earlier iterations since we're processing in pre-order)
+            if !inst_path.is_empty() {
+                self.connect_instance_inputs(inst_path, mir);
+            }
+
+            // Process continuous assignments (sets up signals used by children)
+            for assign in &module.assignments {
+                self.convert_continuous_assign(assign);
+            }
+
+            // Process combinational processes
+            for process in &module.processes {
+                if matches!(process.kind, ProcessKind::Combinational) {
+                    self.convert_combinational_process(process);
+                }
+            }
+
+            // Connect OUTPUT ports to parent (even though parent hasn't been
+            // processed yet in pre-order, the child's output values are now correct
+            // and will be available when parent processes its assignments later
+            // in the post-order pass below)
+            if !inst_path.is_empty() {
+                self.connect_instance_outputs(inst_path, mir);
+            }
+        }
+
+        // BUG #262 FIX: Additional pre-order combinational pass to resolve cross-instance
+        // dependencies through parent entities.
+        //
+        // Problem: When sibling instances have dependencies through a parent's combinational
+        // logic (e.g., voltage_loop.output → CcCvController.i_ref_internal → current_loop.setpoint),
+        // the two-pass approach fails:
+        //   Pre-order:  CcCvController computes i_ref_internal (stale, v_loop_output=0)
+        //               voltage_loop produces v_loop_output
+        //               current_loop gets stale i_ref_internal
+        //   Post-order: current_loop sequential uses stale i_ref_internal → WRONG
+        //
+        // Fix: Re-run pre-order combinational pass. Now voltage_loop's outputs from pass 1
+        // are in signal_map, so CcCvController correctly computes i_ref_internal, and
+        // current_loop picks up the correct value.
+        for (inst_path, module) in all_instances.iter().rev() {
+            self.current_module = Some(*module);
+
+            // Set up register state for this module
+            for (path, sig_ref, _, width) in &all_registers {
+                if path == inst_path {
+                    for bit in 0..*width {
+                        if let Some(&lit) = reg_current_lits.get(&(path.clone(), *sig_ref, bit)) {
+                            self.signal_map.insert((*sig_ref, bit), lit);
+                        }
+                    }
+                }
+            }
+
+            // Track which signals are registers in this module
+            self.register_outputs.clear();
+            for (path, sig_ref, _, _) in &all_registers {
+                if path == inst_path {
+                    self.register_outputs.push(*sig_ref);
+                }
+            }
+
+            // Connect INPUT ports from parent
+            if !inst_path.is_empty() {
+                self.connect_instance_inputs(inst_path, mir);
+            }
+
+            // Re-process continuous assignments (parent now has child outputs from pass 1)
+            for assign in &module.assignments {
+                self.convert_continuous_assign(assign);
+            }
+
+            // Re-process combinational processes
+            for process in &module.processes {
+                if matches!(process.kind, ProcessKind::Combinational) {
+                    self.convert_combinational_process(process);
+                }
+            }
+
+            // Re-connect OUTPUT ports
+            if !inst_path.is_empty() {
+                self.connect_instance_outputs(inst_path, mir);
+            }
+        }
+
+        // Main pass: process in POST-ORDER (children first) for sequential logic
+        // and to re-evaluate with child outputs now available
         let mut next_state_map: HashMap<(String, MirSignalRef, u32), AigLit> = HashMap::new();
         let mut reset_values: HashMap<(String, MirSignalRef, u32), u64> = HashMap::new();
 
@@ -5278,28 +5460,82 @@ impl<'a> MirToAig<'a> {
                 }
             }
 
-            // Connect INPUT ports from parent to child (before processing child)
+            // BUG #267 FIX: Before connecting this instance's inputs, re-establish
+            // its ancestor chain's input connections. When sibling instances share
+            // the same module type (e.g., two HBridgePwm instances), the earlier
+            // sibling's connect_instance_inputs overwrites the shared module's port
+            // entries in signal_map. Re-connecting ancestors ensures the correct
+            // parent port values are in signal_map for THIS instance's context.
             if !inst_path.is_empty() {
-                self.connect_instance_inputs(inst_path, mir);
+                // Walk up the instance path and re-connect each ancestor
+                let parts: Vec<&str> = inst_path.split('.').collect();
+                for depth in 0..parts.len() {
+                    let ancestor_path = parts[..=depth].join(".");
+                    self.connect_instance_inputs(&ancestor_path, mir);
+                }
             }
 
-            // Process continuous assignments
+            // DEBUG: Dump port values for current_loop to trace int_accum[15] issue
+            if inst_path.contains("current_loop") || inst_path.contains("voltage_loop") {
+                println!("[POST_ORDER_DEBUG] Processing instance '{}' (module '{}')", inst_path, module.name);
+                for port in &module.ports {
+                    let width = self.get_type_width(&port.port_type);
+                    let bits: Vec<_> = (0..width.min(32))
+                        .map(|b| {
+                            self.signal_map
+                                .get(&(MirSignalRef::Port(port.id), b as u32))
+                                .map(|lit| format!("{}{}",lit.node.0, if lit.inverted {"'"} else {""}))
+                                .unwrap_or_else(|| "MISS".to_string())
+                        })
+                        .collect();
+                    println!("[POST_ORDER_DEBUG]   port '{}' ({:?}, {:?}): [{}]",
+                        port.name, port.id, port.direction, bits.join(","));
+                }
+                // Also dump signals
+                for sig in &module.signals {
+                    let width = self.get_type_width(&sig.signal_type);
+                    let bits: Vec<_> = (0..width.min(32))
+                        .map(|b| {
+                            self.signal_map
+                                .get(&(MirSignalRef::Signal(sig.id), b as u32))
+                                .map(|lit| format!("{}{}",lit.node.0, if lit.inverted {"'"} else {""}))
+                                .unwrap_or_else(|| "MISS".to_string())
+                        })
+                        .collect();
+                    println!("[POST_ORDER_DEBUG]   signal '{}' ({:?}): [{}]",
+                        sig.name, sig.id, bits.join(","));
+                }
+            }
+
+            // Re-process continuous assignments (with correct child outputs)
             for assign in &module.assignments {
                 self.convert_continuous_assign(assign);
             }
 
-            // Process combinational processes
+            // Re-process combinational processes
             for process in &module.processes {
                 if matches!(process.kind, ProcessKind::Combinational) {
                     self.convert_combinational_process(process);
                 }
             }
 
-            // Process sequential processes
+            // Process sequential processes (only in post-order pass)
             for process in &module.processes {
                 if matches!(process.kind, ProcessKind::Sequential) {
                     let mut inst_next_state: HashMap<(MirSignalRef, u32), AigLit> = HashMap::new();
                     self.convert_sequential_process_for_bmc(process, &mut inst_next_state);
+
+                    // DEBUG: Dump next-state for PI controller registers
+                    if inst_path.contains("current_loop") || inst_path.contains("voltage_loop") {
+                        println!("[POST_ORDER_DEBUG] Next-state for '{}' ({} entries):", inst_path, inst_next_state.len());
+                        let mut sorted: Vec<_> = inst_next_state.iter().collect();
+                        sorted.sort_by_key(|((sr, b), _)| (format!("{:?}", sr), *b));
+                        for ((sig_ref, bit), lit) in &sorted {
+                            if *bit < 32 { // Only show first 32 bits
+                                println!("[POST_ORDER_DEBUG]   {:?}[{}] = lit(n{}{}))", sig_ref, bit, lit.node.0, if lit.inverted {"'"} else {""});
+                            }
+                        }
+                    }
 
                     // Transfer to global next_state_map with instance prefix
                     for ((sig_ref, bit), lit) in inst_next_state {
@@ -5478,6 +5714,15 @@ impl<'a> MirToAig<'a> {
                         self.collect_register_signals_from_module(module, default, registers);
                     }
                 }
+                Statement::ResolvedConditional(resolved) => {
+                    let sig_ref = self.lvalue_to_ref_in_module(module, &resolved.target);
+                    if let Some(sig_ref) = sig_ref {
+                        let (name, width) = self.get_signal_info_from_module(module, sig_ref);
+                        if !registers.iter().any(|(r, _, _)| *r == sig_ref) {
+                            registers.push((sig_ref, name, width));
+                        }
+                    }
+                }
                 _ => {}
             }
         }
@@ -5543,7 +5788,7 @@ impl<'a> MirToAig<'a> {
 
     /// Connect instance INPUT ports to parent signals (before processing child)
     /// Maps parent expressions to child input port IDs
-    fn connect_instance_inputs(&mut self, inst_path: &str, mir: &Mir) {
+    fn connect_instance_inputs(&mut self, inst_path: &str, mir: &'a Mir) {
         // Find the parent module and instance
         let (parent_path, inst_name) = if let Some(dot_pos) = inst_path.rfind('.') {
             (&inst_path[..dot_pos], &inst_path[dot_pos + 1..])
@@ -5575,7 +5820,37 @@ impl<'a> MirToAig<'a> {
                         let width = self.get_type_width(&child_port.port_type);
 
                         // Convert the connection expression (parent value)
+                        // Must temporarily switch to parent module context since
+                        // conn_expr references parent signals/ports, not child's.
+                        let saved_module = self.current_module;
+                        self.current_module = if parent_path.is_empty() {
+                            None // top-level module
+                        } else {
+                            Some(parent_module)
+                        };
                         let conn_lits = self.convert_expression(conn_expr);
+                        self.current_module = saved_module;
+
+                        // DEBUG: trace kp/ki port connections
+                        if (inst_path.contains("charge_ctrl") && !inst_path.contains(".")) ||
+                           inst_path.ends_with("voltage_loop") || inst_path.ends_with("current_loop") {
+                            if port_name == "kp" || port_name == "ki" || port_name == "kp_v" || port_name == "ki_v"
+                                || port_name == "kp_i" || port_name == "ki_i" {
+                                println!("[CONN_DEBUG] {}.'{}' ({:?}): conn_lits.len()={}, width={}, expr={:?}",
+                                    inst_path, port_name, child_port.id, conn_lits.len(), width,
+                                    conn_expr.kind);
+                                let all_zero = conn_lits.iter().all(|l| *l == self.aig.false_lit());
+                                if all_zero {
+                                    println!("[CONN_DEBUG]   ⚠️ ALL ZEROS! expr.kind = {:?}", conn_expr.kind);
+                                } else {
+                                    let non_zero: Vec<_> = conn_lits.iter().enumerate()
+                                        .filter(|(_, l)| **l != self.aig.false_lit())
+                                        .map(|(i, l)| format!("bit{}=n{}{}", i, l.node.0, if l.inverted {"'"} else {""}))
+                                        .collect();
+                                    println!("[CONN_DEBUG]   non-zero bits: [{}]", non_zero.join(", "));
+                                }
+                            }
+                        }
 
                         // Map child input port to parent signal's literals
                         let max_bits = width.min(conn_lits.len());
@@ -5593,7 +5868,7 @@ impl<'a> MirToAig<'a> {
 
     /// Connect instance OUTPUT ports to parent signals (after processing child)
     /// Propagates child output values to the parent's connected signals
-    fn connect_instance_outputs(&mut self, inst_path: &str, mir: &Mir) {
+    fn connect_instance_outputs(&mut self, inst_path: &str, mir: &'a Mir) {
         // Find the parent module and instance
         let (parent_path, inst_name) = if let Some(dot_pos) = inst_path.rfind('.') {
             (&inst_path[..dot_pos], &inst_path[dot_pos + 1..])
@@ -5828,10 +6103,16 @@ impl<'a> MirToAig<'a> {
                 for (item_cond, item_state) in case_updates.into_iter().rev() {
                     // For each register bit, create MUX: item_cond ? item_value : current_value
                     for (key, item_val) in &item_state {
+                        // BUG #265 FIX: Fall back to signal_map (current latch output) when a
+                        // register isn't updated by the default arm or previous overlays.
+                        // Without this, registers not assigned in all case arms get incorrectly
+                        // zeroed (false_lit) instead of holding their current value.
                         let current_val = next_state_map
                             .get(key)
                             .copied()
-                            .unwrap_or_else(|| initial_state.get(key).copied().unwrap_or_else(|| self.aig.false_lit()));
+                            .unwrap_or_else(|| initial_state.get(key).copied()
+                                .unwrap_or_else(|| self.signal_map.get(key).copied()
+                                    .unwrap_or_else(|| self.aig.false_lit())));
 
                         if *item_val != current_val {
                             let muxed = self.aig.add_mux(item_cond, current_val, *item_val);
@@ -6139,6 +6420,14 @@ impl<'a> MirToAig<'a> {
                 Statement::Block(inner_block) => {
                     self.collect_register_signals(inner_block, registers);
                 }
+                Statement::ResolvedConditional(resolved) => {
+                    // ResolvedConditional wraps an if-else-if chain — extract register from target
+                    if let Some((sig_ref, name, width)) = self.lvalue_to_ref_with_info(&resolved.target) {
+                        if !registers.iter().any(|(r, _, _)| *r == sig_ref) {
+                            registers.push((sig_ref, name, width));
+                        }
+                    }
+                }
                 _ => {}
             }
         }
@@ -6152,16 +6441,26 @@ impl<'a> MirToAig<'a> {
         reset_values: &mut HashMap<(MirSignalRef, u32), u64>,
     ) {
         for stmt in &block.statements {
-            if let Statement::If(if_stmt) = stmt {
-                // Check if condition is a reset signal (named "rst" or similar)
-                if self.is_reset_condition(&if_stmt.condition) {
-                    // Collect constant assignments from the then block
-                    self.collect_reset_assignments(&if_stmt.then_block, reset_values);
+            match stmt {
+                Statement::If(if_stmt) => {
+                    // Check if condition is a reset signal (named "rst" or similar)
+                    if self.is_reset_condition(&if_stmt.condition) {
+                        // Collect constant assignments from the then block
+                        self.collect_reset_assignments(&if_stmt.then_block, reset_values);
+                    }
+                    // Recurse into else block (might have nested if rst)
+                    if let Some(else_block) = &if_stmt.else_block {
+                        self.collect_reset_values(else_block, reset_values);
+                    }
                 }
-                // Recurse into else block (might have nested if rst)
-                if let Some(else_block) = &if_stmt.else_block {
-                    self.collect_reset_values(else_block, reset_values);
+                Statement::ResolvedConditional(resolved) => {
+                    // Unwrap to original if-else-if chain and recurse
+                    let wrapped = Block {
+                        statements: vec![Statement::If(*resolved.original.clone())],
+                    };
+                    self.collect_reset_values(&wrapped, reset_values);
                 }
+                _ => {}
             }
         }
     }
@@ -6326,6 +6625,13 @@ impl<'a> MirToAig<'a> {
                 }
                 Statement::Block(inner_block) => {
                     self.find_assigned_signals(inner_block);
+                }
+                Statement::ResolvedConditional(resolved) => {
+                    if let Some(sig_ref) = self.lvalue_to_ref(&resolved.target) {
+                        if !self.register_outputs.contains(&sig_ref) {
+                            self.register_outputs.push(sig_ref);
+                        }
+                    }
                 }
                 _ => {}
             }
@@ -6788,6 +7094,9 @@ impl<'a> MirToAig<'a> {
             ExpressionKind::Ref(lvalue) => self.convert_lvalue_ref(lvalue),
 
             ExpressionKind::Binary { op, left, right } => {
+                if matches!(op, BinaryOp::Div | BinaryOp::Mod) {
+                    println!("[DIV_DEBUG] convert_expression: Binary op={:?}, left.ty={:?}, right.ty={:?}", op, left.ty, right.ty);
+                }
                 let left_lits = self.convert_expression(left);
                 let right_lits = self.convert_expression(right);
                 // Determine signedness by recursively inspecting operand expression trees.
@@ -7174,6 +7483,22 @@ impl<'a> MirToAig<'a> {
         })
     }
 
+    /// Extend AIG literal vector to target width with proper sign/zero extension.
+    /// For signed, repeats the MSB (sign bit). For unsigned, pads with 0.
+    fn extend_to_width(&self, lits: &[AigLit], target_width: usize, signed: bool) -> Vec<AigLit> {
+        if lits.len() >= target_width {
+            return lits[..target_width].to_vec();
+        }
+        let extend_bit = if signed && !lits.is_empty() {
+            *lits.last().unwrap() // MSB = sign bit
+        } else {
+            self.aig.false_lit() // zero
+        };
+        let mut result = lits.to_vec();
+        result.resize(target_width, extend_bit);
+        result
+    }
+
     fn convert_binary_op(
         &mut self,
         op: BinaryOp,
@@ -7181,76 +7506,89 @@ impl<'a> MirToAig<'a> {
         right: &[AigLit],
         signed: bool,
     ) -> Vec<AigLit> {
-        let max_width = left.len().max(right.len());
+        // For shifts, data width is determined by the LEFT operand only.
+        // The right operand (shift amount) does NOT expand the data width.
+        // For all other ops, use max(left, right) with proper sign/zero extension.
+        let is_shift = matches!(op, BinaryOp::LeftShift | BinaryOp::RightShift);
+        let max_width = if is_shift {
+            left.len() // Shift: data width = left operand width
+        } else {
+            left.len().max(right.len())
+        };
+        // BUG FIX: Extend both operands to max_width with proper sign/zero extension.
+        // Previously, shorter operands were implicitly zero-extended via unwrap_or(false_lit()),
+        // which is wrong for signed comparisons/arithmetic (e.g., 10-bit int[10] -250 extended
+        // to 32 bits with zeros becomes +774 instead of -250).
+        // For shifts, only extend the left operand to its own width (no-op), right is used as-is.
+        let left = self.extend_to_width(left, max_width, signed);
+        let right = if is_shift {
+            right.to_vec() // Keep shift amount at original width
+        } else {
+            self.extend_to_width(right, max_width, signed)
+        };
 
         match op {
             BinaryOp::BitwiseAnd | BinaryOp::And => {
                 (0..max_width)
                     .map(|i| {
-                        let l = left.get(i).copied().unwrap_or_else(|| self.aig.false_lit());
-                        let r = right.get(i).copied().unwrap_or_else(|| self.aig.false_lit());
-                        self.aig.add_and(l, r)
+                        self.aig.add_and(left[i], right[i])
                     })
                     .collect()
             }
             BinaryOp::BitwiseOr | BinaryOp::Or => {
                 (0..max_width)
                     .map(|i| {
-                        let l = left.get(i).copied().unwrap_or_else(|| self.aig.false_lit());
-                        let r = right.get(i).copied().unwrap_or_else(|| self.aig.false_lit());
-                        self.aig.add_or(l, r)
+                        self.aig.add_or(left[i], right[i])
                     })
                     .collect()
             }
             BinaryOp::BitwiseXor | BinaryOp::Xor => {
                 (0..max_width)
                     .map(|i| {
-                        let l = left.get(i).copied().unwrap_or_else(|| self.aig.false_lit());
-                        let r = right.get(i).copied().unwrap_or_else(|| self.aig.false_lit());
-                        self.aig.add_xor(l, r)
+                        self.aig.add_xor(left[i], right[i])
                     })
                     .collect()
             }
             BinaryOp::LogicalAnd => {
                 // OR all bits of each operand, then AND
-                let l_any = self.reduce_or(left);
-                let r_any = self.reduce_or(right);
+                let l_any = self.reduce_or(&left);
+                let r_any = self.reduce_or(&right);
                 vec![self.aig.add_and(l_any, r_any)]
             }
             BinaryOp::LogicalOr => {
-                let l_any = self.reduce_or(left);
-                let r_any = self.reduce_or(right);
+                let l_any = self.reduce_or(&left);
+                let r_any = self.reduce_or(&right);
                 vec![self.aig.add_or(l_any, r_any)]
             }
             BinaryOp::Equal => {
-                vec![self.build_equality(left, right)]
+                vec![self.build_equality(&left, &right)]
             }
             BinaryOp::NotEqual => {
-                vec![self.build_equality(left, right).invert()]
+                vec![self.build_equality(&left, &right).invert()]
             }
             BinaryOp::Less => {
-                vec![self.build_less_than(left, right, signed)]
+                vec![self.build_less_than(&left, &right, signed)]
             }
             BinaryOp::LessEqual => {
-                let lt = self.build_less_than(left, right, signed);
-                let eq = self.build_equality(left, right);
+                let lt = self.build_less_than(&left, &right, signed);
+                let eq = self.build_equality(&left, &right);
                 vec![self.aig.add_or(lt, eq)]
             }
             BinaryOp::Greater => {
-                vec![self.build_less_than(right, left, signed)]
+                vec![self.build_less_than(&right, &left, signed)]
             }
             BinaryOp::GreaterEqual => {
-                let gt = self.build_less_than(right, left, signed);
-                let eq = self.build_equality(left, right);
+                let gt = self.build_less_than(&right, &left, signed);
+                let eq = self.build_equality(&left, &right);
                 vec![self.aig.add_or(gt, eq)]
             }
-            BinaryOp::Add => self.build_adder(left, right),
+            BinaryOp::Add => self.build_adder(&left, &right),
             BinaryOp::Sub => {
                 // a - b = a + (~b + 1)
                 let not_right: Vec<_> = right.iter().map(|l| l.invert()).collect();
                 let one = vec![self.aig.true_lit()];
                 let neg_b = self.build_adder(&not_right, &one);
-                self.build_adder(left, &neg_b)
+                self.build_adder(&left, &neg_b)
             }
             BinaryOp::LeftShift => {
                 // Barrel shifter: each stage shifts by 2^i if the i-th bit of amount is set
@@ -7307,12 +7645,16 @@ impl<'a> MirToAig<'a> {
             }
             BinaryOp::Mul => {
                 // BUG FIX #247: Implement proper multiplier for formal verification
-                self.build_multiplier(left, right, signed)
+                self.build_multiplier(&left, &right, signed)
             }
-            BinaryOp::Div | BinaryOp::Mod => {
-                // Division/modulo are complex - for now just return left
-                // TODO: Implement proper divider for formal verification
-                left.to_vec()
+            BinaryOp::Div => {
+                // BUG #266 FIX: Implement proper divider for formal verification
+                println!("[DIV_DEBUG] convert_binary_op: Div, left_width={}, right_width={}, signed={}", left.len(), right.len(), signed);
+                self.build_divider(&left, &right, signed, false)
+            }
+            BinaryOp::Mod => {
+                // BUG #266 FIX: Implement proper modulo for formal verification
+                self.build_divider(&left, &right, signed, true)
             }
         }
     }
@@ -7405,11 +7747,6 @@ impl<'a> MirToAig<'a> {
         let b_width = b.len();
         let result_width = a_width + b_width;
 
-        println!(
-            "🔧 [MIR_AIG_MUL] build_multiplier: a_width={}, b_width={}, result_width={}, signed={}",
-            a_width, b_width, result_width, signed
-        );
-
         if signed {
             // Sign-magnitude multiplication:
             // 1. Get sign bits and compute result sign
@@ -7487,6 +7824,120 @@ impl<'a> MirToAig<'a> {
         }
 
         result
+    }
+
+    /// Build a divider: returns quotient (want_remainder=false) or remainder (want_remainder=true).
+    /// For signed: uses sign-magnitude approach (Rust/hardware truncation-toward-zero semantics).
+    fn build_divider(
+        &mut self,
+        dividend: &[AigLit],
+        divisor: &[AigLit],
+        signed: bool,
+        want_remainder: bool,
+    ) -> Vec<AigLit> {
+        let result_width = dividend.len();
+        println!("[DIV_DEBUG] build_divider: dividend_width={}, divisor_width={}, signed={}, want_remainder={}, result_width={}, aig_nodes_before={}",
+                 dividend.len(), divisor.len(), signed, want_remainder, result_width, self.aig.nodes.len());
+        let raw_result = if signed {
+            let false_lit = self.aig.false_lit();
+            let a_sign = dividend.last().copied().unwrap_or(false_lit);
+            let b_sign = divisor.last().copied().unwrap_or(false_lit);
+
+            // |a|, |b|
+            let a_neg = self.negate_aig(dividend);
+            let a_mag = self.mux_vector(a_sign, &a_neg, dividend);
+            let b_neg = self.negate_aig(divisor);
+            let b_mag = self.mux_vector(b_sign, &b_neg, divisor);
+
+            let (quot, rem) = self.build_unsigned_divmod(&a_mag, &b_mag);
+
+            if want_remainder {
+                // Remainder sign = dividend sign (truncation toward zero)
+                let rem_neg = self.negate_aig(&rem);
+                let mut r = self.mux_vector(a_sign, &rem_neg, &rem);
+                r.truncate(result_width);
+                r
+            } else {
+                // Quotient sign = a_sign XOR b_sign
+                let q_sign = self.aig.add_xor(a_sign, b_sign);
+                let quot_neg = self.negate_aig(&quot);
+                let mut q = self.mux_vector(q_sign, &quot_neg, &quot);
+                q.truncate(result_width);
+                q
+            }
+        } else {
+            let (quot, rem) = self.build_unsigned_divmod(dividend, divisor);
+            let mut raw = if want_remainder { rem } else { quot };
+            raw.truncate(result_width);
+            raw
+        };
+
+        // BUG #266 FIX: Guard against divide-by-zero (return 0, matching C++ behavioral sim)
+        let divisor_any = self.reduce_or(divisor);
+        let divisor_is_zero = divisor_any.invert(); // all bits zero → divisor_any=0 → invert=1
+        let false_lit = self.aig.false_lit();
+        let zero_result = vec![false_lit; result_width];
+        // divisor_is_zero ? zero : raw_result
+        self.mux_vector(divisor_is_zero, &zero_result, &raw_result)
+    }
+
+    /// Restoring unsigned division: returns (quotient, remainder), both `width` bits wide.
+    fn build_unsigned_divmod(
+        &mut self,
+        dividend: &[AigLit],
+        divisor: &[AigLit],
+    ) -> (Vec<AigLit>, Vec<AigLit>) {
+        let n = dividend.len();
+        let m = divisor.len();
+        let width = n.max(m);
+        let false_lit = self.aig.false_lit();
+        let nodes_before = self.aig.nodes.len();
+
+        // Pad both to `width`
+        let mut a = dividend.to_vec();
+        a.resize(width, false_lit);
+        let mut d = divisor.to_vec();
+        d.resize(width, false_lit);
+
+        let mut remainder = vec![false_lit; width];
+        let mut quotient = vec![false_lit; width];
+
+        for i in (0..width).rev() {
+            // Shift remainder left by 1, insert dividend[i] at bit 0
+            for j in (1..width).rev() {
+                remainder[j] = remainder[j - 1];
+            }
+            remainder[0] = a[i];
+
+            // Trial subtraction: remainder - divisor
+            // Compute via: remainder + (~divisor) + 1
+            let d_inv: Vec<AigLit> = d.iter().map(|l| l.invert()).collect();
+            let mut trial = Vec::with_capacity(width);
+            let mut carry = self.aig.true_lit(); // +1 for two's complement
+            for j in 0..width {
+                let r_bit = remainder[j];
+                let d_bit = d_inv[j];
+                let sum_rd = self.aig.add_xor(r_bit, d_bit);
+                let sum = self.aig.add_xor(sum_rd, carry);
+                trial.push(sum);
+                let rd = self.aig.add_and(r_bit, d_bit);
+                let rc = self.aig.add_and(r_bit, carry);
+                let dc = self.aig.add_and(d_bit, carry);
+                let rd_or_rc = self.aig.add_or(rd, rc);
+                carry = self.aig.add_or(rd_or_rc, dc);
+            }
+            // carry = no_borrow (1 means remainder >= divisor)
+            let no_borrow = carry;
+
+            quotient[i] = no_borrow;
+
+            // remainder = no_borrow ? trial : remainder (unchanged)
+            remainder = self.mux_vector(no_borrow, &trial, &remainder);
+        }
+
+        println!("[DIV_DEBUG] build_unsigned_divmod: width={}, aig_nodes_created={}, quotient_width={}, remainder_width={}",
+                 width, self.aig.nodes.len() - nodes_before, quotient.len(), remainder.len());
+        (quotient, remainder)
     }
 
     /// Negate a vector (two's complement: ~x + 1)
@@ -10183,11 +10634,19 @@ impl SimBasedEquivalenceChecker {
                     }
                 }
 
-                let matches = mir_val == Some(gate_val);
+                // Mask MIR value to gate port width for correct comparison
+                let trace_port_width = sorted_bits.iter()
+                    .filter_map(|(_, idx)| *idx)
+                    .max()
+                    .map(|max_idx| max_idx + 1)
+                    .unwrap_or(1) as u32;
+                let trace_mask = if trace_port_width >= 64 { u64::MAX } else { (1u64 << trace_port_width) - 1 };
+                let mir_val_masked = mir_val.map(|v| v & trace_mask);
+                let matches = mir_val_masked == Some(gate_val);
                 trace_entry.signals.push((
                     user_name,
                     mir_name.clone(),
-                    mir_val,
+                    mir_val_masked,
                     if has_gate { Some(gate_val) } else { None },
                     matches
                 ));
@@ -10223,7 +10682,19 @@ impl SimBasedEquivalenceChecker {
                     }
                 }
 
-                if has_bits && mir_val != gate_val {
+                // BUG FIX: Mask MIR value to gate port width before comparing.
+                // MIR simulation may return wider values (e.g., 32-bit for int[10] due to
+                // Value::Integer not carrying width info). The gate side has the correct
+                // width from synthesis. Mask ensures we compare only the relevant bits.
+                let port_width = sorted_bits.iter()
+                    .filter_map(|(_, idx)| *idx)
+                    .max()
+                    .map(|max_idx| max_idx + 1)
+                    .unwrap_or(1) as u32;
+                let width_mask = if port_width >= 64 { u64::MAX } else { (1u64 << port_width) - 1 };
+                let mir_val_masked = mir_val & width_mask;
+
+                if has_bits && mir_val_masked != gate_val {
                     // Build diagnostics for the report
                     let mut diagnostics = MismatchDiagnostics::default();
 
@@ -10281,7 +10752,7 @@ impl SimBasedEquivalenceChecker {
 
                     // Log summary to console
                     println!("[SIM_EQ] MISMATCH at cycle {} on '{}':", cycle, user_name);
-                    println!("[SIM_EQ]   MIR value:  0x{:x} ({})", mir_val, mir_val);
+                    println!("[SIM_EQ]   MIR value:  0x{:x} ({}) [masked to {} bits: 0x{:x}]", mir_val, mir_val, port_width, mir_val_masked);
                     println!("[SIM_EQ]   Gate value: 0x{:x} ({})", gate_val, gate_val);
                     println!("[SIM_EQ]   Diagnostics collected: {} MIR signals, {} Gate signals, {} inputs",
                         diagnostics.mir_signals.len(), diagnostics.gate_signals.len(), diagnostics.input_values.len());
@@ -10466,6 +10937,16 @@ impl SimBasedEquivalenceChecker {
             .map(|(name, _)| name.clone())
             .unwrap_or_else(|| self.clock_name.clone());
 
+        // Debug: show resolved reset/clock names and all gate inputs
+        println!("[SIM_EQ_COV] gate_reset_name='{}' (from self.reset_name='{}')", gate_reset_name, self.reset_name);
+        println!("[SIM_EQ_COV] gate_clock_name='{}' (from self.clock_name='{}')", gate_clock_name, self.clock_name);
+        println!("[SIM_EQ_COV] gate_inputs_by_base keys: {:?}", gate_inputs_by_base.keys().collect::<Vec<_>>());
+        if let Some(rst_bits) = gate_inputs_by_base.get(&self.reset_name) {
+            println!("[SIM_EQ_COV] gate rst bits: {:?}", rst_bits);
+        } else {
+            println!("[SIM_EQ_COV] WARNING: '{}' NOT found in gate_inputs_by_base!", self.reset_name);
+        }
+
         // Reset sequence
         println!("[SIM_EQ_COV] Applying {} reset cycles...", self.reset_cycles);
         for _ in 0..self.reset_cycles {
@@ -10635,12 +11116,42 @@ impl SimBasedEquivalenceChecker {
                     }
                 }
 
-                if has_bits && mir_val != gate_val {
+                // Debug: dump all outputs on first cycle to find mismatches
+                if cycle == 0 {
+                    let user_name = resolve_mir_name(mir_name);
+                    if mir_val != 0 || gate_val != 0 || !has_bits {
+                        println!("[SIM_EQ_COV] CYCLE0 '{}': mir=0x{:x} gate=0x{:x} has_bits={} gate_bits_count={}",
+                            user_name, mir_val, gate_val, has_bits, sorted_bits.len());
+                    }
+                    // Debug: check rst/clk state for state_timer mismatch
+                    if user_name == "debug_state_timer" {
+                        let gate_rst = gate_sim.get_output_raw(&gate_reset_name).await;
+                        let gate_rst_alt = gate_sim.get_output_raw("rst").await;
+                        let mir_rst = mir_sim.get_output_raw(&self.reset_name).await;
+                        println!("[SIM_EQ_COV] CYCLE0 state_timer debug: gate_rst={:?} gate_rst_alt={:?} mir_rst={:?}",
+                            gate_rst, gate_rst_alt, mir_rst);
+                    }
+                }
+
+                // BUG FIX: Mask MIR value to gate port width before comparing
+                let cov_port_width = sorted_bits.iter()
+                    .filter_map(|(_, idx)| *idx)
+                    .max()
+                    .map(|max_idx| max_idx + 1)
+                    .unwrap_or(1) as u32;
+                let cov_width_mask = if cov_port_width >= 64 { u64::MAX } else { (1u64 << cov_port_width) - 1 };
+                let mir_val_masked = mir_val & cov_width_mask;
+
+                if has_bits && mir_val_masked != gate_val {
                     let user_name = resolve_mir_name(mir_name);
                     println!("[SIM_EQ_COV] MISMATCH at cycle {} on '{}':", cycle, user_name);
-                    println!("[SIM_EQ_COV]   MIR value:  0x{:x} ({})", mir_val, mir_val);
+                    println!("[SIM_EQ_COV]   MIR value:  0x{:x} ({}) [masked to {} bits: 0x{:x}]", mir_val, mir_val, cov_port_width, mir_val_masked);
                     println!("[SIM_EQ_COV]   Gate value: 0x{:x} ({})", gate_val, gate_val);
-
+                    // Dump individual gate bits on mismatch
+                    for (gate_name, bit_idx) in &sorted_bits {
+                        let gv = gate_sim.get_output_raw(gate_name).await;
+                        println!("[SIM_EQ_COV]   gate_bit '{}' idx={:?} val={:?}", gate_name, bit_idx, gv);
+                    }
                     let coverage_report = CoverageReport::from_coverage_dbs(
                         &behav_cov, Some(&gate_cov), false, cycle);
 

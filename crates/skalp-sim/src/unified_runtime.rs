@@ -460,8 +460,6 @@ impl UnifiedSimulator {
         // as behavioral simulation
         self.name_registry = sir.name_registry.clone();
 
-        println!("[DEBUG] build_gate_level_name_registry: Using SIR's name_registry with {} entries",
-            self.name_registry.len());
     }
 
     /// Load a gate-level GateNetlist for NCL (async) simulation
@@ -552,22 +550,17 @@ impl UnifiedSimulator {
             HwAccel::Auto => cfg!(target_os = "macos"),
         };
 
-        println!("⚡⚡⚡ BEHAVIORAL_INIT: use_gpu={}", use_gpu);
 
         if use_gpu {
             #[cfg(target_os = "macos")]
             {
-                println!("⚡⚡⚡ BEHAVIORAL_INIT: Trying to create GpuRuntime");
                 match GpuRuntime::new().await {
                     Ok(mut runtime) => {
-                        println!("⚡⚡⚡ BEHAVIORAL_INIT: GpuRuntime created, initializing...");
                         match runtime.initialize(module).await {
-                            Err(e) => {
-                                println!("⚡⚡⚡ BEHAVIORAL_INIT: GPU init FAILED: {}", e);
+                            Err(_e) => {
                                 // Fall through to CPU
                             }
                             Ok(()) => {
-                                println!("⚡⚡⚡ BEHAVIORAL_INIT: GPU initialized successfully!");
                                 self.backend = SimulatorBackend::BehavioralGpu(runtime);
                                 return Ok(());
                             }
@@ -746,13 +739,8 @@ impl UnifiedSimulator {
     /// This is the preferred way to set inputs in NCL mode as it gives
     /// explicit control over the bit width.
     pub fn set_ncl_input(&mut self, name: &str, value: u64, width: usize) {
-        eprintln!(
-            "[UNIFIED] set_ncl_input: name='{}' value=0x{:X} width={}",
-            name, value, width
-        );
         match &mut self.backend {
             SimulatorBackend::NclCpu(ncl_sim) => {
-                eprintln!("[UNIFIED] Calling ncl_sim.set_dual_rail_value");
                 ncl_sim.set_dual_rail_value(name, value, width);
             }
             #[cfg(target_os = "macos")]
@@ -828,12 +816,6 @@ impl UnifiedSimulator {
             SimulatorBackend::NclGpu(runtime) => runtime.get_dual_rail_value(name, width),
             _ => None,
         };
-        if result.is_none() && name.contains("result") {
-            println!(
-                "[UNIFIED_DEBUG] get_ncl_output('{}', {}) = None",
-                name, width
-            );
-        }
         result
     }
 
@@ -994,21 +976,13 @@ impl UnifiedSimulator {
             }
             SimulatorBackend::GateLevelCpu(sim) => {
                 // Gate-level netlists use user-facing names, not internal _s names
-                let result = sim.get_output(name).map(|bits| {
-                    let val: u64 = bits.iter()
+                sim.get_output(name).map(|bits| {
+                    bits.iter()
                         .enumerate()
                         .filter(|(_, &b)| b)
                         .map(|(i, _)| 1u64 << i)
-                        .sum();
-                    if name.contains("power_actual") || name.contains("power_reg") {
-                        println!("[UNIFIED_GET_OUTPUT_RAW] name='{}', bits={:?}, val={}", name, bits, val);
-                    }
-                    val
-                });
-                if name.contains("power_actual") && result.is_none() {
-                    println!("[UNIFIED_GET_OUTPUT_RAW] name='{}' returned None from get_output", name);
-                }
-                result
+                        .sum()
+                })
             }
             #[cfg(target_os = "macos")]
             SimulatorBackend::GateLevelGpu(runtime) => {

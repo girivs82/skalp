@@ -1052,18 +1052,34 @@ impl<'a> MirToSirConverter<'a> {
     ) {
         // Collect from then branch
         for stmt in &if_stmt.then_block.statements {
-            if let Statement::Assignment(assign) = stmt {
-                let target = self.lvalue_to_string(&assign.lhs);
-                targets.insert(target);
+            match stmt {
+                Statement::Assignment(assign) => {
+                    let target = self.lvalue_to_string(&assign.lhs);
+                    targets.insert(target);
+                }
+                // BUG #270 FIX: Also collect from ResolvedConditional
+                Statement::ResolvedConditional(resolved) => {
+                    let target = self.lvalue_to_string(&resolved.target);
+                    targets.insert(target);
+                }
+                _ => {}
             }
         }
 
         // Collect from else branch
         if let Some(else_block) = &if_stmt.else_block {
             for stmt in &else_block.statements {
-                if let Statement::Assignment(assign) = stmt {
-                    let target = self.lvalue_to_string(&assign.lhs);
-                    targets.insert(target);
+                match stmt {
+                    Statement::Assignment(assign) => {
+                        let target = self.lvalue_to_string(&assign.lhs);
+                        targets.insert(target);
+                    }
+                    // BUG #270 FIX: Also collect from ResolvedConditional
+                    Statement::ResolvedConditional(resolved) => {
+                        let target = self.lvalue_to_string(&resolved.target);
+                        targets.insert(target);
+                    }
+                    _ => {}
                 }
             }
         }
@@ -1750,6 +1766,11 @@ impl<'a> MirToSirConverter<'a> {
                         self.collect_all_targets_from_statements(&default_block.statements, targets);
                     }
                 }
+                Statement::ResolvedConditional(resolved) => {
+                    // BUG #270 FIX: Collect target from ResolvedConditional
+                    let target = self.lvalue_to_string(&resolved.target);
+                    targets.insert(target);
+                }
                 _ => {}
             }
         }
@@ -1857,6 +1878,29 @@ impl<'a> MirToSirConverter<'a> {
                     }
 
                     current_value = result;
+                }
+                Statement::ResolvedConditional(resolved) => {
+                    // BUG #270 FIX: Handle ResolvedConditional in value building
+                    let resolved_target = self.lvalue_to_string(&resolved.target);
+                    if resolved_target == target {
+                        let if_stmt = &resolved.original;
+                        let condition = self.create_expression_node(&if_stmt.condition);
+                        let then_value = self.build_value_from_statements_for_target(
+                            &if_stmt.then_block.statements,
+                            target,
+                            current_value,
+                        );
+                        let else_value = if let Some(else_block) = &if_stmt.else_block {
+                            self.build_value_from_statements_for_target(
+                                &else_block.statements,
+                                target,
+                                current_value,
+                            )
+                        } else {
+                            current_value
+                        };
+                        current_value = self.create_mux_node(condition, then_value, else_value);
+                    }
                 }
                 _ => {
                     // Skip other statement types for now
@@ -2207,6 +2251,11 @@ impl<'a> MirToSirConverter<'a> {
                     if let Some(default_block) = &case_stmt.default {
                         self.collect_targets_from_block(&default_block.statements, targets);
                     }
+                }
+                Statement::ResolvedConditional(resolved) => {
+                    // BUG #270 FIX: Collect target from ResolvedConditional
+                    let target = self.lvalue_to_string(&resolved.target);
+                    targets.insert(target);
                 }
                 _ => {}
             }
@@ -2630,6 +2679,20 @@ impl<'a> MirToSirConverter<'a> {
                         return Some(val);
                     }
                 }
+                Statement::ResolvedConditional(resolved) => {
+                    // BUG #270 FIX: Handle ResolvedConditional
+                    let resolved_target = self.lvalue_to_string(&resolved.target);
+                    if resolved_target == target {
+                        let result = self.synthesize_conditional_assignment(&resolved.original, target);
+                        let is_keep_value = self.sir.combinational_nodes.iter().any(|n| {
+                            n.id == result
+                                && matches!(n.kind, SirNodeKind::SignalRef { ref signal } if signal == target)
+                        });
+                        if !is_keep_value {
+                            return Some(result);
+                        }
+                    }
+                }
                 _ => {}
             }
         }
@@ -2681,6 +2744,24 @@ impl<'a> MirToSirConverter<'a> {
                     // BUG #226 FIX: Pass the default value to nested case statements
                     if let Some(val) = self.synthesize_case_for_target_with_default(nested_case, target, default_value) {
                         return Some(val);
+                    }
+                }
+                Statement::ResolvedConditional(resolved) => {
+                    // BUG #270 FIX: Handle ResolvedConditional with default
+                    let resolved_target = self.lvalue_to_string(&resolved.target);
+                    if resolved_target == target {
+                        let result = self.synthesize_conditional_assignment_with_default(
+                            &resolved.original,
+                            target,
+                            default_value,
+                        );
+                        let is_keep_value = self.sir.combinational_nodes.iter().any(|n| {
+                            n.id == result
+                                && matches!(n.kind, SirNodeKind::SignalRef { ref signal } if signal == target)
+                        });
+                        if !is_keep_value {
+                            return Some(result);
+                        }
                     }
                 }
                 _ => {}
@@ -2785,6 +2866,22 @@ impl<'a> MirToSirConverter<'a> {
                     ) {
                         // Case statement assigned to target - use as new result
                         conditional_results.push(result);
+                    }
+                }
+                Statement::ResolvedConditional(resolved) => {
+                    // BUG #270 FIX: Handle ResolvedConditional (single-target optimized if-else-if)
+                    // Check if this resolved conditional targets our signal
+                    let resolved_target = self.lvalue_to_string(&resolved.target);
+                    if resolved_target == target {
+                        // Use the original IfStatement to synthesize the conditional
+                        let nested_result = self.synthesize_conditional_assignment_with_default(
+                            &resolved.original,
+                            target,
+                            current_default,
+                        );
+                        conditional_results.push(nested_result);
+                        current_default = Some(nested_result);
+                        has_direct_assignment = true;
                     }
                 }
                 _ => {}
@@ -3708,7 +3805,6 @@ impl<'a> MirToSirConverter<'a> {
                 then_expr,
                 else_expr,
             } => {
-                println!("⚠️ CONDITIONAL: target_width={:?}", target_width);
                 let cond_node = self.create_expression_node(cond);
                 // Propagate width hint to both branches
                 let then_node = self.create_expression_node_with_width(then_expr, target_width);
@@ -7957,6 +8053,29 @@ impl<'a> MirToSirConverter<'a> {
                     }
                 }
             }
+            Statement::ResolvedConditional(resolved) => {
+                // BUG #269 FIX: ResolvedConditional is an optimized form of if-else-if
+                // chains created by the HIR→MIR optimizer. It has a single target and
+                // a priority mux tree. Without handling this, DFF registers are silently
+                // dropped for sub-entity instances that use simple conditional assignments
+                // (e.g., `if rst { fault_reg = 0 } else { fault_reg = value > threshold }`).
+                let lhs_signal = match &resolved.target {
+                    LValue::Signal(sig_id) => child_module
+                        .signals
+                        .iter()
+                        .find(|s| s.id == *sig_id)
+                        .map(|signal| format!("{}.{}", inst_prefix, signal.name)),
+                    LValue::Port(port_id) => child_module
+                        .ports
+                        .iter()
+                        .find(|p| p.id == *port_id)
+                        .map(|port| format!("{}.{}", inst_prefix, port.name)),
+                    _ => None,
+                };
+                if let Some(sig_name) = lhs_signal {
+                    targets.push(sig_name);
+                }
+            }
             _ => {}
         }
     }
@@ -8118,6 +8237,36 @@ impl<'a> MirToSirConverter<'a> {
                         parent_prefix,
                     ) {
                         return val;
+                    }
+                }
+                Statement::ResolvedConditional(resolved) => {
+                    // BUG #269 FIX: Handle ResolvedConditional (optimized if-else-if chains)
+                    // Check if this targets our signal, then use the original IfStatement
+                    // for synthesis (it has the same semantics as the resolved form).
+                    let lhs = match &resolved.target {
+                        LValue::Signal(sig_id) => {
+                            child_module.signals.iter().find(|s| s.id == *sig_id)
+                                .map(|signal| format!("{}.{}", inst_prefix, signal.name))
+                        }
+                        LValue::Port(port_id) => {
+                            child_module.ports.iter().find(|p| p.id == *port_id)
+                                .map(|port| format!("{}.{}", inst_prefix, port.name))
+                        }
+                        _ => None,
+                    };
+                    if let Some(lhs_name) = lhs {
+                        if lhs_name == target {
+                            println!("      🔄 BUG #269 FIX: ResolvedConditional for target='{}', using original IfStatement", target);
+                            return self.synthesize_conditional_for_instance(
+                                &resolved.original,
+                                inst_prefix,
+                                port_mapping,
+                                child_module,
+                                target,
+                                parent_module_for_signals,
+                                parent_prefix,
+                            );
+                        }
                     }
                 }
                 _ => {}

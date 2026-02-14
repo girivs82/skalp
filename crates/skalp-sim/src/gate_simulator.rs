@@ -471,21 +471,9 @@ impl GateLevelSimulator {
 
     /// Get an output signal value
     pub fn get_output(&self, name: &str) -> Option<Vec<bool>> {
-        let result = self.signal_name_to_id
+        self.signal_name_to_id
             .get(name)
-            .and_then(|id| {
-                let value = self.state.signals.get(&id.0).cloned();
-                // Debug: trace power_actual lookups
-                if name.contains("power_actual") {
-                    println!("[GATE_GET_OUTPUT] name='{}', id={}, value={:?}", name, id.0, value);
-                }
-                value
-            });
-        // Debug: if power_actual not found
-        if name.contains("power_actual") && result.is_none() {
-            println!("[GATE_GET_OUTPUT] name='{}' NOT FOUND in signal_name_to_id", name);
-        }
-        result
+            .and_then(|id| self.state.signals.get(&id.0).cloned())
     }
 
     /// Get any signal value by name (for debugging)
@@ -669,9 +657,15 @@ impl GateLevelSimulator {
     }
 
     /// Evaluate all combinational logic
+    /// Runs multiple passes to handle out-of-order dependencies.
+    /// Gate-level netlists may have operations in arbitrary order
+    /// (not topologically sorted), so a single pass can read stale values.
     fn evaluate_combinational(&mut self) {
-        for block in &self.sir.top_module.comb_blocks.clone() {
-            self.evaluate_comb_block(block);
+        // Multiple passes for convergence (handles non-topological operation order)
+        for _ in 0..3 {
+            for block in &self.sir.top_module.comb_blocks.clone() {
+                self.evaluate_comb_block(block);
+            }
         }
     }
 
@@ -699,78 +693,12 @@ impl GateLevelSimulator {
     fn evaluate_operation(&mut self, op: &SirOperation) {
         match op {
             SirOperation::Primitive {
-                path, ptype, inputs, outputs, ..
-            } if path.contains("state_reg") && path.contains("rst_mux") => {
-                // Special debug for state_reg rst_mux
-                let input_values: Vec<bool> = inputs
-                    .iter()
-                    .filter_map(|sig_id| {
-                        self.state.signals.get(&sig_id.0)
-                            .and_then(|v: &Vec<bool>| v.first().copied())
-                    })
-                    .collect();
-                let input_names: Vec<_> = inputs.iter()
-                    .map(|sig_id| self.signal_id_to_name.get(&sig_id.0).cloned().unwrap_or_else(|| format!("id{}", sig_id.0)))
-                    .collect();
-                let output_vals = crate::gate_eval::evaluate_primitive(ptype, &input_values);
-                println!("[GATE_MUX] state_reg rst_mux: path={}", path);
-                println!("[GATE_MUX]   inputs: {:?}", input_names.iter().zip(input_values.iter()).collect::<Vec<_>>());
-                println!("[GATE_MUX]   sel={}, d0={}, d1={} -> output={}",
-                    input_values.get(0).copied().unwrap_or(false),
-                    input_values.get(1).copied().unwrap_or(false),
-                    input_values.get(2).copied().unwrap_or(false),
-                    output_vals.first().copied().unwrap_or(false));
-
-                // Actually evaluate
-                let output_values = crate::gate_eval::evaluate_primitive(ptype, &input_values);
-                for (i, out_id) in outputs.iter().enumerate() {
-                    if let Some(&value) = output_values.get(i) {
-                        let width = self.signal_widths.get(&out_id.0).copied().unwrap_or(1);
-                        let mut bits = vec![false; width];
-                        bits[0] = value;
-                        self.state.signals.insert(out_id.0, bits);
-                    }
-                }
-            }
-            SirOperation::Primitive {
                 id,
                 ptype,
                 inputs,
                 outputs,
                 path,
             } => {
-                // Check if this operation produces _t300 (next state logic) or faults__oc
-                let produces_t300 = outputs.iter().any(|out_id| {
-                    self.signal_id_to_name
-                        .get(&out_id.0)
-                        .map(|name| name.contains("_t300"))
-                        .unwrap_or(false)
-                });
-
-                // Debug: trace faults__oc signal
-                let produces_faults_oc = outputs.iter().any(|out_id| {
-                    self.signal_id_to_name
-                        .get(&out_id.0)
-                        .map(|name| name.contains("faults__oc") || name.contains("faults.oc"))
-                        .unwrap_or(false)
-                });
-
-                // Debug: trace FaultLatch fault_out signal
-                let produces_fault_out = outputs.iter().any(|out_id| {
-                    self.signal_id_to_name
-                        .get(&out_id.0)
-                        .map(|name| name.contains("fault_out") || name.contains("_latched"))
-                        .unwrap_or(false)
-                });
-
-                // Debug: trace power_actual signal
-                let produces_power_actual = outputs.iter().any(|out_id| {
-                    self.signal_id_to_name
-                        .get(&out_id.0)
-                        .map(|name| name.contains("power_actual"))
-                        .unwrap_or(false)
-                });
-
                 // Gather input values
                 let input_values: Vec<bool> = inputs
                     .iter()
@@ -781,65 +709,6 @@ impl GateLevelSimulator {
                             .and_then(|v: &Vec<bool>| v.first().copied())
                     })
                     .collect();
-
-                // Debug trace for _t300 producers
-                if produces_t300 {
-                    let input_details: Vec<_> = inputs
-                        .iter()
-                        .map(|sig_id| {
-                            let name = self.signal_id_to_name.get(&sig_id.0).cloned().unwrap_or_else(|| format!("id{}", sig_id.0));
-                            let value = self.state.signals.get(&sig_id.0).and_then(|v: &Vec<bool>| v.first().copied());
-                            (name, value)
-                        })
-                        .collect();
-                    let output_names: Vec<_> = outputs
-                        .iter()
-                        .map(|o| self.signal_id_to_name.get(&o.0).cloned().unwrap_or_default())
-                        .collect();
-                    println!("[GATE_T300] path={}, ptype={:?}", path, ptype);
-                    println!("[GATE_T300]   inputs: {:?}", input_details);
-                    println!("[GATE_T300]   outputs: {:?}", output_names);
-                }
-
-                // Debug trace for faults__oc signal
-                if produces_faults_oc {
-                    let input_details: Vec<_> = inputs
-                        .iter()
-                        .map(|sig_id| {
-                            let name = self.signal_id_to_name.get(&sig_id.0).cloned().unwrap_or_else(|| format!("id{}", sig_id.0));
-                            let value = self.state.signals.get(&sig_id.0).and_then(|v: &Vec<bool>| v.first().copied());
-                            (name, value)
-                        })
-                        .collect();
-                    let output_names: Vec<_> = outputs
-                        .iter()
-                        .map(|o| self.signal_id_to_name.get(&o.0).cloned().unwrap_or_default())
-                        .collect();
-                    println!("[GATE_FAULTS_OC] path={}, ptype={:?}", path, ptype);
-                    println!("[GATE_FAULTS_OC]   inputs: {:?}", input_details);
-                    println!("[GATE_FAULTS_OC]   outputs: {:?}", output_names);
-                    println!("[GATE_FAULTS_OC]   input_values: {:?}", input_values);
-                }
-
-                // Debug trace for fault_out/latched signals (FaultLatch outputs)
-                if produces_fault_out && (path.contains("hw_uv_latch") || path.contains("hw_ot_latch")) {
-                    let input_details: Vec<_> = inputs
-                        .iter()
-                        .map(|sig_id| {
-                            let name = self.signal_id_to_name.get(&sig_id.0).cloned().unwrap_or_else(|| format!("id{}", sig_id.0));
-                            let value = self.state.signals.get(&sig_id.0).and_then(|v: &Vec<bool>| v.first().copied());
-                            (name, value)
-                        })
-                        .collect();
-                    let output_names: Vec<_> = outputs
-                        .iter()
-                        .map(|o| self.signal_id_to_name.get(&o.0).cloned().unwrap_or_default())
-                        .collect();
-                    println!("[GATE_FAULT_LATCH] path={}, ptype={:?}", path, ptype);
-                    println!("[GATE_FAULT_LATCH]   inputs: {:?}", input_details);
-                    println!("[GATE_FAULT_LATCH]   outputs: {:?}", output_names);
-                    println!("[GATE_FAULT_LATCH]   input_values: {:?}", input_values);
-                }
 
                 // Evaluate primitive with potential fault injection
                 let output_values = if let Some(fault) = &self.active_fault {
@@ -856,44 +725,6 @@ impl GateLevelSimulator {
                 } else {
                     evaluate_primitive(ptype, &input_values)
                 };
-
-                // Debug trace output values for _t300
-                if produces_t300 {
-                    println!("[GATE_T300]   evaluated: {:?}", output_values);
-                }
-
-                // Debug trace output values for faults__oc
-                if produces_faults_oc {
-                    println!("[GATE_FAULTS_OC]   evaluated: {:?}", output_values);
-                }
-
-                // Debug trace output values for fault_out/latched
-                if produces_fault_out && (path.contains("hw_uv_latch") || path.contains("hw_ot_latch")) {
-                    println!("[GATE_FAULT_LATCH]   evaluated: {:?}", output_values);
-                }
-
-                // Debug trace output values for power_actual
-                if produces_power_actual {
-                    let input_details: Vec<_> = inputs
-                        .iter()
-                        .map(|sig_id| {
-                            let name = self.signal_id_to_name.get(&sig_id.0).cloned().unwrap_or_else(|| format!("id{}", sig_id.0));
-                            let value = self.state.signals.get(&sig_id.0).and_then(|v: &Vec<bool>| v.first().copied());
-                            (name, value)
-                        })
-                        .collect();
-                    let output_details: Vec<_> = outputs
-                        .iter()
-                        .map(|sig_id| {
-                            let name = self.signal_id_to_name.get(&sig_id.0).cloned().unwrap_or_else(|| format!("id{}", sig_id.0));
-                            (name, sig_id.0)
-                        })
-                        .collect();
-                    println!("[GATE_POWER_ACTUAL] path={}, ptype={:?}", path, ptype);
-                    println!("[GATE_POWER_ACTUAL]   inputs: {:?}", input_details);
-                    println!("[GATE_POWER_ACTUAL]   outputs (name, id): {:?}", output_details);
-                    println!("[GATE_POWER_ACTUAL]   evaluated: {:?}", output_values);
-                }
 
                 // Store output values
                 for (i, out_id) in outputs.iter().enumerate() {

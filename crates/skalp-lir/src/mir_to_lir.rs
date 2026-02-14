@@ -816,7 +816,6 @@ impl MirToLirTransform {
                 for target in &all_targets {
                     let target_signal = self.get_lvalue_signal(target);
                     let target_width = self.get_lvalue_width(target);
-
                     // Get then and else expressions (direct assignments only)
                     let then_expr = Self::find_assignment_expr(&then_assigns, target);
                     let else_expr = Self::find_assignment_expr(&else_assigns, target);
@@ -1222,6 +1221,21 @@ impl MirToLirTransform {
                     &[],
                 );
             }
+            Statement::ResolvedConditional(resolved) => {
+                // ResolvedConditional wraps an if-else-if chain into a PriorityMux.
+                // For sequential contexts (NonBlocking), build MUX chain + register.
+                // Use the original IfStatement to leverage existing SDFF and nested-if handling.
+                if matches!(resolved.kind, AssignmentKind::NonBlocking) {
+                    self.transform_sequential_statement(
+                        &Statement::If(*resolved.original.clone()),
+                        clock_signal,
+                        reset_signal,
+                    );
+                } else {
+                    // Blocking: treat as combinational
+                    self.transform_combinational_statement(stmt);
+                }
+            }
             _ => {
                 self.transform_combinational_statement(stmt);
             }
@@ -1440,6 +1454,13 @@ impl MirToLirTransform {
                         assigns.extend(Self::collect_assignments(else_block));
                     }
                 }
+                Statement::ResolvedConditional(resolved) => {
+                    // Treat as original if-else-if for assignment collection
+                    let if_block = Block {
+                        statements: vec![Statement::If(*resolved.original.clone())],
+                    };
+                    assigns.extend(Self::collect_assignments(&if_block));
+                }
                 _ => {}
             }
         }
@@ -1562,6 +1583,13 @@ impl MirToLirTransform {
                         assigns.extend(Self::collect_all_assignments_recursive(default_block));
                     }
                 }
+                Statement::ResolvedConditional(resolved) => {
+                    // Treat as original if-else-if chain for assignment collection
+                    let if_block = Block {
+                        statements: vec![Statement::If(*resolved.original.clone())],
+                    };
+                    assigns.extend(Self::collect_all_assignments_recursive(&if_block));
+                }
                 _ => {}
             }
         }
@@ -1639,47 +1667,11 @@ impl MirToLirTransform {
                             else_condition.as_ref(),
                         ));
                     } else {
-                        // BUG #255 FIX: If there's no else branch but the then branch assigns
-                        // to target, we need to add a "keep current value" path for the negated
-                        // condition. Without this, the mux chain falls through to the global
-                        // default instead of keeping the current state.
-                        //
-                        // Example: `Run => { if fault { state = Fault } }`
-                        // Should generate:
-                        //   - (state==Run && fault) → Fault
-                        //   - (state==Run && !fault) → feedback (keep Run)
-                        //
-                        // We add a special marker path with None as expression to indicate
-                        // "keep current value". The caller must handle this.
-                        let then_assigns_target = Self::block_assigns_to_target(&if_stmt.then_block, target);
-                        if then_assigns_target && outer_condition.is_some() {
-                            let negated_condition = Expression {
-                                kind: ExpressionKind::Unary {
-                                    op: UnaryOp::Not,
-                                    operand: Box::new(if_stmt.condition.clone()),
-                                },
-                                ty: skalp_frontend::types::Type::Bool,
-                                span: None,
-                            };
-
-                            let else_condition = Expression {
-                                kind: ExpressionKind::Binary {
-                                    op: BinaryOp::And,
-                                    left: Box::new(outer_condition.unwrap().clone()),
-                                    right: Box::new(negated_condition),
-                                },
-                                ty: skalp_frontend::types::Type::Bool,
-                                span: None,
-                            };
-
-                            // Add a SignalRef to target to indicate "keep current value"
-                            let keep_expr = Expression {
-                                kind: ExpressionKind::Ref(target.clone()),
-                                ty: skalp_frontend::types::Type::Unknown,
-                                span: None,
-                            };
-                            paths.push((Some(else_condition), keep_expr));
-                        }
+                        // No else branch: the MUX chain naturally falls through to
+                        // current_value (either register feedback or a leading default
+                        // like `state_timer = state_timer + 1`). No explicit feedback
+                        // path needed — adding one would incorrectly override leading
+                        // defaults with register feedback.
                     }
                 }
                 Statement::Block(inner_block) => {
@@ -1729,14 +1721,16 @@ impl MirToLirTransform {
                         }
                     }
 
-                    // Handle default block - it matches when no other arm matches
-                    // For simplicity, we'll treat default as having the outer condition
-                    // (proper implementation would negate all arm conditions)
+                    // Handle default block - it matches when no other arm matches.
+                    // Build condition: NOT(case_expr == val1 OR case_expr == val2 OR ...)
                     if let Some(ref default_block) = case_stmt.default {
+                        let default_cond = Self::build_case_default_condition(
+                            case_stmt, outer_condition,
+                        );
                         paths.extend(Self::collect_conditional_paths_for_target(
                             default_block,
                             target,
-                            outer_condition,
+                            default_cond.as_ref(),
                         ));
                     }
                 }
@@ -1795,8 +1789,18 @@ impl MirToLirTransform {
                     sibling_groups.push(vec![(outer_condition.cloned(), assign.rhs.clone())]);
                 }
                 Statement::If(if_stmt) => {
-                    // An if statement (possibly with else-if chain) is one sibling group
-                    let mut group_paths = Vec::new();
+                    // BUG #271 FIX: Use recursive grouped collection to preserve
+                    // sibling structure within if branches. Previously used the flat
+                    // collect_conditional_paths_for_target which merged sequential
+                    // assignments (e.g., `reg = reg + 1; if reg > 10 { reg = 0 }`)
+                    // into one group. The reverse-order processing then gave the
+                    // broader condition (reg = reg + 1) higher priority, causing it
+                    // to always override the narrower conditional (reg = 0).
+                    //
+                    // With recursive grouped collection, each sequential statement
+                    // within a branch becomes its own sibling group, processed in
+                    // forward order (later = higher priority), which correctly
+                    // implements non-blocking override semantics.
 
                     // Build the combined condition for the then branch
                     let then_condition = if let Some(outer) = outer_condition {
@@ -1813,13 +1817,13 @@ impl MirToLirTransform {
                         Some(if_stmt.condition.clone())
                     };
 
-                    // Collect paths from then branch (flattened - if-else-if chains stay together)
-                    let then_paths = Self::collect_conditional_paths_for_target(
+                    // Recursively collect grouped paths from then branch
+                    let then_sub_groups = Self::collect_conditional_paths_grouped(
                         &if_stmt.then_block,
                         target,
                         then_condition.as_ref(),
                     );
-                    group_paths.extend(then_paths);
+                    sibling_groups.extend(then_sub_groups);
 
                     // Build the combined condition for the else branch
                     if let Some(ref else_block) = if_stmt.else_block {
@@ -1846,16 +1850,13 @@ impl MirToLirTransform {
                             Some(negated_condition)
                         };
 
-                        let else_paths = Self::collect_conditional_paths_for_target(
+                        // Recursively collect grouped paths from else branch
+                        let else_sub_groups = Self::collect_conditional_paths_grouped(
                             else_block,
                             target,
                             else_condition.as_ref(),
                         );
-                        group_paths.extend(else_paths);
-                    }
-
-                    if !group_paths.is_empty() {
-                        sibling_groups.push(group_paths);
+                        sibling_groups.extend(else_sub_groups);
                     }
                 }
                 Statement::Block(inner_block) => {
@@ -1868,8 +1869,10 @@ impl MirToLirTransform {
                     sibling_groups.extend(inner_groups);
                 }
                 Statement::Case(case_stmt) => {
-                    // Case statement is one sibling group (all arms together)
-                    let mut group_paths = Vec::new();
+                    // BUG #271 FIX: Use recursive grouped collection for case arms
+                    // to preserve sibling structure within arm bodies. Same fix as
+                    // for Statement::If — arm bodies may contain sequential assignments
+                    // with conditional overrides that must be separate sibling groups.
 
                     for item in &case_stmt.items {
                         for value in &item.values {
@@ -1897,27 +1900,29 @@ impl MirToLirTransform {
                                 Some(eq_condition)
                             };
 
-                            let arm_paths = Self::collect_conditional_paths_for_target(
+                            let arm_sub_groups = Self::collect_conditional_paths_grouped(
                                 &item.block,
                                 target,
                                 combined_condition.as_ref(),
                             );
-                            group_paths.extend(arm_paths);
+                            sibling_groups.extend(arm_sub_groups);
                         }
                     }
 
+                    // Handle default block - it matches when no other arm matches.
+                    // Build condition: NOT(case_expr == val1 OR case_expr == val2 OR ...)
                     if let Some(ref default_block) = case_stmt.default {
-                        let default_paths = Self::collect_conditional_paths_for_target(
+                        let default_cond = Self::build_case_default_condition(
+                            case_stmt, outer_condition,
+                        );
+                        let default_sub_groups = Self::collect_conditional_paths_grouped(
                             default_block,
                             target,
-                            outer_condition,
+                            default_cond.as_ref(),
                         );
-                        group_paths.extend(default_paths);
+                        sibling_groups.extend(default_sub_groups);
                     }
 
-                    if !group_paths.is_empty() {
-                        sibling_groups.push(group_paths);
-                    }
                 }
                 Statement::ResolvedConditional(rc) if &rc.target == target => {
                     // ResolvedConditional is one sibling group
@@ -1948,6 +1953,70 @@ impl MirToLirTransform {
         }
 
         sibling_groups
+    }
+
+    /// Build the condition for a case/match default arm.
+    /// Returns: outer_condition AND NOT(case_expr==val1 OR case_expr==val2 OR ...)
+    /// This ensures the default arm only fires when no named arm matches.
+    fn build_case_default_condition(
+        case_stmt: &skalp_mir::CaseStatement,
+        outer_condition: Option<&Expression>,
+    ) -> Option<Expression> {
+        // Collect all arm values into an OR chain: (expr==v1) || (expr==v2) || ...
+        let mut any_arm_matches: Option<Expression> = None;
+        for item in &case_stmt.items {
+            for value in &item.values {
+                let eq = Expression {
+                    kind: ExpressionKind::Binary {
+                        op: BinaryOp::Equal,
+                        left: Box::new(case_stmt.expr.clone()),
+                        right: Box::new(value.clone()),
+                    },
+                    ty: skalp_frontend::types::Type::Bool,
+                    span: None,
+                };
+                any_arm_matches = Some(match any_arm_matches {
+                    None => eq,
+                    Some(prev) => Expression {
+                        kind: ExpressionKind::Binary {
+                            op: BinaryOp::Or,
+                            left: Box::new(prev),
+                            right: Box::new(eq),
+                        },
+                        ty: skalp_frontend::types::Type::Bool,
+                        span: None,
+                    },
+                });
+            }
+        }
+
+        // Negate: NOT(any arm matches)
+        let no_arm_matches = match any_arm_matches {
+            Some(expr) => Expression {
+                kind: ExpressionKind::Unary {
+                    op: UnaryOp::Not,
+                    operand: Box::new(expr),
+                },
+                ty: skalp_frontend::types::Type::Bool,
+                span: None,
+            },
+            None => return outer_condition.cloned(), // No named arms, default is unconditional
+        };
+
+        // Combine with outer condition
+        if let Some(outer) = outer_condition {
+            Some(Expression {
+                kind: ExpressionKind::Binary {
+                    op: BinaryOp::And,
+                    left: Box::new(outer.clone()),
+                    right: Box::new(no_arm_matches),
+                },
+                ty: skalp_frontend::types::Type::Bool,
+                span: None,
+            })
+        } else {
+            Some(no_arm_matches)
+        }
     }
 
     /// Extract the simple (innermost) condition from a compound condition.
@@ -2354,9 +2423,6 @@ impl MirToLirTransform {
                         let out = self.alloc_temp_signal(target_width);
                         let is_source_signed = self.infer_expression_is_signed(expr);
 
-                        println!("[LIR_CAST_DEBUG] Widening cast: {} -> {} bits, source_signed={}, expr_kind={:?}",
-                                 source_width, target_width, is_source_signed, std::mem::discriminant(&expr.kind));
-
                         if is_source_signed {
                             let path = self.unique_node_path("sext");
                             self.lir.add_node(
@@ -2679,10 +2745,6 @@ impl MirToLirTransform {
                 let left_signed = self.infer_expression_is_signed(left);
                 let right_signed = self.infer_expression_is_signed(right);
                 let is_signed = left_signed || right_signed;
-                trace!(
-                    "🔍 [SIGNED_CMP] Less: left_signed={}, right_signed={}, is_signed={}, left={:?}, right={:?}",
-                    left_signed, right_signed, is_signed, left.kind, right.kind
-                );
                 let op = if is_signed {
                     LirOp::Slt {
                         width: operand_width,
@@ -2718,10 +2780,6 @@ impl MirToLirTransform {
                 let left_signed = self.infer_expression_is_signed(left);
                 let right_signed = self.infer_expression_is_signed(right);
                 let is_signed = left_signed || right_signed;
-                trace!(
-                    "🔍 [SIGNED_CMP] Greater: left_signed={}, right_signed={}, is_signed={}, left={:?}, right={:?}",
-                    left_signed, right_signed, is_signed, left.kind, right.kind
-                );
                 let op = if is_signed {
                     LirOp::Sgt {
                         width: operand_width,
@@ -2799,45 +2857,32 @@ impl MirToLirTransform {
                         return zero; // Return 0 for div by 0
                     }
 
-                    // BUG #12 FIX: The magic number division algorithm only works correctly
-                    // for widths up to 32 bits (magic number overflows u64 for larger widths).
-                    // For cases like (a * b) / 1000 where intermediate result is 64-bit but
-                    // target is 32-bit, truncate the dividend first to avoid overflow.
-                    // This matches the semantics of the workaround: separate signals.
-                    let div_width = if operand_width > 32 && expected_width <= 32 {
-                        // Use target width - truncate first, then divide
-                        expected_width
-                    } else if operand_width > 32 {
-                        // True 64-bit division needed but not supported, warn and use 32
-                        self.warnings.push(format!(
-                            "Division with {} bit operand exceeds 32-bit magic number limit at {}, truncating to 32 bits",
-                            operand_width, self.hierarchy_path
-                        ));
-                        32
-                    } else {
-                        operand_width
-                    };
-
-                    // Transform left expression with full width, then truncate if needed
-                    let left_sig = self.transform_expression(left, operand_width);
-                    let dividend_sig = if div_width < operand_width {
-                        // Truncate the dividend to the division width
-                        let truncated = self.alloc_temp_signal(div_width);
-                        let path = self.unique_node_path("div_trunc_input");
-                        self.lir.add_node(
-                            LirOp::RangeSelect {
-                                width: operand_width,
-                                high: div_width - 1,
-                                low: 0,
-                            },
-                            vec![left_sig],
-                            truncated,
-                            path,
+                    // BUG #268 FIX: When operand_width > 32, magic number division
+                    // overflows u64. Instead of truncating the dividend (which changes
+                    // the result vs SIR behavioral), use the restoring divider at full width.
+                    if operand_width > 32 {
+                        let left_sig = self.transform_expression(left, operand_width);
+                        let right_sig = self.transform_expression(right, operand_width);
+                        // Zero-extend right operand if narrower
+                        let right_ext = if right_width < operand_width {
+                            let ext = self.alloc_temp_signal(operand_width);
+                            let path = self.unique_node_path("div_rext");
+                            self.lir.add_node(
+                                LirOp::ZeroExtend { from: right_width, to: operand_width },
+                                vec![right_sig], ext, path,
+                            );
+                            ext
+                        } else { right_sig };
+                        let is_signed = self.infer_expression_is_signed(left);
+                        return self.synthesize_restoring_divider(
+                            left_sig, right_ext, operand_width, is_signed, false,
                         );
-                        truncated
-                    } else {
-                        left_sig
-                    };
+                    }
+
+                    let div_width = operand_width; // always <= 32 here
+
+                    let left_sig = self.transform_expression(left, operand_width);
+                    let dividend_sig = left_sig;
 
                     let is_signed = self.infer_expression_is_signed(left);
 
@@ -2938,21 +2983,83 @@ impl MirToLirTransform {
                         return unsigned_result;
                     }
                 } else {
-                    // Variable divisor - not supported yet, emit warning
-                    self.warnings.push(format!(
-                        "Division by non-constant value not supported at {}, using fallback",
-                        self.hierarchy_path
-                    ));
+                    // Variable divisor - synthesize restoring divider circuit
                     let left_sig = self.transform_expression(left, operand_width);
                     let right_sig = self.transform_expression(right, operand_width);
-                    (
-                        left_sig,
-                        right_sig,
-                        LirOp::Buffer {
-                            width: operand_width,
-                        },
-                        operand_width,
-                    )
+                    // BUG #268 FIX: transform_expression for Ref ignores expected_width,
+                    // returning signals at natural width. When Mul inflates operand_width
+                    // (e.g., 16x16→32), the divisor stays at 16 bits. The restoring divider
+                    // needs both operands at full width. Zero-extend narrower operands.
+                    let left_ext = if left_width < operand_width {
+                        let ext = self.alloc_temp_signal(operand_width);
+                        let path = self.unique_node_path("div_lext");
+                        self.lir.add_node(
+                            LirOp::ZeroExtend { from: left_width, to: operand_width },
+                            vec![left_sig],
+                            ext,
+                            path,
+                        );
+                        ext
+                    } else {
+                        left_sig
+                    };
+                    let right_ext = if right_width < operand_width {
+                        let ext = self.alloc_temp_signal(operand_width);
+                        let path = self.unique_node_path("div_rext");
+                        self.lir.add_node(
+                            LirOp::ZeroExtend { from: right_width, to: operand_width },
+                            vec![right_sig],
+                            ext,
+                            path,
+                        );
+                        ext
+                    } else {
+                        right_sig
+                    };
+                    let is_signed = self.infer_expression_is_signed(left);
+                    return self.synthesize_restoring_divider(left_ext, right_ext, operand_width, is_signed, false);
+                }
+            }
+
+            BinaryOp::Mod => {
+                // BUG #266 FIX: Modulo via restoring divider (returns remainder)
+                let left_sig = self.transform_expression(left, operand_width);
+                if let Some(divisor) = extract_constant_value(right) {
+                    if divisor == 0 {
+                        return self.create_constant(&Value::Integer(0), operand_width);
+                    }
+                    let right_sig = self.transform_expression(right, operand_width);
+                    // BUG #268 FIX: Zero-extend operands to operand_width if narrower
+                    let left_ext = if left_width < operand_width {
+                        let ext = self.alloc_temp_signal(operand_width);
+                        let path = self.unique_node_path("mod_lext");
+                        self.lir.add_node(LirOp::ZeroExtend { from: left_width, to: operand_width }, vec![left_sig], ext, path);
+                        ext
+                    } else { left_sig };
+                    let right_ext = if right_width < operand_width {
+                        let ext = self.alloc_temp_signal(operand_width);
+                        let path = self.unique_node_path("mod_rext");
+                        self.lir.add_node(LirOp::ZeroExtend { from: right_width, to: operand_width }, vec![right_sig], ext, path);
+                        ext
+                    } else { right_sig };
+                    let is_signed = self.infer_expression_is_signed(left);
+                    return self.synthesize_restoring_divider(left_ext, right_ext, operand_width, is_signed, true);
+                } else {
+                    let right_sig = self.transform_expression(right, operand_width);
+                    let left_ext = if left_width < operand_width {
+                        let ext = self.alloc_temp_signal(operand_width);
+                        let path = self.unique_node_path("mod_lext");
+                        self.lir.add_node(LirOp::ZeroExtend { from: left_width, to: operand_width }, vec![left_sig], ext, path);
+                        ext
+                    } else { left_sig };
+                    let right_ext = if right_width < operand_width {
+                        let ext = self.alloc_temp_signal(operand_width);
+                        let path = self.unique_node_path("mod_rext");
+                        self.lir.add_node(LirOp::ZeroExtend { from: right_width, to: operand_width }, vec![right_sig], ext, path);
+                        ext
+                    } else { right_sig };
+                    let is_signed = self.infer_expression_is_signed(left);
+                    return self.synthesize_restoring_divider(left_ext, right_ext, operand_width, is_signed, true);
                 }
             }
 
@@ -3262,6 +3369,146 @@ impl MirToLirTransform {
         result
     }
 
+    /// Synthesize a restoring divider circuit using existing LIR operations.
+    /// BUG #266 FIX: Implements proper variable-divisor division.
+    /// Returns the quotient (want_remainder=false) or remainder (want_remainder=true).
+    fn synthesize_restoring_divider(
+        &mut self,
+        dividend: LirSignalId,
+        divisor: LirSignalId,
+        width: u32,
+        signed: bool,
+        want_remainder: bool,
+    ) -> LirSignalId {
+        // For signed division, compute absolute values first
+        let (actual_dividend, actual_divisor) = if signed {
+            let abs_a = self.compute_absolute_value(dividend, width);
+            let abs_b = self.compute_absolute_value(divisor, width);
+            (abs_a, abs_b)
+        } else {
+            (dividend, divisor)
+        };
+
+        // Constants (reused across iterations)
+        let zero = self.create_constant(&Value::Integer(0), width);
+        let one_const = self.create_constant(&Value::Integer(1), width);
+
+        let mut remainder = zero;
+        let mut quotient = zero;
+
+        for i in (0..width).rev() {
+            // Step 1: Shift remainder left by 1
+            let rem_shifted = self.alloc_temp_signal(width);
+            let path = self.unique_node_path(&format!("rdiv_s{}_shl", i));
+            self.lir.add_node(LirOp::Shl { width }, vec![remainder, one_const], rem_shifted, path);
+
+            // Extract dividend bit i: (dividend >> i) & 1
+            let shift_i = self.create_constant(&Value::Integer(i as i64), width);
+            let div_shifted = self.alloc_temp_signal(width);
+            let path = self.unique_node_path(&format!("rdiv_s{}_shr", i));
+            self.lir.add_node(LirOp::Shr { width }, vec![actual_dividend, shift_i], div_shifted, path);
+
+            let div_bit = self.alloc_temp_signal(width);
+            let path = self.unique_node_path(&format!("rdiv_s{}_bit", i));
+            self.lir.add_node(LirOp::And { width }, vec![div_shifted, one_const], div_bit, path);
+
+            // Insert bit into shifted remainder
+            let new_rem = self.alloc_temp_signal(width);
+            let path = self.unique_node_path(&format!("rdiv_s{}_ins", i));
+            self.lir.add_node(LirOp::Or { width }, vec![rem_shifted, div_bit], new_rem, path);
+
+            // Step 2: Compare remainder >= divisor
+            let ge = self.alloc_temp_signal(1);
+            let path = self.unique_node_path(&format!("rdiv_s{}_ge", i));
+            self.lir.add_node(LirOp::Ge { width }, vec![new_rem, actual_divisor], ge, path);
+
+            // Step 3: Trial subtraction: remainder - divisor
+            let trial = self.alloc_temp_signal(width);
+            let path = self.unique_node_path(&format!("rdiv_s{}_sub", i));
+            self.lir.add_node(LirOp::Sub { width, has_borrow: false }, vec![new_rem, actual_divisor], trial, path);
+
+            // Step 4: Select: ge ? trial : new_rem
+            // Mux2 semantics: result = sel ? b : a, inputs are [sel, a, b]
+            let selected = self.alloc_temp_signal(width);
+            let path = self.unique_node_path(&format!("rdiv_s{}_mux", i));
+            self.lir.add_node(LirOp::Mux2 { width }, vec![ge, new_rem, trial], selected, path);
+            remainder = selected;
+
+            // Step 5: Accumulate quotient bit i
+            let ge_ext = self.alloc_temp_signal(width);
+            let path = self.unique_node_path(&format!("rdiv_s{}_qex", i));
+            self.lir.add_node(LirOp::ZeroExtend { from: 1, to: width }, vec![ge], ge_ext, path);
+
+            let ge_pos = self.alloc_temp_signal(width);
+            let path = self.unique_node_path(&format!("rdiv_s{}_qps", i));
+            self.lir.add_node(LirOp::Shl { width }, vec![ge_ext, shift_i], ge_pos, path);
+
+            let new_quot = self.alloc_temp_signal(width);
+            let path = self.unique_node_path(&format!("rdiv_s{}_qac", i));
+            self.lir.add_node(LirOp::Or { width }, vec![quotient, ge_pos], new_quot, path);
+            quotient = new_quot;
+        }
+
+        let raw_result = if want_remainder { remainder } else { quotient };
+
+        // Guard: if divisor == 0, return 0 (matches C++ behavioral sim)
+        let div_is_zero = self.alloc_temp_signal(1);
+        let path = self.unique_node_path("rdiv_zchk");
+        self.lir.add_node(LirOp::Eq { width }, vec![actual_divisor, zero], div_is_zero, path);
+
+        let guarded = self.alloc_temp_signal(width);
+        let path = self.unique_node_path("rdiv_zgrd");
+        // div_is_zero ? zero : raw_result
+        self.lir.add_node(LirOp::Mux2 { width }, vec![div_is_zero, raw_result, zero], guarded, path);
+
+        // For signed division: apply sign correction
+        if signed {
+            if want_remainder {
+                // Remainder sign = dividend sign
+                self.apply_sign_to_result(dividend, guarded, width)
+            } else {
+                // Quotient sign = dividend_sign XOR divisor_sign
+                // Extract sign bits
+                let a_sign = self.alloc_temp_signal(1);
+                let path = self.unique_node_path("rdiv_asign");
+                self.lir.add_node(
+                    LirOp::RangeSelect { width, high: width - 1, low: width - 1 },
+                    vec![dividend],
+                    a_sign,
+                    path,
+                );
+                let b_sign = self.alloc_temp_signal(1);
+                let path = self.unique_node_path("rdiv_bsign");
+                self.lir.add_node(
+                    LirOp::RangeSelect { width, high: width - 1, low: width - 1 },
+                    vec![divisor],
+                    b_sign,
+                    path,
+                );
+                let q_sign = self.alloc_temp_signal(1);
+                let path = self.unique_node_path("rdiv_qsign");
+                self.lir.add_node(LirOp::Xor { width: 1 }, vec![a_sign, b_sign], q_sign, path);
+
+                // Negate quotient if q_sign is 1
+                let inverted = self.alloc_temp_signal(width);
+                let path = self.unique_node_path("rdiv_qnot");
+                self.lir.add_node(LirOp::Not { width }, vec![guarded], inverted, path);
+
+                let one = self.create_constant(&Value::Integer(1), width);
+                let negated = self.alloc_temp_signal(width);
+                let path = self.unique_node_path("rdiv_qneg");
+                self.lir.add_node(LirOp::Add { width, has_carry: false }, vec![inverted, one], negated, path);
+
+                let result = self.alloc_temp_signal(width);
+                let path = self.unique_node_path("rdiv_qres");
+                self.lir.add_node(LirOp::Mux2 { width }, vec![q_sign, guarded, negated], result, path);
+                result
+            }
+        } else {
+            guarded
+        }
+    }
+
     /// Get the name of a signal from its ID
     fn get_signal_name(&self, sig_id: LirSignalId) -> String {
         self.lir
@@ -3289,21 +3536,6 @@ impl MirToLirTransform {
                     return self.port_by_position[pos];
                 }
                 // Fallback: create undriven temp signal
-                // BUG #237 DEBUG: Only print for the first few occurrences to reduce noise
-                static WARNED_PORTS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-                let warned_count = WARNED_PORTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                if warned_count < 5 {
-                    eprintln!("⚠️  BUG #237: Unknown port {:?} in module '{}' (pos={}, len={}) - creating undriven temp signal",
-                        port_id, self.hierarchy_path, pos, self.port_by_position.len());
-                    // Print available port IDs for debugging
-                    if warned_count == 0 {
-                        let port_ids: Vec<_> = self.port_to_signal.keys().take(10).collect();
-                        eprintln!("  Port ID {} is beyond module's {} ports. Available port IDs (first 10): {:?}",
-                            port_id.0, self.port_by_position.len(), port_ids);
-                    }
-                } else if warned_count == 5 {
-                    eprintln!("⚠️  BUG #237: (suppressing further port warnings)");
-                }
                 self.warnings.push(format!("Unknown port: {:?}", port_id));
                 self.alloc_temp_signal(1)
             }
@@ -3372,7 +3604,6 @@ impl MirToLirTransform {
                     out
                 } else {
                     // Dynamic bit select
-                    println!("[LIR_DIAG] Dynamic BitSelect on {}-bit signal, index kind: {:?}", base_width, index.kind);
                     let idx_signal = self.transform_expression(index, 32);
                     let out = self.alloc_temp_signal(1);
                     let path = self.unique_node_path("dyn_bit_sel");
@@ -3940,36 +4171,21 @@ impl HierarchicalMirToLirResult {
                                 let parent_signal_name = format!("{}{}", parent_prefix, parent_signal_base);
 
                                 if let Some(&parent_sig) = name_to_signal.get(&parent_signal_name) {
-                                    if port_name == "clk" || port_name == "rst" || port_name == "enable" || port_name.starts_with("pwm_") {
-                                        println!("[INPUT_ALIAS] {}.{} -> parent signal '{}' (id={})",
-                                            inst_path, port_name, parent_signal_name, parent_sig.0);
-                                    }
                                     port_alias_map.insert((inst_path.clone(), child_port_id), parent_sig);
 
                                     // Also update name_to_signal so that child instances looking up
                                     // this port by name will find the aliased signal, not the original
                                     let child_port_name = format!("{}.{}", inst_path, port_name);
                                     name_to_signal.insert(child_port_name, parent_sig);
-                                } else if port_name == "clk" || port_name == "rst" || port_name == "enable" || port_name.starts_with("pwm_") {
-                                    println!("[INPUT_ALIAS_FAIL] {}.{} -> parent signal '{}' NOT FOUND",
-                                        inst_path, port_name, parent_signal_name);
                                 }
                             } else if let PortConnectionInfo::Constant(value) = conn_info {
                                 // Create a constant node for the port
                                 let child_port_flat_id = signal_id_map.get(&(inst_path.clone(), child_port_id))
                                     .copied()
                                     .unwrap_or_else(|| {
-                                        println!("[FLATTEN] ⚠️ No signal mapping for constant port {}.{} (child_port_id={}), defaulting to LirSignalId(0)",
-                                            inst_path, port_name, child_port_id.0);
                                         LirSignalId(0)
                                     });
                                 let child_width = lir.signals[child_port_id.0 as usize].width;
-
-                                // Debug trace for compare_high constant
-                                if port_name.contains("compare_high") {
-                                    println!("[FLATTEN] 📌 Creating constant node for {}.{} = 0x{:X} -> signal_id={}",
-                                        inst_path, port_name, *value, child_port_flat_id.0);
-                                }
 
                                 let const_node = crate::lir::LirNode {
                                     id: crate::lir::LirNodeId(flat_lir.nodes.len() as u32),
@@ -4052,12 +4268,6 @@ impl HierarchicalMirToLirResult {
                                 signal_id_map.get(&(inst_path.clone(), old_id))
                                     .copied()
                                     .unwrap_or_else(|| {
-                                        // Debug: Log when signal mapping is missing
-                                        let old_sig_name = &lir.signals[old_id.0 as usize].name;
-                                        if old_sig_name.contains("compare_high") {
-                                            println!("[FLATTEN] ⚠️ Missing signal mapping for input {}.{} (old_id={}), defaulting to 0",
-                                                inst_path, old_sig_name, old_id.0);
-                                        }
                                         LirSignalId(0)
                                     })
                             }
@@ -4138,12 +4348,6 @@ impl HierarchicalMirToLirResult {
                         _ => continue,
                     };
 
-                    // Debug: Log what connections we're processing
-                    if port_name == "gate_high" || port_name == "counter" {
-                        println!("[FOURTH_PASS_CONN] Instance '{}' port '{}' -> conn_info={:?}",
-                            inst_path, port_name, conn_info);
-                    }
-
                     let parent_prefix = if parent_path == "top" {
                         "".to_string()
                     } else {
@@ -4155,16 +4359,6 @@ impl HierarchicalMirToLirResult {
                     let port_signal_id = lir.signals.iter().enumerate()
                         .find(|(_, s)| s.name == *port_name)
                         .map(|(idx, _)| LirSignalId(idx as u32));
-
-                    // Debug: Log when processing output ports
-                    if port_name == "gate_high" || port_name == "counter" {
-                        println!("[FOURTH_PASS] Processing {}.{}: port_signal_id={:?}, parent_signal_base='{}'",
-                            inst_path, port_name, port_signal_id, parent_signal_base);
-                        if let Some(psid) = port_signal_id {
-                            println!("[FOURTH_PASS]   Signal name: '{}'", lir.signals[psid.0 as usize].name);
-                            println!("[FOURTH_PASS]   is_output: {}", lir.outputs.contains(&psid));
-                        }
-                    }
 
                     if let Some(child_port_id) = port_signal_id {
                         // Check if this is an output port (in child's outputs list)
@@ -4199,11 +4393,6 @@ impl HierarchicalMirToLirResult {
                             };
 
                             if is_synthesized_name {
-                                println!("[FLATTEN_FIX_DEBUG] Detected synthesized name for {}.{}",
-                                    inst_path, port_name);
-                                println!("[FLATTEN_FIX_DEBUG]   parent_signal_base='{}', parent_prefix='{}'",
-                                    parent_signal_base, parent_prefix);
-                                println!("[FLATTEN_FIX_DEBUG]   original parent_flat_id: {:?}", parent_flat_id);
 
                                 // Clear parent_flat_id so we search for the correct signal
                                 // The synthesized signal (inst_X_Y_port) exists but is not the right one
@@ -4243,7 +4432,6 @@ impl HierarchicalMirToLirResult {
                                             actual_port_suffix.to_string()
                                         };
 
-                                        println!("[FLATTEN_FIX_DEBUG]   Looking for struct field ending with '__{}'", field_suffix);
 
                                         // Look for matching struct field signals in parent's namespace
                                         for (name, &sig_id) in name_to_signal.iter() {
@@ -4262,7 +4450,6 @@ impl HierarchicalMirToLirResult {
                                             }
                                             // The field should end with the computed suffix
                                             if name.ends_with(&format!("__{}", field_suffix)) {
-                                                println!("[FLATTEN_FIX_DEBUG]   FOUND match: '{}'", name);
                                                 parent_flat_id = Some(sig_id);
                                                 break;
                                             }
@@ -4273,7 +4460,6 @@ impl HierarchicalMirToLirResult {
                                         // e.g., port "counter" -> signal "carrier_count"
                                         // e.g., port "at_zero" -> signal "carrier_at_zero"
                                         if parent_flat_id.is_none() {
-                                            println!("[FLATTEN_FIX_DEBUG]   No struct field match, trying non-struct pattern for port '{}'", actual_port_suffix);
 
                                             // Collect all potential matches
                                             let mut candidates: Vec<(&String, LirSignalId)> = Vec::new();
@@ -4309,7 +4495,6 @@ impl HierarchicalMirToLirResult {
                                             // Only use the match if there's exactly one candidate
                                             // Multiple matches means ambiguous - need to narrow down
                                             if candidates.len() == 1 {
-                                                println!("[FLATTEN_FIX_DEBUG]   FOUND unique non-struct match: '{}'", candidates[0].0);
                                                 parent_flat_id = Some(candidates[0].1);
                                             } else if candidates.len() > 1 {
                                                 // Multiple candidates - try to narrow down by:
@@ -4336,12 +4521,7 @@ impl HierarchicalMirToLirResult {
                                                     .collect();
 
                                                 if orphan_candidates.len() == 1 {
-                                                    println!("[FLATTEN_FIX_DEBUG]   Narrowed to orphan: '{}'", orphan_candidates[0].0);
                                                     parent_flat_id = Some(orphan_candidates[0].1);
-                                                } else {
-                                                    println!("[FLATTEN_FIX_DEBUG]   AMBIGUOUS: {} candidates, {} orphans for port '{}': {:?}",
-                                                        candidates.len(), orphan_candidates.len(), actual_port_suffix,
-                                                        candidates.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>());
                                                 }
                                             }
                                         }
@@ -4356,10 +4536,6 @@ impl HierarchicalMirToLirResult {
                                 let child_name = &flat_lir.signals[child_id.0 as usize].name;
                                 let parent_name = &flat_lir.signals[parent_id.0 as usize].name;
                                 // Only log output port connections (for debugging)
-                                if child_name.contains("gate") || child_name.contains("counter") {
-                                    println!("[FLATTEN_WIRE] Creating buffer: {} -> {}", child_name, parent_name);
-                                }
-
                                 let wire_node = crate::lir::LirNode {
                                     id: crate::lir::LirNodeId(flat_lir.nodes.len() as u32),
                                     op: LirOp::Buf { width: child_width },
@@ -4521,13 +4697,6 @@ impl HierarchicalMirToLirResult {
                 let (orphan_id, _, _) = candidates[0];
                 redirects.push((node_idx, *orphan_id));
                 used_orphans.insert(*orphan_id);
-
-                let orphan_name = &flat_lir.signals[orphan_id.0 as usize].name;
-                println!("[ORPHAN_FIX] Redirecting buffer from '{}' to '{}'",
-                    output_sig.name, orphan_name);
-            } else if candidates.len() > 1 {
-                println!("[ORPHAN_FIX] AMBIGUOUS: {} candidates for synthesized '{}' (width={})",
-                    candidates.len(), output_sig.name, output_sig.width);
             }
         }
 
@@ -5600,48 +5769,6 @@ fn extract_connection_info(
 
     for port_name in sorted_port_names {
         let expr = connections.get(port_name).unwrap();
-
-        // BUG #237 DEBUG: Log expression kind for kp_v/ki_v connections
-        if port_name == "kp_v" || port_name == "ki_v" || port_name == "kp_i" || port_name == "ki_i" {
-            eprintln!("[BUG #237 EXTRACT_CONN] Port '{}' in instance '{}' has expr.kind = {:?}",
-                port_name, instance_name, std::mem::discriminant(&expr.kind));
-            eprintln!("  Full expr: {:?}", expr.kind);
-            // Show what ports exist in the module
-            if let ExpressionKind::Ref(LValue::RangeSelect { base, .. }) = &expr.kind {
-                if let LValue::Port(port_id) = base.as_ref() {
-                    eprintln!("  Port ID = {}, module '{}' has {} ports:", port_id.0, parent_module.name, parent_module.ports.len());
-                    for (i, p) in parent_module.ports.iter().take(35).enumerate() {
-                        eprintln!("    port {} (id={}): '{}'", i, p.id.0, p.name);
-                    }
-                }
-            }
-        }
-        if false && (port_name == "gate_high" || port_name == "counter" || port_name == "rst" || port_name == "clk") {
-            println!("[EXTRACT_CONN_DEBUG] Port '{}' in instance '{}' has expr kind: {:?}",
-                port_name, instance_name, expr.kind);
-            // If it's a signal ref, look up the signal name
-            if let ExpressionKind::Ref(LValue::Signal(sig_id)) = &expr.kind {
-                println!("[EXTRACT_CONN_DEBUG]   parent_module '{}' has {} signals",
-                    parent_module.name, parent_module.signals.len());
-                if let Some(sig) = parent_module.signals.get(sig_id.0 as usize) {
-                    println!("[EXTRACT_CONN_DEBUG]   Signal {} in parent_module is named '{}'",
-                        sig_id.0, sig.name);
-                } else {
-                    println!("[EXTRACT_CONN_DEBUG]   Signal {} not found in parent_module (max={})",
-                        sig_id.0, parent_module.signals.len());
-                }
-                if let Some(fb_mod) = fallback_module {
-                    println!("[EXTRACT_CONN_DEBUG]   fallback_module '{}' has {} signals",
-                        fb_mod.name, fb_mod.signals.len());
-                    if let Some(sig) = fb_mod.signals.get(sig_id.0 as usize) {
-                        println!("[EXTRACT_CONN_DEBUG]   Signal {} in fallback_module is named '{}'",
-                            sig_id.0, sig.name);
-                    }
-                } else {
-                    println!("[EXTRACT_CONN_DEBUG]   No fallback module");
-                }
-            }
-        }
 
         let info = match &expr.kind {
             ExpressionKind::Literal(value) => {

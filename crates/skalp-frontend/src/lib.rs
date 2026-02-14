@@ -1258,6 +1258,31 @@ fn remap_statement_ports(
             new_let.value = remap_expr_ports(&let_stmt.value, port_id_map);
             hir::HirStatement::Let(new_let)
         }
+        // BUG #271 FIX: Block statements must be recursively remapped.
+        // Previously fell through to the catch-all clone, causing port references
+        // inside blocks (e.g., match arm bodies wrapped in Block) to keep their
+        // original port IDs after import merging.
+        hir::HirStatement::Block(stmts) => {
+            let remapped_stmts = stmts
+                .iter()
+                .map(|s| remap_statement_ports(s, port_id_map))
+                .collect();
+            hir::HirStatement::Block(remapped_stmts)
+        }
+        hir::HirStatement::For(for_stmt) => {
+            let mut new_for = for_stmt.clone();
+            new_for.range.start = remap_expr_ports(&for_stmt.range.start, port_id_map);
+            new_for.range.end = remap_expr_ports(&for_stmt.range.end, port_id_map);
+            if let Some(step) = &for_stmt.range.step {
+                new_for.range.step = Some(Box::new(remap_expr_ports(step, port_id_map)));
+            }
+            new_for.body = for_stmt
+                .body
+                .iter()
+                .map(|s| remap_statement_ports(s, port_id_map))
+                .collect();
+            hir::HirStatement::For(new_for)
+        }
         _ => stmt.clone(),
     }
 }

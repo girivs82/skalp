@@ -2525,6 +2525,12 @@ impl<'hir> HirToMir<'hir> {
                                         } else if let Some(expr) =
                                             self.convert_expression(&field_init.value, 0)
                                         {
+                                            // BUG #263 DEBUG
+                                            if field_init.name == "kp_v" || field_init.name == "ki_v"
+                                                || field_init.name == "kp_i" || field_init.name == "ki_i" {
+                                                println!("[BUG#263] Instance conn '{}': HIR={:?}, MIR={:?}",
+                                                    field_init.name, field_init.value, expr.kind);
+                                            }
                                             trace!(
                                                 "[HIER_CONN] Field '{}' <- MIR expr: {:?}",
                                                 field_init.name,
@@ -5160,10 +5166,20 @@ impl<'hir> HirToMir<'hir> {
                     }
                 } else {
                     // Simple connection
+                    // BUG #263 DEBUG
+                    if conn.port == "kp_v" || conn.port == "ki_v" || conn.port == "kp_i" || conn.port == "ki_i" {
+                        println!("[BUG#263] convert_instance PATH A: simple conn '{}', expr={:?}",
+                            conn.port, conn.expr);
+                    }
                     vec![(conn.port.clone(), self.convert_expression(&conn.expr, 0)?)]
                 }
             } else {
                 // Port not found in entity, use default conversion
+                // BUG #263 DEBUG
+                if conn.port == "kp_v" || conn.port == "ki_v" || conn.port == "kp_i" || conn.port == "ki_i" {
+                    println!("[BUG#263] convert_instance PATH B: port not found '{}', expr={:?}",
+                        conn.port, conn.expr);
+                }
                 vec![(conn.port.clone(), self.convert_expression(&conn.expr, 0)?)]
             };
 
@@ -6921,15 +6937,9 @@ impl<'hir> HirToMir<'hir> {
                     }
 
                     // BUG FIX: Constant ID not found after module merging
-                    // Collect available constant IDs for debugging
-                    let available_ids: Vec<_> = hir
-                        .implementations
-                        .iter()
-                        .flat_map(|i| i.constants.iter().map(|c| (c.id, &c.name)))
-                        .collect();
                     trace!(
-                        "[CONST_DEBUG] Constant ID {:?} not found! Available: {:?}, current_entity={:?}",
-                        id, available_ids, self.current_entity_id
+                        "Constant ID {:?} not found after module merging, current_entity={:?}",
+                        id, self.current_entity_id
                     );
                     return None;
                 }
@@ -8150,6 +8160,11 @@ impl<'hir> HirToMir<'hir> {
             }
             hir::HirExpression::FieldAccess { base, field } => {
                 // Convert struct field access to bit slice (range select)
+                // BUG #263 DEBUG: trace nested field access
+                if matches!(**base, hir::HirExpression::FieldAccess { .. }) {
+                    println!("[BUG#263] convert_expression_impl_inner: NESTED FieldAccess field='{}', inner_base_type={:?}",
+                        field, std::mem::discriminant(&**base));
+                }
                 trace!(
                     "[BUG #71 FIELD] Converting FieldAccess: field='{}', base={:?}",
                     field,
@@ -9183,7 +9198,9 @@ impl<'hir> HirToMir<'hir> {
             // Skip if we couldn't build a condition
             let condition = match condition {
                 Some(c) => c,
-                None => continue,
+                None => {
+                    continue;
+                }
             };
 
             // Apply guard if present
@@ -17997,22 +18014,37 @@ impl<'hir> HirToMir<'hir> {
                 }
                 hir::HirExpression::Port(port_id) => {
                     // BUG #237 FIX: Only use flattened_ports if port belongs to current entity
-                    if self.port_belongs_to_current_entity(port_id) {
+                    let belongs = self.port_belongs_to_current_entity(port_id);
+                    if belongs {
                         // Check if this port was flattened
                         if let Some(flattened) = self.flattened_ports.get(port_id) {
                             // Find the flattened field with matching path
                             for flat_field in flattened {
                                 if flat_field.field_path == field_path {
+                                    println!("[BUG#263] convert_field_access: ✅ MATCHED Port({:?}) field_path={:?} → PortId({})",
+                                        port_id, field_path, flat_field.id);
                                     return Some(Expression::with_unknown_type(ExpressionKind::Ref(
                                         LValue::Port(PortId(flat_field.id)),
                                     )));
                                 }
                             }
+                            // BUG #263 DEBUG: flattened ports exist but no match
+                            println!("[BUG#263] convert_field_access: Port({:?}) has {} flattened fields but no match for field_path={:?}",
+                                port_id, flattened.len(), field_path);
+                            for ff in flattened {
+                                println!("[BUG#263]   flattened: id={}, path={:?}", ff.id, ff.field_path);
+                            }
+                        } else {
+                            println!("[BUG#263] convert_field_access: Port({:?}) belongs_to_current but NOT in flattened_ports, field_path={:?}",
+                                port_id, field_path);
                         }
+                    } else {
+                        println!("[BUG#263] convert_field_access: Port({:?}) does NOT belong to current entity, field_path={:?}",
+                            port_id, field_path);
                     }
                     // Not flattened - use mapped port ID (or fall back to bit range)
                     // BUG #237 FIX: Only use port_map if port belongs to current entity
-                    if self.port_belongs_to_current_entity(port_id) {
+                    if belongs {
                         if let Some(&port_id_mir) = self.port_map.get(port_id) {
                             // Fall back to bit range approach
                             let base_lval = LValue::Port(port_id_mir);
