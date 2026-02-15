@@ -158,6 +158,7 @@ impl<'a> TechMapper<'a> {
                 used_signals.insert(*input);
             }
         }
+
         let undriven_but_used: Vec<_> = word_lir
             .signals
             .iter()
@@ -285,16 +286,39 @@ impl<'a> TechMapper<'a> {
                 word_lir.name,
                 undriven_but_used.len()
             );
-            for net in undriven_but_used.iter().take(10) {
-                eprintln!(
-                    "  - {} (fanout={}, is_input={})",
-                    net.name,
-                    net.fanout.len(),
-                    net.is_input
-                );
+            // Build reverse map: GateNetId -> (LirSignalId, bit)
+            let mut net_to_lir: std::collections::HashMap<u32, (crate::lir::LirSignalId, usize)> = std::collections::HashMap::new();
+            for (&sig_id, nets) in &self.signal_to_net {
+                for (bit, &net_id) in nets.iter().enumerate() {
+                    net_to_lir.insert(net_id.0, (sig_id, bit));
+                }
             }
-            if undriven_but_used.len() > 10 {
-                eprintln!("  ... and {} more", undriven_but_used.len() - 10);
+            for net in undriven_but_used.iter().take(15) {
+                let net_idx = self.netlist.nets.iter().position(|n| std::ptr::eq(n, *net)).unwrap_or(0);
+                let lir_info = net_to_lir.get(&(net_idx as u32));
+                if let Some(&(sig_id, bit)) = lir_info {
+                    let sig = word_lir.signals.iter().find(|s| s.id == sig_id);
+                    let sig_name = sig.map(|s| s.name.as_str()).unwrap_or("?");
+                    let sig_width = sig.map(|s| s.width).unwrap_or(0);
+                    let driver_node = word_lir.nodes.iter().find(|n| n.output == sig_id);
+                    eprintln!(
+                        "  - {} (fanout={}) -> LIR signal '{}' (id={:?}, width={}, bit={}), driver={:?}",
+                        net.name,
+                        net.fanout.len(),
+                        sig_name, sig_id, sig_width, bit,
+                        driver_node.map(|n| format!("{:?} at {}", n.op, n.path))
+                    );
+                } else {
+                    eprintln!(
+                        "  - {} (fanout={}, is_input={}) -> NO LIR signal mapping!",
+                        net.name,
+                        net.fanout.len(),
+                        net.is_input
+                    );
+                }
+            }
+            if undriven_but_used.len() > 15 {
+                eprintln!("  ... and {} more", undriven_but_used.len() - 15);
             }
         }
 

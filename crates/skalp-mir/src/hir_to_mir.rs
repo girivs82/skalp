@@ -865,6 +865,15 @@ impl<'hir> HirToMir<'hir> {
 
                 // Find the module
                 if let Some(module) = mir.modules.iter_mut().find(|m| m.id == module_id) {
+                    // BUG #272 FIX: Clear variable_map between entity impl blocks to prevent
+                    // HIR VariableId collisions. Each entity's let bindings have independent
+                    // HIR VariableIds (e.g., both PiController and TemperatureProtection can
+                    // have VariableId(0)). Without clearing, a later entity's let binding
+                    // reuses the previous entity's MIR variable instead of creating a new one,
+                    // resulting in missing module.variables entries and undriven LIR signals.
+                    self.variable_map.clear();
+                    self.context_variable_map.clear();
+
                     // Add signals - flatten structs/vectors into individual signals
                     for hir_signal in &impl_block.signals {
                         let signal_type = self.convert_type(&hir_signal.signal_type);

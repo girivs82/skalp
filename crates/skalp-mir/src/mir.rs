@@ -197,7 +197,7 @@ impl Port {
 }
 
 /// Port identifier
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct PortId(pub u32);
 
 /// Port direction
@@ -268,7 +268,7 @@ impl Signal {
 }
 
 /// Signal identifier
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct SignalId(pub u32);
 
 /// Variable (for procedural context)
@@ -288,7 +288,7 @@ pub struct Variable {
 }
 
 /// Variable identifier
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct VariableId(pub u32);
 
 /// Data types in MIR

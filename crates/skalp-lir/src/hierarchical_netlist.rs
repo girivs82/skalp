@@ -393,16 +393,6 @@ impl HierarchicalNetlist {
                         let child_exists = result.get_net(&child_net_name).is_some();
                         let parent_exists = result.get_net(&parent_net_name).is_some();
 
-                        // BUG #237 DEBUG: Log when nets are not found for common signal patterns
-                        if !child_exists || !parent_exists {
-                            if parent_signal.contains("faults") || parent_signal.contains("output") {
-                                eprintln!(
-                                    "⚠️  BUG #237 STITCH MISS: child='{}' (exists={}) <-> parent='{}' (exists={})",
-                                    child_net_name, child_exists, parent_net_name, parent_exists
-                                );
-                            }
-                        }
-
                         // BUG #246 DEBUG: Trace hw_uv stitching
                         if child_net_name.contains("hw_uv") || parent_net_name.contains("hw_uv") {
                             eprintln!(

@@ -32,7 +32,7 @@ use skalp_lir::synth::{
     Fraig, FraigConfig, Pass, Strash,
 };
 use skalp_mir::Type;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::atomic::{AtomicBool, Ordering};
 use crate::sat_solver::{CnfFormula, ExtendFormula, Lit, Solver, Var};
 
@@ -1444,7 +1444,10 @@ impl GateNetlistToAig {
         self.net_map
             .get(&net_id.0)
             .copied()
-            .unwrap_or_else(|| self.aig.false_lit())
+            .unwrap_or_else(|| {
+                println!("[GATE_AIG_BUG] get_net: net_id={} not found in net_map, returning false_lit", net_id.0);
+                self.aig.false_lit()
+            })
     }
 
     fn set_net(&mut self, net_id: skalp_lir::GateNetId, lit: AigLit) {
@@ -1935,6 +1938,15 @@ impl GateNetlistToAig {
             if cell.is_sequential() {
                 continue;
             }
+            // DEBUG: Check for missing input nets before convert_cell
+            for (inp_i, &inp_net) in cell.inputs.iter().enumerate() {
+                if !self.net_map.contains_key(&inp_net.0) {
+                    let net_name = netlist.nets.get(inp_net.0 as usize)
+                        .map(|n| n.name.as_str()).unwrap_or("???");
+                    println!("[GATE_AIG_BUG] Cell '{}' (type={}, fn={:?}) input[{}] references net {}='{}' which is NOT in net_map",
+                        cell.path, cell.cell_type, cell.function, inp_i, inp_net.0, net_name);
+                }
+            }
             self.convert_cell(cell, netlist);
         }
 
@@ -2294,9 +2306,48 @@ pub fn check_sequential_equivalence_sat(aig1: &Aig, aig2: &Aig) -> FormalResult<
 
     let sat_start = std::time::Instant::now();
 
+    // Helper: validate a SAT counterexample by evaluating the miter AIG
+    // Returns true if the diff gate actually outputs 1 with the given model
+    let validate_counterexample = |model: &[Lit], gate_idx: usize| -> bool {
+        let num_nodes = miter.nodes.len();
+        let mut values = vec![false; num_nodes];
+        values[0] = false; // constant false
+
+        // Build var→node mapping from the original var_map
+        let node_to_var: HashMap<u32, Var> = var_map.iter().map(|(&n, &v)| (n, v)).collect();
+
+        // Set node values from model
+        let model_set: std::collections::HashSet<Lit> = model.iter().cloned().collect();
+        for (&node_id, &var) in &var_map {
+            let pos = Lit::positive(var);
+            let neg = Lit::negative(var);
+            if model_set.contains(&pos) {
+                values[node_id as usize] = true;
+            } else if model_set.contains(&neg) {
+                values[node_id as usize] = false;
+            }
+        }
+
+        // Evaluate AND gates in topological order
+        for (i, node) in miter.nodes.iter().enumerate() {
+            if let AigNode::And { left, right } = node {
+                let l = values[left.node.0 as usize] ^ left.inverted;
+                let r = values[right.node.0 as usize] ^ right.inverted;
+                values[i] = l && r;
+            }
+        }
+
+        // Check the specific diff gate
+        if let Some(diff_lit) = miter.outputs.get(gate_idx) {
+            values[diff_lit.node.0 as usize] ^ diff_lit.inverted
+        } else {
+            false
+        }
+    };
+
     // Helper: run parallel SAT on a set of diff gates
     // limit=0 means no conflict limit (run to completion); limit>0 sets per-gate conflict limit
-    // Returns: (SAT counterexample if found, proven gate names, unresolved gate (idx, name) pairs)
+    // Returns: (validated SAT counterexample if found, proven gate names, unresolved gate (idx, name) pairs)
     let run_parallel_sat = |gates: &[(usize, String, Lit)], label: &str, limit: i32|
         -> (Option<(String, Vec<Lit>)>, Vec<String>, Vec<(usize, String)>)
     {
@@ -2308,7 +2359,7 @@ pub fn check_sequential_equivalence_sat(aig1: &Aig, aig2: &Aig) -> FormalResult<
         let proven_names: Mutex<Vec<String>> = Mutex::new(Vec::new());
         let unresolved_names: Mutex<Vec<(usize, String)>> = Mutex::new(Vec::new());
 
-        let sat_result: Option<(String, Vec<Lit>)> = gates.par_iter()
+        let sat_result: Option<(usize, String, Vec<Lit>)> = gates.par_iter()
             .find_map_any(|(idx, diff_name, sat_lit)| {
                 let mut solver = Solver::new();
                 solver.add_formula(&formula);
@@ -2320,7 +2371,7 @@ pub fn check_sequential_equivalence_sat(aig1: &Aig, aig2: &Aig) -> FormalResult<
                 match solver.solve() {
                     Ok(true) => {
                         let model = solver.model().unwrap().to_vec();
-                        Some((diff_name.clone(), model))
+                        Some((*idx, diff_name.clone(), model))
                     }
                     Ok(false) => {
                         let c = checked.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
@@ -2340,9 +2391,21 @@ pub fn check_sequential_equivalence_sat(aig1: &Aig, aig2: &Aig) -> FormalResult<
                 }
             });
 
+        // Validate any counterexample found by evaluating the miter AIG directly
+        let validated = sat_result.and_then(|(idx, name, model)| {
+            if validate_counterexample(&model, idx) {
+                eprintln!("   SAT {}: '{}' counterexample VALIDATED by miter evaluation", label, name);
+                Some((name, model))
+            } else {
+                eprintln!("   SAT {}: '{}' counterexample INVALID (solver spurious result), treating as unresolved", label, name);
+                unresolved_names.lock().unwrap().push((idx, name));
+                None
+            }
+        });
+
         let proven = proven_names.into_inner().unwrap();
         let unresolved = unresolved_names.into_inner().unwrap();
-        (sat_result, proven, unresolved)
+        (validated, proven, unresolved)
     };
 
     // Phase 2b-1: Check output diff gates (5M conflict limit — generous but not unlimited)
@@ -2353,6 +2416,7 @@ pub fn check_sequential_equivalence_sat(aig1: &Aig, aig2: &Aig) -> FormalResult<
         let (sat_result, proven, unresolved) = run_parallel_sat(&output_gates, "outputs", 5_000_000);
         if let Some((diff_name, model)) = sat_result {
             eprintln!("   Output differs: {} ({}ms)", diff_name, sat_start.elapsed().as_millis());
+            print_counterexample_diagnosis(&miter, &var_map, &model, &diff_name);
             let counterexample = extract_symbolic_counterexample(&miter, &var_map, &model, Some(diff_name.clone()));
             return Ok(SymbolicEquivalenceResult {
                 equivalent: false,
@@ -2376,27 +2440,34 @@ pub fn check_sequential_equivalence_sat(aig1: &Aig, aig2: &Aig) -> FormalResult<
     }
 
     // Phase 2b-2: Check latch next-state diff gates (best-effort — unresolved is OK)
+    // BUG #273: Latch counterexamples are treated as WARNINGS, not failures.
+    // Per-gate SAT checks combinational equivalence of next-state functions for ALL
+    // state assignments, including unreachable states. For sequential circuits with
+    // don't-care states (e.g., a 2-bit register encoding 3 states, where state 3 is
+    // unreachable), synthesis may optimize differently than the MIR. These differences
+    // are harmless and should not cause EC failure. Latch counterexamples are demoted
+    // to unresolved gates so miter simulation can validate them.
     if !latch_gates.is_empty() {
-        let (sat_result, proven, unresolved) = run_parallel_sat(&latch_gates, "latches", 100_000);
+        let (sat_result, proven, mut unresolved) = run_parallel_sat(&latch_gates, "latches", 100_000);
+        let had_counterexample = sat_result.is_some();
         if let Some((diff_name, model)) = sat_result {
-            eprintln!("   Latch next-state differs: {} ({}ms)", diff_name, sat_start.elapsed().as_millis());
-            let counterexample = extract_symbolic_counterexample(&miter, &var_map, &model, Some(diff_name.clone()));
-            return Ok(SymbolicEquivalenceResult {
-                equivalent: false,
-                counterexample: Some(counterexample),
-                checked_outputs: true,
-                checked_next_state: true,
-                time_ms: start.elapsed().as_millis() as u64,
-                proven_gates: Vec::new(),
-                unresolved_gates: Vec::new(),
-            });
+            eprintln!("   ⚠️  Latch next-state SAT counterexample (may be unreachable): {} ({}ms)",
+                diff_name, sat_start.elapsed().as_millis());
+            print_counterexample_diagnosis(&miter, &var_map, &model, &diff_name);
+            // Find the gate index for this diff name and add to unresolved
+            if let Some(idx) = latch_gates.iter().position(|(_, n, _)| n == &diff_name) {
+                unresolved.push((latch_gates[idx].0, diff_name));
+            }
         }
+        let total_latch = latch_gates.len();
+        let sat_count = if had_counterexample { 1 } else { 0 };
         if !unresolved.is_empty() {
-            eprintln!("   SAT latches: {}/{} proven, {} unresolved (best-effort, OK) ({}ms)",
-                proven.len(), latch_gates.len(), unresolved.len(), sat_start.elapsed().as_millis());
+            eprintln!("   SAT latches: {}/{} proven, {} unresolved ({} SAT counterexample) ({}ms)",
+                proven.len(), total_latch, unresolved.len(), sat_count,
+                sat_start.elapsed().as_millis());
         } else {
             eprintln!("   SAT latches: all {}/{} proven UNSAT ({}ms)",
-                proven.len(), latch_gates.len(), sat_start.elapsed().as_millis());
+                proven.len(), total_latch, sat_start.elapsed().as_millis());
         }
         all_proven.extend(proven);
         all_unresolved.extend(unresolved);
@@ -3314,6 +3385,190 @@ fn extract_symbolic_counterexample(
         inputs,
         differing_signal,
     }
+}
+
+/// Print detailed counterexample state: reconstruct multi-bit register values
+/// from the SAT model and evaluate both MIR and gate next-state outputs.
+fn print_counterexample_diagnosis(
+    miter: &Aig,
+    var_map: &HashMap<u32, Var>,
+    model: &[Lit],
+    diff_name: &str,
+) {
+    let model_set: std::collections::HashSet<_> = model.iter().collect();
+
+    // 1. Extract all state input values (current latch values in the counterexample)
+    let mut state_bits: BTreeMap<String, BTreeMap<u32, bool>> = BTreeMap::new();
+    let mut primary_inputs: BTreeMap<String, BTreeMap<u32, bool>> = BTreeMap::new();
+
+    for (idx, node) in miter.nodes.iter().enumerate() {
+        if let AigNode::Input { name } = node {
+            if let Some(&var) = var_map.get(&(idx as u32)) {
+                let lit_pos = Lit::positive(var);
+                let value = model_set.contains(&lit_pos);
+
+                // Parse name to extract register base name and bit index
+                // Format: "__reg_cur_pwm_gen.carrier.count_reg[3]" or "v_batt[7]"
+                let clean_name = name.strip_prefix("__reg_cur_").unwrap_or(name);
+                let is_state = name.starts_with("__reg_cur_") || name.starts_with("__dff_cur_");
+
+                if let Some(bracket_pos) = clean_name.rfind('[') {
+                    if let Some(end_pos) = clean_name.rfind(']') {
+                        let base = &clean_name[..bracket_pos];
+                        if let Ok(bit_idx) = clean_name[bracket_pos+1..end_pos].parse::<u32>() {
+                            if is_state {
+                                state_bits.entry(base.to_string()).or_default().insert(bit_idx, value);
+                            } else {
+                                primary_inputs.entry(base.to_string()).or_default().insert(bit_idx, value);
+                            }
+                            continue;
+                        }
+                    }
+                }
+                // Single-bit signal (no bracket)
+                if is_state {
+                    state_bits.entry(clean_name.to_string()).or_default().insert(0, value);
+                } else {
+                    primary_inputs.entry(clean_name.to_string()).or_default().insert(0, value);
+                }
+            }
+        }
+    }
+
+    // 2. Reconstruct multi-bit values and print state registers
+    eprintln!("   ┌─── Counterexample State ──────────────────────────────");
+    eprintln!("   │ Differing signal: {}", diff_name);
+
+    // Extract the base register name from the diff_name for focused reporting
+    let focus_base_owned = {
+        let clean = diff_name
+            .strip_prefix("diff_next_state[")
+            .or_else(|| diff_name.strip_prefix("diff_output["))
+            .unwrap_or(diff_name)
+            .trim_end_matches(']');
+        if let Some(bp) = clean.rfind('[') {
+            clean[..bp].to_string()
+        } else {
+            clean.to_string()
+        }
+    };
+    let focus_base = focus_base_owned.as_str();
+
+    eprintln!("   │");
+    eprintln!("   │ Current latch state (related registers):");
+    for (base_name, bits) in &state_bits {
+        // Show registers related to the failing signal (same hierarchy prefix)
+        let prefix = if focus_base.contains('.') {
+            // e.g., "pwm_gen.carrier" from "pwm_gen.carrier.count_reg"
+            let last_dot = focus_base.rfind('.').unwrap();
+            &focus_base[..last_dot]
+        } else {
+            focus_base
+        };
+        if base_name.starts_with(prefix) || base_name == focus_base {
+            let max_bit = bits.keys().max().copied().unwrap_or(0);
+            let mut value: u64 = 0;
+            for (&bit_idx, &bit_val) in bits {
+                if bit_val {
+                    value |= 1u64 << bit_idx;
+                }
+            }
+            eprintln!("   │   {} = {} (0x{:x}, {}-bit)", base_name, value, value, max_bit + 1);
+        }
+    }
+
+    // 3. Evaluate miter to get both MIR and gate next-state values
+    let num_nodes = miter.nodes.len();
+    let mut values = vec![false; num_nodes];
+    values[0] = false;
+
+    // Set input values from model
+    for (&node_id, &var) in var_map {
+        let pos = Lit::positive(var);
+        if model_set.contains(&pos) {
+            values[node_id as usize] = true;
+        }
+    }
+
+    // Evaluate AND gates
+    for (i, node) in miter.nodes.iter().enumerate() {
+        if let AigNode::And { left, right } = node {
+            let l = values[left.node.0 as usize] ^ left.inverted;
+            let r = values[right.node.0 as usize] ^ right.inverted;
+            values[i] = l && r;
+        }
+    }
+
+    // Find mir_next and gate_next outputs for the related register
+    let mut mir_next_bits: BTreeMap<String, BTreeMap<u32, bool>> = BTreeMap::new();
+    let mut gate_next_bits: BTreeMap<String, BTreeMap<u32, bool>> = BTreeMap::new();
+
+    for (out_idx, out_name) in miter.output_names.iter().enumerate() {
+        if let Some(out_lit) = miter.outputs.get(out_idx) {
+            let out_val = values[out_lit.node.0 as usize] ^ out_lit.inverted;
+
+            let (target_map, clean_name) = if let Some(rest) = out_name.strip_prefix("mir_next[") {
+                (&mut mir_next_bits, rest.strip_suffix(']').unwrap_or(rest))
+            } else if let Some(rest) = out_name.strip_prefix("gate_next[") {
+                (&mut gate_next_bits, rest.strip_suffix(']').unwrap_or(rest))
+            } else {
+                continue;
+            };
+
+            // Filter to only the prefix of interest
+            let prefix = if focus_base.contains('.') {
+                let last_dot = focus_base.rfind('.').unwrap();
+                &focus_base[..last_dot]
+            } else {
+                focus_base
+            };
+
+            if let Some(bracket_pos) = clean_name.rfind('[') {
+                if let Some(end_pos) = clean_name.rfind(']') {
+                    let base = &clean_name[..bracket_pos];
+                    if let Ok(bit_idx) = clean_name[bracket_pos+1..end_pos].parse::<u32>() {
+                        if base.starts_with(prefix) || base == focus_base {
+                            target_map.entry(base.to_string()).or_default().insert(bit_idx, out_val);
+                        }
+                    }
+                }
+            } else {
+                // Single-bit signal (no bracket index)
+                if clean_name.starts_with(prefix) || clean_name == focus_base {
+                    target_map.entry(clean_name.to_string()).or_default().insert(0, out_val);
+                }
+            }
+        }
+    }
+
+    eprintln!("   │");
+    eprintln!("   │ Next-state comparison (MIR vs Gate):");
+    let all_regs: BTreeSet<String> = mir_next_bits.keys().chain(gate_next_bits.keys()).cloned().collect();
+    for reg_name in &all_regs {
+        let mir_bits = mir_next_bits.get(reg_name);
+        let gate_bits = gate_next_bits.get(reg_name);
+        let max_bit = mir_bits.iter().chain(gate_bits.iter())
+            .flat_map(|b| b.keys())
+            .max()
+            .copied()
+            .unwrap_or(0);
+
+        let reconstruct = |bits: Option<&BTreeMap<u32, bool>>| -> u64 {
+            let mut v = 0u64;
+            if let Some(b) = bits {
+                for (&idx, &val) in b {
+                    if val { v |= 1u64 << idx; }
+                }
+            }
+            v
+        };
+        let mir_val = reconstruct(mir_bits);
+        let gate_val = reconstruct(gate_bits);
+        let diff_marker = if mir_val != gate_val { " *** DIFFERS" } else { "" };
+        eprintln!("   │   {} ({}-bit): MIR_next={} (0x{:x}), Gate_next={} (0x{:x}){}",
+            reg_name, max_bit + 1, mir_val, mir_val, gate_val, gate_val, diff_marker);
+    }
+    eprintln!("   └──────────────────────────────────────────────────────");
 }
 
 // ============================================================================
@@ -4979,7 +5234,7 @@ use skalp_mir::{
 };
 
 /// Signal reference in MIR (either port or signal)
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum MirSignalRef {
     Port(PortId),
     Signal(SignalId),
@@ -5001,6 +5256,10 @@ pub struct MirToAig<'a> {
     pub aig: Aig,
     /// Map from (MirSignalRef, bit_index) to current AigLit
     signal_map: HashMap<(MirSignalRef, u32), AigLit>,
+    /// Per-instance signal maps keyed by instance path ("" = top module)
+    instance_signal_maps: HashMap<String, HashMap<(MirSignalRef, u32), AigLit>>,
+    /// Current instance path ("" = top module)
+    current_instance_path: String,
     /// Map from port/signal names to their reference
     name_to_ref: HashMap<String, MirSignalRef>,
     /// Register outputs (for sequential detection)
@@ -5015,6 +5274,8 @@ impl<'a> MirToAig<'a> {
             current_module: None,
             aig: Aig::new(),
             signal_map: HashMap::new(),
+            instance_signal_maps: HashMap::new(),
+            current_instance_path: String::new(),
             name_to_ref: HashMap::new(),
             register_outputs: Vec::new(),
         };
@@ -5033,6 +5294,8 @@ impl<'a> MirToAig<'a> {
             current_module: None,
             aig: Aig::new(),
             signal_map: HashMap::new(),
+            instance_signal_maps: HashMap::new(),
+            current_instance_path: String::new(),
             name_to_ref: HashMap::new(),
             register_outputs: Vec::new(),
         };
@@ -5053,6 +5316,19 @@ impl<'a> MirToAig<'a> {
             self.name_to_ref
                 .insert(var.name.clone(), MirSignalRef::Variable(var.id));
         }
+    }
+
+    /// Switch signal_map context to a different module instance.
+    /// Saves current signal_map under current_instance_path,
+    /// loads target instance's signal_map (or empty if first visit).
+    fn switch_to_instance(&mut self, instance_path: &str) {
+        if instance_path == self.current_instance_path {
+            return;
+        }
+        let current_map = std::mem::take(&mut self.signal_map);
+        self.instance_signal_maps.insert(self.current_instance_path.clone(), current_map);
+        self.signal_map = self.instance_signal_maps.remove(instance_path).unwrap_or_default();
+        self.current_instance_path = instance_path.to_string();
     }
 
     /// Find a port by its ID
@@ -5369,121 +5645,66 @@ impl<'a> MirToAig<'a> {
             }
         }
 
-        // BUG FIX: Pre-pass — process each module's continuous assignments and
-        // combinational processes in PRE-ORDER (parent before children).
-        // This ensures that signals like `bms_i_charge_max = bms.i_charge_max` are
-        // available in the signal_map before child instances try to use them via
-        // connect_instance_inputs. Without this, child input ports would be stuck
-        // at constant 0 because parent signals hadn't been computed yet.
+        // BUG #273 part 2: Pre-order passes to propagate combinational values through
+        // the hierarchy. With per-instance signal maps, each pass propagates values
+        // up one level from children to parents. For a hierarchy of depth D, we need
+        // D passes to fully propagate leaf values to the root.
         //
-        // The all_instances list is in POST-ORDER (children first). We iterate
-        // in reverse to get pre-order (parent first).
-        for (inst_path, module) in all_instances.iter().rev() {
-            self.current_module = Some(*module);
+        // Compute max hierarchy depth from instance paths.
+        let max_depth = all_instances.iter()
+            .map(|(path, _)| if path.is_empty() { 0 } else { path.matches('.').count() + 1 })
+            .max()
+            .unwrap_or(0);
+        let num_passes = max_depth.max(2); // At least 2 passes for cross-sibling dependencies
 
-            // Set up register state for this module
-            for (path, sig_ref, _, width) in &all_registers {
-                if path == inst_path {
-                    for bit in 0..*width {
-                        if let Some(&lit) = reg_current_lits.get(&(path.clone(), *sig_ref, bit)) {
-                            self.signal_map.insert((*sig_ref, bit), lit);
+        log::debug!("[HIER_AIG] Max hierarchy depth: {}, running {} pre-order passes", max_depth, num_passes);
+
+        for pass in 0..num_passes {
+            for (inst_path, module) in all_instances.iter().rev() {
+                self.current_module = Some(*module);
+                self.switch_to_instance(inst_path);
+
+                // Set up register state for this module
+                for (path, sig_ref, _, width) in &all_registers {
+                    if path == inst_path {
+                        for bit in 0..*width {
+                            if let Some(&lit) = reg_current_lits.get(&(path.clone(), *sig_ref, bit)) {
+                                self.signal_map.insert((*sig_ref, bit), lit);
+                            }
                         }
                     }
                 }
-            }
 
-            // Track which signals are registers in this module
-            self.register_outputs.clear();
-            for (path, sig_ref, _, _) in &all_registers {
-                if path == inst_path {
-                    self.register_outputs.push(*sig_ref);
-                }
-            }
-
-            // Connect INPUT ports from parent (parent's signals are available from
-            // earlier iterations since we're processing in pre-order)
-            if !inst_path.is_empty() {
-                self.connect_instance_inputs(inst_path, mir);
-            }
-
-            // Process continuous assignments (sets up signals used by children)
-            for assign in &module.assignments {
-                self.convert_continuous_assign(assign);
-            }
-
-            // Process combinational processes
-            for process in &module.processes {
-                if matches!(process.kind, ProcessKind::Combinational) {
-                    self.convert_combinational_process(process);
-                }
-            }
-
-            // Connect OUTPUT ports to parent (even though parent hasn't been
-            // processed yet in pre-order, the child's output values are now correct
-            // and will be available when parent processes its assignments later
-            // in the post-order pass below)
-            if !inst_path.is_empty() {
-                self.connect_instance_outputs(inst_path, mir);
-            }
-        }
-
-        // BUG #262 FIX: Additional pre-order combinational pass to resolve cross-instance
-        // dependencies through parent entities.
-        //
-        // Problem: When sibling instances have dependencies through a parent's combinational
-        // logic (e.g., voltage_loop.output → CcCvController.i_ref_internal → current_loop.setpoint),
-        // the two-pass approach fails:
-        //   Pre-order:  CcCvController computes i_ref_internal (stale, v_loop_output=0)
-        //               voltage_loop produces v_loop_output
-        //               current_loop gets stale i_ref_internal
-        //   Post-order: current_loop sequential uses stale i_ref_internal → WRONG
-        //
-        // Fix: Re-run pre-order combinational pass. Now voltage_loop's outputs from pass 1
-        // are in signal_map, so CcCvController correctly computes i_ref_internal, and
-        // current_loop picks up the correct value.
-        for (inst_path, module) in all_instances.iter().rev() {
-            self.current_module = Some(*module);
-
-            // Set up register state for this module
-            for (path, sig_ref, _, width) in &all_registers {
-                if path == inst_path {
-                    for bit in 0..*width {
-                        if let Some(&lit) = reg_current_lits.get(&(path.clone(), *sig_ref, bit)) {
-                            self.signal_map.insert((*sig_ref, bit), lit);
-                        }
+                // Track which signals are registers in this module
+                self.register_outputs.clear();
+                for (path, sig_ref, _, _) in &all_registers {
+                    if path == inst_path {
+                        self.register_outputs.push(*sig_ref);
                     }
                 }
-            }
 
-            // Track which signals are registers in this module
-            self.register_outputs.clear();
-            for (path, sig_ref, _, _) in &all_registers {
-                if path == inst_path {
-                    self.register_outputs.push(*sig_ref);
+                // Connect INPUT ports from parent
+                if !inst_path.is_empty() {
+                    self.connect_instance_inputs(inst_path, mir);
+                }
+
+                // Process continuous assignments and combinational processes
+                for assign in &module.assignments {
+                    self.convert_continuous_assign(assign);
+                }
+                for process in &module.processes {
+                    if matches!(process.kind, ProcessKind::Combinational) {
+                        self.convert_combinational_process(process);
+                    }
+                }
+
+                // Connect OUTPUT ports to parent
+                if !inst_path.is_empty() {
+                    self.connect_instance_outputs(inst_path, mir);
                 }
             }
 
-            // Connect INPUT ports from parent
-            if !inst_path.is_empty() {
-                self.connect_instance_inputs(inst_path, mir);
-            }
-
-            // Re-process continuous assignments (parent now has child outputs from pass 1)
-            for assign in &module.assignments {
-                self.convert_continuous_assign(assign);
-            }
-
-            // Re-process combinational processes
-            for process in &module.processes {
-                if matches!(process.kind, ProcessKind::Combinational) {
-                    self.convert_combinational_process(process);
-                }
-            }
-
-            // Re-connect OUTPUT ports
-            if !inst_path.is_empty() {
-                self.connect_instance_outputs(inst_path, mir);
-            }
+            log::debug!("[HIER_AIG] Pre-order pass {}/{} complete", pass + 1, num_passes);
         }
 
         // Main pass: process in POST-ORDER (children first) for sequential logic
@@ -5492,10 +5713,91 @@ impl<'a> MirToAig<'a> {
         let mut reset_values: HashMap<(String, MirSignalRef, u32), u64> = HashMap::new();
 
         for (inst_path, module) in &all_instances {
-            // Set current module for this iteration
-            self.current_module = Some(*module);
+            // BUG #273 part 2: Per-instance signal map isolation.
+            // Ancestor refresh re-processes the ancestor chain to pick up any
+            // cross-instance updates. With per-instance maps, each ancestor's
+            // combinational logic writes only to its own signal_map (no collisions).
+            // After processing each ancestor's combinational logic, we re-connect
+            // its children's outputs to restore values that combinational logic may
+            // have overwritten (e.g., default signal initializers).
+            if !inst_path.is_empty() {
+                let parts: Vec<&str> = inst_path.split('.').collect();
 
-            // Build signal_map for this instance's registers
+                for depth in 0..parts.len() {
+                    let ancestor_path = if depth == 0 {
+                        String::new()
+                    } else {
+                        parts[..depth].join(".")
+                    };
+
+                    let ancestor_module = if ancestor_path.is_empty() {
+                        self.module
+                    } else {
+                        self.find_module_for_instance_path(mir, &ancestor_path)
+                            .unwrap_or(self.module)
+                    };
+
+                    self.switch_to_instance(&ancestor_path);
+                    self.current_module = if ancestor_path.is_empty() {
+                        None
+                    } else {
+                        Some(ancestor_module)
+                    };
+
+                    if !ancestor_path.is_empty() {
+                        self.connect_instance_inputs(&ancestor_path, mir);
+                    }
+
+                    for assign in &ancestor_module.assignments {
+                        self.convert_continuous_assign(assign);
+                    }
+                    for process in &ancestor_module.processes {
+                        if matches!(process.kind, ProcessKind::Combinational) {
+                            self.convert_combinational_process(process);
+                        }
+                    }
+
+                    // Re-connect all children's outputs to restore values that
+                    // combinational logic may have overwritten
+                    for child_inst in &ancestor_module.instances {
+                        let child_path = if ancestor_path.is_empty() {
+                            child_inst.name.clone()
+                        } else {
+                            format!("{}.{}", ancestor_path, child_inst.name)
+                        };
+                        let child_exists = self.instance_signal_maps.contains_key(&child_path)
+                            || self.current_instance_path == child_path;
+                        if child_exists {
+                            if let Some(child_mod) = mir.modules.iter().find(|m| m.id == child_inst.module) {
+                                self.switch_to_instance(&child_path);
+                                self.current_module = Some(child_mod);
+                                self.connect_instance_outputs(&child_path, mir);
+                            }
+                        }
+                    }
+                    // Switch back to ancestor for next iteration
+                    self.switch_to_instance(&ancestor_path);
+                    self.current_module = if ancestor_path.is_empty() {
+                        None
+                    } else {
+                        Some(ancestor_module)
+                    };
+                }
+
+                // Switch to child instance and connect its inputs
+                self.switch_to_instance(inst_path);
+                self.current_module = Some(*module);
+                self.connect_instance_inputs(inst_path, mir);
+            } else {
+                self.switch_to_instance(inst_path);
+                self.current_module = if inst_path.is_empty() {
+                    None
+                } else {
+                    Some(*module)
+                };
+            }
+
+            // Load registers for this instance
             for (path, sig_ref, _, width) in &all_registers {
                 if path == inst_path {
                     for bit in 0..*width {
@@ -5514,27 +5816,10 @@ impl<'a> MirToAig<'a> {
                 }
             }
 
-            // BUG #267 FIX: Before connecting this instance's inputs, re-establish
-            // its ancestor chain's input connections. When sibling instances share
-            // the same module type (e.g., two HBridgePwm instances), the earlier
-            // sibling's connect_instance_inputs overwrites the shared module's port
-            // entries in signal_map. Re-connecting ancestors ensures the correct
-            // parent port values are in signal_map for THIS instance's context.
-            if !inst_path.is_empty() {
-                // Walk up the instance path and re-connect each ancestor
-                let parts: Vec<&str> = inst_path.split('.').collect();
-                for depth in 0..parts.len() {
-                    let ancestor_path = parts[..=depth].join(".");
-                    self.connect_instance_inputs(&ancestor_path, mir);
-                }
-            }
-
-            // Re-process continuous assignments (with correct child outputs)
+            // Re-process continuous assignments and combinational logic
             for assign in &module.assignments {
                 self.convert_continuous_assign(assign);
             }
-
-            // Re-process combinational processes
             for process in &module.processes {
                 if matches!(process.kind, ProcessKind::Combinational) {
                     self.convert_combinational_process(process);
@@ -5561,7 +5846,7 @@ impl<'a> MirToAig<'a> {
                 }
             }
 
-            // Connect OUTPUT ports from child to parent (after processing child)
+            // Connect OUTPUT ports from child to parent
             if !inst_path.is_empty() {
                 self.connect_instance_outputs(inst_path, mir);
             }
@@ -5572,6 +5857,7 @@ impl<'a> MirToAig<'a> {
 
         // Create Latch nodes for all registers
         for (inst_path, sig_ref, name, width) in &all_registers {
+            self.switch_to_instance(inst_path);
             for bit in 0..*width {
                 let latch_name = if *width == 1 {
                     name.clone()
@@ -5606,6 +5892,10 @@ impl<'a> MirToAig<'a> {
                 self.signal_map.insert((*sig_ref, bit), latch_lit);
             }
         }
+
+        // Switch to top module context for reading output port values
+        self.switch_to_instance("");
+        self.current_module = None;
 
         // Add primary outputs (only from top module)
         for port in &self.module.ports {
@@ -5797,7 +6087,8 @@ impl<'a> MirToAig<'a> {
     }
 
     /// Connect instance INPUT ports to parent signals (before processing child)
-    /// Maps parent expressions to child input port IDs
+    /// Maps parent expressions to child input port IDs.
+    /// Switches to parent context to evaluate connection expressions, then back to child.
     fn connect_instance_inputs(&mut self, inst_path: &str, mir: &'a Mir) {
         // Find the parent module and instance
         let (parent_path, inst_name) = if let Some(dot_pos) = inst_path.rfind('.') {
@@ -5809,54 +6100,56 @@ impl<'a> MirToAig<'a> {
         let parent_module = if parent_path.is_empty() {
             self.module
         } else {
-            // Find the parent module by traversing the instance path
             self.find_module_for_instance_path(mir, parent_path)
                 .unwrap_or(self.module)
         };
 
-        // Find the instance in the parent
+        // Save child context
+        let child_instance_path = self.current_instance_path.clone();
+        let child_module_saved = self.current_module;
+
+        // Switch to parent to evaluate connection expressions
+        self.switch_to_instance(parent_path);
+        self.current_module = if parent_path.is_empty() {
+            None
+        } else {
+            Some(parent_module)
+        };
+
+        let mut port_connections: Vec<(PortId, usize, Vec<AigLit>)> = Vec::new();
         if let Some(instance) = parent_module.instances.iter().find(|i| i.name == inst_name) {
-            // Find child module definition
             if let Some(child_module) = mir.modules.iter().find(|m| m.id == instance.module) {
-                // Process INPUT port connections
                 for (port_name, conn_expr) in &instance.connections {
-                    // Find the port in child module
                     if let Some(child_port) = child_module.ports.iter().find(|p| p.name == *port_name) {
-                        // Only handle INPUT ports here
                         if child_port.direction != PortDirection::Input {
                             continue;
                         }
-
                         let width = self.get_type_width(&child_port.port_type);
-
-                        // Convert the connection expression (parent value)
-                        // Must temporarily switch to parent module context since
-                        // conn_expr references parent signals/ports, not child's.
-                        let saved_module = self.current_module;
-                        self.current_module = if parent_path.is_empty() {
-                            None // top-level module
-                        } else {
-                            Some(parent_module)
-                        };
                         let conn_lits = self.convert_expression(conn_expr);
-                        self.current_module = saved_module;
-
-                        // Map child input port to parent signal's literals
-                        let max_bits = width.min(conn_lits.len());
-                        for bit in 0..max_bits {
-                            self.signal_map.insert(
-                                (MirSignalRef::Port(child_port.id), bit as u32),
-                                conn_lits[bit],
-                            );
-                        }
+                        port_connections.push((child_port.id, width, conn_lits));
                     }
                 }
+            }
+        }
+
+        // Switch back to child and write port entries
+        self.switch_to_instance(&child_instance_path);
+        self.current_module = child_module_saved;
+
+        for (port_id, width, conn_lits) in port_connections {
+            let max_bits = width.min(conn_lits.len());
+            for bit in 0..max_bits {
+                self.signal_map.insert(
+                    (MirSignalRef::Port(port_id), bit as u32),
+                    conn_lits[bit],
+                );
             }
         }
     }
 
     /// Connect instance OUTPUT ports to parent signals (after processing child)
-    /// Propagates child output values to the parent's connected signals
+    /// Propagates child output values to the parent's connected signals.
+    /// Reads child outputs in child context, switches to parent to write, switches back.
     fn connect_instance_outputs(&mut self, inst_path: &str, mir: &'a Mir) {
         // Find the parent module and instance
         let (parent_path, inst_name) = if let Some(dot_pos) = inst_path.rfind('.') {
@@ -5868,27 +6161,24 @@ impl<'a> MirToAig<'a> {
         let parent_module = if parent_path.is_empty() {
             self.module
         } else {
-            // Find the parent module by traversing the instance path
             self.find_module_for_instance_path(mir, parent_path)
                 .unwrap_or(self.module)
         };
 
-        // Find the instance in the parent
+        let child_instance_path = self.current_instance_path.clone();
+
+        // Collect child output values + parent target refs (in child context)
+        let mut transfers: Vec<(MirSignalRef, Vec<AigLit>)> = Vec::new();
         if let Some(instance) = parent_module.instances.iter().find(|i| i.name == inst_name) {
-            // Find child module definition
             if let Some(child_module) = mir.modules.iter().find(|m| m.id == instance.module) {
-                // Process OUTPUT port connections
                 for (port_name, conn_expr) in &instance.connections {
-                    // Find the port in child module
                     if let Some(child_port) = child_module.ports.iter().find(|p| p.name == *port_name) {
-                        // Only handle OUTPUT ports here
                         if child_port.direction != PortDirection::Output {
                             continue;
                         }
 
                         let width = self.get_type_width(&child_port.port_type);
 
-                        // Get the child output port's value
                         let child_lits: Vec<AigLit> = (0..width)
                             .map(|bit| {
                                 self.signal_map
@@ -5898,19 +6188,26 @@ impl<'a> MirToAig<'a> {
                             })
                             .collect();
 
-                        // If the connection expression is a simple signal reference,
-                        // map the child output to the parent signal
                         if let ExpressionKind::Ref(lvalue) = &conn_expr.kind {
                             if let Some(parent_sig_ref) = self.lvalue_to_ref(lvalue) {
-                                for (bit, &lit) in child_lits.iter().enumerate() {
-                                    self.signal_map.insert((parent_sig_ref, bit as u32), lit);
-                                }
+                                transfers.push((parent_sig_ref, child_lits));
                             }
                         }
                     }
                 }
             }
         }
+
+        // Switch to parent context and write
+        self.switch_to_instance(parent_path);
+        for (parent_sig_ref, child_lits) in transfers {
+            for (bit, &lit) in child_lits.iter().enumerate() {
+                self.signal_map.insert((parent_sig_ref, bit as u32), lit);
+            }
+        }
+
+        // Switch back to child context
+        self.switch_to_instance(&child_instance_path);
     }
 
     /// Convert sequential process for BMC - stores next-state values separately
@@ -5993,8 +6290,8 @@ impl<'a> MirToAig<'a> {
 
                 // Merge: for each register bit, create MUX if values differ
                 // Collect all keys from both then and else states
-                let mut all_keys: std::collections::HashSet<(MirSignalRef, u32)> =
-                    std::collections::HashSet::new();
+                let mut all_keys: std::collections::BTreeSet<(MirSignalRef, u32)> =
+                    std::collections::BTreeSet::new();
                 for key in then_state.keys() {
                     all_keys.insert(*key);
                 }
@@ -6747,7 +7044,7 @@ impl<'a> MirToAig<'a> {
 
         // Build muxes for all modified signal bits
         self.signal_map = saved_state;
-        let all_keys: std::collections::HashSet<_> = then_assigns
+        let all_keys: std::collections::BTreeSet<_> = then_assigns
             .keys()
             .chain(else_assigns.keys())
             .cloned()

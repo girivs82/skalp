@@ -983,6 +983,7 @@ impl MirToLirTransform {
                                 // Check if the LAST group has an unconditional else
                                 // (it would be the last path in the last group)
                                 let mut groups: Vec<Vec<_>> = sibling_groups;
+
                                 if let Some(last_group) = groups.last_mut() {
                                     if let Some((None, last_expr)) = last_group.last() {
                                         // Last path of last group is unconditional - use as base
