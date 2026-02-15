@@ -31,6 +31,11 @@ pub use equivalence::{
     HierarchicalEquivalenceChecker, HierarchicalEquivalenceResult, MismatchDetails, SemanticFingerprint,
     // Simulation-based equivalence checking types
     SimBasedEquivalenceChecker, SimEquivalenceResult,
+    // SAT-based symbolic equivalence checking types
+    SymbolicEquivalenceResult, SymbolicCounterexample,
+    check_sequential_equivalence_sat, build_sequential_miter,
+    extract_aig_cone, AigCone,
+    inject_random_bugs, check_non_equivalence_fast,
 };
 pub use skalp_sim::CoverageReport;
 

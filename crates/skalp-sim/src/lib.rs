@@ -28,6 +28,7 @@ pub mod gate_eval;
 pub mod gate_netlist_to_sir;
 pub mod gate_runtime;
 pub mod gate_simulator;
+pub mod gpu_aig_cone_sim;
 #[cfg(target_os = "macos")]
 pub mod gpu_fault_simulator;
 #[cfg(target_os = "macos")]
@@ -61,6 +62,9 @@ pub use gate_simulator::{
     FaultCampaignConfig, FaultCampaignResults, FaultSimResult, GateLevelSimulator,
     GateSimulationState,
 };
+pub use gpu_aig_cone_sim::AigCone;
+#[cfg(target_os = "macos")]
+pub use gpu_aig_cone_sim::GpuAigConeSim;
 #[cfg(target_os = "macos")]
 pub use gpu_fault_simulator::{GpuFaultCampaignConfig, GpuFaultSimulator};
 #[cfg(target_os = "macos")]

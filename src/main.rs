@@ -2375,7 +2375,7 @@ fn run_equivalence_check(
     verbose: bool,
     coverage: bool,
 ) -> Result<()> {
-    use skalp_formal::equivalence::{MirToAig, GateNetlistToAig, check_sequential_equivalence_sat, inject_random_bugs, check_non_equivalence_fast};
+    use skalp_formal::equivalence::{MirToAig, GateNetlistToAig, check_sequential_equivalence_sat, build_sequential_miter, extract_aig_cone, inject_random_bugs, check_non_equivalence_fast};
     use skalp_frontend::parse_and_build_compilation_context;
     use skalp_lir::{get_stdlib_library, lower_mir_hierarchical_with_top, map_hierarchical_to_gates};
     use std::time::Instant;
@@ -2497,38 +2497,29 @@ fn run_equivalence_check(
     let mut sim_found_bug = false;
     let mut sim_result_for_report: Option<skalp_formal::SimEquivalenceResult> = None;
 
-    // Phase 1: Simulation (unless --symbolic only)
+    // Phase 1: Quick smoke test (unless --symbolic only)
     if !symbolic {
         println!();
-        if coverage {
-            println!("📊 Phase 1: Coverage-driven simulation-based check...");
-        } else {
-            println!("📊 Phase 1: Simulation-based check ({} cycles)...", bound);
-        }
+        println!("📊 Phase 1: Quick smoke test (100 cycles)...");
         use skalp_formal::SimBasedEquivalenceChecker;
 
+        let smoke_cycles = if quick { bound as u64 } else { 100u64 };
         let checker = SimBasedEquivalenceChecker::new()
-            .with_cycles(bound as u64)
+            .with_cycles(smoke_cycles)
             .with_reset("rst", reset_cycles)
-            .with_coverage(coverage);
+            .with_coverage(false);
 
         let rt = tokio::runtime::Runtime::new()
             .context("Failed to create tokio runtime")?;
 
-        let sim_result = if coverage {
-            rt.block_on(async {
-                checker.check_mir_vs_gate_coverage(&mir, target_entity, &gate_netlist).await
-            }).map_err(|e| anyhow::anyhow!("Coverage simulation equivalence check failed: {:?}", e))?
-        } else {
-            rt.block_on(async {
-                checker.check_mir_vs_gate(&mir, target_entity, &gate_netlist).await
-            }).map_err(|e| anyhow::anyhow!("Simulation equivalence check failed: {:?}", e))?
-        };
+        let sim_result = rt.block_on(async {
+            checker.check_mir_vs_gate(&mir, target_entity, &gate_netlist).await
+        }).map_err(|e| anyhow::anyhow!("Smoke test failed: {:?}", e))?;
 
         if sim_result.equivalent {
-            println!("   ✓ Simulation PASS: No mismatch in {} cycles", sim_result.cycles_verified);
+            println!("   ✓ Smoke test PASS: No mismatch in {} cycles", sim_result.cycles_verified);
         } else {
-            println!("   ✗ Simulation FAIL: Mismatch detected!");
+            println!("   ✗ Smoke test FAIL: Mismatch detected!");
             if let Some(cycle) = sim_result.mismatch_cycle {
                 println!("     Cycle: {}", cycle);
             }
@@ -2539,24 +2530,10 @@ fn run_equivalence_check(
             overall_pass = false;
         }
 
-        // Always store sim result for coverage reporting and EC report generation
         sim_result_for_report = Some(sim_result.clone());
 
         // If quick mode, stop here (no SAT phase)
         if quick {
-            // Print coverage report for quick mode (simulation only, no SAT)
-            if let Some(ref sim_result) = sim_result_for_report {
-                if let Some(ref cov_report) = sim_result.coverage_report {
-                    cov_report.print_summary();
-                    let cov_path = output_dir.join("coverage_report.txt");
-                    if let Err(e) = cov_report.write_text(&cov_path) {
-                        eprintln!("Warning: failed to write coverage report: {}", e);
-                    } else {
-                        println!("   Coverage report written to {:?}", cov_path);
-                    }
-                }
-            }
-
             let total_time = start_time.elapsed();
             println!();
             println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
@@ -2575,7 +2552,7 @@ fn run_equivalence_check(
         }
     }
 
-    // Phase 2: SAT-based symbolic check (unless simulation already found bug)
+    // Phase 2: SAT-based symbolic check + GPU cone sim for unresolved gates
     let mut mir_aig_opt = None;
     let mut gate_aig_opt = None;
     let mut sat_passed = false;
@@ -2584,39 +2561,26 @@ fn run_equivalence_check(
         println!("🔬 Phase 2: SAT-based symbolic equivalence check...");
         println!("   Checking transition function equivalence for ALL states...");
 
-        // Convert to sequential AIGs (MIR→AIG for behavioral, GateNetlist→AIG for gate)
+        // Phase 2a: Convert to sequential AIGs
         let mir_aig = MirToAig::new_with_mir(&mir, target_entity).convert_sequential_hierarchical();
         let gate_aig = GateNetlistToAig::new().convert_sequential(&gate_netlist);
 
         println!("   MIR AIG:  {} nodes, {} latches", mir_aig.nodes.len(), mir_aig.latches.len());
         println!("   Gate AIG: {} nodes, {} latches", gate_aig.nodes.len(), gate_aig.latches.len());
 
+        // Phase 2b: Per-gate SAT (returns unresolved gates instead of running CPU sim)
         match check_sequential_equivalence_sat(&mir_aig, &gate_aig) {
             Ok(sat_result) => {
-                if sat_result.equivalent {
-                    if sat_result.checked_outputs && sat_result.checked_next_state {
-                        println!("   ✓ SAT PASS: Transition functions equivalent for ALL states (full proof)");
-                    } else {
-                        let mut partial = Vec::new();
-                        if !sat_result.checked_outputs { partial.push("some outputs"); }
-                        if !sat_result.checked_next_state { partial.push("some latches"); }
-                        println!("   ✓ SAT PASS: No non-equivalence found ({} unresolved due to complexity)",
-                            partial.join(" + "));
-                    }
-                    println!("     Proof completed in {}ms", sat_result.time_ms);
-                    sat_passed = true;
-                } else {
+                if !sat_result.equivalent {
                     println!("   ✗ SAT FAIL: Found state where designs differ!");
                     overall_pass = false;
 
                     if let Some(ref ce) = sat_result.counterexample {
-                        // Show the differing signal
                         if let Some(ref diff_sig) = ce.differing_signal {
                             println!();
                             println!("   🔍 DIFFERING SIGNAL: {}", diff_sig);
                         }
 
-                        // Show ALL inputs that trigger the bug
                         if !ce.inputs.is_empty() {
                             println!();
                             println!("   📥 INPUTS that trigger the bug ({} total):", ce.inputs.len());
@@ -2630,7 +2594,6 @@ fn run_equivalence_check(
                             }
                         }
 
-                        // Show ALL state values (latch values) where bug occurs
                         if !ce.state.is_empty() {
                             println!();
                             println!("   📊 STATE (latch values) where difference occurs ({} total):", ce.state.len());
@@ -2644,13 +2607,101 @@ fn run_equivalence_check(
                             }
                         }
 
-                        // This is the key insight for slow state machines
                         println!();
                         println!("   💡 Note: This bug may be in a state unreachable via normal simulation");
-                        println!("      (e.g., requires millions of cycles to reach via timeout)");
                         println!("      SAT found it by reasoning symbolically about all possible states.");
                     } else {
                         println!("   ⚠️  No counterexample returned by SAT solver");
+                    }
+                } else if sat_result.unresolved_gates.is_empty() {
+                    // All gates proven UNSAT — full proof!
+                    println!("   ✓ SAT PASS: Transition functions equivalent for ALL states (full proof)");
+                    println!("     {} gates proven, {}ms", sat_result.proven_gates.len(), sat_result.time_ms);
+                    sat_passed = true;
+                } else {
+                    // Some gates unresolved — dispatch to GPU cone sim
+                    println!("   SAT: {}/{} gates proven, {} unresolved ({}ms)",
+                        sat_result.proven_gates.len(),
+                        sat_result.proven_gates.len() + sat_result.unresolved_gates.len(),
+                        sat_result.unresolved_gates.len(),
+                        sat_result.time_ms);
+
+                    // Phase 2c: GPU cone simulation for SAT-hard gates
+                    println!();
+                    println!("   🖥️  Phase 2c: GPU cone simulation for {} unresolved gates...",
+                        sat_result.unresolved_gates.len());
+
+                    let cone_start = std::time::Instant::now();
+                    let miter = build_sequential_miter(&mir_aig, &gate_aig)
+                        .map_err(|e| anyhow::anyhow!("Failed to build miter: {:?}", e))?;
+
+                    let num_patterns = 1_000_000u32;
+                    let mut cone_failures: Vec<String> = Vec::new();
+
+                    // Try GPU first, fall back to CPU
+                    #[cfg(target_os = "macos")]
+                    {
+                        use skalp_sim::GpuAigConeSim;
+                        match GpuAigConeSim::new() {
+                            Ok(gpu_sim) => {
+                                for (idx, name) in &sat_result.unresolved_gates {
+                                    let cone = extract_aig_cone(&miter, *idx);
+                                    println!("     GPU cone '{}': {} AND gates, {} inputs, {} latches",
+                                        name, cone.and_gates.len(), cone.input_indices.len(), cone.latch_indices.len());
+                                    match gpu_sim.evaluate_cone(&cone, num_patterns) {
+                                        Ok(true) => {
+                                            println!("     ✓ '{}' verified ({} patterns)", name, num_patterns);
+                                        }
+                                        Ok(false) => {
+                                            println!("     ✗ '{}' COUNTEREXAMPLE FOUND", name);
+                                            cone_failures.push(name.clone());
+                                        }
+                                        Err(e) => {
+                                            println!("     ⚠ '{}' GPU error: {}, falling back to CPU", name, e);
+                                            let cone = extract_aig_cone(&miter, *idx);
+                                            if !skalp_sim::gpu_aig_cone_sim::evaluate_cone_cpu(&cone, num_patterns) {
+                                                println!("     ✗ '{}' CPU COUNTEREXAMPLE FOUND", name);
+                                                cone_failures.push(name.clone());
+                                            } else {
+                                                println!("     ✓ '{}' verified via CPU ({} patterns)", name, num_patterns);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                println!("     GPU unavailable ({}), using CPU fallback", e);
+                                for (idx, name) in &sat_result.unresolved_gates {
+                                    let cone = extract_aig_cone(&miter, *idx);
+                                    if !skalp_sim::gpu_aig_cone_sim::evaluate_cone_cpu(&cone, num_patterns) {
+                                        cone_failures.push(name.clone());
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    #[cfg(not(target_os = "macos"))]
+                    {
+                        for (idx, name) in &sat_result.unresolved_gates {
+                            let cone = extract_aig_cone(&miter, *idx);
+                            if !skalp_sim::gpu_aig_cone_sim::evaluate_cone_cpu(&cone, num_patterns) {
+                                cone_failures.push(name.clone());
+                            }
+                        }
+                    }
+
+                    let cone_ms = cone_start.elapsed().as_millis();
+                    if cone_failures.is_empty() {
+                        println!("   ✓ Cone sim PASS: {} unresolved gates verified with {} patterns each ({}ms)",
+                            sat_result.unresolved_gates.len(), num_patterns, cone_ms);
+                        sat_passed = true;
+                    } else {
+                        println!("   ✗ Cone sim FAIL: counterexample on {} gates ({}ms)", cone_failures.len(), cone_ms);
+                        for name in &cone_failures {
+                            println!("     ✗ {}", name);
+                        }
+                        overall_pass = false;
                     }
                 }
             }
@@ -2688,7 +2739,6 @@ fn run_equivalence_check(
         }
 
         let phase3_ms = phase3_start.elapsed().as_millis();
-        // Require 100% detection — all mutations are always-observable (invert/swap only, no stuck-at)
         let min_detected = mutants.len();
         if detected >= min_detected {
             println!("   ✓ Bug injection: {}/{} detected ({}ms)", detected, mutants.len(), phase3_ms);
@@ -2698,13 +2748,39 @@ fn run_equivalence_check(
         }
     }
 
+    // Optional: Run targeted coverage simulation if --coverage flag is set
+    if coverage && sat_passed {
+        println!();
+        println!("📊 Coverage: Running targeted simulation (500 cycles)...");
+        use skalp_formal::SimBasedEquivalenceChecker;
+
+        let cov_checker = SimBasedEquivalenceChecker::new()
+            .with_cycles(500)
+            .with_reset("rst", reset_cycles)
+            .with_coverage(true);
+
+        let rt = tokio::runtime::Runtime::new()
+            .context("Failed to create tokio runtime")?;
+
+        let cov_result = rt.block_on(async {
+            cov_checker.check_mir_vs_gate_coverage(&mir, target_entity, &gate_netlist).await
+        });
+
+        match cov_result {
+            Ok(result) => {
+                sim_result_for_report = Some(result);
+            }
+            Err(e) => {
+                println!("   ⚠ Coverage simulation error: {:?}", e);
+            }
+        }
+    }
+
     // Print coverage report after SAT check so equivalence_ok reflects the final result
     if let Some(ref mut sim_result) = sim_result_for_report {
         if let Some(ref mut cov_report) = sim_result.coverage_report {
-            // Update equivalence status to reflect combined simulation + SAT result
             cov_report.equivalence_ok = overall_pass;
             cov_report.print_summary();
-            // Write coverage report to output directory
             let cov_path = output_dir.join("coverage_report.txt");
             if let Err(e) = cov_report.write_text(&cov_path) {
                 eprintln!("Warning: failed to write coverage report: {}", e);
@@ -2738,7 +2814,7 @@ fn run_equivalence_check(
         if symbolic {
             println!("✅ PASS: Designs are PROVEN equivalent (SAT-based)");
         } else if sat_passed {
-            println!("✅ PASS: Designs equivalent (simulation + SAT proof + self-test)");
+            println!("✅ PASS: Designs equivalent (SAT proof + cone sim + self-test)");
         } else {
             println!("✅ PASS: Designs equivalent (simulation)");
         }

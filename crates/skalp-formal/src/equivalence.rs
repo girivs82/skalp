@@ -26,6 +26,7 @@ use crate::{Counterexample, FormalError, FormalResult, TraceStep};
 use rayon::prelude::*;
 use rand::Rng;
 use skalp_lir::{CellFunction, GateNetlist, Lir, LirNode, LirOp, LirSignalId};
+pub use skalp_sim::gpu_aig_cone_sim::AigCone;
 use skalp_lir::synth::{
     Aig as SynthAig, AigLit as SynthAigLit,
     Fraig, FraigConfig, Pass, Strash,
@@ -2189,6 +2190,8 @@ pub fn check_sequential_equivalence_sat(aig1: &Aig, aig2: &Aig) -> FormalResult<
             checked_outputs: true,
             checked_next_state: true,
             time_ms: start.elapsed().as_millis() as u64,
+            proven_gates: Vec::new(),
+            unresolved_gates: Vec::new(),
         });
     }
 
@@ -2231,6 +2234,8 @@ pub fn check_sequential_equivalence_sat(aig1: &Aig, aig2: &Aig) -> FormalResult<
                                 checked_outputs: true,
                                 checked_next_state: true,
                                 time_ms: start.elapsed().as_millis() as u64,
+                                proven_gates: Vec::new(),
+                                unresolved_gates: Vec::new(),
                             });
                         } else {
                             eprintln!("   FRAIG found non-equivalence (miter output = const 1)");
@@ -2240,6 +2245,8 @@ pub fn check_sequential_equivalence_sat(aig1: &Aig, aig2: &Aig) -> FormalResult<
                                 checked_outputs: true,
                                 checked_next_state: true,
                                 time_ms: start.elapsed().as_millis() as u64,
+                                proven_gates: Vec::new(),
+                                unresolved_gates: Vec::new(),
                             });
                         }
                     }
@@ -2289,16 +2296,20 @@ pub fn check_sequential_equivalence_sat(aig1: &Aig, aig2: &Aig) -> FormalResult<
 
     // Helper: run parallel SAT on a set of diff gates
     // limit=0 means no conflict limit (run to completion); limit>0 sets per-gate conflict limit
-    // Returns: (SAT result if found, proven count, unresolved count)
+    // Returns: (SAT counterexample if found, proven gate names, unresolved gate (idx, name) pairs)
     let run_parallel_sat = |gates: &[(usize, String, Lit)], label: &str, limit: i32|
-        -> (Option<(String, Vec<Lit>)>, usize, usize)
+        -> (Option<(String, Vec<Lit>)>, Vec<String>, Vec<(usize, String)>)
     {
         let checked = std::sync::atomic::AtomicUsize::new(0);
-        let unresolved_count = std::sync::atomic::AtomicUsize::new(0);
         let total = gates.len();
 
+        // Collect per-gate results using parallel map, then partition
+        use std::sync::Mutex;
+        let proven_names: Mutex<Vec<String>> = Mutex::new(Vec::new());
+        let unresolved_names: Mutex<Vec<(usize, String)>> = Mutex::new(Vec::new());
+
         let sat_result: Option<(String, Vec<Lit>)> = gates.par_iter()
-            .find_map_any(|(_idx, diff_name, sat_lit)| {
+            .find_map_any(|(idx, diff_name, sat_lit)| {
                 let mut solver = Solver::new();
                 solver.add_formula(&formula);
                 solver.add_clause(&[*sat_lit]);
@@ -2317,26 +2328,29 @@ pub fn check_sequential_equivalence_sat(aig1: &Aig, aig2: &Aig) -> FormalResult<
                             eprintln!("   SAT {}: {}/{} proven UNSAT ({}ms)",
                                 label, c, total, sat_start.elapsed().as_millis());
                         }
+                        proven_names.lock().unwrap().push(diff_name.clone());
                         None
                     }
                     Err(_) => {
-                        let u = unresolved_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-                        eprintln!("   SAT {}: '{}' exceeded conflict limit ({}/{})",
-                            label, diff_name, u, total);
+                        eprintln!("   SAT {}: '{}' exceeded conflict limit",
+                            label, diff_name);
+                        unresolved_names.lock().unwrap().push((*idx, diff_name.clone()));
                         None
                     }
                 }
             });
 
-        let final_checked = checked.load(std::sync::atomic::Ordering::Relaxed);
-        let final_unresolved = unresolved_count.load(std::sync::atomic::Ordering::Relaxed);
-        (sat_result, final_checked, final_unresolved)
+        let proven = proven_names.into_inner().unwrap();
+        let unresolved = unresolved_names.into_inner().unwrap();
+        (sat_result, proven, unresolved)
     };
 
-    // Phase 2b-1: Check output diff gates (50M conflict limit — generous but not unlimited)
-    let mut output_unresolved = 0;
+    // Phase 2b-1: Check output diff gates (5M conflict limit — generous but not unlimited)
+    let mut all_proven: Vec<String> = Vec::new();
+    let mut all_unresolved: Vec<(usize, String)> = Vec::new();
+
     if !output_gates.is_empty() {
-        let (sat_result, proven, unresolved_out) = run_parallel_sat(&output_gates, "outputs", 5_000_000);
+        let (sat_result, proven, unresolved) = run_parallel_sat(&output_gates, "outputs", 5_000_000);
         if let Some((diff_name, model)) = sat_result {
             eprintln!("   Output differs: {} ({}ms)", diff_name, sat_start.elapsed().as_millis());
             let counterexample = extract_symbolic_counterexample(&miter, &var_map, &model, Some(diff_name.clone()));
@@ -2346,22 +2360,24 @@ pub fn check_sequential_equivalence_sat(aig1: &Aig, aig2: &Aig) -> FormalResult<
                 checked_outputs: true,
                 checked_next_state: false,
                 time_ms: start.elapsed().as_millis() as u64,
+                proven_gates: Vec::new(),
+                unresolved_gates: Vec::new(),
             });
         }
-        output_unresolved = unresolved_out;
-        if unresolved_out > 0 {
+        if !unresolved.is_empty() {
             eprintln!("   SAT outputs: {}/{} proven, {} unresolved ({}ms)",
-                proven, output_gates.len(), unresolved_out, sat_start.elapsed().as_millis());
+                proven.len(), output_gates.len(), unresolved.len(), sat_start.elapsed().as_millis());
         } else {
             eprintln!("   SAT outputs: all {}/{} proven UNSAT ({}ms)",
-                proven, output_gates.len(), sat_start.elapsed().as_millis());
+                proven.len(), output_gates.len(), sat_start.elapsed().as_millis());
         }
+        all_proven.extend(proven);
+        all_unresolved.extend(unresolved);
     }
 
     // Phase 2b-2: Check latch next-state diff gates (best-effort — unresolved is OK)
-    let mut latch_unresolved = 0;
     if !latch_gates.is_empty() {
-        let (sat_result, proven, unresolved_latch) = run_parallel_sat(&latch_gates, "latches", 100_000);
+        let (sat_result, proven, unresolved) = run_parallel_sat(&latch_gates, "latches", 100_000);
         if let Some((diff_name, model)) = sat_result {
             eprintln!("   Latch next-state differs: {} ({}ms)", diff_name, sat_start.elapsed().as_millis());
             let counterexample = extract_symbolic_counterexample(&miter, &var_map, &model, Some(diff_name.clone()));
@@ -2371,83 +2387,41 @@ pub fn check_sequential_equivalence_sat(aig1: &Aig, aig2: &Aig) -> FormalResult<
                 checked_outputs: true,
                 checked_next_state: true,
                 time_ms: start.elapsed().as_millis() as u64,
+                proven_gates: Vec::new(),
+                unresolved_gates: Vec::new(),
             });
         }
-        latch_unresolved = unresolved_latch;
-        if unresolved_latch > 0 {
+        if !unresolved.is_empty() {
             eprintln!("   SAT latches: {}/{} proven, {} unresolved (best-effort, OK) ({}ms)",
-                proven, latch_gates.len(), unresolved_latch, sat_start.elapsed().as_millis());
+                proven.len(), latch_gates.len(), unresolved.len(), sat_start.elapsed().as_millis());
         } else {
             eprintln!("   SAT latches: all {}/{} proven UNSAT ({}ms)",
-                proven, latch_gates.len(), sat_start.elapsed().as_millis());
+                proven.len(), latch_gates.len(), sat_start.elapsed().as_millis());
         }
+        all_proven.extend(proven);
+        all_unresolved.extend(unresolved);
     }
 
     let sat_elapsed = sat_start.elapsed().as_millis();
-    let total_unresolved = output_unresolved + latch_unresolved;
-    let total_proven = diff_count - total_unresolved;
+    let total_unresolved = all_unresolved.len();
+    let total_proven = all_proven.len();
     let unresolved_detail = if total_unresolved > 0 {
-        let mut parts = Vec::new();
-        if output_unresolved > 0 { parts.push(format!("{} output", output_unresolved)); }
-        if latch_unresolved > 0 { parts.push(format!("{} latch", latch_unresolved)); }
-        format!(", {} unresolved ({})", total_unresolved, parts.join(" + "))
+        format!(", {} unresolved", total_unresolved)
     } else {
         String::new()
     };
     eprintln!("   SAT total: {}/{} proven UNSAT{} ({}ms)",
         total_proven, diff_count, unresolved_detail, sat_elapsed);
 
-    // --- Phase 2c: Random simulation of unresolved diff gates ---
-    // SAT-hard gates (typically multiplier-dependent) can't be proven UNSAT,
-    // but we can verify them with high confidence via random simulation.
-    let mut sim_verified = 0;
-    if total_unresolved > 0 {
-        let sim_start = std::time::Instant::now();
-        let num_patterns = 100_000;
-        eprintln!("   SIM: verifying {} unresolved diff gates with {} random patterns...",
-            total_unresolved, num_patterns);
-
-        // Simulate ALL diff gates (cheap cross-check, but only count unresolved as sim-verified)
-        let all_gates: Vec<(usize, String)> = (0..diff_count)
-            .filter_map(|idx| {
-                let name = miter.output_names.get(idx)?.clone();
-                Some((idx, name))
-            })
-            .collect();
-
-        match simulate_miter_random(&miter, num_patterns, &all_gates) {
-            Ok((_verified, failing_gate)) => {
-                if let Some((name, pattern_idx)) = failing_gate {
-                    eprintln!("   SIM: counterexample found at pattern {} on gate '{}'",
-                        pattern_idx, name);
-                    return Ok(SymbolicEquivalenceResult {
-                        equivalent: false,
-                        counterexample: None,
-                        checked_outputs: true,
-                        checked_next_state: true,
-                        time_ms: start.elapsed().as_millis() as u64,
-                    });
-                }
-                sim_verified = total_unresolved;
-                eprintln!("   SIM: {} unresolved gates verified with {} random patterns ({}ms)",
-                    sim_verified, num_patterns, sim_start.elapsed().as_millis());
-            }
-            Err(e) => {
-                eprintln!("   SIM: simulation error: {}", e);
-            }
-        }
-    }
-
-    let all_verified = total_proven + sim_verified;
-    eprintln!("   Total: {}/{} verified ({} SAT-proven + {} sim-verified)",
-        all_verified, diff_count, total_proven, sim_verified);
-
+    // Return result with unresolved gates for caller to handle (GPU cone sim or CPU fallback)
     Ok(SymbolicEquivalenceResult {
         equivalent: true,
         counterexample: None,
-        checked_outputs: output_unresolved == 0 || sim_verified > 0,
-        checked_next_state: latch_unresolved == 0 || sim_verified > 0,
+        checked_outputs: all_unresolved.iter().all(|(_, n)| !n.starts_with("diff_output[")),
+        checked_next_state: all_unresolved.iter().all(|(_, n)| !n.starts_with("diff_next_state[")),
         time_ms: start.elapsed().as_millis() as u64,
+        proven_gates: all_proven,
+        unresolved_gates: all_unresolved,
     })
 }
 
@@ -2537,6 +2511,95 @@ fn simulate_miter_random(
 
     // All patterns passed — all diff gates verified
     Ok((diff_outputs.len(), None))
+}
+
+/// Extract the logic cone for a specific diff gate from a miter AIG.
+///
+/// Traverses backward from the diff gate's output literal, collecting all
+/// reachable AND gates, inputs, and latches. Returns a compact `AigCone`
+/// with node IDs remapped to [0..N) for efficient GPU evaluation.
+pub fn extract_aig_cone(miter: &Aig, diff_gate_idx: usize) -> AigCone {
+    let diff_lit = &miter.outputs[diff_gate_idx];
+    let diff_name = miter.output_names.get(diff_gate_idx)
+        .cloned()
+        .unwrap_or_else(|| format!("diff_{}", diff_gate_idx));
+
+    // Phase 1: Backward traversal to find all nodes in the cone
+    let mut in_cone = std::collections::HashSet::new();
+    let mut stack = vec![diff_lit.node.0];
+    in_cone.insert(0u32); // Node 0 (constant false) is always in cone
+
+    while let Some(node_id) = stack.pop() {
+        if !in_cone.insert(node_id) {
+            continue;
+        }
+        match &miter.nodes[node_id as usize] {
+            AigNode::And { left, right } => {
+                stack.push(left.node.0);
+                stack.push(right.node.0);
+            }
+            AigNode::Input { .. } => {
+                // Also follow state_input → latch link
+                if let Some(&latch_id) = miter.state_input_to_latch.get(&node_id) {
+                    stack.push(latch_id);
+                }
+            }
+            AigNode::Latch { .. } | AigNode::False => {}
+        }
+    }
+
+    // Phase 2: Build compact node ID mapping (original_id → compact_id)
+    // Sort by original ID to maintain topological order
+    let mut sorted_cone: Vec<u32> = in_cone.iter().copied().collect();
+    sorted_cone.sort();
+
+    let mut id_map: HashMap<u32, u32> = HashMap::new();
+    for (compact_id, &orig_id) in sorted_cone.iter().enumerate() {
+        id_map.insert(orig_id, compact_id as u32);
+    }
+
+    // Phase 3: Collect cone components with remapped IDs
+    let mut and_gates = Vec::new();
+    let mut input_indices = Vec::new();
+    let mut latch_indices = Vec::new();
+    let mut state_input_map = Vec::new();
+
+    for &orig_id in &sorted_cone {
+        let compact_id = id_map[&orig_id];
+        match &miter.nodes[orig_id as usize] {
+            AigNode::And { left, right } => {
+                let l_compact = id_map[&left.node.0];
+                let r_compact = id_map[&right.node.0];
+                and_gates.push((compact_id, l_compact, left.inverted, r_compact, right.inverted));
+            }
+            AigNode::Input { .. } => {
+                input_indices.push(compact_id);
+                // Map state_input → latch if applicable
+                if let Some(&latch_orig) = miter.state_input_to_latch.get(&orig_id) {
+                    if let Some(&latch_compact) = id_map.get(&latch_orig) {
+                        state_input_map.push((compact_id, latch_compact));
+                    }
+                }
+            }
+            AigNode::Latch { .. } => {
+                latch_indices.push(compact_id);
+            }
+            AigNode::False => {}
+        }
+    }
+
+    let output_compact = id_map[&diff_lit.node.0];
+
+    AigCone {
+        name: diff_name,
+        and_gates,
+        input_indices,
+        latch_indices,
+        state_input_map,
+        output_node: output_compact,
+        output_inverted: diff_lit.inverted,
+        num_nodes: sorted_cone.len() as u32,
+    }
 }
 
 /// Inject random bugs into an AIG for self-testing the EC pipeline.
@@ -2695,6 +2758,10 @@ pub struct SymbolicEquivalenceResult {
     pub checked_next_state: bool,
     /// Verification time in milliseconds
     pub time_ms: u64,
+    /// Gate names proven UNSAT by SAT solver
+    pub proven_gates: Vec<String>,
+    /// Unresolved gates: (miter output index, name) for SAT-hard gates
+    pub unresolved_gates: Vec<(usize, String)>,
 }
 
 /// Counterexample from symbolic equivalence check
@@ -3033,7 +3100,7 @@ fn compute_structural_io_matches(
 }
 
 /// Build a miter that checks both output AND next-state equivalence
-fn build_sequential_miter(aig1: &Aig, aig2: &Aig) -> FormalResult<Aig> {
+pub fn build_sequential_miter(aig1: &Aig, aig2: &Aig) -> FormalResult<Aig> {
     let mut miter = Aig::new();
 
     // Pre-compute structural latch matches (gate_name → mir_name)
