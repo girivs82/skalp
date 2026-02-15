@@ -2339,7 +2339,7 @@ pub fn check_sequential_equivalence_sat(aig1: &Aig, aig2: &Aig) -> FormalResult<
         let (sat_result, proven, unresolved_out) = run_parallel_sat(&output_gates, "outputs", 5_000_000);
         if let Some((diff_name, model)) = sat_result {
             eprintln!("   Output differs: {} ({}ms)", diff_name, sat_start.elapsed().as_millis());
-            let counterexample = extract_symbolic_counterexample(&miter, &var_map, &model);
+            let counterexample = extract_symbolic_counterexample(&miter, &var_map, &model, Some(diff_name.clone()));
             return Ok(SymbolicEquivalenceResult {
                 equivalent: false,
                 counterexample: Some(counterexample),
@@ -2364,7 +2364,7 @@ pub fn check_sequential_equivalence_sat(aig1: &Aig, aig2: &Aig) -> FormalResult<
         let (sat_result, proven, unresolved_latch) = run_parallel_sat(&latch_gates, "latches", 100_000);
         if let Some((diff_name, model)) = sat_result {
             eprintln!("   Latch next-state differs: {} ({}ms)", diff_name, sat_start.elapsed().as_millis());
-            let counterexample = extract_symbolic_counterexample(&miter, &var_map, &model);
+            let counterexample = extract_symbolic_counterexample(&miter, &var_map, &model, Some(diff_name.clone()));
             return Ok(SymbolicEquivalenceResult {
                 equivalent: false,
                 counterexample: Some(counterexample),
@@ -3103,10 +3103,6 @@ fn build_sequential_miter(aig1: &Aig, aig2: &Aig) -> FormalResult<Aig> {
     for (i, out1) in aig1.outputs.iter().enumerate() {
         let name = aig1.output_names.get(i).cloned().unwrap_or_else(|| format!("output_{}", i));
         let normalized = normalize_signal_name_for_matching(&name);
-        if name.contains("phase_shift") || name.contains("phase_limited") {
-            eprintln!("[MITER_DEBUG] AIG1 output[{}]: raw='{}' normalized='{}' lit=({},{})",
-                i, name, normalized, out1.node.0, out1.inverted);
-        }
         let lit = remap_lit(*out1, &map1);
         out1_by_name.insert(normalized, lit);
     }
@@ -3114,10 +3110,6 @@ fn build_sequential_miter(aig1: &Aig, aig2: &Aig) -> FormalResult<Aig> {
     for (i, out2) in aig2.outputs.iter().enumerate() {
         let name = aig2.output_names.get(i).cloned().unwrap_or_else(|| format!("output_{}", i));
         let normalized = normalize_signal_name_for_matching(&name);
-        if name.contains("phase_shift") || name.contains("phase_limited") {
-            eprintln!("[MITER_DEBUG] AIG2 output[{}]: raw='{}' normalized='{}' lit=({},{})",
-                i, name, normalized, out2.node.0, out2.inverted);
-        }
         let lit = remap_lit(*out2, &map2);
         out2_by_name.insert(normalized, lit);
     }
@@ -3126,12 +3118,6 @@ fn build_sequential_miter(aig1: &Aig, aig2: &Aig) -> FormalResult<Aig> {
     let mut matched_outputs = 0;
     for (name, lit1) in &out1_by_name {
         if let Some(lit2) = out2_by_name.get(name) {
-            // Debug: dump lockstep_tx__phase_shift outputs
-            if name.contains("phase_shift") || name.contains("phase_limited") {
-                eprintln!("[MITER_DEBUG] Output '{}': MIR_lit=({},{}) Gate_lit=({},{}) same={}",
-                    name, lit1.node.0, lit1.inverted, lit2.node.0, lit2.inverted,
-                    lit1 == lit2);
-            }
             let diff = miter.add_xor(*lit1, *lit2);
             diff_gates.push((format!("output[{}]", name), diff));
             miter_output = miter.add_or(miter_output, diff);
@@ -3234,6 +3220,7 @@ fn extract_symbolic_counterexample(
     miter: &Aig,
     var_map: &HashMap<u32, Var>,
     model: &[Lit],
+    differing_signal: Option<String>,
 ) -> SymbolicCounterexample {
     let model_set: std::collections::HashSet<_> = model.iter().collect();
 
@@ -3258,7 +3245,7 @@ fn extract_symbolic_counterexample(
     SymbolicCounterexample {
         state,
         inputs,
-        differing_signal: None, // Could be enhanced to identify which signal differs
+        differing_signal,
     }
 }
 
@@ -5475,38 +5462,6 @@ impl<'a> MirToAig<'a> {
                 }
             }
 
-            // DEBUG: Dump port values for current_loop to trace int_accum[15] issue
-            if inst_path.contains("current_loop") || inst_path.contains("voltage_loop") {
-                println!("[POST_ORDER_DEBUG] Processing instance '{}' (module '{}')", inst_path, module.name);
-                for port in &module.ports {
-                    let width = self.get_type_width(&port.port_type);
-                    let bits: Vec<_> = (0..width.min(32))
-                        .map(|b| {
-                            self.signal_map
-                                .get(&(MirSignalRef::Port(port.id), b as u32))
-                                .map(|lit| format!("{}{}",lit.node.0, if lit.inverted {"'"} else {""}))
-                                .unwrap_or_else(|| "MISS".to_string())
-                        })
-                        .collect();
-                    println!("[POST_ORDER_DEBUG]   port '{}' ({:?}, {:?}): [{}]",
-                        port.name, port.id, port.direction, bits.join(","));
-                }
-                // Also dump signals
-                for sig in &module.signals {
-                    let width = self.get_type_width(&sig.signal_type);
-                    let bits: Vec<_> = (0..width.min(32))
-                        .map(|b| {
-                            self.signal_map
-                                .get(&(MirSignalRef::Signal(sig.id), b as u32))
-                                .map(|lit| format!("{}{}",lit.node.0, if lit.inverted {"'"} else {""}))
-                                .unwrap_or_else(|| "MISS".to_string())
-                        })
-                        .collect();
-                    println!("[POST_ORDER_DEBUG]   signal '{}' ({:?}): [{}]",
-                        sig.name, sig.id, bits.join(","));
-                }
-            }
-
             // Re-process continuous assignments (with correct child outputs)
             for assign in &module.assignments {
                 self.convert_continuous_assign(assign);
@@ -5524,18 +5479,6 @@ impl<'a> MirToAig<'a> {
                 if matches!(process.kind, ProcessKind::Sequential) {
                     let mut inst_next_state: HashMap<(MirSignalRef, u32), AigLit> = HashMap::new();
                     self.convert_sequential_process_for_bmc(process, &mut inst_next_state);
-
-                    // DEBUG: Dump next-state for PI controller registers
-                    if inst_path.contains("current_loop") || inst_path.contains("voltage_loop") {
-                        println!("[POST_ORDER_DEBUG] Next-state for '{}' ({} entries):", inst_path, inst_next_state.len());
-                        let mut sorted: Vec<_> = inst_next_state.iter().collect();
-                        sorted.sort_by_key(|((sr, b), _)| (format!("{:?}", sr), *b));
-                        for ((sig_ref, bit), lit) in &sorted {
-                            if *bit < 32 { // Only show first 32 bits
-                                println!("[POST_ORDER_DEBUG]   {:?}[{}] = lit(n{}{}))", sig_ref, bit, lit.node.0, if lit.inverted {"'"} else {""});
-                            }
-                        }
-                    }
 
                     // Transfer to global next_state_map with instance prefix
                     for ((sig_ref, bit), lit) in inst_next_state {
@@ -5830,27 +5773,6 @@ impl<'a> MirToAig<'a> {
                         };
                         let conn_lits = self.convert_expression(conn_expr);
                         self.current_module = saved_module;
-
-                        // DEBUG: trace kp/ki port connections
-                        if (inst_path.contains("charge_ctrl") && !inst_path.contains(".")) ||
-                           inst_path.ends_with("voltage_loop") || inst_path.ends_with("current_loop") {
-                            if port_name == "kp" || port_name == "ki" || port_name == "kp_v" || port_name == "ki_v"
-                                || port_name == "kp_i" || port_name == "ki_i" {
-                                println!("[CONN_DEBUG] {}.'{}' ({:?}): conn_lits.len()={}, width={}, expr={:?}",
-                                    inst_path, port_name, child_port.id, conn_lits.len(), width,
-                                    conn_expr.kind);
-                                let all_zero = conn_lits.iter().all(|l| *l == self.aig.false_lit());
-                                if all_zero {
-                                    println!("[CONN_DEBUG]   ⚠️ ALL ZEROS! expr.kind = {:?}", conn_expr.kind);
-                                } else {
-                                    let non_zero: Vec<_> = conn_lits.iter().enumerate()
-                                        .filter(|(_, l)| **l != self.aig.false_lit())
-                                        .map(|(i, l)| format!("bit{}=n{}{}", i, l.node.0, if l.inverted {"'"} else {""}))
-                                        .collect();
-                                    println!("[CONN_DEBUG]   non-zero bits: [{}]", non_zero.join(", "));
-                                }
-                            }
-                        }
 
                         // Map child input port to parent signal's literals
                         let max_bits = width.min(conn_lits.len());
@@ -7094,9 +7016,6 @@ impl<'a> MirToAig<'a> {
             ExpressionKind::Ref(lvalue) => self.convert_lvalue_ref(lvalue),
 
             ExpressionKind::Binary { op, left, right } => {
-                if matches!(op, BinaryOp::Div | BinaryOp::Mod) {
-                    println!("[DIV_DEBUG] convert_expression: Binary op={:?}, left.ty={:?}, right.ty={:?}", op, left.ty, right.ty);
-                }
                 let left_lits = self.convert_expression(left);
                 let right_lits = self.convert_expression(right);
                 // Determine signedness by recursively inspecting operand expression trees.
@@ -7649,7 +7568,6 @@ impl<'a> MirToAig<'a> {
             }
             BinaryOp::Div => {
                 // BUG #266 FIX: Implement proper divider for formal verification
-                println!("[DIV_DEBUG] convert_binary_op: Div, left_width={}, right_width={}, signed={}", left.len(), right.len(), signed);
                 self.build_divider(&left, &right, signed, false)
             }
             BinaryOp::Mod => {
@@ -7836,8 +7754,6 @@ impl<'a> MirToAig<'a> {
         want_remainder: bool,
     ) -> Vec<AigLit> {
         let result_width = dividend.len();
-        println!("[DIV_DEBUG] build_divider: dividend_width={}, divisor_width={}, signed={}, want_remainder={}, result_width={}, aig_nodes_before={}",
-                 dividend.len(), divisor.len(), signed, want_remainder, result_width, self.aig.nodes.len());
         let raw_result = if signed {
             let false_lit = self.aig.false_lit();
             let a_sign = dividend.last().copied().unwrap_or(false_lit);
@@ -7935,8 +7851,6 @@ impl<'a> MirToAig<'a> {
             remainder = self.mux_vector(no_borrow, &trial, &remainder);
         }
 
-        println!("[DIV_DEBUG] build_unsigned_divmod: width={}, aig_nodes_created={}, quotient_width={}, remainder_width={}",
-                 width, self.aig.nodes.len() - nodes_before, quotient.len(), remainder.len());
         (quotient, remainder)
     }
 

@@ -865,10 +865,11 @@ impl<'a> TechMapper<'a> {
         }
 
         let cell_info = self.get_cell_info(&function);
+        let tie_low = self.get_tie_low();
 
         for bit in 0..width as usize {
-            let a = inputs[0].get(bit).copied().unwrap_or(inputs[0][0]);
-            let b = inputs[1].get(bit).copied().unwrap_or(inputs[1][0]);
+            let a = inputs[0].get(bit).copied().unwrap_or(tie_low);
+            let b = inputs[1].get(bit).copied().unwrap_or(tie_low);
             let y = outputs.get(bit).copied().unwrap_or(outputs[0]);
 
             let mut gate_cell = Cell::new_comb(
@@ -903,9 +904,10 @@ impl<'a> TechMapper<'a> {
         }
 
         let cell_info = self.get_cell_info(&function);
+        let tie_low = self.get_tie_low();
 
         for bit in 0..width as usize {
-            let a = inputs[0].get(bit).copied().unwrap_or(inputs[0][0]);
+            let a = inputs[0].get(bit).copied().unwrap_or(tie_low);
             let y = outputs.get(bit).copied().unwrap_or(outputs[0]);
 
             let mut gate_cell = Cell::new_comb(
@@ -1269,6 +1271,7 @@ impl<'a> TechMapper<'a> {
         let and_info = self.get_cell_info(&CellFunction::And2);
         let ha_info = self.get_cell_info(&CellFunction::HalfAdder);
         let fa_info = self.get_cell_info(&CellFunction::FullAdder);
+        let tie_low = self.get_tie_low();
 
         // Create partial products: pp[i][j] = a[j] & b[i]
         // This creates a grid of AND gates
@@ -1277,10 +1280,10 @@ impl<'a> TechMapper<'a> {
 
         for i in 0..n {
             let mut row: Vec<GateNetId> = Vec::new();
-            let b_i = inputs[1].get(i).copied().unwrap_or(inputs[1][0]);
+            let b_i = inputs[1].get(i).copied().unwrap_or(tie_low);
 
             for j in 0..n {
-                let a_j = inputs[0].get(j).copied().unwrap_or(inputs[0][0]);
+                let a_j = inputs[0].get(j).copied().unwrap_or(tie_low);
                 let pp = self.alloc_net_id();
                 self.netlist
                     .add_net(GateNet::new(pp, format!("{}.pp_{}_{}", path, i, j)));
@@ -1479,6 +1482,7 @@ impl<'a> TechMapper<'a> {
 
         let a_raw = &inputs[0];
         let b_raw = &inputs[1];
+        let tie_low = self.get_tie_low();
 
         // BUG FIX #247: For asymmetric input widths (e.g., 16×32), we must:
         // 1. Get the sign bit from the actual MSB of each input (not from bit n-1)
@@ -1538,7 +1542,7 @@ impl<'a> TechMapper<'a> {
         // First, compute ~a
         let mut a_inv: Vec<GateNetId> = Vec::with_capacity(n);
         for i in 0..n {
-            let a_bit = a.get(i).copied().unwrap_or(a[0]);
+            let a_bit = a.get(i).copied().unwrap_or(tie_low);
             let inv_net = self.alloc_net_id();
             self.netlist
                 .add_net(GateNet::new(inv_net, format!("{}.a_inv_{}", path, i)));
@@ -1595,7 +1599,7 @@ impl<'a> TechMapper<'a> {
         // Select |a| = a_sign ? a_neg : a
         let mut a_mag: Vec<GateNetId> = Vec::with_capacity(n);
         for i in 0..n {
-            let a_bit = a.get(i).copied().unwrap_or(a[0]);
+            let a_bit = a.get(i).copied().unwrap_or(tie_low);
             let mux_out = self.alloc_net_id();
             self.netlist
                 .add_net(GateNet::new(mux_out, format!("{}.a_mag_{}", path, i)));
@@ -1620,7 +1624,7 @@ impl<'a> TechMapper<'a> {
         // Step 3: Same for b
         let mut b_inv: Vec<GateNetId> = Vec::with_capacity(n);
         for i in 0..n {
-            let b_bit = b.get(i).copied().unwrap_or(b[0]);
+            let b_bit = b.get(i).copied().unwrap_or(tie_low);
             let inv_net = self.alloc_net_id();
             self.netlist
                 .add_net(GateNet::new(inv_net, format!("{}.b_inv_{}", path, i)));
@@ -1674,7 +1678,7 @@ impl<'a> TechMapper<'a> {
 
         let mut b_mag: Vec<GateNetId> = Vec::with_capacity(n);
         for i in 0..n {
-            let b_bit = b.get(i).copied().unwrap_or(b[0]);
+            let b_bit = b.get(i).copied().unwrap_or(tie_low);
             let mux_out = self.alloc_net_id();
             self.netlist
                 .add_net(GateNet::new(mux_out, format!("{}.b_mag_{}", path, i)));
@@ -1814,12 +1818,13 @@ impl<'a> TechMapper<'a> {
         }
 
         let mux_info = self.get_cell_info(&CellFunction::Mux2);
+        let tie_low = self.get_tie_low();
 
         let sel = inputs[0].first().copied().unwrap_or(GateNetId(0));
 
         for bit in 0..width as usize {
-            let d0 = inputs[1].get(bit).copied().unwrap_or(inputs[1][0]);
-            let d1 = inputs[2].get(bit).copied().unwrap_or(inputs[2][0]);
+            let d0 = inputs[1].get(bit).copied().unwrap_or(tie_low);
+            let d1 = inputs[2].get(bit).copied().unwrap_or(tie_low);
             let y = outputs.get(bit).copied().unwrap_or(outputs[0]);
 
             let mut cell = Cell::new_comb(
@@ -2307,10 +2312,11 @@ impl<'a> TechMapper<'a> {
         // This is needed because multiple NCL operations can have the same path
         let c_elem_id = self.c_elem_counter;
         self.c_elem_counter += 1;
+        let tie_low = self.get_tie_low();
 
         for bit in 0..width as usize {
-            let a = inputs[0].get(bit).copied().unwrap_or(inputs[0][0]);
-            let b = inputs[1].get(bit).copied().unwrap_or(inputs[1][0]);
+            let a = inputs[0].get(bit).copied().unwrap_or(tie_low);
+            let b = inputs[1].get(bit).copied().unwrap_or(tie_low);
             let q = outputs.get(bit).copied().unwrap_or(GateNetId(0));
 
             // Create intermediate nets with unique naming: path.c_elem_{id}_{bit}
@@ -2488,12 +2494,13 @@ impl<'a> TechMapper<'a> {
 
         let xnor_info = self.get_cell_info(&CellFunction::Xnor2);
         let and_info = self.get_cell_info(&CellFunction::And2);
+        let tie_low = self.get_tie_low();
 
         // XNOR each bit pair
         let mut xnor_outs: Vec<GateNetId> = Vec::new();
         for bit in 0..width as usize {
-            let a = inputs[0].get(bit).copied().unwrap_or(inputs[0][0]);
-            let b = inputs[1].get(bit).copied().unwrap_or(inputs[1][0]);
+            let a = inputs[0].get(bit).copied().unwrap_or(tie_low);
+            let b = inputs[1].get(bit).copied().unwrap_or(tie_low);
 
             // Use add_net's return value - it assigns the correct ID
             let xnor_out = self
@@ -2592,6 +2599,7 @@ impl<'a> TechMapper<'a> {
         let or_info = self.get_cell_info(&CellFunction::Or2);
         let inv_info = self.get_cell_info(&CellFunction::Inv);
         let xnor_info = self.get_cell_info(&CellFunction::Xnor2);
+        let tie_low = self.get_tie_low();
 
         // Start from LSB and work up
         // prev_lt carries whether a[i-1:0] < b[i-1:0] based on lower bits
@@ -2600,8 +2608,8 @@ impl<'a> TechMapper<'a> {
         let mut prev_lt = None; // None means 0 (not less than so far)
 
         for i in 0..width as usize {
-            let a_bit = a.get(i).copied().unwrap_or(a[0]);
-            let b_bit = b.get(i).copied().unwrap_or(b[0]);
+            let a_bit = a.get(i).copied().unwrap_or(tie_low);
+            let b_bit = b.get(i).copied().unwrap_or(tie_low);
 
             // Compute a[i] == b[i] using XNOR
             let eq_net = self
@@ -2767,9 +2775,10 @@ impl<'a> TechMapper<'a> {
         self.add_cell(const1_cell);
 
         // Create modified inputs with flipped MSB
+        // If input is narrower than width, use its actual MSB (sign bit) for sign extension
         let msb_idx = width as usize - 1;
-        let a_msb = a.get(msb_idx).copied().unwrap_or(a[0]);
-        let b_msb = b.get(msb_idx).copied().unwrap_or(b[0]);
+        let a_msb = a.get(msb_idx).or_else(|| a.last()).copied().unwrap_or(GateNetId(0));
+        let b_msb = b.get(msb_idx).or_else(|| b.last()).copied().unwrap_or(GateNetId(0));
 
         // Flip a's MSB
         let a_msb_flipped = self
@@ -2958,9 +2967,10 @@ impl<'a> TechMapper<'a> {
 
         let dff_info = self.get_cell_info(&dff_func);
         let clk = clock.unwrap_or(GateNetId(0));
+        let tie_low = self.get_tie_low();
 
         for bit in 0..width as usize {
-            let d_orig = inputs[0].get(bit).copied().unwrap_or(inputs[0][0]);
+            let d_orig = inputs[0].get(bit).copied().unwrap_or(tie_low);
             let q = outputs.get(bit).copied().unwrap_or(outputs[0]);
 
             // If non-zero reset value, add MUX: d_new = rst ? reset_bit : d_orig
