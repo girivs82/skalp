@@ -2181,7 +2181,7 @@ fn copy_aig_structure(target: &mut Aig, source: &Aig, map: &mut HashMap<u32, Aig
 /// This can find bugs in slow state machines without needing to simulate to reach the state.
 ///
 /// The check asks: "Exists state S, input I: next_state_A(S,I) != next_state_B(S,I) OR output_A(S,I) != output_B(S,I)"
-pub fn check_sequential_equivalence_sat(aig1: &Aig, aig2: &Aig) -> FormalResult<SymbolicEquivalenceResult> {
+pub fn check_sequential_equivalence_sat(aig1: &Aig, aig2: &Aig, thorough: bool) -> FormalResult<SymbolicEquivalenceResult> {
     let start = std::time::Instant::now();
 
     // Build a miter that compares both outputs AND next-state (latch D inputs)
@@ -2413,7 +2413,8 @@ pub fn check_sequential_equivalence_sat(aig1: &Aig, aig2: &Aig) -> FormalResult<
     let mut all_unresolved: Vec<(usize, String)> = Vec::new();
 
     if !output_gates.is_empty() {
-        let (sat_result, proven, unresolved) = run_parallel_sat(&output_gates, "outputs", 5_000_000);
+        let output_conflict_limit = if thorough { 0 } else { 5_000_000 };
+        let (sat_result, proven, unresolved) = run_parallel_sat(&output_gates, "outputs", output_conflict_limit);
         if let Some((diff_name, model)) = sat_result {
             eprintln!("   Output differs: {} ({}ms)", diff_name, sat_start.elapsed().as_millis());
             print_counterexample_diagnosis(&miter, &var_map, &model, &diff_name);
@@ -2448,7 +2449,8 @@ pub fn check_sequential_equivalence_sat(aig1: &Aig, aig2: &Aig) -> FormalResult<
     // are harmless and should not cause EC failure. Latch counterexamples are demoted
     // to unresolved gates so miter simulation can validate them.
     if !latch_gates.is_empty() {
-        let (sat_result, proven, mut unresolved) = run_parallel_sat(&latch_gates, "latches", 100_000);
+        let latch_conflict_limit = if thorough { 0 } else { 100_000 };
+        let (sat_result, proven, mut unresolved) = run_parallel_sat(&latch_gates, "latches", latch_conflict_limit);
         let had_counterexample = sat_result.is_some();
         if let Some((diff_name, model)) = sat_result {
             eprintln!("   ⚠️  Latch next-state SAT counterexample (may be unreachable): {} ({}ms)",

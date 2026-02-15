@@ -361,6 +361,11 @@ enum Commands {
         /// Enable coverage-driven simulation with systematic + random + biased vectors
         #[arg(long)]
         coverage: bool,
+
+        /// Run thorough SAT with no conflict limits for ASIC-grade conclusive proofs.
+        /// May take hours for designs with multipliers. Default uses conflict limits + simulation.
+        #[arg(long)]
+        thorough: bool,
     },
 
     /// ISO 26262 FI-driven safety analysis
@@ -754,6 +759,7 @@ fn main() -> Result<()> {
             reset_cycles,
             verbose,
             coverage,
+            thorough,
         } => {
             run_equivalence_check(
                 &source,
@@ -767,6 +773,7 @@ fn main() -> Result<()> {
                 reset_cycles,
                 verbose,
                 coverage,
+                thorough,
             )?;
         }
 
@@ -2374,6 +2381,7 @@ fn run_equivalence_check(
     reset_cycles: u64,
     verbose: bool,
     coverage: bool,
+    thorough: bool,
 ) -> Result<()> {
     use skalp_formal::equivalence::{MirToAig, GateNetlistToAig, check_sequential_equivalence_sat, build_sequential_miter, extract_aig_cone, inject_random_bugs, check_non_equivalence_fast};
     use skalp_frontend::parse_and_build_compilation_context;
@@ -2558,7 +2566,11 @@ fn run_equivalence_check(
     let mut sat_passed = false;
     if !sim_found_bug {
         println!();
-        println!("🔬 Phase 2: SAT-based symbolic equivalence check...");
+        if thorough {
+            println!("🔬 Phase 2: SAT-based symbolic equivalence check (thorough — no conflict limits)...");
+        } else {
+            println!("🔬 Phase 2: SAT-based symbolic equivalence check...");
+        }
         println!("   Checking transition function equivalence for ALL states...");
 
         // Phase 2a: Convert to sequential AIGs
@@ -2569,7 +2581,7 @@ fn run_equivalence_check(
         println!("   Gate AIG: {} nodes, {} latches", gate_aig.nodes.len(), gate_aig.latches.len());
 
         // Phase 2b: Per-gate SAT (returns unresolved gates instead of running CPU sim)
-        match check_sequential_equivalence_sat(&mir_aig, &gate_aig) {
+        match check_sequential_equivalence_sat(&mir_aig, &gate_aig, thorough) {
             Ok(sat_result) => {
                 if !sat_result.equivalent {
                     println!("   ✗ SAT FAIL: Found state where designs differ!");

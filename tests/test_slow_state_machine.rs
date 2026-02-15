@@ -170,7 +170,7 @@ impl FsmB {
     println!("This checks if there exists ANY state/input where designs differ.");
     println!("No simulation needed - SAT solver reasons symbolically!\n");
 
-    match check_sequential_equivalence_sat(&aig_a, &aig_b) {
+    match check_sequential_equivalence_sat(&aig_a, &aig_b, false) {
         Ok(result) => {
             if result.equivalent {
                 println!("Result: EQUIVALENT (unexpected!)");
