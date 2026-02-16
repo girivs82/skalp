@@ -2361,10 +2361,12 @@ fn find_top_level_module(mir: &skalp_mir::mir::Mir) -> Option<&skalp_mir::mir::M
     // Find all uninstantiated modules, pick the one with most content
     // This handles monomorphization: both `Foo` (empty template) and `Foo_42` (specialized)
     // are uninstantiated, but only the specialized one has actual logic
+    // Include assignments and ports in the score so designs with function calls
+    // (no sub-entity instances) still rank above imported library entities
     mir.modules
         .iter()
         .filter(|m| !instantiated.contains(&m.id))
-        .max_by_key(|m| m.instances.len() + m.processes.len() + m.signals.len())
+        .max_by_key(|m| m.instances.len() + m.processes.len() + m.signals.len() + m.assignments.len() + m.ports.len())
         .or_else(|| mir.modules.last())
 }
 
