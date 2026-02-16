@@ -2152,6 +2152,19 @@ impl HirBuilderContext {
             expr_children.first()
         }?;
 
+        // BUG #277 FIX: Skip wildcard (_) bindings for output ports.
+        // build_instance_as_statements() already skips wildcards, but build_instance()
+        // (used in entity impl blocks) calls build_connection() which didn't handle them.
+        // Without this, `port: _` creates a connection with `_` as an identifier expression,
+        // which the MIR treats as constant 0 — corrupting the output port's internal logic.
+        if expr_node.kind() == SyntaxKind::IdentExpr {
+            if let Some(tok) = expr_node.first_token_of_kind(SyntaxKind::Ident) {
+                if tok.text() == "_" {
+                    return None;
+                }
+            }
+        }
+
         let expr = self.build_expression(expr_node)?;
 
         Some(HirConnection {

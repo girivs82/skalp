@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use skalp_frontend::hir::PipelineConfig;
 use skalp_frontend::SourceSpan;
 use skalp_mir::NameRegistry;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 /// Implementation style hint for RTL synthesis
 /// Passed through from intent system to guide backend code generation
@@ -549,11 +549,12 @@ impl SirModule {
     /// Returns nodes in evaluation order (inputs before outputs).
     /// This is computed once when extracting cones and stored in sorted_nodes.
     fn topological_sort_cone_nodes(&self, node_ids: &[usize]) -> Vec<usize> {
-        use std::collections::VecDeque;
+        use std::collections::BinaryHeap;
+        use std::cmp::Reverse;
 
         // Build a map from output signal_id to node_id (which node produces each signal)
-        let mut signal_to_producer: HashMap<String, usize> = HashMap::new();
-        let node_id_set: HashSet<usize> = node_ids.iter().copied().collect();
+        let mut signal_to_producer: BTreeMap<String, usize> = BTreeMap::new();
+        let node_id_set: BTreeSet<usize> = node_ids.iter().copied().collect();
 
         for &node_id in node_ids {
             if let Some(node) = self.combinational_nodes.iter().find(|n| n.id == node_id) {
@@ -564,12 +565,13 @@ impl SirModule {
         }
 
         // Build dependency graph: for each node, track which nodes depend on it
-        let mut dependencies: HashMap<usize, HashSet<usize>> = HashMap::new();
-        let mut in_degree: HashMap<usize, usize> = HashMap::new();
+        // BTreeSet ensures deterministic iteration order (sorted by node ID)
+        let mut dependencies: BTreeMap<usize, BTreeSet<usize>> = BTreeMap::new();
+        let mut in_degree: BTreeMap<usize, usize> = BTreeMap::new();
 
         // Initialize all nodes
         for &id in node_ids {
-            dependencies.insert(id, HashSet::new());
+            dependencies.insert(id, BTreeSet::new());
             in_degree.insert(id, 0);
         }
 
@@ -594,17 +596,19 @@ impl SirModule {
         }
 
         // Kahn's algorithm for topological sort
-        let mut queue = VecDeque::new();
+        // Use a min-heap (BinaryHeap<Reverse<usize>>) for deterministic ordering:
+        // when multiple nodes have in_degree 0 simultaneously, process lowest ID first
+        let mut heap: BinaryHeap<Reverse<usize>> = BinaryHeap::new();
         let mut sorted = Vec::with_capacity(node_ids.len());
 
         // Start with nodes that have no dependencies (in_degree == 0)
         for &id in node_ids {
             if in_degree.get(&id) == Some(&0) {
-                queue.push_back(id);
+                heap.push(Reverse(id));
             }
         }
 
-        while let Some(node_id) = queue.pop_front() {
+        while let Some(Reverse(node_id)) = heap.pop() {
             sorted.push(node_id);
 
             if let Some(deps) = dependencies.get(&node_id) {
@@ -612,7 +616,7 @@ impl SirModule {
                     if let Some(degree) = in_degree.get_mut(&dep) {
                         *degree -= 1;
                         if *degree == 0 {
-                            queue.push_back(dep);
+                            heap.push(Reverse(dep));
                         }
                     }
                 }
@@ -621,7 +625,7 @@ impl SirModule {
 
         // If topological sort didn't include all nodes (cycle detected), append remaining
         if sorted.len() != node_ids.len() {
-            let sorted_set: HashSet<usize> = sorted.iter().copied().collect();
+            let sorted_set: BTreeSet<usize> = sorted.iter().copied().collect();
             let unsorted: Vec<usize> = node_ids
                 .iter()
                 .filter(|id| !sorted_set.contains(*id))

@@ -114,7 +114,7 @@ pub struct Aig {
     pub latches: Vec<AigNodeId>,
     /// Mapping from state-input node IDs to their corresponding latch node IDs
     /// Used during simulation: state_input reads from its linked latch's current value
-    pub state_input_to_latch: HashMap<u32, u32>,
+    pub state_input_to_latch: BTreeMap<u32, u32>,
 }
 
 impl Aig {
@@ -127,7 +127,7 @@ impl Aig {
             output_names: Vec::new(),
             input_names: Vec::new(),
             latches: Vec::new(),
-            state_input_to_latch: HashMap::new(),
+            state_input_to_latch: BTreeMap::new(),
         }
     }
 
@@ -252,14 +252,14 @@ pub struct LirToAig {
     /// The AIG being built
     pub aig: Aig,
     /// Map from (LirSignalId, bit_index) to AigLit
-    pub signal_map: HashMap<(u32, u32), AigLit>,
+    pub signal_map: BTreeMap<(u32, u32), AigLit>,
 }
 
 impl LirToAig {
     pub fn new() -> Self {
         Self {
             aig: Aig::new(),
-            signal_map: HashMap::new(),
+            signal_map: BTreeMap::new(),
         }
     }
 
@@ -353,7 +353,7 @@ impl LirToAig {
         }
 
         // Create placeholder inputs for register current values
-        let mut reg_current_map: HashMap<(u32, u32), AigLit> = HashMap::new();
+        let mut reg_current_map: BTreeMap<(u32, u32), AigLit> = BTreeMap::new();
         for (_, node) in &register_nodes {
             if let LirOp::Reg { width, .. } = &node.op {
                 let output_signal = &lir.signals[node.output.0 as usize];
@@ -494,7 +494,7 @@ impl LirToAig {
         // IMPORTANT: Skip register nodes - their outputs are already in signal_map
         // from the register_current_map initialization, so combinational nodes
         // should not depend on register nodes
-        let mut signal_producer: HashMap<u32, usize> = HashMap::new();
+        let mut signal_producer: BTreeMap<u32, usize> = BTreeMap::new();
         for (idx, node) in lir.nodes.iter().enumerate() {
             // Skip registers - their outputs don't create dependencies
             if matches!(node.op, LirOp::Reg { .. }) {
@@ -1359,8 +1359,6 @@ impl LirToAig {
             _ => {
                 let output_signal = &lir.signals[node.output.0 as usize];
                 let width = node.op.output_width();
-                println!("WARNING: Unimplemented LirOp {:?} for signal '{}' (width={})",
-                    node.op, output_signal.name, width);
                 for bit in 0..width {
                     let name = format!("{}[{}]_unimpl", output_signal.name, bit);
                     let lit = self.aig.add_input(name);
@@ -1385,14 +1383,14 @@ impl Default for LirToAig {
 pub struct GateNetlistToAig {
     aig: Aig,
     /// Map from (GateNetId) to AigLit
-    net_map: HashMap<u32, AigLit>,
+    net_map: BTreeMap<u32, AigLit>,
 }
 
 impl GateNetlistToAig {
     pub fn new() -> Self {
         Self {
             aig: Aig::new(),
-            net_map: HashMap::new(),
+            net_map: BTreeMap::new(),
         }
     }
 
@@ -1445,7 +1443,6 @@ impl GateNetlistToAig {
             .get(&net_id.0)
             .copied()
             .unwrap_or_else(|| {
-                println!("[GATE_AIG_BUG] get_net: net_id={} not found in net_map, returning false_lit", net_id.0);
                 self.aig.false_lit()
             })
     }
@@ -1458,12 +1455,12 @@ impl GateNetlistToAig {
     /// Returns cell indices in order such that when processing a cell, all its inputs
     /// (from other cells' outputs) have already been processed.
     fn topological_sort_cells(&self, netlist: &GateNetlist) -> Vec<usize> {
-        use std::collections::{HashMap, HashSet, VecDeque};
+        use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
         // Build a map from output net -> cell index
         // IMPORTANT: Only include COMBINATIONAL cells - DFF outputs should be treated as primary inputs
         // because their values are determined by state, not by combinational logic in the same cycle
-        let mut net_to_cell: HashMap<u32, usize> = HashMap::new();
+        let mut net_to_cell: BTreeMap<u32, usize> = BTreeMap::new();
         for (idx, cell) in netlist.cells.iter().enumerate() {
             // Skip sequential cells - their outputs don't create combinational dependencies
             if cell.is_sequential() {
@@ -1475,8 +1472,8 @@ impl GateNetlistToAig {
         }
 
         // Build dependency graph: cell -> cells it depends on
-        let mut dependencies: HashMap<usize, HashSet<usize>> = HashMap::new();
-        let mut reverse_deps: HashMap<usize, HashSet<usize>> = HashMap::new();
+        let mut dependencies: BTreeMap<usize, BTreeSet<usize>> = BTreeMap::new();
+        let mut reverse_deps: BTreeMap<usize, BTreeSet<usize>> = BTreeMap::new();
 
         for (idx, cell) in netlist.cells.iter().enumerate() {
             dependencies.entry(idx).or_default();
@@ -1491,7 +1488,7 @@ impl GateNetlistToAig {
         }
 
         // Kahn's algorithm for topological sort
-        let mut in_degree: HashMap<usize, usize> = HashMap::new();
+        let mut in_degree: BTreeMap<usize, usize> = BTreeMap::new();
         for (idx, _) in netlist.cells.iter().enumerate() {
             let deg = dependencies.get(&idx).map(|s| s.len()).unwrap_or(0);
             in_degree.insert(idx, deg);
@@ -1938,15 +1935,6 @@ impl GateNetlistToAig {
             if cell.is_sequential() {
                 continue;
             }
-            // DEBUG: Check for missing input nets before convert_cell
-            for (inp_i, &inp_net) in cell.inputs.iter().enumerate() {
-                if !self.net_map.contains_key(&inp_net.0) {
-                    let net_name = netlist.nets.get(inp_net.0 as usize)
-                        .map(|n| n.name.as_str()).unwrap_or("???");
-                    println!("[GATE_AIG_BUG] Cell '{}' (type={}, fn={:?}) input[{}] references net {}='{}' which is NOT in net_map",
-                        cell.path, cell.cell_type, cell.function, inp_i, inp_net.0, net_name);
-                }
-            }
             self.convert_cell(cell, netlist);
         }
 
@@ -2080,15 +2068,15 @@ pub fn build_miter(aig1: &Aig, aig2: &Aig) -> FormalResult<Aig> {
     let mut miter = Aig::new();
 
     // Map from old node IDs to new ones for both AIGs
-    let mut map1: HashMap<u32, AigLit> = HashMap::new();
-    let mut map2: HashMap<u32, AigLit> = HashMap::new();
+    let mut map1: BTreeMap<u32, AigLit> = BTreeMap::new();
+    let mut map2: BTreeMap<u32, AigLit> = BTreeMap::new();
 
     // Node 0 (false) maps to node 0
     map1.insert(0, miter.false_lit());
     map2.insert(0, miter.false_lit());
 
     // Add shared inputs (by name matching)
-    let mut input_map: HashMap<String, AigLit> = HashMap::new();
+    let mut input_map: BTreeMap<String, AigLit> = BTreeMap::new();
 
     for (idx, node) in aig1.nodes.iter().enumerate() {
         if let AigNode::Input { name } = node {
@@ -2130,7 +2118,7 @@ pub fn build_miter(aig1: &Aig, aig2: &Aig) -> FormalResult<Aig> {
     Ok(miter)
 }
 
-fn remap_lit(lit: AigLit, map: &HashMap<u32, AigLit>) -> AigLit {
+fn remap_lit(lit: AigLit, map: &BTreeMap<u32, AigLit>) -> AigLit {
     let mapped = map.get(&lit.node.0).copied().unwrap_or(AigLit::positive(AigNodeId(0)));
     if lit.inverted {
         mapped.invert()
@@ -2139,7 +2127,7 @@ fn remap_lit(lit: AigLit, map: &HashMap<u32, AigLit>) -> AigLit {
     }
 }
 
-fn copy_aig_structure(target: &mut Aig, source: &Aig, map: &mut HashMap<u32, AigLit>) {
+fn copy_aig_structure(target: &mut Aig, source: &Aig, map: &mut BTreeMap<u32, AigLit>) {
     for (idx, node) in source.nodes.iter().enumerate() {
         if map.contains_key(&(idx as u32)) {
             continue; // Already mapped (input or constant)
@@ -2314,7 +2302,7 @@ pub fn check_sequential_equivalence_sat(aig1: &Aig, aig2: &Aig, thorough: bool) 
         values[0] = false; // constant false
 
         // Build var→node mapping from the original var_map
-        let node_to_var: HashMap<u32, Var> = var_map.iter().map(|(&n, &v)| (n, v)).collect();
+        let node_to_var: BTreeMap<u32, Var> = var_map.iter().map(|(&n, &v)| (n, v)).collect();
 
         // Set node values from model
         let model_set: std::collections::HashSet<Lit> = model.iter().cloned().collect();
@@ -2408,6 +2396,56 @@ pub fn check_sequential_equivalence_sat(aig1: &Aig, aig2: &Aig, thorough: bool) 
         (validated, proven, unresolved)
     };
 
+    // Exhaustive parallel SAT: processes ALL gates (no early termination).
+    // Used for latch gates where SAT counterexamples are demoted to unresolved,
+    // so we must check every gate. find_map_any would cancel in-flight gates when
+    // any gate finds SAT, silently losing their results and causing non-determinism.
+    let run_parallel_sat_exhaustive = |gates: &[(usize, String, Lit)], label: &str, limit: i32|
+        -> (Vec<(usize, String, Vec<Lit>)>, Vec<String>, Vec<(usize, String)>)
+    {
+        let checked = std::sync::atomic::AtomicUsize::new(0);
+        let total = gates.len();
+
+        use std::sync::Mutex;
+        let proven_names: Mutex<Vec<String>> = Mutex::new(Vec::new());
+        let unresolved_names: Mutex<Vec<(usize, String)>> = Mutex::new(Vec::new());
+        let sat_results: Mutex<Vec<(usize, String, Vec<Lit>)>> = Mutex::new(Vec::new());
+
+        gates.par_iter().for_each(|(idx, diff_name, sat_lit)| {
+            let mut solver = Solver::new();
+            solver.add_formula(&formula);
+            solver.add_clause(&[*sat_lit]);
+            if limit > 0 {
+                solver.set_conflict_limit(limit);
+            }
+
+            match solver.solve() {
+                Ok(true) => {
+                    let model = solver.model().unwrap().to_vec();
+                    sat_results.lock().unwrap().push((*idx, diff_name.clone(), model));
+                }
+                Ok(false) => {
+                    let c = checked.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                    if c % 20 == 0 || c == total {
+                        eprintln!("   SAT {}: {}/{} proven UNSAT ({}ms)",
+                            label, c, total, sat_start.elapsed().as_millis());
+                    }
+                    proven_names.lock().unwrap().push(diff_name.clone());
+                }
+                Err(_) => {
+                    eprintln!("   SAT {}: '{}' exceeded conflict limit",
+                        label, diff_name);
+                    unresolved_names.lock().unwrap().push((*idx, diff_name.clone()));
+                }
+            }
+        });
+
+        let results = sat_results.into_inner().unwrap();
+        let proven = proven_names.into_inner().unwrap();
+        let unresolved = unresolved_names.into_inner().unwrap();
+        (results, proven, unresolved)
+    };
+
     // Phase 2b-1: Check output diff gates (5M conflict limit — generous but not unlimited)
     let mut all_proven: Vec<String> = Vec::new();
     let mut all_unresolved: Vec<(usize, String)> = Vec::new();
@@ -2450,19 +2488,18 @@ pub fn check_sequential_equivalence_sat(aig1: &Aig, aig2: &Aig, thorough: bool) 
     // to unresolved gates so miter simulation can validate them.
     if !latch_gates.is_empty() {
         let latch_conflict_limit = if thorough { 0 } else { 100_000 };
-        let (sat_result, proven, mut unresolved) = run_parallel_sat(&latch_gates, "latches", latch_conflict_limit);
-        let had_counterexample = sat_result.is_some();
-        if let Some((diff_name, model)) = sat_result {
+        // Use exhaustive SAT (not find_map_any) to ensure ALL latch gates are checked.
+        // Latch counterexamples are demoted to unresolved, so early termination would
+        // silently lose results from cancelled threads, causing non-deterministic counts.
+        let (sat_results, proven, mut unresolved) = run_parallel_sat_exhaustive(&latch_gates, "latches", latch_conflict_limit);
+        let sat_count = sat_results.len();
+        for (idx, diff_name, model) in &sat_results {
             eprintln!("   ⚠️  Latch next-state SAT counterexample (may be unreachable): {} ({}ms)",
                 diff_name, sat_start.elapsed().as_millis());
-            print_counterexample_diagnosis(&miter, &var_map, &model, &diff_name);
-            // Find the gate index for this diff name and add to unresolved
-            if let Some(idx) = latch_gates.iter().position(|(_, n, _)| n == &diff_name) {
-                unresolved.push((latch_gates[idx].0, diff_name));
-            }
+            print_counterexample_diagnosis(&miter, &var_map, model, diff_name);
+            unresolved.push((*idx, diff_name.clone()));
         }
         let total_latch = latch_gates.len();
-        let sat_count = if had_counterexample { 1 } else { 0 };
         if !unresolved.is_empty() {
             eprintln!("   SAT latches: {}/{} proven, {} unresolved ({} SAT counterexample) ({}ms)",
                 proven.len(), total_latch, unresolved.len(), sat_count,
@@ -2641,15 +2678,22 @@ pub fn extract_aig_cone(miter: &Aig, diff_gate_idx: usize) -> AigCone {
     let mut sorted_cone: Vec<u32> = in_cone.iter().copied().collect();
     sorted_cone.sort();
 
-    let mut id_map: HashMap<u32, u32> = HashMap::new();
+    let mut id_map: BTreeMap<u32, u32> = BTreeMap::new();
     for (compact_id, &orig_id) in sorted_cone.iter().enumerate() {
         id_map.insert(orig_id, compact_id as u32);
     }
 
+    // Build input node_id → name mapping
+    let input_id_to_name: BTreeMap<u32, String> = miter.inputs.iter().enumerate()
+        .map(|(i, id)| (id.0, miter.input_names.get(i).cloned().unwrap_or_else(|| format!("input_{}", i))))
+        .collect();
+
     // Phase 3: Collect cone components with remapped IDs
     let mut and_gates = Vec::new();
     let mut input_indices = Vec::new();
+    let mut input_names = Vec::new();
     let mut latch_indices = Vec::new();
+    let mut latch_names = Vec::new();
     let mut state_input_map = Vec::new();
 
     for &orig_id in &sorted_cone {
@@ -2662,6 +2706,7 @@ pub fn extract_aig_cone(miter: &Aig, diff_gate_idx: usize) -> AigCone {
             }
             AigNode::Input { .. } => {
                 input_indices.push(compact_id);
+                input_names.push(input_id_to_name.get(&orig_id).cloned().unwrap_or_else(|| format!("node_{}", orig_id)));
                 // Map state_input → latch if applicable
                 if let Some(&latch_orig) = miter.state_input_to_latch.get(&orig_id) {
                     if let Some(&latch_compact) = id_map.get(&latch_orig) {
@@ -2671,6 +2716,7 @@ pub fn extract_aig_cone(miter: &Aig, diff_gate_idx: usize) -> AigCone {
             }
             AigNode::Latch { .. } => {
                 latch_indices.push(compact_id);
+                latch_names.push(format!("latch_node_{}", orig_id));
             }
             AigNode::False => {}
         }
@@ -2682,7 +2728,9 @@ pub fn extract_aig_cone(miter: &Aig, diff_gate_idx: usize) -> AigCone {
         name: diff_name,
         and_gates,
         input_indices,
+        input_names,
         latch_indices,
+        latch_names,
         state_input_map,
         output_node: output_compact,
         output_inverted: diff_lit.inverted,
@@ -2999,15 +3047,15 @@ fn compute_structural_io_matches(
     matched_input_keys: &std::collections::HashSet<String>,
     matched_output_keys: &std::collections::HashSet<String>,
     entity_name: Option<&str>,
-) -> (HashMap<String, String>, HashMap<String, String>) {
-    let mut input_matches: HashMap<String, String> = HashMap::new();
-    let mut output_matches: HashMap<String, String> = HashMap::new();
+) -> (BTreeMap<String, String>, BTreeMap<String, String>) {
+    let mut input_matches: BTreeMap<String, String> = BTreeMap::new();
+    let mut output_matches: BTreeMap<String, String> = BTreeMap::new();
 
     // --- Output matching via backward cone (input signature) ---
 
     // Build node→input_key maps for both AIGs
-    let build_input_key_map = |aig: &Aig| -> HashMap<u32, String> {
-        let mut map = HashMap::new();
+    let build_input_key_map = |aig: &Aig| -> BTreeMap<u32, String> {
+        let mut map = BTreeMap::new();
         for (idx, node) in aig.nodes.iter().enumerate() {
             if let AigNode::Input { name } = node {
                 let key = normalize_port_name_with_entity(name, entity_name).key();
@@ -3023,7 +3071,7 @@ fn compute_structural_io_matches(
     let aig2_input_keys = build_input_key_map(aig2);
 
     // Compute "input signature" of an output: the set of matched input keys in its backward cone
-    let compute_input_signature = |aig: &Aig, out_lit: AigLit, input_keys: &HashMap<u32, String>| -> std::collections::BTreeSet<String> {
+    let compute_input_signature = |aig: &Aig, out_lit: AigLit, input_keys: &BTreeMap<u32, String>| -> std::collections::BTreeSet<String> {
         let mut sig = std::collections::BTreeSet::new();
         let mut stack = vec![out_lit.node.0];
         let mut visited = std::collections::HashSet::new();
@@ -3074,7 +3122,7 @@ fn compute_structural_io_matches(
     }
 
     // Match outputs with identical input signatures (must be unique on both sides)
-    let mut aig1_sig_map: HashMap<std::collections::BTreeSet<String>, Vec<usize>> = HashMap::new();
+    let mut aig1_sig_map: BTreeMap<std::collections::BTreeSet<String>, Vec<usize>> = BTreeMap::new();
     for (i, (_, _, sig)) in aig1_unmatched_outputs.iter().enumerate() {
         aig1_sig_map.entry(sig.clone()).or_default().push(i);
     }
@@ -3165,7 +3213,7 @@ fn compute_structural_io_matches(
     }
 
     // Match inputs with identical output signatures
-    let mut aig1_input_sig_map: HashMap<std::collections::BTreeSet<String>, Vec<usize>> = HashMap::new();
+    let mut aig1_input_sig_map: BTreeMap<std::collections::BTreeSet<String>, Vec<usize>> = BTreeMap::new();
     for (i, (_, _, sig)) in aig1_unmatched_inputs.iter().enumerate() {
         aig1_input_sig_map.entry(sig.clone()).or_default().push(i);
     }
@@ -3195,14 +3243,14 @@ pub fn build_sequential_miter(aig1: &Aig, aig2: &Aig) -> FormalResult<(Aig, Vec<
     let structural_matches = compute_structural_latch_matches(aig1, aig2);
 
     // Map from old node IDs to new ones
-    let mut map1: HashMap<u32, AigLit> = HashMap::new();
-    let mut map2: HashMap<u32, AigLit> = HashMap::new();
+    let mut map1: BTreeMap<u32, AigLit> = BTreeMap::new();
+    let mut map2: BTreeMap<u32, AigLit> = BTreeMap::new();
 
     map1.insert(0, miter.false_lit());
     map2.insert(0, miter.false_lit());
 
     // Collect inputs and state inputs from both AIGs
-    let mut shared_inputs: HashMap<String, AigLit> = HashMap::new();
+    let mut shared_inputs: BTreeMap<String, AigLit> = BTreeMap::new();
 
     // Add inputs from AIG1 (including state inputs __reg_cur_*)
     for (idx, node) in aig1.nodes.iter().enumerate() {
@@ -3378,7 +3426,7 @@ fn normalize_signal_name_for_matching(name: &str) -> String {
 /// Extract counterexample from SAT model
 fn extract_symbolic_counterexample(
     miter: &Aig,
-    var_map: &HashMap<u32, Var>,
+    var_map: &BTreeMap<u32, Var>,
     model: &[Lit],
     differing_signal: Option<String>,
 ) -> SymbolicCounterexample {
@@ -3413,7 +3461,7 @@ fn extract_symbolic_counterexample(
 /// from the SAT model and evaluate both MIR and gate next-state outputs.
 fn print_counterexample_diagnosis(
     miter: &Aig,
-    var_map: &HashMap<u32, Var>,
+    var_map: &BTreeMap<u32, Var>,
     model: &[Lit],
     diff_name: &str,
 ) {
@@ -3941,8 +3989,8 @@ pub fn build_miter_with_port_matching(aig1: &Aig, aig2: &Aig) -> FormalResult<Ai
     let entity_ref = entity_name.as_deref();
 
     // Map from old node IDs to new ones for both AIGs
-    let mut map1: HashMap<u32, AigLit> = HashMap::new();
-    let mut map2: HashMap<u32, AigLit> = HashMap::new();
+    let mut map1: BTreeMap<u32, AigLit> = BTreeMap::new();
+    let mut map2: BTreeMap<u32, AigLit> = BTreeMap::new();
 
     // Node 0 (false) maps to node 0
     map1.insert(0, miter.false_lit());
@@ -3950,8 +3998,8 @@ pub fn build_miter_with_port_matching(aig1: &Aig, aig2: &Aig) -> FormalResult<Ai
 
     // Collect inputs from both AIGs with normalized names
     // Filter out internal signals - only primary I/O should be compared
-    let mut aig1_inputs: HashMap<String, (u32, String)> = HashMap::new(); // normalized_key -> (node_idx, original_name)
-    let mut aig2_inputs: HashMap<String, (u32, String)> = HashMap::new();
+    let mut aig1_inputs: BTreeMap<String, (u32, String)> = BTreeMap::new(); // normalized_key -> (node_idx, original_name)
+    let mut aig2_inputs: BTreeMap<String, (u32, String)> = BTreeMap::new();
 
     for (idx, node) in aig1.nodes.iter().enumerate() {
         if let AigNode::Input { name } = node {
@@ -3976,7 +4024,7 @@ pub fn build_miter_with_port_matching(aig1: &Aig, aig2: &Aig) -> FormalResult<Ai
     }
 
     // Create shared inputs for ports that exist in both designs
-    let mut shared_input_map: HashMap<String, AigLit> = HashMap::new();
+    let mut shared_input_map: BTreeMap<String, AigLit> = BTreeMap::new();
     let mut aig1_only_inputs: Vec<String> = Vec::new();
     let mut aig2_only_inputs: Vec<String> = Vec::new();
 
@@ -4037,7 +4085,7 @@ pub fn build_miter_with_port_matching(aig1: &Aig, aig2: &Aig) -> FormalResult<Ai
 
     // Collect outputs with normalized names
     let mut aig1_outputs: Vec<(String, AigLit)> = Vec::new();
-    let mut aig2_outputs_map: HashMap<String, AigLit> = HashMap::new();
+    let mut aig2_outputs_map: BTreeMap<String, AigLit> = BTreeMap::new();
 
     for (i, output) in aig1.outputs.iter().enumerate() {
         let name = aig1.output_names.get(i).cloned().unwrap_or_else(|| format!("out_{}", i));
@@ -4407,9 +4455,9 @@ pub fn check_equivalence_sat(miter: &Aig) -> FormalResult<EquivalenceResult> {
 }
 
 /// Convert AIG to CNF formula
-fn aig_to_cnf(aig: &Aig) -> (CnfFormula, HashMap<u32, Var>, Lit) {
+fn aig_to_cnf(aig: &Aig) -> (CnfFormula, BTreeMap<u32, Var>, Lit) {
     let mut formula = CnfFormula::new();
-    let mut var_map: HashMap<u32, Var> = HashMap::new();
+    let mut var_map: BTreeMap<u32, Var> = BTreeMap::new();
 
     // Create variables for each AIG node
     for (idx, _) in aig.nodes.iter().enumerate() {
@@ -4463,7 +4511,7 @@ fn aig_to_cnf(aig: &Aig) -> (CnfFormula, HashMap<u32, Var>, Lit) {
 /// Extract counterexample from SAT model
 fn extract_counterexample(
     aig: &Aig,
-    var_map: &HashMap<u32, Var>,
+    var_map: &BTreeMap<u32, Var>,
     model: &[Lit],
 ) -> Counterexample {
     let model_set: std::collections::HashSet<Lit> = model.iter().copied().collect();
@@ -8532,21 +8580,6 @@ impl BoundedModelChecker {
         // Convert GateNetlist to sequential AIG (with latches)
         let gate_aig = GateNetlistToAig::new().convert_sequential(netlist);
 
-        println!(
-            "[HIER_BMC] MIR has {} inputs, {} outputs, {} latches, {} state_input_to_latch mappings",
-            mir_aig.inputs.len(),
-            mir_aig.outputs.len(),
-            mir_aig.latches.len(),
-            mir_aig.state_input_to_latch.len()
-        );
-        println!(
-            "[HIER_BMC] Gate has {} inputs, {} outputs, {} latches, {} state_input_to_latch mappings",
-            gate_aig.inputs.len(),
-            gate_aig.outputs.len(),
-            gate_aig.latches.len(),
-            gate_aig.state_input_to_latch.len()
-        );
-
         // Run BMC
         let result = self.check_sequential_aig_equivalence(&mir_aig, &gate_aig, bound)?;
 
@@ -9633,12 +9666,6 @@ impl HierarchicalEquivalenceChecker {
     ) -> FormalResult<HierarchicalEquivalenceResult> {
         let start = std::time::Instant::now();
 
-        println!("\n[HIER_EQ] Starting hierarchical equivalence check");
-        println!("[HIER_EQ] Design 1: {} inputs, {} outputs, {} latches",
-            aig1.inputs.len(), aig1.outputs.len(), aig1.latches.len());
-        println!("[HIER_EQ] Design 2: {} inputs, {} outputs, {} latches",
-            aig2.inputs.len(), aig2.outputs.len(), aig2.latches.len());
-
         // Step 1: Match outputs (semantic or name-based)
         let matched_outputs = if self.use_fingerprinting {
             self.match_outputs_semantic(aig1, aig2)
@@ -9646,13 +9673,9 @@ impl HierarchicalEquivalenceChecker {
             self.match_outputs_by_name(aig1, aig2)
         };
 
-        println!("[HIER_EQ] Matched {} output pairs", matched_outputs.len());
-
         // Step 2: Match inputs (by normalized name, inputs should be stable)
         let (matched_inputs, aig1_input_map, aig2_input_map) =
             self.match_inputs(aig1, aig2);
-
-        println!("[HIER_EQ] Matched {} input pairs", matched_inputs.len());
 
         if matched_inputs.is_empty() {
             return Err(FormalError::PropertyFailed(
@@ -9670,28 +9693,12 @@ impl HierarchicalEquivalenceChecker {
         let unmatched_1 = self.get_unmatched_outputs(aig1, &matched_outputs, true);
         let unmatched_2 = self.get_unmatched_outputs(aig2, &matched_outputs, false);
 
-        if !unmatched_1.is_empty() {
-            println!("[HIER_EQ] Warning: {} unmatched outputs in design 1", unmatched_1.len());
-            for name in unmatched_1.iter().take(5) {
-                println!("  - {}", name);
-            }
-        }
-
-        if !unmatched_2.is_empty() {
-            println!("[HIER_EQ] Warning: {} unmatched outputs in design 2", unmatched_2.len());
-            for name in unmatched_2.iter().take(5) {
-                println!("  - {}", name);
-            }
-        }
-
         // Step 4: Run output-only BMC
         let mut output_status: HashMap<String, bool> = HashMap::new();
         let mut mismatch_details: Option<MismatchDetails> = None;
         let mut all_equivalent = true;
 
         // First do simulation-based quick check
-        println!("[HIER_EQ] Phase 1: Simulation-based verification...");
-
         for (key, o1_idx, o2_idx) in &matched_outputs {
             let sim_result = self.simulate_output_equivalence(
                 aig1, aig2,
@@ -9703,8 +9710,6 @@ impl HierarchicalEquivalenceChecker {
             );
 
             if let Some((cycle, val1, val2, inputs)) = sim_result {
-                println!("[HIER_EQ] Simulation mismatch on '{}' at cycle {}: {} vs {}",
-                    key, cycle, val1, val2);
                 output_status.insert(key.clone(), false);
                 all_equivalent = false;
                 mismatch_details = Some(MismatchDetails {
@@ -9721,8 +9726,6 @@ impl HierarchicalEquivalenceChecker {
         }
 
         if all_equivalent {
-            println!("[HIER_EQ] Phase 2: SAT-based verification...");
-
             // SAT-based verification for proof
             for k in 1..=bound {
                 let sat_result = self.check_cycle_sat(
@@ -9735,7 +9738,6 @@ impl HierarchicalEquivalenceChecker {
                 )?;
 
                 if let Some((output_key, val1, val2)) = sat_result {
-                    println!("[HIER_EQ] SAT found mismatch on '{}' at cycle {}", output_key, k);
                     output_status.insert(output_key.clone(), false);
                     all_equivalent = false;
                     mismatch_details = Some(MismatchDetails {
@@ -9748,15 +9750,9 @@ impl HierarchicalEquivalenceChecker {
                     break;
                 }
 
-                if k % 5 == 0 {
-                    println!("[HIER_EQ] Verified equivalent through cycle {}", k);
-                }
             }
         }
 
-        if all_equivalent {
-            println!("[HIER_EQ] Designs are equivalent up to bound {}", bound);
-        }
 
         Ok(HierarchicalEquivalenceResult {
             equivalent: all_equivalent,
@@ -9775,9 +9771,6 @@ impl HierarchicalEquivalenceChecker {
     /// signature similarity, not by name.
     fn match_outputs_semantic(&self, aig1: &Aig, aig2: &Aig) -> Vec<(String, usize, usize)> {
         let mut matched = Vec::new();
-
-        println!("[HIER_EQ] Generating fingerprints for {} + {} outputs...",
-            aig1.outputs.len(), aig2.outputs.len());
 
         // Generate fingerprints for design 1
         let fp1: Vec<SemanticFingerprint> = (0..aig1.outputs.len())
@@ -10233,10 +10226,7 @@ impl HierarchicalEquivalenceChecker {
         netlist: &GateNetlist,
         bound: usize,
     ) -> FormalResult<HierarchicalEquivalenceResult> {
-        println!("\n[HIER_EQ] Converting MIR hierarchy to AIG...");
         let mir_aig = MirToAig::new_with_mir(mir, top_module).convert_sequential_hierarchical();
-
-        println!("[HIER_EQ] Converting GateNetlist to AIG...");
         let gate_aig = GateNetlistToAig::new().convert_sequential(netlist);
 
         self.check_equivalence(&mir_aig, &gate_aig, bound)
@@ -10249,10 +10239,7 @@ impl HierarchicalEquivalenceChecker {
         netlist: &GateNetlist,
         bound: usize,
     ) -> FormalResult<HierarchicalEquivalenceResult> {
-        println!("\n[HIER_EQ] Converting LIR to AIG...");
         let lir_aig = LirToAig::new().convert_sequential(lir);
-
-        println!("[HIER_EQ] Converting GateNetlist to AIG...");
         let gate_aig = GateNetlistToAig::new().convert_sequential(netlist);
 
         self.check_equivalence(&lir_aig, &gate_aig, bound)
@@ -10415,14 +10402,8 @@ impl SimBasedEquivalenceChecker {
         let start = std::time::Instant::now();
 
         // Convert both netlists to SIR for simulation
-        println!("[SIM_EQ] Converting netlists to SIR...");
         let sir1_result = convert_gate_netlist_to_sir(netlist1);
         let sir2_result = convert_gate_netlist_to_sir(netlist2);
-
-        println!("[SIM_EQ] Design 1: {} signals, {} primitives",
-            sir1_result.stats.signals_created, sir1_result.stats.primitives_created);
-        println!("[SIM_EQ] Design 2: {} signals, {} primitives",
-            sir2_result.stats.signals_created, sir2_result.stats.primitives_created);
 
         // Create simulators
         let mut sim1 = GateLevelSimulator::new(&sir1_result.sir);
@@ -10452,9 +10433,6 @@ impl SimBasedEquivalenceChecker {
             })
             .collect();
 
-        println!("[SIM_EQ] Matched {} inputs, {} outputs",
-            matched_inputs.len(), matched_outputs.len());
-
         if matched_outputs.is_empty() {
             return Err(FormalError::PropertyFailed(
                 "No matching outputs between designs".to_string()
@@ -10462,7 +10440,6 @@ impl SimBasedEquivalenceChecker {
         }
 
         // Reset sequence
-        println!("[SIM_EQ] Applying {} reset cycles...", self.reset_cycles);
         for _ in 0..self.reset_cycles {
             // Set reset high
             sim1.set_input_u64(&self.reset_name, 1);
@@ -10485,7 +10462,6 @@ impl SimBasedEquivalenceChecker {
         sim2.set_input_u64(&self.reset_name, 0);
 
         // Main simulation loop with random inputs
-        println!("[SIM_EQ] Running {} simulation cycles...", self.max_cycles);
         let mut rng_seed = 0x12345678u64;
 
         for cycle in 0..self.max_cycles {
@@ -10524,8 +10500,6 @@ impl SimBasedEquivalenceChecker {
 
                 match (val1, val2) {
                     (Some(v1), Some(v2)) if v1 != v2 => {
-                        println!("[SIM_EQ] Mismatch at cycle {} on '{}': {} vs {}",
-                            cycle, name1, v1, v2);
                         return Ok(SimEquivalenceResult {
                             equivalent: false,
                             cycles_verified: cycle,
@@ -10540,19 +10514,12 @@ impl SimBasedEquivalenceChecker {
                         });
                     }
                     (None, Some(_)) | (Some(_), None) => {
-                        println!("[SIM_EQ] Output '{}' missing in one design at cycle {}",
-                            name1, cycle);
                     }
                     _ => {}
                 }
             }
 
-            if (cycle + 1) % 10 == 0 {
-                println!("[SIM_EQ] Verified {} cycles...", cycle + 1);
-            }
         }
-
-        println!("[SIM_EQ] Designs are equivalent for {} cycles", self.max_cycles);
 
         Ok(SimEquivalenceResult {
             equivalent: true,
@@ -11050,29 +11017,6 @@ impl SimBasedEquivalenceChecker {
                     // Add input matching info
                     diagnostics.input_matching = input_matching_info.clone();
 
-                    // Log summary to console
-                    println!("[SIM_EQ] MISMATCH at cycle {} on '{}':", cycle, user_name);
-                    println!("[SIM_EQ]   MIR value:  0x{:x} ({}) [masked to {} bits: 0x{:x}]", mir_val, mir_val, port_width, mir_val_masked);
-                    println!("[SIM_EQ]   Gate value: 0x{:x} ({})", gate_val, gate_val);
-                    println!("[SIM_EQ]   Diagnostics collected: {} MIR signals, {} Gate signals, {} inputs",
-                        diagnostics.mir_signals.len(), diagnostics.gate_signals.len(), diagnostics.input_values.len());
-
-                    // BUG #247 DEBUG: Print input values at mismatch
-                    println!("[SIM_EQ]   Input values:");
-                    for (name, val) in &diagnostics.input_values {
-                        println!("[SIM_EQ]     {} = 0x{:x} ({})", name, val, *val as i64);
-                    }
-
-                    // BUG #247 DEBUG: Print key MIR internal signals
-                    println!("[SIM_EQ]   Key MIR signals:");
-                    for (hier_path, internal_name, val) in &diagnostics.mir_signals {
-                        // Filter to show only relevant signals
-                        if hier_path.contains("sum") || hier_path.contains("prop") || hier_path.contains("int")
-                            || hier_path.contains("error") || hier_path.contains("out_max") || hier_path.contains("out_min") {
-                            println!("[SIM_EQ]     {} ({}) = 0x{:x} ({})", hier_path, internal_name, val, *val as i64);
-                        }
-                    }
-
                     // Return with diagnostics
                     return Ok(SimEquivalenceResult {
                         equivalent: false,
@@ -11089,12 +11033,7 @@ impl SimBasedEquivalenceChecker {
                 }
             }
 
-            if (cycle + 1) % 10 == 0 {
-                println!("[SIM_EQ] Verified {} cycles...", cycle + 1);
-            }
         }
-
-        println!("[SIM_EQ] MIR and GateNetlist are equivalent for {} cycles", self.max_cycles);
 
         Ok(SimEquivalenceResult {
             equivalent: true,
@@ -11127,16 +11066,10 @@ impl SimBasedEquivalenceChecker {
         let start = std::time::Instant::now();
 
         // Convert MIR to behavioral SirModule
-        println!("[SIM_EQ_COV] Converting MIR to behavioral SIR...");
         let sir_module = convert_mir_to_sir_with_hierarchy(mir, top_module);
-        println!("[SIM_EQ_COV] MIR module: {} inputs, {} outputs",
-            sir_module.inputs.len(), sir_module.outputs.len());
 
         // Convert GateNetlist to gate-level SIR
-        println!("[SIM_EQ_COV] Converting GateNetlist to gate-level SIR...");
         let gate_sir_result = convert_gate_netlist_to_sir(netlist);
-        println!("[SIM_EQ_COV] Gate netlist: {} signals, {} primitives",
-            gate_sir_result.stats.signals_created, gate_sir_result.stats.primitives_created);
 
         // Create behavioral simulator
         let mut mir_config = UnifiedSimConfig::default();
@@ -11217,9 +11150,6 @@ impl SimBasedEquivalenceChecker {
             })
             .collect();
 
-        println!("[SIM_EQ_COV] Matched {} inputs, {} outputs",
-            matched_inputs.len(), matched_outputs.len());
-
         if matched_outputs.is_empty() {
             return Err(FormalError::PropertyFailed(
                 "No matching outputs between MIR and Gate".to_string()
@@ -11237,18 +11167,7 @@ impl SimBasedEquivalenceChecker {
             .map(|(name, _)| name.clone())
             .unwrap_or_else(|| self.clock_name.clone());
 
-        // Debug: show resolved reset/clock names and all gate inputs
-        println!("[SIM_EQ_COV] gate_reset_name='{}' (from self.reset_name='{}')", gate_reset_name, self.reset_name);
-        println!("[SIM_EQ_COV] gate_clock_name='{}' (from self.clock_name='{}')", gate_clock_name, self.clock_name);
-        println!("[SIM_EQ_COV] gate_inputs_by_base keys: {:?}", gate_inputs_by_base.keys().collect::<Vec<_>>());
-        if let Some(rst_bits) = gate_inputs_by_base.get(&self.reset_name) {
-            println!("[SIM_EQ_COV] gate rst bits: {:?}", rst_bits);
-        } else {
-            println!("[SIM_EQ_COV] WARNING: '{}' NOT found in gate_inputs_by_base!", self.reset_name);
-        }
-
         // Reset sequence
-        println!("[SIM_EQ_COV] Applying {} reset cycles...", self.reset_cycles);
         for _ in 0..self.reset_cycles {
             mir_sim.set_input(&self.reset_name, 1).await;
             gate_sim.set_input(&gate_reset_name, 1).await;
@@ -11329,21 +11248,10 @@ impl SimBasedEquivalenceChecker {
             .with_bias_budget(500)
             .with_coverage_goal(90.0);
 
-        println!("[SIM_EQ_COV] Coverage-driven simulation with {} data inputs", vecgen.input_count());
-        println!("[SIM_EQ_COV] Phases: systematic -> LFSR(1000) -> biased(500, goal=90%)");
-
         let mut cycle: u64 = 0;
-        let mut last_phase = vecgen.phase_name().to_string();
 
         // Main simulation loop driven by vector generator
         while let Some(vec) = vecgen.next(Some(&behav_cov)) {
-            let current_phase = vecgen.phase_name();
-            if current_phase != last_phase {
-                let m = behav_cov.metrics();
-                println!("[SIM_EQ_COV] Phase transition: {} -> {} (coverage: {:.1}% at cycle {})",
-                    last_phase, current_phase, m.overall_pct, cycle);
-                last_phase = current_phase.to_string();
-            }
 
             // Apply vector to both simulators
             for (user_name, value) in &vec.values {
@@ -11416,23 +11324,6 @@ impl SimBasedEquivalenceChecker {
                     }
                 }
 
-                // Debug: dump all outputs on first cycle to find mismatches
-                if cycle == 0 {
-                    let user_name = resolve_mir_name(mir_name);
-                    if mir_val != 0 || gate_val != 0 || !has_bits {
-                        println!("[SIM_EQ_COV] CYCLE0 '{}': mir=0x{:x} gate=0x{:x} has_bits={} gate_bits_count={}",
-                            user_name, mir_val, gate_val, has_bits, sorted_bits.len());
-                    }
-                    // Debug: check rst/clk state for state_timer mismatch
-                    if user_name == "debug_state_timer" {
-                        let gate_rst = gate_sim.get_output_raw(&gate_reset_name).await;
-                        let gate_rst_alt = gate_sim.get_output_raw("rst").await;
-                        let mir_rst = mir_sim.get_output_raw(&self.reset_name).await;
-                        println!("[SIM_EQ_COV] CYCLE0 state_timer debug: gate_rst={:?} gate_rst_alt={:?} mir_rst={:?}",
-                            gate_rst, gate_rst_alt, mir_rst);
-                    }
-                }
-
                 // BUG FIX: Mask MIR value to gate port width before comparing
                 let cov_port_width = sorted_bits.iter()
                     .filter_map(|(_, idx)| *idx)
@@ -11444,14 +11335,6 @@ impl SimBasedEquivalenceChecker {
 
                 if has_bits && mir_val_masked != gate_val {
                     let user_name = resolve_mir_name(mir_name);
-                    println!("[SIM_EQ_COV] MISMATCH at cycle {} on '{}':", cycle, user_name);
-                    println!("[SIM_EQ_COV]   MIR value:  0x{:x} ({}) [masked to {} bits: 0x{:x}]", mir_val, mir_val, cov_port_width, mir_val_masked);
-                    println!("[SIM_EQ_COV]   Gate value: 0x{:x} ({})", gate_val, gate_val);
-                    // Dump individual gate bits on mismatch
-                    for (gate_name, bit_idx) in &sorted_bits {
-                        let gv = gate_sim.get_output_raw(gate_name).await;
-                        println!("[SIM_EQ_COV]   gate_bit '{}' idx={:?} val={:?}", gate_name, bit_idx, gv);
-                    }
                     let coverage_report = CoverageReport::from_coverage_dbs(
                         &behav_cov, Some(&gate_cov), false, cycle);
 
@@ -11471,11 +11354,6 @@ impl SimBasedEquivalenceChecker {
             }
 
             cycle += 1;
-            if (cycle) % 100 == 0 {
-                let m = behav_cov.metrics();
-                println!("[SIM_EQ_COV] Cycle {}: coverage {:.1}% (toggle={:.1}%, mux={:.1}%, cmp={:.1}%)",
-                    cycle, m.overall_pct, m.toggle_pct, m.mux_pct, m.comparison_pct);
-            }
         }
 
         // Cross-reference uncovered mux arms against gate netlist
@@ -11532,13 +11410,6 @@ impl SimBasedEquivalenceChecker {
         // Build final coverage report with cross-reference data
         let coverage_report = CoverageReport::from_coverage_dbs_with_xref(
             &behav_cov, Some(&gate_cov), &mux_xref, &toggle_xref, true, cycle);
-
-        let m = behav_cov.metrics();
-        println!("[SIM_EQ_COV] Final coverage: {:.1}% overall ({} vectors)", m.overall_pct, cycle);
-        println!("[SIM_EQ_COV]   Toggle:     {:.1}% ({}/{})", m.toggle_pct, m.toggle_covered, m.toggle_total);
-        println!("[SIM_EQ_COV]   Mux arms:   {:.1}% ({}/{})", m.mux_pct, m.mux_arms_covered, m.mux_arms_total);
-        println!("[SIM_EQ_COV]   Comparison: {:.1}% ({}/{})", m.comparison_pct, m.cmp_covered, m.cmp_total);
-        println!("[SIM_EQ_COV] MIR and GateNetlist are equivalent for {} coverage-driven cycles", cycle);
 
         Ok(SimEquivalenceResult {
             equivalent: true,

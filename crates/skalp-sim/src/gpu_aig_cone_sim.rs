@@ -48,6 +48,12 @@ pub struct AigCone {
 
     /// Total number of nodes in the compacted cone (for signal array sizing)
     pub num_nodes: u32,
+
+    /// Names of the primary inputs (parallel to input_indices)
+    pub input_names: Vec<String>,
+
+    /// Names of the latches (parallel to latch_indices)
+    pub latch_names: Vec<String>,
 }
 
 #[cfg(target_os = "macos")]
@@ -304,4 +310,59 @@ pub fn evaluate_cone_cpu(cone: &AigCone, num_patterns: u32) -> bool {
     }
 
     true // All patterns passed
+}
+
+/// Find and dump the first counterexample for a cone, showing all input values.
+pub fn find_counterexample_cpu(cone: &AigCone, num_patterns: u32) -> Option<Vec<(String, bool)>> {
+    let num_nodes = cone.num_nodes as usize;
+    let mut signals = vec![0u32; num_nodes];
+
+    let base_seed: u32 = 12345; // deterministic seed for reproducibility
+
+    for pattern in 0..num_patterns {
+        let mut rng = pattern.wrapping_mul(1103515245).wrapping_add(base_seed);
+
+        signals[0] = 0;
+
+        for &input_id in &cone.input_indices {
+            rng = rng.wrapping_mul(1103515245).wrapping_add(12345);
+            signals[input_id as usize] = (rng >> 16) & 1;
+        }
+
+        for &latch_id in &cone.latch_indices {
+            rng = rng.wrapping_mul(1103515245).wrapping_add(12345);
+            signals[latch_id as usize] = (rng >> 16) & 1;
+        }
+
+        for &(si, latch) in &cone.state_input_map {
+            signals[si as usize] = signals[latch as usize];
+        }
+
+        for &(out, left, l_inv, right, r_inv) in &cone.and_gates {
+            let l = signals[left as usize] ^ (l_inv as u32);
+            let r = signals[right as usize] ^ (r_inv as u32);
+            signals[out as usize] = l & r;
+        }
+
+        let diff = signals[cone.output_node as usize] ^ (cone.output_inverted as u32);
+        if diff != 0 {
+            // Collect input values with names
+            let mut result: Vec<(String, bool)> = Vec::new();
+            for (i, &input_id) in cone.input_indices.iter().enumerate() {
+                let name = cone.input_names.get(i)
+                    .cloned()
+                    .unwrap_or_else(|| format!("input_{}", input_id));
+                result.push((name, signals[input_id as usize] != 0));
+            }
+            for (i, &latch_id) in cone.latch_indices.iter().enumerate() {
+                let name = cone.latch_names.get(i)
+                    .cloned()
+                    .unwrap_or_else(|| format!("latch_{}", latch_id));
+                result.push((name, signals[latch_id as usize] != 0));
+            }
+            return Some(result);
+        }
+    }
+
+    None
 }

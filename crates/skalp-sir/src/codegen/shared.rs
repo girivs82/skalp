@@ -1053,25 +1053,55 @@ impl<'a> SharedCodegen<'a> {
         // Guard unsigned division/modulo against division by zero (C++ UB)
         let is_div_mod = matches!(op, BinaryOperation::Div | BinaryOperation::Mod);
         if is_div_mod {
-            self.write_indented(&format!(
-                "signals->{} = (signals->{} != 0) ? (signals->{} {} signals->{}) : 0;\n",
-                self.sanitize_name(output),
-                self.sanitize_name(right),
-                self.sanitize_name(left),
-                op_str,
-                self.sanitize_name(right)
-            ));
+            if output_width < 32 {
+                let mask = (1u64 << output_width) - 1;
+                self.write_indented(&format!(
+                    "signals->{} = ((signals->{} != 0) ? (signals->{} {} signals->{}) : 0) & 0x{:X};\n",
+                    self.sanitize_name(output),
+                    self.sanitize_name(right),
+                    self.sanitize_name(left),
+                    op_str,
+                    self.sanitize_name(right),
+                    mask
+                ));
+            } else {
+                self.write_indented(&format!(
+                    "signals->{} = (signals->{} != 0) ? (signals->{} {} signals->{}) : 0;\n",
+                    self.sanitize_name(output),
+                    self.sanitize_name(right),
+                    self.sanitize_name(left),
+                    op_str,
+                    self.sanitize_name(right)
+                ));
+            }
             return;
         }
 
         // Standard scalar operation
-        self.write_indented(&format!(
-            "signals->{} = signals->{} {} signals->{};\n",
-            self.sanitize_name(output),
-            self.sanitize_name(left),
-            op_str,
-            self.sanitize_name(right)
-        ));
+        // BUG #275 FIX: Mask arithmetic results to output_width to prevent 32-bit overflow/underflow
+        // from poisoning subsequent comparisons. In hardware, all signals have fixed widths and
+        // arithmetic naturally wraps. But in C++ with uint32_t storage, sub/add/shl can produce
+        // values wider than the signal's actual width.
+        let needs_mask = output_width < 32 && !is_comparison;
+        if needs_mask {
+            let mask = (1u64 << output_width) - 1;
+            self.write_indented(&format!(
+                "signals->{} = (signals->{} {} signals->{}) & 0x{:X};\n",
+                self.sanitize_name(output),
+                self.sanitize_name(left),
+                op_str,
+                self.sanitize_name(right),
+                mask
+            ));
+        } else {
+            self.write_indented(&format!(
+                "signals->{} = signals->{} {} signals->{};\n",
+                self.sanitize_name(output),
+                self.sanitize_name(left),
+                op_str,
+                self.sanitize_name(right)
+            ));
+        }
     }
 
     /// Generate signed comparison with proper type casting
@@ -1242,8 +1272,19 @@ impl<'a> SharedCodegen<'a> {
                     mask
                 ));
             }
+        } else if actual_output_width < 32 {
+            // Sub-32-bit output: mask to prevent overflow from polluting upper bits
+            let mask = (1u64 << actual_output_width) - 1;
+            self.write_indented(&format!(
+                "signals->{} = (uint32_t)({} {} {}) & 0x{:X};\n",
+                output_sanitized,
+                left_expr,
+                op_str,
+                right_expr,
+                mask
+            ));
         } else {
-            // 32-bit or smaller output
+            // 32-bit output
             self.write_indented(&format!(
                 "signals->{} = (uint32_t)({} {} {});\n",
                 output_sanitized,
@@ -1928,12 +1969,25 @@ impl<'a> SharedCodegen<'a> {
                 self.write_indented("}\n");
             }
         } else {
-            self.write_indented(&format!(
-                "signals->{} = {}signals->{};\n",
-                self.sanitize_name(output),
-                op_str,
-                self.sanitize_name(input)
-            ));
+            let output_width = self.get_signal_width(output);
+            let needs_mask = output_width < 32 && matches!(op, UnaryOperation::Not | UnaryOperation::Neg);
+            if needs_mask {
+                let mask = (1u64 << output_width) - 1;
+                self.write_indented(&format!(
+                    "signals->{} = ({}signals->{}) & 0x{:X};\n",
+                    self.sanitize_name(output),
+                    op_str,
+                    self.sanitize_name(input),
+                    mask
+                ));
+            } else {
+                self.write_indented(&format!(
+                    "signals->{} = {}signals->{};\n",
+                    self.sanitize_name(output),
+                    op_str,
+                    self.sanitize_name(input)
+                ));
+            }
         }
     }
 

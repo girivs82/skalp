@@ -2666,6 +2666,13 @@ fn run_equivalence_check(
                                         }
                                         Ok(false) => {
                                             println!("     ✗ '{}' COUNTEREXAMPLE FOUND", name);
+                                            // Dump counterexample details
+                                            if let Some(cex) = skalp_sim::gpu_aig_cone_sim::find_counterexample_cpu(&cone, 1_000_000) {
+                                                println!("       Counterexample inputs:");
+                                                for (input_name, value) in &cex {
+                                                    println!("         {} = {}", input_name, if *value { 1 } else { 0 });
+                                                }
+                                            }
                                             cone_failures.push(name.clone());
                                         }
                                         Err(e) => {

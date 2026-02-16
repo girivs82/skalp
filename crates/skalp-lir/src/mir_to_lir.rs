@@ -5654,7 +5654,7 @@ fn elaborate_instance(
                 module.name,
                 is_async_context
             );
-            let computed_result = lower_mir_module_to_lir_with_context(module, is_async_context);
+                let computed_result = lower_mir_module_to_lir_with_context(module, is_async_context);
             lir_cache.insert(cache_key, computed_result.clone());
             computed_result
         }

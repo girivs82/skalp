@@ -883,14 +883,6 @@ impl<'hir> HirToMir<'hir> {
                             .and_then(|expr| self.convert_literal_expr(expr));
                         let clock_domain = hir_signal.clock_domain.map(|id| ClockDomainId(id.0));
 
-                        // BUG #117r DEBUG: Log signal flattening for impl block
-                        if hir_signal.name.contains("prot_faults") {
-                            println!(
-                                "📍 HIR_TO_MIR IMPL: signal='{}', type={:?}",
-                                hir_signal.name, signal_type
-                            );
-                        }
-
                         let (flattened_signals, flattened_fields) = self.flatten_signal(
                             &hir_signal.name,
                             &signal_type,
@@ -899,17 +891,6 @@ impl<'hir> HirToMir<'hir> {
                             hir_signal.span.clone(),
                             hir_signal.memory_config.is_some(),
                         );
-
-                        // BUG #117r DEBUG: Log flattening result for impl block
-                        if hir_signal.name.contains("prot_faults") {
-                            println!(
-                                "📍 HIR_TO_MIR IMPL RESULT: signal='{}', num_flattened_signals={}, num_fields={}",
-                                hir_signal.name, flattened_signals.len(), flattened_fields.len()
-                            );
-                            for (i, sig) in flattened_signals.iter().enumerate() {
-                                println!("   FlatSig[{}]: name='{}', id={:?}", i, sig.name, sig.id);
-                            }
-                        }
 
                         // CRITICAL FIX (Bug #21): Store flattening info for ALL composite types
                         // Even single-field structs need mapping because field name != signal name
@@ -967,12 +948,6 @@ impl<'hir> HirToMir<'hir> {
                                 signal.safety_context = Some(convert_safety_config(safety_config));
                             }
                             module.signals.push(signal);
-                        }
-
-                        // BUG #117r DEBUG: Verify signals were added
-                        if hir_signal.name.contains("prot_faults") {
-                            let count = module.signals.iter().filter(|s| s.name.starts_with("prot_faults")).count();
-                            println!("📍 AFTER PUSH: module '{}' now has {} signals starting with 'prot_faults'", module.name, count);
                         }
 
                         // BUG FIX: Generate continuous assignment for impl signals with non-literal initial expressions
@@ -1702,15 +1677,7 @@ impl<'hir> HirToMir<'hir> {
                     }
 
                     // Convert module instances
-                    // BUG #117r DEBUG: Log instances being processed
-                    if module.name == "DabBatteryController" {
-                        println!("📍 CONVERT_INSTANCES: module='{}', {} instances to convert",
-                            module.name, impl_block.instances.len());
-                    }
                     for hir_instance in &impl_block.instances {
-                        if module.name == "DabBatteryController" {
-                            println!("   -> instance '{}' of entity {:?}", hir_instance.name, hir_instance.entity);
-                        }
                         if let Some(instance) = self.convert_instance(hir_instance) {
                             module.instances.push(instance);
                         }
@@ -2534,12 +2501,6 @@ impl<'hir> HirToMir<'hir> {
                                         } else if let Some(expr) =
                                             self.convert_expression(&field_init.value, 0)
                                         {
-                                            // BUG #263 DEBUG
-                                            if field_init.name == "kp_v" || field_init.name == "ki_v"
-                                                || field_init.name == "kp_i" || field_init.name == "ki_i" {
-                                                println!("[BUG#263] Instance conn '{}': HIR={:?}, MIR={:?}",
-                                                    field_init.name, field_init.value, expr.kind);
-                                            }
                                             trace!(
                                                 "[HIER_CONN] Field '{}' <- MIR expr: {:?}",
                                                 field_init.name,
@@ -5175,20 +5136,10 @@ impl<'hir> HirToMir<'hir> {
                     }
                 } else {
                     // Simple connection
-                    // BUG #263 DEBUG
-                    if conn.port == "kp_v" || conn.port == "ki_v" || conn.port == "kp_i" || conn.port == "ki_i" {
-                        println!("[BUG#263] convert_instance PATH A: simple conn '{}', expr={:?}",
-                            conn.port, conn.expr);
-                    }
                     vec![(conn.port.clone(), self.convert_expression(&conn.expr, 0)?)]
                 }
             } else {
                 // Port not found in entity, use default conversion
-                // BUG #263 DEBUG
-                if conn.port == "kp_v" || conn.port == "ki_v" || conn.port == "kp_i" || conn.port == "ki_i" {
-                    println!("[BUG#263] convert_instance PATH B: port not found '{}', expr={:?}",
-                        conn.port, conn.expr);
-                }
                 vec![(conn.port.clone(), self.convert_expression(&conn.expr, 0)?)]
             };
 
@@ -8169,11 +8120,6 @@ impl<'hir> HirToMir<'hir> {
             }
             hir::HirExpression::FieldAccess { base, field } => {
                 // Convert struct field access to bit slice (range select)
-                // BUG #263 DEBUG: trace nested field access
-                if matches!(**base, hir::HirExpression::FieldAccess { .. }) {
-                    println!("[BUG#263] convert_expression_impl_inner: NESTED FieldAccess field='{}', inner_base_type={:?}",
-                        field, std::mem::discriminant(&**base));
-                }
                 trace!(
                     "[BUG #71 FIELD] Converting FieldAccess: field='{}', base={:?}",
                     field,
@@ -18030,26 +17976,12 @@ impl<'hir> HirToMir<'hir> {
                             // Find the flattened field with matching path
                             for flat_field in flattened {
                                 if flat_field.field_path == field_path {
-                                    println!("[BUG#263] convert_field_access: ✅ MATCHED Port({:?}) field_path={:?} → PortId({})",
-                                        port_id, field_path, flat_field.id);
                                     return Some(Expression::with_unknown_type(ExpressionKind::Ref(
                                         LValue::Port(PortId(flat_field.id)),
                                     )));
                                 }
                             }
-                            // BUG #263 DEBUG: flattened ports exist but no match
-                            println!("[BUG#263] convert_field_access: Port({:?}) has {} flattened fields but no match for field_path={:?}",
-                                port_id, flattened.len(), field_path);
-                            for ff in flattened {
-                                println!("[BUG#263]   flattened: id={}, path={:?}", ff.id, ff.field_path);
-                            }
-                        } else {
-                            println!("[BUG#263] convert_field_access: Port({:?}) belongs_to_current but NOT in flattened_ports, field_path={:?}",
-                                port_id, field_path);
                         }
-                    } else {
-                        println!("[BUG#263] convert_field_access: Port({:?}) does NOT belong to current entity, field_path={:?}",
-                            port_id, field_path);
                     }
                     // Not flattened - use mapped port ID (or fall back to bit range)
                     // BUG #237 FIX: Only use port_map if port belongs to current entity
@@ -22909,7 +22841,6 @@ impl<'hir> HirToMir<'hir> {
         // Find which entity owns the foreign port
         let owner_id = self.port_owner.get(foreign_port_id);
         if owner_id.is_none() {
-            println!("[REMAP_FAIL] No owner for port {:?}", foreign_port_id);
             return None;
         }
         let owner_id = owner_id?;
@@ -22919,7 +22850,6 @@ impl<'hir> HirToMir<'hir> {
         // Find the port by ID in the owner entity
         let foreign_port = owner_entity.ports.iter().find(|p| p.id == *foreign_port_id);
         if foreign_port.is_none() {
-            println!("[REMAP_FAIL] Port {:?} not found in owner '{}'", foreign_port_id, owner_entity.name);
             return None;
         }
         let foreign_port = foreign_port?;
@@ -22927,7 +22857,6 @@ impl<'hir> HirToMir<'hir> {
         // Look for a port with the same name in the current entity
         let current_port = current_entity.ports.iter().find(|p| p.name == foreign_port.name);
         if current_port.is_none() {
-            println!("[REMAP_FAIL] Port '{}' not found in current entity '{}'", foreign_port.name, current_entity.name);
             return None;
         }
         let current_port = current_port?;
@@ -22935,12 +22864,10 @@ impl<'hir> HirToMir<'hir> {
         // Get the MIR port ID for the current entity's port
         let mir_port_id = self.port_map.get(&current_port.id);
         if mir_port_id.is_none() {
-            println!("[REMAP_FAIL] No MIR port for HIR port {:?} '{}' in current entity", current_port.id, current_port.name);
             return None;
         }
         let mir_port_id = mir_port_id?;
 
-        println!("[REMAP_OK] Remapped '{}': {:?} → {:?}", foreign_port.name, foreign_port_id, mir_port_id);
         Some(LValue::Port(*mir_port_id))
     }
 
