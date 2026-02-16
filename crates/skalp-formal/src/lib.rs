@@ -10,6 +10,7 @@
 //! - Combinational equivalence checking (CEC)
 //! - MIR (RTL) to gate-level equivalence checking
 
+pub mod arithmetic_solver;
 pub mod assertions;
 pub mod bmc;
 pub mod equivalence;

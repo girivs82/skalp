@@ -2185,7 +2185,7 @@ pub fn check_sequential_equivalence_sat(aig1: &Aig, aig2: &Aig, thorough: bool) 
     let start = std::time::Instant::now();
 
     // Build a miter that compares both outputs AND next-state (latch D inputs)
-    let miter = build_sequential_miter(aig1, aig2)?;
+    let (miter, matched_pairs) = build_sequential_miter(aig1, aig2)?;
 
     let and_count = miter.nodes.iter().filter(|n| matches!(n, AigNode::And { .. })).count();
     eprintln!("   Miter: {} nodes, {} AND gates", miter.nodes.len(), and_count);
@@ -2486,6 +2486,21 @@ pub fn check_sequential_equivalence_sat(aig1: &Aig, aig2: &Aig, thorough: bool) 
     eprintln!("   SAT total: {}/{} proven UNSAT{} ({}ms)",
         total_proven, diff_count, unresolved_detail, sat_elapsed);
 
+    // --- Phase 2b-3: Algebraic verification for SAT-hard gates (multiplier cones) ---
+    if !all_unresolved.is_empty() {
+        let algebraic_proven = crate::arithmetic_solver::verify_unresolved_algebraic(
+            &miter,
+            &matched_pairs,
+            &all_unresolved,
+        );
+
+        if !algebraic_proven.is_empty() {
+            let proven_set: BTreeSet<String> = algebraic_proven.iter().cloned().collect();
+            all_unresolved.retain(|(_, name)| !proven_set.contains(name));
+            all_proven.extend(algebraic_proven);
+        }
+    }
+
     // Return result with unresolved gates for caller to handle (GPU cone sim or CPU fallback)
     Ok(SymbolicEquivalenceResult {
         equivalent: true,
@@ -2759,7 +2774,7 @@ pub fn check_non_equivalence_fast(aig1: &Aig, aig2: &Aig) -> bool {
 
     // Build miter
     let miter = match build_sequential_miter(aig1, aig2) {
-        Ok(m) => m,
+        Ok((m, _)) => m,
         Err(_) => return false,
     };
 
@@ -3173,7 +3188,7 @@ fn compute_structural_io_matches(
 }
 
 /// Build a miter that checks both output AND next-state equivalence
-pub fn build_sequential_miter(aig1: &Aig, aig2: &Aig) -> FormalResult<Aig> {
+pub fn build_sequential_miter(aig1: &Aig, aig2: &Aig) -> FormalResult<(Aig, Vec<(String, AigLit, AigLit)>)> {
     let mut miter = Aig::new();
 
     // Pre-compute structural latch matches (gate_name → mir_name)
@@ -3235,6 +3250,7 @@ pub fn build_sequential_miter(aig1: &Aig, aig2: &Aig) -> FormalResult<Aig> {
     let mut miter_output = miter.false_lit();
 
     let mut diff_gates: Vec<(String, AigLit)> = Vec::new();
+    let mut matched_pairs: Vec<(String, AigLit, AigLit)> = Vec::new();
 
     // 1. Check output equivalence (by normalized name matching)
     // Use BTreeMap for deterministic iteration order (HashMap randomizes per-process,
@@ -3259,7 +3275,9 @@ pub fn build_sequential_miter(aig1: &Aig, aig2: &Aig) -> FormalResult<Aig> {
     for (name, lit1) in &out1_by_name {
         if let Some(lit2) = out2_by_name.get(name) {
             let diff = miter.add_xor(*lit1, *lit2);
-            diff_gates.push((format!("output[{}]", name), diff));
+            let pair_name = format!("output[{}]", name);
+            diff_gates.push((pair_name.clone(), diff));
+            matched_pairs.push((pair_name, *lit1, *lit2));
             miter_output = miter.add_or(miter_output, diff);
             matched_outputs += 1;
         }
@@ -3324,7 +3342,9 @@ pub fn build_sequential_miter(aig1: &Aig, aig2: &Aig) -> FormalResult<Aig> {
     for (name, next1) in &latch1_by_name {
         if let Some(next2) = latch2_by_name.get(name) {
             let diff = miter.add_xor(*next1, *next2);
-            diff_gates.push((format!("next_state[{}]", name), diff));
+            let pair_name = format!("next_state[{}]", name);
+            diff_gates.push((pair_name.clone(), diff));
+            matched_pairs.push((pair_name, *next1, *next2));
             miter_output = miter.add_or(miter_output, diff);
             // BUG #271 DEBUG: Add individual model outputs for diagnostic evaluation
             miter.add_output(format!("mir_next[{}]", name), *next1);
@@ -3338,7 +3358,7 @@ pub fn build_sequential_miter(aig1: &Aig, aig2: &Aig) -> FormalResult<Aig> {
     }
 
     miter.add_output("miter".to_string(), miter_output);
-    Ok(miter)
+    Ok((miter, matched_pairs))
 }
 
 /// Normalize signal name for matching between designs
@@ -5257,13 +5277,13 @@ pub struct MirToAig<'a> {
     /// The AIG being built
     pub aig: Aig,
     /// Map from (MirSignalRef, bit_index) to current AigLit
-    signal_map: HashMap<(MirSignalRef, u32), AigLit>,
+    signal_map: BTreeMap<(MirSignalRef, u32), AigLit>,
     /// Per-instance signal maps keyed by instance path ("" = top module)
-    instance_signal_maps: HashMap<String, HashMap<(MirSignalRef, u32), AigLit>>,
+    instance_signal_maps: BTreeMap<String, BTreeMap<(MirSignalRef, u32), AigLit>>,
     /// Current instance path ("" = top module)
     current_instance_path: String,
     /// Map from port/signal names to their reference
-    name_to_ref: HashMap<String, MirSignalRef>,
+    name_to_ref: BTreeMap<String, MirSignalRef>,
     /// Register outputs (for sequential detection)
     register_outputs: Vec<MirSignalRef>,
 }
@@ -5275,10 +5295,10 @@ impl<'a> MirToAig<'a> {
             mir: None,
             current_module: None,
             aig: Aig::new(),
-            signal_map: HashMap::new(),
-            instance_signal_maps: HashMap::new(),
+            signal_map: BTreeMap::new(),
+            instance_signal_maps: BTreeMap::new(),
             current_instance_path: String::new(),
-            name_to_ref: HashMap::new(),
+            name_to_ref: BTreeMap::new(),
             register_outputs: Vec::new(),
         };
         converter.build_name_map();
@@ -5295,10 +5315,10 @@ impl<'a> MirToAig<'a> {
             mir: Some(mir),
             current_module: None,
             aig: Aig::new(),
-            signal_map: HashMap::new(),
-            instance_signal_maps: HashMap::new(),
+            signal_map: BTreeMap::new(),
+            instance_signal_maps: BTreeMap::new(),
             current_instance_path: String::new(),
-            name_to_ref: HashMap::new(),
+            name_to_ref: BTreeMap::new(),
             register_outputs: Vec::new(),
         };
         converter.build_name_map();
@@ -5414,7 +5434,7 @@ impl<'a> MirToAig<'a> {
 
         // Create temporary input nodes for register current values
         // These will be replaced with proper latch outputs
-        let mut reg_current_lits: HashMap<(MirSignalRef, u32), AigLit> = HashMap::new();
+        let mut reg_current_lits: BTreeMap<(MirSignalRef, u32), AigLit> = BTreeMap::new();
         for (sig_ref, name, width) in &register_signals {
             for bit in 0..*width {
                 // Create a temporary input for the current register value
@@ -5444,10 +5464,10 @@ impl<'a> MirToAig<'a> {
 
         // Process sequential processes to compute next-state logic
         // Store computed next-state values separately
-        let mut next_state_map: HashMap<(MirSignalRef, u32), AigLit> = HashMap::new();
+        let mut next_state_map: BTreeMap<(MirSignalRef, u32), AigLit> = BTreeMap::new();
 
         // Collect reset values from sequential processes
-        let mut reset_values: HashMap<(MirSignalRef, u32), u64> = HashMap::new();
+        let mut reset_values: BTreeMap<(MirSignalRef, u32), u64> = BTreeMap::new();
         for process in &self.module.processes {
             if matches!(process.kind, ProcessKind::Sequential) {
                 // Convert sequential body - assignments go to next-state
@@ -5634,7 +5654,7 @@ impl<'a> MirToAig<'a> {
         }
 
         // Create temporary input nodes for all register current values
-        let mut reg_current_lits: HashMap<(String, MirSignalRef, u32), AigLit> = HashMap::new();
+        let mut reg_current_lits: BTreeMap<(String, MirSignalRef, u32), AigLit> = BTreeMap::new();
         for (inst_path, sig_ref, name, width) in &all_registers {
             for bit in 0..*width {
                 let temp_name = if *width == 1 {
@@ -5711,8 +5731,8 @@ impl<'a> MirToAig<'a> {
 
         // Main pass: process in POST-ORDER (children first) for sequential logic
         // and to re-evaluate with child outputs now available
-        let mut next_state_map: HashMap<(String, MirSignalRef, u32), AigLit> = HashMap::new();
-        let mut reset_values: HashMap<(String, MirSignalRef, u32), u64> = HashMap::new();
+        let mut next_state_map: BTreeMap<(String, MirSignalRef, u32), AigLit> = BTreeMap::new();
+        let mut reset_values: BTreeMap<(String, MirSignalRef, u32), u64> = BTreeMap::new();
 
         for (inst_path, module) in &all_instances {
             // BUG #273 part 2: Per-instance signal map isolation.
@@ -5831,7 +5851,7 @@ impl<'a> MirToAig<'a> {
             // Process sequential processes (only in post-order pass)
             for process in &module.processes {
                 if matches!(process.kind, ProcessKind::Sequential) {
-                    let mut inst_next_state: HashMap<(MirSignalRef, u32), AigLit> = HashMap::new();
+                    let mut inst_next_state: BTreeMap<(MirSignalRef, u32), AigLit> = BTreeMap::new();
                     self.convert_sequential_process_for_bmc(process, &mut inst_next_state);
 
                     // Transfer to global next_state_map with instance prefix
@@ -5840,7 +5860,7 @@ impl<'a> MirToAig<'a> {
                     }
 
                     // Collect reset values
-                    let mut inst_reset: HashMap<(MirSignalRef, u32), u64> = HashMap::new();
+                    let mut inst_reset: BTreeMap<(MirSignalRef, u32), u64> = BTreeMap::new();
                     self.collect_reset_values(&process.body, &mut inst_reset);
                     for ((sig_ref, bit), val) in inst_reset {
                         reset_values.insert((inst_path.clone(), sig_ref, bit), val);
@@ -6216,7 +6236,7 @@ impl<'a> MirToAig<'a> {
     fn convert_sequential_process_for_bmc(
         &mut self,
         process: &Process,
-        next_state_map: &mut HashMap<(MirSignalRef, u32), AigLit>,
+        next_state_map: &mut BTreeMap<(MirSignalRef, u32), AigLit>,
     ) {
         // Convert the process body, but capture assignments to registers
         // as next-state values instead of updating signal_map directly
@@ -6227,7 +6247,7 @@ impl<'a> MirToAig<'a> {
     fn convert_block_for_bmc(
         &mut self,
         block: &Block,
-        next_state_map: &mut HashMap<(MirSignalRef, u32), AigLit>,
+        next_state_map: &mut BTreeMap<(MirSignalRef, u32), AigLit>,
     ) {
         const STACK_RED_ZONE: usize = 256 * 1024;
         const STACK_GROW_SIZE: usize = 8 * 1024 * 1024;
@@ -6241,7 +6261,7 @@ impl<'a> MirToAig<'a> {
     fn convert_statement_for_bmc(
         &mut self,
         stmt: &Statement,
-        next_state_map: &mut HashMap<(MirSignalRef, u32), AigLit>,
+        next_state_map: &mut BTreeMap<(MirSignalRef, u32), AigLit>,
     ) {
         const STACK_RED_ZONE: usize = 256 * 1024;
         const STACK_GROW_SIZE: usize = 8 * 1024 * 1024;
@@ -6261,7 +6281,7 @@ impl<'a> MirToAig<'a> {
                     }
                 }
                 // Not a register - normal assignment (update signal_map)
-                self.convert_assignment(assign, &HashMap::new());
+                self.convert_assignment(assign, &BTreeMap::new());
             }
             Statement::If(if_stmt) => {
                 // For conditionals with register assignments, we need proper MUXing:
@@ -6359,7 +6379,7 @@ impl<'a> MirToAig<'a> {
                 let initial_state = next_state_map.clone();
 
                 // Collect updates from each case item
-                let mut case_updates: Vec<(AigLit, HashMap<(MirSignalRef, u32), AigLit>)> =
+                let mut case_updates: Vec<(AigLit, BTreeMap<(MirSignalRef, u32), AigLit>)> =
                     Vec::new();
 
                 for item in &case_stmt.items {
@@ -6440,11 +6460,11 @@ impl<'a> MirToAig<'a> {
                     }
                 }
                 // Not a register - use normal conversion
-                self.convert_statement(stmt, &HashMap::new());
+                self.convert_statement(stmt, &BTreeMap::new());
             }
             _ => {
                 // Other statements handled normally
-                self.convert_statement(stmt, &HashMap::new());
+                self.convert_statement(stmt, &BTreeMap::new());
             }
         }
         });
@@ -6726,7 +6746,7 @@ impl<'a> MirToAig<'a> {
     fn collect_reset_values(
         &self,
         block: &Block,
-        reset_values: &mut HashMap<(MirSignalRef, u32), u64>,
+        reset_values: &mut BTreeMap<(MirSignalRef, u32), u64>,
     ) {
         for stmt in &block.statements {
             match stmt {
@@ -6780,7 +6800,7 @@ impl<'a> MirToAig<'a> {
     fn collect_reset_assignments(
         &self,
         block: &Block,
-        reset_values: &mut HashMap<(MirSignalRef, u32), u64>,
+        reset_values: &mut BTreeMap<(MirSignalRef, u32), u64>,
     ) {
         for stmt in &block.statements {
             match stmt {
@@ -6878,7 +6898,7 @@ impl<'a> MirToAig<'a> {
     fn convert_combinational_process(&mut self, process: &Process) {
         // For combinational processes, we need to convert the body
         // while tracking what each signal is assigned to
-        self.convert_block(&process.body, &HashMap::new());
+        self.convert_block(&process.body, &BTreeMap::new());
     }
 
     fn detect_sequential_registers(&mut self, process: &Process) {
@@ -6941,7 +6961,7 @@ impl<'a> MirToAig<'a> {
     fn convert_block(
         &mut self,
         block: &Block,
-        conditions: &HashMap<MirSignalRef, Vec<AigLit>>,
+        conditions: &BTreeMap<MirSignalRef, Vec<AigLit>>,
     ) {
         const STACK_RED_ZONE: usize = 256 * 1024;
         const STACK_GROW_SIZE: usize = 8 * 1024 * 1024;
@@ -6955,7 +6975,7 @@ impl<'a> MirToAig<'a> {
     fn convert_statement(
         &mut self,
         stmt: &Statement,
-        conditions: &HashMap<MirSignalRef, Vec<AigLit>>,
+        conditions: &BTreeMap<MirSignalRef, Vec<AigLit>>,
     ) {
         const STACK_RED_ZONE: usize = 256 * 1024;
         const STACK_GROW_SIZE: usize = 8 * 1024 * 1024;
@@ -6995,7 +7015,7 @@ impl<'a> MirToAig<'a> {
     fn convert_assignment(
         &mut self,
         assign: &Assignment,
-        _conditions: &HashMap<MirSignalRef, Vec<AigLit>>,
+        _conditions: &BTreeMap<MirSignalRef, Vec<AigLit>>,
     ) {
         let rhs_lits = self.convert_expression(&assign.rhs);
         self.assign_lvalue(&assign.lhs, &rhs_lits);
@@ -7004,7 +7024,7 @@ impl<'a> MirToAig<'a> {
     fn convert_if_statement(
         &mut self,
         if_stmt: &IfStatement,
-        conditions: &HashMap<MirSignalRef, Vec<AigLit>>,
+        conditions: &BTreeMap<MirSignalRef, Vec<AigLit>>,
     ) {
         const STACK_RED_ZONE: usize = 256 * 1024;
         const STACK_GROW_SIZE: usize = 8 * 1024 * 1024;
@@ -7019,8 +7039,8 @@ impl<'a> MirToAig<'a> {
 
         // Get all signals assigned in then/else branches
         // Use (MirSignalRef, bit) as key to properly track bit positions
-        let mut then_assigns: HashMap<(MirSignalRef, u32), AigLit> = HashMap::new();
-        let mut else_assigns: HashMap<(MirSignalRef, u32), AigLit> = HashMap::new();
+        let mut then_assigns: BTreeMap<(MirSignalRef, u32), AigLit> = BTreeMap::new();
+        let mut else_assigns: BTreeMap<(MirSignalRef, u32), AigLit> = BTreeMap::new();
 
         // Save current state
         let saved_state = self.signal_map.clone();
@@ -7084,7 +7104,7 @@ impl<'a> MirToAig<'a> {
     fn convert_case_statement(
         &mut self,
         case_stmt: &CaseStatement,
-        conditions: &HashMap<MirSignalRef, Vec<AigLit>>,
+        conditions: &BTreeMap<MirSignalRef, Vec<AigLit>>,
     ) {
         const STACK_RED_ZONE: usize = 256 * 1024;
         const STACK_GROW_SIZE: usize = 8 * 1024 * 1024;
@@ -7097,7 +7117,7 @@ impl<'a> MirToAig<'a> {
         let saved_state = self.signal_map.clone();
 
         // Use (MirSignalRef, bit) as key to properly track bit positions
-        let mut result_map: HashMap<(MirSignalRef, u32), AigLit> = HashMap::new();
+        let mut result_map: BTreeMap<(MirSignalRef, u32), AigLit> = BTreeMap::new();
 
         // First, collect all assignments from default case
         if let Some(default_block) = &case_stmt.default {

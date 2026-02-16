@@ -2644,7 +2644,7 @@ fn run_equivalence_check(
                         sat_result.unresolved_gates.len());
 
                     let cone_start = std::time::Instant::now();
-                    let miter = build_sequential_miter(&mir_aig, &gate_aig)
+                    let (miter, _) = build_sequential_miter(&mir_aig, &gate_aig)
                         .map_err(|e| anyhow::anyhow!("Failed to build miter: {:?}", e))?;
 
                     let num_patterns = 1_000_000u32;
