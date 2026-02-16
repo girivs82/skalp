@@ -1,4 +1,5 @@
 use indexmap::IndexMap;
+use serde::Serialize;
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::Path;
@@ -347,4 +348,184 @@ impl Waveform {
             );
         }
     }
+
+    /// Export waveform in SKALP Waveform (.skw) JSON format
+    pub fn export_skw(&self, path: &Path, design_name: &str) -> std::io::Result<()> {
+        let skw = self.build_skw_data(design_name);
+        let file = File::create(path)?;
+        let writer = BufWriter::new(file);
+        serde_json::to_writer_pretty(writer, &skw)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
+    }
+
+    /// Export waveform in compressed SKALP Waveform (.skw.gz) format
+    pub fn export_skw_compressed(&self, path: &Path, design_name: &str) -> std::io::Result<()> {
+        let skw = self.build_skw_data(design_name);
+        let file = File::create(path)?;
+        let encoder = flate2::write::GzEncoder::new(BufWriter::new(file), flate2::Compression::fast());
+        serde_json::to_writer(encoder, &skw)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
+    }
+
+    fn build_skw_data(&self, design_name: &str) -> SkwData {
+        let mut skw_signals = Vec::new();
+        let mut changes = IndexMap::new();
+        let mut groups: IndexMap<String, Vec<String>> = IndexMap::new();
+
+        for (name, signal) in &self.signals {
+            let sig_type = self.infer_signal_type(signal);
+            let group = signal
+                .trace_config
+                .as_ref()
+                .and_then(|tc| tc.group.clone())
+                .unwrap_or_default();
+
+            let display = signal.trace_config.as_ref().map(|tc| SkwSignalDisplay {
+                radix: match tc.radix {
+                    TraceRadix::Binary => "binary".to_string(),
+                    TraceRadix::Hex => "hex".to_string(),
+                    TraceRadix::Unsigned => "decimal".to_string(),
+                    TraceRadix::Signed => "signed".to_string(),
+                    TraceRadix::Ascii => "hex".to_string(),
+                },
+                color: None,
+            });
+
+            skw_signals.push(SkwSignal {
+                name: name.clone(),
+                width: signal.width,
+                signal_type: sig_type,
+                group: if group.is_empty() {
+                    None
+                } else {
+                    Some(group.clone())
+                },
+                display,
+            });
+
+            if !group.is_empty() {
+                groups
+                    .entry(group)
+                    .or_default()
+                    .push(name.clone());
+            }
+
+            // Build sparse changes (only record when value actually changes)
+            let mut sparse_changes: Vec<(u64, String)> = Vec::new();
+            let mut prev_hex = String::new();
+            for (cycle, value) in &signal.values {
+                let hex = self.format_hex(value);
+                if hex != prev_hex {
+                    sparse_changes.push((*cycle, hex.clone()));
+                    prev_hex = hex;
+                }
+            }
+            changes.insert(name.clone(), sparse_changes);
+        }
+
+        let signal_groups: Vec<SkwSignalGroup> = groups
+            .into_iter()
+            .map(|(name, signals)| SkwSignalGroup { name, signals })
+            .collect();
+
+        SkwData {
+            version: 1,
+            design: design_name.to_string(),
+            timescale: "1ns".to_string(),
+            end_time: self.max_cycle,
+            sim_cycles: self.max_cycle,
+            signals: skw_signals,
+            changes,
+            annotations: Vec::new(),
+            display_config: SkwDisplayConfig {
+                default_radix: "hex".to_string(),
+                signal_groups,
+            },
+        }
+    }
+
+    fn infer_signal_type(&self, signal: &Signal) -> String {
+        let name_lower = signal.name.to_lowercase();
+        if name_lower.contains("clk") || name_lower.contains("clock") {
+            return "clock".to_string();
+        }
+        if name_lower.contains("rst") || name_lower.contains("reset") {
+            return "reset".to_string();
+        }
+        if signal.width == 1 {
+            return "bit".to_string();
+        }
+        "nat".to_string()
+    }
+
+    fn format_hex(&self, bytes: &[u8]) -> String {
+        let mut result = String::new();
+        for byte in bytes.iter().rev() {
+            result.push_str(&format!("{:02x}", byte));
+        }
+        // Trim leading zeros but keep at least one char
+        let trimmed = result.trim_start_matches('0');
+        if trimmed.is_empty() {
+            "0".to_string()
+        } else {
+            trimmed.to_string()
+        }
+    }
+}
+
+// --- SKALP Waveform (.skw) JSON Format ---
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkwData {
+    pub version: u32,
+    pub design: String,
+    pub timescale: String,
+    pub end_time: u64,
+    pub sim_cycles: u64,
+    pub signals: Vec<SkwSignal>,
+    pub changes: IndexMap<String, Vec<(u64, String)>>,
+    pub annotations: Vec<SkwAnnotation>,
+    pub display_config: SkwDisplayConfig,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkwSignal {
+    pub name: String,
+    pub width: usize,
+    #[serde(rename = "type")]
+    pub signal_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub display: Option<SkwSignalDisplay>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SkwSignalDisplay {
+    pub radix: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SkwAnnotation {
+    pub time: u64,
+    pub label: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkwDisplayConfig {
+    pub default_radix: String,
+    pub signal_groups: Vec<SkwSignalGroup>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SkwSignalGroup {
+    pub name: String,
+    pub signals: Vec<String>,
 }

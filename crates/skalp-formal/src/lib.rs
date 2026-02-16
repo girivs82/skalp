@@ -13,6 +13,7 @@
 pub mod arithmetic_solver;
 pub mod assertions;
 pub mod bmc;
+pub mod ec_report;
 pub mod equivalence;
 pub mod model_checker;
 pub mod property;

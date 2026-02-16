@@ -33,7 +33,7 @@ const GROUP_TIMEOUT_SECS: u64 = 30;
 // ── Public result types ─────────────────────────────────────────────────────
 
 /// Status of algebraic verification for a single group of related diff gates
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub enum AlgebraicGroupStatus {
     /// Group proven equivalent (W reduced to zero)
     Proven { substitutions: usize, time_ms: u64 },
@@ -42,7 +42,7 @@ pub enum AlgebraicGroupStatus {
 }
 
 /// Report for a single group of diff gates
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct AlgebraicGroupReport {
     pub name: String,
     pub num_bits: usize,
@@ -50,7 +50,7 @@ pub struct AlgebraicGroupReport {
 }
 
 /// Complete result of algebraic verification across all groups
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct AlgebraicVerificationResult {
     pub proven_names: Vec<String>,
     pub group_results: Vec<AlgebraicGroupReport>,

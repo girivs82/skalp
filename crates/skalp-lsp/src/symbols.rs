@@ -277,6 +277,11 @@ fn parse_signal_symbol(line: &str, line_num: usize) -> Option<SymbolInformation>
     None
 }
 
+/// Public API: extract word at a given character position in a line
+pub fn extract_word(line: &str, pos: usize) -> Option<String> {
+    extract_word_at_position(line, pos)
+}
+
 /// Extract word at a given position
 fn extract_word_at_position(line: &str, pos: usize) -> Option<String> {
     if pos > line.len() {

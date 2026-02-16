@@ -1,17 +1,34 @@
 {
     "name": "skalp",
     "displayName": "SKALP Language Support",
-    "description": "Language support for SKALP hardware description language",
-    "version": "0.1.0",
+    "description": "Full-stack IDE for SKALP hardware design language — syntax, LSP, waveforms, schematics, equivalence checking",
+    "version": "0.2.0",
     "publisher": "skalp-lang",
     "engines": {
         "vscode": "^1.74.0"
     },
     "categories": [
-        "Programming Languages"
+        "Programming Languages",
+        "Visualization",
+        "Testing"
+    ],
+    "keywords": [
+        "hardware",
+        "HDL",
+        "SKALP",
+        "FPGA",
+        "ASIC",
+        "synthesis",
+        "HLS"
     ],
     "activationEvents": [
-        "onLanguage:skalp"
+        "onLanguage:skalp",
+        "onCommand:skalp.build",
+        "onCommand:skalp.simulate",
+        "onCommand:skalp.ec",
+        "onCommand:skalp.showWaveform",
+        "onCommand:skalp.showSchematic",
+        "onView:skalpEc"
     ],
     "main": "./out/extension.js",
     "contributes": {
@@ -36,6 +53,144 @@
                 "path": "./syntaxes/skalp.tmLanguage.json"
             }
         ],
+        "commands": [
+            {
+                "command": "skalp.build",
+                "title": "Build",
+                "category": "SKALP",
+                "icon": "$(gear)"
+            },
+            {
+                "command": "skalp.simulate",
+                "title": "Simulate",
+                "category": "SKALP",
+                "icon": "$(play)"
+            },
+            {
+                "command": "skalp.ec",
+                "title": "Equivalence Check",
+                "category": "SKALP",
+                "icon": "$(verified)"
+            },
+            {
+                "command": "skalp.showWaveform",
+                "title": "Open Waveform Viewer",
+                "category": "SKALP",
+                "icon": "$(graph-line)"
+            },
+            {
+                "command": "skalp.showSchematic",
+                "title": "Show Schematic",
+                "category": "SKALP",
+                "icon": "$(circuit-board)"
+            },
+            {
+                "command": "skalp.restart",
+                "title": "Restart Language Server",
+                "category": "SKALP"
+            }
+        ],
+        "viewsContainers": {
+            "activitybar": [
+                {
+                    "id": "skalp-explorer",
+                    "title": "SKALP",
+                    "icon": "$(circuit-board)"
+                }
+            ]
+        },
+        "views": {
+            "skalp-explorer": [
+                {
+                    "id": "skalpEc",
+                    "name": "Equivalence Checking",
+                    "icon": "$(verified)"
+                }
+            ]
+        },
+        "menus": {
+            "explorer/context": [
+                {
+                    "when": "resourceExtname == .sk || resourceExtname == .skalp",
+                    "command": "skalp.build",
+                    "group": "skalp@1"
+                },
+                {
+                    "when": "resourceExtname == .sk || resourceExtname == .skalp",
+                    "command": "skalp.simulate",
+                    "group": "skalp@2"
+                },
+                {
+                    "when": "resourceExtname == .sk || resourceExtname == .skalp",
+                    "command": "skalp.ec",
+                    "group": "skalp@3"
+                }
+            ],
+            "editor/context": [
+                {
+                    "when": "resourceLangId == skalp",
+                    "command": "skalp.build",
+                    "group": "skalp@1"
+                },
+                {
+                    "when": "resourceLangId == skalp",
+                    "command": "skalp.simulate",
+                    "group": "skalp@2"
+                },
+                {
+                    "when": "resourceLangId == skalp",
+                    "command": "skalp.ec",
+                    "group": "skalp@3"
+                },
+                {
+                    "when": "resourceLangId == skalp",
+                    "command": "skalp.showSchematic",
+                    "group": "skalp@4"
+                }
+            ],
+            "editor/title": [
+                {
+                    "when": "resourceLangId == skalp",
+                    "command": "skalp.build",
+                    "group": "navigation"
+                }
+            ]
+        },
+        "keybindings": [
+            {
+                "command": "skalp.build",
+                "key": "ctrl+shift+b",
+                "mac": "cmd+shift+b",
+                "when": "resourceLangId == skalp"
+            },
+            {
+                "command": "skalp.simulate",
+                "key": "ctrl+shift+s",
+                "mac": "cmd+shift+s",
+                "when": "resourceLangId == skalp"
+            },
+            {
+                "command": "skalp.ec",
+                "key": "ctrl+shift+e",
+                "mac": "cmd+shift+e",
+                "when": "resourceLangId == skalp"
+            }
+        ],
+        "customEditors": [
+            {
+                "viewType": "skalp.waveformViewer",
+                "displayName": "SKALP Waveform Viewer",
+                "selector": [
+                    {
+                        "filenamePattern": "*.skw"
+                    },
+                    {
+                        "filenamePattern": "*.skw.gz"
+                    }
+                ],
+                "priority": "default"
+            }
+        ],
         "configuration": {
             "type": "object",
             "title": "SKALP",
@@ -44,6 +199,11 @@
                     "type": "string",
                     "default": "skalp-lsp",
                     "description": "Path to the SKALP language server executable"
+                },
+                "skalp.cliPath": {
+                    "type": "string",
+                    "default": "skalp",
+                    "description": "Path to the SKALP CLI executable"
                 },
                 "skalp.trace.server": {
                     "type": "string",
@@ -54,6 +214,33 @@
                     ],
                     "default": "off",
                     "description": "Traces the communication between VS Code and the SKALP language server"
+                },
+                "skalp.buildOnSave": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Automatically build on file save"
+                },
+                "skalp.simulation.defaultCycles": {
+                    "type": "number",
+                    "default": 1000,
+                    "description": "Default number of simulation cycles"
+                },
+                "skalp.waveform.defaultRadix": {
+                    "type": "string",
+                    "enum": [
+                        "hex",
+                        "binary",
+                        "decimal",
+                        "signed",
+                        "float"
+                    ],
+                    "default": "hex",
+                    "description": "Default radix for waveform display"
+                },
+                "skalp.ec.outputDir": {
+                    "type": "string",
+                    "default": "",
+                    "description": "Directory for equivalence checking output (defaults to workspace)"
                 }
             }
         }

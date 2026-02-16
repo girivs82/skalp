@@ -3009,7 +3009,7 @@ pub fn check_non_equivalence_fast(aig1: &Aig, aig2: &Aig) -> bool {
 }
 
 /// Result of symbolic equivalence checking
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct SymbolicEquivalenceResult {
     /// True if designs are equivalent for all reachable AND unreachable states
     pub equivalent: bool,
@@ -3030,7 +3030,7 @@ pub struct SymbolicEquivalenceResult {
 }
 
 /// Counterexample from symbolic equivalence check
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct SymbolicCounterexample {
     /// Current state assignment (state variable -> value)
     pub state: HashMap<String, bool>,
