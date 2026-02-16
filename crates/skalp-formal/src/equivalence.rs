@@ -2911,13 +2911,26 @@ pub fn inject_random_bugs(aig: &Aig, count: usize) -> Vec<(Aig, String)> {
             }
             2 => {
                 // Swap two random output literals (keep names in place so miter detects the swap)
+                // Ensure the two outputs have different AIG literals (otherwise swap is invisible)
                 let a = rng.gen_range(0..mutant.outputs.len());
                 let mut b = rng.gen_range(0..mutant.outputs.len());
-                while b == a { b = rng.gen_range(0..mutant.outputs.len()); }
-                mutant.outputs.swap(a, b);
-                let name_a = aig.output_names.get(a).cloned().unwrap_or_else(|| format!("out_{}", a));
-                let name_b = aig.output_names.get(b).cloned().unwrap_or_else(|| format!("out_{}", b));
-                format!("swap outputs '{}' <-> '{}'", name_a, name_b)
+                let mut attempts = 0;
+                while (b == a || mutant.outputs[b] == mutant.outputs[a]) && attempts < 100 {
+                    b = rng.gen_range(0..mutant.outputs.len());
+                    attempts += 1;
+                }
+                if mutant.outputs[b] == mutant.outputs[a] {
+                    // All outputs have the same literal — fall back to invert
+                    let idx = rng.gen_range(0..mutant.outputs.len());
+                    mutant.outputs[idx].inverted = !mutant.outputs[idx].inverted;
+                    let name = mutant.output_names.get(idx).cloned().unwrap_or_else(|| format!("out_{}", idx));
+                    format!("invert output '{}'", name)
+                } else {
+                    mutant.outputs.swap(a, b);
+                    let name_a = aig.output_names.get(a).cloned().unwrap_or_else(|| format!("out_{}", a));
+                    let name_b = aig.output_names.get(b).cloned().unwrap_or_else(|| format!("out_{}", b));
+                    format!("swap outputs '{}' <-> '{}'", name_a, name_b)
+                }
             }
             _ => unreachable!(),
         };
