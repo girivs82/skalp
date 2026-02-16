@@ -2192,6 +2192,7 @@ pub fn check_sequential_equivalence_sat(aig1: &Aig, aig2: &Aig, thorough: bool) 
             time_ms: start.elapsed().as_millis() as u64,
             proven_gates: Vec::new(),
             unresolved_gates: Vec::new(),
+            algebraic_result: None,
         });
     }
 
@@ -2236,6 +2237,7 @@ pub fn check_sequential_equivalence_sat(aig1: &Aig, aig2: &Aig, thorough: bool) 
                                 time_ms: start.elapsed().as_millis() as u64,
                                 proven_gates: Vec::new(),
                                 unresolved_gates: Vec::new(),
+                                algebraic_result: None,
                             });
                         } else {
                             eprintln!("   FRAIG found non-equivalence (miter output = const 1)");
@@ -2247,6 +2249,7 @@ pub fn check_sequential_equivalence_sat(aig1: &Aig, aig2: &Aig, thorough: bool) 
                                 time_ms: start.elapsed().as_millis() as u64,
                                 proven_gates: Vec::new(),
                                 unresolved_gates: Vec::new(),
+                                algebraic_result: None,
                             });
                         }
                     }
@@ -2465,6 +2468,7 @@ pub fn check_sequential_equivalence_sat(aig1: &Aig, aig2: &Aig, thorough: bool) 
                 time_ms: start.elapsed().as_millis() as u64,
                 proven_gates: Vec::new(),
                 unresolved_gates: Vec::new(),
+                algebraic_result: None,
             });
         }
         if !unresolved.is_empty() {
@@ -2524,21 +2528,24 @@ pub fn check_sequential_equivalence_sat(aig1: &Aig, aig2: &Aig, thorough: bool) 
         total_proven, diff_count, unresolved_detail, sat_elapsed);
 
     // --- Phase 2b-3: Algebraic verification for SAT-hard gates (multiplier cones) ---
-    if !all_unresolved.is_empty() {
-        let algebraic_proven = crate::arithmetic_solver::verify_unresolved_algebraic(
+    let algebraic_result = if !all_unresolved.is_empty() {
+        let result = crate::arithmetic_solver::verify_unresolved_algebraic(
             &miter,
             &matched_pairs,
             &all_unresolved,
         );
 
-        if !algebraic_proven.is_empty() {
-            let proven_set: BTreeSet<String> = algebraic_proven.iter().cloned().collect();
+        if !result.proven_names.is_empty() {
+            let proven_set: BTreeSet<String> = result.proven_names.iter().cloned().collect();
             all_unresolved.retain(|(_, name)| !proven_set.contains(name));
-            all_proven.extend(algebraic_proven);
+            all_proven.extend(result.proven_names.clone());
         }
-    }
+        Some(result)
+    } else {
+        None
+    };
 
-    // Return result with unresolved gates for caller to handle (GPU cone sim or CPU fallback)
+    // Return result with unresolved gates
     Ok(SymbolicEquivalenceResult {
         equivalent: true,
         counterexample: None,
@@ -2547,6 +2554,7 @@ pub fn check_sequential_equivalence_sat(aig1: &Aig, aig2: &Aig, thorough: bool) 
         time_ms: start.elapsed().as_millis() as u64,
         proven_gates: all_proven,
         unresolved_gates: all_unresolved,
+        algebraic_result,
     })
 }
 
@@ -2898,6 +2906,8 @@ pub struct SymbolicEquivalenceResult {
     pub proven_gates: Vec<String>,
     /// Unresolved gates: (miter output index, name) for SAT-hard gates
     pub unresolved_gates: Vec<(usize, String)>,
+    /// Algebraic verification result (if any unresolved gates were checked)
+    pub algebraic_result: Option<crate::arithmetic_solver::AlgebraicVerificationResult>,
 }
 
 /// Counterexample from symbolic equivalence check

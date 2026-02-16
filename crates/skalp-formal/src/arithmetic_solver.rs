@@ -14,6 +14,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use crate::equivalence::{Aig, AigLit, AigNode};
+use rayon::prelude::*;
 
 /// Maximum number of terms before bailing out (prevents exponential blowup on non-multiplier cones)
 const TERM_LIMIT: usize = 1_000_000;
@@ -28,6 +29,35 @@ const MAX_CONE_SIZE: usize = 200_000;
 
 /// Per-group time limit in seconds
 const GROUP_TIMEOUT_SECS: u64 = 30;
+
+// ── Public result types ─────────────────────────────────────────────────────
+
+/// Status of algebraic verification for a single group of related diff gates
+#[derive(Debug, Clone)]
+pub enum AlgebraicGroupStatus {
+    /// Group proven equivalent (W reduced to zero)
+    Proven { substitutions: usize, time_ms: u64 },
+    /// Could not prove — includes diagnostic reason
+    Unknown { reason: String, cone_size: usize, terms_at_failure: usize },
+}
+
+/// Report for a single group of diff gates
+#[derive(Debug, Clone)]
+pub struct AlgebraicGroupReport {
+    pub name: String,
+    pub num_bits: usize,
+    pub status: AlgebraicGroupStatus,
+}
+
+/// Complete result of algebraic verification across all groups
+#[derive(Debug, Clone)]
+pub struct AlgebraicVerificationResult {
+    pub proven_names: Vec<String>,
+    pub group_results: Vec<AlgebraicGroupReport>,
+    pub total_time_ms: u64,
+}
+
+// ── Polynomial implementation ───────────────────────────────────────────────
 
 /// A polynomial over Z with boolean variables (x²=x constraint).
 /// Each term is a monomial (sorted set of variable IDs) with an integer coefficient.
@@ -152,6 +182,12 @@ impl Polynomial {
     /// Multiply two polynomials with boolean constraint x²=x.
     /// Returns None if term limit is exceeded.
     fn mul(&self, other: &Polynomial) -> Option<Polynomial> {
+        self.mul_with_limit(other, TERM_LIMIT)
+    }
+
+    /// Multiply two polynomials with boolean constraint x²=x.
+    /// Returns None if `limit` terms is exceeded (allows early bail).
+    fn mul_with_limit(&self, other: &Polynomial, limit: usize) -> Option<Polynomial> {
         if self.is_zero() || other.is_zero() {
             return Some(Self::zero());
         }
@@ -171,7 +207,7 @@ impl Polynomial {
                     result.remove(&key);
                 }
 
-                if result.len() > TERM_LIMIT {
+                if result.len() > limit {
                     return None; // Bail out
                 }
             }
@@ -367,12 +403,10 @@ fn collect_cone_nodes(miter: &Aig, root_node_ids: &BTreeSet<u32>) -> Option<Vec<
     Some(nodes)
 }
 
-/// Result of algebraic verification for a single group
+/// Result of algebraic verification for a single group (internal)
 enum AlgebraicResult {
-    /// Proven equivalent (W reduced to zero)
-    Proven,
-    /// Could not prove (term limit exceeded, timeout, or non-zero remainder)
-    Unknown,
+    Proven { substitutions: usize, time_ms: u64 },
+    Unknown { reason: String, cone_size: usize, terms_at_failure: usize },
 }
 
 /// Verify a word-level group of related diff gates using backward polynomial rewriting.
@@ -402,8 +436,11 @@ fn verify_word_level_group(
         let (mir_lit, gate_lit) = match pair {
             Some((_, m, g)) => (*m, *g),
             None => {
-                // Can't find pre-XOR pair — fall back to unknown
-                return AlgebraicResult::Unknown;
+                return AlgebraicResult::Unknown {
+                    reason: "pair not found in matched_pairs".to_string(),
+                    cone_size: 0,
+                    terms_at_failure: 0,
+                };
             }
         };
 
@@ -424,32 +461,37 @@ fn verify_word_level_group(
     }
 
     if w.is_zero() {
-        return AlgebraicResult::Proven; // Trivially equal (same literal on both sides)
+        return AlgebraicResult::Proven {
+            substitutions: 0,
+            time_ms: group_start.elapsed().as_millis() as u64,
+        };
     }
 
     // Collect cone nodes in reverse topological order
     let cone_nodes = match collect_cone_nodes(miter, &all_root_nodes) {
         Some(nodes) => nodes,
         None => {
-            eprintln!("   Algebraic: group '{}' cone exceeds {} nodes, skipping",
-                group.first().map(|(_, n, _)| n.as_str()).unwrap_or("?"), MAX_CONE_SIZE);
-            return AlgebraicResult::Unknown;
+            return AlgebraicResult::Unknown {
+                reason: format!("cone exceeds {} AND nodes", MAX_CONE_SIZE),
+                cone_size: MAX_CONE_SIZE,
+                terms_at_failure: w.term_count(),
+            };
         }
     };
 
     let cone_size = cone_nodes.len();
     let deadline = group_start + std::time::Duration::from_secs(GROUP_TIMEOUT_SECS);
 
-    eprintln!("   Algebraic: cone has {} nodes for group", cone_size);
-
     // Backward rewrite: substitute AND gates from outputs toward inputs
     let mut substitutions = 0usize;
     for node_id in &cone_nodes {
         // Time check EVERY substitution
         if substitutions > 0 && std::time::Instant::now() >= deadline {
-            eprintln!("   Algebraic: timeout after {}s ({} substitutions, {} terms)",
-                group_start.elapsed().as_secs(), substitutions, w.term_count());
-            return AlgebraicResult::Unknown;
+            return AlgebraicResult::Unknown {
+                reason: format!("timeout after {}s", group_start.elapsed().as_secs()),
+                cone_size,
+                terms_at_failure: w.term_count(),
+            };
         }
 
         // O(1) check if this variable appears in W at all
@@ -459,50 +501,74 @@ fn verify_word_level_group(
 
         if let Some(AigNode::And { left, right }) = miter.nodes.get(*node_id as usize) {
             // AND(a, b) = a · b as a polynomial
+            // Use WORKING_TERM_LIMIT for early bail in intermediate product
             let left_poly = lit_to_poly(left);
             let right_poly = lit_to_poly(right);
-            let gate_poly = match left_poly.mul(&right_poly) {
+            let gate_poly = match left_poly.mul_with_limit(&right_poly, WORKING_TERM_LIMIT) {
                 Some(p) => p,
-                None => return AlgebraicResult::Unknown, // Term limit in intermediate product
+                None => {
+                    return AlgebraicResult::Unknown {
+                        reason: format!("intermediate AND product exceeded {} term limit", WORKING_TERM_LIMIT),
+                        cone_size,
+                        terms_at_failure: w.term_count(),
+                    };
+                }
             };
 
             // Substitute: replace var(node_id) with gate_poly in W
             w = match w.substitute(*node_id, &gate_poly, deadline) {
                 Some(p) => p,
                 None => {
-                    eprintln!("   Algebraic: term limit or timeout during substitution ({} subs, {} terms)",
-                        substitutions, w.term_count());
-                    return AlgebraicResult::Unknown;
+                    return AlgebraicResult::Unknown {
+                        reason: format!("substitution exceeded term/time limit ({} subs, {} terms)",
+                            substitutions, w.term_count()),
+                        cone_size,
+                        terms_at_failure: w.term_count(),
+                    };
                 }
             };
 
             substitutions += 1;
 
             if w.is_zero() {
-                eprintln!("   Algebraic: proven after {} substitutions ({}ms)",
-                    substitutions, group_start.elapsed().as_millis());
-                return AlgebraicResult::Proven; // Early termination
+                return AlgebraicResult::Proven {
+                    substitutions,
+                    time_ms: group_start.elapsed().as_millis() as u64,
+                };
             }
 
             // Working term limit — if polynomial is too large, this isn't a clean multiplier
             if w.term_count() > WORKING_TERM_LIMIT {
-                eprintln!("   Algebraic: working term limit {} exceeded ({} terms after {} subs)",
-                    WORKING_TERM_LIMIT, w.term_count(), substitutions);
-                return AlgebraicResult::Unknown;
+                return AlgebraicResult::Unknown {
+                    reason: format!("working term limit {} exceeded ({} terms after {} subs)",
+                        WORKING_TERM_LIMIT, w.term_count(), substitutions),
+                    cone_size,
+                    terms_at_failure: w.term_count(),
+                };
             }
         }
     }
 
     if w.is_zero() {
-        AlgebraicResult::Proven
+        AlgebraicResult::Proven {
+            substitutions,
+            time_ms: group_start.elapsed().as_millis() as u64,
+        }
     } else {
-        AlgebraicResult::Unknown
+        // Count remaining variables in the polynomial
+        let remaining_vars = w.active_vars.len();
+        AlgebraicResult::Unknown {
+            reason: format!("non-zero remainder after all substitutions ({} terms, {} variables remaining)",
+                w.term_count(), remaining_vars),
+            cone_size,
+            terms_at_failure: w.term_count(),
+        }
     }
 }
 
 /// Entry point: verify unresolved diff gates using algebraic polynomial rewriting.
 ///
-/// Returns the names of gates that were algebraically proven equivalent.
+/// Returns structured results with per-group diagnostics and the names of proven gates.
 ///
 /// # Arguments
 /// - `miter`: The miter AIG (from build_sequential_miter)
@@ -512,44 +578,82 @@ pub fn verify_unresolved_algebraic(
     miter: &Aig,
     matched_pairs: &[(String, AigLit, AigLit)],
     unresolved: &[(usize, String)],
-) -> Vec<String> {
+) -> AlgebraicVerificationResult {
     if unresolved.is_empty() {
-        return Vec::new();
+        return AlgebraicVerificationResult {
+            proven_names: Vec::new(),
+            group_results: Vec::new(),
+            total_time_ms: 0,
+        };
     }
 
     let start = std::time::Instant::now();
     let groups = group_gates_by_signal(unresolved);
-    let mut proven_names: Vec<String> = Vec::new();
     let total_groups = groups.len();
 
-    for (i, (base_name, group)) in groups.iter().enumerate() {
-        eprintln!("   Algebraic: group {}/{} '{}' ({} bits)...",
-            i + 1, total_groups, base_name, group.len());
-        let result = verify_word_level_group(miter, group, matched_pairs);
+    println!("   Algebraic: {} unresolved gates in {} groups", unresolved.len(), total_groups);
+
+    // Process groups in parallel — each group is independent
+    let groups_vec: Vec<(String, Vec<(usize, String, u32)>)> = groups.into_iter().collect();
+    let raw_results: Vec<(String, Vec<(usize, String, u32)>, AlgebraicResult)> = groups_vec
+        .par_iter()
+        .map(|(base_name, group)| {
+            let result = verify_word_level_group(miter, group, matched_pairs);
+            (base_name.clone(), group.clone(), result)
+        })
+        .collect();
+
+    // Collect results sequentially for deterministic output
+    let mut proven_names: Vec<String> = Vec::new();
+    let mut group_results: Vec<AlgebraicGroupReport> = Vec::new();
+
+    for (base_name, group, result) in &raw_results {
+        let num_bits = group.len();
         match result {
-            AlgebraicResult::Proven => {
-                eprintln!("   Algebraic: group '{}' PROVEN ({} bits) ({}ms)",
-                    base_name, group.len(), start.elapsed().as_millis());
+            AlgebraicResult::Proven { substitutions, time_ms } => {
+                println!("   Algebraic: group '{}' PROVEN ({} bits, {} subs, {}ms)",
+                    base_name, num_bits, substitutions, time_ms);
                 for (_, name, _) in group {
                     proven_names.push(name.clone());
                 }
+                group_results.push(AlgebraicGroupReport {
+                    name: base_name.clone(),
+                    num_bits,
+                    status: AlgebraicGroupStatus::Proven {
+                        substitutions: *substitutions,
+                        time_ms: *time_ms,
+                    },
+                });
             }
-            AlgebraicResult::Unknown => {
-                eprintln!("   Algebraic: group '{}' unknown ({} bits)",
-                    base_name, group.len());
+            AlgebraicResult::Unknown { reason, cone_size, terms_at_failure } => {
+                println!("   Algebraic: group '{}' unknown ({} bits): {}",
+                    base_name, num_bits, reason);
+                group_results.push(AlgebraicGroupReport {
+                    name: base_name.clone(),
+                    num_bits,
+                    status: AlgebraicGroupStatus::Unknown {
+                        reason: reason.clone(),
+                        cone_size: *cone_size,
+                        terms_at_failure: *terms_at_failure,
+                    },
+                });
             }
         }
     }
 
     let elapsed = start.elapsed().as_millis();
-    eprintln!(
+    println!(
         "   Algebraic: {}/{} unresolved gates proven via polynomial rewriting ({}ms)",
         proven_names.len(),
         unresolved.len(),
         elapsed
     );
 
-    proven_names
+    AlgebraicVerificationResult {
+        proven_names,
+        group_results,
+        total_time_ms: elapsed as u64,
+    }
 }
 
 #[cfg(test)]
@@ -698,8 +802,8 @@ mod tests {
         ];
 
         let miter = Aig::new();
-        let proven = verify_unresolved_algebraic(&miter, &matched_pairs, &unresolved);
-        assert_eq!(proven.len(), 1);
+        let result = verify_unresolved_algebraic(&miter, &matched_pairs, &unresolved);
+        assert_eq!(result.proven_names.len(), 1);
     }
 
     #[test]
@@ -726,7 +830,21 @@ mod tests {
             (0, "diff_output[x[0]]".to_string()),
         ];
 
-        let proven = verify_unresolved_algebraic(&miter, &matched_pairs, &unresolved);
-        assert_eq!(proven.len(), 1);
+        let result = verify_unresolved_algebraic(&miter, &matched_pairs, &unresolved);
+        assert_eq!(result.proven_names.len(), 1);
+    }
+
+    #[test]
+    fn test_mul_with_limit() {
+        let x = Polynomial::var(1);
+        let y = Polynomial::var(2);
+
+        // Normal mul works fine
+        let xy = x.mul_with_limit(&y, 100).unwrap();
+        assert_eq!(xy.term_count(), 1);
+
+        // Zero limit causes bail
+        let result = x.mul_with_limit(&y, 0);
+        assert!(result.is_none());
     }
 }
