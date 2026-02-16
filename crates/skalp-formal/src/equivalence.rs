@@ -2175,6 +2175,16 @@ pub fn check_sequential_equivalence_sat(aig1: &Aig, aig2: &Aig, thorough: bool) 
     // Build a miter that compares both outputs AND next-state (latch D inputs)
     let (miter, matched_pairs) = build_sequential_miter(aig1, aig2)?;
 
+    // Build state_input_name → init_value map from AIG1 (MIR side) for k-induction base case
+    let mut state_init_map: BTreeMap<String, bool> = BTreeMap::new();
+    for (&state_input_id, &latch_id) in &aig1.state_input_to_latch {
+        if let AigNode::Input { name } = &aig1.nodes[state_input_id as usize] {
+            if let AigNode::Latch { init, .. } = &aig1.nodes[latch_id as usize] {
+                state_init_map.insert(name.clone(), *init);
+            }
+        }
+    }
+
     let and_count = miter.nodes.iter().filter(|n| matches!(n, AigNode::And { .. })).count();
     eprintln!("   Miter: {} nodes, {} AND gates", miter.nodes.len(), and_count);
 
@@ -2268,6 +2278,22 @@ pub fn check_sequential_equivalence_sat(aig1: &Aig, aig2: &Aig, thorough: bool) 
     // (unresolved is acceptable since they may involve multipliers/accumulators,
     // but SAT = non-equivalent is still a failure).
     let (formula, var_map, _miter_output_lit) = aig_to_cnf(&miter);
+
+    // Build init-state constraints for k-induction base case
+    let init_constraints: Vec<Lit> = miter.nodes.iter().enumerate()
+        .filter_map(|(idx, node)| {
+            if let AigNode::Input { name } = node {
+                state_init_map.get(name).and_then(|&init_val| {
+                    var_map.get(&(idx as u32)).map(|&var| {
+                        if init_val { Lit::positive(var) } else { Lit::negative(var) }
+                    })
+                })
+            } else {
+                None
+            }
+        })
+        .collect();
+
     let diff_count = miter.outputs.len().saturating_sub(1);
     let num_threads = rayon::current_num_threads();
 
@@ -2526,6 +2552,86 @@ pub fn check_sequential_equivalence_sat(aig1: &Aig, aig2: &Aig, thorough: bool) 
     };
     eprintln!("   SAT total: {}/{} proven UNSAT{} ({}ms)",
         total_proven, diff_count, unresolved_detail, sat_elapsed);
+
+    // --- Phase 2b-2.5: k-Induction base case (constrained SAT with init state + proven lemmas) ---
+    if !all_unresolved.is_empty() && !init_constraints.is_empty() {
+        let kinduct_start = std::time::Instant::now();
+        let proven_set: BTreeSet<String> = all_proven.iter().cloned().collect();
+
+        // Build proven-gate lemmas: for each proven diff gate, assert diff = 0
+        let mut proven_lemmas: Vec<Lit> = Vec::new();
+        for idx in 0..diff_count {
+            let diff_name = miter.output_names.get(idx).cloned().unwrap_or_default();
+            if proven_set.contains(&diff_name) {
+                let diff_lit = &miter.outputs[idx];
+                if let Some(&var) = var_map.get(&diff_lit.node.0) {
+                    // Assert diff = 0: if diff_lit = var, assert !var; if diff_lit = !var, assert var
+                    let negated = if diff_lit.inverted {
+                        Lit::positive(var)
+                    } else {
+                        Lit::negative(var)
+                    };
+                    proven_lemmas.push(negated);
+                }
+            }
+        }
+
+        eprintln!("   k-Induction: {} init constraints, {} proven lemmas, re-checking {} gates",
+            init_constraints.len(), proven_lemmas.len(), all_unresolved.len());
+
+        // Build constrained gate list from all_unresolved
+        let constrained_gates: Vec<(usize, String, Lit)> = all_unresolved.iter()
+            .filter_map(|(idx, name)| {
+                let diff_lit = &miter.outputs[*idx];
+                var_map.get(&diff_lit.node.0).map(|&var| {
+                    let sat_lit = if diff_lit.inverted {
+                        Lit::negative(var)
+                    } else {
+                        Lit::positive(var)
+                    };
+                    (*idx, name.clone(), sat_lit)
+                })
+            })
+            .collect();
+
+        // Run per-gate SAT with init constraints + proven lemmas
+        let newly_proven: Vec<String> = constrained_gates.par_iter()
+            .filter_map(|(_idx, diff_name, sat_lit)| {
+                let mut solver = Solver::new();
+                solver.add_formula(&formula);
+                // Add init-state constraints
+                for &lit in &init_constraints {
+                    solver.add_clause(&[lit]);
+                }
+                // Add proven-gate lemmas
+                for &lit in &proven_lemmas {
+                    solver.add_clause(&[lit]);
+                }
+                // Assert this diff gate = 1 (looking for counterexample)
+                solver.add_clause(&[*sat_lit]);
+                solver.set_conflict_limit(500_000);
+
+                match solver.solve() {
+                    Ok(false) => {
+                        // UNSAT — proven equivalent from init state
+                        Some(diff_name.clone())
+                    }
+                    _ => None, // SAT (counterexample from init) or conflict limit exceeded
+                }
+            })
+            .collect();
+
+        if !newly_proven.is_empty() {
+            let newly_proven_set: BTreeSet<String> = newly_proven.iter().cloned().collect();
+            all_unresolved.retain(|(_, name)| !newly_proven_set.contains(name));
+            all_proven.extend(newly_proven.iter().cloned());
+            eprintln!("   k-Induction: {} additional gates proven ({}ms)",
+                newly_proven.len(), kinduct_start.elapsed().as_millis());
+        } else {
+            eprintln!("   k-Induction: no additional gates proven ({}ms)",
+                kinduct_start.elapsed().as_millis());
+        }
+    }
 
     // --- Phase 2b-3: Algebraic verification for SAT-hard gates (multiplier cones) ---
     let algebraic_result = if !all_unresolved.is_empty() {
