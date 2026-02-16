@@ -1543,7 +1543,6 @@ fn get_width_spec(data_type: &skalp_mir::DataType) -> String {
     match data_type {
         skalp_mir::DataType::Bit(width)
         | skalp_mir::DataType::Logic(width)
-        | skalp_mir::DataType::Int(width)
         | skalp_mir::DataType::Nat(width) => {
             if *width > 1 {
                 format!("[{}:0] ", width - 1)
@@ -1551,11 +1550,17 @@ fn get_width_spec(data_type: &skalp_mir::DataType) -> String {
                 String::new()
             }
         }
+        skalp_mir::DataType::Int(width) => {
+            if *width > 1 {
+                format!("signed [{}:0] ", width - 1)
+            } else {
+                "signed ".to_string()
+            }
+        }
         skalp_mir::DataType::Bool => String::new(), // Boolean is single bit
         // Parametric types use parameter name
         skalp_mir::DataType::BitParam { param, default }
         | skalp_mir::DataType::LogicParam { param, default }
-        | skalp_mir::DataType::IntParam { param, default }
         | skalp_mir::DataType::NatParam { param, default } => {
             if *default > 1 {
                 format!("[{}-1:0] ", param)
@@ -1563,10 +1568,16 @@ fn get_width_spec(data_type: &skalp_mir::DataType) -> String {
                 String::new()
             }
         }
+        skalp_mir::DataType::IntParam { param, default } => {
+            if *default > 1 {
+                format!("signed [{}-1:0] ", param)
+            } else {
+                "signed ".to_string()
+            }
+        }
         // Expression-based parametric types - convert MIR expression to SystemVerilog
         skalp_mir::DataType::BitExpr { expr, default }
         | skalp_mir::DataType::LogicExpr { expr, default }
-        | skalp_mir::DataType::IntExpr { expr, default }
         | skalp_mir::DataType::NatExpr { expr, default } => {
             if *default > 1 {
                 // Convert MIR expression to SystemVerilog string
@@ -1574,6 +1585,14 @@ fn get_width_spec(data_type: &skalp_mir::DataType) -> String {
                 format!("[{}-1:0] ", expr_str)
             } else {
                 String::new()
+            }
+        }
+        skalp_mir::DataType::IntExpr { expr, default } => {
+            if *default > 1 {
+                let expr_str = convert_mir_expr_to_sv(expr);
+                format!("signed [{}-1:0] ", expr_str)
+            } else {
+                "signed ".to_string()
             }
         }
         skalp_mir::DataType::Clock { .. } => String::new(), // Clocks are single bit
