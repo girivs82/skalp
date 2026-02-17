@@ -348,18 +348,7 @@ impl UnifiedSimulator {
                 self.latency_adjustments
                     .insert(module.name.clone(), adjustment);
 
-                eprintln!(
-                    "[SIM] Pipeline latency adjustment: {} = +{} cycles",
-                    module.name, adjustment
-                );
             }
-        }
-
-        if annotations.has_retiming() {
-            eprintln!(
-                "[SIM] Loaded pipeline annotations: {}",
-                annotations.summary()
-            );
         }
 
         self.pipeline_annotations = Some(annotations);
@@ -419,9 +408,6 @@ impl UnifiedSimulator {
             {
                 match crate::gpu_gate_runtime::GpuGateRuntime::new(sir) {
                     Ok(runtime) => {
-                        use std::io::Write;
-                        writeln!(std::io::stderr(), "🔧 [UNIFIED] Using GateLevelGpu backend").ok();
-                        std::io::stderr().flush().ok();
                         self.backend = SimulatorBackend::GateLevelGpu(runtime);
                         return Ok(());
                     }
@@ -438,11 +424,6 @@ impl UnifiedSimulator {
         }
 
         // CPU fallback
-        {
-            use std::io::Write;
-            writeln!(std::io::stderr(), "🔧 [UNIFIED] Using GateLevelCpu backend").ok();
-            std::io::stderr().flush().ok();
-        }
         self.backend =
             SimulatorBackend::GateLevelCpu(crate::gate_simulator::GateLevelSimulator::new(sir));
         Ok(())
@@ -487,26 +468,16 @@ impl UnifiedSimulator {
             {
                 match crate::gpu_ncl_runtime::GpuNclRuntime::new(netlist.clone()) {
                     Ok(runtime) => {
-                        eprintln!(
-                            "[SIM] NCL GPU runtime initialized: {}",
-                            if runtime.is_using_gpu() {
-                                "GPU"
-                            } else {
-                                "CPU fallback"
-                            }
-                        );
                         self.backend = SimulatorBackend::NclGpu(runtime);
                         return Ok(());
                     }
                     Err(e) => {
-                        eprintln!("NCL GPU initialization failed, falling back to CPU: {}", e);
                         // Fall through to CPU
                     }
                 }
             }
             #[cfg(not(target_os = "macos"))]
             {
-                eprintln!("GPU requested but not available on this platform, using CPU for NCL");
             }
         }
 
@@ -652,9 +623,7 @@ impl UnifiedSimulator {
             SimulatorBackend::BehavioralGpu(runtime) => {
                 // Convert u64 to bytes (little-endian)
                 let bytes = value.to_le_bytes().to_vec();
-                if let Err(e) = runtime.set_input(&internal_name, &bytes).await {
-                    eprintln!("❌ set_input FAILED for '{}' (internal: '{}'): {}", name, internal_name, e);
-                }
+                let _ = runtime.set_input(&internal_name, &bytes).await;
             }
             SimulatorBackend::GateLevelCpu(sim) => {
                 // Gate-level netlists use user-facing names, not internal _s names

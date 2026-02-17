@@ -253,20 +253,11 @@ impl Testbench {
         netlist: GateNetlist,
         config: UnifiedSimConfig,
     ) -> Result<Self> {
-        use std::time::Instant;
-        let start = Instant::now();
-
         let mut sim = UnifiedSimulator::new(config)
             .map_err(|e| anyhow::anyhow!("Failed to create NCL simulator: {}", e))?;
 
         sim.load_ncl_gate_level(netlist)
             .map_err(|e| anyhow::anyhow!("Failed to load NCL netlist: {}", e))?;
-
-        eprintln!(
-            "⏱️  [TESTBENCH] NCL testbench created in {:?} (device: {})",
-            start.elapsed(),
-            sim.device_info()
-        );
 
         Ok(Self {
             sim,
@@ -370,13 +361,6 @@ impl Testbench {
         config: UnifiedSimConfig,
         top_module: Option<&str>,
     ) -> Result<Self> {
-        use std::time::Instant;
-        let start_total = Instant::now();
-        eprintln!(
-            "⏱️  [TESTBENCH] Starting behavioral compilation with coverage of '{}'",
-            source_path
-        );
-
         let path = Path::new(source_path);
 
         // Initialize cache
@@ -389,7 +373,6 @@ impl Testbench {
             Self::compile_to_sir_with_top(path, &cache, cache_key.as_ref(), top_module)?
         } else if let Some(ref key) = cache_key {
             if let Ok(Some(cached_sir)) = cache.load(key) {
-                eprintln!("⏱️  [TESTBENCH] Using cached SIR");
                 cached_sir
             } else {
                 Self::compile_to_sir_with_top(path, &cache, Some(key), None)?
@@ -414,23 +397,12 @@ impl Testbench {
             .collect();
 
         // Create simulator
-        let start_sim = Instant::now();
         let mut sim = UnifiedSimulator::new(config)
             .map_err(|e| anyhow::anyhow!("Failed to create simulator: {}", e))?;
 
         sim.load_behavioral(&sir)
             .await
             .map_err(|e| anyhow::anyhow!("Failed to load behavioral design: {}", e))?;
-
-        eprintln!(
-            "⏱️  [TESTBENCH] Simulator initialized in {:?} (device: {})",
-            start_sim.elapsed(),
-            sim.device_info()
-        );
-        eprintln!(
-            "⏱️  [TESTBENCH] ✅ Behavioral+coverage testbench created in {:?}",
-            start_total.elapsed()
-        );
 
         Ok(Self {
             sim,
@@ -459,14 +431,6 @@ impl Testbench {
             get_stdlib_library, lower_mir_hierarchical_with_top, lower_mir_module_to_lir,
             map_hierarchical_to_gates, map_lir_to_gates_optimized,
         };
-        use std::time::Instant;
-
-        let start_total = Instant::now();
-        eprintln!(
-            "⏱️  [TESTBENCH] Starting gate-level compilation with coverage of '{}' with library '{}'",
-            source_path, library_name
-        );
-
         let path = Path::new(source_path);
 
         // Parse HIR
@@ -551,11 +515,6 @@ impl Testbench {
         let input_names = sim.get_input_names();
         let output_names = sim.get_output_names();
 
-        eprintln!(
-            "⏱️  [TESTBENCH] ✅ Gate-level+coverage testbench created in {:?}",
-            start_total.elapsed()
-        );
-
         Ok(Self {
             sim,
             mode: TestbenchMode::GateLevel,
@@ -584,13 +543,6 @@ impl Testbench {
         config: UnifiedSimConfig,
         top_module: Option<&str>,
     ) -> Result<Self> {
-        use std::time::Instant;
-        let start_total = Instant::now();
-        eprintln!(
-            "⏱️  [TESTBENCH] Starting behavioral compilation of '{}'",
-            source_path
-        );
-
         let path = Path::new(source_path);
 
         // Initialize cache
@@ -603,7 +555,6 @@ impl Testbench {
             Self::compile_to_sir_with_top(path, &cache, cache_key.as_ref(), top_module)?
         } else if let Some(ref key) = cache_key {
             if let Ok(Some(cached_sir)) = cache.load(key) {
-                eprintln!("⏱️  [TESTBENCH] Using cached SIR");
                 cached_sir
             } else {
                 Self::compile_to_sir_with_top(path, &cache, Some(key), None)?
@@ -617,23 +568,12 @@ impl Testbench {
         let output_names: Vec<String> = sir.outputs.iter().map(|o| o.name.clone()).collect();
 
         // Create simulator
-        let start_sim = Instant::now();
         let mut sim = UnifiedSimulator::new(config)
             .map_err(|e| anyhow::anyhow!("Failed to create simulator: {}", e))?;
 
         sim.load_behavioral(&sir)
             .await
             .map_err(|e| anyhow::anyhow!("Failed to load behavioral design: {}", e))?;
-
-        eprintln!(
-            "⏱️  [TESTBENCH] Simulator initialized in {:?} (device: {})",
-            start_sim.elapsed(),
-            sim.device_info()
-        );
-        eprintln!(
-            "⏱️  [TESTBENCH] ✅ Total creation time: {:?}",
-            start_total.elapsed()
-        );
 
         Ok(Self {
             sim,
@@ -666,15 +606,6 @@ impl Testbench {
             get_stdlib_library, lower_mir_hierarchical_with_top, lower_mir_module_to_lir,
             map_hierarchical_to_gates, map_lir_to_gates_optimized,
         };
-        use std::time::Instant;
-
-        let start_total = Instant::now();
-        eprintln!(
-            "⏱️  [TESTBENCH] Starting gate-level compilation of '{}' with library '{}'{}",
-            source_path,
-            library_name,
-            top_module_name.map(|t| format!(" (top: {})", t)).unwrap_or_default()
-        );
 
         let path = Path::new(source_path);
 
@@ -714,13 +645,6 @@ impl Testbench {
             tech_result.netlist
         };
 
-        eprintln!(
-            "⏱️  [TESTBENCH] Gate netlist ({}): {} cells, {} nets",
-            library_name,
-            netlist.cells.len(),
-            netlist.nets.len()
-        );
-
         // Convert to SIR and load
         let mut sir_result = convert_gate_netlist_to_sir(&netlist);
 
@@ -735,10 +659,6 @@ impl Testbench {
         if let Some(top_module) = top_mir_module {
             let behavioral_sir = skalp_sir::convert_mir_to_sir_with_hierarchy(&mir, top_module);
             sir_result.sir.name_registry = behavioral_sir.name_registry.clone();
-            eprintln!(
-                "⏱️  [TESTBENCH] BUG #237 FIX: Copied name_registry with {} entries from behavioral SIR",
-                behavioral_sir.name_registry.len()
-            );
         }
 
         let mut sim = UnifiedSimulator::new(config)
@@ -750,11 +670,6 @@ impl Testbench {
         // Extract port names before moving sim
         let input_names = sim.get_input_names();
         let output_names = sim.get_output_names();
-
-        eprintln!(
-            "⏱️  [TESTBENCH] ✅ Gate-level testbench created in {:?}",
-            start_total.elapsed()
-        );
 
         Ok(Self {
             sim,
@@ -777,13 +692,6 @@ impl Testbench {
         top_module: Option<&str>,
     ) -> Result<Self> {
         use skalp_lir::{get_stdlib_library, lower_mir_hierarchical, map_hierarchical_to_gates};
-        use std::time::Instant;
-
-        let start_total = Instant::now();
-        eprintln!(
-            "⏱️  [TESTBENCH] Starting NCL compilation of '{}' (top: {:?})",
-            source_path, top_module
-        );
 
         let path = Path::new(source_path);
 
@@ -805,7 +713,6 @@ impl Testbench {
                     mir.modules.iter().map(|m| &m.name).collect::<Vec<_>>()
                 );
             }
-            eprintln!("⏱️  [TESTBENCH] Using explicit top module: {}", top_name);
         }
 
         // Load technology library and synthesize
@@ -816,23 +723,12 @@ impl Testbench {
         let hier_netlist = map_hierarchical_to_gates(&hier_lir, &library);
         let netlist = hier_netlist.flatten();
 
-        eprintln!(
-            "⏱️  [TESTBENCH] NCL netlist: {} cells, {} nets",
-            netlist.cells.len(),
-            netlist.nets.len()
-        );
-
         // Load as NCL
         let mut sim = UnifiedSimulator::new(config)
             .map_err(|e| anyhow::anyhow!("Failed to create NCL simulator: {}", e))?;
 
         sim.load_ncl_gate_level(netlist)
             .map_err(|e| anyhow::anyhow!("Failed to load NCL netlist: {}", e))?;
-
-        eprintln!(
-            "⏱️  [TESTBENCH] ✅ NCL testbench created in {:?}",
-            start_total.elapsed()
-        );
 
         Ok(Self {
             sim,
@@ -856,26 +752,13 @@ impl Testbench {
         cache_key: Option<&String>,
         explicit_top: Option<&str>,
     ) -> Result<skalp_sir::SirModule> {
-        use std::time::Instant;
-
-        let start_hir = Instant::now();
         let context = skalp_frontend::parse_and_build_compilation_context(path)?;
-        eprintln!(
-            "⏱️  [TESTBENCH] HIR parsing completed in {:?}",
-            start_hir.elapsed()
-        );
 
-        let start_mir = Instant::now();
         let compiler = MirCompiler::new();
         let mir = compiler
             .compile_to_mir_with_modules(&context.main_hir, &context.module_hirs)
             .map_err(|e| anyhow::anyhow!("{}", e))?;
-        eprintln!(
-            "⏱️  [TESTBENCH] MIR compilation completed in {:?}",
-            start_mir.elapsed()
-        );
 
-        let start_sir = Instant::now();
         if mir.modules.is_empty() {
             anyhow::bail!("No modules found in design");
         }
@@ -958,13 +841,7 @@ impl Testbench {
                 .unwrap()
         };
 
-        eprintln!("✅ Selected top module: '{}'", top_module.name);
-
         let sir = convert_mir_to_sir_with_hierarchy(&mir, top_module);
-        eprintln!(
-            "⏱️  [TESTBENCH] SIR conversion completed in {:?}",
-            start_sir.elapsed()
-        );
 
         if let Some(key) = cache_key {
             let _ = cache.store(key, &sir);
@@ -1578,10 +1455,6 @@ impl Testbench {
             if let Some(ref db) = self.coverage_db {
                 let m = db.metrics();
                 if m.overall_pct >= goal {
-                    eprintln!(
-                        "⏱️  [COVERAGE] Goal {:.1}% reached at {:.1}% after {} vectors",
-                        goal, m.overall_pct, vectors_applied
-                    );
                     return Ok(m);
                 }
             }
@@ -1633,11 +1506,6 @@ impl Testbench {
                 overall_pct: 0.0,
                 vectors_applied: 0,
             });
-
-        eprintln!(
-            "⏱️  [COVERAGE] Closure finished: {:.1}% after {} vectors (goal: {:.1}%)",
-            metrics.overall_pct, vectors_applied, goal
-        );
 
         Ok(metrics)
     }

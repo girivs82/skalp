@@ -211,9 +211,6 @@ fn fix_by_delaying_ready(
 
     if detection_nets.is_empty() {
         // No detection nets found - fall back to per-fork buffering
-        eprintln!(
-            "Warning: No completion detection nets found, falling back to per-fork buffering"
-        );
         return fix_by_per_fork_buffering(netlist, sta_result, config);
     }
 
@@ -302,9 +299,6 @@ fn fix_by_delaying_ready_multi_corner(
 
     if detection_nets.is_empty() {
         // No detection nets found - fall back to per-fork buffering
-        eprintln!(
-            "Warning: No completion detection nets found, falling back to per-fork buffering"
-        );
         return fix_by_per_fork_buffering(netlist, &multi_result.worst_case, config);
     }
 

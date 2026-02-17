@@ -332,10 +332,6 @@ fn infer_variable_widths(mir_module: &Module) -> HashMap<skalp_mir::VariableId, 
                     let type_w = safe_get_type_width(&var.var_type);
                     // If the expression width differs from type width, record the actual width
                     if width != type_w {
-                        eprintln!(
-                            "🔧 BUG #8: Variable '{}' (id={}) type width={} but expression width={} - using expression width",
-                            var.name, var_id.0, type_w, width
-                        );
                         width_map.insert(*var_id, width);
                     }
                 }
@@ -365,10 +361,6 @@ fn scan_statements_for_variable_widths(
                         if let Some(var) = mir_module.variables.iter().find(|v| v.id == *var_id) {
                             let type_w = safe_get_type_width(&var.var_type);
                             if width != type_w {
-                                eprintln!(
-                                    "🔧 BUG #8: Variable '{}' (id={}) in process: type width={} but expression width={} - using expression width",
-                                    var.name, var_id.0, type_w, width
-                                );
                                 width_map.insert(*var_id, width);
                             }
                         }
@@ -499,13 +491,6 @@ fn generate_module(mir_module: &Module, mir: &Mir) -> Result<String> {
             skalp_mir::PortDirection::InOut => "inout",
         };
 
-        // Debug: check for struct types before calling get_type_dimensions
-        if matches!(&port.port_type, skalp_mir::DataType::Struct(_)) {
-            eprintln!(
-                "[CODEGEN_STRUCT_PORT_DEBUG] Module '{}' port '{}' has STRUCT type: {:?}",
-                mir_module.name, port.name, port.port_type
-            );
-        }
         let (element_width, array_dim) = get_type_dimensions(&port.port_type);
         ports.push(format!(
             "    {} {}{}{}",

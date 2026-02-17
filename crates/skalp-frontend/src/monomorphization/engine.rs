@@ -62,18 +62,6 @@ impl<'hir> MonomorphizationEngine<'hir> {
 
         for impl_block in &hir.implementations {
             // Find entity name for debugging
-            let entity_name = hir
-                .entities
-                .iter()
-                .find(|e| e.id == impl_block.entity)
-                .map(|e| e.name.as_str())
-                .unwrap_or("unknown");
-            eprintln!(
-                "[MONO_ENGINE] Registering impl for '{}' (entity_id={:?}) with {} signals",
-                entity_name,
-                impl_block.entity,
-                impl_block.signals.len()
-            );
             impl_map.insert(impl_block.entity, impl_block.clone());
         }
 
@@ -134,21 +122,6 @@ impl<'hir> MonomorphizationEngine<'hir> {
             // Collect instantiations from current state
             let collector = InstantiationCollector::new(&current_hir);
             let new_instantiations_set = collector.collect(&current_hir);
-
-            // Debug: show what was found
-            eprintln!(
-                "[MONOMORPHIZE] Collected {} instantiations from {} entities, {} implementations, {} trait_impls",
-                new_instantiations_set.len(),
-                current_hir.entities.len(),
-                current_hir.implementations.len(),
-                current_hir.trait_implementations.len()
-            );
-            for inst in &new_instantiations_set {
-                eprintln!(
-                    "[MONOMORPHIZE]   - {} (entity_id={:?}) const_args={:?}",
-                    inst.entity_name, inst.entity_id, inst.const_args
-                );
-            }
 
             // Find truly new instantiations (not seen before)
             // Sort by mangled name to ensure deterministic processing order
@@ -214,17 +187,6 @@ impl<'hir> MonomorphizationEngine<'hir> {
                     });
 
                     if let Some(impl_block) = impl_block {
-                        let impl_for_entity = hir
-                            .entities
-                            .iter()
-                            .find(|e| e.id == impl_block.entity)
-                            .map(|e| e.name.as_str())
-                            .unwrap_or("unknown");
-                        eprintln!(
-                            "[MONO_ENGINE] Found impl for instantiation '{}' with {} signals",
-                            impl_for_entity,
-                            impl_block.signals.len()
-                        );
                         // BUG #175 FIX: The impl_block was parsed with port IDs starting from 0,
                         // but after module merging, the entity's port IDs may have been reassigned
                         // to different values (e.g., 3, 4, 5, 6). We need to create a combined
@@ -297,21 +259,6 @@ impl<'hir> MonomorphizationEngine<'hir> {
                         impl_port_ids_used.sort_by_key(|id| id.0);
                         impl_port_ids_used.dedup();
 
-                        // BUG #237 DEBUG: Print port IDs for diagnosis
-                        eprintln!("[BUG #237 DEBUG] Entity '{}' has {} ports:", entity.name, entity.ports.len());
-                        for (i, p) in entity.ports.iter().enumerate() {
-                            if i < 5 {
-                                eprintln!("  [{}] PortId({}) = '{}'", i, p.id.0, p.name);
-                            }
-                        }
-                        eprintln!("[BUG #237 DEBUG] port_id_map has {} entries:", port_id_map.len());
-                        for (i, (old, new)) in port_id_map.iter().enumerate() {
-                            if i < 5 {
-                                eprintln!("  PortId({}) -> PortId({})", old.0, new.0);
-                            }
-                        }
-                        eprintln!("[BUG #237 DEBUG] impl_port_ids_used: {:?}", impl_port_ids_used.iter().map(|p| p.0).collect::<Vec<_>>());
-
                         // BUG #237 FIX: Include ALL entity ports in the mapping, not just those used in impl_port_ids_used.
                         // The previous approach only mapped ports explicitly referenced in the impl block,
                         // but some port references can come from nested expressions or instance connections
@@ -348,11 +295,6 @@ impl<'hir> MonomorphizationEngine<'hir> {
                             instantiation,
                             &impl_to_specialized_map,
                         );
-                        eprintln!(
-                            "[MONO_ENGINE] Specialized impl for '{}' has {} signals",
-                            specialized_entity.name,
-                            specialized_impl.signals.len()
-                        );
                         all_specialized_implementations.push(specialized_impl);
                     }
 
@@ -381,29 +323,10 @@ impl<'hir> MonomorphizationEngine<'hir> {
         }
 
         for impl_block in &mut new_implementations {
-            // BUG #207 DEBUG: Find which impl this is
-            let impl_entity_name = all_entities_map
-                .get(&impl_block.entity)
-                .map(|e| e.name.as_str())
-                .unwrap_or("unknown");
-
             for instance in &mut impl_block.instances {
                 // Check if this instance uses a generic entity
                 // Look in both original and specialized entities
                 if let Some(entity) = all_entities_map.get(&instance.entity) {
-                    // BUG #207 DEBUG
-                    if instance.name == "adder" {
-                        eprintln!(
-                            "[BUG #207 INSTANCE_UPDATE] impl for '{}': instance '{}' entity='{}' (id={:?}) generics={} generic_args={}",
-                            impl_entity_name,
-                            instance.name,
-                            entity.name,
-                            instance.entity,
-                            entity.generics.len(),
-                            instance.generic_args.len()
-                        );
-                    }
-
                     if !entity.generics.is_empty() {
                         // This is a generic instantiation - find the specialized entity
                         // BUG #239 FIX: Handle both explicit generic args AND default values.
@@ -419,40 +342,12 @@ impl<'hir> MonomorphizationEngine<'hir> {
                         };
 
                         if let Some(instantiation) = instantiation_opt {
-                            // BUG #207 DEBUG
-                            if instance.name == "adder" {
-                                eprintln!(
-                                    "[BUG #207 INSTANCE_UPDATE] Found instantiation for 'adder': {:?}",
-                                    instantiation.mangled_name()
-                                );
-                            }
-
                             if let Some(&specialized_id) = specialization_map.get(instantiation) {
-                                // BUG #207 DEBUG
-                                if instance.name == "adder" {
-                                    eprintln!(
-                                        "[BUG #207 INSTANCE_UPDATE] Updating 'adder' entity {:?} -> {:?}",
-                                        instance.entity, specialized_id
-                                    );
-                                }
-                                // BUG #239 FIX DEBUG
-                                eprintln!(
-                                    "[BUG #239 FIX] Updating instance '{}' entity {:?} -> {:?}",
-                                    instance.name, instance.entity, specialized_id
-                                );
                                 // Update instance to reference specialized entity
                                 instance.entity = specialized_id;
                                 // Clear generic args since specialized entity doesn't have generics
                                 instance.generic_args.clear();
-                            } else if instance.name == "adder" {
-                                eprintln!(
-                                    "[BUG #207 INSTANCE_UPDATE] No specialized_id for 'adder' instantiation!"
-                                );
                             }
-                        } else if instance.name == "adder" {
-                            eprintln!(
-                                "[BUG #207 INSTANCE_UPDATE] No matching instantiation found for 'adder'"
-                            );
                         }
                     }
                 }
@@ -597,10 +492,6 @@ impl<'hir> MonomorphizationEngine<'hir> {
             .collect();
 
         // BUG #237 FIX: Remap port IDs in entity assignments
-        if !entity.assignments.is_empty() {
-            eprintln!("[BUG #237 DEBUG] Remapping {} entity assignments for '{}', port_id_map has {} entries",
-                entity.assignments.len(), entity.name, port_id_map.len());
-        }
         let specialized_assignments = entity
             .assignments
             .iter()

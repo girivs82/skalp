@@ -256,42 +256,15 @@ impl SynthEngine {
         self.pass_results.clear();
 
         // Phase 1: Build AIG
-        if self.config.verbose {
-            eprintln!("Building AIG from GateNetlist...");
-        }
         let builder = AigBuilder::new(netlist);
         let mut aig = builder.build();
 
         let initial_stats = aig.compute_stats();
-        eprintln!(
-            "[ENGINE] Initial AIG: {} ANDs, {} levels, {} latches, {} inputs, {} outputs",
-            initial_stats.and_count,
-            initial_stats.max_level,
-            initial_stats.latch_count,
-            initial_stats.input_count,
-            initial_stats.output_count
-        );
-        if self.config.verbose {
-            eprintln!(
-                "Initial: {} ANDs, {} levels",
-                initial_stats.and_count, initial_stats.max_level
-            );
-        }
 
         // Phase 2: Run optimization passes
         self.run_optimization_passes(&mut aig);
 
         let final_stats = aig.compute_stats();
-        eprintln!(
-            "[ENGINE] After optimization: {} ANDs, {} levels, {} latches",
-            final_stats.and_count, final_stats.max_level, final_stats.latch_count
-        );
-        if self.config.verbose {
-            eprintln!(
-                "After optimization: {} ANDs, {} levels",
-                final_stats.and_count, final_stats.max_level
-            );
-        }
 
         // Phase 3: Run timing analysis if requested
         if self.config.run_timing_analysis {
@@ -302,9 +275,6 @@ impl SynthEngine {
         self.run_technology_mapping(&aig, library);
 
         // Phase 5: Convert back to GateNetlist using technology mapping results
-        if self.config.verbose {
-            eprintln!("Converting AIG back to GateNetlist...");
-        }
         let writer = if let Some(ref mapping) = self.mapping_result {
             AigWriter::with_mapping(library, mapping)
         } else {
@@ -352,8 +322,6 @@ impl SynthEngine {
     fn optimize_auto(&mut self, netlist: &GateNetlist, library: &TechLibrary) -> SynthResult {
         let start = Instant::now();
 
-        // DEBUG: eprintln!("[AUTO] Running multiple optimization strategies in parallel...");
-
         // Presets to try in parallel
         let presets = [SynthPreset::Resyn2, SynthPreset::Compress2];
 
@@ -378,14 +346,6 @@ impl SynthEngine {
             .expect("At least one preset should run");
 
         let total_time = start.elapsed().as_millis() as u64;
-
-        eprintln!(
-            "[AUTO] Best result: {:?} with {} cells (tested {} presets in {}ms)",
-            best_preset,
-            best_result.netlist.cell_count(),
-            presets.len(),
-            total_time
-        );
 
         // Update timing to reflect total parallel time
         best_result.total_time_ms = total_time;
@@ -444,11 +404,6 @@ impl SynthEngine {
         let total_instances = hier.instances.len();
         let cache_hits = total_instances - unique_modules;
 
-        eprintln!(
-            "[HIER] Optimizing {} unique module types ({} instances, {} cache hits)",
-            unique_modules, total_instances, cache_hits
-        );
-
         // Optimize each unique module type in parallel
         // Use the first instance of each type as the representative
         let cache: Mutex<IndexMap<String, SynthResult>> = Mutex::new(IndexMap::new());
@@ -462,24 +417,8 @@ impl SynthEngine {
             let first_path = &paths[0];
             let inst = &hier.instances[first_path];
 
-            let original_cells = inst.netlist.cell_count();
-            eprintln!(
-                "[HIER] {} ({}) -> optimizing... ({} cells, {} outputs) [{}x instances]",
-                first_path,
-                inst.module_name,
-                original_cells,
-                inst.netlist.outputs.len(),
-                paths.len()
-            );
-
             let mut engine = SynthEngine::with_preset(SynthPreset::Auto);
             let result = engine.optimize(&inst.netlist, library);
-
-            let optimized_cells = result.netlist.cell_count();
-            eprintln!(
-                "[HIER] {} -> {} cells (was {})",
-                first_path, optimized_cells, original_cells
-            );
 
             cache.lock().unwrap().insert(signature.clone(), result);
         });
@@ -516,13 +455,6 @@ impl SynthEngine {
         }
 
         let total_time = start.elapsed().as_millis() as u64;
-
-        eprintln!(
-            "[HIER] Hierarchical synthesis complete: {} instances ({} unique) in {}ms",
-            hier.instances.len(),
-            unique_modules,
-            total_time
-        );
 
         // Copy results to self for consistency
         self.total_time_ms = total_time;
@@ -566,24 +498,10 @@ impl SynthEngine {
         let passes = self.get_pass_sequence();
 
         for iteration in 0..self.config.max_iterations {
-            if self.config.verbose {
-                eprintln!("=== Iteration {} ===", iteration + 1);
-            }
-
             let before = aig.compute_stats();
 
             for pass_name in &passes {
                 if let Some(result) = self.run_pass(aig, pass_name) {
-                    let stats = aig.compute_stats();
-                    eprintln!(
-                        "[PASS] {}: {} -> {} ANDs, {} latches, {} inputs, {} outputs",
-                        result.pass_name,
-                        result.ands_before,
-                        result.ands_after,
-                        stats.latch_count,
-                        stats.input_count,
-                        stats.output_count
-                    );
                     self.pass_results.push(result);
                 }
             }
@@ -592,9 +510,6 @@ impl SynthEngine {
 
             // Check for convergence
             if before.and_count == after.and_count && before.max_level == after.max_level {
-                if self.config.verbose {
-                    eprintln!("Converged after {} iterations", iteration + 1);
-                }
                 break;
             }
         }
@@ -805,9 +720,6 @@ impl SynthEngine {
                 Some(pass.run(aig))
             }
             _ => {
-                if self.config.verbose {
-                    eprintln!("Unknown pass: {}", pass_name);
-                }
                 None
             }
         }
@@ -826,12 +738,6 @@ impl SynthEngine {
         }
 
         self.timing_result = Some(sta.analyze(aig));
-
-        if self.config.verbose {
-            if let Some(ref result) = self.timing_result {
-                eprintln!("Timing: {}", result.summary());
-            }
-        }
     }
 
     /// Run technology mapping using cells from the library
@@ -890,10 +796,6 @@ impl SynthEngine {
             // Auto is handled at optimize() level, shouldn't reach here
             SynthPreset::Auto => unreachable!("Auto preset handled in optimize_auto()"),
         };
-
-        if self.config.verbose {
-            eprintln!("Mapping: {}", result.stats.summary());
-        }
 
         self.mapping_result = Some(result);
     }

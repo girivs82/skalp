@@ -345,10 +345,6 @@ impl Pass for Scorr {
         // Step 2: Build equivalence classes
         let classes = self.build_equivalence_classes(aig, &signatures);
 
-        if self.verbose {
-            eprintln!("[SCORR] Found {} equivalence classes", classes.len());
-        }
-
         // Step 3: Prove/disprove equivalences and collect substitutions
         let mut substitutions: IndexMap<AigNodeId, AigLit> = IndexMap::new();
 
@@ -385,10 +381,6 @@ impl Pass for Scorr {
 
         // Step 4: Apply substitutions
         if !substitutions.is_empty() {
-            if self.verbose {
-                eprintln!("[SCORR] Merging {} equivalent signals", substitutions.len());
-            }
-
             aig.apply_substitutions(&substitutions);
 
             // Clean up

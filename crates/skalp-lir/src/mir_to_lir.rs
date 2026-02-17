@@ -2525,7 +2525,6 @@ impl MirToLirTransform {
                     ExpressionKind::Literal(Value::Integer(n)) => *n as u32,
                     ExpressionKind::Literal(Value::BitVector { value: n, .. }) => *n as u32,
                     _ => {
-                        eprintln!("[LIR] Replicate: non-constant count {:?}, treating as 1", count.kind);
                         1
                     }
                 };
@@ -2590,13 +2589,11 @@ impl MirToLirTransform {
                 }
             }
             ExpressionKind::FieldAccess { base, field } => {
-                eprintln!("[LIR] WARNING: Unsupported FieldAccess expression: field='{}', treating as zero", field);
                 self.warnings
                     .push(format!("Unsupported FieldAccess expression: field='{}'", field));
                 self.create_constant(&Value::Integer(0), expected_width)
             }
             _ => {
-                eprintln!("[LIR] WARNING: Unsupported expression kind: {:?}", expr.kind);
                 self.warnings
                     .push(format!("Unsupported expression kind: {:?}", expr.kind));
                 self.alloc_temp_signal(expected_width)

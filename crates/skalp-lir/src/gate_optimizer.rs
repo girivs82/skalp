@@ -1023,9 +1023,6 @@ impl GateOptimizer {
         // For each replaced net, we:
         // 1. Set alias_of to point to the final replacement (following the chain)
         // 2. Optionally transfer meaningful names to internal nets
-        let mut aliases_set = 0;
-        let mut names_transferred = 0;
-
         for (&old_net, &new_net) in &self.net_replacements {
             if old_net == new_net {
                 continue;
@@ -1043,7 +1040,6 @@ impl GateOptimizer {
             // Set alias_of on the old net to point to the final net
             if let Some(net) = netlist.nets.get_mut(old_net.0 as usize) {
                 net.alias_of = Some(final_net);
-                aliases_set += 1;
             }
 
             // For non-NCL or when the new net has an internal name, transfer the name
@@ -1057,18 +1053,10 @@ impl GateOptimizer {
                 if !old.starts_with("__") && !old.is_empty() && new.starts_with("__") {
                     if let Some(net) = netlist.nets.get_mut(final_net.0 as usize) {
                         net.name = old.clone();
-                        names_transferred += 1;
                     }
                 }
             }
         }
-        if aliases_set > 0 {
-            eprintln!(
-                "[BUF_REMOVAL] Set {} net aliases, transferred {} names",
-                aliases_set, names_transferred
-            );
-        }
-
         // Handle output ports specially - NEVER replace output port net IDs
         // Output ports are part of the module interface and must keep their original net IDs.
         // If an output was originally driven by a cell that got optimized away (folded to constant),

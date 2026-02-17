@@ -377,8 +377,5 @@ mod tests {
         assert_eq!(result.cones.len(), 1);
         assert_eq!(result.execution_order.len(), 1);
         assert!(result.parallelism_factor > 0.0);
-
-        println!("Extracted {} cones with parallelism factor {:.2}",
-                result.cones.len(), result.parallelism_factor);
     }
 }

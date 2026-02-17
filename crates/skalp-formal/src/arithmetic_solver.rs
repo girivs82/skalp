@@ -591,7 +591,6 @@ pub fn verify_unresolved_algebraic(
     let groups = group_gates_by_signal(unresolved);
     let total_groups = groups.len();
 
-    println!("   Algebraic: {} unresolved gates in {} groups", unresolved.len(), total_groups);
 
     // Process groups in parallel — each group is independent
     let groups_vec: Vec<(String, Vec<(usize, String, u32)>)> = groups.into_iter().collect();
@@ -611,8 +610,6 @@ pub fn verify_unresolved_algebraic(
         let num_bits = group.len();
         match result {
             AlgebraicResult::Proven { substitutions, time_ms } => {
-                println!("   Algebraic: group '{}' PROVEN ({} bits, {} subs, {}ms)",
-                    base_name, num_bits, substitutions, time_ms);
                 for (_, name, _) in group {
                     proven_names.push(name.clone());
                 }
@@ -626,8 +623,6 @@ pub fn verify_unresolved_algebraic(
                 });
             }
             AlgebraicResult::Unknown { reason, cone_size, terms_at_failure } => {
-                println!("   Algebraic: group '{}' unknown ({} bits): {}",
-                    base_name, num_bits, reason);
                 group_results.push(AlgebraicGroupReport {
                     name: base_name.clone(),
                     num_bits,
@@ -642,12 +637,6 @@ pub fn verify_unresolved_algebraic(
     }
 
     let elapsed = start.elapsed().as_millis();
-    println!(
-        "   Algebraic: {}/{} unresolved gates proven via polynomial rewriting ({}ms)",
-        proven_names.len(),
-        unresolved.len(),
-        elapsed
-    );
 
     AlgebraicVerificationResult {
         proven_names,

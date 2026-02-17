@@ -218,8 +218,6 @@ impl Placer {
 
     /// Place standard cells
     pub fn place(&self, netlist: &Netlist, floorplan: &Floorplan) -> Result<Placement, AsicError> {
-        println!("   Starting analytical placement...");
-
         // Step 1: Initial placement using quadratic placement
         let initial_placement = self.quadratic_placement(netlist, floorplan)?;
 
@@ -231,11 +229,6 @@ impl Placer {
 
         // Step 4: Final legalization and alignment
         let final_placement = self.final_legalization(&optimized, floorplan)?;
-
-        println!(
-            "   Placement complete: {} cells placed",
-            final_placement.cell_positions.len()
-        );
 
         Ok(final_placement)
     }
@@ -493,9 +486,6 @@ impl Placer {
         let mut best_cost = self.calculate_cost(&placement, netlist);
         let mut current_cost = best_cost;
 
-        println!("   Starting simulated annealing optimization...");
-        println!("   Initial cost: {:.2}", best_cost);
-
         for iteration in 0..self.config.iterations {
             // Generate a move
             let move_op = self.generate_move(&placement, netlist);
@@ -525,21 +515,12 @@ impl Placer {
             // Cool down
             if iteration % 100 == 0 {
                 temperature *= self.config.temperature.cooling_rate;
-
-                if iteration % 1000 == 0 {
-                    println!(
-                        "   Iteration {}: cost = {:.2}, temp = {:.2}",
-                        iteration, current_cost, temperature
-                    );
-                }
             }
 
             if temperature < self.config.temperature.final_temp {
                 break;
             }
         }
-
-        println!("   Annealing complete. Final cost: {:.2}", best_cost);
 
         Ok(placement)
     }

@@ -804,21 +804,9 @@ impl Aig {
             if let AigNode::And { left, right } = node {
                 // Validate node references before accessing
                 if left.node.0 as usize >= self.nodes.len() {
-                    eprintln!(
-                        "[AIG ERROR] Node {} references left={} but only {} nodes exist",
-                        id.0,
-                        left.node.0,
-                        self.nodes.len()
-                    );
                     continue;
                 }
                 if right.node.0 as usize >= self.nodes.len() {
-                    eprintln!(
-                        "[AIG ERROR] Node {} references right={} but only {} nodes exist",
-                        id.0,
-                        right.node.0,
-                        self.nodes.len()
-                    );
                     continue;
                 }
                 let left_level = levels[left.node.0 as usize];

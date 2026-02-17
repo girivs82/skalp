@@ -274,52 +274,6 @@ impl HierarchicalNetlist {
             result.resets.len()
         );
 
-        // BUG #237 DEBUG: Check for undriven nets that are used
-        let undriven_but_used: Vec<_> = result
-            .nets
-            .iter()
-            .enumerate()
-            .filter(|(_, net)| {
-                net.driver.is_none() && !net.fanout.is_empty() && !net.is_input
-            })
-            .collect();
-
-        if !undriven_but_used.is_empty() {
-            eprintln!(
-                "⚠️  BUG #237 DEBUG: {} nets are used but have no driver:",
-                undriven_but_used.len()
-            );
-            // Separate named signals from temporaries
-            let named_signals: Vec<_> = undriven_but_used.iter()
-                .filter(|(_, net)| !net.name.contains("._t"))
-                .collect();
-            let temp_signals: Vec<_> = undriven_but_used.iter()
-                .filter(|(_, net)| net.name.contains("._t"))
-                .collect();
-
-            eprintln!("  📋 {} named signals, {} _t temporaries", named_signals.len(), temp_signals.len());
-
-            eprintln!("  Named signals (first 15):");
-            for &&(idx, ref net) in named_signals.iter().take(15) {
-                eprintln!(
-                    "    - {} (idx={}, fanout={})",
-                    net.name,
-                    idx,
-                    net.fanout.len()
-                );
-            }
-
-            eprintln!("  _t temporaries (first 10):");
-            for &&(idx, ref net) in temp_signals.iter().take(10) {
-                eprintln!(
-                    "    - {} (idx={}, fanout={})",
-                    net.name,
-                    idx,
-                    net.fanout.len()
-                );
-            }
-        }
-
         result.update_stats();
         result
     }
@@ -354,21 +308,6 @@ impl HierarchicalNetlist {
                     path,
                     inst.port_connections.len()
                 );
-                // BUG #237 DEBUG: Print first few port connections
-                eprintln!(
-                    "🔗 BUG #237 STITCH: Instance '{}' has {} port connections (parent='{}')",
-                    path,
-                    inst.port_connections.len(),
-                    parent_path
-                );
-                // BUG #237 DEBUG: Show port connections for key instances
-                // BUG #246: Also show top.protection to debug hw_uv input issue
-                if path == "top.inner.protection" || path == "top.inner.charge_ctrl" || path.contains("current_loop") || path == "top.protection" {
-                    eprintln!("    PORT CONNECTIONS:");
-                    for (port_name, conn) in inst.port_connections.iter() {
-                        eprintln!("      🔌 '{}' -> {:?}", port_name, conn);
-                    }
-                }
             }
 
             // Sort port names for deterministic ordering
@@ -393,45 +332,14 @@ impl HierarchicalNetlist {
                         let child_exists = result.get_net(&child_net_name).is_some();
                         let parent_exists = result.get_net(&parent_net_name).is_some();
 
-                        // BUG #246 DEBUG: Trace hw_uv stitching
-                        if child_net_name.contains("hw_uv") || parent_net_name.contains("hw_uv") {
-                            eprintln!(
-                                "[BUG #246 STITCH] child='{}' (exists={}) <-> parent='{}' (exists={})",
-                                child_net_name, child_exists, parent_net_name, parent_exists
-                            );
-                        }
-
                         if child_exists && parent_exists {
                             // Direct single-net merge - parent first so its name survives
                             trace!("[STITCH]   ✓ {} <-> {}", child_net_name, parent_net_name);
-                            // BUG #246 DEBUG: Trace hw_uv merge
-                            if child_net_name.contains("hw_uv") || parent_net_name.contains("hw_uv") {
-                                eprintln!("[BUG #246 MERGE] Merging {} into {}", child_net_name, parent_net_name);
-                            }
                             merge_pairs.push((parent_net_name, child_net_name));
                         } else {
                             // Try bit-level stitching for multi-bit ports
                             let child_bits = result.find_bit_indexed_nets(&child_net_name);
                             let parent_bits = result.find_bit_indexed_nets(&parent_net_name);
-
-                            // BUG #237 DEBUG: Log bit-level stitch attempts for certain signals
-                            if parent_signal.contains("output") || parent_signal.contains("faults") {
-                                eprintln!(
-                                    "  🔍 BUG #237 bit-stitch: child_bits={}, parent_bits={}",
-                                    child_bits.len(),
-                                    parent_bits.len()
-                                );
-                                if child_bits.is_empty() || parent_bits.is_empty() {
-                                    eprintln!(
-                                        "     child='{}' -> {} bits found",
-                                        child_net_name, child_bits.len()
-                                    );
-                                    eprintln!(
-                                        "     parent='{}' -> {} bits found",
-                                        parent_net_name, parent_bits.len()
-                                    );
-                                }
-                            }
 
                             if !child_bits.is_empty() && !parent_bits.is_empty() {
                                 // Both have bit-indexed nets - stitch bit by bit
@@ -605,11 +513,6 @@ impl HierarchicalNetlist {
                                 value,
                                 net_name
                             );
-                            // Debug trace for compare_high constant
-                            if net_name.contains("compare_high") {
-                                println!("[GATE] 📌 Creating TIE cell for {} = 0x{:X}",
-                                    net_name, *value);
-                            }
                             result.add_tie_cell(&net_name, *value);
                         } else {
                             // Net doesn't exist - this might be an unused connection
@@ -618,11 +521,6 @@ impl HierarchicalNetlist {
                                 value,
                                 net_name
                             );
-                            // Debug trace for compare_high constant not found
-                            if net_name.contains("compare_high") {
-                                println!("[GATE] ⚠️ TIE cell for {} = 0x{:X} FAILED - net not found!",
-                                    net_name, *value);
-                            }
                         }
                     }
                     PortConnection::ChildPort(child_path, child_port) => {
@@ -664,21 +562,6 @@ impl HierarchicalNetlist {
 
                         // Get child bits
                         let child_bits = result.find_bit_indexed_nets(&child_net_name);
-
-                        // BUG #237 DEBUG: Check if parent signal exists
-                        if port_name == "kp_v" || port_name == "ki_v" {
-                            let parent_bits = result.find_bit_indexed_nets(&parent_base);
-                            eprintln!(
-                                "🔍 RANGE STITCH '{}': child='{}' ({} bits) -> parent='{}' ({} bits) [{}:{}]",
-                                port_name, child_net_name, child_bits.len(),
-                                parent_base, parent_bits.len(), high, low
-                            );
-                            // Check if first few parent bits exist
-                            for i in 0..3 {
-                                let pnet = format!("{}[{}]", parent_base, low + i);
-                                eprintln!("    parent bit {} exists: {}", low + i, result.get_net(&pnet).is_some());
-                            }
-                        }
 
                         if !child_bits.is_empty() {
                             let mut stitched = 0;
@@ -804,17 +687,11 @@ impl HierarchicalNetlist {
 
         // Apply all merges in a single batched pass
         if !merge_pairs.is_empty() {
-            eprintln!(
-                "🔗 BUG #237 STITCH: Applying {} merge pairs in batched mode",
-                merge_pairs.len()
-            );
             let pairs_refs: Vec<(&str, &str)> = merge_pairs
                 .iter()
                 .map(|(s, m)| (s.as_str(), m.as_str()))
                 .collect();
             result.merge_nets_batched(&pairs_refs);
-        } else {
-            eprintln!("🔗 BUG #237 STITCH: NO merge pairs to apply!");
         }
     }
 

@@ -138,19 +138,12 @@ impl CompilationCache {
             return Ok(None);
         }
 
-        let start = std::time::Instant::now();
         let data = fs::read(&cache_path)
             .with_context(|| format!("Failed to read cache file: {}", cache_path.display()))?;
 
         let sir: SirModule = bincode::deserialize(&data).with_context(|| {
             format!("Failed to deserialize cached SIR: {}", cache_path.display())
         })?;
-
-        eprintln!(
-            "⚡ [CACHE] Loaded SIR from cache in {:?} (key: {}...)",
-            start.elapsed(),
-            &cache_key[..12]
-        );
 
         Ok(Some(sir))
     }
@@ -170,19 +163,11 @@ impl CompilationCache {
         })?;
 
         let cache_path = cache_entry_dir.join("sir.bin");
-        let start = std::time::Instant::now();
 
         let data = bincode::serialize(sir).context("Failed to serialize SIR for caching")?;
 
         fs::write(&cache_path, &data)
             .with_context(|| format!("Failed to write cache file: {}", cache_path.display()))?;
-
-        eprintln!(
-            "💾 [CACHE] Stored SIR in cache in {:?} ({} bytes, key: {}...)",
-            start.elapsed(),
-            data.len(),
-            &cache_key[..12]
-        );
 
         Ok(())
     }

@@ -217,11 +217,7 @@ impl GpuNclRuntime {
         runtime.initialize()?;
 
         // Try to compile GPU shaders
-        if let Err(e) = runtime.compile_shaders() {
-            eprintln!(
-                "GPU NCL shader compilation failed, falling back to CPU: {}",
-                e
-            );
+        if let Err(_e) = runtime.compile_shaders() {
             runtime.use_gpu = false;
         }
 
@@ -316,27 +312,7 @@ impl GpuNclRuntime {
             .count();
         let has_fp32_cells = fp32_cell_count > 0;
 
-        // Debug: Show FP32 cell detection
-        if fp32_cell_count > 0 {
-            println!("[GPU_NCL] Found {} FP32 cells", fp32_cell_count);
-        } else {
-            // Show first few cell types for debugging
-            let mut type_counts: IndexMap<String, usize> = IndexMap::new();
-            for cell in &self.netlist.cells {
-                *type_counts.entry(cell.cell_type.clone()).or_default() += 1;
-            }
-            let mut types: Vec<_> = type_counts.iter().collect();
-            types.sort_by(|a, b| b.1.cmp(a.1));
-            println!(
-                "[GPU_NCL] Cell types (top 10): {:?}",
-                types.iter().take(10).collect::<Vec<_>>()
-            );
-        }
-
         if has_fp32_cells {
-            println!(
-                "[GPU_NCL] FP32 cells detected - using CPU fallback (GPU shader only supports 8 inputs/cell)"
-            );
             self.use_gpu = false;
         }
 
@@ -345,13 +321,6 @@ impl GpuNclRuntime {
         if self.cells.len() < 10000 {
             self.use_gpu = false;
         }
-
-        // Debug: show stateful gate count
-        println!(
-            "[GPU_NCL] Detected {} stateful gates (TH12, TH22, etc.) out of {} total cells",
-            self.num_stateful_gates,
-            self.cells.len()
-        );
 
         // Allocate GPU buffers (even if not using GPU, we need the data structures)
         self.allocate_buffers()?;
@@ -996,10 +965,6 @@ kernel void eval_ncl(
             // Determine actual width from signal nets (t rails + f rails)
             let actual_width = nets.len() / 2;
             let width = width.min(actual_width);
-            println!(
-                "[GPU_NCL_SET] Setting '{}': {} bits, value=0x{:X}",
-                name, width, value
-            );
 
             for bit in 0..width {
                 // For bits beyond u64 range, value is 0
@@ -1019,8 +984,6 @@ kernel void eval_ncl(
                     self.set_net(f_net, !bit_value);
                 }
             }
-        } else {
-            println!("[GPU_NCL_SET] Signal '{}' NOT FOUND!", name);
         }
     }
 
@@ -1626,13 +1589,7 @@ kernel void eval_ncl(
             iterations += 1;
             last_changes = changes;
 
-            // Debug: print changes for first few iterations and periodic updates
-            if iterations <= 5 || iterations % 10000 == 0 {
-                println!("[GPU_NCL] Iteration {}: {} changes", iterations, changes);
-            }
-
             if changes == 0 {
-                println!("[GPU_NCL] Converged at iteration {}", iterations);
                 break;
             }
 
@@ -1640,11 +1597,6 @@ kernel void eval_ncl(
             if changes == oscillation_value && changes <= MAX_OSCILLATION_SIZE {
                 oscillation_count += 1;
                 if oscillation_count >= OSCILLATION_THRESHOLD {
-                    println!(
-                        "[GPU_NCL] Detected stable oscillation: {} signals oscillating for {} iterations",
-                        changes, oscillation_count
-                    );
-                    println!("[GPU_NCL] Accepting as practically stable (oscillation is small)");
                     // Mark as stable since the oscillation is minor
                     self.is_stable = true;
                     return iterations;
@@ -1654,27 +1606,7 @@ kernel void eval_ncl(
                 oscillation_count = 1;
             }
 
-            // Also print last iterations before timeout
-            if iterations >= max_iterations - 5 {
-                println!(
-                    "[GPU_NCL] Iteration {}: {} changes (near max)",
-                    iterations, changes
-                );
-            }
-
             if iterations >= max_iterations {
-                println!(
-                    "[GPU_NCL] Warning: Max iterations ({}) reached with {} changes still pending",
-                    max_iterations, changes
-                );
-                // Debug: identify oscillating cells
-                let oscillating = self.identify_oscillating_cells(20);
-                if !oscillating.is_empty() {
-                    println!("[GPU_NCL] Top oscillating cells:");
-                    for (path, cell_type, count) in oscillating.iter().take(10) {
-                        println!("  {} ({}) - {} changes", path, cell_type, count);
-                    }
-                }
                 break;
             }
         }

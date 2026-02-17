@@ -301,14 +301,6 @@ impl Pass for Dchoice {
             }
         }
 
-        if self.verbose {
-            eprintln!(
-                "[DCHOICE] Recorded {} choices across {} nodes",
-                self.choices_recorded,
-                all_choices.len()
-            );
-        }
-
         // Final cleanup
         let mut dce = super::Dce::new();
         dce.run(aig);

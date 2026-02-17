@@ -267,38 +267,6 @@ impl GateNetlistToSirConverter {
     /// like `output_port = internal_signal;`. We need to create buffer primitives to
     /// connect the driver output to the output port signal.
     fn create_output_buffers(&mut self, netlist: &GateNetlist, comb_ops: &mut Vec<SirOperation>) {
-        // Debug: List all output ports and their driver status
-        if std::env::var("SKALP_DEBUG_GPU").is_ok() {
-            // Print cell ID range in netlist
-            let min_id = netlist.cells.iter().map(|c| c.id.0).min().unwrap_or(0);
-            let max_id = netlist.cells.iter().map(|c| c.id.0).max().unwrap_or(0);
-            println!(
-                "[SIR] Netlist has {} cells with IDs from {} to {}",
-                netlist.cells.len(),
-                min_id,
-                max_id
-            );
-
-            println!("[SIR] Output port analysis:");
-            for net in &netlist.nets {
-                if net.is_output && net.name.contains("add_result[0]") {
-                    let driver_info = if let Some(driver_id) = &net.driver {
-                        if let Some(cell) = netlist.cells.iter().find(|c| c.id == *driver_id) {
-                            format!("cell_type={}, outputs={:?}", cell.cell_type, cell.outputs)
-                        } else {
-                            format!("CELL {} NOT FOUND in netlist", driver_id.0)
-                        }
-                    } else {
-                        "NO DRIVER".to_string()
-                    };
-                    println!(
-                        "[SIR]   Output '{}' (net_id={:?}): driver={:?}, {}",
-                        net.name, net.id, net.driver, driver_info
-                    );
-                }
-            }
-        }
-
         for net in &netlist.nets {
             // Only process output ports that have a driver
             if net.is_output && net.driver.is_some() {
@@ -332,13 +300,6 @@ impl GateNetlistToSirConverter {
                                     path: format!("output_buffer_{}", net.name),
                                 };
 
-                                if std::env::var("SKALP_DEBUG_GPU").is_ok() {
-                                    println!(
-                                        "[SIR]   Created buffer for output '{}': {} -> {}",
-                                        net.name, driver_signal_id.0, output_signal_id.0
-                                    );
-                                }
-
                                 comb_ops.push(buffer_op);
                             }
                         }
@@ -359,28 +320,6 @@ impl GateNetlistToSirConverter {
     /// so the gate-level simulator can properly initialize registers at cycle 0.
     fn extract_dff_reset_values(&self, netlist: &GateNetlist, module: &mut SirModule) {
         use bitvec::prelude::*;
-
-        let debug = std::env::var("SKALP_DEBUG_RESET").is_ok();
-
-        // Count cells by source_op for debugging
-        if debug {
-            let mut reset_mux_count = 0;
-            let mut reset_value_count = 0;
-            let mut seq_count = 0;
-            for cell in &netlist.cells {
-                if cell.source_op.as_deref() == Some("ResetMux") {
-                    reset_mux_count += 1;
-                }
-                if cell.source_op.as_deref() == Some("ResetValue") {
-                    reset_value_count += 1;
-                }
-                if cell.is_sequential() {
-                    seq_count += 1;
-                }
-            }
-            println!("[BUG #246 DEBUG] Netlist has {} cells: {} sequential, {} ResetMux, {} ResetValue",
-                     netlist.cells.len(), seq_count, reset_mux_count, reset_value_count);
-        }
 
         // Find all DFF cells
         for cell in &netlist.cells {
@@ -423,13 +362,6 @@ impl GateNetlistToSirConverter {
                                     let mut bv: BitVec = BitVec::with_capacity(1);
                                     bv.push(reset_bit);
                                     signal.initial_value = Some(bv);
-
-                                    if std::env::var("SKALP_DEBUG_RESET").is_ok() {
-                                        println!(
-                                            "[BUG #246 FIX] DFF '{}' reset value = {} (from TIE cell '{}')",
-                                            signal.name, reset_bit as u8, tie.cell_type
-                                        );
-                                    }
                                 }
                             }
                         }
@@ -765,11 +697,7 @@ impl GateNetlistToSirConverter {
 
             // Default to buffer for unknown types
             _ => {
-                eprintln!(
-                    "Warning: Unknown cell type '{}', mapping to buffer",
-                    cell_type
-                );
-                PrimitiveType::Buf // Use buffer as fallback
+                PrimitiveType::Buf // Use buffer as fallback for unknown types
             }
         }
     }
@@ -840,7 +768,6 @@ impl GateNetlistToSirConverter {
         // If we didn't process all operations, there's a cycle
         if result.len() != n {
             // Fall back to original order (shouldn't happen for well-formed combinational logic)
-            eprintln!("Warning: Cycle detected in combinational logic, using original order");
             return (0..n).collect();
         }
 

@@ -302,33 +302,16 @@ impl PolicyTrainer {
         let start_time = std::time::Instant::now();
 
         // Convert to experiences based on mode
-        let (mut experiences, mode_desc) = match mode {
-            TrainingMode::Standard => (Self::dataset_to_experiences(dataset), ""),
-            TrainingMode::PositiveOnly => (
-                Self::dataset_to_positive_experiences(dataset),
-                " (positive rewards only)",
-            ),
-            TrainingMode::EpisodeWeighted => (
-                Self::dataset_to_episode_weighted_experiences(dataset),
-                " (episode-weighted)",
-            ),
-            TrainingMode::BestEpisodes => (
-                Self::dataset_to_best_episode_experiences(dataset, 0.20),
-                " (top 20% episodes)",
-            ),
+        let mut experiences = match mode {
+            TrainingMode::Standard => Self::dataset_to_experiences(dataset),
+            TrainingMode::PositiveOnly => Self::dataset_to_positive_experiences(dataset),
+            TrainingMode::EpisodeWeighted => Self::dataset_to_episode_weighted_experiences(dataset),
+            TrainingMode::BestEpisodes => Self::dataset_to_best_episode_experiences(dataset, 0.20),
         };
 
         if experiences.is_empty() {
-            eprintln!("Warning: No training experiences found");
             return self.stats.clone();
         }
-
-        println!(
-            "Training on {} experiences from {} episodes{}",
-            experiences.len(),
-            dataset.episodes.len(),
-            mode_desc
-        );
 
         // Compute baseline and advantages
         let baseline = Self::compute_baseline(&experiences);
@@ -344,12 +327,6 @@ impl PolicyTrainer {
         experiences.shuffle(&mut rng);
 
         let (train_exp, val_exp) = experiences.split_at(train_size);
-
-        println!(
-            "Training: {} experiences, Validation: {} experiences",
-            train_exp.len(),
-            val_exp.len()
-        );
 
         // Training loop with early stopping
         let mut epochs_without_improvement = 0;
@@ -372,28 +349,8 @@ impl PolicyTrainer {
                 epochs_without_improvement += 1;
             }
 
-            if epoch % 10 == 0 || epoch == self.config.epochs - 1 {
-                println!(
-                    "Epoch {}/{}: loss={:.4}, val_acc={:.2}%{}",
-                    epoch + 1,
-                    self.config.epochs,
-                    loss,
-                    val_accuracy * 100.0,
-                    if epochs_without_improvement > 0 {
-                        format!(" (no improvement for {})", epochs_without_improvement)
-                    } else {
-                        " *best*".to_string()
-                    }
-                );
-            }
-
             // Early stopping check
             if epochs_without_improvement >= self.config.early_stopping_patience {
-                println!(
-                    "\nEarly stopping at epoch {} (no improvement for {} epochs)",
-                    epoch + 1,
-                    self.config.early_stopping_patience
-                );
                 break;
             }
         }
@@ -401,23 +358,9 @@ impl PolicyTrainer {
         // Restore best policy
         if let Some(best) = self.best_policy.take() {
             self.policy = best;
-            println!(
-                "Restored best model from epoch {}",
-                self.stats.best_epoch + 1
-            );
         }
 
         self.stats.training_time_secs = start_time.elapsed().as_secs_f64();
-
-        println!(
-            "\nTraining complete in {:.1}s",
-            self.stats.training_time_secs
-        );
-        println!(
-            "Best validation accuracy: {:.2}% at epoch {}",
-            self.stats.best_val_accuracy * 100.0,
-            self.stats.best_epoch + 1
-        );
 
         self.stats.clone()
     }

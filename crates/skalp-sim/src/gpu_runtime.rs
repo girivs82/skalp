@@ -4,7 +4,6 @@ use async_trait::async_trait;
 use indexmap::IndexMap;
 use metal::{Buffer, CommandQueue, ComputePipelineState, Device, MTLResourceOptions};
 use skalp_sir::{MetalBackend, SirModule};
-use std::fs;
 
 pub struct GpuDevice {
     device: Device,
@@ -296,8 +295,6 @@ impl GpuRuntime {
             let mut signal_offset = 0usize;
             let mut output_offset = 0usize;
 
-            let _debug = std::env::var("SKALP_DEBUG_OUTPUT").is_ok();
-
             // Outputs are at the beginning of the signal buffer
             // BUG FIX: Skip state element outputs - they're NOT in the Signals struct
             // (Metal shader generator skips them too, see codegen/shared.rs)
@@ -387,85 +384,6 @@ impl GpuRuntime {
             unsafe {
                 std::ptr::copy_nonoverlapping(main_ptr, shadow_ptr, size);
             }
-        }
-    }
-
-    fn debug_print_state(&self, label: &str) {
-        if let Some(register_buffer) = &self.register_buffer {
-            let ptr = register_buffer.contents() as *const u32;
-            // Print first few registers
-            let reg0 = unsafe { *ptr.offset(0) };
-            let reg1 = unsafe { *ptr.offset(1) };
-            let reg2 = unsafe { *ptr.offset(2) };
-            let reg3 = unsafe { *ptr.offset(3) };
-            let reg4 = unsafe { *ptr.offset(4) };
-            let reg5 = unsafe { *ptr.offset(5) };
-            eprintln!(
-                "[{}] regs: [0]={:#x} [1]={:#x} [2]={:#x} [3]={:#x} [4]={:#x} [5]={:#x}",
-                label, reg0, reg1, reg2, reg3, reg4, reg5
-            );
-        }
-        if let Some(signal_buffer) = &self.signal_buffer {
-            let ptr = signal_buffer.contents() as *const u32;
-            // Print first few signals (outputs are at the beginning)
-            let sig0 = unsafe { *ptr.offset(0) };
-            let sig1 = unsafe { *ptr.offset(1) };
-            let sig2 = unsafe { *ptr.offset(2) };
-            let sig3 = unsafe { *ptr.offset(3) };
-            eprintln!(
-                "[{}] sigs: [0]={:#x} [1]={:#x} [2]={:#x} [3]={:#x}",
-                label, sig0, sig1, sig2, sig3
-            );
-        }
-    }
-
-    fn debug_print_state_detailed(&self, label: &str) {
-        println!("=== {} ===", label);
-        // Print inputs
-        if let Some(input_buffer) = &self.input_buffer {
-            let ptr = input_buffer.contents() as *const u32;
-            let mut inputs = Vec::new();
-            for i in 0..8 {
-                inputs.push(unsafe { *ptr.offset(i) });
-            }
-            println!("  Inputs: {:?}", inputs);
-        }
-        // Print registers
-        if let Some(register_buffer) = &self.register_buffer {
-            let ptr = register_buffer.contents() as *const u32;
-            let mut regs = Vec::new();
-            for i in 0..8 {
-                regs.push(unsafe { *ptr.offset(i) });
-            }
-            println!("  Registers: {:?}", regs);
-        }
-        // Print shadow registers
-        if let Some(shadow_buffer) = &self.shadow_register_buffer {
-            let ptr = shadow_buffer.contents() as *const u32;
-            let mut shadow = Vec::new();
-            for i in 0..8 {
-                shadow.push(unsafe { *ptr.offset(i) });
-            }
-            println!("  Shadow: {:?}", shadow);
-        }
-        // Print first 10 signals (outputs are at beginning: vertex_ready, output_valid, ...)
-        if let Some(signal_buffer) = &self.signal_buffer {
-            let ptr = signal_buffer.contents() as *const u32;
-            let mut sigs = Vec::new();
-            for i in 0..10 {
-                sigs.push(unsafe { *ptr.offset(i) });
-            }
-            println!("  Signals[0-9]: {:?}", sigs);
-            println!("  vertex_ready={}, output_valid={}", sigs[0], sigs[1]);
-        }
-        // Print output buffer
-        if let Some(output_buffer) = &self.output_buffer {
-            let ptr = output_buffer.contents() as *const u32;
-            let mut outputs = Vec::new();
-            for i in 0..10 {
-                outputs.push(unsafe { *ptr.offset(i) });
-            }
-            println!("  Outputs: {:?}", outputs);
         }
     }
 
@@ -759,16 +677,6 @@ impl SimulationRuntime for GpuRuntime {
         // Generate Metal shader from SIR
         let shader_source = MetalBackend::generate(module);
 
-        // DEBUG: Write Metal shader source to file for inspection
-        if let Err(e) = fs::write("/tmp/skalp_metal_shader.metal", &shader_source) {
-            eprintln!(
-                "Warning: Could not write Metal shader to /tmp/skalp_metal_shader.metal: {}",
-                e
-            );
-        } else {
-            eprintln!("✅ Metal shader written to /tmp/skalp_metal_shader.metal");
-        }
-
         // The Metal backend generates a single combined `combinational_cone_0` kernel
         // that evaluates all combinational logic in topological order.
         // We always use this single kernel regardless of how many cones exist.
@@ -789,11 +697,9 @@ impl SimulationRuntime for GpuRuntime {
         match self.compile_shader(&shader_source, "batched_simulation") {
             Ok(pipeline) => {
                 self.pipelines.insert("batched".to_string(), pipeline);
-                println!("⚡ BATCHED: Kernel compiled successfully");
             }
-            Err(e) => {
-                println!("⚠️ BATCHED: Kernel compilation FAILED: {:?}", e);
-                println!("   Falling back to step-by-step GPU execution");
+            Err(_) => {
+                // Fall back to step-by-step GPU execution
             }
         }
 
@@ -841,42 +747,18 @@ impl SimulationRuntime for GpuRuntime {
         // This ensures sequential reads consistent pre-edge values while writing new values
         self.create_register_snapshot();
 
-        let debug_phases = std::env::var("SKALP_DEBUG_PHASES").is_ok();
-        if debug_phases {
-            eprintln!(">>> STEP() called, cycle {} <<<", self.current_cycle);
-        }
-        use std::io::Write;
-        let _ = std::io::stdout().flush();
-
         // === PHASE 1: Initial update pass ===
         // Combinational: compute signals from working registers (still have old values)
-        if debug_phases {
-            eprintln!("=== PHASE 1: Combinational (old state) ===");
-            self.debug_print_state("before phase 1 comb");
-        }
-
         self.execute_combinational().await?;
 
         // Sequential: state machines update based on old signals
         // (reads frozen snapshot, writes to working buffer)
-        if debug_phases {
-            eprintln!("=== PHASE 1: Sequential ===");
-        }
         self.execute_sequential().await?;
-        if debug_phases {
-            self.debug_print_state("after phase 1 seq");
-        }
 
         // === FINAL COMBINATIONAL: Output update pass ===
         // Recompute combinational outputs to reflect NEW register values
         // This provides FWFT (First Word Fall Through) semantics
-        if debug_phases {
-            eprintln!("=== FINAL: Combinational (new state) ===");
-        }
         self.execute_combinational().await?;
-        if debug_phases {
-            self.debug_print_state("after final comb");
-        }
 
         // Capture outputs after convergence
         self.capture_outputs()?;
@@ -890,65 +772,6 @@ impl SimulationRuntime for GpuRuntime {
         // when set_input() is called, so if the testbench doesn't call set_input()
         // between steps, we'd incorrectly detect edges on every step.
         self.update_clock_previous_values();
-
-        // Debug: Print register values when they have meaningful data
-        // Disabled debug output - enable by changing false to true
-        #[allow(clippy::overly_complex_bool_expr)]
-        if false {
-            if let Some(register_buffer) = &self.register_buffer {
-                let register_ptr = register_buffer.contents() as *const u32;
-                // AsyncFifo registers (alphabetically sorted in Metal struct):
-                // reg0-7: fifo_mem_0-7_value
-                // reg8: fifo_rd_ptr
-                // reg9: fifo_rd_ptr_gray
-                // reg10: fifo_rd_ptr_gray_sync1
-                // reg11: fifo_rd_ptr_gray_sync2
-                // reg12: fifo_wr_ptr
-                // reg13: fifo_wr_ptr_gray
-                // reg14: fifo_wr_ptr_gray_sync1
-                // reg15: fifo_wr_ptr_gray_sync2
-                let reg0 = unsafe { *register_ptr.offset(0) };
-                let reg1 = unsafe { *register_ptr.offset(1) };
-                let reg2 = unsafe { *register_ptr.offset(2) };
-                let reg8 = unsafe { *register_ptr.offset(8) };
-                let reg9 = unsafe { *register_ptr.offset(9) };
-                let reg10 = unsafe { *register_ptr.offset(10) };
-                let reg11 = unsafe { *register_ptr.offset(11) };
-                let reg12 = unsafe { *register_ptr.offset(12) };
-                let reg13 = unsafe { *register_ptr.offset(13) };
-                let reg14 = unsafe { *register_ptr.offset(14) };
-                let reg15 = unsafe { *register_ptr.offset(15) };
-
-                // Check input values - print ALL inputs
-                if let Some(input_buffer) = &self.input_buffer {
-                    let input_ptr = input_buffer.contents() as *const u32;
-                    // Print first 8 input words
-                    let in0 = unsafe { *input_ptr.offset(0) };
-                    let in1 = unsafe { *input_ptr.offset(1) };
-                    let in2 = unsafe { *input_ptr.offset(2) };
-                    let in3 = unsafe { *input_ptr.offset(3) };
-                    let in4 = unsafe { *input_ptr.offset(4) };
-                    let in5 = unsafe { *input_ptr.offset(5) };
-                    let in6 = unsafe { *input_ptr.offset(6) };
-
-                    // Also check signal buffer for intermediate values
-                    if let Some(signal_buffer) = &self.signal_buffer {
-                        let _signal_ptr = signal_buffer.contents() as *const u32;
-
-                        // Only print detailed debug on key cycles
-                        if self.current_cycle == 7 || self.current_cycle == 8 {
-                            eprintln!("DEBUG Cycle {}: inputs=[wr_clk:{}, wr_rst:{}, rd_clk:{}, rd_rst:{}, wr_data:0x{:08X}, wr_en:{}, rd_en:{}]",
-                                self.current_cycle, in0, in1, in2, in3, in4, in5, in6);
-                            eprintln!("  regs=[mem[0-2]:{},{},{}, rd_ptr:{}, rd_ptr_gray:{}, rd_ptr_gray_sync1:{}, rd_ptr_gray_sync2:{}, wr_ptr:{}, wr_ptr_gray:{}, wr_ptr_gray_sync1:{}, wr_ptr_gray_sync2:{}]",
-                                reg0, reg1, reg2, reg8, reg9, reg10, reg11, reg12, reg13, reg14, reg15);
-                        }
-                    } else {
-                        eprintln!("DEBUG Cycle {}: inputs=[wr_clk:{}, wr_rst:{}, rd_clk:{}, rd_rst:{}, wr_data:0x{:08X}, wr_en:{}, rd_en:{}], regs=[mem[0-2]:{},{},{}, rd_ptr:{}, rd_ptr_gray:{}, rd_ptr_gray_sync1:{}, rd_ptr_gray_sync2:{}, wr_ptr:{}, wr_ptr_gray:{}, wr_ptr_gray_sync1:{}, wr_ptr_gray_sync2:{}]",
-                            self.current_cycle, in0, in1, in2, in3, in4, in5, in6, reg0, reg1, reg2, reg8, reg9, reg10, reg11, reg12, reg13, reg14, reg15);
-                    }
-                }
-            }
-        }
 
         // Extract and return current state
         Ok(self.extract_state())
@@ -1078,13 +901,6 @@ impl SimulationRuntime for GpuRuntime {
                                     bytes_needed.min(metal_size),
                                 );
                             }
-                            // DEBUG: Print what we read for multi-clock debugging
-                            if std::env::var("SKALP_DEBUG_OUTPUT").is_ok() {
-                                eprintln!(
-                                    "[DEBUG get_output] name='{}' width={} metal_size={} bytes_needed={} offset={} value={:?}",
-                                    name, output.width, metal_size, bytes_needed, offset, value
-                                );
-                            }
                             return Ok(value);
                         }
                         offset += metal_size;
@@ -1123,12 +939,6 @@ impl SimulationRuntime for GpuRuntime {
                                 bytes_needed.min(metal_size),
                             );
                         }
-                        if std::env::var("SKALP_DEBUG_OUTPUT").is_ok() {
-                            eprintln!(
-                                "[DEBUG get_output] REGISTER name='{}' width={} metal_size={} bytes_needed={} offset={} value={:?}",
-                                name, width, metal_size, bytes_needed, offset, value
-                            );
-                        }
                         return Ok(value);
                     }
                     offset += metal_size;
@@ -1147,9 +957,7 @@ impl GpuRuntime {
     /// Run multiple cycles in a single GPU dispatch for massive speedup
     /// This bypasses per-cycle CPU<->GPU synchronization overhead
     pub async fn run_batched(&mut self, cycles: u64) -> SimulationResult<SimulationState> {
-        println!("⚡ GPU run_batched called with {} cycles", cycles);
         if let Some(pipeline) = self.pipelines.get("batched") {
-            println!("⚡ GPU run_batched: Using batched kernel");
             // Set up params buffer with cycle count and clock offset
             if let Some(params_buffer) = &self.params_buffer {
                 let params_ptr = params_buffer.contents() as *mut u32;

@@ -1440,10 +1440,6 @@ mod tests {
         // Each corner should have results
         for (corner, corner_result) in &result.per_corner {
             assert!(corner_result.stats.total_forks >= 1);
-            println!(
-                "{:?}: {} forks, max_skew={:.1}ps",
-                corner, corner_result.stats.total_forks, corner_result.stats.max_skew_ps
-            );
         }
 
         // Worst case should be identified

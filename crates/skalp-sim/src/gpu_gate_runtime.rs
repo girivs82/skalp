@@ -156,7 +156,6 @@ impl GpuGateRuntime {
 
         // Try to compile GPU shaders, fall back to CPU if it fails
         if let Err(e) = runtime.compile_shaders() {
-            eprintln!("GPU shader compilation failed, falling back to CPU: {}", e);
             runtime.use_gpu = false;
         }
 
@@ -277,18 +276,6 @@ impl GpuGateRuntime {
                     });
                 }
             }
-        }
-
-        // Debug: Print clock and sequential primitive info
-        if std::env::var("SKALP_DEBUG_SEQ").is_ok() {
-            use std::io::Write;
-            let clock_names: Vec<_> = self.clock_signals.iter()
-                .filter_map(|id| self.signal_id_to_name.get(&id.0))
-                .collect();
-            let seq_count = self.primitives.iter().filter(|p| p.is_sequential).count();
-            writeln!(std::io::stderr(), "🕐 [GPU INIT] clock_signals: {:?}, sequential_primitives: {}, total_primitives: {}",
-                clock_names, seq_count, self.primitives.len()).ok();
-            std::io::stderr().flush().ok();
         }
 
         // Create GPU buffers
@@ -827,22 +814,6 @@ kernel void eval_sequential(
         // Detect clock edges before we start modifying signals
         let clock_mask = self.detect_clock_edges_gpu();
 
-        // Debug: Print constant primitives
-        if std::env::var("SKALP_DEBUG_GPU").is_ok() {
-            println!(
-                "[GPU] step_gpu called, {} primitives",
-                self.primitives.len()
-            );
-            for (i, prim) in self.primitives.iter().enumerate() {
-                if matches!(&prim.ptype, PrimitiveType::Constant { .. }) {
-                    println!(
-                        "[GPU] Primitive {}: Constant {:?}, output_id={:?}",
-                        i, prim.ptype, prim.outputs
-                    );
-                }
-            }
-        }
-
         // Iterate combinational logic until convergence
         // Multi-level circuits (like ripple-carry adders) need multiple passes
         const MAX_ITERATIONS: usize = 100;
@@ -905,85 +876,7 @@ kernel void eval_sequential(
             self.current_buffer_is_a = !self.current_buffer_is_a;
 
             if converged {
-                if std::env::var("SKALP_DEBUG_GPU").is_ok() {
-                    println!("[GPU] Converged after {} iterations", _iter + 1);
-                }
                 break;
-            }
-        }
-
-        // Debug: Print output signal values
-        if std::env::var("SKALP_DEBUG_GPU").is_ok() {
-            let current_buf = if self.current_buffer_is_a {
-                buf_a
-            } else {
-                buf_b
-            };
-
-            // Check what primitives write to add_result signals (IDs 2-33)
-            println!("[GPU] Primitives writing to signals 2-33 (add_result):");
-            for (i, prim) in self.primitives.iter().enumerate() {
-                for out_id in &prim.outputs {
-                    if out_id.0 >= 2 && out_id.0 <= 33 {
-                        println!(
-                            "[GPU]   Prim {}: {:?} -> signal {}, inputs={:?}",
-                            i, prim.ptype, out_id.0, prim.inputs
-                        );
-                    }
-                }
-            }
-
-            // Check output range of all primitives
-            let mut min_out = u32::MAX;
-            let mut max_out = 0u32;
-            for prim in &self.primitives {
-                for out_id in &prim.outputs {
-                    min_out = min_out.min(out_id.0);
-                    max_out = max_out.max(out_id.0);
-                }
-            }
-            println!("[GPU] Primitive output range: {} to {}", min_out, max_out);
-
-            // Check first 10 non-constant primitives
-            println!("[GPU] First 10 non-constant primitives:");
-            let mut count = 0;
-            for (i, prim) in self.primitives.iter().enumerate() {
-                if !matches!(&prim.ptype, PrimitiveType::Constant { .. }) && count < 10 {
-                    println!(
-                        "[GPU]   Prim {}: {:?} -> {:?}, inputs={:?}",
-                        i, prim.ptype, prim.outputs, prim.inputs
-                    );
-                    count += 1;
-                }
-            }
-
-            // Check constant output signals
-            println!("[GPU] Checking constant output signals in buffer:");
-            for prim in &self.primitives {
-                if let PrimitiveType::Constant { value } = &prim.ptype {
-                    if let Some(out_id) = prim.outputs.first() {
-                        let buf_val = unsafe {
-                            let ptr = current_buf.contents() as *const u32;
-                            *ptr.add(out_id.0 as usize)
-                        };
-                        if *value {
-                            println!(
-                                "[GPU]   CONST TRUE -> signal {} = {} (expected 1)",
-                                out_id.0, buf_val
-                            );
-                        }
-                    }
-                }
-            }
-
-            for (name, id) in &self.signal_name_to_id {
-                if name.contains("add_result") || name.contains("sub_result") {
-                    let val = unsafe {
-                        let ptr = current_buf.contents() as *const u32;
-                        *ptr.add(id.0 as usize)
-                    };
-                    println!("[GPU] Signal '{}' (id={}) = {}", name, id.0, val);
-                }
             }
         }
 
@@ -1198,22 +1091,12 @@ kernel void eval_sequential(
                     }
                 }
 
-                if std::env::var("SKALP_DEBUG_GPU").is_ok() {
-                    println!(
-                        "[GPU] FP32 CPU eval: {:?}({}, {}) = {} (0x{:08X}), {} inputs, {} outputs, out_ids[0..4]={:?}",
-                        prim.ptype, a, b, result, result_bits,
-                        prim.inputs.len(), prim.outputs.len(),
-                        prim.outputs.iter().take(4).map(|s| s.0).collect::<Vec<_>>()
-                    );
-                }
             }
         }
     }
 
     /// Step simulation on CPU (fallback)
     fn step_cpu(&mut self) {
-        let debug_seq = std::env::var("SKALP_DEBUG_SEQ").is_ok();
-
         // Detect clock edges
         let mut rising_edges = Vec::new();
         for clock_id in &self.clock_signals {
@@ -1224,27 +1107,9 @@ kernel void eval_sequential(
                 .and_then(|v| v.first().copied())
                 .unwrap_or(false);
 
-            if debug_seq {
-                // Find clock name
-                let clock_name = self
-                    .signal_name_to_id
-                    .iter()
-                    .find(|(_, &id)| id.0 == clock_id.0)
-                    .map(|(n, _)| n.as_str())
-                    .unwrap_or("?");
-                eprintln!(
-                    "🕐 [SEQ] Clock {} (id={}): prev={}, curr={}",
-                    clock_name, clock_id.0, prev, curr
-                );
-            }
-
             if !prev && curr {
                 rising_edges.push(*clock_id);
             }
-        }
-
-        if debug_seq && !rising_edges.is_empty() {
-            eprintln!("🕐 [SEQ] Rising edges detected: {:?}", rising_edges.iter().map(|s| s.0).collect::<Vec<_>>());
         }
 
         // Evaluate combinational primitives until convergence
@@ -1296,15 +1161,6 @@ kernel void eval_sequential(
         }
 
         // Evaluate sequential primitives on clock edges
-        let seq_primitives: Vec<_> = self.primitives.iter().filter(|p| p.is_sequential).collect();
-        if debug_seq {
-            eprintln!(
-                "🔄 [SEQ] Total sequential primitives: {}, rising_edges: {:?}",
-                seq_primitives.len(),
-                rising_edges.iter().map(|s| s.0).collect::<Vec<_>>()
-            );
-        }
-
         for prim in &self.primitives.clone() {
             if !prim.is_sequential {
                 continue;
@@ -1313,9 +1169,6 @@ kernel void eval_sequential(
             let clock_id = match prim.clock {
                 Some(c) => c,
                 None => {
-                    if debug_seq {
-                        eprintln!("⚠️ [SEQ] Sequential primitive {:?} has no clock!", prim.ptype);
-                    }
                     continue;
                 }
             };
@@ -1335,25 +1188,6 @@ kernel void eval_sequential(
                 .collect();
 
             let output_values = evaluate_primitive(&prim.ptype, &input_values);
-
-            if debug_seq {
-                // Find output signal names
-                let out_names: Vec<_> = prim
-                    .outputs
-                    .iter()
-                    .map(|out_id| {
-                        self.signal_name_to_id
-                            .iter()
-                            .find(|(_, &id)| id.0 == out_id.0)
-                            .map(|(n, _)| n.clone())
-                            .unwrap_or_else(|| format!("sig_{}", out_id.0))
-                    })
-                    .collect();
-                eprintln!(
-                    "🔄 [SEQ] Evaluating {:?}: inputs={:?} -> outputs={:?}, out_signals={:?}",
-                    prim.ptype, input_values, output_values, out_names
-                );
-            }
 
             for (i, out_id) in prim.outputs.iter().enumerate() {
                 if let Some(&value) = output_values.get(i) {
@@ -1575,8 +1409,6 @@ mod tests {
         let runtime = GpuGateRuntime::new(&sir_result.sir);
 
         assert!(runtime.is_ok());
-        let rt = runtime.unwrap();
-        println!("Device info: {}", rt.device_info());
     }
 
     #[cfg(target_os = "macos")]

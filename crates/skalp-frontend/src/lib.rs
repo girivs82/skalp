@@ -196,42 +196,22 @@ fn rebuild_instances_with_imports(hir: &Hir, file_path: &Path) -> Result<Hir> {
 
     // Pre-register all functions with their return types (BUG FIX #67)
     // This ensures imported function return types are available for type inference
-    eprintln!(
-        "🔍 DEBUG: Pre-registering functions from {} implementations and {} top-level functions",
-        hir.implementations.len(),
-        hir.functions.len()
-    );
 
     // Preregister top-level functions (these come from imports like 'use foo::*')
     for function in &hir.functions {
-        eprintln!(
-            "  Top-level function: {} (return type: {:?})",
-            function.name, function.return_type
-        );
         builder.preregister_function(function);
     }
 
     // Preregister functions from implementation blocks
-    for (impl_idx, implementation) in hir.implementations.iter().enumerate() {
-        eprintln!(
-            "  Implementation {}: {} functions",
-            impl_idx,
-            implementation.functions.len()
-        );
+    for implementation in &hir.implementations {
         for function in &implementation.functions {
-            eprintln!("    Function: {}", function.name);
             builder.preregister_function(function);
         }
     }
 
     // Pre-register distinct types so they're available during type resolution
     // This is critical for trait-based FP operators: `use skalp::numeric::formats::fp32`
-    eprintln!(
-        "🔍 DEBUG: Pre-registering {} distinct types",
-        hir.distinct_types.len()
-    );
     for distinct in &hir.distinct_types {
-        eprintln!("  Distinct type: {}", distinct.name);
         builder.preregister_distinct_type(distinct);
     }
 
@@ -399,10 +379,6 @@ fn rebuild_instances_with_imports(hir: &Hir, file_path: &Path) -> Result<Hir> {
             final_hir.implementations.push(impl_block);
         } else {
             // Entity not in remap table - this shouldn't happen for valid impls
-            eprintln!(
-                "[REBUILD_REMAP] Warning: No remap for impl entity {:?}",
-                impl_block.entity
-            );
         }
     }
 
@@ -767,10 +743,6 @@ fn remap_port_signal_ids_in_stmt(
 fn merge_imports(hir: &Hir, dependencies: &[PathBuf], resolver: &ModuleResolver) -> Result<Hir> {
     use hir::HirImportPath;
 
-    eprintln!(
-        "🔀 [MERGE_IMPORTS] Starting merge, {} imports to process",
-        hir.imports.len()
-    );
     let mut merged_hir = hir.clone();
 
     // For each import in the current HIR
@@ -780,11 +752,6 @@ fn merge_imports(hir: &Hir, dependencies: &[PathBuf], resolver: &ModuleResolver)
         let loaded_module = resolver
             .get_module(&module_path)
             .ok_or_else(|| anyhow::anyhow!("Module not loaded: {:?}", module_path))?;
-
-        eprintln!(
-            "[MERGE_IMPORTS_DEBUG] Processing import {:?} from {:?}, loaded_module has {} trait_impls, {} trait_defs",
-            import.path, module_path, loaded_module.trait_implementations.len(), loaded_module.trait_definitions.len()
-        );
 
         // Extract and merge symbols based on import type
         match &import.path {
@@ -830,11 +797,6 @@ fn merge_imports(hir: &Hir, dependencies: &[PathBuf], resolver: &ModuleResolver)
         }
     }
 
-    eprintln!(
-        "🔀 [MERGE_IMPORTS] After merge: {} distinct_types, {} trait_implementations",
-        merged_hir.distinct_types.len(),
-        merged_hir.trait_implementations.len()
-    );
     Ok(merged_hir)
 }
 
@@ -849,21 +811,9 @@ fn merge_trait_implementations_for_existing_types(target: &mut Hir, source: &Hir
         .chain(target.user_defined_types.iter().map(|t| t.name.clone()))
         .collect();
 
-    eprintln!(
-        "[MERGE_TRAIT_IMPLS_DEBUG] source has {} trait_impls, target has {} types: {:?}",
-        source.trait_implementations.len(),
-        target_types.len(),
-        target_types
-    );
-
     // BUG #FP16-IEEE754 FIX: Build a map of constant names to IDs from the source HIR
     // This is needed to rewrite GenericParam("IEEE754_16") to Constant(id) in trait impls
     let constant_map = build_constant_name_map(source);
-    eprintln!(
-        "[MERGE_TRAIT_IMPLS_DEBUG] Built constant map with {} entries: {:?}",
-        constant_map.len(),
-        constant_map.keys().collect::<Vec<_>>()
-    );
 
     // Track which trait definitions we need to merge
     let mut traits_to_merge: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -1535,13 +1485,6 @@ fn rewrite_trait_impl_generic_params(
 
 /// Merge a specific symbol from a module into the current HIR
 fn merge_symbol(target: &mut Hir, source: &Hir, symbol_name: &str) -> Result<()> {
-    eprintln!(
-        "[MERGE_SYMBOL] Importing symbol '{}' from source with {} entities, {} trait_defs",
-        symbol_name,
-        source.entities.len(),
-        source.trait_definitions.len()
-    );
-
     // FIRST: Merge trait implementations for types we already have
     // This ensures that when we import an entity from a module that has trait impls
     // for types we already have (like fp32), those impls are available
@@ -1595,10 +1538,6 @@ fn merge_symbol(target: &mut Hir, source: &Hir, symbol_name: &str) -> Result<()>
                     let already_imported =
                         target.entities.iter().any(|e| e.name == dep_entity.name);
                     if !already_imported {
-                        eprintln!(
-                            "[MERGE_DEPENDENCY] Recursively importing dependency entity '{}' for '{}'",
-                            dep_entity.name, symbol_name
-                        );
                         // Recursively import the dependency entity
                         merge_symbol(target, source, &dep_entity.name)?;
                     }
@@ -1673,11 +1612,6 @@ fn merge_symbol(target: &mut Hir, source: &Hir, symbol_name: &str) -> Result<()>
         .iter()
         .find(|t| t.name == symbol_name)
     {
-        eprintln!(
-            "[IMPORT_TRAIT_DEF] Importing trait definition '{}' from source with {} trait_defs",
-            symbol_name,
-            source.trait_definitions.len()
-        );
         target.trait_definitions.push(trait_def.clone());
         return Ok(());
     }
@@ -1728,10 +1662,6 @@ fn merge_symbol(target: &mut Hir, source: &Hir, symbol_name: &str) -> Result<()>
             };
 
             if target_matches {
-                eprintln!(
-                    "[DISTINCT_TYPE_IMPORT] Merging trait impl '{}' for type '{}' (target: {:?})",
-                    trait_impl.trait_name, symbol_name, trait_impl.target
-                );
                 // Check if we already have this trait implementation
                 let already_exists = target.trait_implementations.iter().any(|ti| {
                     ti.trait_name == trait_impl.trait_name
@@ -1748,10 +1678,6 @@ fn merge_symbol(target: &mut Hir, source: &Hir, symbol_name: &str) -> Result<()>
                     // an entity (e.g., FpAdd<IEEE754_32>), we need to merge that entity
                     for method in &trait_impl.method_implementations {
                         let entity_names = extract_entity_refs_from_statements(&method.body);
-                        eprintln!(
-                            "[BUG #207 DEBUG] Trait impl '{}' method '{}' body has {} stmts, extracted entities: {:?}",
-                            trait_impl.trait_name, method.name, method.body.len(), entity_names
-                        );
                         for entity_name in entity_names {
                             // Check if entity already exists in target
                             if !target.entities.iter().any(|e| e.name == entity_name) {
@@ -1759,10 +1685,6 @@ fn merge_symbol(target: &mut Hir, source: &Hir, symbol_name: &str) -> Result<()>
                                 if let Some(entity) =
                                     source.entities.iter().find(|e| e.name == entity_name)
                                 {
-                                    eprintln!(
-                                        "[BUG #207 FIX] Merging entity '{}' referenced by trait impl '{}'",
-                                        entity_name, trait_impl.trait_name
-                                    );
                                     // Assign new entity ID
                                     let new_entity_id = hir::EntityId(
                                         target.entities.iter().map(|e| e.id.0).max().unwrap_or(0)
@@ -1833,10 +1755,6 @@ fn merge_symbol(target: &mut Hir, source: &Hir, symbol_name: &str) -> Result<()>
     // This is critical for importing stdlib functions with their return types
     for impl_block in &source.implementations {
         if let Some(function) = impl_block.functions.iter().find(|f| f.name == symbol_name) {
-            eprintln!(
-                "📦 BUG #67 FIX: Merging function '{}' with return type: {:?}",
-                function.name, function.return_type
-            );
             // Add the function to the target's global implementation block
             // Create one if it doesn't exist
             if target.implementations.is_empty() {
@@ -2140,14 +2058,6 @@ fn extract_entity_refs_from_expr(expr: &hir::HirExpression, names: &mut Vec<Stri
 fn merge_all_symbols(target: &mut Hir, source: &Hir) -> Result<()> {
     use hir::HirVisibility;
 
-    eprintln!(
-        "[MERGE_ALL_SYMBOLS] source has {} entities, {} implementations, {} trait_impls, {} trait_defs",
-        source.entities.len(),
-        source.implementations.len(),
-        source.trait_implementations.len(),
-        source.trait_definitions.len()
-    );
-
     // BUG #183 FIX: Use two-pass approach to ensure all entities are available
     // before processing implementations (which may reference other entities)
 
@@ -2159,10 +2069,6 @@ fn merge_all_symbols(target: &mut Hir, source: &Hir) -> Result<()> {
     > = IndexMap::new();
 
     for entity in &source.entities {
-        eprintln!(
-            "[MERGE_ALL_SYMBOLS] Entity '{}' visibility={:?}",
-            entity.name, entity.visibility
-        );
         if entity.visibility == HirVisibility::Public {
             let old_entity_id = entity.id;
 
@@ -2219,13 +2125,6 @@ fn merge_all_symbols(target: &mut Hir, source: &Hir) -> Result<()> {
             .iter()
             .find(|i| i.entity == old_entity_id)
         {
-            eprintln!(
-                "[MERGE_ALL_SYMBOLS] Found impl for '{}' with {} signals, {} assignments, {} instances",
-                entity.name,
-                impl_block.signals.len(),
-                impl_block.assignments.len(),
-                impl_block.instances.len()
-            );
             let mut imported_impl = impl_block.clone();
             // Update implementation to point to the new entity ID
             imported_impl.entity = new_entity_id;
@@ -2242,32 +2141,12 @@ fn merge_all_symbols(target: &mut Hir, source: &Hir) -> Result<()> {
                     if let Some(new_dep_entity) =
                         target.entities.iter().find(|e| e.name == dep_entity.name)
                     {
-                        eprintln!(
-                            "[MERGE_INSTANCE] Instance '{}' in '{}': entity {:?} ('{}') -> {:?} ('{}') in target",
-                            instance.name, entity.name, old_entity_id, dep_entity.name,
-                            new_dep_entity.id, new_dep_entity.name
-                        );
                         instance.entity = new_dep_entity.id;
-                    } else {
-                        eprintln!(
-                            "[MERGE_INSTANCE] Instance '{}' in '{}': entity {:?} ('{}') NOT FOUND in target by name",
-                            instance.name, entity.name, old_entity_id, dep_entity.name
-                        );
                     }
-                } else {
-                    eprintln!(
-                        "[MERGE_INSTANCE] Instance '{}' in '{}': entity {:?} NOT FOUND in source",
-                        instance.name, entity.name, old_entity_id
-                    );
                 }
             }
 
             target.implementations.push(imported_impl);
-        } else {
-            eprintln!(
-                "[MERGE_ALL_SYMBOLS] NO impl found for entity '{}' (entity_id={:?})",
-                entity.name, old_entity_id
-            );
         }
     }
 
@@ -2311,23 +2190,11 @@ fn merge_all_symbols(target: &mut Hir, source: &Hir) -> Result<()> {
     }
 
     // Merge all public user-defined types (structs, enums, unions)
-    eprintln!(
-        "[MERGE_ALL_SYMBOLS] source has {} user_defined_types",
-        source.user_defined_types.len()
-    );
     for user_type in &source.user_defined_types {
-        eprintln!(
-            "[MERGE_ALL_SYMBOLS] User type '{}' visibility={:?}",
-            user_type.name, user_type.visibility
-        );
         if user_type.visibility == HirVisibility::Public {
             target.user_defined_types.push(user_type.clone());
         }
     }
-    eprintln!(
-        "[MERGE_ALL_SYMBOLS] After merge, target has {} user_defined_types",
-        target.user_defined_types.len()
-    );
 
     // BUG #34 FIX: Merge all public constants (from implementation blocks)
     // Note: Constants don't currently have a visibility field in HIR, but we only merge
@@ -2335,15 +2202,7 @@ fn merge_all_symbols(target: &mut Hir, source: &Hir) -> Result<()> {
     for impl_block in &source.implementations {
         // Only merge constants from the global scope (entity ID 0)
         if impl_block.entity == hir::EntityId::GLOBAL_IMPL {
-            eprintln!(
-                "[MERGE_ALL_SYMBOLS] Found GLOBAL_IMPL in source with {} constants",
-                impl_block.constants.len()
-            );
             for constant in &impl_block.constants {
-                eprintln!(
-                    "[MERGE_ALL_SYMBOLS]   Merging constant '{}' (id={:?})",
-                    constant.name, constant.id
-                );
                 // BUG #85 FIX: Find or create GLOBAL_IMPL in target, don't just use first impl
                 // The previous code used target.implementations.first_mut() which was wrong -
                 // if target already had entity implementations, constants would go to the wrong place
@@ -2390,10 +2249,6 @@ fn merge_all_symbols(target: &mut Hir, source: &Hir) -> Result<()> {
         // Only merge functions from the global scope (entity ID 0)
         if impl_block.entity == hir::EntityId::GLOBAL_IMPL {
             for function in &impl_block.functions {
-                eprintln!(
-                    "📦 BUG #67 FIX: Merging glob-imported function '{}' with return type: {:?}",
-                    function.name, function.return_type
-                );
                 // BUG #85 FIX: Find or create GLOBAL_IMPL in target
                 let global_impl_idx = target
                     .implementations

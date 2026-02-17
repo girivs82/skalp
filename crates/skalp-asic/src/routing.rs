@@ -199,8 +199,6 @@ impl GlobalRouter {
         netlist: &Netlist,
         placement: &Placement,
     ) -> Result<GlobalRouting, AsicError> {
-        println!("   Starting global routing...");
-
         // Create routing grid
         let grid = self.create_routing_grid(placement)?;
 
@@ -240,11 +238,6 @@ impl GlobalRouter {
             netlist,
             placement,
         )?;
-
-        println!(
-            "   Global routing complete: {} nets routed",
-            global_wires.len()
-        );
 
         Ok(GlobalRouting {
             grid,
@@ -618,7 +611,6 @@ impl GlobalRouter {
             return Ok(());
         }
 
-        println!("   Handling {} congested cells...", congested_gcells.len());
 
         // Rip up and reroute affected nets
         // (Simplified - full implementation would be more sophisticated)
@@ -716,8 +708,6 @@ impl DetailedRouter {
         placement: &Placement,
         global: &GlobalRouting,
     ) -> Result<DetailedRouting, AsicError> {
-        println!("   Starting detailed routing...");
-
         let mut wires = Vec::new();
         let mut vias = Vec::new();
 
@@ -736,12 +726,6 @@ impl DetailedRouter {
         if self.config.optimize_vias {
             self.minimize_vias(&mut wires, &mut vias)?;
         }
-
-        println!(
-            "   Detailed routing complete: {} wires, {} vias",
-            wires.len(),
-            vias.len()
-        );
 
         Ok(DetailedRouting { wires, vias })
     }

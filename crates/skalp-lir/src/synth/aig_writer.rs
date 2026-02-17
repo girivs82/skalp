@@ -73,10 +73,7 @@ impl<'a> AigWriter<'a> {
         state.create_outputs(aig);
 
         // Phase 6: Remove dead cells (cells whose outputs have no fanout)
-        let removed = state.netlist.remove_dead_cells();
-        if removed > 0 {
-            eprintln!("[AIG_WRITER] Removed {} dead cells", removed);
-        }
+        state.netlist.remove_dead_cells();
 
         state.netlist.update_stats();
         state.netlist
@@ -197,8 +194,6 @@ impl AigWriterState<'_> {
     /// This must be called before process_nodes so that MUX nodes that are
     /// absorbed into SDFFE cells are not emitted as separate cells.
     fn pre_scan_sdffe_patterns(&mut self, aig: &Aig) {
-        let debug = std::env::var("SKALP_DEBUG_SDFFE").is_ok();
-
         for (id, node) in aig.iter_nodes() {
             if let AigNode::Latch { data, .. } = node {
                 // Try to detect enable pattern
@@ -222,22 +217,8 @@ impl AigWriterState<'_> {
                             }
                         }
                     }
-
-                    if debug {
-                        eprintln!(
-                            "[SDFFE] Pre-scan: Marked nodes as consumed for latch {:?}: {:?}",
-                            id, self.sdffe_consumed_nodes
-                        );
-                    }
                 }
             }
-        }
-
-        if debug && !self.sdffe_consumed_nodes.is_empty() {
-            eprintln!(
-                "[SDFFE] Pre-scan complete: {} nodes marked as consumed by SDFFE",
-                self.sdffe_consumed_nodes.len()
-            );
         }
     }
 
@@ -245,24 +226,6 @@ impl AigWriterState<'_> {
     fn process_nodes(&mut self, aig: &Aig) {
         // Get nodes in topological order
         let order = self.topological_order(aig);
-
-        eprintln!(
-            "[AIG_WRITER] Processing {} nodes in topological order",
-            order.len()
-        );
-        let mut and_count = 0;
-        let mut latch_count = 0;
-        for (id, node) in aig.iter_nodes() {
-            match node {
-                AigNode::And { .. } => and_count += 1,
-                AigNode::Latch { .. } => latch_count += 1,
-                _ => {}
-            }
-        }
-        eprintln!(
-            "[AIG_WRITER] AIG has {} AND nodes, {} latches",
-            and_count, latch_count
-        );
 
         for id in order {
             let node = aig.get_node(id).unwrap().clone();
@@ -335,9 +298,6 @@ impl AigWriterState<'_> {
     fn process_and_node(&mut self, aig: &Aig, id: AigNodeId, left: AigLit, right: AigLit) {
         // Skip nodes consumed by SDFFE patterns - the MUX logic is absorbed into the FF
         if self.sdffe_consumed_nodes.contains(&id) {
-            if std::env::var("SKALP_DEBUG_SDFFE").is_ok() {
-                eprintln!("[SDFFE] Skipping consumed AND node {:?}", id);
-            }
             // Still need to create a net for this node in case it's referenced elsewhere
             // (shouldn't happen for properly detected patterns, but be safe)
             if let indexmap::map::Entry::Vacant(e) = self.node_to_net.entry(id) {
@@ -898,22 +858,8 @@ impl AigWriterState<'_> {
         data: AigLit,
         latch_id: AigNodeId,
     ) -> Option<(AigLit, AigLit)> {
-        // Debug: log what we're seeing
-        if std::env::var("SKALP_DEBUG_SDFFE").is_ok() {
-            eprintln!(
-                "[SDFFE] Checking latch {:?}, data={:?} (inverted={})",
-                latch_id, data.node, data.inverted
-            );
-            if let Some(node) = aig.get_node(data.node) {
-                eprintln!("[SDFFE]   data node: {:?}", node);
-            }
-        }
-
         // Pattern: D = NOT(AND(X, Y)) where D.inverted = true
         if !data.inverted {
-            if std::env::var("SKALP_DEBUG_SDFFE").is_ok() {
-                eprintln!("[SDFFE]   FAIL: data not inverted");
-            }
             return None;
         }
 
@@ -921,27 +867,14 @@ impl AigWriterState<'_> {
         let mux_and = match aig.get_node(data.node) {
             Some(AigNode::And { left, right }) => (*left, *right),
             _ => {
-                if std::env::var("SKALP_DEBUG_SDFFE").is_ok() {
-                    eprintln!("[SDFFE]   FAIL: data node is not AND");
-                }
                 return None;
             }
         };
-
-        if std::env::var("SKALP_DEBUG_SDFFE").is_ok() {
-            eprintln!(
-                "[SDFFE]   AND inputs: left={:?} (inv={}), right={:?} (inv={})",
-                mux_and.0.node, mux_and.0.inverted, mux_and.1.node, mux_and.1.inverted
-            );
-        }
 
         // Both inputs should be inverted (they are the NORed halves of the MUX)
         // X = NOT(AND(enable, new_value))
         // Y = NOT(AND(NOT(enable), Q))
         if !mux_and.0.inverted || !mux_and.1.inverted {
-            if std::env::var("SKALP_DEBUG_SDFFE").is_ok() {
-                eprintln!("[SDFFE]   FAIL: AND inputs not both inverted");
-            }
             return None;
         }
 
@@ -965,15 +898,10 @@ impl AigWriterState<'_> {
         y: AigLit,
         latch_id: AigNodeId,
     ) -> Option<(AigLit, AigLit)> {
-        let debug = std::env::var("SKALP_DEBUG_SDFFE").is_ok();
-
         // x.node should be AND(enable, new_value)
         let (x_left, x_right) = match aig.get_node(x.node) {
             Some(AigNode::And { left, right }) => (*left, *right),
             _ => {
-                if debug {
-                    eprintln!("[SDFFE]     x node {:?} is not AND", x.node);
-                }
                 return None;
             }
         };
@@ -982,27 +910,9 @@ impl AigWriterState<'_> {
         let (y_left, y_right) = match aig.get_node(y.node) {
             Some(AigNode::And { left, right }) => (*left, *right),
             _ => {
-                if debug {
-                    eprintln!("[SDFFE]     y node {:?} is not AND", y.node);
-                }
                 return None;
             }
         };
-
-        if debug {
-            eprintln!(
-                "[SDFFE]     x={:?}: AND({:?} inv={}, {:?} inv={})",
-                x.node, x_left.node, x_left.inverted, x_right.node, x_right.inverted
-            );
-            eprintln!(
-                "[SDFFE]     y={:?}: AND({:?} inv={}, {:?} inv={})",
-                y.node, y_left.node, y_left.inverted, y_right.node, y_right.inverted
-            );
-            eprintln!(
-                "[SDFFE]     Looking for latch_id={:?} in y inputs",
-                latch_id
-            );
-        }
 
         // One of y's inputs should be the latch output (Q)
         // The other should be the inverted enable
@@ -1011,39 +921,20 @@ impl AigWriterState<'_> {
         } else if y_right.node == latch_id {
             (y_left, y_right)
         } else {
-            if debug {
-                eprintln!(
-                    "[SDFFE]     FAIL: latch_id {:?} not found in y inputs ({:?}, {:?})",
-                    latch_id, y_left.node, y_right.node
-                );
-            }
             return None;
         };
 
         // Q should not be inverted in the feedback path
         if q_input.inverted {
-            if debug {
-                eprintln!("[SDFFE]     FAIL: Q input is inverted");
-            }
             return None;
         }
 
         // enable_inv should be inverted (it's ~enable in the pattern)
         if !enable_inv.inverted {
-            if debug {
-                eprintln!("[SDFFE]     FAIL: enable_inv is not inverted");
-            }
             return None;
         }
 
         let enable_node = enable_inv.node;
-
-        if debug {
-            eprintln!(
-                "[SDFFE]     Found Q at {:?}, enable_inv at {:?} (looking for {:?} in x)",
-                latch_id, enable_inv.node, enable_node
-            );
-        }
 
         // Check if one of x's inputs matches the enable
         let (potential_enable, new_value) = if x_left.node == enable_node && !x_left.inverted {
@@ -1051,21 +942,8 @@ impl AigWriterState<'_> {
         } else if x_right.node == enable_node && !x_right.inverted {
             (x_right, x_left)
         } else {
-            if debug {
-                eprintln!(
-                    "[SDFFE]     FAIL: enable {:?} not found in x inputs ({:?}, {:?})",
-                    enable_node, x_left.node, x_right.node
-                );
-            }
             return None;
         };
-
-        if debug {
-            eprintln!(
-                "[SDFFE]     SUCCESS! enable={:?}, new_value={:?}",
-                potential_enable.node, new_value.node
-            );
-        }
 
         // Found the pattern!
         Some((potential_enable, new_value))

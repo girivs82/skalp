@@ -166,34 +166,6 @@ impl<'a> TechMapper<'a> {
                 s.driver.is_none() && !s.is_input && used_signals.contains(&s.id)
             })
             .collect();
-        if !undriven_but_used.is_empty() {
-            eprintln!(
-                "⚠️  BUG #237 LIR: Module '{}' has {} signals with no driver but used as inputs:",
-                word_lir.name,
-                undriven_but_used.len()
-            );
-            for sig in undriven_but_used.iter().take(10) {
-                let is_output = word_lir.outputs.contains(&sig.id);
-                eprintln!("  - {} (id={:?}, width={}, is_output={})", sig.name, sig.id, sig.width, is_output);
-                // Show which nodes use this signal as input
-                if sig.name.starts_with("_t") {
-                    let mut use_count = 0;
-                    for node in &word_lir.nodes {
-                        if node.inputs.contains(&sig.id) {
-                            if use_count == 0 {
-                                eprintln!("    -> used by {:?} at {}", node.op, node.path);
-                            }
-                            use_count += 1;
-                        }
-                    }
-                    eprintln!("    -> total {} uses in LIR", use_count);
-                }
-            }
-            if undriven_but_used.len() > 10 {
-                eprintln!("  ... and {} more", undriven_but_used.len() - 10);
-            }
-        }
-
         // Phase 1: Create nets for all signals
         for signal in &word_lir.signals {
             let nets = self.create_signal_nets(signal.id, &signal.name, signal.width);
@@ -269,58 +241,6 @@ impl<'a> TechMapper<'a> {
 
         // Update statistics
         self.netlist.update_stats();
-
-        // BUG #237 DEBUG: Check for undriven nets in this module's netlist
-        let undriven_but_used: Vec<_> = self
-            .netlist
-            .nets
-            .iter()
-            .filter(|net| {
-                net.driver.is_none() && !net.fanout.is_empty() && !net.is_input
-            })
-            .collect();
-
-        if !undriven_but_used.is_empty() {
-            eprintln!(
-                "⚠️  BUG #237 TECH_MAP: Module '{}' has {} undriven-but-used nets after mapping:",
-                word_lir.name,
-                undriven_but_used.len()
-            );
-            // Build reverse map: GateNetId -> (LirSignalId, bit)
-            let mut net_to_lir: std::collections::HashMap<u32, (crate::lir::LirSignalId, usize)> = std::collections::HashMap::new();
-            for (&sig_id, nets) in &self.signal_to_net {
-                for (bit, &net_id) in nets.iter().enumerate() {
-                    net_to_lir.insert(net_id.0, (sig_id, bit));
-                }
-            }
-            for net in undriven_but_used.iter().take(15) {
-                let net_idx = self.netlist.nets.iter().position(|n| std::ptr::eq(n, *net)).unwrap_or(0);
-                let lir_info = net_to_lir.get(&(net_idx as u32));
-                if let Some(&(sig_id, bit)) = lir_info {
-                    let sig = word_lir.signals.iter().find(|s| s.id == sig_id);
-                    let sig_name = sig.map(|s| s.name.as_str()).unwrap_or("?");
-                    let sig_width = sig.map(|s| s.width).unwrap_or(0);
-                    let driver_node = word_lir.nodes.iter().find(|n| n.output == sig_id);
-                    eprintln!(
-                        "  - {} (fanout={}) -> LIR signal '{}' (id={:?}, width={}, bit={}), driver={:?}",
-                        net.name,
-                        net.fanout.len(),
-                        sig_name, sig_id, sig_width, bit,
-                        driver_node.map(|n| format!("{:?} at {}", n.op, n.path))
-                    );
-                } else {
-                    eprintln!(
-                        "  - {} (fanout={}, is_input={}) -> NO LIR signal mapping!",
-                        net.name,
-                        net.fanout.len(),
-                        net.is_input
-                    );
-                }
-            }
-            if undriven_but_used.len() > 15 {
-                eprintln!("  ... and {} more", undriven_but_used.len() - 15);
-            }
-        }
 
         TechMapResult {
             netlist: std::mem::replace(
@@ -5657,10 +5577,6 @@ pub fn map_hierarchical_to_gates(
             // Load the pre-compiled netlist directly
             match CompiledIp::read_from_file(std::path::Path::new(compiled_ip_path), None) {
                 Ok(compiled_ip) => {
-                    eprintln!(
-                        "📦 COMPILED_IP: Using pre-compiled netlist for '{}' from '{}'",
-                        inst_lir.module_name, compiled_ip_path
-                    );
                     TechMapResult {
                         netlist: compiled_ip.netlist.clone(),
                         stats: TechMapStats {
@@ -5676,20 +5592,12 @@ pub fn map_hierarchical_to_gates(
                         )],
                     }
                 }
-                Err(e) => {
-                    eprintln!(
-                        "⚠️ COMPILED_IP: Failed to load '{}', falling back to synthesis: {}",
-                        compiled_ip_path, e
-                    );
+                Err(_e) => {
                     map_lir_to_gates_optimized(&inst_lir.lir_result.lir, library)
                 }
             }
         } else if let Some(ref blackbox_info) = inst_lir.lir_result.blackbox_info {
             // This is a blackbox/vendor IP - create a netlist with a single blackbox cell
-            eprintln!(
-                "🔌 BLACKBOX: Creating blackbox cell '{}' for instance '{}'",
-                blackbox_info.cell_name, path
-            );
             create_blackbox_netlist(blackbox_info, &inst_lir.module_name)
         } else {
             // Normal synthesis path - use non-optimized mapping for now
@@ -5698,18 +5606,6 @@ pub fn map_hierarchical_to_gates(
             // TODO: Add NCL-aware optimization that understands dual-rail semantics
             map_lir_to_gates(&inst_lir.lir_result.lir, library)
         };
-
-        // BUG #237 DEBUG: Log any tech mapping warnings
-        if !tech_result.warnings.is_empty() {
-            eprintln!(
-                "⚠️  TECH_MAP_WARNINGS for '{}': {} warnings",
-                path,
-                tech_result.warnings.len()
-            );
-            for (i, warn) in tech_result.warnings.iter().enumerate() {
-                eprintln!("  [{}/{}] {}", i + 1, tech_result.warnings.len(), warn);
-            }
-        }
 
         let mut inst_netlist =
             InstanceNetlist::new(inst_lir.module_name.clone(), tech_result.netlist);

@@ -58,10 +58,6 @@ impl ModuleResolver {
         if let Some(parent) = root_dir.parent() {
             let lib_dir = parent.join("lib");
             if lib_dir.exists() && lib_dir.is_dir() {
-                eprintln!(
-                    "[MODULE_RESOLVER] Found sibling lib directory: {:?}",
-                    lib_dir
-                );
                 search_paths.push(lib_dir);
             }
         }
@@ -76,24 +72,11 @@ impl ModuleResolver {
                     if let Some(build) = manifest.get("build") {
                         if let Some(src_dirs_value) = build.get("src_dirs") {
                             if let Some(src_dirs) = src_dirs_value.as_array() {
-                                eprintln!(
-                                    "[MODULE_RESOLVER] Found {} src_dirs in skalp.toml",
-                                    src_dirs.len()
-                                );
                                 for dir in src_dirs {
                                     if let Some(dir_str) = dir.as_str() {
                                         let dir_path = root_dir.join(dir_str);
                                         if dir_path.exists() {
-                                            eprintln!(
-                                                "[MODULE_RESOLVER] Adding src_dir: {:?}",
-                                                dir_path
-                                            );
                                             search_paths.push(dir_path);
-                                        } else {
-                                            eprintln!(
-                                                "[MODULE_RESOLVER] Warning: src_dir does not exist: {:?}",
-                                                dir_path
-                                            );
                                         }
                                     }
                                 }
@@ -107,10 +90,6 @@ impl ModuleResolver {
         // Add standard library path(s) if they exist
         // Supports colon-separated paths (e.g., "/path1:/path2")
         if let Ok(stdlib_paths) = std::env::var("SKALP_STDLIB_PATH") {
-            eprintln!(
-                "[MODULE_RESOLVER] Using SKALP_STDLIB_PATH from environment: {:?}",
-                stdlib_paths
-            );
             for path_str in stdlib_paths.split(':') {
                 if !path_str.is_empty() {
                     search_paths.push(PathBuf::from(path_str));
@@ -120,10 +99,6 @@ impl ModuleResolver {
             // Default stdlib location relative to root
             let default_stdlib = root_dir.join("stdlib");
             if default_stdlib.exists() {
-                eprintln!(
-                    "[MODULE_RESOLVER] Found stdlib relative to root: {:?}",
-                    default_stdlib
-                );
                 search_paths.push(default_stdlib);
             }
 
@@ -134,26 +109,13 @@ impl ModuleResolver {
                 .canonicalize()
                 .unwrap_or_else(|_| std::env::current_dir().unwrap().join(&root_dir));
 
-            eprintln!(
-                "[MODULE_RESOLVER] Searching for stdlib starting from: {:?}",
-                abs_root
-            );
-
             let mut current = Some(abs_root.as_path());
             let mut found_stdlib = false;
 
             while let Some(dir) = current {
                 // Check current/crates/skalp-stdlib
                 let potential_stdlib = dir.join("crates/skalp-stdlib");
-                eprintln!(
-                    "[MODULE_RESOLVER] Checking for stdlib at: {:?}",
-                    potential_stdlib
-                );
                 if potential_stdlib.exists() && potential_stdlib.is_dir() {
-                    eprintln!(
-                        "[MODULE_RESOLVER] ✅ Found development stdlib: {:?}",
-                        potential_stdlib
-                    );
                     search_paths.push(potential_stdlib);
                     found_stdlib = true;
                     break;
@@ -163,15 +125,7 @@ impl ModuleResolver {
                 // This handles the case where we have /src/hw/karythra and /src/hw/hls as siblings
                 if let Some(parent) = dir.parent() {
                     let hls_stdlib = parent.join("hls/crates/skalp-stdlib");
-                    eprintln!(
-                        "[MODULE_RESOLVER] Checking for stdlib in sibling hls: {:?}",
-                        hls_stdlib
-                    );
                     if hls_stdlib.exists() && hls_stdlib.is_dir() {
-                        eprintln!(
-                            "[MODULE_RESOLVER] ✅ Found stdlib in sibling hls directory: {:?}",
-                            hls_stdlib
-                        );
                         search_paths.push(hls_stdlib);
                         found_stdlib = true;
                         break;
@@ -185,14 +139,6 @@ impl ModuleResolver {
                 trace!("[MODULE_RESOLVER] Warning: Could not find SKALP stdlib. Imports like 'use bitops::*' will fail.");
                 trace!("[MODULE_RESOLVER] Hint: Set SKALP_STDLIB_PATH environment variable or ensure crates/skalp-stdlib exists in a parent directory.");
             }
-        }
-
-        eprintln!(
-            "[MODULE_RESOLVER] Initialized with {} search paths:",
-            search_paths.len()
-        );
-        for (i, path) in search_paths.iter().enumerate() {
-            trace!("[MODULE_RESOLVER]   {}: {:?}", i + 1, path);
         }
 
         Self {
@@ -226,28 +172,13 @@ impl ModuleResolver {
             // Check for skalp/numeric/fp.sk (contains fp32 trait implementations)
             let fp_path = search_path.join("skalp/numeric/fp.sk");
             if fp_path.exists() {
-                eprintln!(
-                    "[MODULE_RESOLVER] Preloading stdlib numeric module: {:?}",
-                    fp_path
-                );
-                if let Err(e) = self.load_module(&fp_path) {
-                    eprintln!("[MODULE_RESOLVER] Warning: Failed to preload fp.sk: {}", e);
-                }
+                let _ = self.load_module(&fp_path);
             }
 
             // Check for skalp/numeric/traits.sk (contains trait definitions)
             let traits_path = search_path.join("skalp/numeric/traits.sk");
             if traits_path.exists() {
-                eprintln!(
-                    "[MODULE_RESOLVER] Preloading stdlib traits module: {:?}",
-                    traits_path
-                );
-                if let Err(e) = self.load_module(&traits_path) {
-                    eprintln!(
-                        "[MODULE_RESOLVER] Warning: Failed to preload traits.sk: {}",
-                        e
-                    );
-                }
+                let _ = self.load_module(&traits_path);
             }
         }
         Ok(())
@@ -365,10 +296,6 @@ impl ModuleResolver {
 
         // Check if already loaded
         if self.loaded_modules.contains_key(path) {
-            eprintln!(
-                "[MODULE_RESOLVER] Module already loaded (cached): {:?}",
-                path
-            );
             return Ok(());
         }
 
@@ -388,11 +315,6 @@ impl ModuleResolver {
             .with_context(|| format!("Failed to read module file: {:?}", path))?;
 
         // Parse to syntax tree
-        eprintln!(
-            "[MODULE_RESOLVER] Parsing {} bytes from {:?}",
-            source.len(),
-            path
-        );
         let (syntax_tree, parse_errors) = parse::parse_with_errors(&source);
 
         if !parse_errors.is_empty() {
@@ -420,31 +342,13 @@ impl ModuleResolver {
             )
         })?;
 
-        eprintln!(
-            "[MODULE_RESOLVER] HIR built successfully for {:?}, found {} imports, {} trait_implementations, {} trait_definitions",
-            path,
-            hir.imports.len(),
-            hir.trait_implementations.len(),
-            hir.trait_definitions.len()
-        );
-
         // Recursively load dependencies first
         let mut dep_paths = Vec::new();
-        for (i, import) in hir.imports.iter().enumerate() {
-            eprintln!(
-                "[MODULE_RESOLVER] Processing import {}/{} from {:?}",
-                i + 1,
-                hir.imports.len(),
-                path
-            );
+        for import in &hir.imports {
             let dep_path = self.resolve_import_path(import)?;
             trace!("[MODULE_RESOLVER] Resolved import to: {:?}", dep_path);
             // Recursively load (this will use cache if already loaded)
             self.load_module(&dep_path)?;
-            eprintln!(
-                "[MODULE_RESOLVER] Successfully loaded dependency: {:?}",
-                dep_path
-            );
             dep_paths.push((import.clone(), dep_path));
         }
 
@@ -719,10 +623,6 @@ impl ModuleResolver {
                 // an entity (e.g., FpAdd<IEEE754_32>), we need to merge that entity
                 for method in &trait_impl.method_implementations {
                     let entity_names = Self::extract_entity_refs_from_statements(&method.body);
-                    eprintln!(
-                        "[BUG #207 DEBUG] Trait impl '{}' method '{}' has {} body statements, extracted entities: {:?}",
-                        trait_impl.trait_name, method.name, method.body.len(), entity_names
-                    );
                     for entity_name in entity_names {
                         // Check if entity already exists in target
                         if !target.entities.iter().any(|e| e.name == entity_name) {
@@ -730,10 +630,6 @@ impl ModuleResolver {
                             if let Some(entity) =
                                 source.entities.iter().find(|e| e.name == entity_name)
                             {
-                                eprintln!(
-                                    "[MERGE_IMPORT] BUG #207: Merging entity '{}' referenced by trait impl '{}'",
-                                    entity_name, trait_impl.trait_name
-                                );
                                 // Assign new entity ID
                                 let new_entity_id = crate::hir::EntityId(
                                     target.entities.iter().map(|e| e.id.0).max().unwrap_or(0) + 1,
@@ -838,10 +734,6 @@ impl ModuleResolver {
                     let mut imported_distinct = distinct.clone();
                     if import.visibility == crate::hir::HirVisibility::Public {
                         imported_distinct.visibility = crate::hir::HirVisibility::Public;
-                        eprintln!(
-                            "[MERGE_IMPORT] Re-exporting distinct type '{}' as public",
-                            distinct.name
-                        );
                     }
                     target.distinct_types.push(imported_distinct);
                 }

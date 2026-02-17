@@ -596,14 +596,6 @@ impl<'hir> HirToMir<'hir> {
                     .and_then(|expr| self.convert_literal_expr(expr));
                 let clock_domain = hir_signal.clock_domain.map(|id| ClockDomainId(id.0));
 
-                // BUG #117r DEBUG: Log signal flattening in hir_to_mir
-                if hir_signal.name.contains("prot_faults") || hir_signal.name.contains("FaultFlags") {
-                    eprintln!(
-                        "📍 HIR_TO_MIR FLATTEN: signal='{}', type={:?}",
-                        hir_signal.name, signal_type
-                    );
-                }
-
                 let (flattened_signals, flattened_fields) = self.flatten_signal(
                     &hir_signal.name,
                     &signal_type,
@@ -612,17 +604,6 @@ impl<'hir> HirToMir<'hir> {
                     hir_signal.span.clone(),
                     hir_signal.memory_config.is_some(),
                 );
-
-                // BUG #117r DEBUG: Log flattening result
-                if hir_signal.name.contains("prot_faults") {
-                    eprintln!(
-                        "📍 HIR_TO_MIR RESULT: signal='{}', num_flattened_signals={}, num_fields={}",
-                        hir_signal.name, flattened_signals.len(), flattened_fields.len()
-                    );
-                    for (i, sig) in flattened_signals.iter().enumerate() {
-                        eprintln!("   FlatSig[{}]: name='{}', id={:?}", i, sig.name, sig.id);
-                    }
-                }
 
                 if !flattened_fields.is_empty() {
                     self.flattened_signals
@@ -2024,11 +2005,6 @@ impl<'hir> HirToMir<'hir> {
                 }
             }
             hir::HirStatement::Let(let_stmt) => {
-                // BUG #117r DEBUG: Log all let statements being processed
-                if let_stmt.name.contains("protection") || let_stmt.name.contains("charge") {
-                    eprintln!("📍 CONVERT_LET: name='{}', value_type={:?}",
-                        let_stmt.name, std::mem::discriminant(&let_stmt.value));
-                }
                 trace!(
                     "🟠🟠🟠 [DEBUG] convert_statement: Processing Let for '{}' (ID {:?}), value type: {:?} 🟠🟠🟠",
                     let_stmt.name, let_stmt.id, std::mem::discriminant(&let_stmt.value)
@@ -2054,11 +2030,6 @@ impl<'hir> HirToMir<'hir> {
                 // Pattern: let inner = Inner { data };
                 // If the RHS is a StructLiteral and the type_name matches an entity, create a module instance
                 if let hir::HirExpression::StructLiteral(struct_lit) = &let_stmt.value {
-                    // BUG #117r DEBUG: Log struct literal entity detection
-                    if struct_lit.type_name.contains("Protection") || struct_lit.type_name.contains("Controller") {
-                        eprintln!("📍 STRUCT_LIT_ENTITY: let '{}' = {}{{...}} with {} fields",
-                            let_stmt.name, struct_lit.type_name, struct_lit.fields.len());
-                    }
                     // Check if this type_name matches an entity
                     let hir = self.hir.as_ref();
                     if let Some(hir) = hir {
@@ -2367,12 +2338,6 @@ impl<'hir> HirToMir<'hir> {
                                             }
                                         }).unwrap_or(false);
 
-                                        // BUG #117r DEBUG
-                                        if field_init.name.contains("faults") {
-                                            eprintln!("📍 STRUCT_LIT_OUT: field='{}', needs_expansion={}, port_type={:?}",
-                                                field_init.name, needs_expansion, port_opt.map(|p| &p.port_type));
-                                        }
-
                                         // Try to expand connection if needed
                                         let expanded_opt = if needs_expansion {
                                             self.expand_instance_connection(&field_init.name, &field_init.value)
@@ -2381,14 +2346,6 @@ impl<'hir> HirToMir<'hir> {
                                         };
 
                                         if let Some(expanded_conns) = expanded_opt {
-                                            // BUG #117r FIX: Insert all expanded connections for struct output
-                                            if field_init.name.contains("faults") {
-                                                eprintln!("📍 STRUCT_LIT_OUT_EXPAND: field='{}', expanded to {} connections",
-                                                    field_init.name, expanded_conns.len());
-                                                for (pn, _) in &expanded_conns {
-                                                    eprintln!("   -> port='{}'", pn);
-                                                }
-                                            }
                                             for (port_name, expr) in expanded_conns {
                                                 connections.insert(port_name, expr);
                                             }
@@ -2476,12 +2433,6 @@ impl<'hir> HirToMir<'hir> {
                                             }
                                         }).unwrap_or(false);
 
-                                        // BUG #117r DEBUG
-                                        if field_init.name.contains("faults") || field_init.name.contains("threshold") {
-                                            eprintln!("📍 STRUCT_LIT_CONN: field='{}', needs_expansion={}, port_type={:?}",
-                                                field_init.name, needs_expansion, port_opt.map(|p| &p.port_type));
-                                        }
-
                                         // Try to expand connection if needed
                                         let expanded_opt = if needs_expansion {
                                             self.expand_instance_connection(&field_init.name, &field_init.value)
@@ -2490,11 +2441,6 @@ impl<'hir> HirToMir<'hir> {
                                         };
 
                                         if let Some(expanded_conns) = expanded_opt {
-                                            // BUG #117r FIX: Insert all expanded connections
-                                            if field_init.name.contains("faults") {
-                                                eprintln!("📍 STRUCT_LIT_EXPAND: field='{}', expanded to {} connections",
-                                                    field_init.name, expanded_conns.len());
-                                            }
                                             for (port_name, expr) in expanded_conns {
                                                 connections.insert(port_name, expr);
                                             }
@@ -4348,8 +4294,6 @@ impl<'hir> HirToMir<'hir> {
                         for field_init in &struct_lit.fields {
                             // First try to expand the connection (for struct-typed input ports)
                             if let Some(expanded_conns) = self.expand_instance_connection(&field_init.name, &field_init.value) {
-                                // BUG #225: Insert all expanded connections for struct input
-                                eprintln!("📍 BUG#225: Expanded input connection '{}' to {} fields", field_init.name, expanded_conns.len());
                                 for (port_field_name, rhs_expr) in expanded_conns {
                                     connections.insert(port_field_name, rhs_expr);
                                 }
@@ -4384,21 +4328,11 @@ impl<'hir> HirToMir<'hir> {
                                     _ => false,
                                 };
 
-                                // BUG #117r DEBUG: Log output port processing for ALL struct lit entity instantiations
-                                eprintln!("🔍 BUG#117r: Processing output port '{}' in instance '{}', needs_expansion={}, field_init_opt={:?}",
-                                    port.name, instance_name, needs_expansion, field_init_opt.map(|fi| format!("{:?}", fi.value)));
-
                                 // Try to expand connection if RHS is a flattened signal
                                 let expanded_opt = if needs_expansion {
-                                    let result = field_init_opt.and_then(|fi| {
+                                    field_init_opt.and_then(|fi| {
                                         self.expand_instance_connection(&port.name, &fi.value)
-                                    });
-                                    // BUG #117r DEBUG
-                                    if instance_name == "protection" || port.name == "faults" {
-                                        eprintln!("🔍 BUG#117r: expand_instance_connection for port '{}' returned {:?}",
-                                            port.name, result.as_ref().map(|v| v.len()));
-                                    }
-                                    result
+                                    })
                                 } else {
                                     None
                                 };
@@ -7453,11 +7387,6 @@ impl<'hir> HirToMir<'hir> {
                     );
 
                     let result = self.inline_function_call(call);
-                    eprintln!(
-                        "[DEBUG #85] inline_function_call('{}') returned: is_some={}",
-                        call.function,
-                        result.is_some()
-                    );
 
                     // BUG FIX #IMPORT_MATCH: Restore match_arm_prefix after inlining
                     self.match_arm_prefix = saved_match_arm_prefix;
@@ -7482,10 +7411,6 @@ impl<'hir> HirToMir<'hir> {
                 }
 
                 // Path 2: SYNTHESIZE MODULE (complex functions OR inlining failed)
-                eprintln!(
-                    "[DEBUG #85] Entering module synthesis path for '{}'",
-                    call.function
-                );
                 {
                     // Path 2: SYNTHESIZE MODULE (complex functions with >5 nested calls)
                     trace!(
@@ -7506,10 +7431,6 @@ impl<'hir> HirToMir<'hir> {
                     if let Some(cached) = self.module_call_cache.get(&cache_key) {
                         trace!(
                             "📞📞📞 BUG FIX #DUPLICATE_INSTANCES: Using CACHED Call result for '{}' in convert_expression 📞📞📞",
-                            call.function
-                        );
-                        eprintln!(
-                            "[DEBUG #85] CACHE HIT for '{}' - returning cached result",
                             call.function
                         );
                         return Some(cached.clone());
@@ -7558,10 +7479,6 @@ impl<'hir> HirToMir<'hir> {
                         });
 
                         if let Some(func) = func {
-                            eprintln!(
-                                "[DEBUG] About to call synthesize_function_as_module for '{}'",
-                                call.function
-                            );
                             self.synthesize_function_as_module(func)
                         } else {
                             trace!("❌ [HYBRID ERROR] Cannot synthesize '{}' - function not found in HIR!",
@@ -7707,10 +7624,6 @@ impl<'hir> HirToMir<'hir> {
                     // This prevents duplicate module instances when the same Call is processed
                     // multiple times (e.g., during tuple destructuring element access)
                     self.module_call_cache.insert(cache_key, result.clone());
-                    eprintln!(
-                        "[DEBUG #85] Cached result for '{}' in convert_expression",
-                        call.function
-                    );
 
                     Some(result)
                 }
@@ -21666,18 +21579,6 @@ impl<'hir> HirToMir<'hir> {
                 }
                 hir::HirStatement::Return(Some(val)) => {
                     return_expr = Some(val.clone());
-                    eprintln!(
-                        "[DEBUG SYNTH] Found return expression: {:?} for function '{}'",
-                        std::mem::discriminant(val),
-                        ctx.func_name
-                    );
-                    if let hir::HirExpression::Match(m) = val {
-                        eprintln!(
-                            "[DEBUG SYNTH] Return is Match with {} arms, mux_style={:?}",
-                            m.arms.len(),
-                            m.mux_style
-                        );
-                    }
                     trace!(
                         "    • Found return expression: {:?}",
                         std::mem::discriminant(val)

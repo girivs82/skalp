@@ -289,13 +289,6 @@ impl NclSimulator {
     /// Storage layout: all t rails first, then all f rails
     /// For width N: indices 0..N are t rails, indices N..2N are f rails
     pub fn set_dual_rail(&mut self, name: &str, bit: usize, value: NclValue) {
-        // Debug: always print for bit 0
-        if bit == 0 {
-            eprintln!(
-                "[NCL_SIM DEBUG] set_dual_rail called: name='{}' bit={}",
-                name, bit
-            );
-        }
         // Extract net IDs first to avoid borrow conflict
         let (t_net, f_net, width) = {
             if let Some(nets) = self.input_nets.get(name) {
@@ -635,12 +628,6 @@ impl NclSimulator {
             }
 
             if iterations >= max {
-                if self.config.debug {
-                    eprintln!(
-                        "[NCL_SIM] Warning: Max iterations ({}) reached with {} changes",
-                        max, changes
-                    );
-                }
                 self.stats.is_stable = false;
                 break;
             }
@@ -668,13 +655,6 @@ impl NclSimulator {
                     NclPhase::Null => self.stats.null_wavefronts += 1,
                     _ => {}
                 }
-            }
-
-            if self.config.debug {
-                eprintln!(
-                    "[NCL_SIM] Wavefront complete: {:?} -> {:?} in {} iterations",
-                    start_phase, end_phase, iterations
-                );
             }
 
             true
@@ -929,12 +909,6 @@ impl NclSimulator {
             "TIE_LOW" | "TIEL" | "GND" | "VSS" => PrimitiveType::Constant { value: false },
             _ => {
                 // Default to buffer for unknown types
-                if self.config.debug {
-                    eprintln!(
-                        "[NCL_SIM] Unknown cell type: {} (base: {})",
-                        cell_type, base_type
-                    );
-                }
                 PrimitiveType::Buf
             }
         }

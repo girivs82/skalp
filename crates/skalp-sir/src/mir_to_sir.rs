@@ -7244,9 +7244,6 @@ impl<'a> MirToSirConverter<'a> {
                 }
                 Statement::If(if_stmt) => {
                     // Build conditional MUX
-                    if target.contains("state_reg") {
-                        eprintln!("      ⚙️ Found If statement for target={}, calling synthesize_conditional_for_instance", target);
-                    }
                     return self.synthesize_conditional_for_instance(
                         if_stmt,
                         inst_prefix,
@@ -7259,9 +7256,6 @@ impl<'a> MirToSirConverter<'a> {
                 }
                 Statement::Case(case_stmt) => {
                     // BUG #237 FIX: Handle top-level Case statements too
-                    if target.contains("state_reg") {
-                        eprintln!("      ⚙️ Found top-level Case statement for target={}, {} items", target, case_stmt.items.len());
-                    }
                     if let Some(val) = self.synthesize_case_for_target_for_instance(
                         case_stmt,
                         inst_prefix,

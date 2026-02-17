@@ -3175,10 +3175,6 @@ mod tests {
         );
         let th12 = th12.unwrap();
         assert_eq!(th12.name, "TH12_X1");
-
-        // Print for debugging
-        println!("TH22 cell: {:?}", th22.name);
-        println!("TH12 cell: {:?}", th12.name);
     }
 
     #[test]

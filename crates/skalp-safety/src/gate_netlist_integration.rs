@@ -492,15 +492,10 @@ fn analyze_detection_coverage(netlist: &GateNetlist) -> DetectionCoverageInfo {
 
             info.net_detection_modes.insert(net.id.0, mode);
 
-            println!(
-                "✅ [DETECTION_ANALYSIS] Found detection net: {} (id={}) mode={:?}",
-                net.name, net.id.0, mode
-            );
         }
     }
 
     if info.detection_nets.is_empty() {
-        println!("⚠️ [DETECTION_ANALYSIS] No detection signals found in netlist");
         return info;
     }
 
@@ -566,20 +561,6 @@ fn analyze_detection_coverage(netlist: &GateNetlist) -> DetectionCoverageInfo {
         // Boot DC (boot-time) - for LFM
         info.boot_dc = (boot_count as f64 / total_functional as f64) * 100.0;
     }
-
-    println!("✅ [DETECTION_ANALYSIS] Detection coverage summary:");
-    println!(
-        "   Total: {}/{} cells = {:.1}% DC",
-        covered_count, total_functional, info.calculated_dc
-    );
-    println!(
-        "   Runtime (SPFM): {}/{} cells = {:.1}% DC",
-        continuous_count, total_functional, info.runtime_dc
-    );
-    println!(
-        "   Boot (LFM): {}/{} cells = {:.1}% DC",
-        boot_count, total_functional, info.boot_dc
-    );
 
     info
 }

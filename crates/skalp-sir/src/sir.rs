@@ -632,13 +632,6 @@ impl SirModule {
                 .copied()
                 .collect();
 
-            eprintln!(
-                "⚠️ SIR: Combinational cycle detected: {} of {} nodes sorted, {} stuck",
-                sorted.len(),
-                node_ids.len(),
-                unsorted.len()
-            );
-
             // Fall back to node ID order for stuck nodes
             let mut id_sorted: Vec<usize> = unsorted;
             id_sorted.sort();

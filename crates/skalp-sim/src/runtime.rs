@@ -396,7 +396,6 @@ mod tests {
         let runtime = GpuSimRuntime::new(sir).await;
 
         assert!(runtime.is_ok());
-        println!("GPU runtime created successfully");
     }
 
     #[tokio::test]
@@ -409,9 +408,5 @@ mod tests {
         assert!(result.is_ok());
         let sim_result = result.unwrap();
         assert_eq!(sim_result.cycles_simulated, 10);
-
-        println!("Simulated {} cycles in {:?}",
-                sim_result.cycles_simulated,
-                sim_result.wall_time);
     }
 }

@@ -226,16 +226,6 @@ impl PatternDetector {
         // Step 4: Detect watchdog patterns
         patterns.watchdogs = self.detect_watchdogs(netlist);
 
-        if self.verbose {
-            eprintln!(
-                "[PATTERN_DETECT] Found {} TMR, {} DMR, {} voters, {} watchdogs",
-                patterns.tmr_patterns.len(),
-                patterns.dmr_patterns.len(),
-                patterns.voters.len(),
-                patterns.watchdogs.len()
-            );
-        }
-
         patterns
     }
 

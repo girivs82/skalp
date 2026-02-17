@@ -191,13 +191,8 @@ impl<'hir> InstantiationCollector<'hir> {
         // Note: This may cause ID collisions in edge cases where different impls have
         // constants with the same ID. If that becomes an issue, we need a more sophisticated
         // constant ID remapping during module merge.
-        eprintln!("[COLLECTOR] Registering constants from {} implementations", hir.implementations.len());
         for implementation in &hir.implementations {
             if !implementation.constants.is_empty() {
-                eprintln!("[COLLECTOR]   Impl entity={:?} has {} constants:", implementation.entity, implementation.constants.len());
-                for c in &implementation.constants {
-                    eprintln!("[COLLECTOR]     - '{}' (id={:?})", c.name, c.id);
-                }
                 evaluator.register_constants(&implementation.constants);
             }
         }
@@ -220,18 +215,7 @@ impl<'hir> InstantiationCollector<'hir> {
 
         // Also collect from trait implementations (where entity instantiations live)
         for trait_impl in &hir.trait_implementations {
-            eprintln!(
-                "[COLLECTOR] Processing trait impl '{}' on {:?}: {} methods",
-                trait_impl.trait_name,
-                trait_impl.target,
-                trait_impl.method_implementations.len()
-            );
             for method_impl in &trait_impl.method_implementations {
-                eprintln!(
-                    "[COLLECTOR]   Method '{}' has {} body statements",
-                    method_impl.name,
-                    method_impl.body.len()
-                );
                 for stmt in &method_impl.body {
                     self.collect_from_statement(stmt);
                 }
@@ -326,24 +310,6 @@ impl<'hir> InstantiationCollector<'hir> {
 
     /// Collect instantiations from an implementation
     fn collect_from_implementation(&mut self, implementation: &'hir HirImplementation) {
-        // Find entity name for logging
-        let entity_name = self
-            .hir
-            .entities
-            .iter()
-            .find(|e| e.id == implementation.entity)
-            .map(|e| e.name.as_str())
-            .unwrap_or("unknown");
-
-        eprintln!(
-            "[COLLECTOR] Processing impl for entity '{}': {} instances, {} event_blocks, {} statements, {} assignments",
-            entity_name,
-            implementation.instances.len(),
-            implementation.event_blocks.len(),
-            implementation.statements.len(),
-            implementation.assignments.len()
-        );
-
         // Set current implementation context
         self.current_impl = Some(implementation);
 
@@ -427,11 +393,6 @@ impl<'hir> InstantiationCollector<'hir> {
     fn collect_from_expression(&mut self, expr: &HirExpression) {
         match expr {
             HirExpression::StructLiteral(struct_lit) => {
-                eprintln!(
-                    "[COLLECTOR] Found StructLiteral: type_name='{}', generic_args={}",
-                    struct_lit.type_name,
-                    struct_lit.generic_args.len()
-                );
                 // Check if this struct literal corresponds to an entity
                 self.try_collect_struct_literal_entity(struct_lit);
                 // Also recurse into field values
@@ -520,12 +481,6 @@ impl<'hir> InstantiationCollector<'hir> {
     /// Try to collect an instantiation from a struct literal that matches an entity
     fn try_collect_struct_literal_entity(&mut self, struct_lit: &crate::hir::HirStructLiteral) {
         let type_name = &struct_lit.type_name;
-        eprintln!(
-            "[COLLECTOR] Looking for entity '{}' among {} entities (struct literal has {} generic_args)",
-            type_name,
-            self.hir.entities.len(),
-            struct_lit.generic_args.len()
-        );
 
         // Find the entity by name, or resolve entity alias
         let (entity, resolved_generic_args) = match self.hir.entities.iter().find(|e| e.name == *type_name) {
@@ -544,10 +499,6 @@ impl<'hir> InstantiationCollector<'hir> {
                     // Find the target entity
                     match self.hir.entities.iter().find(|e| e.name == target_name) {
                         Some(e) => {
-                            eprintln!(
-                                "[COLLECTOR] Resolved entity alias '{}' -> '{}' with {} alias generic_args",
-                                type_name, target_name, alias.generic_args.len()
-                            );
                             // Use alias's generic_args if present, otherwise struct_lit's
                             let args = if !alias.generic_args.is_empty() {
                                 alias.generic_args.clone()
@@ -568,18 +519,8 @@ impl<'hir> InstantiationCollector<'hir> {
             }
         };
 
-        eprintln!(
-            "[COLLECTOR] Found entity '{}' with {} generics",
-            entity.name,
-            entity.generics.len()
-        );
-
         // If entity has no generics, nothing to collect
         if entity.generics.is_empty() {
-            eprintln!(
-                "[COLLECTOR] Entity '{}' has no generics, skipping",
-                entity.name
-            );
             return;
         }
 
@@ -595,10 +536,6 @@ impl<'hir> InstantiationCollector<'hir> {
             }
 
             let generic = &entity.generics[i];
-            eprintln!(
-                "[COLLECTOR] Processing generic arg[{}] for '{}' (type: {:?})",
-                i, generic.name, generic.param_type
-            );
 
             match &generic.param_type {
                 HirGenericType::Type => {
@@ -607,14 +544,8 @@ impl<'hir> InstantiationCollector<'hir> {
                     }
                 }
                 HirGenericType::Const(_const_type) => {
-                    match self.evaluator.eval(arg) {
-                        Ok(value) => {
-                            eprintln!("[COLLECTOR] Const arg '{}' evaluated to: {:?}", generic.name, value);
-                            const_args.insert(generic.name.clone(), value);
-                        }
-                        Err(e) => {
-                            eprintln!("[COLLECTOR] Const arg '{}' eval FAILED: {:?}, arg={:?}", generic.name, e, arg);
-                        }
+                    if let Ok(value) = self.evaluator.eval(arg) {
+                        const_args.insert(generic.name.clone(), value);
                     }
                 }
                 HirGenericType::Intent => {
@@ -634,22 +565,12 @@ impl<'hir> InstantiationCollector<'hir> {
             let provided_positionally = i < struct_lit.generic_args.len();
 
             if !provided_positionally {
-                eprintln!("[BUG #232 DEBUG] Generic '{}' not provided positionally, checking for default", generic.name);
                 match &generic.param_type {
                     HirGenericType::Const(_const_type) => {
                         if let Some(ref default) = generic.default_value {
-                            eprintln!("[BUG #232 DEBUG]   Has default expr: {:?}", default);
-                            match self.evaluator.eval(default) {
-                                Ok(value) => {
-                                    eprintln!("[BUG #232 DEBUG]   Evaluated to: {:?}", value);
-                                    const_args.entry(generic.name.clone()).or_insert(value);
-                                }
-                                Err(e) => {
-                                    eprintln!("[BUG #232 DEBUG]   Evaluation FAILED: {:?}", e);
-                                }
+                            if let Ok(value) = self.evaluator.eval(default) {
+                                const_args.entry(generic.name.clone()).or_insert(value);
                             }
-                        } else {
-                            eprintln!("[BUG #232 DEBUG]   No default value");
                         }
                     }
                     HirGenericType::Intent => {
@@ -668,11 +589,6 @@ impl<'hir> InstantiationCollector<'hir> {
                 }
             }
         }
-
-        eprintln!(
-            "[COLLECTOR] Creating instantiation for '{}': const_args={:?}",
-            entity.name, const_args
-        );
 
         // Create instantiation record
         let instantiation = Instantiation {

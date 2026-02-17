@@ -493,8 +493,6 @@ impl Monomorphizer {
     ///
     /// This is the main entry point for monomorphization.
     pub fn monomorphize(&mut self, hir: &Hir) -> Hir {
-        eprintln!("🔄 [MONOMORPHIZE] Starting monomorphization pass");
-
         // Step 1: Build trait method registry
         self.build_trait_registry(hir);
 
@@ -515,8 +513,6 @@ impl Monomorphizer {
     ///
     /// Extracts all trait implementations and stores method info for later resolution
     fn build_trait_registry(&mut self, hir: &Hir) {
-        eprintln!("  [TRAIT] Building trait method registry");
-
         for trait_impl in &hir.trait_implementations {
             // Only process type-based implementations
             // Entity-based impls are not relevant for function calls
@@ -524,29 +520,11 @@ impl Monomorphizer {
                 // Get type key string for lookup
                 let type_key = format!("{:?}", target_type);
 
-                eprintln!(
-                    "  [TRAIT] Found impl {} for {:?}",
-                    trait_impl.trait_name, target_type
-                );
-
                 // Get trait definition to get parameter info
                 let trait_def = hir
                     .trait_definitions
                     .iter()
                     .find(|t| t.name == trait_impl.trait_name);
-
-                if let Some(def) = trait_def {
-                    eprintln!(
-                        "    [TRAIT_DEBUG] Found trait definition '{}' with {} methods",
-                        def.name,
-                        def.methods.len()
-                    );
-                } else {
-                    eprintln!(
-                        "    [TRAIT_DEBUG] ❌ No trait definition found for '{}'",
-                        trait_impl.trait_name
-                    );
-                }
 
                 // Get or create method map for this (trait, type) pair
                 let key = (trait_impl.trait_name.clone(), type_key.clone());
@@ -557,24 +535,9 @@ impl Monomorphizer {
                     let trait_method = trait_def
                         .and_then(|t| t.methods.iter().find(|m| m.name == method_impl.name));
 
-                    if let Some(tm) = trait_method {
-                        eprintln!(
-                            "    [TRAIT_DEBUG] Found trait method '{}' with {} parameters: {:?}",
-                            tm.name,
-                            tm.parameters.len(),
-                            tm.parameters.iter().map(|p| &p.name).collect::<Vec<_>>()
-                        );
-                    }
-
                     let parameters = trait_method
                         .map(|m| m.parameters.clone())
                         .unwrap_or_default();
-
-                    eprintln!(
-                        "    [TRAIT_DEBUG] Method '{}' has {} parameters",
-                        method_impl.name,
-                        parameters.len()
-                    );
 
                     let info = TraitMethodInfo {
                         trait_name: trait_impl.trait_name.clone(),
@@ -585,21 +548,9 @@ impl Monomorphizer {
                     };
 
                     methods_map.insert(method_impl.name.clone(), info);
-
-                    eprintln!(
-                        "    [TRAIT] Registered method: {}.{}",
-                        trait_impl.trait_name, method_impl.name
-                    );
                 }
             }
         }
-
-        let total_methods: usize = self.trait_methods.values().map(|m| m.len()).sum();
-        eprintln!(
-            "  [TRAIT] Registered {} trait implementations with {} total methods",
-            self.trait_methods.len(),
-            total_methods
-        );
     }
 
     /// Identify which functions are generic
@@ -607,11 +558,6 @@ impl Monomorphizer {
         // Check top-level functions
         for func in &hir.functions {
             if !func.generics.is_empty() {
-                eprintln!(
-                    "  [MONO] Found generic function: {} with {} generic params",
-                    func.name,
-                    func.generics.len()
-                );
                 self.generic_function_ids.insert(func.id);
                 self.generic_functions.insert(func.id, func.clone());
             }
@@ -621,27 +567,16 @@ impl Monomorphizer {
         for impl_block in &hir.implementations {
             for func in &impl_block.functions {
                 if !func.generics.is_empty() {
-                    eprintln!(
-                        "  [MONO] Found generic function in impl: {} with {} generic params",
-                        func.name,
-                        func.generics.len()
-                    );
                     self.generic_function_ids.insert(func.id);
                     self.generic_functions.insert(func.id, func.clone());
                 }
             }
         }
 
-        eprintln!(
-            "  [MONO] Identified {} generic functions",
-            self.generic_function_ids.len()
-        );
     }
 
     /// Collect all calls to generic functions
     fn collect_generic_calls(&mut self, hir: &Hir) {
-        eprintln!("  [MONO] Collecting generic function calls");
-
         // Collect from top-level functions
         for func in &hir.functions {
             self.collect_calls_from_statements(&func.body, &func.name);
@@ -666,10 +601,6 @@ impl Monomorphizer {
             }
         }
 
-        eprintln!(
-            "  [MONO] Found {} specialization requests",
-            self.pending.len()
-        );
     }
 
     /// Collect calls from a list of statements
@@ -721,35 +652,18 @@ impl Monomorphizer {
     fn collect_calls_from_expression(&mut self, expr: &hir::HirExpression, context: &str) {
         match expr {
             hir::HirExpression::Call(call) => {
-                eprintln!(
-                    "    [MONO_DEBUG] Found call to '{}' with {} type args",
-                    call.function,
-                    call.type_args.len()
-                );
-
                 // Check if this is a call to a generic function with type arguments
                 if !call.type_args.is_empty() {
-                    eprintln!("    [MONO_DEBUG] Call has type args, looking up function...");
-
                     // Look up the function by name to get its ID
                     if let Some((func_id, func)) =
                         self.find_generic_function_by_name(&call.function)
                     {
-                        eprintln!(
-                            "  [MONO] Found call to generic function '{}' with {} type args in {}",
-                            call.function,
-                            call.type_args.len(),
-                            context
-                        );
-
                         // Convert type arguments to ConcreteType based on generic parameter kind
                         let type_args: Vec<ConcreteType> = call
                             .type_args
                             .iter()
                             .zip(&func.generics)
                             .map(|(ty, generic)| {
-                                eprintln!("    [MONO_DEBUG] Converting type arg: {:?}, generic param type: {:?}",
-                                    ty, generic.param_type);
                                 match &generic.param_type {
                                     hir::HirGenericType::Const(_) => {
                                         // For const parameters, extract the constant value
@@ -760,23 +674,18 @@ impl Monomorphizer {
                                                     let value = match lit {
                                                         hir::HirLiteral::Integer(v) => *v,
                                                         _ => {
-                                                            eprintln!("    [MONO_DEBUG] NatExpr contains non-integer literal: {:?}", lit);
                                                             0
                                                         }
                                                     };
-                                                    eprintln!("    [MONO_DEBUG] Extracted const value from NatExpr: {}", value);
                                                     ConcreteType::ConstValue(value)
                                                 } else {
-                                                    eprintln!("    [MONO_DEBUG] NatExpr contains non-literal expression: {:?}", expr);
                                                     ConcreteType::Type(ty.clone())
                                                 }
                                             }
                                             HirType::Bit(width) => {
-                                                eprintln!("    [MONO_DEBUG] Extracted const value from Bit: {}", width);
                                                 ConcreteType::ConstValue(*width as u64)
                                             }
                                             _ => {
-                                                eprintln!("    [MONO_DEBUG] Type arg is not NatExpr or Bit, treating as type: {:?}", ty);
                                                 // Fallback: treat as type
                                                 ConcreteType::Type(ty.clone())
                                             }
@@ -784,7 +693,6 @@ impl Monomorphizer {
                                     }
                                     _ => {
                                         // For type parameters, use the type directly
-                                        eprintln!("    [MONO_DEBUG] Type parameter, using type directly");
                                         ConcreteType::Type(ty.clone())
                                     }
                                 }
@@ -793,17 +701,7 @@ impl Monomorphizer {
 
                         // Queue this specialization
                         self.request_specialization(func_id, type_args);
-                    } else {
-                        eprintln!(
-                            "    [MONO_DEBUG] Function '{}' not found in generic_functions map",
-                            call.function
-                        );
                     }
-                } else {
-                    eprintln!(
-                        "    [MONO_DEBUG] Call to '{}' has no type args",
-                        call.function
-                    );
                 }
 
                 // Recursively collect from arguments
@@ -912,11 +810,6 @@ impl Monomorphizer {
         // Check if we've already specialized this combination
         let key = self.make_specialization_key(function_id, &type_args);
         if !self.specializations.contains_key(&key) {
-            eprintln!(
-                "    [MONO] Queuing specialization for function ID {:?} with {} type args",
-                function_id,
-                type_args.len()
-            );
             self.pending.push(SpecializationRequest {
                 function_id,
                 type_args,
@@ -926,16 +819,10 @@ impl Monomorphizer {
 
     /// Generate all pending specializations
     fn generate_all_specializations(&mut self) {
-        eprintln!("  [MONO] Generating specializations");
-
         while let Some(req) = self.pending.pop() {
             self.generate_specialization(req);
         }
 
-        eprintln!(
-            "  [MONO] Generated {} specialized functions",
-            self.specialized_functions.len()
-        );
     }
 
     /// Generate a single specialization
@@ -943,21 +830,12 @@ impl Monomorphizer {
         let generic_func = match self.generic_functions.get(&req.function_id) {
             Some(func) => func,
             None => {
-                eprintln!(
-                    "    [MONO] ERROR: Generic function {:?} not found",
-                    req.function_id
-                );
                 return;
             }
         };
 
         // Generate specialized name
         let specialized_name = self.mangle_name(&generic_func.name, &req.type_args);
-
-        eprintln!(
-            "    [MONO] Generating specialization: {} -> {}",
-            generic_func.name, specialized_name
-        );
 
         // Record the specialization
         let key = self.make_specialization_key(req.function_id, &req.type_args);
@@ -1000,12 +878,6 @@ impl Monomorphizer {
             span: generic_func.span.clone(), // Preserve source span from generic function
             pipeline_config: generic_func.pipeline_config.clone(), // Preserve pipeline config
         };
-
-        eprintln!(
-            "    [MONO] Created specialized function '{}' with {} params",
-            specialized_func.name,
-            specialized_func.params.len()
-        );
 
         self.specialized_functions.push(specialized_func);
     }
@@ -1061,8 +933,6 @@ impl Monomorphizer {
 
     /// Replace generic calls with specialized calls in the HIR
     fn replace_calls_in_hir(&mut self, hir: &Hir) -> Hir {
-        eprintln!("  [MONO] Replacing generic calls with specialized versions");
-
         let mut new_hir = hir.clone();
 
         // Replace calls in all functions
@@ -1072,12 +942,6 @@ impl Monomorphizer {
             for param in &func.params {
                 ctx.add_variable(param.name.clone(), param.param_type.clone());
             }
-
-            eprintln!(
-                "  [TYPE_CTX] Function '{}' has {} parameters in context",
-                func.name,
-                ctx.variables.len()
-            );
 
             // Process statements with accumulating context (for let bindings)
             let (new_body, _final_ctx) =
@@ -1129,11 +993,6 @@ impl Monomorphizer {
         // Add specialized functions to the HIR
         new_hir.functions.extend(self.specialized_functions.clone());
 
-        eprintln!(
-            "  [MONO] Replaced calls and added {} specialized functions",
-            self.specialized_functions.len()
-        );
-
         new_hir
     }
 
@@ -1159,11 +1018,6 @@ impl Monomorphizer {
         let receiver_type = self.infer_simple_type(&call.args[0], ctx)?;
         let type_key = format!("{:?}", receiver_type);
 
-        eprintln!(
-            "    [TRAIT_RESOLVE] Checking if call to '{}' with receiver type '{}' is a trait method",
-            call.function, type_key
-        );
-
         // Look through all trait implementations for this type
         for ((trait_name, impl_type_key), methods) in &self.trait_methods {
             if impl_type_key == &type_key {
@@ -1174,11 +1028,6 @@ impl Monomorphizer {
                         trait_name,
                         self.mangle_type(&receiver_type),
                         call.function
-                    );
-
-                    eprintln!(
-                        "    [TRAIT_RESOLVE] ✅ Resolved '{}' to trait method '{}'",
-                        call.function, specialized_name
                     );
 
                     // Check if we've already generated this function
@@ -1198,11 +1047,6 @@ impl Monomorphizer {
             }
         }
 
-        eprintln!(
-            "    [TRAIT_RESOLVE] ❌ No trait method found for '{}'",
-            call.function
-        );
-
         None
     }
 
@@ -1213,11 +1057,6 @@ impl Monomorphizer {
         method_info: &TraitMethodInfo,
         receiver_type: &HirType,
     ) {
-        eprintln!(
-            "    [TRAIT_GEN] Generating function '{}' from trait method '{}.{}'",
-            specialized_name, method_info.trait_name, method_info.method_name
-        );
-
         // Generate unique function ID
         let func_id = hir::FunctionId(self.specialized_functions.len() as u32 + 10000);
 
@@ -1253,12 +1092,6 @@ impl Monomorphizer {
             span: None,                     // Specialized functions don't have source spans
             pipeline_config: None,          // Trait methods don't have pipeline config
         };
-
-        eprintln!(
-            "    [TRAIT_GEN] Created function '{}' with {} params",
-            specialized_name,
-            specialized_func.params.len()
-        );
 
         // Record that we've generated this specialization
         self.specializations
@@ -1310,16 +1143,8 @@ impl Monomorphizer {
             // Generic parameters - look up in context!
             hir::HirExpression::GenericParam(name) => {
                 if let Some(ty) = ctx.get_variable_type(name) {
-                    eprintln!(
-                        "    [TRAIT_RESOLVE] Found type for generic param '{}': {:?}",
-                        name, ty
-                    );
                     Some(ty.clone())
                 } else {
-                    eprintln!(
-                        "    [TRAIT_RESOLVE] No type found for generic param '{}' in context",
-                        name
-                    );
                     None
                 }
             }
@@ -1327,16 +1152,8 @@ impl Monomorphizer {
             // Variables - look up by ID in context!
             hir::HirExpression::Variable(var_id) => {
                 if let Some(ty) = ctx.get_variable_id_type(var_id) {
-                    eprintln!(
-                        "    [TRAIT_RESOLVE] Found type for variable ID {:?}: {:?}",
-                        var_id, ty
-                    );
                     Some(ty.clone())
                 } else {
-                    eprintln!(
-                        "    [TRAIT_RESOLVE] No type found for variable ID {:?} in context",
-                        var_id
-                    );
                     None
                 }
             }
@@ -1359,10 +1176,6 @@ impl Monomorphizer {
             // - Infer from function return types
             // - Use trait bounds from generic parameters
             _ => {
-                eprintln!(
-                    "    [TRAIT_RESOLVE] Cannot infer type for expression: {:?}",
-                    expr
-                );
                 None
             }
         }
@@ -1383,11 +1196,6 @@ impl Monomorphizer {
                 let mut new_ctx = ctx.clone();
                 new_ctx.add_variable(let_stmt.name.clone(), let_stmt.var_type.clone());
                 new_ctx.add_variable_id(let_stmt.id, let_stmt.var_type.clone());
-
-                eprintln!(
-                    "  [TYPE_CTX] Added let binding '{}' (id={:?}) with type {:?}",
-                    let_stmt.name, let_stmt.id, let_stmt.var_type
-                );
 
                 let new_stmt = hir::HirStatement::Let(hir::HirLetStatement {
                     id: let_stmt.id,
@@ -1542,11 +1350,6 @@ impl Monomorphizer {
 
                         let key = self.make_specialization_key(func_id, &type_args);
                         if let Some(specialized_name) = self.specializations.get(&key) {
-                            eprintln!(
-                                "    [MONO] Replacing call '{}' -> '{}'",
-                                call.function, specialized_name
-                            );
-
                             // Replace with call to specialized function (no type args)
                             return hir::HirExpression::Call(hir::HirCallExpr {
                                 function: specialized_name.clone(),
@@ -1565,11 +1368,6 @@ impl Monomorphizer {
 
                 // Try to resolve as trait method call
                 if let Some(specialized_name) = self.try_resolve_trait_method(call, ctx) {
-                    eprintln!(
-                        "    [TRAIT] Replacing method call '{}' -> '{}'",
-                        call.function, specialized_name
-                    );
-
                     return hir::HirExpression::Call(hir::HirCallExpr {
                         function: specialized_name,
                         type_args: Vec::new(),

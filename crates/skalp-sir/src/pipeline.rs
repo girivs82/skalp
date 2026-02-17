@@ -45,17 +45,8 @@ pub fn insert_pipeline_registers(sir: &mut SirModule) -> Option<PipelineResult> 
 
     // Only pipeline if stages > 1
     if config.stages <= 1 {
-        println!(
-            "🔧 PIPELINE: Skipping pipeline insertion for '{}' (stages={})",
-            sir.name, config.stages
-        );
         return None;
     }
-
-    println!(
-        "🔧 PIPELINE: Inserting {} pipeline stages for module '{}'",
-        config.stages, sir.name
-    );
 
     let mut inserter = PipelineInserter::new(sir, config.clone());
     inserter.run()
@@ -114,22 +105,11 @@ impl<'a> PipelineInserter<'a> {
             });
         }
 
-        println!(
-            "🔧 PIPELINE: Computed logic levels, max depth = {}",
-            self.max_level
-        );
-
         // Step 2: Determine cut points
         let cut_levels = self.compute_cut_levels();
-        println!("🔧 PIPELINE: Cut levels: {:?}", cut_levels);
 
         // Step 3: Insert pipeline registers at cut points
-        let registers_inserted = self.insert_registers_at_cuts(&cut_levels);
-
-        println!(
-            "🔧 PIPELINE: Inserted {} pipeline register signals",
-            registers_inserted
-        );
+        let _registers_inserted = self.insert_registers_at_cuts(&cut_levels);
 
         Some(PipelineResult {
             stages_inserted: self.config.stages as usize,
@@ -419,10 +399,6 @@ impl<'a> PipelineInserter<'a> {
             }
         }
 
-        println!(
-            "🔧 PIPELINE: Created register '{}' for signal '{}' at cut level {}",
-            reg_name, signal_name, cut_level
-        );
     }
 }
 

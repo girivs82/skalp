@@ -438,7 +438,5 @@ mod tests {
         assert!(shader.source.contains("cone_0_kernel"));
         assert!(shader.input_layout.len() == 2);
         assert!(shader.output_layout.len() == 1);
-
-        println!("Generated shader:\n{}", shader.source);
     }
 }

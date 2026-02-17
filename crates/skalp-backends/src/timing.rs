@@ -203,34 +203,24 @@ impl TimingAnalyzer {
                     self.add_clock(clock);
                 }
                 TimingConstraint::InputDelay {
-                    port_name,
-                    delay_ns,
-                    clock_name,
+                    port_name: _,
+                    delay_ns: _,
+                    clock_name: _,
                 } => {
                     // Would create input delay constraint
-                    println!(
-                        "Input delay constraint: {} = {} ns relative to {}",
-                        port_name, delay_ns, clock_name
-                    );
                 }
                 TimingConstraint::OutputDelay {
-                    port_name,
-                    delay_ns,
-                    clock_name,
+                    port_name: _,
+                    delay_ns: _,
+                    clock_name: _,
                 } => {
                     // Would create output delay constraint
-                    println!(
-                        "Output delay constraint: {} = {} ns relative to {}",
-                        port_name, delay_ns, clock_name
-                    );
                 }
-                TimingConstraint::FalsePath { from, to } => {
+                TimingConstraint::FalsePath { from: _, to: _ } => {
                     // Would create false path constraint
-                    println!("False path: {} to {}", from, to);
                 }
-                TimingConstraint::MulticyclePath { from, to, cycles } => {
+                TimingConstraint::MulticyclePath { from: _, to: _, cycles: _ } => {
                     // Would create multicycle path constraint
-                    println!("Multicycle path: {} to {} ({} cycles)", from, to, cycles);
                 }
             }
         }

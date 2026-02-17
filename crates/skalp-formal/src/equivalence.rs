@@ -2186,14 +2186,11 @@ pub fn check_sequential_equivalence_sat(aig1: &Aig, aig2: &Aig, thorough: bool) 
     }
 
     let and_count = miter.nodes.iter().filter(|n| matches!(n, AigNode::And { .. })).count();
-    eprintln!("   Miter: {} nodes, {} AND gates", miter.nodes.len(), and_count);
 
     // Quick check: if the miter output is already a constant, skip all solving
     let miter_out = miter.outputs.last().unwrap();
     if miter_out.node.0 == 0 {
         let is_const_true = miter_out.inverted; // node 0 is False, inverted = True
-        eprintln!("   Miter output is constant {} (skipping SAT)",
-            if is_const_true { "TRUE (non-equiv)" } else { "FALSE (equiv)" });
         return Ok(SymbolicEquivalenceResult {
             equivalent: !is_const_true,
             counterexample: None,
@@ -2208,7 +2205,6 @@ pub fn check_sequential_equivalence_sat(aig1: &Aig, aig2: &Aig, thorough: bool) 
 
     // --- Phase 2a: Try FRAIG simplification on large miters ---
     if and_count > 1000 {
-        eprintln!("   Running FRAIG simplification (large miter)...");
         let fraig_timeout = std::time::Duration::from_secs(30);
         let miter_clone = miter.clone();
 
@@ -2231,14 +2227,12 @@ pub fn check_sequential_equivalence_sat(aig1: &Aig, aig2: &Aig, thorough: bool) 
 
         match rx.recv_timeout(fraig_timeout) {
             Ok((synth_miter, before_ands, after_ands)) => {
-                eprintln!("   FRAIG: {} → {} AND gates", before_ands, after_ands);
 
                 // Check if miter output was reduced to constant (last output = OR of all diffs)
                 let outputs = synth_miter.outputs();
                 if let Some((_, out_lit)) = outputs.last() {
                     if let Some(val) = out_lit.const_value() {
                         if !val {
-                            eprintln!("   FRAIG proved equivalence (miter output = const 0)");
                             return Ok(SymbolicEquivalenceResult {
                                 equivalent: true,
                                 counterexample: None,
@@ -2250,7 +2244,6 @@ pub fn check_sequential_equivalence_sat(aig1: &Aig, aig2: &Aig, thorough: bool) 
                                 algebraic_result: None,
                             });
                         } else {
-                            eprintln!("   FRAIG found non-equivalence (miter output = const 1)");
                             return Ok(SymbolicEquivalenceResult {
                                 equivalent: false,
                                 counterexample: None,
@@ -2264,10 +2257,8 @@ pub fn check_sequential_equivalence_sat(aig1: &Aig, aig2: &Aig, thorough: bool) 
                         }
                     }
                 }
-                eprintln!("   FRAIG could not resolve miter, falling through to SAT...");
             }
             Err(_) => {
-                eprintln!("   FRAIG timed out after {}s, falling through to SAT...", fraig_timeout.as_secs());
             }
         }
     }
@@ -2295,7 +2286,7 @@ pub fn check_sequential_equivalence_sat(aig1: &Aig, aig2: &Aig, thorough: bool) 
         .collect();
 
     let diff_count = miter.outputs.len().saturating_sub(1);
-    let num_threads = rayon::current_num_threads();
+
 
     // Separate output diffs (required) from latch next-state diffs (best-effort)
     let mut output_gates: Vec<(usize, String, Lit)> = Vec::new();
@@ -2318,10 +2309,7 @@ pub fn check_sequential_equivalence_sat(aig1: &Aig, aig2: &Aig, thorough: bool) 
         }
     }
 
-    eprintln!("   SAT: {} vars, {} clauses, {} output + {} latch diff gates ({} threads)",
-        formula.max_var(), formula.clauses().len(), output_gates.len(), latch_gates.len(), num_threads);
 
-    let sat_start = std::time::Instant::now();
 
     // Helper: validate a SAT counterexample by evaluating the miter AIG
     // Returns true if the diff gate actually outputs 1 with the given model
@@ -2365,12 +2353,9 @@ pub fn check_sequential_equivalence_sat(aig1: &Aig, aig2: &Aig, thorough: bool) 
     // Helper: run parallel SAT on a set of diff gates
     // limit=0 means no conflict limit (run to completion); limit>0 sets per-gate conflict limit
     // Returns: (validated SAT counterexample if found, proven gate names, unresolved gate (idx, name) pairs)
-    let run_parallel_sat = |gates: &[(usize, String, Lit)], label: &str, limit: i32|
+    let run_parallel_sat = |gates: &[(usize, String, Lit)], _label: &str, limit: i32|
         -> (Option<(String, Vec<Lit>)>, Vec<String>, Vec<(usize, String)>)
     {
-        let checked = std::sync::atomic::AtomicUsize::new(0);
-        let total = gates.len();
-
         // Collect per-gate results using parallel map, then partition
         use std::sync::Mutex;
         let proven_names: Mutex<Vec<String>> = Mutex::new(Vec::new());
@@ -2391,17 +2376,10 @@ pub fn check_sequential_equivalence_sat(aig1: &Aig, aig2: &Aig, thorough: bool) 
                         Some((*idx, diff_name.clone(), model))
                     }
                     Ok(false) => {
-                        let c = checked.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-                        if c % 20 == 0 || c == total {
-                            eprintln!("   SAT {}: {}/{} proven UNSAT ({}ms)",
-                                label, c, total, sat_start.elapsed().as_millis());
-                        }
                         proven_names.lock().unwrap().push(diff_name.clone());
                         None
                     }
                     Err(_) => {
-                        eprintln!("   SAT {}: '{}' exceeded conflict limit",
-                            label, diff_name);
                         unresolved_names.lock().unwrap().push((*idx, diff_name.clone()));
                         None
                     }
@@ -2411,10 +2389,8 @@ pub fn check_sequential_equivalence_sat(aig1: &Aig, aig2: &Aig, thorough: bool) 
         // Validate any counterexample found by evaluating the miter AIG directly
         let validated = sat_result.and_then(|(idx, name, model)| {
             if validate_counterexample(&model, idx) {
-                eprintln!("   SAT {}: '{}' counterexample VALIDATED by miter evaluation", label, name);
                 Some((name, model))
             } else {
-                eprintln!("   SAT {}: '{}' counterexample INVALID (solver spurious result), treating as unresolved", label, name);
                 unresolved_names.lock().unwrap().push((idx, name));
                 None
             }
@@ -2429,12 +2405,9 @@ pub fn check_sequential_equivalence_sat(aig1: &Aig, aig2: &Aig, thorough: bool) 
     // Used for latch gates where SAT counterexamples are demoted to unresolved,
     // so we must check every gate. find_map_any would cancel in-flight gates when
     // any gate finds SAT, silently losing their results and causing non-determinism.
-    let run_parallel_sat_exhaustive = |gates: &[(usize, String, Lit)], label: &str, limit: i32|
+    let run_parallel_sat_exhaustive = |gates: &[(usize, String, Lit)], _label: &str, limit: i32|
         -> (Vec<(usize, String, Vec<Lit>)>, Vec<String>, Vec<(usize, String)>)
     {
-        let checked = std::sync::atomic::AtomicUsize::new(0);
-        let total = gates.len();
-
         use std::sync::Mutex;
         let proven_names: Mutex<Vec<String>> = Mutex::new(Vec::new());
         let unresolved_names: Mutex<Vec<(usize, String)>> = Mutex::new(Vec::new());
@@ -2454,16 +2427,9 @@ pub fn check_sequential_equivalence_sat(aig1: &Aig, aig2: &Aig, thorough: bool) 
                     sat_results.lock().unwrap().push((*idx, diff_name.clone(), model));
                 }
                 Ok(false) => {
-                    let c = checked.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-                    if c % 20 == 0 || c == total {
-                        eprintln!("   SAT {}: {}/{} proven UNSAT ({}ms)",
-                            label, c, total, sat_start.elapsed().as_millis());
-                    }
                     proven_names.lock().unwrap().push(diff_name.clone());
                 }
                 Err(_) => {
-                    eprintln!("   SAT {}: '{}' exceeded conflict limit",
-                        label, diff_name);
                     unresolved_names.lock().unwrap().push((*idx, diff_name.clone()));
                 }
             }
@@ -2483,7 +2449,6 @@ pub fn check_sequential_equivalence_sat(aig1: &Aig, aig2: &Aig, thorough: bool) 
         let output_conflict_limit = if thorough { 0 } else { 5_000_000 };
         let (sat_result, proven, unresolved) = run_parallel_sat(&output_gates, "outputs", output_conflict_limit);
         if let Some((diff_name, model)) = sat_result {
-            eprintln!("   Output differs: {} ({}ms)", diff_name, sat_start.elapsed().as_millis());
             print_counterexample_diagnosis(&miter, &var_map, &model, &diff_name);
             let counterexample = extract_symbolic_counterexample(&miter, &var_map, &model, Some(diff_name.clone()));
             return Ok(SymbolicEquivalenceResult {
@@ -2496,13 +2461,6 @@ pub fn check_sequential_equivalence_sat(aig1: &Aig, aig2: &Aig, thorough: bool) 
                 unresolved_gates: Vec::new(),
                 algebraic_result: None,
             });
-        }
-        if !unresolved.is_empty() {
-            eprintln!("   SAT outputs: {}/{} proven, {} unresolved ({}ms)",
-                proven.len(), output_gates.len(), unresolved.len(), sat_start.elapsed().as_millis());
-        } else {
-            eprintln!("   SAT outputs: all {}/{} proven UNSAT ({}ms)",
-                proven.len(), output_gates.len(), sat_start.elapsed().as_millis());
         }
         all_proven.extend(proven);
         all_unresolved.extend(unresolved);
@@ -2522,36 +2480,14 @@ pub fn check_sequential_equivalence_sat(aig1: &Aig, aig2: &Aig, thorough: bool) 
         // Latch counterexamples are demoted to unresolved, so early termination would
         // silently lose results from cancelled threads, causing non-deterministic counts.
         let (sat_results, proven, mut unresolved) = run_parallel_sat_exhaustive(&latch_gates, "latches", latch_conflict_limit);
-        let sat_count = sat_results.len();
         for (idx, diff_name, model) in &sat_results {
-            eprintln!("   ⚠️  Latch next-state SAT counterexample (may be unreachable): {} ({}ms)",
-                diff_name, sat_start.elapsed().as_millis());
             print_counterexample_diagnosis(&miter, &var_map, model, diff_name);
             unresolved.push((*idx, diff_name.clone()));
-        }
-        let total_latch = latch_gates.len();
-        if !unresolved.is_empty() {
-            eprintln!("   SAT latches: {}/{} proven, {} unresolved ({} SAT counterexample) ({}ms)",
-                proven.len(), total_latch, unresolved.len(), sat_count,
-                sat_start.elapsed().as_millis());
-        } else {
-            eprintln!("   SAT latches: all {}/{} proven UNSAT ({}ms)",
-                proven.len(), total_latch, sat_start.elapsed().as_millis());
         }
         all_proven.extend(proven);
         all_unresolved.extend(unresolved);
     }
 
-    let sat_elapsed = sat_start.elapsed().as_millis();
-    let total_unresolved = all_unresolved.len();
-    let total_proven = all_proven.len();
-    let unresolved_detail = if total_unresolved > 0 {
-        format!(", {} unresolved", total_unresolved)
-    } else {
-        String::new()
-    };
-    eprintln!("   SAT total: {}/{} proven UNSAT{} ({}ms)",
-        total_proven, diff_count, unresolved_detail, sat_elapsed);
 
     // --- Phase 2b-2.5: k-Induction base case (constrained SAT with init state + proven lemmas) ---
     if !all_unresolved.is_empty() && !init_constraints.is_empty() {
@@ -2576,8 +2512,6 @@ pub fn check_sequential_equivalence_sat(aig1: &Aig, aig2: &Aig, thorough: bool) 
             }
         }
 
-        eprintln!("   k-Induction: {} init constraints, {} proven lemmas, re-checking {} gates",
-            init_constraints.len(), proven_lemmas.len(), all_unresolved.len());
 
         // Build constrained gate list from all_unresolved
         let constrained_gates: Vec<(usize, String, Lit)> = all_unresolved.iter()
@@ -2625,11 +2559,7 @@ pub fn check_sequential_equivalence_sat(aig1: &Aig, aig2: &Aig, thorough: bool) 
             let newly_proven_set: BTreeSet<String> = newly_proven.iter().cloned().collect();
             all_unresolved.retain(|(_, name)| !newly_proven_set.contains(name));
             all_proven.extend(newly_proven.iter().cloned());
-            eprintln!("   k-Induction: {} additional gates proven ({}ms)",
-                newly_proven.len(), kinduct_start.elapsed().as_millis());
         } else {
-            eprintln!("   k-Induction: no additional gates proven ({}ms)",
-                kinduct_start.elapsed().as_millis());
         }
     }
 
@@ -3152,8 +3082,6 @@ fn compute_structural_latch_matches(aig1: &Aig, aig2: &Aig) -> BTreeMap<String, 
                     if applied_mir.contains(&mir_latch_name) {
                         continue;
                     }
-                    eprintln!("     [LATCH MATCHED VIA STRUCTURE] MIR '{}' <-> Gate '{}' (both feed output '{}')",
-                        mir_latch_name, gate_latch_name, norm_out);
                     result.insert(gate_latch_name.clone(), mir_latch_name.clone());
                     applied_mir.insert(mir_latch_name);
                     applied_gate.insert(gate_latch_name.clone());
@@ -3264,7 +3192,6 @@ fn compute_structural_io_matches(
             if available.len() == 1 {
                 let aig1_idx = *available[0];
                 let aig1_key = &aig1_unmatched_outputs[aig1_idx].0;
-                eprintln!("     [OUTPUT MATCHED VIA STRUCTURE] AIG2 '{}' <-> AIG1 '{}' (same input cone)", aig2_key, aig1_key);
                 output_matches.insert(aig2_key.clone(), aig1_key.clone());
                 used_aig1.insert(aig1_idx);
             }
@@ -3354,7 +3281,6 @@ fn compute_structural_io_matches(
             if available.len() == 1 {
                 let aig1_idx = *available[0];
                 let aig1_key = &aig1_unmatched_inputs[aig1_idx].0;
-                eprintln!("     [INPUT MATCHED VIA STRUCTURE] AIG2 '{}' <-> AIG1 '{}' (same output cone)", aig2_key, aig1_key);
                 input_matches.insert(aig2_key.clone(), aig1_key.clone());
                 used_aig1_inputs.insert(aig1_idx);
             }
@@ -3448,7 +3374,6 @@ pub fn build_sequential_miter(aig1: &Aig, aig2: &Aig) -> FormalResult<(Aig, Vec<
     }
 
     // Match outputs by name and compare
-    let mut matched_outputs = 0;
     for (name, lit1) in &out1_by_name {
         if let Some(lit2) = out2_by_name.get(name) {
             let diff = miter.add_xor(*lit1, *lit2);
@@ -3456,13 +3381,8 @@ pub fn build_sequential_miter(aig1: &Aig, aig2: &Aig) -> FormalResult<(Aig, Vec<
             diff_gates.push((pair_name.clone(), diff));
             matched_pairs.push((pair_name, *lit1, *lit2));
             miter_output = miter.add_or(miter_output, diff);
-            matched_outputs += 1;
         }
     }
-    let unmatched_out1 = out1_by_name.keys().filter(|n| !out2_by_name.contains_key(*n)).count();
-    let unmatched_out2 = out2_by_name.keys().filter(|n| !out1_by_name.contains_key(*n)).count();
-    eprintln!("   Outputs: {} matched, {} unmatched (MIR: {}, Gate: {})",
-        matched_outputs, unmatched_out1 + unmatched_out2, unmatched_out1, unmatched_out2);
 
     // 2. Check next-state (latch D input) equivalence
     // Match latches by normalized name (BTreeMap for deterministic iteration)
@@ -3496,24 +3416,6 @@ pub fn build_sequential_miter(aig1: &Aig, aig2: &Aig) -> FormalResult<(Aig, Vec<
         }
     }
 
-    // Report latch matching
-    let mut matched_latches = 0;
-    let mut unmatched_mir = 0;
-    let mut unmatched_gate = 0;
-    for name in latch1_by_name.keys() {
-        if latch2_by_name.contains_key(name) {
-            matched_latches += 1;
-        } else {
-            unmatched_mir += 1;
-        }
-    }
-    for name in latch2_by_name.keys() {
-        if !latch1_by_name.contains_key(name) {
-            unmatched_gate += 1;
-        }
-    }
-    eprintln!("   Latches: {} matched, {} unmatched (MIR: {}, Gate: {})",
-        matched_latches, unmatched_mir + unmatched_gate, unmatched_mir, unmatched_gate);
 
     // Compare next-state for matching latches
     for (name, next1) in &latch1_by_name {
@@ -3589,185 +3491,12 @@ fn extract_symbolic_counterexample(
 /// Print detailed counterexample state: reconstruct multi-bit register values
 /// from the SAT model and evaluate both MIR and gate next-state outputs.
 fn print_counterexample_diagnosis(
-    miter: &Aig,
-    var_map: &BTreeMap<u32, Var>,
-    model: &[Lit],
-    diff_name: &str,
+    _miter: &Aig,
+    _var_map: &BTreeMap<u32, Var>,
+    _model: &[Lit],
+    _diff_name: &str,
 ) {
-    let model_set: std::collections::HashSet<_> = model.iter().collect();
-
-    // 1. Extract all state input values (current latch values in the counterexample)
-    let mut state_bits: BTreeMap<String, BTreeMap<u32, bool>> = BTreeMap::new();
-    let mut primary_inputs: BTreeMap<String, BTreeMap<u32, bool>> = BTreeMap::new();
-
-    for (idx, node) in miter.nodes.iter().enumerate() {
-        if let AigNode::Input { name } = node {
-            if let Some(&var) = var_map.get(&(idx as u32)) {
-                let lit_pos = Lit::positive(var);
-                let value = model_set.contains(&lit_pos);
-
-                // Parse name to extract register base name and bit index
-                // Format: "__reg_cur_pwm_gen.carrier.count_reg[3]" or "v_batt[7]"
-                let clean_name = name.strip_prefix("__reg_cur_").unwrap_or(name);
-                let is_state = name.starts_with("__reg_cur_") || name.starts_with("__dff_cur_");
-
-                if let Some(bracket_pos) = clean_name.rfind('[') {
-                    if let Some(end_pos) = clean_name.rfind(']') {
-                        let base = &clean_name[..bracket_pos];
-                        if let Ok(bit_idx) = clean_name[bracket_pos+1..end_pos].parse::<u32>() {
-                            if is_state {
-                                state_bits.entry(base.to_string()).or_default().insert(bit_idx, value);
-                            } else {
-                                primary_inputs.entry(base.to_string()).or_default().insert(bit_idx, value);
-                            }
-                            continue;
-                        }
-                    }
-                }
-                // Single-bit signal (no bracket)
-                if is_state {
-                    state_bits.entry(clean_name.to_string()).or_default().insert(0, value);
-                } else {
-                    primary_inputs.entry(clean_name.to_string()).or_default().insert(0, value);
-                }
-            }
-        }
-    }
-
-    // 2. Reconstruct multi-bit values and print state registers
-    eprintln!("   ┌─── Counterexample State ──────────────────────────────");
-    eprintln!("   │ Differing signal: {}", diff_name);
-
-    // Extract the base register name from the diff_name for focused reporting
-    let focus_base_owned = {
-        let clean = diff_name
-            .strip_prefix("diff_next_state[")
-            .or_else(|| diff_name.strip_prefix("diff_output["))
-            .unwrap_or(diff_name)
-            .trim_end_matches(']');
-        if let Some(bp) = clean.rfind('[') {
-            clean[..bp].to_string()
-        } else {
-            clean.to_string()
-        }
-    };
-    let focus_base = focus_base_owned.as_str();
-
-    eprintln!("   │");
-    eprintln!("   │ Current latch state (related registers):");
-    for (base_name, bits) in &state_bits {
-        // Show registers related to the failing signal (same hierarchy prefix)
-        let prefix = if focus_base.contains('.') {
-            // e.g., "pwm_gen.carrier" from "pwm_gen.carrier.count_reg"
-            let last_dot = focus_base.rfind('.').unwrap();
-            &focus_base[..last_dot]
-        } else {
-            focus_base
-        };
-        if base_name.starts_with(prefix) || base_name == focus_base {
-            let max_bit = bits.keys().max().copied().unwrap_or(0);
-            let mut value: u64 = 0;
-            for (&bit_idx, &bit_val) in bits {
-                if bit_val {
-                    value |= 1u64 << bit_idx;
-                }
-            }
-            eprintln!("   │   {} = {} (0x{:x}, {}-bit)", base_name, value, value, max_bit + 1);
-        }
-    }
-
-    // 3. Evaluate miter to get both MIR and gate next-state values
-    let num_nodes = miter.nodes.len();
-    let mut values = vec![false; num_nodes];
-    values[0] = false;
-
-    // Set input values from model
-    for (&node_id, &var) in var_map {
-        let pos = Lit::positive(var);
-        if model_set.contains(&pos) {
-            values[node_id as usize] = true;
-        }
-    }
-
-    // Evaluate AND gates
-    for (i, node) in miter.nodes.iter().enumerate() {
-        if let AigNode::And { left, right } = node {
-            let l = values[left.node.0 as usize] ^ left.inverted;
-            let r = values[right.node.0 as usize] ^ right.inverted;
-            values[i] = l && r;
-        }
-    }
-
-    // Find mir_next and gate_next outputs for the related register
-    let mut mir_next_bits: BTreeMap<String, BTreeMap<u32, bool>> = BTreeMap::new();
-    let mut gate_next_bits: BTreeMap<String, BTreeMap<u32, bool>> = BTreeMap::new();
-
-    for (out_idx, out_name) in miter.output_names.iter().enumerate() {
-        if let Some(out_lit) = miter.outputs.get(out_idx) {
-            let out_val = values[out_lit.node.0 as usize] ^ out_lit.inverted;
-
-            let (target_map, clean_name) = if let Some(rest) = out_name.strip_prefix("mir_next[") {
-                (&mut mir_next_bits, rest.strip_suffix(']').unwrap_or(rest))
-            } else if let Some(rest) = out_name.strip_prefix("gate_next[") {
-                (&mut gate_next_bits, rest.strip_suffix(']').unwrap_or(rest))
-            } else {
-                continue;
-            };
-
-            // Filter to only the prefix of interest
-            let prefix = if focus_base.contains('.') {
-                let last_dot = focus_base.rfind('.').unwrap();
-                &focus_base[..last_dot]
-            } else {
-                focus_base
-            };
-
-            if let Some(bracket_pos) = clean_name.rfind('[') {
-                if let Some(end_pos) = clean_name.rfind(']') {
-                    let base = &clean_name[..bracket_pos];
-                    if let Ok(bit_idx) = clean_name[bracket_pos+1..end_pos].parse::<u32>() {
-                        if base.starts_with(prefix) || base == focus_base {
-                            target_map.entry(base.to_string()).or_default().insert(bit_idx, out_val);
-                        }
-                    }
-                }
-            } else {
-                // Single-bit signal (no bracket index)
-                if clean_name.starts_with(prefix) || clean_name == focus_base {
-                    target_map.entry(clean_name.to_string()).or_default().insert(0, out_val);
-                }
-            }
-        }
-    }
-
-    eprintln!("   │");
-    eprintln!("   │ Next-state comparison (MIR vs Gate):");
-    let all_regs: BTreeSet<String> = mir_next_bits.keys().chain(gate_next_bits.keys()).cloned().collect();
-    for reg_name in &all_regs {
-        let mir_bits = mir_next_bits.get(reg_name);
-        let gate_bits = gate_next_bits.get(reg_name);
-        let max_bit = mir_bits.iter().chain(gate_bits.iter())
-            .flat_map(|b| b.keys())
-            .max()
-            .copied()
-            .unwrap_or(0);
-
-        let reconstruct = |bits: Option<&BTreeMap<u32, bool>>| -> u64 {
-            let mut v = 0u64;
-            if let Some(b) = bits {
-                for (&idx, &val) in b {
-                    if val { v |= 1u64 << idx; }
-                }
-            }
-            v
-        };
-        let mir_val = reconstruct(mir_bits);
-        let gate_val = reconstruct(gate_bits);
-        let diff_marker = if mir_val != gate_val { " *** DIFFERS" } else { "" };
-        eprintln!("   │   {} ({}-bit): MIR_next={} (0x{:x}), Gate_next={} (0x{:x}){}",
-            reg_name, max_bit + 1, mir_val, mir_val, gate_val, gate_val, diff_marker);
-    }
-    eprintln!("   └──────────────────────────────────────────────────────");
+    // Debug printing removed; function retained for call-site compatibility.
 }
 
 // ============================================================================
@@ -4793,20 +4522,13 @@ impl EquivalenceChecker {
         );
 
         // Use port matching to handle LIR vs flattened netlist naming differences
-        eprintln!("   Building miter...");
         let miter = build_miter_with_port_matching(&aig_lir, &aig_netlist)?;
-        eprintln!("   Miter built: {} nodes, {} AND gates", miter.nodes.len(), miter.and_count());
 
         // Try FRAIG-based simplification (simulation + SAT sweeping).
         // Run in a thread with a real timeout via channel so we don't block forever.
         let start = std::time::Instant::now();
         let fraig_timeout = std::time::Duration::from_secs(30);
 
-        eprintln!(
-            "   FRAIG: miter has {} AND gates, running simplification ({}s timeout)...",
-            miter.and_count(),
-            fraig_timeout.as_secs()
-        );
 
         let (tx, rx) = std::sync::mpsc::channel();
         let miter_clone = miter.clone();
@@ -4835,18 +4557,11 @@ impl EquivalenceChecker {
         match rx.recv_timeout(fraig_timeout) {
             Ok((synth_miter, fraig_result, merged, (calls, proofs, refutes))) => {
                 let elapsed = start.elapsed().as_millis() as u64;
-                eprintln!(
-                    "   FRAIG: {} -> {} AND gates ({} merged, {} SAT calls: {} proofs, {} refutes) in {} ms",
-                    fraig_result.ands_before,
-                    fraig_result.ands_after,
-                    merged, calls, proofs, refutes, elapsed,
-                );
 
                 // Check if miter output was reduced to constant false (= equivalent)
                 let outputs = synth_miter.outputs();
                 if let Some((_name, out_lit)) = outputs.first() {
                     if out_lit.is_const() && out_lit.const_value() == Some(false) {
-                        eprintln!("   FRAIG proved equivalence in {} ms", elapsed);
                         return Ok(EquivalenceResult {
                             equivalent: true,
                             counterexample: None,
@@ -4864,7 +4579,6 @@ impl EquivalenceChecker {
                 ))
             }
             Err(_) => {
-                eprintln!("   FRAIG timed out after {}s", fraig_timeout.as_secs());
                 Err(FormalError::SolverError(format!(
                     "FRAIG timed out after {}s on {}-node miter (multiplier-hard). \
                      Simulation-based equivalence passed.",

@@ -71,16 +71,10 @@ impl MirCompiler {
         module_hirs: &IndexMap<PathBuf, Hir>,
     ) -> Result<Mir, String> {
         // Step 1: Transform HIR to MIR
-        if self.verbose {
-            println!("Phase 1: HIR to MIR transformation");
-        }
         let mut transformer = HirToMir::new_with_modules(module_hirs);
         let mut mir = transformer.transform(hir);
 
         // Step 2: Perform CDC analysis
-        if self.verbose {
-            println!("Phase 2: Clock Domain Crossing (CDC) analysis");
-        }
         let violations = self.perform_cdc_analysis(&mir);
 
         // Check for critical CDC violations and report them
@@ -104,18 +98,9 @@ impl MirCompiler {
         // Step 3: Apply SSA conversion
         // This eliminates combinational cycles from mutable variable reassignment (x = f(x))
         // by transforming to unique variables (x_0 = value, x_1 = f(x_0), etc.)
-        if self.verbose {
-            println!("Phase 3: SSA conversion");
-        }
         apply_ssa_conversion(&mut mir);
 
         // Step 4: Apply optimizations
-        if self.verbose {
-            println!(
-                "Phase 4: Applying optimizations (level: {:?})",
-                self.opt_level
-            );
-        }
         self.apply_optimizations(&mut mir);
 
         Ok(mir)
@@ -144,9 +129,6 @@ impl MirCompiler {
 
     /// Apply a single optimization pass
     fn apply_pass(&self, mir: &mut Mir, pass: &mut dyn OptimizationPass) {
-        if self.verbose {
-            println!("  - Applying {}", pass.name());
-        }
         pass.apply(mir);
     }
 

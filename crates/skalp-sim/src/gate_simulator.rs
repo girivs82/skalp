@@ -356,19 +356,6 @@ impl GateLevelSimulator {
             }
         }
 
-        // Debug: Print clock info
-        if std::env::var("SKALP_DEBUG_SEQ").is_ok() {
-            use std::io::Write;
-            let clock_names: Vec<_> = self.clock_signals.iter()
-                .filter_map(|id| self.signal_id_to_name.get(&id.0))
-                .collect();
-            let seq_block_count = self.sir.top_module.seq_blocks.len();
-            writeln!(std::io::stderr(), "🕐 [CPU GATE INIT] clock_ids found: {:?}", clock_ids).ok();
-            writeln!(std::io::stderr(), "🕐 [CPU GATE INIT] clock_signals: {:?}", clock_names).ok();
-            writeln!(std::io::stderr(), "🕐 [CPU GATE INIT] Sequential blocks: {}", seq_block_count).ok();
-            std::io::stderr().flush().ok();
-        }
-
         // Calculate total FIT from primitives
         self.total_fit = self.calculate_total_fit();
     }

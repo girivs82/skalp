@@ -929,7 +929,6 @@ entity Counter {
         let tokens: Vec<_> = lexer.tokenize().into_iter().map(|t| t.token).collect();
 
         // Should skip the comment and only see: entity, Test
-        println!("Tokens: {:?}", tokens);
         assert_eq!(tokens.len(), 2);
         assert_eq!(tokens[0], Token::Entity);
         assert_eq!(tokens[1], Token::Identifier("Test".to_string()));

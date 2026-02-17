@@ -339,7 +339,6 @@ fn rebuild_aig_topological(aig: &mut Aig) {
         let node = match aig.get_node(id) {
             Some(n) => n,
             None => {
-                // DEBUG: eprintln!("[REBUILD] Skipping non-existent node {:?}", id);
                 continue;
             }
         };
@@ -365,25 +364,6 @@ fn rebuild_aig_topological(aig: &mut Aig) {
             }
         }
     }
-
-    // Count node types in reachable set
-    let mut reachable_ands = 0;
-    let mut reachable_latches = 0;
-    for &id in &reachable {
-        if let Some(node) = aig.get_node(id) {
-            match node {
-                AigNode::And { .. } => reachable_ands += 1,
-                AigNode::Latch { .. } => reachable_latches += 1,
-                _ => {}
-            }
-        }
-    }
-    eprintln!(
-        "[REBUILD] Reachable: {} nodes ({} ANDs, {} latches)",
-        reachable.len(),
-        reachable_ands,
-        reachable_latches
-    );
 
     // Build new AIG with reachable nodes using Kahn's algorithm (O(V+E))
     let mut new_aig = Aig::new(aig.name.clone());
@@ -470,10 +450,6 @@ fn rebuild_aig_topological(aig: &mut Aig) {
         }
     });
 
-    eprintln!(
-        "[REBUILD] Starting with {} nodes in zero_degree queue",
-        zero_degree.len()
-    );
     let mut queue: VecDeque<AigNodeId> = zero_degree.into_iter().collect();
 
     // Phase 0: Process input nodes FIRST so clock/reset mappings are available for latches
@@ -486,11 +462,6 @@ fn rebuild_aig_topological(aig: &mut Aig) {
             input_ids.push(id);
         }
     }
-    eprintln!(
-        "[REBUILD] Pre-created {} inputs in node_map",
-        input_ids.len()
-    );
-
     // Pre-create latch/barrier outputs as placeholders in node_map
     // This allows AND nodes to resolve references to latch outputs during phase 1
     // The latch data inputs will be properly connected in phase 2
@@ -611,33 +582,6 @@ fn rebuild_aig_topological(aig: &mut Aig) {
         }
     }
 
-    eprintln!(
-        "[REBUILD] After phase 1: node_map has {} entries, new_aig has {} ANDs",
-        node_map.len(),
-        new_aig.and_count()
-    );
-
-    // Debug: find nodes that are reachable but not in node_map
-    for &id in &reachable {
-        if !node_map.contains_key(&id) && id != AigNodeId::FALSE {
-            let node_type = aig
-                .get_node(id)
-                .map(|n| match n {
-                    AigNode::Const => "Const",
-                    AigNode::Input { .. } => "Input",
-                    AigNode::And { .. } => "And",
-                    AigNode::Latch { .. } => "Latch",
-                    AigNode::Barrier { .. } => "Barrier",
-                })
-                .unwrap_or("Unknown");
-            let in_deg = in_degree.get(&id).copied().unwrap_or(999);
-            eprintln!(
-                "[REBUILD DEBUG] Node {:?} ({}) is reachable but NOT in node_map, in_degree={}",
-                id, node_type, in_deg
-            );
-        }
-    }
-
     // Phase 2: Update sequential elements (latches/barriers) with their data inputs
     // The latches were pre-created with placeholder data - now update with real values
     for id in sequential_nodes {
@@ -694,10 +638,6 @@ fn resolve_lit(map: &IndexMap<AigNodeId, AigLit>, lit: AigLit) -> AigLit {
     } else {
         // Node not found in map - this can happen when the node was removed
         // by optimization or doesn't exist after rebuild. Return FALSE as safe default.
-        eprintln!(
-            "[REWRITE WARNING] Node {:?} not found in map, returning FALSE",
-            lit.node
-        );
         AigLit::false_lit()
     }
 }
@@ -792,13 +732,6 @@ impl Pass for Rewrite {
                 let gates_added = aig.and_count() - gates_before;
                 // Sanity check: we should add at most impl_.and_count gates
                 // (could be fewer due to structural hashing)
-                if gates_added > candidate.implementation.and_count {
-                    eprintln!(
-                        "    [rewrite warning] Expected to add {} gates, actually added {}",
-                        candidate.implementation.and_count, gates_added
-                    );
-                }
-
                 // Register the substitution
                 subst_map.insert(candidate.node, new_lit);
 
@@ -817,59 +750,10 @@ impl Pass for Rewrite {
 
         // Apply all substitutions to update the AIG
         if !subst_map.is_empty() {
-            // DEBUG: eprintln!("[REWRITE] Applying {} substitutions:", subst_map.len());
-            // DEBUG: for (old, new) in &subst_map {
-            //     eprintln!("  {:?} -> {:?}", old, new);
-            // }
-
-            // Debug: check latch data BEFORE apply_substitutions
-            for (id, node) in aig.iter_nodes() {
-                if let AigNode::Latch { data, .. } = node {
-                    let exists = aig.get_node(data.node).is_some();
-                    if !exists {
-                        // DEBUG: eprintln!("[REWRITE PRE-BUG] Latch {:?} BEFORE subst already references non-existent data {:?}", id, data.node);
-                    }
-                }
-            }
-
             aig.apply_substitutions(&subst_map);
-
-            // Debug: check AIG state before rebuild
-            eprintln!(
-                "[REWRITE] Before rebuild: {} nodes in AIG",
-                aig.node_count()
-            );
-            // Check what latches reference
-            for (id, node) in aig.iter_nodes() {
-                if let AigNode::Latch { data, .. } = node {
-                    let exists = aig.get_node(data.node).is_some();
-                    if !exists {
-                        eprintln!(
-                            "[REWRITE BUG] Latch {:?} references non-existent data {:?}",
-                            id, data.node
-                        );
-                        // Check if any substitution points to this node
-                        for (old, new) in &subst_map {
-                            if new.node == data.node {
-                                // DEBUG: eprintln!("[REWRITE BUG]   Substitution {:?} -> {:?} points to missing node", old, new);
-                            }
-                        }
-                    }
-                }
-            }
 
             // Rebuild AIG to compact and ensure topological order
             rebuild_aig_topological(aig);
-
-            // Debug: verify latch data is valid after rebuild
-            for (id, node) in aig.iter_nodes() {
-                if let AigNode::Latch { data, .. } = node {
-                    let exists = aig.get_node(data.node).is_some();
-                    if !exists {
-                        // DEBUG: eprintln!("[REWRITE POST-REBUILD BUG] Latch {:?} STILL references non-existent data {:?}", id, data.node);
-                    }
-                }
-            }
         }
 
         result.record_after(aig);
@@ -944,9 +828,6 @@ mod tests {
 
     #[test]
     fn test_rewrite_finds_candidates() {
-        use crate::synth::cuts::{CutEnumeration, CutParams};
-        use crate::synth::npn::NpnDatabase;
-
         // Create an AIG with a known pattern that should be rewritable
         // XOR: (a & !b) | (!a & b) = !(!( a & !b) & !(! a & b))
         // In AIG: need 4 AND gates naively
@@ -964,90 +845,8 @@ mod tests {
         // Result is !(nand) = XOR
         aig.add_output("xor".to_string(), nand.invert());
 
-        let before_ands = aig.and_count();
-        println!("Before rewrite: {} ANDs", before_ands);
-
-        // Debug: enumerate cuts and see what we find
-        let cuts = CutEnumeration::enumerate(&aig, CutParams::default());
-        println!("\nCuts enumerated:");
-        for (id, node) in aig.iter_nodes() {
-            if let AigNode::And { .. } = node {
-                if let Some(cut_set) = cuts.get_cuts(id) {
-                    println!("  Node {:?}: {} cuts", id, cut_set.cuts.len());
-                    for cut in &cut_set.cuts {
-                        println!(
-                            "    leaves: {:?}, tt: 0x{:x}, size: {}",
-                            cut.leaves,
-                            cut.truth_table,
-                            cut.size()
-                        );
-                    }
-                }
-            }
-        }
-
-        // Debug: check NPN database
-        let npn_db = NpnDatabase::new();
-        println!("\nNPN database has {} entries", npn_db.len());
-
-        // Check what the XOR truth table is
-        // XOR of 2 inputs: 0110 = 0x6
-        let xor_tt_2 = 0x6_u64;
-        if let Some((impl_, canonical)) = npn_db.lookup(xor_tt_2, 2) {
-            println!(
-                "XOR 2-input (0x{:x}) -> canonical 0x{:x}, {} AND gates, {} gates",
-                xor_tt_2,
-                canonical.canonical_tt,
-                impl_.and_count,
-                impl_.gates.len()
-            );
-        } else {
-            println!("XOR 2-input (0x{:x}) NOT FOUND in NPN database", xor_tt_2);
-        }
-
-        // XOR of 4 inputs that only depends on 2 vars: 0x6666
-        let xor_tt_4 = 0x6666_u64;
-        if let Some((impl_, canonical)) = npn_db.lookup(xor_tt_4, 4) {
-            println!(
-                "XOR 4-input (0x{:x}) -> canonical 0x{:x}, {} AND gates, {} gates",
-                xor_tt_4,
-                canonical.canonical_tt,
-                impl_.and_count,
-                impl_.gates.len()
-            );
-        } else {
-            println!("XOR 4-input (0x{:x}) NOT FOUND in NPN database", xor_tt_4);
-        }
-
-        // Also check what's at 0x9 (what the cut has)
-        if let Some((impl_, canonical)) = npn_db.lookup(0x9, 2) {
-            println!(
-                "XNOR 2-input (0x9) -> canonical 0x{:x}, {} AND gates, {} gates",
-                canonical.canonical_tt,
-                impl_.and_count,
-                impl_.gates.len()
-            );
-        }
-
         let mut pass = Rewrite::new();
         let result = pass.run(&mut aig);
-
-        println!("\nAfter rewrite: {} ANDs", result.ands_after);
-        // Extract extra values from the Vec
-        let get_extra = |key: &str| -> String {
-            result
-                .extra
-                .iter()
-                .find(|(k, _)| k == key)
-                .map(|(_, v)| v.clone())
-                .unwrap_or_else(|| "?".to_string())
-        };
-        println!(
-            "Candidates found: {}, rewrites applied: {}, total gain: {}",
-            get_extra("candidates"),
-            get_extra("rewrites_applied"),
-            get_extra("total_gain")
-        );
 
         // The rewrite should at least complete and find some candidates
         assert!(result.ands_after > 0);

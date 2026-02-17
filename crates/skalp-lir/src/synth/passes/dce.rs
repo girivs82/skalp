@@ -281,10 +281,6 @@ fn resolve_lit(map: &IndexMap<AigNodeId, AigLit>, lit: AigLit) -> AigLit {
         }
     } else {
         // Node not found in map - return FALSE as safe default
-        eprintln!(
-            "[DCE WARNING] Node {:?} not found in map, returning FALSE",
-            lit.node
-        );
         AigLit::false_lit()
     }
 }

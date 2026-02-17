@@ -7481,9 +7481,6 @@ mod tests {
         let source = "entity Test<const W: usize> { in a: bit }";
         let (tree, errors) = parse_with_errors(source);
 
-        eprintln!("Errors: {:?}", errors);
-        eprintln!("Tree: {}", tree);
-
         assert!(
             errors.is_empty(),
             "Should parse const generic with usize type"
@@ -7491,9 +7488,6 @@ mod tests {
 
         // Now test HIR building
         let hir_result = crate::parse_and_build_hir(source);
-        if let Err(e) = &hir_result {
-            eprintln!("HIR Error: {:?}", e);
-        }
         assert!(hir_result.is_ok(), "Should build HIR from const generic");
     }
 
@@ -7502,13 +7496,6 @@ mod tests {
         let source = "entity Test<const W: nat> { in a: bit }";
         let (tree, errors) = parse_with_errors(source);
 
-        eprintln!("Errors: {:?}", errors);
-        eprintln!("Tree: {}", tree);
-
-        for error in &errors {
-            eprintln!("Parse error: {:?}", error);
-        }
-
         assert!(
             errors.is_empty(),
             "Should parse const generic with nat type"
@@ -7516,9 +7503,6 @@ mod tests {
 
         // Now test HIR building
         let hir_result = crate::parse_and_build_hir(source);
-        if let Err(e) = &hir_result {
-            eprintln!("HIR Error: {:?}", e);
-        }
         assert!(
             hir_result.is_ok(),
             "Should build HIR from const generic with nat"
@@ -7530,13 +7514,6 @@ mod tests {
         let source = "entity Test<const W: nat, const D: nat> { in a: bit }";
         let (tree, errors) = parse_with_errors(source);
 
-        eprintln!("Errors for two generics: {:?}", errors);
-        eprintln!("Tree: {}", tree);
-
-        for error in &errors {
-            eprintln!("Parse error: {:?}", error);
-        }
-
         assert!(errors.is_empty(), "Should parse two const generics");
     }
 
@@ -7544,13 +7521,6 @@ mod tests {
     fn test_const_generic_with_default() {
         let source = "entity Test<const W: nat = 8> { in a: bit }";
         let (tree, errors) = parse_with_errors(source);
-
-        eprintln!("Errors for default: {:?}", errors);
-        eprintln!("Tree: {}", tree);
-
-        for error in &errors {
-            eprintln!("Parse error: {:?}", error);
-        }
 
         assert!(
             errors.is_empty(),
@@ -7663,7 +7633,6 @@ mod tests {
         "#;
         let (tree, errors) = parse_with_errors(source);
 
-        eprintln!("Errors: {:?}", errors);
         assert!(
             errors.is_empty(),
             "Single-line intent syntax should parse without errors"
@@ -7680,7 +7649,6 @@ mod tests {
         "#;
         let (tree, errors) = parse_with_errors(source);
 
-        eprintln!("Errors: {:?}", errors);
         assert!(
             errors.is_empty(),
             "Composed intent syntax should parse without errors"
@@ -7701,7 +7669,6 @@ mod tests {
         "#;
         let (tree, errors) = parse_with_errors(source);
 
-        eprintln!("Errors: {:?}", errors);
         assert!(
             errors.is_empty(),
             "Attribute on entity should parse without errors"
@@ -7724,7 +7691,6 @@ mod tests {
         "#;
         let (tree, errors) = parse_with_errors(source);
 
-        eprintln!("Errors: {:?}", errors);
         assert!(
             errors.is_empty(),
             "Attribute on function should parse without errors"
@@ -7746,7 +7712,6 @@ mod tests {
         "#;
         let (tree, errors) = parse_with_errors(source);
 
-        eprintln!("Errors: {:?}", errors);
         assert!(
             errors.is_empty(),
             "Multiple attributes should parse without errors"
@@ -7768,7 +7733,6 @@ mod tests {
         "#;
         let (tree, errors) = parse_with_errors(source);
 
-        eprintln!("Errors: {:?}", errors);
         assert!(
             errors.is_empty(),
             "Composed attribute should parse without errors"
@@ -7791,7 +7755,6 @@ mod tests {
         "#;
         let (tree, errors) = parse_with_errors(source);
 
-        eprintln!("Errors: {:?}", errors);
         assert!(
             errors.is_empty(),
             "Attribute in function body should parse without errors"
@@ -7806,7 +7769,6 @@ mod tests {
         "#;
         let (tree, errors) = parse_with_errors(source);
 
-        eprintln!("Errors: {:?}", errors);
         assert!(
             errors.is_empty(),
             "Namespaced intent composition should parse without errors"
@@ -7821,7 +7783,6 @@ mod tests {
             "intent parallel = mux_style::parallel;\n\nintent priority = mux_style::priority;\n";
         let (tree, errors) = parse_with_errors(source);
 
-        eprintln!("Errors: {:?}", errors);
         assert!(
             errors.is_empty(),
             "Intent declarations without leading whitespace should parse without errors"
@@ -7845,7 +7806,6 @@ mod tests {
         "#;
         let (tree, errors) = parse_with_errors(source);
 
-        eprintln!("Errors: {:?}", errors);
         assert!(
             errors.is_empty(),
             "Expression with intent should parse without errors"
@@ -7870,7 +7830,6 @@ mod tests {
         "#;
         let (tree, errors) = parse_with_errors(source);
 
-        eprintln!("Errors: {:?}", errors);
         assert!(
             errors.is_empty(),
             "With intent block should parse without errors"
@@ -7888,7 +7847,6 @@ mod tests {
         "#;
         let (tree, errors) = parse_with_errors(source);
 
-        eprintln!("Errors: {:?}", errors);
         assert!(
             errors.is_empty(),
             "Entity with intent should parse without errors"
@@ -7910,7 +7868,6 @@ mod tests {
         "#;
         let (tree, errors) = parse_with_errors(source);
 
-        eprintln!("Errors: {:?}", errors);
         assert!(
             errors.is_empty(),
             "Impl with intent should parse without errors"
@@ -7932,7 +7889,6 @@ mod tests {
         "#;
         let (tree, errors) = parse_with_errors(source);
 
-        eprintln!("Errors: {:?}", errors);
         assert!(
             errors.is_empty(),
             "Intent composition should parse without errors"
@@ -7973,7 +7929,6 @@ mod tests {
         "#;
         let (tree, errors) = parse_with_errors(source);
 
-        eprintln!("Errors: {:?}", errors);
         assert!(errors.is_empty(), "Safety goal should parse without errors");
         assert_eq!(tree.kind(), SyntaxKind::SourceFile);
     }
@@ -8008,7 +7963,6 @@ mod tests {
         "#;
         let (tree, errors) = parse_with_errors(source);
 
-        eprintln!("Errors: {:?}", errors);
         assert!(
             errors.is_empty(),
             "Safety entity should parse without errors"
@@ -8028,7 +7982,6 @@ mod tests {
         "#;
         let (tree, errors) = parse_with_errors(source);
 
-        eprintln!("Errors: {:?}", errors);
         assert!(
             errors.is_empty(),
             "Safety trait should parse without errors"
@@ -8057,7 +8010,6 @@ mod tests {
         "#;
         let (tree, errors) = parse_with_errors(source);
 
-        eprintln!("Errors: {:?}", errors);
         assert!(
             errors.is_empty(),
             "FMEDA library should parse without errors"
