@@ -336,6 +336,8 @@
 
         let prevVal = 0;
         let started = false;
+        const endTime = waveformData ? (waveformData.endTime || 10000) : 10000;
+        const endX = Math.min(canvasWidth, (endTime - startTime) / timePerPixel);
 
         for (let ci = 0; ci < changes.length; ci++) {
             const [t, hexVal] = changes[ci];
@@ -358,10 +360,10 @@
             prevVal = val;
         }
 
-        // Extend to end
+        // Extend to simulation end (not canvas edge)
         if (started) {
             const lastY = prevVal ? y : y + height;
-            ctx.lineTo(canvasWidth, lastY);
+            ctx.lineTo(endX, lastY);
         }
 
         ctx.stroke();
@@ -457,9 +459,10 @@
             // Zoom
             const factor = e.deltaY < 0 ? 1.2 : 1 / 1.2;
             zoom = Math.max(0.01, Math.min(1000, zoom * factor));
-        } else if (e.shiftKey) {
-            // Horizontal scroll
-            scrollX = Math.max(0, scrollX + e.deltaY);
+        } else if (e.shiftKey || Math.abs(e.deltaX) > Math.abs(e.deltaY)) {
+            // Horizontal scroll (shift+wheel or trackpad horizontal swipe)
+            const delta = e.shiftKey ? e.deltaY : e.deltaX;
+            scrollX = Math.max(0, scrollX + delta);
         } else {
             // Vertical scroll — sync signal list
             scrollY = Math.max(0, scrollY + e.deltaY);
