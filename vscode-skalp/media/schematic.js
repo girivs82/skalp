@@ -37,6 +37,9 @@
         instanceBg: '#2a2d2e',
         instanceBorder: '#555',
         instanceHeader: '#383b3d',
+        logicBg: '#2d2a2e',
+        logicBorder: '#8e6aa0',
+        logicHeader: '#3d2e42',
         portIn: '#4caf50',
         portOut: '#ff9800',
         portInout: '#9c27b0',
@@ -162,7 +165,8 @@
             let maxIn = 0, maxOut = 0;
             for (const p of inPorts) { maxIn = Math.max(maxIn, measureTextWidth(p, FONT_SIZE)); }
             for (const p of outPorts) { maxOut = Math.max(maxOut, measureTextWidth(p, FONT_SIZE)); }
-            const nameW = measureTextWidth(entityType || name, FONT_SIZE + 1);
+            const displayLabel = name === 'logic' ? 'State Machine' : (entityType || name);
+            const nameW = measureTextWidth(displayLabel, FONT_SIZE + 1);
             const w = Math.max(INSTANCE_BOX_MIN_WIDTH, maxIn + maxOut + 40, nameW + 30);
             return { w, h };
         }
@@ -202,8 +206,9 @@
             rankBuckets[r].push(inst);
         }
 
-        // Compute X offsets for each rank column
+        // Compute X offsets for each rank column and track column widths
         const columnX = [];
+        const columnMaxW = [];
         let currentX = entityInX + entityInW + COLUMN_GAP;
         for (let r = 0; r <= maxRank; r++) {
             columnX.push(currentX);
@@ -215,6 +220,7 @@
                 const size = computeBoxSize(inst.name, inst.entity_type, inPorts, outPorts);
                 maxW = Math.max(maxW, size.w);
             }
+            columnMaxW.push(maxW);
             currentX += maxW + COLUMN_GAP;
         }
 
@@ -286,11 +292,43 @@
             line: data.entityLine
         });
 
-        // ── Step 5: Route wires ──
-        routeWires(data);
+        // ── Step 5: Compute routing channels (gaps between columns) ──
+        // Each channel is a vertical corridor between two columns where wires can route
+        const routingChannels = [];
+
+        // Channel between entity_in right edge and first instance column left edge
+        routingChannels.push({
+            left: entityInX + entityInW,
+            right: columnX.length > 0 ? columnX[0] : entityOutX,
+            center: entityInX + entityInW + COLUMN_GAP / 2
+        });
+
+        // Channels between instance columns
+        for (let r = 0; r < maxRank; r++) {
+            const rightEdge = columnX[r] + columnMaxW[r];
+            const nextLeft = columnX[r + 1];
+            routingChannels.push({
+                left: rightEdge,
+                right: nextLeft,
+                center: (rightEdge + nextLeft) / 2
+            });
+        }
+
+        // Channel between last instance column right edge and entity_out left edge
+        if (columnX.length > 0) {
+            const lastRight = columnX[maxRank] + columnMaxW[maxRank];
+            routingChannels.push({
+                left: lastRight,
+                right: entityOutX,
+                center: (lastRight + entityOutX) / 2
+            });
+        }
+
+        // ── Step 6: Route wires ──
+        routeWires(data, routingChannels);
     }
 
-    function routeWires(data) {
+    function routeWires(data, routingChannels) {
         layoutWires = [];
         if (!data.nets || data.nets.length === 0) { return; }
 
@@ -302,8 +340,8 @@
             else { elemByName.set(el.name, el); }
         }
 
-        // For channel allocation, track vertical segments per X-column gap
-        const channelColumns = new Map(); // columnGapX → nextOffset
+        // For channel allocation, track vertical segments per channel index
+        const channelUsage = new Map(); // channelIndex → nextOffset
 
         for (const net of data.nets) {
             const driver = net.driver;
@@ -314,7 +352,7 @@
                 const dstPort = findPortPosition(elemByName, sink, 'in');
                 if (!dstPort) { continue; }
 
-                const segments = routeManhattan(srcPort, dstPort, channelColumns);
+                const segments = routeManhattan(srcPort, dstPort, routingChannels, channelUsage);
 
                 layoutWires.push({
                     from: srcPort,
@@ -359,31 +397,73 @@
         return null;
     }
 
-    function routeManhattan(src, dst, channelColumns) {
+    function routeManhattan(src, dst, routingChannels, channelUsage) {
         // 3-segment Manhattan routing: horizontal → vertical → horizontal
+        // The vertical segment is placed in a routing channel (gap between columns)
+        // to avoid cutting through instance boxes.
         const segments = [];
 
         if (Math.abs(src.y - dst.y) < 2 && src.x < dst.x) {
-            // Straight horizontal line
+            // Straight horizontal line (same Y, left-to-right)
             segments.push({ x1: src.x, y1: src.y, x2: dst.x, y2: dst.y });
             return segments;
         }
 
-        // Determine midpoint X for the vertical segment
-        const midX = (src.x + dst.x) / 2;
+        // Find the best routing channel for the vertical segment.
+        // Pick the channel whose center is between src.x and dst.x,
+        // or the closest one if none is strictly between them.
+        const minX = Math.min(src.x, dst.x);
+        const maxX = Math.max(src.x, dst.x);
+        const idealMidX = (src.x + dst.x) / 2;
 
-        // Quantize to nearest channel column for alignment
-        const channelKey = Math.round(midX / 20) * 20;
-        const offset = channelColumns.get(channelKey) || 0;
-        channelColumns.set(channelKey, offset + 1);
-        const actualMidX = channelKey + offset * WIRE_CHANNEL_SPACING;
+        let bestChannel = -1;
+        let bestDist = Infinity;
+
+        for (let i = 0; i < routingChannels.length; i++) {
+            const ch = routingChannels[i];
+            // Prefer channels that are between src and dst
+            if (ch.center >= minX && ch.center <= maxX) {
+                const dist = Math.abs(ch.center - idealMidX);
+                if (dist < bestDist) {
+                    bestDist = dist;
+                    bestChannel = i;
+                }
+            }
+        }
+
+        // Fallback: pick closest channel overall
+        if (bestChannel < 0) {
+            for (let i = 0; i < routingChannels.length; i++) {
+                const dist = Math.abs(routingChannels[i].center - idealMidX);
+                if (dist < bestDist) {
+                    bestDist = dist;
+                    bestChannel = i;
+                }
+            }
+        }
+
+        // Compute the actual X for the vertical segment, with offset for parallel wires
+        let midX;
+        if (bestChannel >= 0) {
+            const ch = routingChannels[bestChannel];
+            const offset = channelUsage.get(bestChannel) || 0;
+            channelUsage.set(bestChannel, offset + 1);
+            // Spread wires within the channel, centered on ch.center
+            const channelWidth = ch.right - ch.left;
+            const maxWires = Math.max(1, Math.floor(channelWidth / WIRE_CHANNEL_SPACING));
+            const startX = ch.center - ((Math.min(maxWires, offset + 1) - 1) * WIRE_CHANNEL_SPACING) / 2;
+            midX = startX + (offset % maxWires) * WIRE_CHANNEL_SPACING;
+        } else {
+            // No channels available (shouldn't happen), fallback to midpoint
+            midX = idealMidX;
+        }
 
         // Horizontal from src
-        segments.push({ x1: src.x, y1: src.y, x2: actualMidX, y2: src.y });
+        segments.push({ x1: src.x, y1: src.y, x2: midX, y2: src.y });
         // Vertical
-        segments.push({ x1: actualMidX, y1: src.y, x2: actualMidX, y2: dst.y });
+        segments.push({ x1: midX, y1: src.y, x2: midX, y2: dst.y });
         // Horizontal to dst
-        segments.push({ x1: actualMidX, y1: dst.y, x2: dst.x, y2: dst.y });
+        segments.push({ x1: midX, y1: dst.y, x2: dst.x, y2: dst.y });
 
         return segments;
     }
@@ -502,11 +582,14 @@
     }
 
     function drawInstanceBox(el) {
+        const isLogic = el.name === 'logic';
         const isHovered = hoveredItem === el.name;
-        const borderColor = isHovered ? COLORS.highlight : COLORS.instanceBorder;
+        const borderColor = isHovered ? COLORS.highlight : (isLogic ? COLORS.logicBorder : COLORS.instanceBorder);
+        const bgColor = isLogic ? COLORS.logicBg : COLORS.instanceBg;
+        const headerColor = isLogic ? COLORS.logicHeader : COLORS.instanceHeader;
         const lw = isHovered ? 2 : 1;
 
-        drawRoundedRect(ctx, el.x, el.y, el.w, el.h, BORDER_RADIUS, COLORS.instanceBg, borderColor, lw);
+        drawRoundedRect(ctx, el.x, el.y, el.w, el.h, BORDER_RADIUS, bgColor, borderColor, lw);
 
         // Header bar
         ctx.save();
@@ -519,7 +602,7 @@
         ctx.lineTo(el.x, el.y + BORDER_RADIUS);
         ctx.quadraticCurveTo(el.x, el.y, el.x + BORDER_RADIUS, el.y);
         ctx.closePath();
-        ctx.fillStyle = COLORS.instanceHeader;
+        ctx.fillStyle = headerColor;
         ctx.fill();
         ctx.restore();
 
@@ -528,10 +611,11 @@
         ctx.font = `bold ${FONT_SIZE}px monospace`;
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
-        ctx.fillText(el.name, el.x + el.w / 2, el.y + HEADER_HEIGHT / 2);
+        const displayName = isLogic ? 'State Machine' : el.name;
+        ctx.fillText(displayName, el.x + el.w / 2, el.y + HEADER_HEIGHT / 2);
 
         // Entity type (dimmer, below name)
-        if (el.entityType) {
+        if (el.entityType && !isLogic) {
             ctx.fillStyle = COLORS.textDim;
             ctx.font = `${FONT_SIZE - 1}px monospace`;
             ctx.fillText(el.entityType, el.x + el.w / 2, el.y + HEADER_HEIGHT + 10);
@@ -767,7 +851,7 @@
     canvas.addEventListener('click', (e) => {
         if (hoveredItem) {
             const el = layoutElements.find(el => el.name === hoveredItem);
-            if (el && el.type === 'instance' && el.entityType) {
+            if (el && el.type === 'instance' && el.entityType && el.name !== 'logic') {
                 vscode.postMessage({ type: 'navigateToEntity', entityType: el.entityType });
             } else if (el && el.line !== undefined && schematicData && schematicData.filePath) {
                 vscode.postMessage({ type: 'navigateToLine', filePath: schematicData.filePath, line: el.line });
