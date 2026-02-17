@@ -20,10 +20,14 @@
     let isSyncingScroll = false;
     let hoverX = -1; // mouse x position on canvas (-1 = not hovering)
 
-    const ROW_HEIGHT = 26;
-    const SIGNAL_LIST_WIDTH = 250;
-    const HEADER_HEIGHT = 20;
-    const VALUE_HEIGHT = 20;
+    const cfg = window.skalpConfig || {};
+    const FONT_SIZE = cfg.fontSize || 12;
+    const ROW_HEIGHT = cfg.rowHeight || Math.round(FONT_SIZE * 2.2);
+    const SIGNAL_LIST_WIDTH = cfg.signalListWidth || Math.round(FONT_SIZE * 22);
+    const HEADER_HEIGHT = cfg.headerHeight || Math.round(FONT_SIZE * 1.7);
+    const VALUE_HEIGHT = HEADER_HEIGHT;
+    const CANVAS_FONT = FONT_SIZE + 'px monospace';
+    const CANVAS_FONT_SMALL = Math.max(8, FONT_SIZE - 1) + 'px sans-serif';
 
     const canvas = /** @type {HTMLCanvasElement} */ (document.getElementById('waveform-canvas'));
     const ctx = canvas.getContext('2d');
@@ -231,7 +235,7 @@
 
         // Time ruler
         ctx.fillStyle = getComputedStyle(document.body).getPropertyValue('--vscode-editorLineNumber-foreground') || '#888';
-        ctx.font = '10px monospace';
+        ctx.font = CANVAS_FONT;
         ctx.textAlign = 'center';
 
         const tickInterval = computeTickInterval(endTime, w, zoom);
@@ -239,7 +243,7 @@
 
         for (let t = firstTick; t <= startTime + w * timePerPixel; t += tickInterval) {
             const x = (t - startTime) / timePerPixel;
-            ctx.fillText(formatTime(t, waveformData.timescale), x, 12);
+            ctx.fillText(formatTime(t, waveformData.timescale), x, HEADER_HEIGHT - 6);
             ctx.strokeStyle = 'rgba(128,128,128,0.2)';
             ctx.beginPath();
             ctx.moveTo(x, HEADER_HEIGHT);
@@ -299,9 +303,9 @@
                 ctx.stroke();
                 ctx.setLineDash([]);
                 ctx.fillStyle = ann.color || '#ff9800';
-                ctx.font = '10px sans-serif';
+                ctx.font = CANVAS_FONT_SMALL;
                 ctx.textAlign = 'left';
-                ctx.fillText(ann.label, x + 4, HEADER_HEIGHT + 12);
+                ctx.fillText(ann.label, x + 4, HEADER_HEIGHT + FONT_SIZE + 2);
             }
         }
 
@@ -404,9 +408,9 @@
             if (labelWidth > 30) {
                 const fmtVal = formatValue(hexVal, sig.width, radix, sig.type);
                 ctx.fillStyle = color;
-                ctx.font = '10px monospace';
+                ctx.font = CANVAS_FONT;
                 ctx.textAlign = 'center';
-                ctx.fillText(fmtVal, (x1 + x2) / 2, y + height / 2 + 3, labelWidth - 10);
+                ctx.fillText(fmtVal, (x1 + x2) / 2, y + height / 2 + Math.round(FONT_SIZE * 0.35), labelWidth - 10);
             }
         }
     }

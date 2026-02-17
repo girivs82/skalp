@@ -342,6 +342,13 @@
                     "default": "hex",
                     "description": "Default radix for waveform display"
                 },
+                "skalp.waveform.fontSize": {
+                    "type": "number",
+                    "default": 12,
+                    "minimum": 8,
+                    "maximum": 24,
+                    "description": "Font size (px) for waveform viewer signal names and values. Increase for HiDPI displays."
+                },
                 "skalp.ec.outputDir": {
                     "type": "string",
                     "default": "",

@@ -26,7 +26,8 @@ export class WaveformViewerProvider implements vscode.CustomReadonlyEditorProvid
             vscode.Uri.joinPath(this.context.extensionUri, 'media', 'waveform.js')
         );
 
-        webviewPanel.webview.html = this.getHtml(scriptUri);
+        const fontSize = vscode.workspace.getConfiguration('skalp.waveform').get<number>('fontSize', 12);
+        webviewPanel.webview.html = this.getHtml(scriptUri, fontSize);
 
         const fileData = await vscode.workspace.fs.readFile(document.uri);
         let text = new TextDecoder().decode(fileData);
@@ -65,7 +66,12 @@ export class WaveformViewerProvider implements vscode.CustomReadonlyEditorProvid
         });
     }
 
-    private getHtml(scriptUri: vscode.Uri): string {
+    private getHtml(scriptUri: vscode.Uri, fontSize: number): string {
+        const rowHeight = Math.round(fontSize * 2.2);
+        const headerHeight = Math.round(fontSize * 1.7);
+        const smallFontSize = Math.max(8, fontSize - 1);
+        const tinyFontSize = Math.max(7, fontSize - 2);
+        const toolbarFontSize = Math.max(10, fontSize);
         return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -96,7 +102,7 @@ export class WaveformViewerProvider implements vscode.CustomReadonlyEditorProvid
             border: none;
             padding: 4px 8px;
             cursor: pointer;
-            font-size: 12px;
+            font-size: ${toolbarFontSize}px;
         }
         #toolbar button:hover {
             background: var(--vscode-button-hoverBackground);
@@ -106,7 +112,7 @@ export class WaveformViewerProvider implements vscode.CustomReadonlyEditorProvid
             color: var(--vscode-input-foreground);
             border: 1px solid var(--vscode-input-border);
             padding: 2px 4px;
-            font-size: 12px;
+            font-size: ${toolbarFontSize}px;
         }
         #search {
             width: 180px;
@@ -116,12 +122,12 @@ export class WaveformViewerProvider implements vscode.CustomReadonlyEditorProvid
             height: calc(100vh - 32px);
         }
         #signal-list {
-            width: 250px;
+            width: ${Math.round(fontSize * 22)}px;
             min-width: 150px;
             overflow-y: auto;
             border-right: 1px solid var(--vscode-panel-border);
             user-select: none;
-            padding-top: 20px;
+            padding-top: ${headerHeight}px;
         }
         .signal-row {
             display: flex;
@@ -129,7 +135,7 @@ export class WaveformViewerProvider implements vscode.CustomReadonlyEditorProvid
             padding: 0 8px;
             cursor: pointer;
             white-space: nowrap;
-            height: 26px;
+            height: ${rowHeight}px;
             box-sizing: border-box;
             border-bottom: 1px solid var(--vscode-panel-border, rgba(128,128,128,0.2));
         }
@@ -144,28 +150,28 @@ export class WaveformViewerProvider implements vscode.CustomReadonlyEditorProvid
             flex: 1;
             overflow: hidden;
             text-overflow: ellipsis;
-            font-size: 11px;
+            font-size: ${fontSize}px;
         }
         .signal-value {
             font-family: var(--vscode-editor-fontFamily, monospace);
-            font-size: 11px;
+            font-size: ${fontSize}px;
             margin-left: 8px;
             color: var(--vscode-descriptionForeground);
         }
         .group-header {
             font-weight: bold;
             padding: 0 8px;
-            height: 26px;
+            height: ${rowHeight}px;
             box-sizing: border-box;
-            line-height: 26px;
+            line-height: ${rowHeight}px;
             background: var(--vscode-sideBarSectionHeader-background);
             border-bottom: 1px solid var(--vscode-panel-border, rgba(128,128,128,0.2));
             cursor: pointer;
-            font-size: 11px;
+            font-size: ${fontSize}px;
         }
         .group-header::before {
             content: '\\25BC ';
-            font-size: 10px;
+            font-size: ${tinyFontSize}px;
         }
         .group-header.collapsed::before {
             content: '\\25B6 ';
@@ -173,7 +179,7 @@ export class WaveformViewerProvider implements vscode.CustomReadonlyEditorProvid
         .group-count {
             font-weight: normal;
             opacity: 0.5;
-            font-size: 10px;
+            font-size: ${tinyFontSize}px;
         }
         #waveform-canvas {
             flex: 1;
@@ -186,7 +192,7 @@ export class WaveformViewerProvider implements vscode.CustomReadonlyEditorProvid
             border: 1px solid var(--vscode-editorWidget-border);
             padding: 2px 8px;
             font-family: var(--vscode-editor-fontFamily, monospace);
-            font-size: 11px;
+            font-size: ${smallFontSize}px;
         }
     </style>
 </head>
@@ -213,6 +219,14 @@ export class WaveformViewerProvider implements vscode.CustomReadonlyEditorProvid
         <canvas id="waveform-canvas"></canvas>
     </div>
     <div id="cursor-readout"></div>
+    <script>
+        window.skalpConfig = {
+            fontSize: ${fontSize},
+            rowHeight: ${rowHeight},
+            headerHeight: ${headerHeight},
+            signalListWidth: ${Math.round(fontSize * 22)}
+        };
+    </script>
     <script src="${scriptUri}"></script>
 </body>
 </html>`;
