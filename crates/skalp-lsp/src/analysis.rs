@@ -602,6 +602,25 @@ impl AnalysisContext {
         if let Some(t) = self.type_aliases.iter().find(|t| t.name == name) {
             return Some((t.line, t.column, t.source_file.as_deref()));
         }
+        // Search enum variants — navigate to the enum definition
+        for ta in &self.type_aliases {
+            let underlying = ta.type_str.as_deref().unwrap_or("");
+            if underlying.starts_with("enum {") {
+                if let Some(inner) = underlying.strip_prefix("enum { ")
+                    .and_then(|s| s.strip_suffix(" }"))
+                {
+                    for variant in inner.split(", ") {
+                        let vname = variant.split(|c| c == '=' || c == ':')
+                            .next()
+                            .unwrap_or(variant)
+                            .trim();
+                        if vname == name {
+                            return Some((ta.line, ta.column, ta.source_file.as_deref()));
+                        }
+                    }
+                }
+            }
+        }
         None
     }
 
@@ -686,10 +705,19 @@ impl AnalysisContext {
             let default = g.default_value.as_deref()
                 .map(|v| format!(" = {}", v))
                 .unwrap_or_default();
-            return Some(format!(
+            let mut info = format!(
                 "**generic** `{}`: `{}{}`\n\nIn entity `{}`",
                 g.name, g.type_str, default, g.entity
-            ));
+            );
+            // Resolve default value if it references a known constant
+            if let Some(ref default_name) = g.default_value {
+                if let Some(c) = self.constants.iter().find(|c| c.name == *default_name) {
+                    if let Some(ref detail) = c.type_str {
+                        info.push_str(&format!("\n\n`{}: {}`", default_name, detail));
+                    }
+                }
+            }
+            return Some(info);
         }
 
         // Type alias / struct / enum
@@ -716,6 +744,29 @@ impl AnalysisContext {
                 return Some(format!("**enum** `{}`", t.name));
             } else {
                 return Some(format!("**type** `{}` = `{}`", t.name, underlying));
+            }
+        }
+
+        // Enum variant: search all enums for a matching variant name
+        for ta in &self.type_aliases {
+            let underlying = ta.type_str.as_deref().unwrap_or("");
+            if underlying.starts_with("enum {") {
+                if let Some(inner) = underlying.strip_prefix("enum { ")
+                    .and_then(|s| s.strip_suffix(" }"))
+                {
+                    for variant in inner.split(", ") {
+                        let vname = variant.split(|c| c == '=' || c == ':')
+                            .next()
+                            .unwrap_or(variant)
+                            .trim();
+                        if vname == name {
+                            return Some(format!(
+                                "**variant** `{}::{}` \n\n`{}`\n\nIn enum `{}`",
+                                ta.name, vname, variant.trim(), ta.name
+                            ));
+                        }
+                    }
+                }
             }
         }
 

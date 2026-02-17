@@ -175,7 +175,7 @@ impl LanguageServer for SkalpLanguageServer {
         let position = params.text_document_position.position;
 
         if let Some(doc) = self.documents.get(&uri) {
-            let completions = completion::get_completions(&doc, position);
+            let completions = completion::get_completions(&doc, position, doc.analysis.as_ref());
             Ok(Some(CompletionResponse::Array(completions)))
         } else {
             Ok(None)
