@@ -513,6 +513,66 @@
         render();
     });
 
+    // --- Snap to transition (arrow keys) ---
+
+    function findNextTransition(sigName, afterTime) {
+        const changes = waveformData && waveformData.changes[sigName];
+        if (!changes) { return null; }
+        for (const [t, _v] of changes) {
+            if (t > afterTime) { return t; }
+        }
+        return null;
+    }
+
+    function findPrevTransition(sigName, beforeTime) {
+        const changes = waveformData && waveformData.changes[sigName];
+        if (!changes) { return null; }
+        let prev = null;
+        for (const [t, _v] of changes) {
+            if (t >= beforeTime) { break; }
+            prev = t;
+        }
+        return prev;
+    }
+
+    function snapCursorToTransition(direction) {
+        if (!selectedSignal || !waveformData) { return; }
+        const t = direction > 0
+            ? findNextTransition(selectedSignal, cursorTime)
+            : findPrevTransition(selectedSignal, cursorTime);
+        if (t === null) { return; }
+
+        cursorTime = t;
+
+        // Auto-scroll to keep cursor visible
+        const container = canvas.parentElement;
+        const w = container.clientWidth - SIGNAL_LIST_WIDTH;
+        const endTime = waveformData.endTime || 10000;
+        const timePerPixel = endTime / (w * zoom);
+        const startTime = scrollX * timePerPixel;
+        const cx = (cursorTime - startTime) / timePerPixel;
+        if (cx < 0 || cx > w) {
+            // Center cursor on screen
+            scrollX = Math.max(0, (cursorTime / timePerPixel) - w / 2);
+        }
+
+        buildSignalList();
+        render();
+        updateCursorReadout();
+    }
+
+    document.addEventListener('keydown', (e) => {
+        // Don't capture when typing in search input
+        if (e.target === searchInput) { return; }
+        if (e.key === 'ArrowRight') {
+            e.preventDefault();
+            snapCursorToTransition(1);
+        } else if (e.key === 'ArrowLeft') {
+            e.preventDefault();
+            snapCursorToTransition(-1);
+        }
+    });
+
     function updateCursorReadout() {
         if (cursorTime < 0 || !waveformData) {
             cursorReadout.style.display = 'none';
