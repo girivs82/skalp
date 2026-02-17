@@ -1737,6 +1737,73 @@ impl Testbench {
     pub fn reset_ncl(&mut self) {
         self.sim.reset();
     }
+
+    // ========================================================================
+    // Waveform export
+    // ========================================================================
+
+    /// Export captured waveform data to an `.skw.gz` file.
+    ///
+    /// The testbench must have been created with `capture_waveforms: true`
+    /// (which is the default for all constructors). Call this after running
+    /// your test stimulus to save the waveform for viewing in the VS Code
+    /// waveform viewer.
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// let mut tb = Testbench::behavioral("design.sk").await.unwrap();
+    /// tb.reset(5).await;
+    /// tb.set("input", 42u32);
+    /// tb.clock(100).await;
+    /// tb.export_waveform("build/test_output.skw.gz").unwrap();
+    /// ```
+    pub fn export_waveform(&self, path: impl AsRef<Path>) -> Result<()> {
+        use skalp_sim::Waveform;
+
+        let snapshots = self.sim.get_waveforms();
+        if snapshots.is_empty() {
+            anyhow::bail!("No waveform data captured. Ensure capture_waveforms is enabled.");
+        }
+
+        let signal_widths = self.sim.get_signal_widths();
+        let mut waveform = Waveform::new();
+
+        // Initialize signals from first snapshot with real widths
+        if let Some(first) = snapshots.first() {
+            for name in first.signals.keys() {
+                let width = signal_widths.get(name).copied().unwrap_or(64);
+                waveform.add_signal(name.clone(), width);
+            }
+        }
+
+        // Add values from all snapshots
+        for snapshot in snapshots {
+            for (name, value) in &snapshot.signals {
+                waveform.add_value(name, snapshot.cycle, value.to_le_bytes().to_vec());
+            }
+        }
+
+        // Ensure parent directory exists
+        let path = path.as_ref();
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+
+        let design_name = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("testbench")
+            .to_string();
+
+        waveform
+            .export_skw_compressed(path, &design_name)
+            .map_err(|e| anyhow::anyhow!("Failed to write waveform: {}", e))?;
+
+        eprintln!("Waveform exported to {:?} ({} cycles, {} signals)",
+            path, self.cycle_count, waveform.signals.len());
+
+        Ok(())
+    }
 }
 
 // ============================================================================

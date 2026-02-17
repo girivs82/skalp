@@ -11,10 +11,12 @@ import { WaveformViewerProvider } from './waveform/provider';
 import { EcResultTreeProvider } from './ec-dashboard/tree-provider';
 import { SchematicViewerProvider } from './schematic/provider';
 import { SkalpTaskProvider } from './tasks/provider';
+import { SkalpTestController } from './testing/controller';
 
 let client: LanguageClient;
 let cliRunner: CliRunner;
 let statusBarItem: vscode.StatusBarItem;
+let testController: SkalpTestController;
 
 export function activate(context: vscode.ExtensionContext) {
     const outputChannel = vscode.window.createOutputChannel('SKALP');
@@ -99,6 +101,10 @@ export function activate(context: vscode.ExtensionContext) {
     context.subscriptions.push(
         vscode.tasks.registerTaskProvider(SkalpTaskProvider.type, new SkalpTaskProvider())
     );
+
+    // --- Test Controller ---
+    testController = new SkalpTestController(outputChannel);
+    context.subscriptions.push({ dispose: () => testController.dispose() });
 
     // --- Commands ---
     context.subscriptions.push(

@@ -1476,6 +1476,18 @@ impl UnifiedSimulator {
         &self.waveforms
     }
 
+    /// Get signal widths (display_name -> bit width) for waveform export
+    pub fn get_signal_widths(&self) -> IndexMap<String, usize> {
+        match &self.backend {
+            SimulatorBackend::CompiledCpu(runtime) => {
+                runtime.get_waveform_signals().into_iter()
+                    .map(|(_, display, width)| (display, width))
+                    .collect()
+            }
+            _ => IndexMap::new(),
+        }
+    }
+
     /// Get input port names
     pub fn get_input_names(&self) -> Vec<String> {
         match &self.backend {

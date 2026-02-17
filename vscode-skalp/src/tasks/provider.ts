@@ -1,5 +1,4 @@
 import * as vscode from 'vscode';
-import * as path from 'path';
 
 interface SkalpTaskDefinition extends vscode.TaskDefinition {
     command: string;
