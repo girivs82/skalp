@@ -460,8 +460,9 @@
     canvas.addEventListener('wheel', (e) => {
         e.preventDefault();
         if (e.ctrlKey || e.metaKey) {
-            // Zoom
-            const factor = e.deltaY < 0 ? 1.2 : 1 / 1.2;
+            // Zoom — scale factor by deltaY magnitude for smooth trackpad pinch
+            const sensitivity = 0.005;
+            const factor = Math.exp(-e.deltaY * sensitivity);
             zoom = Math.max(0.01, Math.min(1000, zoom * factor));
         } else if (e.shiftKey || Math.abs(e.deltaX) > Math.abs(e.deltaY)) {
             // Horizontal scroll (shift+wheel or trackpad horizontal swipe)
