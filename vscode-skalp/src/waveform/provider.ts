@@ -121,14 +121,16 @@ export class WaveformViewerProvider implements vscode.CustomReadonlyEditorProvid
             overflow-y: auto;
             border-right: 1px solid var(--vscode-panel-border);
             user-select: none;
+            padding-top: 20px;
         }
         .signal-row {
             display: flex;
             align-items: center;
-            padding: 2px 8px;
+            padding: 0 8px;
             cursor: pointer;
             white-space: nowrap;
-            height: 24px;
+            height: 26px;
+            box-sizing: border-box;
             border-bottom: 1px solid var(--vscode-panel-border, rgba(128,128,128,0.2));
         }
         .signal-row:hover {
@@ -152,9 +154,14 @@ export class WaveformViewerProvider implements vscode.CustomReadonlyEditorProvid
         }
         .group-header {
             font-weight: bold;
-            padding: 4px 8px;
+            padding: 0 8px;
+            height: 26px;
+            box-sizing: border-box;
+            line-height: 26px;
             background: var(--vscode-sideBarSectionHeader-background);
+            border-bottom: 1px solid var(--vscode-panel-border, rgba(128,128,128,0.2));
             cursor: pointer;
+            font-size: 11px;
         }
         .group-header::before {
             content: '\\25BC ';
@@ -162,6 +169,11 @@ export class WaveformViewerProvider implements vscode.CustomReadonlyEditorProvid
         }
         .group-header.collapsed::before {
             content: '\\25B6 ';
+        }
+        .group-count {
+            font-weight: normal;
+            opacity: 0.5;
+            font-size: 10px;
         }
         #waveform-canvas {
             flex: 1;

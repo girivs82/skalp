@@ -15,6 +15,10 @@
     let cursorTime = -1;
     let radix = 'hex';
     let filterText = '';
+    let collapsedGroups = new Set();
+    let displayRows = []; // [{type:'group', groupName:'...'}, {type:'signal', name:'...'}]
+    let isSyncingScroll = false;
+    let hoverX = -1; // mouse x position on canvas (-1 = not hovering)
 
     const ROW_HEIGHT = 26;
     const SIGNAL_LIST_WIDTH = 250;
@@ -49,9 +53,6 @@
     }
 
     function resizeCanvas() {
-        const container = canvas.parentElement;
-        canvas.width = container.clientWidth - SIGNAL_LIST_WIDTH;
-        canvas.height = container.clientHeight;
         render();
     }
 
@@ -108,67 +109,81 @@
         return val;
     }
 
+    function shortName(fullName) {
+        // Show leaf name for display (group header provides hierarchy context)
+        const parts = fullName.split('.');
+        return parts[parts.length - 1];
+    }
+
     function buildSignalList() {
         if (!waveformData) { return; }
 
         const signals = waveformData.signals;
         const filter = filterText.toLowerCase();
 
-        // Group signals
+        // Group signals by explicit group or auto-group by hierarchy prefix
         const groups = {};
         const ungrouped = [];
 
         for (const sig of signals) {
             if (filter && !sig.name.toLowerCase().includes(filter)) { continue; }
-            const group = sig.group || '';
-            if (group) {
-                if (!groups[group]) { groups[group] = []; }
-                groups[group].push(sig);
+
+            if (sig.group) {
+                if (!groups[sig.group]) { groups[sig.group] = []; }
+                groups[sig.group].push(sig);
+            } else if (sig.name.includes('.')) {
+                const lastDot = sig.name.lastIndexOf('.');
+                const prefix = sig.name.substring(0, lastDot);
+                if (!groups[prefix]) { groups[prefix] = []; }
+                groups[prefix].push(sig);
             } else {
                 ungrouped.push(sig);
             }
         }
 
-        // Also use displayConfig groups
-        if (waveformData.displayConfig && waveformData.displayConfig.signalGroups) {
-            for (const g of waveformData.displayConfig.signalGroups) {
-                if (!groups[g.name]) { groups[g.name] = []; }
-            }
-        }
-
+        displayRows = [];
         visibleSignals = [];
         let html = '';
 
-        for (const [groupName, sigs] of Object.entries(groups)) {
-            html += `<div class="group-header" data-group="${groupName}">${groupName}</div>`;
-            for (const sig of sigs) {
-                visibleSignals.push(sig.name);
-                const val = cursorTime >= 0 ? getValueAtTime(waveformData.changes[sig.name], cursorTime) : '';
-                const fmtVal = val ? formatValue(val, sig.width, radix, sig.type) : '';
-                const sel = sig.name === selectedSignal ? ' selected' : '';
-                html += `<div class="signal-row${sel}" data-name="${sig.name}">
-                    <span class="signal-name" style="color:${getSignalColor(sig)}">${sig.name.split('.').pop()}</span>
-                    <span class="signal-value">${fmtVal}</span>
-                </div>`;
+        // Helper to emit a group and its signals
+        function emitGroup(groupName, sigs, useShortName) {
+            const collapsed = collapsedGroups.has(groupName);
+            const count = sigs.length;
+            displayRows.push({ type: 'group', groupName });
+            html += `<div class="group-header${collapsed ? ' collapsed' : ''}" data-group="${groupName}">${groupName} <span class="group-count">(${count})</span></div>`;
+            if (!collapsed) {
+                for (const sig of sigs) {
+                    displayRows.push({ type: 'signal', name: sig.name });
+                    visibleSignals.push(sig.name);
+                    const val = cursorTime >= 0 ? getValueAtTime(waveformData.changes[sig.name], cursorTime) : '';
+                    const fmtVal = val ? formatValue(val, sig.width, radix, sig.type) : '';
+                    const sel = sig.name === selectedSignal ? ' selected' : '';
+                    const label = useShortName ? shortName(sig.name) : sig.name;
+                    html += `<div class="signal-row${sel}" data-name="${sig.name}">
+                        <span class="signal-name" style="color:${getSignalColor(sig)}">${label}</span>
+                        <span class="signal-value">${fmtVal}</span>
+                    </div>`;
+                }
             }
         }
 
         if (ungrouped.length > 0) {
-            for (const sig of ungrouped) {
-                visibleSignals.push(sig.name);
-                const val = cursorTime >= 0 ? getValueAtTime(waveformData.changes[sig.name], cursorTime) : '';
-                const fmtVal = val ? formatValue(val, sig.width, radix, sig.type) : '';
-                const sel = sig.name === selectedSignal ? ' selected' : '';
-                html += `<div class="signal-row${sel}" data-name="${sig.name}">
-                    <span class="signal-name" style="color:${getSignalColor(sig)}">${sig.name.split('.').pop()}</span>
-                    <span class="signal-value">${fmtVal}</span>
-                </div>`;
-            }
+            emitGroup('top', ungrouped, false);
         }
 
-        signalListEl.innerHTML = html;
+        const sortedGroups = Object.keys(groups).sort();
+        for (const groupName of sortedGroups) {
+            emitGroup(groupName, groups[groupName], true);
+        }
 
-        // Click handlers
+        const savedScroll = signalListEl.scrollTop;
+        signalListEl.innerHTML = html;
+        isSyncingScroll = true;
+        signalListEl.scrollTop = savedScroll;
+        scrollY = signalListEl.scrollTop;
+        isSyncingScroll = false;
+
+        // Click handlers for signal rows
         signalListEl.querySelectorAll('.signal-row').forEach(row => {
             row.addEventListener('click', () => {
                 selectedSignal = row.getAttribute('data-name');
@@ -177,14 +192,17 @@
             });
         });
 
+        // Click handlers for group headers — toggle collapse, rebuild both panels
         signalListEl.querySelectorAll('.group-header').forEach(hdr => {
             hdr.addEventListener('click', () => {
-                hdr.classList.toggle('collapsed');
-                let next = hdr.nextElementSibling;
-                while (next && !next.classList.contains('group-header')) {
-                    next.style.display = hdr.classList.contains('collapsed') ? 'none' : 'flex';
-                    next = next.nextElementSibling;
+                const group = hdr.getAttribute('data-group');
+                if (collapsedGroups.has(group)) {
+                    collapsedGroups.delete(group);
+                } else {
+                    collapsedGroups.add(group);
                 }
+                buildSignalList();
+                render();
             });
         });
     }
@@ -192,8 +210,9 @@
     function render() {
         if (!ctx || !waveformData) { return; }
 
-        const w = canvas.width;
-        const h = canvas.height;
+        const container = canvas.parentElement;
+        const w = container.clientWidth - SIGNAL_LIST_WIDTH;
+        const h = container.clientHeight;
         const dpr = window.devicePixelRatio || 1;
 
         canvas.width = w * dpr;
@@ -228,15 +247,28 @@
             ctx.stroke();
         }
 
-        // Waveforms
+        // Waveforms — iterate displayRows for 1:1 alignment with signal list
         const yOffset = HEADER_HEIGHT - scrollY;
-        for (let i = 0; i < visibleSignals.length; i++) {
-            const sigName = visibleSignals[i];
-            const sig = waveformData.signals.find(s => s.name === sigName);
-            if (!sig) { continue; }
-
+        for (let i = 0; i < displayRows.length; i++) {
+            const row = displayRows[i];
             const y = yOffset + i * ROW_HEIGHT;
             if (y + ROW_HEIGHT < HEADER_HEIGHT || y > h) { continue; }
+
+            if (row.type === 'group') {
+                // Group header spacer row — subtle background
+                ctx.fillStyle = 'rgba(128,128,128,0.08)';
+                ctx.fillRect(0, y, w, ROW_HEIGHT);
+                ctx.strokeStyle = 'rgba(128,128,128,0.2)';
+                ctx.beginPath();
+                ctx.moveTo(0, y + ROW_HEIGHT);
+                ctx.lineTo(w, y + ROW_HEIGHT);
+                ctx.stroke();
+                continue;
+            }
+
+            const sigName = row.name;
+            const sig = waveformData.signals.find(s => s.name === sigName);
+            if (!sig) { continue; }
 
             const changes = waveformData.changes[sigName] || [];
             const color = getSignalColor(sig);
@@ -273,7 +305,19 @@
             }
         }
 
-        // Cursor
+        // Hover guideline
+        if (hoverX >= 0) {
+            ctx.strokeStyle = 'rgba(255,255,255,0.25)';
+            ctx.lineWidth = 1;
+            ctx.setLineDash([4, 4]);
+            ctx.beginPath();
+            ctx.moveTo(hoverX, 0);
+            ctx.lineTo(hoverX, h);
+            ctx.stroke();
+            ctx.setLineDash([]);
+        }
+
+        // Cursor (placed on click — solid yellow line)
         if (cursorTime >= 0) {
             const cx = (cursorTime - startTime) / timePerPixel;
             ctx.strokeStyle = '#ffeb3b';
@@ -282,7 +326,6 @@
             ctx.moveTo(cx, 0);
             ctx.lineTo(cx, h);
             ctx.stroke();
-            ctx.lineWidth = 1;
         }
     }
 
@@ -385,6 +428,17 @@
 
     // --- Event Handlers ---
 
+    canvas.addEventListener('mousemove', (e) => {
+        const rect = canvas.getBoundingClientRect();
+        hoverX = e.clientX - rect.left;
+        render();
+    });
+
+    canvas.addEventListener('mouseleave', () => {
+        hoverX = -1;
+        render();
+    });
+
     canvas.addEventListener('click', (e) => {
         if (!waveformData) { return; }
         const rect = canvas.getBoundingClientRect();
@@ -407,11 +461,21 @@
             // Horizontal scroll
             scrollX = Math.max(0, scrollX + e.deltaY);
         } else {
-            // Vertical scroll
+            // Vertical scroll — sync signal list
             scrollY = Math.max(0, scrollY + e.deltaY);
+            isSyncingScroll = true;
+            signalListEl.scrollTop = scrollY;
+            isSyncingScroll = false;
         }
         render();
     }, { passive: false });
+
+    // Signal list scroll → sync canvas
+    signalListEl.addEventListener('scroll', () => {
+        if (isSyncingScroll) { return; }
+        scrollY = signalListEl.scrollTop;
+        render();
+    });
 
     document.getElementById('btn-zoom-in').addEventListener('click', () => {
         zoom *= 1.5;

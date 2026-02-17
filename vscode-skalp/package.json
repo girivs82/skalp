@@ -26,9 +26,13 @@
         "onCommand:skalp.build",
         "onCommand:skalp.simulate",
         "onCommand:skalp.ec",
+        "onCommand:skalp.synthesize",
+        "onCommand:skalp.format",
+        "onCommand:skalp.analyze",
         "onCommand:skalp.showWaveform",
         "onCommand:skalp.showSchematic",
-        "onView:skalpEc"
+        "onView:skalpEc",
+        "onTaskType:skalp"
     ],
     "main": "./out/extension.js",
     "contributes": {
@@ -85,9 +89,77 @@
                 "icon": "$(circuit-board)"
             },
             {
+                "command": "skalp.synthesize",
+                "title": "Synthesize",
+                "category": "SKALP",
+                "icon": "$(chip)"
+            },
+            {
+                "command": "skalp.format",
+                "title": "Format",
+                "category": "SKALP",
+                "icon": "$(edit)"
+            },
+            {
+                "command": "skalp.analyze",
+                "title": "Analyze",
+                "category": "SKALP",
+                "icon": "$(search)"
+            },
+            {
                 "command": "skalp.restart",
                 "title": "Restart Language Server",
                 "category": "SKALP"
+            }
+        ],
+        "taskDefinitions": [
+            {
+                "type": "skalp",
+                "required": ["command"],
+                "properties": {
+                    "command": {
+                        "type": "string",
+                        "enum": ["build", "simulate", "synthesize", "ec", "format", "analyze"],
+                        "description": "The SKALP command to run"
+                    },
+                    "file": {
+                        "type": "string",
+                        "description": "Source file path"
+                    },
+                    "target": {
+                        "type": "string",
+                        "enum": ["sv", "gates", "mir"],
+                        "description": "Build target"
+                    },
+                    "cycles": {
+                        "type": "number",
+                        "description": "Simulation cycles"
+                    },
+                    "device": {
+                        "type": "string",
+                        "description": "FPGA device for synthesis"
+                    },
+                    "optimize": {
+                        "type": "string",
+                        "enum": ["quick", "balanced", "full", "area", "timing"],
+                        "description": "Optimization preset"
+                    }
+                }
+            }
+        ],
+        "problemMatchers": [
+            {
+                "name": "skalp",
+                "owner": "skalp",
+                "fileLocation": ["autoDetect", "${workspaceFolder}"],
+                "pattern": {
+                    "regexp": "^(.+):(\\d+):(\\d+): (error|warning|info): (.+)$",
+                    "file": 1,
+                    "line": 2,
+                    "column": 3,
+                    "severity": 4,
+                    "message": 5
+                }
             }
         ],
         "viewsContainers": {
@@ -122,8 +194,18 @@
                 },
                 {
                     "when": "resourceExtname == .sk || resourceExtname == .skalp",
-                    "command": "skalp.ec",
+                    "command": "skalp.synthesize",
                     "group": "skalp@3"
+                },
+                {
+                    "when": "resourceExtname == .sk || resourceExtname == .skalp",
+                    "command": "skalp.ec",
+                    "group": "skalp@4"
+                },
+                {
+                    "when": "resourceExtname == .sk || resourceExtname == .skalp",
+                    "command": "skalp.format",
+                    "group": "skalp@5"
                 }
             ],
             "editor/context": [
@@ -139,13 +221,23 @@
                 },
                 {
                     "when": "resourceLangId == skalp",
-                    "command": "skalp.ec",
+                    "command": "skalp.synthesize",
                     "group": "skalp@3"
                 },
                 {
                     "when": "resourceLangId == skalp",
-                    "command": "skalp.showSchematic",
+                    "command": "skalp.ec",
                     "group": "skalp@4"
+                },
+                {
+                    "when": "resourceLangId == skalp",
+                    "command": "skalp.format",
+                    "group": "skalp@5"
+                },
+                {
+                    "when": "resourceLangId == skalp",
+                    "command": "skalp.showSchematic",
+                    "group": "skalp@6"
                 }
             ],
             "editor/title": [

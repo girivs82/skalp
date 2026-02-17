@@ -10,6 +10,7 @@ import { CliRunner } from './cli/runner';
 import { WaveformViewerProvider } from './waveform/provider';
 import { EcResultTreeProvider } from './ec-dashboard/tree-provider';
 import { SchematicViewerProvider } from './schematic/provider';
+import { SkalpTaskProvider } from './tasks/provider';
 
 let client: LanguageClient;
 let cliRunner: CliRunner;
@@ -17,13 +18,13 @@ let statusBarItem: vscode.StatusBarItem;
 
 export function activate(context: vscode.ExtensionContext) {
     const outputChannel = vscode.window.createOutputChannel('SKALP');
-    cliRunner = new CliRunner(outputChannel);
+    cliRunner = new CliRunner(outputChannel, context.extensionPath);
 
     // --- Status Bar ---
     statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 50);
     statusBarItem.text = '$(circuit-board) SKALP';
-    statusBarItem.tooltip = 'SKALP Language Support';
-    statusBarItem.command = 'skalp.build';
+    statusBarItem.tooltip = 'SKALP — click for commands';
+    statusBarItem.command = 'skalp.showMenu';
     statusBarItem.show();
     context.subscriptions.push(statusBarItem);
 
@@ -94,8 +95,40 @@ export function activate(context: vscode.ExtensionContext) {
     // --- Schematic Viewer ---
     const schematicProvider = new SchematicViewerProvider(context);
 
+    // --- Task Provider ---
+    context.subscriptions.push(
+        vscode.tasks.registerTaskProvider(SkalpTaskProvider.type, new SkalpTaskProvider())
+    );
+
     // --- Commands ---
     context.subscriptions.push(
+        vscode.commands.registerCommand('skalp.showMenu', async () => {
+            const items: vscode.QuickPickItem[] = [
+                { label: '$(gear) Build', description: 'Build to SystemVerilog' },
+                { label: '$(play) Simulate', description: 'Run simulation' },
+                { label: '$(chip) Synthesize', description: 'Synthesize for FPGA' },
+                { label: '$(verified) Equivalence Check', description: 'Verify RTL vs gates' },
+                { label: '$(edit) Format', description: 'Format source file' },
+                { label: '$(search) Analyze', description: 'Gate-level analysis' },
+                { label: '$(graph-line) Open Waveform', description: 'Open waveform viewer' },
+                { label: '$(circuit-board) Show Schematic', description: 'Show schematic view' },
+            ];
+            const pick = await vscode.window.showQuickPick(items, { placeHolder: 'Select SKALP command' });
+            if (!pick) { return; }
+            const commandMap: Record<string, string> = {
+                '$(gear) Build': 'skalp.build',
+                '$(play) Simulate': 'skalp.simulate',
+                '$(chip) Synthesize': 'skalp.synthesize',
+                '$(verified) Equivalence Check': 'skalp.ec',
+                '$(edit) Format': 'skalp.format',
+                '$(search) Analyze': 'skalp.analyze',
+                '$(graph-line) Open Waveform': 'skalp.showWaveform',
+                '$(circuit-board) Show Schematic': 'skalp.showSchematic',
+            };
+            const cmd = commandMap[pick.label];
+            if (cmd) { vscode.commands.executeCommand(cmd); }
+        }),
+
         vscode.commands.registerCommand('skalp.restart', async () => {
             await client.stop();
             await client.start();
@@ -158,6 +191,47 @@ export function activate(context: vscode.ExtensionContext) {
                 ecProvider.loadReport(result.outputPath);
             } else if (result.exitCode !== 0) {
                 vscode.window.showErrorMessage('Equivalence check failed. See output for details.');
+            }
+        }),
+
+        vscode.commands.registerCommand('skalp.synthesize', async (uri?: vscode.Uri) => {
+            const filePath = resolveFilePath(uri);
+            if (!filePath) { return; }
+
+            statusBarItem.text = '$(loading~spin) Synthesizing...';
+            const result = await cliRunner.runSynth(filePath);
+            statusBarItem.text = result.exitCode === 0
+                ? '$(check) Synth OK'
+                : '$(error) Synth Failed';
+            setTimeout(() => { statusBarItem.text = '$(circuit-board) SKALP'; }, 5000);
+
+            if (result.exitCode !== 0) {
+                vscode.window.showErrorMessage('SKALP synthesis failed. See output for details.');
+            }
+        }),
+
+        vscode.commands.registerCommand('skalp.format', async (uri?: vscode.Uri) => {
+            const filePath = resolveFilePath(uri);
+            if (!filePath) { return; }
+
+            const result = await cliRunner.runFormat(filePath);
+            if (result.exitCode === 0) {
+                vscode.window.showInformationMessage('SKALP: File formatted.');
+            } else {
+                vscode.window.showErrorMessage('SKALP format failed. See output for details.');
+            }
+        }),
+
+        vscode.commands.registerCommand('skalp.analyze', async (uri?: vscode.Uri) => {
+            const filePath = resolveFilePath(uri);
+            if (!filePath) { return; }
+
+            statusBarItem.text = '$(loading~spin) Analyzing...';
+            const result = await cliRunner.runAnalyze(filePath);
+            statusBarItem.text = '$(circuit-board) SKALP';
+
+            if (result.exitCode !== 0) {
+                vscode.window.showErrorMessage('SKALP analysis failed. See output for details.');
             }
         }),
 

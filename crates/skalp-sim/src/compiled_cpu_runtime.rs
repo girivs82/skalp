@@ -341,6 +341,79 @@ impl CompiledCpuRuntime {
         }
     }
 
+    /// Get user-facing signal and register names for waveform capture.
+    /// Returns (sanitized_field_name, display_name) pairs.
+    /// Uses the name_registry to reverse-resolve internal names to user-facing paths.
+    /// Signals without a user-facing name are skipped.
+    pub fn get_waveform_signals(&self) -> Vec<(String, String, usize)> {
+        let mut result: Vec<(String, String, usize)> = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+
+        // Input ports — use name_registry to get user-facing names
+        for input in &self.module.inputs {
+            let sanitized = input.name.replace('.', "_");
+            if self.input_fields.get(&sanitized).is_some() {
+                let display = self.module.name_registry
+                    .reverse_resolve(&input.name)
+                    .unwrap_or(&input.name)
+                    .to_string();
+                if seen.insert(display.clone()) {
+                    result.push((sanitized, display, input.width));
+                }
+            }
+        }
+
+        // Output ports
+        for output in &self.module.outputs {
+            let sanitized = output.name.replace('.', "_");
+            if self.signal_fields.get(&sanitized).is_some() {
+                let display = self.module.name_registry
+                    .reverse_resolve(&output.name)
+                    .unwrap_or(&output.name)
+                    .to_string();
+                if seen.insert(display.clone()) {
+                    result.push((sanitized, display, output.width));
+                }
+            }
+        }
+
+        // State elements (registers)
+        for (name, elem) in &self.module.state_elements {
+            let sanitized = name.replace('.', "_");
+            if self.register_fields.get(&sanitized).is_some() {
+                let display = self.module.name_registry
+                    .reverse_resolve(name)
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| name.clone());
+                // Skip internal names that didn't resolve
+                if display.starts_with("_s") || display.starts_with("_t") {
+                    continue;
+                }
+                if seen.insert(display.clone()) {
+                    result.push((sanitized, display, elem.width));
+                }
+            }
+        }
+
+        // Other signals — only include those with user-facing names
+        for signal in &self.module.signals {
+            let sanitized = signal.name.replace('.', "_");
+            // Try signal_fields first, then register_fields
+            let in_fields = self.signal_fields.get(&sanitized).is_some()
+                || self.register_fields.get(&sanitized).is_some();
+            if !in_fields { continue; }
+
+            if let Some(display) = self.module.name_registry.reverse_resolve(&signal.name) {
+                let display = display.to_string();
+                if seen.insert(display.clone()) {
+                    result.push((sanitized, display, signal.width));
+                }
+            }
+        }
+
+        result
+    }
+
     /// Extract current state as SimulationState
     fn extract_state(&self) -> SimulationState {
         let mut signals = IndexMap::new();

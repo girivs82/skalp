@@ -173,6 +173,10 @@ enum Commands {
         #[arg(short, long)]
         duration: Option<String>,
 
+        /// Output waveform file (.skw.gz). If not specified, saves next to source as <name>.skw.gz
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+
         /// Use gate-level simulation (HIR→MIR→LIR→SIR) instead of behavioral (HIR→MIR→SIR)
         #[arg(long)]
         gate_level: bool,
@@ -681,11 +685,18 @@ fn main() -> Result<()> {
         Commands::Sim {
             design,
             duration,
+            output,
             gate_level,
             gpu,
             gate_opt_level,
             ncl,
         } => {
+            // Default output: <design_dir>/build/<name>.skw.gz
+            let waveform_path = output.unwrap_or_else(|| {
+                let dir = design.parent().unwrap_or(Path::new("."));
+                let stem = design.file_stem().unwrap_or_default().to_string_lossy();
+                dir.join("build").join(format!("{}.skw.gz", stem))
+            });
             simulate_design(
                 &design,
                 duration.as_deref(),
@@ -693,6 +704,7 @@ fn main() -> Result<()> {
                 gpu,
                 gate_opt_level,
                 ncl,
+                &waveform_path,
             )?;
         }
 
@@ -1655,6 +1667,74 @@ fn train_ml_model(
 /// Compile a design to pre-compiled IP format (.skb)
 ///
 /// This function synthesizes the design to a gate netlist and packages it
+/// Convert simulation snapshots to a Waveform and export as .skw.gz
+fn export_waveform_from_snapshots(
+    snapshots: &[skalp_sim::unified_runtime::SimulationSnapshot],
+    signal_widths: &indexmap::IndexMap<String, usize>,
+    waveform_path: &Path,
+    source_file: &Path,
+) -> Result<()> {
+    use skalp_sim::Waveform;
+
+    if snapshots.is_empty() {
+        println!("   No waveform data captured.");
+        return Ok(());
+    }
+
+    let mut waveform = Waveform::new();
+
+    // Initialize signals from first snapshot with real widths from SIR
+    if let Some(first) = snapshots.first() {
+        for name in first.signals.keys() {
+            let width = signal_widths.get(name).copied().unwrap_or(64);
+            waveform.add_signal(name.clone(), width);
+        }
+    }
+
+    // Add values from all snapshots
+    for snapshot in snapshots {
+        for (name, value) in &snapshot.signals {
+            waveform.add_value(name, snapshot.cycle, value.to_le_bytes().to_vec());
+        }
+    }
+
+    // Ensure parent directory exists
+    if let Some(parent) = waveform_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    let design_name = source_file
+        .file_stem()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_string();
+
+    waveform
+        .export_skw_compressed(waveform_path, &design_name)
+        .with_context(|| format!("Failed to write waveform to {:?}", waveform_path))?;
+
+    println!("   Waveform: {:?}", waveform_path);
+
+    Ok(())
+}
+
+fn byte_offset_to_line_col(source: &str, offset: usize) -> (usize, usize) {
+    let mut line = 1;
+    let mut col = 1;
+    for (i, ch) in source.char_indices() {
+        if i >= offset {
+            break;
+        }
+        if ch == '\n' {
+            line += 1;
+            col = 1;
+        } else {
+            col += 1;
+        }
+    }
+    (line, col)
+}
+
 /// as a distributable binary file. Optionally generates a header file (.skh)
 /// for importing the compiled IP in other designs.
 #[allow(clippy::too_many_arguments)]
@@ -1693,7 +1773,8 @@ fn compile_to_ip(
     let (syntax_tree, parse_errors) = parse::parse_with_errors(&source_code);
     if !parse_errors.is_empty() {
         for err in &parse_errors {
-            eprintln!("Parse error: {}", err.message);
+            let (line, col) = byte_offset_to_line_col(&source_code, err.position);
+            eprintln!("{}:{}:{}: error: {}", source.display(), line, col, err.message);
         }
         anyhow::bail!("Parsing failed with {} errors", parse_errors.len());
     }
@@ -1838,6 +1919,7 @@ fn simulate_design(
     use_gpu: bool,
     gate_opt_level: u8,
     ncl_mode: bool,
+    waveform_path: &Path,
 ) -> Result<()> {
     use skalp_mir::Mir;
     use skalp_sir::convert_mir_to_sir;
@@ -1866,9 +1948,9 @@ fn simulate_design(
             if ncl_mode {
                 simulate_ncl(design_file, cycles, use_gpu, gate_opt_level)
             } else if gate_level {
-                simulate_gate_level(design_file, cycles, use_gpu, gate_opt_level)
+                simulate_gate_level(design_file, cycles, use_gpu, gate_opt_level, waveform_path)
             } else {
-                simulate_behavioral(design_file, cycles, use_gpu)
+                simulate_behavioral(design_file, cycles, use_gpu, waveform_path)
             }
         }
         Some("mir") => {
@@ -1885,7 +1967,7 @@ fn simulate_design(
             } else {
                 // MIR → SIR
                 let sir = convert_mir_to_sir(&mir.modules[0]);
-                simulate_sir_behavioral(&sir, cycles, use_gpu)
+                simulate_sir_behavioral(&sir, cycles, use_gpu, waveform_path)
             }
         }
         Some("lir") => {
@@ -1899,7 +1981,7 @@ fn simulate_design(
 }
 
 /// Behavioral simulation: HIR → MIR → SIR
-fn simulate_behavioral(source_file: &PathBuf, cycles: u64, use_gpu: bool) -> Result<()> {
+fn simulate_behavioral(source_file: &PathBuf, cycles: u64, use_gpu: bool, waveform_path: &Path) -> Result<()> {
     use skalp_frontend::parse_and_build_hir_from_file;
     use skalp_mir::MirCompiler;
     use skalp_sir::convert_mir_to_sir_with_hierarchy;
@@ -1927,9 +2009,13 @@ fn simulate_behavioral(source_file: &PathBuf, cycles: u64, use_gpu: bool) -> Res
         anyhow::bail!("No modules found in compiled design");
     }
 
+    // Find the top-level module (not necessarily modules[0])
+    let top_module = find_top_level_module(&mir)
+        .ok_or_else(|| anyhow::anyhow!("Could not find top-level module"))?;
+
     // Convert to SIR with full hierarchy support (for synthesized function modules)
     info!("Converting to SIR...");
-    let sir = convert_mir_to_sir_with_hierarchy(&mir, &mir.modules[0]);
+    let sir = convert_mir_to_sir_with_hierarchy(&mir, top_module);
 
     println!("📊 Design Statistics:");
     println!("   Inputs: {}", sir.inputs.len());
@@ -1938,7 +2024,7 @@ fn simulate_behavioral(source_file: &PathBuf, cycles: u64, use_gpu: bool) -> Res
     println!("   Sequential nodes: {}", sir.sequential_nodes.len());
     println!();
 
-    simulate_sir_behavioral(&sir, cycles, use_gpu)
+    simulate_sir_behavioral(&sir, cycles, use_gpu, waveform_path)
 }
 
 /// Gate-level simulation: HIR → MIR → LIR → GateNetlist → SIR → Simulation
@@ -1947,6 +2033,7 @@ fn simulate_gate_level(
     cycles: u64,
     use_gpu: bool,
     gate_opt_level: u8,
+    waveform_path: &Path,
 ) -> Result<()> {
     use skalp_frontend::parse_and_build_hir_from_file;
     use skalp_lir::get_stdlib_library;
@@ -2118,6 +2205,9 @@ fn simulate_gate_level(
         println!("      {} = 0x{:x}", name, value);
     }
 
+    // Export waveforms
+    export_waveform_from_snapshots(&result.waveforms, &result.signal_widths, waveform_path, source_file)?;
+
     println!("\n✅ Gate-level simulation complete!");
 
     Ok(())
@@ -2247,7 +2337,7 @@ fn simulate_ncl(
 }
 
 /// Run behavioral SIR simulation
-fn simulate_sir_behavioral(sir: &skalp_sir::SirModule, cycles: u64, use_gpu: bool) -> Result<()> {
+fn simulate_sir_behavioral(sir: &skalp_sir::SirModule, cycles: u64, use_gpu: bool, waveform_path: &Path) -> Result<()> {
     use skalp_sim::{HwAccel, SimLevel, UnifiedSimConfig, UnifiedSimulator};
     use tokio::runtime::Runtime;
 
@@ -2256,7 +2346,7 @@ fn simulate_sir_behavioral(sir: &skalp_sir::SirModule, cycles: u64, use_gpu: boo
     // Create async runtime for simulation
     let runtime = Runtime::new()?;
 
-    runtime.block_on(async {
+    let result = runtime.block_on(async {
         // Create simulation config
         let config = UnifiedSimConfig {
             level: SimLevel::Behavioral,
@@ -2278,10 +2368,14 @@ fn simulate_sir_behavioral(sir: &skalp_sir::SirModule, cycles: u64, use_gpu: boo
         let result = simulator.run(cycles).await;
 
         println!("   Completed {} cycles", result.cycles);
-        println!("\n✅ Behavioral simulation complete!");
 
-        Ok::<(), anyhow::Error>(())
+        Ok::<_, anyhow::Error>(result)
     })?;
+
+    // Export waveforms
+    export_waveform_from_snapshots(&result.waveforms, &result.signal_widths, waveform_path, &PathBuf::from("design"))?;
+
+    println!("\n✅ Behavioral simulation complete!");
 
     Ok(())
 }

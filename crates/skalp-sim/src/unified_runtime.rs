@@ -173,6 +173,8 @@ pub struct UnifiedSimResult {
     pub outputs: IndexMap<String, u64>,
     /// Waveform snapshots (if capture_waveforms was enabled)
     pub waveforms: Vec<SimulationSnapshot>,
+    /// Signal widths (display_name -> bit width) for waveform export
+    pub signal_widths: IndexMap<String, usize>,
     /// Whether GPU was used
     pub used_gpu: bool,
     /// Whether simulation is stable (NCL mode)
@@ -189,6 +191,7 @@ impl Default for UnifiedSimResult {
             wavefronts: 0,
             outputs: IndexMap::new(),
             waveforms: Vec::new(),
+            signal_widths: IndexMap::new(),
             used_gpu: false,
             is_stable: true,
             circuit_mode: CircuitMode::Sync,
@@ -1016,36 +1019,34 @@ impl UnifiedSimulator {
     pub async fn get_all_outputs(&self) -> IndexMap<String, u64> {
         let mut outputs = IndexMap::new();
 
-        let output_names: Vec<String> = match &self.backend {
-            SimulatorBackend::Uninitialized => vec![],
-            SimulatorBackend::CompiledCpu(_) => {
-                // Behavioral outputs - return empty for now, users should query specific outputs
-                vec![]
+        match &self.backend {
+            SimulatorBackend::CompiledCpu(runtime) => {
+                // Use structured signal list with user-facing names
+                for (field_name, display_name, _width) in runtime.get_waveform_signals() {
+                    if let Some(value) = self.get_output(&field_name).await {
+                        outputs.insert(display_name, value);
+                    }
+                }
             }
-            #[cfg(target_os = "macos")]
-            SimulatorBackend::BehavioralGpu(_) => {
-                // Behavioral outputs - return empty for now, users should query specific outputs
-                vec![]
-            }
-            SimulatorBackend::GateLevelCpu(sim) => sim.get_output_names(),
-            #[cfg(target_os = "macos")]
-            SimulatorBackend::GateLevelGpu(runtime) => runtime.get_output_names(),
-            SimulatorBackend::NclCpu(_) => {
-                // NCL outputs are named differently; return empty for now
-                // Users should use get_ncl_output with explicit width
-                vec![]
-            }
-            #[cfg(target_os = "macos")]
-            SimulatorBackend::NclGpu(_) => {
-                // NCL outputs are named differently; return empty for now
-                // Users should use get_ncl_output with explicit width
-                vec![]
-            }
-        };
-
-        for name in output_names {
-            if let Some(value) = self.get_output(&name).await {
-                outputs.insert(name, value);
+            _ => {
+                // Gate-level and other backends: use output names directly
+                let output_names: Vec<String> = match &self.backend {
+                    SimulatorBackend::Uninitialized => vec![],
+                    SimulatorBackend::CompiledCpu(_) => unreachable!(),
+                    #[cfg(target_os = "macos")]
+                    SimulatorBackend::BehavioralGpu(_) => vec![],
+                    SimulatorBackend::GateLevelCpu(sim) => sim.get_output_names(),
+                    #[cfg(target_os = "macos")]
+                    SimulatorBackend::GateLevelGpu(runtime) => runtime.get_output_names(),
+                    SimulatorBackend::NclCpu(_) => vec![],
+                    #[cfg(target_os = "macos")]
+                    SimulatorBackend::NclGpu(_) => vec![],
+                };
+                for name in output_names {
+                    if let Some(value) = self.get_output(&name).await {
+                        outputs.insert(name, value);
+                    }
+                }
             }
         }
 
@@ -1387,12 +1388,22 @@ impl UnifiedSimulator {
             _ => true,
         };
 
+        let signal_widths = match &self.backend {
+            SimulatorBackend::CompiledCpu(runtime) => {
+                runtime.get_waveform_signals().into_iter()
+                    .map(|(_, display, width)| (display, width))
+                    .collect()
+            }
+            _ => IndexMap::new(),
+        };
+
         UnifiedSimResult {
             cycles: self.current_cycle,
             iterations: self.total_iterations,
             wavefronts: self.total_wavefronts,
             outputs: self.get_all_outputs().await,
             waveforms: self.waveforms.clone(),
+            signal_widths,
             used_gpu: self.is_using_gpu(),
             is_stable,
             circuit_mode: self.config.circuit_mode,
