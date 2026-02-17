@@ -8,11 +8,30 @@ export class SkalpTestController {
     private disposables: vscode.Disposable[] = [];
     private watcher: vscode.FileSystemWatcher | undefined;
     private log: vscode.OutputChannel;
+    /** Maps test item ID → waveform file path for the most recent run */
+    private testWaveforms = new Map<string, string>();
 
     constructor(outputChannel: vscode.OutputChannel) {
         this.log = outputChannel;
         this.log.appendLine('[TestController] Initializing...');
         this.controller = vscode.tests.createTestController('skalpTests', 'SKALP Tests');
+
+        // Register command to open waveform for a specific test
+        this.disposables.push(
+            vscode.commands.registerCommand('skalp.openTestWaveform', (testItem: vscode.TestItem) => {
+                const id = testItem?.id;
+                const wfPath = id ? this.testWaveforms.get(id) : undefined;
+                if (wfPath && fs.existsSync(wfPath)) {
+                    vscode.commands.executeCommand(
+                        'vscode.openWith',
+                        vscode.Uri.file(wfPath),
+                        'skalp.waveformViewer'
+                    );
+                } else {
+                    vscode.window.showWarningMessage('Waveform file not found. Run the test first.');
+                }
+            })
+        );
 
         this.controller.resolveHandler = async (item) => {
             if (!item) {
@@ -494,7 +513,7 @@ export class SkalpTestController {
         return snapshot;
     }
 
-    /** Detect new/modified waveform files created during the test run and offer to open them */
+    /** Detect new/modified waveform files created during the test run and associate with tests */
     private detectNewWaveforms(
         cargoDir: string,
         before: Map<string, number>,
@@ -511,7 +530,6 @@ export class SkalpTestController {
                 if (!f.endsWith('.skw.gz') && !f.endsWith('.skw')) { continue; }
                 const stat = fs.statSync(path.join(buildDir, f));
                 const prevMtime = before.get(f);
-                // New file or modified since before the test run
                 if (prevMtime === undefined || stat.mtimeMs > prevMtime) {
                     newWaveforms.push({ name: f, fullPath: path.join(buildDir, f) });
                 }
@@ -519,49 +537,34 @@ export class SkalpTestController {
 
             if (newWaveforms.length === 0) { return; }
 
-            // Try to match waveform files to specific tests by name
+            // Match each waveform to its test by name and store the mapping
+            const matchedIds: string[] = [];
             for (const wf of newWaveforms) {
                 const wfBase = wf.name.replace(/\.skw(\.gz)?$/, '').toLowerCase();
                 const matchedTest = testItems.find(t =>
+                    wfBase === t.label.toLowerCase() ||
                     wfBase.includes(t.label.toLowerCase()) ||
                     t.label.toLowerCase().includes(wfBase)
                 );
 
-                const testLabel = matchedTest ? matchedTest.label : 'test';
-                run.appendOutput(`\r\n📊 Waveform for ${testLabel}: ${wf.name}\r\n`);
+                if (matchedTest) {
+                    this.testWaveforms.set(matchedTest.id, wf.fullPath);
+                    matchedIds.push(matchedTest.id);
+                    run.appendOutput(
+                        `\r\n[Waveform] ${wf.fullPath}\r\n`,
+                        undefined,
+                        matchedTest
+                    );
+                }
             }
 
-            // Show notification with quick-open for all new waveforms
-            if (newWaveforms.length === 1) {
-                const wf = newWaveforms[0];
-                vscode.window.showInformationMessage(
-                    `Waveform: ${wf.name}`,
-                    'Open Waveform'
-                ).then(choice => {
-                    if (choice === 'Open Waveform') {
-                        vscode.commands.executeCommand(
-                            'vscode.openWith',
-                            vscode.Uri.file(wf.fullPath),
-                            'skalp.waveformViewer'
-                        );
-                    }
-                });
-            } else {
-                vscode.window.showInformationMessage(
-                    `${newWaveforms.length} waveforms available`,
-                    ...newWaveforms.map(w => w.name)
-                ).then(choice => {
-                    if (choice) {
-                        const wf = newWaveforms.find(w => w.name === choice);
-                        if (wf) {
-                            vscode.commands.executeCommand(
-                                'vscode.openWith',
-                                vscode.Uri.file(wf.fullPath),
-                                'skalp.waveformViewer'
-                            );
-                        }
-                    }
-                });
+            // Set context so "View Waveform" button appears on matched tests
+            if (matchedIds.length > 0) {
+                vscode.commands.executeCommand(
+                    'setContext',
+                    'skalp.testsWithWaveforms',
+                    [...this.testWaveforms.keys()]
+                );
             }
         } catch {
             // ignore fs errors

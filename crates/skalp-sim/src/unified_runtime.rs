@@ -1003,7 +1003,11 @@ impl UnifiedSimulator {
                     SimulatorBackend::Uninitialized => vec![],
                     SimulatorBackend::CompiledCpu(_) => unreachable!(),
                     #[cfg(target_os = "macos")]
-                    SimulatorBackend::BehavioralGpu(_) => vec![],
+                    SimulatorBackend::BehavioralGpu(_) => {
+                        let mut names = self.behavioral_input_names.clone();
+                        names.extend(self.behavioral_output_names.clone());
+                        names
+                    }
                     SimulatorBackend::GateLevelCpu(sim) => sim.get_output_names(),
                     #[cfg(target_os = "macos")]
                     SimulatorBackend::GateLevelGpu(runtime) => runtime.get_output_names(),

@@ -110,6 +110,12 @@
                 "command": "skalp.restart",
                 "title": "Restart Language Server",
                 "category": "SKALP"
+            },
+            {
+                "command": "skalp.openTestWaveform",
+                "title": "View Waveform",
+                "category": "SKALP",
+                "icon": "$(graph-line)"
             }
         ],
         "taskDefinitions": [
@@ -245,6 +251,13 @@
                     "when": "resourceLangId == skalp",
                     "command": "skalp.build",
                     "group": "navigation"
+                }
+            ],
+            "testing/item/context": [
+                {
+                    "command": "skalp.openTestWaveform",
+                    "group": "inline",
+                    "when": "testId in skalp.testsWithWaveforms"
                 }
             ]
         },
