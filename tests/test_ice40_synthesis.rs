@@ -498,6 +498,8 @@ impl TestAnd {
             a, b, expected, result
         );
     }
+
+    tb.export_waveform("build/test_ice40_gate_level_and_gate.skw.gz").ok();
 }
 
 #[tokio::test]
@@ -536,6 +538,8 @@ impl TestXor {
             a, b, expected, result
         );
     }
+
+    tb.export_waveform("build/test_ice40_gate_level_xor_gate.skw.gz").ok();
 }
 
 #[tokio::test]
@@ -580,6 +584,8 @@ impl TestMux {
         "sel=1 should select b (0xAA), got 0x{:02x}",
         result
     );
+
+    tb.export_waveform("build/test_ice40_gate_level_mux.skw.gz").ok();
 }
 
 #[tokio::test]
@@ -624,6 +630,8 @@ impl TestAdder {
             a, b, expected, result
         );
     }
+
+    tb.export_waveform("build/test_ice40_gate_level_adder.skw.gz").ok();
 }
 
 #[tokio::test]
@@ -668,6 +676,8 @@ impl TestSubtractor {
             a, b, expected, result
         );
     }
+
+    tb.export_waveform("build/test_ice40_gate_level_subtractor.skw.gz").ok();
 }
 
 #[tokio::test]
@@ -726,6 +736,8 @@ impl TestCounter {
     tb.clock(3).await;
     let held = tb.get_u32("count").await;
     assert_eq!(held, 5, "Counter should hold at 5 when disabled");
+
+    tb.export_waveform("build/test_ice40_gate_level_counter.skw.gz").ok();
 }
 
 #[tokio::test]
@@ -775,6 +787,8 @@ impl TestAlu {
     tb.set("op", 3u8);
     tb.clock(1).await;
     assert_eq!(tb.get_u32("result").await, 0xFF, "OR failed");
+
+    tb.export_waveform("build/test_ice40_gate_level_alu.skw.gz").ok();
 }
 
 // =============================================================================

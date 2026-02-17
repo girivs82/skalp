@@ -46,4 +46,5 @@ async fn test_fp_metal_mul() {
     );
 
     println!("  PASS!");
+    tb.export_waveform("build/test_fp_metal_mul.skw.gz").ok();
 }

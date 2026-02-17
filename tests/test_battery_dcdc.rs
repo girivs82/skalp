@@ -35,6 +35,7 @@ async fn test_battery_dcdc_init() {
     assert_eq!(state, 0, "Should be in Init state after reset");
 
     println!("✓ Battery DCDC initialization test passed");
+    tb.export_waveform("build/test_battery_dcdc_init.skw.gz").ok();
 }
 
 /// Test state machine transition from Init to WaitBms
@@ -119,6 +120,7 @@ async fn test_state_transition_init_to_waitbms() {
     assert_eq!(state_after, 1, "Should be in WaitBms state (1) after enable");
 
     println!("✓ State transition Init->WaitBms test passed");
+    tb.export_waveform("build/test_state_transition_init_to_waitbms.skw.gz").ok();
 }
 
 /// Test that any_fault_flag prevents state transition
@@ -193,6 +195,7 @@ async fn test_fault_prevents_transition() {
     );
 
     println!("✓ Fault prevents transition test passed");
+    tb.export_waveform("build/test_fault_prevents_transition.skw.gz").ok();
 }
 
 /// Test timer reset behavior (BUG #222 verification)
@@ -238,6 +241,7 @@ async fn test_timer_reset_on_state_change() {
     // wasn't reset, the state machine would behave incorrectly in subsequent transitions
 
     println!("✓ Timer reset on state change test passed (BUG #222 verification)");
+    tb.export_waveform("build/test_timer_reset_on_state_change.skw.gz").ok();
 }
 
 // ============================================================================
@@ -381,6 +385,7 @@ async fn test_battery_dcdc_init_gate_level() {
     assert_eq!(state, 0, "Gate-level: Should be in Init state after reset");
 
     println!("✓ Gate-level: Battery DCDC initialization test passed");
+    tb.export_waveform("build/test_battery_dcdc_init_gate_level.skw.gz").ok();
 }
 
 /// Gate-level test: state machine transition from Init to WaitBms
@@ -467,4 +472,5 @@ async fn test_state_transition_init_to_waitbms_gate_level() {
     assert_eq!(state_after, 1, "Gate-level: Should be in WaitBms state (1) after enable");
 
     println!("✓ Gate-level: State transition Init->WaitBms test passed");
+    tb.export_waveform("build/test_state_transition_init_to_waitbms_gate_level.skw.gz").ok();
 }

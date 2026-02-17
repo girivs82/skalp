@@ -170,6 +170,8 @@ impl GeometryProcessor4 {
 
         println!("   ✅ Processor returned to ready state");
         println!("✅ GeometryProcessor4 test PASSED!");
+
+        tb.export_waveform("build/test_geometry_processor_vertex_passthrough.skw.gz").ok();
     }
 
     // GPU simulator captures outputs AFTER phase 3 (after combinational re-evaluation)
@@ -343,6 +345,8 @@ impl FifoTest {
 
         println!("   ✅ FIFO CDC test complete");
         println!("✅ AsyncFIFO CDC test PASSED!");
+
+        tb.export_waveform("build/test_async_fifo_clock_domain_crossing.skw.gz").ok();
     }
 
     #[tokio::test]
@@ -527,6 +531,8 @@ impl FifoTest {
             "   ✅ All {} vertices preserved through pipeline",
             test_vertices.len()
         );
+
+        tb.export_waveform("build/test_graphics_pipeline_multi_clock_domains.skw.gz").ok();
     }
 
     #[tokio::test]
@@ -620,6 +626,8 @@ impl FifoTest {
         assert_eq!(value, 0x12345678, "Should read written value");
 
         println!("✅ AsyncFIFO Single Value test PASSED!");
+
+        tb.export_waveform("build/test_async_fifo_single_value.skw.gz").ok();
     }
 
     #[tokio::test]
@@ -688,6 +696,8 @@ impl SimpleCDC {
             "Should read written value across clock domains"
         );
         println!("✅ Simple CDC test PASSED!");
+
+        tb.export_waveform("build/test_simple_cdc.skw.gz").ok();
     }
 }
 #[cfg(all(test, target_os = "macos"))]
@@ -734,6 +744,8 @@ async fn test_struct_output_read() {
     assert_eq!(z, 0xCCCCCCCC, "vertex_z mismatch");
 
     println!("✅ All struct fields read correctly!");
+
+    tb.export_waveform("build/test_struct_output_read.skw.gz").ok();
 }
 #[cfg(all(test, target_os = "macos"))]
 #[tokio::test]
@@ -810,4 +822,6 @@ async fn test_vec3_fifo() {
     tb.set("read_enable", 0u8);
 
     println!("✅ Vec3 FIFO test PASSED!");
+
+    tb.export_waveform("build/test_vec3_fifo.skw.gz").ok();
 }

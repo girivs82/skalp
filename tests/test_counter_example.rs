@@ -35,6 +35,8 @@ async fn test_counter_basic() {
     tb.set("enable", 1u8);
     tb.clock(1).await;
     tb.expect("count", 8u8).await;
+
+    tb.export_waveform("build/test_counter_basic.skw.gz").ok();
 }
 
 #[tokio::test]
@@ -57,6 +59,8 @@ async fn test_counter_reset_during_count() {
     tb.set("rst", 0u8);
     tb.clock(1).await;
     tb.expect("count", 1u8).await;
+
+    tb.export_waveform("build/test_counter_reset_during_count.skw.gz").ok();
 }
 
 #[tokio::test]
@@ -85,6 +89,8 @@ async fn test_counter_overflow() {
     // And continue from 1
     tb.clock(1).await;
     tb.expect("count", 1u8).await;
+
+    tb.export_waveform("build/test_counter_overflow.skw.gz").ok();
 }
 
 #[tokio::test]
@@ -114,4 +120,6 @@ async fn test_counter_enable_control() {
     tb.set("enable", 1u8);
     tb.clock(2).await;
     tb.expect("count", 6u8).await; // Counts to 6
+
+    tb.export_waveform("build/test_counter_enable_control.skw.gz").ok();
 }

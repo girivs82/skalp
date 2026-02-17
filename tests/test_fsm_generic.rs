@@ -42,6 +42,7 @@ async fn test_fsm_init() {
     assert_eq!(error, 0, "error_out should be 0 in Idle");
 
     println!("✓ FSM initialization test passed");
+    tb.export_waveform("build/test_fsm_init.skw.gz").ok();
 }
 
 /// Test NOT operation - verifies BUG #117r fix
@@ -78,6 +79,7 @@ async fn test_not_operation() {
     assert_eq!(not_en, 1, "NOT(0) should still be 1");
 
     println!("✓ NOT operation test passed (BUG #117r verification)");
+    tb.export_waveform("build/test_not_operation.skw.gz").ok();
 }
 
 /// Test state machine transition from Idle to WaitReady
@@ -130,6 +132,7 @@ async fn test_state_transition_idle_to_waitready() {
     assert_eq!(state, 1, "Should be in WaitReady state after enable");
 
     println!("✓ State transition Idle->WaitReady test passed");
+    tb.export_waveform("build/test_state_transition_idle_to_waitready.skw.gz").ok();
 }
 
 /// Test full transition sequence: Idle -> WaitReady -> Active -> Done
@@ -184,6 +187,7 @@ async fn test_full_transition_sequence() {
     assert_eq!(state, 0, "Should be back in Idle (0) after clearing enable");
 
     println!("✓ Full transition sequence test passed");
+    tb.export_waveform("build/test_full_transition_sequence.skw.gz").ok();
 }
 
 /// Test fault detection and latching
@@ -241,6 +245,7 @@ async fn test_fault_detection() {
     assert_eq!(fault_a, 0, "Fault should be cleared after reset");
 
     println!("✓ Fault detection test passed");
+    tb.export_waveform("build/test_fault_detection.skw.gz").ok();
 }
 
 /// Test that fault blocks state transition from Idle
@@ -276,6 +281,7 @@ async fn test_fault_blocks_transition() {
     assert_eq!(state, 0, "Should remain in Idle when fault is latched");
 
     println!("✓ Fault blocks transition test passed");
+    tb.export_waveform("build/test_fault_blocks_transition.skw.gz").ok();
 }
 
 /// Test hierarchical signal access (struct fields via name registry)
@@ -310,6 +316,7 @@ async fn test_hierarchical_signal_access() {
     assert_eq!(fault_a, 1, "faults.error_a should be 1 after error_input");
 
     println!("✓ Hierarchical signal access test passed");
+    tb.export_waveform("build/test_hierarchical_signal_access.skw.gz").ok();
 }
 
 /// Test counter comparison
@@ -343,4 +350,5 @@ async fn test_counter_comparison() {
     assert_eq!(match_out, 0, "counter_match should be 0 when counter != threshold");
 
     println!("✓ Counter comparison test passed");
+    tb.export_waveform("build/test_counter_comparison.skw.gz").ok();
 }

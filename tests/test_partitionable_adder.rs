@@ -85,6 +85,7 @@ async fn test_single_mode_basic() {
     assert_eq!(cout & 0x8, 0x8, "Single mode should have final carry out");
 
     println!("Single mode tests passed!");
+    tb.export_waveform("build/test_single_mode_basic.skw.gz").ok();
 }
 
 #[tokio::test]
@@ -164,6 +165,7 @@ async fn test_dual_mode_independent() {
     );
 
     println!("Dual mode tests passed!");
+    tb.export_waveform("build/test_dual_mode_independent.skw.gz").ok();
 }
 
 #[tokio::test]
@@ -240,6 +242,7 @@ async fn test_quad_mode_independent() {
     assert_eq!(cout & 0x1, 0x1, "Quad mode section 0 should have carry out");
 
     println!("Quad mode tests passed!");
+    tb.export_waveform("build/test_quad_mode_independent.skw.gz").ok();
 }
 
 #[tokio::test]
@@ -332,4 +335,5 @@ async fn test_mode_switching() {
     );
 
     println!("Mode switching tests passed!");
+    tb.export_waveform("build/test_mode_switching.skw.gz").ok();
 }

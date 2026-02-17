@@ -46,6 +46,7 @@ async fn test_fp32_add_standalone() {
             a, b, expected, result, result_bits
         );
     }
+    tb.export_waveform("build/test_fp32_add_standalone.skw.gz").ok();
 }
 
 #[tokio::test]
@@ -81,4 +82,5 @@ async fn test_fp16_add_standalone() {
             a, b, expected, result_bits
         );
     }
+    tb.export_waveform("build/test_fp16_add_standalone.skw.gz").ok();
 }

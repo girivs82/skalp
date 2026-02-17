@@ -273,6 +273,8 @@ export class SkalpTestController {
                 continue;
             }
 
+            run.appendOutput(`\r\n> cargo test --test ${basename}\r\n`);
+
             // Build cargo test command
             const args = ['test', '--test', basename];
 
@@ -285,7 +287,10 @@ export class SkalpTestController {
 
             args.push('--', '--nocapture');
 
-            const results = await this.execCargoTest(args, cargoDir, token);
+            // Snapshot existing waveforms before test run
+            const waveformsBefore = this.snapshotWaveforms(cargoDir);
+
+            const results = await this.execCargoTest(args, cargoDir, token, run);
 
             // Map results to test items
             for (const fn of filteredFns) {
@@ -306,8 +311,8 @@ export class SkalpTestController {
                 }
             }
 
-            // Check for waveform files
-            this.checkForWaveforms(cargoDir, run, fileItem);
+            // Detect new waveform files created during the test run
+            this.detectNewWaveforms(cargoDir, waveformsBefore, run, filteredFns);
         }
 
         run.end();
@@ -318,6 +323,15 @@ export class SkalpTestController {
         item: vscode.TestItem,
         result: { status: 'ok' | 'FAILED' | 'ignored'; output: string; duration?: number }
     ): void {
+        // Associate output with the specific test item (populates the per-test detail pane)
+        if (result.output) {
+            run.appendOutput(
+                result.output.replace(/\n/g, '\r\n') + '\r\n',
+                undefined,
+                item
+            );
+        }
+
         switch (result.status) {
             case 'ok':
                 run.passed(item, result.duration);
@@ -334,7 +348,8 @@ export class SkalpTestController {
     private execCargoTest(
         args: string[],
         cwd: string,
-        token: vscode.CancellationToken
+        token: vscode.CancellationToken,
+        run?: vscode.TestRun
     ): Promise<Map<string, { status: 'ok' | 'FAILED' | 'ignored'; output: string; duration?: number }>> {
         return new Promise((resolve) => {
             const results = new Map<string, { status: 'ok' | 'FAILED' | 'ignored'; output: string; duration?: number }>();
@@ -347,11 +362,19 @@ export class SkalpTestController {
             });
 
             proc.stdout.on('data', (data: Buffer) => {
-                fullOutput += data.toString();
+                const text = data.toString();
+                fullOutput += text;
+                if (run) {
+                    run.appendOutput(text.replace(/\n/g, '\r\n'));
+                }
             });
 
             proc.stderr.on('data', (data: Buffer) => {
-                fullOutput += data.toString();
+                const text = data.toString();
+                fullOutput += text;
+                if (run) {
+                    run.appendOutput(text.replace(/\n/g, '\r\n'));
+                }
             });
 
             proc.on('close', () => {
@@ -370,18 +393,8 @@ export class SkalpTestController {
                         }
                     }
 
-                    let output = '';
-                    if (status === 'FAILED') {
-                        const failureRe = new RegExp(
-                            `---- ${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} stdout ----\\n([\\s\\S]*?)(?=\\n---- |\\nfailures:)`, 'g'
-                        );
-                        const failMatch = failureRe.exec(fullOutput);
-                        if (failMatch) {
-                            output = failMatch[1].trim();
-                        } else {
-                            output = fullOutput.slice(-2000);
-                        }
-                    }
+                    // Extract per-test output from --nocapture output
+                    const output = this.extractTestOutput(name, status, fullOutput);
 
                     results.set(name, { status, output, duration });
                 }
@@ -402,6 +415,55 @@ export class SkalpTestController {
         });
     }
 
+    /** Extract per-test output from cargo's --nocapture output */
+    private extractTestOutput(name: string, status: string, fullOutput: string): string {
+        const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+        if (status === 'FAILED') {
+            // For failed tests, cargo prints "---- <name> stdout ----" sections
+            const failureRe = new RegExp(
+                `---- ${escaped} stdout ----\\n([\\s\\S]*?)(?=\\n---- |\\nfailures:)`, 'g'
+            );
+            const failMatch = failureRe.exec(fullOutput);
+            if (failMatch) {
+                return failMatch[1].trim();
+            }
+            return fullOutput.slice(-2000);
+        }
+
+        // For passing tests with --nocapture, output appears between
+        // "test <name> ..." and "test <name> ... ok" or between test lines.
+        // Extract everything between "running N test" and the result summary,
+        // or fall back to the full output for single-test runs.
+        const lines = fullOutput.split('\n');
+        const testOutput: string[] = [];
+        let capturing = false;
+
+        for (const line of lines) {
+            // Start capture after seeing our test start
+            if (line.match(new RegExp(`^test ${escaped} \\.\\.\\.`)) && !line.match(/\.\.\. (ok|FAILED|ignored)/)) {
+                capturing = true;
+                continue;
+            }
+            // Stop capture at any test result line
+            if (capturing && line.match(/^test \S+ \.\.\. (ok|FAILED|ignored)/)) {
+                capturing = false;
+                continue;
+            }
+            if (capturing) {
+                testOutput.push(line);
+            }
+        }
+
+        if (testOutput.length > 0) {
+            return testOutput.join('\n').trim();
+        }
+
+        // Fallback: return the full output (trimmed) for single-test runs
+        const resultLine = `test ${name} ... ${status === 'ok' ? 'ok' : status}`;
+        return `${resultLine}\n\n${fullOutput.trim()}`.slice(0, 3000);
+    }
+
     private findCargoDir(filePath: string): string | undefined {
         let dir = path.dirname(filePath);
         while (dir !== path.dirname(dir)) {
@@ -413,36 +475,93 @@ export class SkalpTestController {
         return undefined;
     }
 
-    private checkForWaveforms(cargoDir: string, run: vscode.TestRun, fileItem: vscode.TestItem): void {
+    /** Scan build/ directory and return a map of filename -> mtime for waveform files */
+    private snapshotWaveforms(cargoDir: string): Map<string, number> {
+        const snapshot = new Map<string, number>();
+        const buildDir = path.join(cargoDir, 'build');
+        if (!fs.existsSync(buildDir)) { return snapshot; }
+
+        try {
+            for (const f of fs.readdirSync(buildDir)) {
+                if (f.endsWith('.skw.gz') || f.endsWith('.skw')) {
+                    const stat = fs.statSync(path.join(buildDir, f));
+                    snapshot.set(f, stat.mtimeMs);
+                }
+            }
+        } catch {
+            // ignore fs errors
+        }
+        return snapshot;
+    }
+
+    /** Detect new/modified waveform files created during the test run and offer to open them */
+    private detectNewWaveforms(
+        cargoDir: string,
+        before: Map<string, number>,
+        run: vscode.TestRun,
+        testItems: vscode.TestItem[]
+    ): void {
         const buildDir = path.join(cargoDir, 'build');
         if (!fs.existsSync(buildDir)) { return; }
 
         try {
-            const skwFiles = fs.readdirSync(buildDir)
-                .filter(f => f.endsWith('.skw.gz') || f.endsWith('.skw'));
-            if (skwFiles.length > 0) {
-                const latest = skwFiles
-                    .map(f => ({ name: f, mtime: fs.statSync(path.join(buildDir, f)).mtimeMs }))
-                    .sort((a, b) => b.mtime - a.mtime)[0];
+            const newWaveforms: { name: string; fullPath: string }[] = [];
 
-                const skwPath = path.join(buildDir, latest.name);
-                const fiveSecondsAgo = Date.now() - 5000;
-                if (latest.mtime > fiveSecondsAgo) {
-                    run.appendOutput(
-                        `\r\nWaveform available: ${latest.name}\r\n`,
-                        undefined,
-                        fileItem
-                    );
-                    vscode.window.showInformationMessage(
-                        `Waveform available: ${latest.name}`,
-                        'Open Waveform'
-                    ).then(choice => {
-                        if (choice === 'Open Waveform') {
-                            const skwUri = vscode.Uri.file(skwPath);
-                            vscode.commands.executeCommand('vscode.openWith', skwUri, 'skalp.waveformViewer');
-                        }
-                    });
+            for (const f of fs.readdirSync(buildDir)) {
+                if (!f.endsWith('.skw.gz') && !f.endsWith('.skw')) { continue; }
+                const stat = fs.statSync(path.join(buildDir, f));
+                const prevMtime = before.get(f);
+                // New file or modified since before the test run
+                if (prevMtime === undefined || stat.mtimeMs > prevMtime) {
+                    newWaveforms.push({ name: f, fullPath: path.join(buildDir, f) });
                 }
+            }
+
+            if (newWaveforms.length === 0) { return; }
+
+            // Try to match waveform files to specific tests by name
+            for (const wf of newWaveforms) {
+                const wfBase = wf.name.replace(/\.skw(\.gz)?$/, '').toLowerCase();
+                const matchedTest = testItems.find(t =>
+                    wfBase.includes(t.label.toLowerCase()) ||
+                    t.label.toLowerCase().includes(wfBase)
+                );
+
+                const testLabel = matchedTest ? matchedTest.label : 'test';
+                run.appendOutput(`\r\n📊 Waveform for ${testLabel}: ${wf.name}\r\n`);
+            }
+
+            // Show notification with quick-open for all new waveforms
+            if (newWaveforms.length === 1) {
+                const wf = newWaveforms[0];
+                vscode.window.showInformationMessage(
+                    `Waveform: ${wf.name}`,
+                    'Open Waveform'
+                ).then(choice => {
+                    if (choice === 'Open Waveform') {
+                        vscode.commands.executeCommand(
+                            'vscode.openWith',
+                            vscode.Uri.file(wf.fullPath),
+                            'skalp.waveformViewer'
+                        );
+                    }
+                });
+            } else {
+                vscode.window.showInformationMessage(
+                    `${newWaveforms.length} waveforms available`,
+                    ...newWaveforms.map(w => w.name)
+                ).then(choice => {
+                    if (choice) {
+                        const wf = newWaveforms.find(w => w.name === choice);
+                        if (wf) {
+                            vscode.commands.executeCommand(
+                                'vscode.openWith',
+                                vscode.Uri.file(wf.fullPath),
+                                'skalp.waveformViewer'
+                            );
+                        }
+                    }
+                });
             }
         } catch {
             // ignore fs errors
