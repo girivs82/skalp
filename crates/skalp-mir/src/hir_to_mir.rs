@@ -16702,46 +16702,14 @@ impl<'hir> HirToMir<'hir> {
         &self,
         call: &hir::HirCallExpr,
     ) -> Option<(Vec<hir::HirParameter>, Vec<hir::HirStatement>)> {
-        use std::io::Write;
-        let _ = writeln!(
-            std::io::stderr(),
-            "[DEBUG TRAIT] try_find_trait_method_for_call: function='{}', args={}",
-            call.function,
-            call.args.len()
-        );
-
         // Handle both single-argument (unary) and two-argument (binary) trait methods
         let is_binary = Self::is_binary_trait_method(&call.function);
         if call.args.len() != 1 && !(is_binary && call.args.len() == 2) {
-            let _ = writeln!(
-                std::io::stderr(),
-                "[DEBUG TRAIT] ❌ Unsupported arg count: {} for '{}'",
-                call.args.len(),
-                call.function
-            );
             return None;
         }
 
         // Map function name to trait name
-        let trait_name = match Self::function_name_to_trait_name(&call.function) {
-            Some(n) => {
-                let _ = writeln!(
-                    std::io::stderr(),
-                    "[DEBUG TRAIT] ✓ Mapped '{}' to trait '{}'",
-                    call.function,
-                    n
-                );
-                n
-            }
-            None => {
-                let _ = writeln!(
-                    std::io::stderr(),
-                    "[DEBUG TRAIT] ❌ No trait mapping for '{}'",
-                    call.function
-                );
-                return None;
-            }
-        };
+        let trait_name = Self::function_name_to_trait_name(&call.function)?;
 
         trace!(
             "[TRAIT_FUNC_RESOLVE] Trying to resolve '{}' as trait method {}::{}",
@@ -16751,24 +16719,7 @@ impl<'hir> HirToMir<'hir> {
         );
 
         // Infer the type of the argument
-        let arg_type = match self.infer_hir_type(&call.args[0]) {
-            Some(t) => {
-                let _ = writeln!(
-                    std::io::stderr(),
-                    "[DEBUG TRAIT] ✓ Arg type inferred: {:?}",
-                    t
-                );
-                t
-            }
-            None => {
-                let _ = writeln!(
-                    std::io::stderr(),
-                    "[DEBUG TRAIT] ❌ Failed to infer arg type for '{}'",
-                    call.function
-                );
-                return None;
-            }
-        };
+        let arg_type = self.infer_hir_type(&call.args[0])?;
 
         // Get type name for trait lookup
         let type_name = match &arg_type {
@@ -16780,22 +16731,8 @@ impl<'hir> HirToMir<'hir> {
             hir::HirType::Bit(width) => format!("bit[{}]", width),
             hir::HirType::Bool => "bool".to_string(),
             hir::HirType::Int(width) => format!("int[{}]", width),
-            _ => {
-                let _ = writeln!(
-                    std::io::stderr(),
-                    "[DEBUG TRAIT] ❌ Unsupported arg type: {:?}",
-                    arg_type
-                );
-                return None;
-            }
+            _ => return None,
         };
-
-        let _ = writeln!(
-            std::io::stderr(),
-            "[DEBUG TRAIT] Looking for impl {} for {}",
-            trait_name,
-            type_name
-        );
 
         trace!(
             "[TRAIT_FUNC_RESOLVE] Argument type is '{}', looking for impl {} for {}",
@@ -16805,49 +16742,15 @@ impl<'hir> HirToMir<'hir> {
         );
 
         // Find the trait implementation first (we need this regardless)
-        let trait_impl = match self.find_trait_impl(&type_name, trait_name) {
-            Some(i) => {
-                let _ = writeln!(
-                    std::io::stderr(),
-                    "[DEBUG TRAIT] ✓ Found impl {} for {}",
-                    trait_name,
-                    type_name
-                );
-                i
-            }
-            None => {
-                let _ = writeln!(
-                    std::io::stderr(),
-                    "[DEBUG TRAIT] ❌ No impl {} for {}",
-                    trait_name,
-                    type_name
-                );
-                return None;
-            }
-        };
+        let trait_impl = self.find_trait_impl(&type_name, trait_name)?;
 
         // Get parameters from trait definition, or synthesize for known traits
         let is_binary = Self::is_binary_trait_method(&call.function);
         let params = match self.find_trait_method_definition(trait_name, &call.function) {
-            Some(m) => {
-                let _ = writeln!(
-                    std::io::stderr(),
-                    "[DEBUG TRAIT] ✓ Found trait method def for {}::{}",
-                    trait_name,
-                    call.function
-                );
-                m.parameters.clone()
-            }
+            Some(m) => m.parameters.clone(),
             None => {
-                // BUG FIX: Synthesize parameters for known traits when trait definition
+                // Synthesize parameters for known traits when trait definition
                 // is not available (e.g., when impl is imported but trait definition is in another module)
-                let _ = writeln!(
-                    std::io::stderr(),
-                    "[DEBUG TRAIT] ⚠️ No trait method def for {}::{}, synthesizing {} parameters",
-                    trait_name,
-                    call.function,
-                    if is_binary { "binary" } else { "unary" }
-                );
                 if is_binary {
                     // Binary traits (Add, Sub, Mul, Div, etc.) have two Self parameters
                     vec![
@@ -16874,29 +16777,10 @@ impl<'hir> HirToMir<'hir> {
         };
 
         // Find the method implementation (body)
-        let method_impl = match trait_impl
+        let method_impl = trait_impl
             .method_implementations
             .iter()
-            .find(|m| m.name == call.function)
-        {
-            Some(m) => {
-                let _ = writeln!(
-                    std::io::stderr(),
-                    "[DEBUG TRAIT] ✓ Found method impl '{}' with {} stmts",
-                    call.function,
-                    m.body.len()
-                );
-                m
-            }
-            None => {
-                let _ = writeln!(
-                    std::io::stderr(),
-                    "[DEBUG TRAIT] ❌ No method impl '{}' in trait impl",
-                    call.function
-                );
-                return None;
-            }
-        };
+            .find(|m| m.name == call.function)?;
 
         trace!(
             "[TRAIT_FUNC_RESOLVE] ✅ Found impl {} for {}, method '{}' has {} params and {} body stmts",
