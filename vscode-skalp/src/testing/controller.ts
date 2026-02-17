@@ -521,6 +521,7 @@ export class SkalpTestController {
         testItems: vscode.TestItem[]
     ): void {
         const buildDir = path.join(cargoDir, 'build');
+        this.log.appendLine(`[Waveform] Scanning ${buildDir} (exists=${fs.existsSync(buildDir)})`);
         if (!fs.existsSync(buildDir)) { return; }
 
         try {
@@ -535,6 +536,7 @@ export class SkalpTestController {
                 }
             }
 
+            this.log.appendLine(`[Waveform] Found ${newWaveforms.length} new/modified waveform files`);
             if (newWaveforms.length === 0) { return; }
 
             // Match each waveform to its test by name and store the mapping
@@ -547,6 +549,8 @@ export class SkalpTestController {
                     t.label.toLowerCase().includes(wfBase)
                 );
 
+                this.log.appendLine(`[Waveform] ${wf.name}: wfBase="${wfBase}", matched=${matchedTest?.label ?? 'none'} (test labels: ${testItems.map(t => t.label).join(', ')})`);
+
                 if (matchedTest) {
                     this.testWaveforms.set(matchedTest.id, wf.fullPath);
                     matchedIds.push(matchedTest.id);
@@ -557,6 +561,8 @@ export class SkalpTestController {
                     );
                 }
             }
+
+            this.log.appendLine(`[Waveform] Matched ${matchedIds.length} waveforms to tests. IDs: ${matchedIds.join(', ')}`);
 
             // Set context so "View Waveform" button appears on matched tests
             if (matchedIds.length > 0) {

@@ -1017,7 +1017,10 @@ impl UnifiedSimulator {
                 };
                 for name in output_names {
                     if let Some(value) = self.get_output(&name).await {
-                        outputs.insert(name, value);
+                        let display = self.name_registry.reverse_resolve(&name)
+                            .unwrap_or(&name)
+                            .to_string();
+                        outputs.insert(display, value);
                     }
                 }
             }
@@ -1457,7 +1460,18 @@ impl UnifiedSimulator {
                     .map(|(_, display, width)| (display, width))
                     .collect()
             }
-            _ => IndexMap::new(),
+            _ => {
+                // Use name registry to get widths for all known signals
+                let mut widths = IndexMap::new();
+                for internal_name in self.behavioral_input_names.iter()
+                    .chain(self.behavioral_output_names.iter())
+                {
+                    if let Some(entry) = self.name_registry.get_entry_by_internal(internal_name) {
+                        widths.insert(entry.hierarchical_path.clone(), entry.width);
+                    }
+                }
+                widths
+            }
         }
     }
 

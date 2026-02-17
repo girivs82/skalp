@@ -13,11 +13,6 @@
 #![allow(clippy::match_like_matches_macro)]
 #![allow(dead_code)]
 
-// GLOBAL: Disable all debug output for performance
-macro_rules! eprintln {
-    ($($arg:tt)*) => {{}};
-}
-
 pub mod breakpoint;
 pub mod clock_manager;
 pub mod compiled_cpu_runtime;

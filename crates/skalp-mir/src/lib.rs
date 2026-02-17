@@ -8,11 +8,6 @@
 //! - Optimization passes
 //! - Preparation for code generation
 
-// GLOBAL: Disable all debug output for performance
-macro_rules! eprintln {
-    ($($arg:tt)*) => {{}};
-}
-
 pub mod cdc_analysis;
 pub mod compiler;
 pub mod hir_to_mir;
