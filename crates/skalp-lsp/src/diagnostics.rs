@@ -22,39 +22,6 @@ pub fn analyze_document(content: &str) -> Vec<Diagnostic> {
         }
     }
 
-    // Additional static analysis checks
-    let lines: Vec<&str> = content.lines().collect();
-
-    for (line_num, line) in lines.iter().enumerate() {
-        // Check for missing semicolons after statements
-        if should_have_semicolon(line) && !line.trim_end().ends_with(';') {
-            diagnostics.push(Diagnostic {
-                range: Range {
-                    start: Position {
-                        line: line_num as u32,
-                        character: line.len() as u32 - 1,
-                    },
-                    end: Position {
-                        line: line_num as u32,
-                        character: line.len() as u32,
-                    },
-                },
-                severity: Some(DiagnosticSeverity::ERROR),
-                code: Some(tower_lsp::lsp_types::NumberOrString::String(
-                    "E001".to_string(),
-                )),
-                source: Some("skalp".to_string()),
-                message: "Missing semicolon".to_string(),
-                related_information: None,
-                tags: None,
-                code_description: None,
-                data: None,
-            });
-        }
-
-        // Note: Style warnings are now handled in check_style_warnings()
-    }
-
     diagnostics
 }
 

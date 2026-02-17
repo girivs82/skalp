@@ -29,7 +29,20 @@ export function activate(context: vscode.ExtensionContext) {
 
     // --- LSP Client ---
     const config = vscode.workspace.getConfiguration('skalp');
-    const serverPath = config.get<string>('serverPath') || 'skalp-lsp';
+    let serverPath = config.get<string>('serverPath') || 'skalp-lsp';
+
+    // Auto-detect: if default 'skalp-lsp' and running from repo, use the built binary
+    if (serverPath === 'skalp-lsp') {
+        const repoRoot = path.resolve(context.extensionPath, '..');
+        const releaseBin = path.join(repoRoot, 'target', 'release', 'skalp-lsp');
+        const debugBin = path.join(repoRoot, 'target', 'debug', 'skalp-lsp');
+        const fs = require('fs');
+        if (fs.existsSync(releaseBin)) {
+            serverPath = releaseBin;
+        } else if (fs.existsSync(debugBin)) {
+            serverPath = debugBin;
+        }
+    }
 
     const serverOptions: ServerOptions = {
         run: {

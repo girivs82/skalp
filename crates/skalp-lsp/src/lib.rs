@@ -66,7 +66,11 @@ impl SkalpLanguageServer {
         if let Some(doc) = self.documents.get(uri) {
             let content_str = doc.content.to_string();
             let diagnostics = diagnostics::analyze_document(&content_str);
-            let analysis = analysis::AnalysisContext::from_source(&content_str);
+            let analysis = if let Ok(path) = uri.to_file_path() {
+                analysis::AnalysisContext::from_source_with_path(&content_str, &path)
+            } else {
+                analysis::AnalysisContext::from_source(&content_str)
+            };
 
             // Send diagnostics to client
             self.client
@@ -111,14 +115,6 @@ impl LanguageServer for SkalpLanguageServer {
                         },
                     ),
                 ),
-                diagnostic_provider: Some(DiagnosticServerCapabilities::Options(
-                    DiagnosticOptions {
-                        identifier: Some("skalp".to_string()),
-                        inter_file_dependencies: false,
-                        workspace_diagnostics: false,
-                        ..Default::default()
-                    },
-                )),
                 ..Default::default()
             },
             ..Default::default()
@@ -195,7 +191,8 @@ impl LanguageServer for SkalpLanguageServer {
             if let Some(ref ctx) = doc.analysis {
                 let line_idx = position.line as usize;
                 if line_idx < doc.content.len_lines() {
-                    let line = doc.content.line(line_idx).as_str().unwrap_or("");
+                    let line = doc.content.line(line_idx).to_string();
+                    let line = line.as_str();
                     if let Some(word) = symbols::extract_word(line, position.character as usize) {
                         if let Some(info) = ctx.hover_info(&word) {
                             return Ok(Some(Hover {
@@ -227,11 +224,17 @@ impl LanguageServer for SkalpLanguageServer {
             if let Some(ref ctx) = doc.analysis {
                 let line_idx = position.line as usize;
                 if line_idx < doc.content.len_lines() {
-                    let line = doc.content.line(line_idx).as_str().unwrap_or("");
+                    let line = doc.content.line(line_idx).to_string();
+                    let line = line.as_str();
                     if let Some(word) = symbols::extract_word(line, position.character as usize) {
-                        if let Some((def_line, def_col)) = ctx.find_definition(&word) {
+                        if let Some((def_line, def_col, source_file)) = ctx.find_definition(&word) {
+                            let target_uri = if let Some(path) = source_file {
+                                Url::from_file_path(path).unwrap_or_else(|_| uri.clone())
+                            } else {
+                                uri.clone()
+                            };
                             return Ok(Some(GotoDefinitionResponse::Scalar(Location {
-                                uri: uri.clone(),
+                                uri: target_uri,
                                 range: Range {
                                     start: Position {
                                         line: def_line,
@@ -262,7 +265,8 @@ impl LanguageServer for SkalpLanguageServer {
             if let Some(ref ctx) = doc.analysis {
                 let line_idx = position.line as usize;
                 if line_idx < doc.content.len_lines() {
-                    let line = doc.content.line(line_idx).as_str().unwrap_or("");
+                    let line = doc.content.line(line_idx).to_string();
+                    let line = line.as_str();
                     if let Some(word) = symbols::extract_word(line, position.character as usize) {
                         let content_str = doc.content.to_string();
                         let refs = ctx.find_references_in(&word, &content_str);

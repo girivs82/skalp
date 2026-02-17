@@ -276,6 +276,7 @@ mod tests {
             version: 1,
             ast: None,
             diagnostics: Vec::new(),
+            analysis: None,
         };
 
         let completions = get_completions(
@@ -296,6 +297,7 @@ mod tests {
             version: 1,
             ast: None,
             diagnostics: Vec::new(),
+            analysis: None,
         };
 
         let completions = get_completions(

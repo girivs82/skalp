@@ -277,6 +277,7 @@ mod tests {
             version: 1,
             ast: None,
             diagnostics: Vec::new(),
+            analysis: None,
         };
 
         let hover = get_hover(
