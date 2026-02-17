@@ -224,6 +224,9 @@ pub struct UnifiedSimulator {
     /// Users can use hierarchical paths (e.g., "bms.connected") which get
     /// resolved to collision-proof internal names (e.g., "_s0")
     name_registry: NameRegistry,
+    /// Current input values (internal_name -> value) for waveform capture.
+    /// Updated on every set_input() call so clock/reset/all inputs appear in waveforms.
+    current_input_values: IndexMap<String, u64>,
 }
 
 /// Internal backend enum to hold the actual simulator
@@ -263,6 +266,7 @@ impl UnifiedSimulator {
             behavioral_input_names: Vec::new(),
             behavioral_output_names: Vec::new(),
             name_registry: NameRegistry::new(),
+            current_input_values: IndexMap::new(),
         })
     }
 
@@ -609,6 +613,9 @@ impl UnifiedSimulator {
     pub async fn set_input(&mut self, name: &str, value: u64) {
         // Resolve user-facing path to internal name (for behavioral simulation)
         let internal_name = self.resolve_path(name);
+
+        // Track current input value for waveform capture
+        self.current_input_values.insert(internal_name.clone(), value);
 
         match &mut self.backend {
             SimulatorBackend::Uninitialized => {
@@ -987,6 +994,14 @@ impl UnifiedSimulator {
     /// Get all output values
     pub async fn get_all_outputs(&self) -> IndexMap<String, u64> {
         let mut outputs = IndexMap::new();
+
+        // Include tracked input values (clk, rst, and all user inputs) for waveform capture
+        for (internal_name, value) in &self.current_input_values {
+            let display = self.name_registry.reverse_resolve(internal_name)
+                .unwrap_or(internal_name)
+                .to_string();
+            outputs.insert(display, *value);
+        }
 
         match &self.backend {
             SimulatorBackend::CompiledCpu(runtime) => {
