@@ -40,6 +40,9 @@ pub struct CircuitInput {
     id: String,
     name: String,
     is_constant: bool,
+    /// "clock", "reset", or null — derived from entity port type declarations
+    #[serde(skip_serializing_if = "Option::is_none")]
+    role: Option<String>,
 }
 
 struct CircuitBuilder {
@@ -106,9 +109,16 @@ impl CircuitBuilder {
             id: id.clone(),
             name: trimmed.to_string(),
             is_constant,
+            role: None,
         });
         self.input_map.insert(trimmed.to_string(), id.clone());
         id
+    }
+
+    fn set_input_role(&mut self, id: &str, role: &str) {
+        if let Some(input) = self.inputs.iter_mut().find(|i| i.id == id) {
+            input.role = Some(role.to_string());
+        }
     }
 }
 
@@ -180,6 +190,7 @@ pub fn get_expression_circuit(
         builder.add_wire(&root_id, &dff_id, 0, Some("D"));
 
         let clk_id = builder.add_input(&clock_text);
+        builder.set_input_role(&clk_id, "clock");
         builder.add_wire(&clk_id, &dff_id, 1, Some("CLK"));
 
         // Rename any input matching the target to show it's the registered feedback
@@ -187,6 +198,24 @@ pub fn get_expression_circuit(
             if input.name == target_name {
                 input.name = format!("{} (Q)", target_name);
             }
+        }
+    }
+
+    // Tag inputs with roles from entity port type declarations (clock/reset)
+    let port_roles = find_enclosing_entity_port_roles(&stmt_node);
+    for input in &mut builder.inputs {
+        if input.role.is_some() {
+            continue; // already tagged (e.g., DFF clock)
+        }
+        // Match input name against port names
+        // Strip " (Q)" suffix and ".rising"/".falling" edge suffix
+        let base_name = input.name.strip_suffix(" (Q)").unwrap_or(&input.name);
+        let base_name = base_name
+            .strip_suffix(".rising")
+            .or_else(|| base_name.strip_suffix(".falling"))
+            .unwrap_or(base_name);
+        if let Some(role) = port_roles.get(base_name) {
+            input.role = Some(role.clone());
         }
     }
 
@@ -381,6 +410,109 @@ fn is_inside_on_block(node: &SyntaxNode) -> bool {
         parent = p.parent();
     }
     false
+}
+
+/// Find the enclosing entity declaration and extract port roles from type annotations.
+/// The statement may be inside an `impl Foo { ... }` block, so we find the impl block's
+/// entity name, then search the tree root for the corresponding `entity Foo { ... }`.
+/// Returns a map of port_name → role ("clock" or "reset").
+fn find_enclosing_entity_port_roles(
+    node: &SyntaxNode,
+) -> std::collections::HashMap<String, String> {
+    let mut roles = std::collections::HashMap::new();
+
+    // Walk up to find the enclosing EntityDecl or ImplBlock
+    let mut entity_node = None;
+    let mut parent = node.parent();
+    while let Some(p) = parent {
+        if p.kind() == SyntaxKind::EntityDecl {
+            entity_node = Some(p.clone());
+            break;
+        }
+        if p.kind() == SyntaxKind::ImplBlock {
+            // Get entity name from impl block (first Ident token)
+            let impl_name = p.children_with_tokens().find_map(|c| {
+                if let rowan::NodeOrToken::Token(t) = c {
+                    if t.kind() == SyntaxKind::Ident {
+                        return Some(t.text().to_string());
+                    }
+                }
+                None
+            });
+            // Find the corresponding EntityDecl at the tree root
+            if let Some(name) = impl_name {
+                let root = {
+                    let mut n = p.clone();
+                    while let Some(pp) = n.parent() {
+                        n = pp;
+                    }
+                    n
+                };
+                for child in root.children() {
+                    if child.kind() == SyntaxKind::EntityDecl {
+                        let entity_name = child.children_with_tokens().find_map(|c| {
+                            if let rowan::NodeOrToken::Token(t) = c {
+                                if t.kind() == SyntaxKind::Ident {
+                                    return Some(t.text().to_string());
+                                }
+                            }
+                            None
+                        });
+                        if entity_name.as_deref() == Some(&name) {
+                            entity_node = Some(child);
+                            break;
+                        }
+                    }
+                }
+            }
+            break;
+        }
+        parent = p.parent();
+    }
+
+    if let Some(entity) = entity_node {
+        extract_port_roles_from_entity(&entity, &mut roles);
+    }
+    roles
+}
+
+fn extract_port_roles_from_entity(
+    entity: &SyntaxNode,
+    roles: &mut std::collections::HashMap<String, String>,
+) {
+    for desc in entity.descendants() {
+        if desc.kind() == SyntaxKind::PortDecl {
+            let mut port_name = String::new();
+            let mut port_role = None;
+            for child in desc.children_with_tokens() {
+                match &child {
+                    rowan::NodeOrToken::Token(t) if t.kind() == SyntaxKind::Ident => {
+                        if port_name.is_empty() {
+                            port_name = t.text().to_string();
+                        }
+                    }
+                    rowan::NodeOrToken::Node(n) if n.kind() == SyntaxKind::TypeAnnotation => {
+                        for tc in n.descendants() {
+                            if tc.kind() == SyntaxKind::ClockType {
+                                port_role = Some("clock".to_string());
+                                break;
+                            }
+                            if tc.kind() == SyntaxKind::ResetType {
+                                port_role = Some("reset".to_string());
+                                break;
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            if !port_name.is_empty() {
+                if let Some(role) = port_role {
+                    roles.insert(port_name, role);
+                }
+            }
+        }
+    }
 }
 
 /// Find the enclosing EventBlock and extract the clock expression text (e.g., "clk.rising").
@@ -1207,9 +1339,34 @@ impl Foo {
         assert_eq!(data.inputs.len(), 3);
         assert!(data.inputs.iter().any(|i| i.name == "counter (Q)"), "Expected feedback input renamed");
         assert!(data.inputs.iter().any(|i| i.name == "1" && i.is_constant));
-        assert!(data.inputs.iter().any(|i| i.name == "clk.rising"));
+        let clk_input = data.inputs.iter().find(|i| i.name == "clk.rising").expect("Expected clk input");
+        assert_eq!(clk_input.role.as_deref(), Some("clock"), "Clock input should have role=clock");
+        // Non-clock inputs should not have a role
+        assert!(data.inputs.iter().filter(|i| i.name != "clk.rising").all(|i| i.role.is_none()));
         // Wires: 2 for ADD (counter+1), 1 from ADD→DFF D, 1 from clk→DFF CLK = 4
         assert_eq!(data.wires.len(), 4);
+    }
+
+    #[test]
+    fn test_port_roles_clock_and_reset() {
+        let source = r#"entity Foo {
+    in clk: clock
+    in rst: reset(active_high)
+    in enable: bit
+    out q: bit
+}
+impl Foo {
+    q = enable & !rst
+}"#;
+        let result = get_expression_circuit(source, 7, 8);
+        assert!(result.is_some());
+        let data = result.unwrap();
+        // rst input should have role=reset
+        let rst_input = data.inputs.iter().find(|i| i.name == "rst").expect("Expected rst input");
+        assert_eq!(rst_input.role.as_deref(), Some("reset"));
+        // enable input should have no role
+        let en_input = data.inputs.iter().find(|i| i.name == "enable").expect("Expected enable input");
+        assert!(en_input.role.is_none());
     }
 
     #[test]

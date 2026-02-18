@@ -17,7 +17,7 @@
 
     // Layout results
     let layoutNodes = [];    // { id, type, label, x, y, w, h, inputLabels, inputPositions, outputPosition }
-    let layoutInputs = [];   // { id, name, isConstant, x, y, w, h, outputPosition }
+    let layoutInputs = [];   // { id, name, isConstant, role, x, y, w, h, outputPosition }
     let layoutOutput = null;  // { name, x, y, w, h, inputPosition }
     let layoutWires = [];    // { segments[], fromId, toId, label }
 
@@ -291,6 +291,7 @@
                     id: child.id,
                     name: data.name,
                     isConstant: data.isConstant,
+                    role: data.role || null,
                     x: child.x,
                     y: child.y,
                     w: child.width,
@@ -416,8 +417,8 @@
     function drawInputs() {
         for (const inp of layoutInputs) {
             const isHovered = hoveredNode === inp.id;
-            const isClock = !inp.isConstant && isClockName(inp.name);
-            const isReset = !inp.isConstant && isResetName(inp.name);
+            const isClock = inp.role === 'clock';
+            const isReset = inp.role === 'reset';
             const stubColor = isHovered ? COLORS.highlight :
                 isClock ? COLORS.wireClock :
                 isReset ? COLORS.wireReset : COLORS.wire;
@@ -443,8 +444,8 @@
 
             // Label
             ctx.fillStyle = inp.isConstant ? COLORS.constantText :
-                isClockName(inp.name) ? COLORS.clockText :
-                isResetName(inp.name) ? COLORS.resetText :
+                isClock ? COLORS.clockText :
+                isReset ? COLORS.resetText :
                 COLORS.inputText;
             ctx.font = `${FONT_SIZE}px monospace`;
             ctx.textAlign = 'right';
@@ -725,12 +726,12 @@
     function drawWires() {
         for (const wire of layoutWires) {
             const isHovered = hoveredNode && (wire.fromId === hoveredNode || wire.toId === hoveredNode);
-            // Color clock/reset wires by checking source input name OR target port label
+            // Color clock/reset wires using input role metadata
             let wireColor = COLORS.wire;
             if (!isHovered) {
                 const srcInput = layoutInputs.find(i => i.id === wire.fromId);
-                if (srcInput && isClockName(srcInput.name)) { wireColor = COLORS.wireClock; }
-                else if (srcInput && isResetName(srcInput.name)) { wireColor = COLORS.wireReset; }
+                if (srcInput && srcInput.role === 'clock') { wireColor = COLORS.wireClock; }
+                else if (srcInput && srcInput.role === 'reset') { wireColor = COLORS.wireReset; }
                 // Also check target node's input label (e.g., wire to DFF CLK port)
                 if (wireColor === COLORS.wire && wire.tgtPortIndex >= 0) {
                     const tgtNode = layoutNodes.find(n => n.id === wire.toId);

@@ -22,6 +22,7 @@ interface CircuitInput {
     id: string;
     name: string;
     isConstant: boolean;
+    role?: 'clock' | 'reset';
 }
 
 interface ExpressionData {
