@@ -1890,11 +1890,29 @@ impl GateNetlistToAig {
             if cell.is_sequential() {
                 if let Some(out) = cell.outputs.first().copied() {
                     let net = &netlist.nets[out.0 as usize];
-                    // Create temporary input for the current DFF output (latch state)
-                    let temp_name = format!("__dff_cur_{}", net.name);
+                    // Check if this DFF participates in the async reset-to-1 inversion trick.
+                    // Pattern: DFF Q → AsyncResetInvQ → actual state output
+                    // If so, the temp input represents the ACTUAL state (non-inverted).
+                    // The DFF Q net gets the INVERTED temp input (since DFF stores complement).
+                    let inv_q_info = netlist.cells.iter()
+                        .find(|c| {
+                            c.inputs.iter().any(|i| i.0 == out.0)
+                                && c.source_op.as_deref() == Some("AsyncResetInvQ")
+                        })
+                        .and_then(|inv_q| inv_q.outputs.first().copied())
+                        .map(|inv_q_out| netlist.nets[inv_q_out.0 as usize].name.clone());
+                    let is_inversion_trick = inv_q_info.is_some();
+                    let effective_name = inv_q_info.as_deref().unwrap_or(&net.name);
+                    // Create temporary input for the current latch state
+                    let temp_name = format!("__dff_cur_{}", effective_name);
                     let temp_lit = self.aig.add_input(temp_name);
                     let state_input_id = temp_lit.node.0;
-                    self.net_map.insert(out.0, temp_lit);
+                    if is_inversion_trick {
+                        // DFF Q = complement of actual state, so map it as inverted temp
+                        self.net_map.insert(out.0, temp_lit.invert());
+                    } else {
+                        self.net_map.insert(out.0, temp_lit);
+                    }
                     dff_cells.push((idx, out, net.name.clone(), state_input_id));
                 }
             }
@@ -1961,55 +1979,90 @@ impl GateNetlistToAig {
             // Determine reset handling using source_op metadata from tech mapper:
             // 1. If D is driven by source_op="ResetMux" -> non-zero reset, get value from TIE cell
             // 2. If DFF has cell.reset -> it's a DFFR, reset value is 0
+            //    2b. If DFF has AsyncResetInvD/InvQ -> it's the inversion trick for reset-to-1
             // 3. Otherwise -> no reset
             //
             // The tech mapper sets source_op="ResetMux" for MUXes that handle non-zero reset
             // and source_op="ResetValue" for TIE cells that provide the reset bit value.
 
-            let (next_lit, init_value) = if let Some(&d_net) = d_input {
-                // Check if D is driven by a ResetMux (indicates non-zero reset value)
-                let reset_mux = netlist.cells.iter().find(|c| {
+            // Check for async reset-to-1 inversion trick FIRST:
+            // Pattern: AsyncResetInvD → DffR → AsyncResetInvQ
+            // The DffR stores the complement (init=0), but logically represents reset-to-1.
+            // To match the LIR AIG, we absorb both inverters: next = rst | d_orig, init = true.
+            // We also use the INV_Q output net name as the latch name for proper EC matching.
+            let async_inv_trick = if let Some(&d_net) = d_input {
+                let inv_d = netlist.cells.iter().find(|c| {
                     c.outputs.iter().any(|o| o.0 == d_net.0)
-                        && c.source_op.as_deref() == Some("ResetMux")
+                        && c.source_op.as_deref() == Some("AsyncResetInvD")
                 });
+                let inv_q = netlist.cells.iter().find(|c| {
+                    c.inputs.iter().any(|i| i.0 == out_net.0)
+                        && c.source_op.as_deref() == Some("AsyncResetInvQ")
+                });
+                match (inv_d, inv_q) {
+                    (Some(id), Some(iq)) => Some((id.inputs.first().copied(), iq.outputs.first().copied())),
+                    _ => None,
+                }
+            } else {
+                None
+            };
 
-                if let Some(mux_cell) = reset_mux {
-                    // D is driven by ResetMux: non-zero reset value
-                    // MUX inputs: [rst, d_orig, reset_bit_net]
-                    // The reset value comes from the TIE cell driving reset_bit_net (inputs[2])
-                    let reset_val = mux_cell.inputs.get(2).and_then(|&reset_net| {
-                        netlist.cells.iter().find(|c| {
-                            c.outputs.iter().any(|o| o.0 == reset_net.0)
-                                && c.source_op.as_deref() == Some("ResetValue")
-                        })
-                    }).map(|tie_cell| {
-                        tie_cell.cell_type.contains("HIGH") || tie_cell.cell_type.contains("HI")
-                    }).unwrap_or(false);
-
-                    // For ResetMux: D already handles reset, use D directly
-                    // Init value is the reset value
-                    (d_lit, reset_val)
-                } else if let Some(rst_net) = cell.reset {
-                    // DFF has reset pin: it's a DFFR, reset value is always 0
-                    // Apply reset gate: next = !rst AND D (rst ? 0 : D)
+            let (next_lit, init_value, effective_name, inv_q_out_net) =
+                if let (Some((Some(d_orig_net), Some(inv_q_out))), Some(rst_net)) =
+                    (async_inv_trick.as_ref().map(|(d, q)| (*d, *q)), cell.reset)
+                {
+                    // Async reset-to-1 (inversion trick)
                     let rst_lit = self.net_map.get(&rst_net.0).copied().unwrap_or_else(|| {
                         let rst_net_obj = &netlist.nets[rst_net.0 as usize];
                         let lit = self.aig.add_input(rst_net_obj.name.clone());
                         self.net_map.insert(rst_net.0, lit);
                         lit
                     });
-                    (self.aig.add_and(rst_lit.invert(), d_lit), false) // init = 0
-                } else {
-                    // No reset at all - use D directly, init = 0
-                    (d_lit, false)
-                }
-            } else {
-                // No D input found - default behavior
-                (d_lit, false)
-            };
+                    let d_orig_lit = self.net_map.get(&d_orig_net.0).copied()
+                        .unwrap_or_else(|| self.aig.false_lit());
+                    // next = rst | d_orig (matches LIR AIG: rst ? 1 : d)
+                    let next = self.aig.add_or(rst_lit, d_orig_lit);
+                    // Use the INV_Q output net name as latch name (matches external signal name)
+                    let inv_q_name = netlist.nets[inv_q_out.0 as usize].name.clone();
+                    (next, true, inv_q_name, Some(inv_q_out))
+                } else if let Some(&d_net) = d_input {
+                    // Check if D is driven by a ResetMux (indicates non-zero sync reset value)
+                    let reset_mux = netlist.cells.iter().find(|c| {
+                        c.outputs.iter().any(|o| o.0 == d_net.0)
+                            && c.source_op.as_deref() == Some("ResetMux")
+                    });
 
-            // Create latch with proper init value
-            let latch_lit = self.aig.add_latch(latch_name.clone(), next_lit, init_value);
+                    if let Some(mux_cell) = reset_mux {
+                        // D is driven by ResetMux: non-zero reset value
+                        let reset_val = mux_cell.inputs.get(2).and_then(|&reset_net| {
+                            netlist.cells.iter().find(|c| {
+                                c.outputs.iter().any(|o| o.0 == reset_net.0)
+                                    && c.source_op.as_deref() == Some("ResetValue")
+                            })
+                        }).map(|tie_cell| {
+                            tie_cell.cell_type.contains("HIGH") || tie_cell.cell_type.contains("HI")
+                        }).unwrap_or(false);
+
+                        (d_lit, reset_val, latch_name.clone(), None)
+                    } else if let Some(rst_net) = cell.reset {
+                        // Standard DffR: reset value is 0
+                        let rst_lit = self.net_map.get(&rst_net.0).copied().unwrap_or_else(|| {
+                            let rst_net_obj = &netlist.nets[rst_net.0 as usize];
+                            let lit = self.aig.add_input(rst_net_obj.name.clone());
+                            self.net_map.insert(rst_net.0, lit);
+                            lit
+                        });
+                        (self.aig.add_and(rst_lit.invert(), d_lit), false, latch_name.clone(), None)
+                    } else {
+                        // No reset
+                        (d_lit, false, latch_name.clone(), None)
+                    }
+                } else {
+                    (d_lit, false, latch_name.clone(), None)
+                };
+
+            // Create latch with proper init value and effective name
+            let latch_lit = self.aig.add_latch(effective_name, next_lit, init_value);
             let latch_id = latch_lit.node.0;
 
             // Link state input to latch (metadata-based, no name matching needed)
@@ -2017,6 +2070,13 @@ impl GateNetlistToAig {
 
             // Update net_map to use latch output
             self.net_map.insert(out_net.0, latch_lit);
+
+            // For inversion trick: also map the INV_Q output net to the latch output.
+            // Since we absorbed both inverters into the latch logic, the INV_Q output
+            // should directly be the latch value (no inversion needed).
+            if let Some(inv_q_net) = inv_q_out_net {
+                self.net_map.insert(inv_q_net.0, latch_lit);
+            }
         }
 
         // Add primary outputs
