@@ -169,7 +169,7 @@ export class SchematicViewerProvider {
 
         for (let i = 0; i < lines.length; i++) {
             const line = lines[i];
-            const entityMatch = line.match(/^\s*entity\s+(\w+)/);
+            const entityMatch = line.match(/^\s*(?:pub\s+)?entity\s+(\w+)/);
             if (entityMatch && eStart < 0) {
                 eStart = i;
                 eName = entityMatch[1];
@@ -468,18 +468,19 @@ export class SchematicViewerProvider {
                 }
 
                 // Parse connections from lines within the instance block
+                // Handles multiple connections per line: `clk: clk, rst: rst,`
                 for (let j = instStartLine; j <= (instanceRanges.length > 0 ? instanceRanges[instanceRanges.length - 1].end : i); j++) {
-                    const connLine = lines[j].replace(/\/\/.*$/, '').trim();
-                    // Match port: expression or port = expression
-                    // The port name is an identifier, the expression is everything after : or = until , or end
-                    const connMatch = connLine.match(/^\s*(\w+)\s*[:=]\s*(.+?)\s*[,}]?\s*$/);
-                    if (connMatch) {
-                        const connPort = connMatch[1];
-                        let connExpr = connMatch[2].trim();
-                        // Strip trailing comma
-                        connExpr = connExpr.replace(/,\s*$/, '').trim();
-                        // Skip the `let name = Type {` line itself
-                        if (connPort === 'let' || connPort === instType) { continue; }
+                    let connLine = lines[j].replace(/\/\/.*$/, '').trim();
+                    // Skip the `let name = Type {` line itself
+                    if (connLine.match(/^\s*let\s+\w+\s*=/)) { continue; }
+
+                    // Match all `port: expr` pairs using global regex
+                    const pairRegex = /(\w+)\s*:\s*([^,}]+)/g;
+                    let pairMatch;
+                    while ((pairMatch = pairRegex.exec(connLine)) !== null) {
+                        const connPort = pairMatch[1];
+                        const connExpr = pairMatch[2].trim();
+                        if (connPort === instType) { continue; }
                         connections.push({ port: connPort, signal: connExpr });
                     }
                 }
