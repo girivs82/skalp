@@ -40,9 +40,11 @@
         logicBg: '#2d2a2e',
         logicBorder: '#8e6aa0',
         logicHeader: '#3d2e42',
-        portIn: '#4caf50',
+        portIn: '#64b5f6',
         portOut: '#ff9800',
         portInout: '#9c27b0',
+        portClock: '#4caf50',
+        portReset: '#ff9800',
         wire: '#5c8dbf',
         wireBus: '#7baad4',
         wireHighlight: '#ffeb3b',
@@ -54,6 +56,10 @@
         highlight: '#ffeb3b',
         junctionDot: '#8cb4d8'
     };
+
+    // Clock/reset signal detection
+    let clockSignals = new Set();
+    let resetSignals = new Set();
 
     // Layout result
     /** @type {{ x: number, y: number, w: number, h: number, name: string, type: string, entityType?: string, inputPorts: {name:string, x:number, y:number}[], outputPorts: {name:string, x:number, y:number}[], line?: number }[]} */
@@ -287,7 +293,11 @@
                 for (const p of inputPorts) {
                     const pos = portMap.get('__entity_in___' + p.name + '_out');
                     if (pos) {
-                        outPorts.push({ name: p.name, x: pos.x, y: pos.y });
+                        outPorts.push({
+                            name: p.name, x: pos.x, y: pos.y,
+                            isClock: clockSignals.has(p.name),
+                            isReset: resetSignals.has(p.name)
+                        });
                     }
                 }
                 layoutElements.push({
@@ -321,7 +331,11 @@
                 for (const c of inConns) {
                     const pos = portMap.get(inst.name + '_' + c.port + '_in');
                     if (pos) {
-                        instInPorts.push({ name: c.port, x: pos.x, y: pos.y });
+                        instInPorts.push({
+                            name: c.port, x: pos.x, y: pos.y,
+                            isClock: clockSignals.has(c.signal),
+                            isReset: resetSignals.has(c.signal)
+                        });
                     }
                 }
                 const instOutPorts = [];
@@ -447,7 +461,9 @@
         // Draw ports
         const ports = isInput ? el.outputPorts : el.inputPorts;
         for (const port of ports) {
-            const color = isInput ? COLORS.portIn : COLORS.portOut;
+            const color = port.isClock ? COLORS.portClock :
+                          port.isReset ? COLORS.portReset :
+                          isInput ? COLORS.portIn : COLORS.portOut;
 
             // Port stub line
             ctx.strokeStyle = color;
@@ -534,22 +550,39 @@
 
         // Input ports (left side)
         for (const port of el.inputPorts) {
+            const portColor = port.isClock ? COLORS.portClock :
+                              port.isReset ? COLORS.portReset :
+                              COLORS.portIn;
+
             // Stub line
-            ctx.strokeStyle = COLORS.portIn;
+            ctx.strokeStyle = portColor;
             ctx.lineWidth = 1.5;
             ctx.beginPath();
             ctx.moveTo(port.x - PORT_STUB_LEN, port.y);
             ctx.lineTo(port.x, port.y);
             ctx.stroke();
 
-            // Dot
-            ctx.fillStyle = COLORS.portIn;
-            ctx.beginPath();
-            ctx.arc(port.x - PORT_STUB_LEN, port.y, PORT_DOT_R - 0.5, 0, Math.PI * 2);
-            ctx.fill();
+            if (port.isClock) {
+                // Clock notch triangle (▷) on the box edge
+                const triSize = 5;
+                ctx.strokeStyle = portColor;
+                ctx.lineWidth = 1.5;
+                ctx.beginPath();
+                ctx.moveTo(el.x, port.y - triSize);
+                ctx.lineTo(el.x + triSize * 1.2, port.y);
+                ctx.lineTo(el.x, port.y + triSize);
+                ctx.closePath();
+                ctx.stroke();
+            } else {
+                // Dot
+                ctx.fillStyle = portColor;
+                ctx.beginPath();
+                ctx.arc(port.x - PORT_STUB_LEN, port.y, PORT_DOT_R - 0.5, 0, Math.PI * 2);
+                ctx.fill();
+            }
 
             // Label
-            ctx.fillStyle = COLORS.text;
+            ctx.fillStyle = port.isClock || port.isReset ? portColor : COLORS.text;
             ctx.font = `${FONT_SIZE - 1}px monospace`;
             ctx.textAlign = 'left';
             ctx.textBaseline = 'middle';
@@ -585,7 +618,12 @@
         for (const wire of layoutWires) {
             const isBus = wire.width > 1;
             const isHighlighted = hoveredNet === wire.netName;
-            const color = isHighlighted ? COLORS.wireHighlight : (isBus ? COLORS.wireBus : COLORS.wire);
+            const isClock = clockSignals.has(wire.netName);
+            const isReset = resetSignals.has(wire.netName);
+            const color = isHighlighted ? COLORS.wireHighlight :
+                          isClock ? COLORS.portClock :
+                          isReset ? COLORS.portReset :
+                          isBus ? COLORS.wireBus : COLORS.wire;
             const lineW = isBus ? 2.5 : 1;
 
             ctx.strokeStyle = color;
@@ -829,6 +867,14 @@
         if (msg.type === 'updateSchematic') {
             schematicData = msg.data;
             entityNameEl.textContent = schematicData.entity_name || 'No entity';
+
+            // Build clock/reset signal sets from port types
+            clockSignals = new Set();
+            resetSignals = new Set();
+            for (const p of (schematicData.ports || [])) {
+                if (p.type === 'clock' || p.type.startsWith('clock')) { clockSignals.add(p.name); }
+                if (p.type === 'reset' || p.type.startsWith('reset')) { resetSignals.add(p.name); }
+            }
 
             // Update stats
             const instCount = schematicData.instances ? schematicData.instances.length : 0;
