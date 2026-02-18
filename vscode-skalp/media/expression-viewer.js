@@ -357,8 +357,11 @@
             const tgtPortId = edge.targets[0] || '';
             const fromId = srcPortId.replace(/_out$/, '');
             const toId = tgtPortId.replace(/_in\d*$/, '').replace(/_in$/, '');
+            // Extract target port index for clock/reset detection
+            const tgtPortMatch = tgtPortId.match(/_in(\d+)$/);
+            const tgtPortIndex = tgtPortMatch ? parseInt(tgtPortMatch[1], 10) : -1;
 
-            layoutWires.push({ segments, fromId, toId, label: null });
+            layoutWires.push({ segments, fromId, toId, tgtPortIndex, label: null });
         }
     }
 
@@ -722,12 +725,21 @@
     function drawWires() {
         for (const wire of layoutWires) {
             const isHovered = hoveredNode && (wire.fromId === hoveredNode || wire.toId === hoveredNode);
-            // Color clock/reset wires by checking the source input name
+            // Color clock/reset wires by checking source input name OR target port label
             let wireColor = COLORS.wire;
             if (!isHovered) {
                 const srcInput = layoutInputs.find(i => i.id === wire.fromId);
                 if (srcInput && isClockName(srcInput.name)) { wireColor = COLORS.wireClock; }
                 else if (srcInput && isResetName(srcInput.name)) { wireColor = COLORS.wireReset; }
+                // Also check target node's input label (e.g., wire to DFF CLK port)
+                if (wireColor === COLORS.wire && wire.tgtPortIndex >= 0) {
+                    const tgtNode = layoutNodes.find(n => n.id === wire.toId);
+                    if (tgtNode && tgtNode.inputLabels) {
+                        const lbl = tgtNode.inputLabels[wire.tgtPortIndex] || '';
+                        if (isClockName(lbl)) { wireColor = COLORS.wireClock; }
+                        else if (isResetName(lbl)) { wireColor = COLORS.wireReset; }
+                    }
+                }
             }
             ctx.strokeStyle = isHovered ? COLORS.wireHighlight : wireColor;
             ctx.lineWidth = 1;
