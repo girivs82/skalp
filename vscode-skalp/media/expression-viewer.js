@@ -413,9 +413,14 @@
     function drawInputs() {
         for (const inp of layoutInputs) {
             const isHovered = hoveredNode === inp.id;
+            const isClock = !inp.isConstant && isClockName(inp.name);
+            const isReset = !inp.isConstant && isResetName(inp.name);
+            const stubColor = isHovered ? COLORS.highlight :
+                isClock ? COLORS.wireClock :
+                isReset ? COLORS.wireReset : COLORS.wire;
 
             // Arrow line
-            ctx.strokeStyle = isHovered ? COLORS.highlight : COLORS.wire;
+            ctx.strokeStyle = stubColor;
             ctx.lineWidth = 1;
             ctx.beginPath();
             ctx.moveTo(inp.x + inp.w - 8, inp.outputPosition.y);
@@ -425,7 +430,7 @@
             // Arrow head
             const ax = inp.outputPosition.x;
             const ay = inp.outputPosition.y;
-            ctx.fillStyle = isHovered ? COLORS.highlight : COLORS.wire;
+            ctx.fillStyle = stubColor;
             ctx.beginPath();
             ctx.moveTo(ax, ay);
             ctx.lineTo(ax - 5, ay - 3);
@@ -511,10 +516,13 @@
                     break;
             }
 
-            // Draw input port dots
+            // Draw input port dots (clock/reset ports colored)
             if (ln.inputPositions) {
-                for (const pos of ln.inputPositions) {
-                    ctx.fillStyle = borderColor;
+                for (let pi = 0; pi < ln.inputPositions.length; pi++) {
+                    const pos = ln.inputPositions[pi];
+                    const lbl = (ln.inputLabels && ln.inputLabels[pi]) || '';
+                    ctx.fillStyle = isClockName(lbl) ? COLORS.clockText :
+                                    isResetName(lbl) ? COLORS.resetText : borderColor;
                     ctx.beginPath();
                     ctx.arc(pos.x, pos.y, PORT_DOT_R, 0, Math.PI * 2);
                     ctx.fill();
@@ -676,10 +684,12 @@
         ctx.fill();
         ctx.stroke();
 
-        // Clock triangle at the CLK port (bottom-left input)
+        // Clock triangle at the CLK port (bottom-left input) — green
         if (ln.inputPositions && ln.inputPositions.length >= 2) {
             const clkPos = ln.inputPositions[1]; // CLK is port 1
             const triSize = 6;
+            ctx.strokeStyle = COLORS.clockText;
+            ctx.lineWidth = 1.5;
             ctx.beginPath();
             ctx.moveTo(x, clkPos.y - triSize);
             ctx.lineTo(x + triSize * 1.2, clkPos.y);
@@ -695,14 +705,15 @@
         ctx.textBaseline = 'middle';
         ctx.fillText('DFF', x + w / 2, y + h / 2 - 2);
 
-        // Port labels
+        // Port labels (CLK label in green)
         if (ln.inputLabels && ln.inputPositions) {
             ctx.font = `${FONT_SIZE - 1}px monospace`;
             ctx.textAlign = 'left';
-            ctx.fillStyle = COLORS.textDim;
             for (let i = 0; i < Math.min(ln.inputLabels.length, ln.inputPositions.length); i++) {
                 const lbl = ln.inputLabels[i];
                 const pos = ln.inputPositions[i];
+                ctx.fillStyle = isClockName(lbl) ? COLORS.clockText :
+                                isResetName(lbl) ? COLORS.resetText : COLORS.textDim;
                 ctx.fillText(lbl, x + 4 + (i === 1 ? 6 : 0), pos.y + 1);
             }
         }
