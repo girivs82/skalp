@@ -789,6 +789,7 @@ pub enum LirOp {
         width: u32,
         has_enable: bool,
         has_reset: bool,
+        async_reset: bool,
         reset_value: Option<u64>,
     },
     /// Latch array
@@ -1408,6 +1409,7 @@ mod lir_tests {
             width: 8,
             has_enable: false,
             has_reset: true,
+            async_reset: false,
             reset_value: Some(0)
         }
         .is_sequential());

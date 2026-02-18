@@ -799,7 +799,7 @@ impl<'a> ParseState<'a> {
         self.start_node(SyntaxKind::EventTriggerList);
         self.parse_event_trigger();
 
-        while self.at(SyntaxKind::Pipe) {
+        while self.at(SyntaxKind::Pipe) || self.at(SyntaxKind::Comma) {
             self.bump();
             self.parse_event_trigger();
         }
@@ -825,10 +825,11 @@ impl<'a> ParseState<'a> {
             self.bump();
 
             self.start_node(SyntaxKind::EdgeType);
-            if self.at(SyntaxKind::RiseKw) || self.at(SyntaxKind::FallKw) {
+            if self.at(SyntaxKind::RiseKw) || self.at(SyntaxKind::FallKw)
+                || self.at(SyntaxKind::ActiveKw) || self.at(SyntaxKind::InactiveKw) {
                 self.bump();
             } else {
-                self.error("expected 'rise' or 'fall'");
+                self.error("expected 'rise', 'fall', 'active', or 'inactive'");
             }
             self.finish_node();
         }

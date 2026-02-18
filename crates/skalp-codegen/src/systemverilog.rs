@@ -1163,8 +1163,20 @@ fn format_sensitivity(sensitivity: &skalp_mir::SensitivityList, module: &Module)
                     EdgeType::Rising => "posedge",
                     EdgeType::Falling => "negedge",
                     EdgeType::Both => "",
-                    EdgeType::Active => "",
-                    EdgeType::Inactive => "",
+                    EdgeType::Active => {
+                        if is_active_high_reset(&e.signal, module) {
+                            "posedge"
+                        } else {
+                            "negedge"
+                        }
+                    }
+                    EdgeType::Inactive => {
+                        if is_active_high_reset(&e.signal, module) {
+                            "negedge"
+                        } else {
+                            "posedge"
+                        }
+                    }
                 };
                 if edge_str.is_empty() {
                     format_lvalue_with_context(&e.signal, module)
@@ -1178,6 +1190,30 @@ fn format_sensitivity(sensitivity: &skalp_mir::SensitivityList, module: &Module)
             })
             .collect::<Vec<_>>()
             .join(" or "),
+    }
+}
+
+/// Check if a reset signal is active-high by looking up its port type in the module.
+/// Defaults to active-high if the signal type cannot be determined.
+fn is_active_high_reset(signal: &skalp_mir::LValue, module: &Module) -> bool {
+    match signal {
+        skalp_mir::LValue::Port(port_id) => {
+            if let Some(port) = module.ports.iter().find(|p| p.id == *port_id) {
+                if let DataType::Reset { active_high, .. } = &port.port_type {
+                    return *active_high;
+                }
+            }
+            true // default: active-high
+        }
+        skalp_mir::LValue::Signal(signal_id) => {
+            if let Some(sig) = module.signals.iter().find(|s| s.id == *signal_id) {
+                if let DataType::Reset { active_high, .. } = &sig.signal_type {
+                    return *active_high;
+                }
+            }
+            true // default: active-high
+        }
+        _ => true, // default: active-high
     }
 }
 

@@ -500,9 +500,10 @@ impl<'a> MirToSirConverter<'a> {
                     self.convert_combinational_block(&process.body.statements);
                 }
                 ProcessKind::Sequential => {
-    // Force stderr output
                     if let SensitivityList::Edge(edges) = &process.sensitivity {
-                        if let Some(edge_sens) = edges.first() {
+                        // Find the clock edge (Rising/Falling), skipping Active/Inactive reset edges
+                        let clock_edge = edges.iter().find(|e| matches!(e.edge, EdgeType::Rising | EdgeType::Falling | EdgeType::Both));
+                        if let Some(edge_sens) = clock_edge {
                             let edge = match edge_sens.edge {
                                 EdgeType::Rising => ClockEdge::Rising,
                                 EdgeType::Falling => ClockEdge::Falling,
@@ -510,7 +511,6 @@ impl<'a> MirToSirConverter<'a> {
                                 _ => ClockEdge::Rising,
                             };
                             let signal_name = self.lvalue_to_string(&edge_sens.signal);
-    // Force stderr output
                             self.convert_sequential_block(
                                 &process.body.statements,
                                 &signal_name,

@@ -4683,6 +4683,7 @@ pub fn extract_registers(lir: &Lir) -> Vec<RegisterInfo> {
                 has_enable,
                 has_reset: _,
                 reset_value,
+                ..
             } => {
                 // The first input is always D (data)
                 let d_input = node.inputs.get(0).copied().unwrap_or(LirSignalId(0));
@@ -11409,6 +11410,7 @@ mod tests {
                 width: 8,
                 has_enable: false,
                 has_reset: true,
+                async_reset: false,
                 reset_value: Some(0),
             },
             vec![d_in],
@@ -11464,6 +11466,7 @@ mod tests {
                     width: 4,
                     has_enable: false,
                     has_reset: true,
+                    async_reset: false,
                     reset_value: Some(0),
                 },
                 vec![next_count],
@@ -11511,6 +11514,7 @@ mod tests {
                 width: 4,
                 has_enable: false,
                 has_reset: true,
+                async_reset: false,
                 reset_value: Some(0), // Reset to 0
             },
             vec![next1],
@@ -11536,6 +11540,7 @@ mod tests {
                 width: 4,
                 has_enable: false,
                 has_reset: true,
+                async_reset: false,
                 reset_value: Some(5), // Reset to 5 (different!)
             },
             vec![next2],

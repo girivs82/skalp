@@ -12329,6 +12329,10 @@ impl HirBuilderContext {
             HirEdgeType::Rising
         } else if node.first_token_of_kind(SyntaxKind::FallKw).is_some() {
             HirEdgeType::Falling
+        } else if node.first_token_of_kind(SyntaxKind::ActiveKw).is_some() {
+            HirEdgeType::Active
+        } else if node.first_token_of_kind(SyntaxKind::InactiveKw).is_some() {
+            HirEdgeType::Inactive
         } else {
             // Default to both edges if not specified
             HirEdgeType::Both

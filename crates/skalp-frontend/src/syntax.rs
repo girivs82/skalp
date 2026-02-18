@@ -53,9 +53,11 @@ pub enum SyntaxKind {
     SelfKw,
     SelfTypeKw,
 
-    // Event Control (2)
+    // Event Control (4)
     RiseKw,
     FallKw,
+    ActiveKw,
+    InactiveKw,
 
     // Control Flow (4)
     MatchKw,
@@ -557,8 +559,8 @@ impl SyntaxKind {
             | TrueKw | FalseKw
             // Traits and Generics (5)
             | TraitKw | ProtocolKw | WhereKw | SelfKw | SelfTypeKw
-            // Event Control (2)
-            | RiseKw | FallKw
+            // Event Control (4)
+            | RiseKw | FallKw | ActiveKw | InactiveKw
             // Control Flow (4)
             | MatchKw | ForKw | GenerateKw | StepKw
             // Design Intent (3)
@@ -681,9 +683,11 @@ impl SyntaxKind {
             SelfKw => "'self'",
             SelfTypeKw => "'Self'",
 
-            // Event Control (2)
+            // Event Control (4)
             RiseKw => "'rise'",
             FallKw => "'fall'",
+            ActiveKw => "'active'",
+            InactiveKw => "'inactive'",
 
             // Control Flow (4)
             MatchKw => "'match'",
@@ -953,9 +957,11 @@ impl From<crate::lexer::Token> for SyntaxKind {
             Token::SelfKeyword => SelfKw,
             Token::SelfType => SelfTypeKw,
 
-            // Event Control (2)
+            // Event Control (4)
             Token::Rise => RiseKw,
             Token::Fall => FallKw,
+            Token::Active => ActiveKw,
+            Token::Inactive => InactiveKw,
 
             // Control Flow (4)
             Token::Match => MatchKw,

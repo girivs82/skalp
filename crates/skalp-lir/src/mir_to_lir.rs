@@ -125,6 +125,8 @@ pub struct MirToLirTransform {
     temp_counter: u32,
     /// Counter for generating unique node names
     node_counter: u32,
+    /// Whether the current process uses async reset (Active/Inactive edge in sensitivity list)
+    async_reset: bool,
 }
 
 impl MirToLirTransform {
@@ -149,6 +151,7 @@ impl MirToLirTransform {
             reset_signals: Vec::new(),
             temp_counter: 0,
             node_counter: 0,
+            async_reset: false,
         }
     }
 
@@ -645,8 +648,15 @@ impl MirToLirTransform {
                 let clock_signal = self.get_clock_from_sensitivity(&process.sensitivity);
                 let reset_signal = self.get_reset_from_sensitivity(&process.sensitivity);
 
+                // Detect async reset from sensitivity list (Active/Inactive edge types)
+                self.async_reset = matches!(&process.sensitivity, SensitivityList::Edge(edges)
+                    if edges.iter().any(|e| matches!(e.edge, EdgeType::Active | EdgeType::Inactive)));
+
                 // Transform sequential statements (create registers)
                 self.transform_sequential_block(&process.body, clock_signal, reset_signal);
+
+                // Reset for next process
+                self.async_reset = false;
             }
             ProcessKind::Combinational | ProcessKind::General => {
                 // Transform combinational statements
@@ -746,6 +756,7 @@ impl MirToLirTransform {
                         width: target_width,
                         has_enable: false,
                         has_reset: reset_signal.is_some(),
+                        async_reset: self.async_reset,
                         reset_value: Some(0), // Default reset value
                     };
 
@@ -913,6 +924,7 @@ impl MirToLirTransform {
                             width: target_width,
                             has_enable: false,
                             has_reset: reset_signal.is_some(),
+                            async_reset: self.async_reset,
                             reset_value: Some(0),
                         };
 
@@ -1030,11 +1042,12 @@ impl MirToLirTransform {
                             target_signal // Feedback: keep current value
                         };
 
-                        // Create register with sync reset (no mux needed)
+                        // Create register with reset
                         let reg_op = LirOp::Reg {
                             width: target_width,
                             has_enable: false,
                             has_reset: true,
+                            async_reset: self.async_reset,
                             reset_value: Some(reset_value),
                         };
 
@@ -1154,6 +1167,7 @@ impl MirToLirTransform {
                             width: target_width,
                             has_enable: false,
                             has_reset: reset_signal.is_some(),
+                            async_reset: self.async_reset,
                             reset_value: Some(0),
                         };
 
@@ -1397,6 +1411,7 @@ impl MirToLirTransform {
                 width: target_width,
                 has_enable: false,
                 has_reset: reset_signal.is_some(),
+                async_reset: self.async_reset,
                 reset_value: Some(0),
             };
 
@@ -2125,6 +2140,7 @@ impl MirToLirTransform {
                 width: target_width,
                 has_enable: false,
                 has_reset: reset_signal.is_some(),
+                async_reset: self.async_reset,
                 reset_value: Some(0),
             };
 

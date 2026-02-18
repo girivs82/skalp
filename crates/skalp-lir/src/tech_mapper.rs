@@ -592,6 +592,7 @@ impl<'a> TechMapper<'a> {
             LirOp::Reg {
                 width,
                 has_reset,
+                async_reset,
                 reset_value,
                 ..
             } => {
@@ -612,6 +613,7 @@ impl<'a> TechMapper<'a> {
                     clock_net,
                     reset_net,
                     *reset_value,
+                    *async_reset,
                 );
             }
 
@@ -2892,6 +2894,7 @@ impl<'a> TechMapper<'a> {
         clock: Option<GateNetId>,
         reset: Option<GateNetId>,
         reset_value: Option<u64>,
+        async_reset: bool,
     ) {
         if inputs.is_empty() {
             self.warnings
@@ -2899,83 +2902,151 @@ impl<'a> TechMapper<'a> {
             return;
         }
 
-        // BUG FIX: Always use MUX-based reset for ALL reset values (including 0)
-        // This ensures consistent behavior between gate netlist and SIR simulation.
-        // The SIR converter doesn't track per-cell reset ports, so DFFR cells with
-        // reset-to-0 were broken. Using MUX for all cases makes reset work correctly.
         let reset_val = reset_value.unwrap_or(0);
-        let use_mux_for_reset = reset.is_some();
-
-        // Always use regular DFF - reset is handled by MUX
-        let dff_func = CellFunction::Dff;
-
-        let dff_info = self.get_cell_info(&dff_func);
         let clk = clock.unwrap_or(GateNetId(0));
         let tie_low = self.get_tie_low();
 
-        for bit in 0..width as usize {
-            let d_orig = inputs[0].get(bit).copied().unwrap_or(tie_low);
-            let q = outputs.get(bit).copied().unwrap_or(outputs[0]);
+        if async_reset && reset.is_some() {
+            // Async reset: DFF with dedicated async reset pin, no MUX on D-input.
+            // Reset takes effect immediately, independent of clock.
+            let dff_func = CellFunction::DffR;
+            let dff_info = self.get_cell_info(&dff_func);
 
-            // If non-zero reset value, add MUX: d_new = rst ? reset_bit : d_orig
-            let d = if use_mux_for_reset {
+            for bit in 0..width as usize {
+                let d_orig = inputs[0].get(bit).copied().unwrap_or(tie_low);
+                let q = outputs.get(bit).copied().unwrap_or(outputs[0]);
                 let reset_bit_val = (reset_val >> bit) & 1 != 0;
 
-                // Create tie-high or tie-low for reset value bit
-                let reset_bit_net = self.netlist.add_net_with_name(format!("{}.rst_val_bit{}", path, bit));
-                let tie_cell_name = if reset_bit_val { "TIE_HIGH" } else { "TIE_LOW" };
-                let mut tie_cell = Cell::new_comb(
+                if reset_bit_val {
+                    // Reset-to-1: invert D before DFF, use DffR (clears to 0), invert Q output
+                    // At reset: stored=0, output=INV(0)=1. During operation: stored=~D, output=INV(~D)=D.
+                    let inv_d_net = self.netlist.add_net_with_name(format!("{}.inv_d_bit{}", path, bit));
+                    let inv_info = self.get_cell_info(&CellFunction::Inv);
+                    let mut inv_d_cell = Cell::new_comb(
+                        CellId(0),
+                        inv_info.name.clone(),
+                        self.library.name.clone(),
+                        inv_info.fit,
+                        format!("{}.inv_d{}", path, bit),
+                        vec![d_orig],
+                        vec![inv_d_net],
+                    );
+                    inv_d_cell.source_op = Some("AsyncResetInvD".to_string());
+                    inv_info.apply_to_cell(&mut inv_d_cell);
+                    self.add_cell(inv_d_cell);
+
+                    let dff_q_net = self.netlist.add_net_with_name(format!("{}.dff_q_bit{}", path, bit));
+                    let mut cell = Cell::new_seq(
+                        CellId(0),
+                        dff_info.name.clone(),
+                        self.library.name.clone(),
+                        dff_info.fit,
+                        format!("{}.bit{}", path, bit),
+                        vec![inv_d_net],
+                        vec![dff_q_net],
+                        clk,
+                        reset,
+                    );
+                    cell.source_op = Some("AsyncResetRegister".to_string());
+                    dff_info.apply_to_cell(&mut cell);
+                    self.add_cell(cell);
+
+                    let inv_q_info = self.get_cell_info(&CellFunction::Inv);
+                    let mut inv_q_cell = Cell::new_comb(
+                        CellId(0),
+                        inv_q_info.name.clone(),
+                        self.library.name.clone(),
+                        inv_q_info.fit,
+                        format!("{}.inv_q{}", path, bit),
+                        vec![dff_q_net],
+                        vec![q],
+                    );
+                    inv_q_cell.source_op = Some("AsyncResetInvQ".to_string());
+                    inv_q_info.apply_to_cell(&mut inv_q_cell);
+                    self.add_cell(inv_q_cell);
+                } else {
+                    // Reset-to-0: standard DffR cell with async clear
+                    let mut cell = Cell::new_seq(
+                        CellId(0),
+                        dff_info.name.clone(),
+                        self.library.name.clone(),
+                        dff_info.fit,
+                        format!("{}.bit{}", path, bit),
+                        vec![d_orig],
+                        vec![q],
+                        clk,
+                        reset,
+                    );
+                    cell.source_op = Some("AsyncResetRegister".to_string());
+                    dff_info.apply_to_cell(&mut cell);
+                    self.add_cell(cell);
+                }
+            }
+        } else {
+            // Sync reset: MUX selects between reset_value and D-input, feeds regular DFF
+            let use_mux_for_reset = reset.is_some();
+            let dff_func = CellFunction::Dff;
+            let dff_info = self.get_cell_info(&dff_func);
+
+            for bit in 0..width as usize {
+                let d_orig = inputs[0].get(bit).copied().unwrap_or(tie_low);
+                let q = outputs.get(bit).copied().unwrap_or(outputs[0]);
+
+                let d = if use_mux_for_reset {
+                    let reset_bit_val = (reset_val >> bit) & 1 != 0;
+
+                    let reset_bit_net = self.netlist.add_net_with_name(format!("{}.rst_val_bit{}", path, bit));
+                    let tie_cell_name = if reset_bit_val { "TIE_HIGH" } else { "TIE_LOW" };
+                    let mut tie_cell = Cell::new_comb(
+                        CellId(0),
+                        tie_cell_name.to_string(),
+                        self.library.name.clone(),
+                        0.01,
+                        format!("{}.rst_tie{}", path, bit),
+                        vec![],
+                        vec![reset_bit_net],
+                    );
+                    tie_cell.source_op = Some("ResetValue".to_string());
+                    self.add_cell(tie_cell);
+
+                    let mux_out = self.netlist.add_net_with_name(format!("{}.rst_mux_bit{}", path, bit));
+                    let mux_info = self.get_cell_info(&CellFunction::Mux2);
+                    let mut mux_cell = Cell::new_comb(
+                        CellId(0),
+                        mux_info.name.clone(),
+                        self.library.name.clone(),
+                        mux_info.fit,
+                        format!("{}.rst_mux{}", path, bit),
+                        vec![reset.unwrap(), d_orig, reset_bit_net],
+                        vec![mux_out],
+                    );
+                    mux_cell.source_op = Some("ResetMux".to_string());
+                    mux_info.apply_to_cell(&mut mux_cell);
+                    self.add_cell(mux_cell);
+
+                    mux_out
+                } else {
+                    d_orig
+                };
+
+                let dff_inputs = vec![d];
+                let dff_reset = if use_mux_for_reset { None } else { reset };
+
+                let mut cell = Cell::new_seq(
                     CellId(0),
-                    tie_cell_name.to_string(),
+                    dff_info.name.clone(),
                     self.library.name.clone(),
-                    0.01,
-                    format!("{}.rst_tie{}", path, bit),
-                    vec![],
-                    vec![reset_bit_net],
+                    dff_info.fit,
+                    format!("{}.bit{}", path, bit),
+                    dff_inputs,
+                    vec![q],
+                    clk,
+                    dff_reset,
                 );
-                tie_cell.source_op = Some("ResetValue".to_string());
-                self.add_cell(tie_cell);
-
-                // Create MUX: sel=rst, d0=d_orig, d1=reset_bit
-                // MUX output = rst ? reset_bit : d_orig
-                let mux_out = self.netlist.add_net_with_name(format!("{}.rst_mux_bit{}", path, bit));
-                let mux_info = self.get_cell_info(&CellFunction::Mux2);
-                let mut mux_cell = Cell::new_comb(
-                    CellId(0),
-                    mux_info.name.clone(),
-                    self.library.name.clone(),
-                    mux_info.fit,
-                    format!("{}.rst_mux{}", path, bit),
-                    vec![reset.unwrap(), d_orig, reset_bit_net],
-                    vec![mux_out],
-                );
-                mux_cell.source_op = Some("ResetMux".to_string());
-                mux_info.apply_to_cell(&mut mux_cell);
-                self.add_cell(mux_cell);
-
-                mux_out
-            } else {
-                d_orig
-            };
-
-            // D input - reset is only passed for DFFR cells (reset-to-0)
-            let dff_inputs = vec![d];
-            let dff_reset = if use_mux_for_reset { None } else { reset };
-
-            let mut cell = Cell::new_seq(
-                CellId(0),
-                dff_info.name.clone(),
-                self.library.name.clone(),
-                dff_info.fit,
-                format!("{}.bit{}", path, bit),
-                dff_inputs,
-                vec![q],
-                clk,
-                dff_reset,
-            );
-            cell.source_op = Some("Register".to_string());
-            dff_info.apply_to_cell(&mut cell);
-            self.add_cell(cell);
+                cell.source_op = Some("Register".to_string());
+                dff_info.apply_to_cell(&mut cell);
+                self.add_cell(cell);
+            }
         }
 
         self.stats.direct_mappings += 1;
@@ -5931,6 +6002,7 @@ mod tests {
                 width: 8,
                 has_enable: false,
                 has_reset: false,
+                async_reset: false,
                 reset_value: None,
             },
             vec![d],

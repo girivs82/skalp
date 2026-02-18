@@ -91,11 +91,15 @@ pub enum Token {
     #[token("Self")]
     SelfType,
 
-    // Event Control (2)
+    // Event Control (4)
     #[token("rise")]
     Rise,
     #[token("fall")]
     Fall,
+    #[token("active")]
+    Active,
+    #[token("inactive")]
+    Inactive,
 
     // Control Flow (4)
     #[token("match")]
