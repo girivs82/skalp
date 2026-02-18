@@ -3210,6 +3210,7 @@ version = "0.1.0"
 dependencies = [
  "dashmap",
  "ropey",
+ "rowan",
  "serde",
  "serde_json",
  "skalp-frontend",

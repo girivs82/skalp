@@ -10,6 +10,7 @@ import { CliRunner } from './cli/runner';
 import { WaveformViewerProvider } from './waveform/provider';
 import { EcResultTreeProvider } from './ec-dashboard/tree-provider';
 import { SchematicViewerProvider } from './schematic/provider';
+import { ExpressionViewerProvider } from './expression-viewer/provider';
 import { SkalpTaskProvider } from './tasks/provider';
 import { SkalpTestController } from './testing/controller';
 
@@ -97,6 +98,9 @@ export function activate(context: vscode.ExtensionContext) {
     // --- Schematic Viewer ---
     const schematicProvider = new SchematicViewerProvider(context);
 
+    // --- Expression Viewer ---
+    const expressionProvider = new ExpressionViewerProvider(context);
+
     // --- Task Provider ---
     context.subscriptions.push(
         vscode.tasks.registerTaskProvider(SkalpTaskProvider.type, new SkalpTaskProvider())
@@ -118,6 +122,7 @@ export function activate(context: vscode.ExtensionContext) {
                 { label: '$(search) Analyze', description: 'Gate-level analysis' },
                 { label: '$(graph-line) Open Waveform', description: 'Open waveform viewer' },
                 { label: '$(circuit-board) Show Schematic', description: 'Show schematic view' },
+                { label: '$(symbol-operator) Expression Viewer', description: 'Show expression circuit diagram' },
             ];
             const pick = await vscode.window.showQuickPick(items, { placeHolder: 'Select SKALP command' });
             if (!pick) { return; }
@@ -130,6 +135,7 @@ export function activate(context: vscode.ExtensionContext) {
                 '$(search) Analyze': 'skalp.analyze',
                 '$(graph-line) Open Waveform': 'skalp.showWaveform',
                 '$(circuit-board) Show Schematic': 'skalp.showSchematic',
+                '$(symbol-operator) Expression Viewer': 'skalp.showExpressionViewer',
             };
             const cmd = commandMap[pick.label];
             if (cmd) { vscode.commands.executeCommand(cmd); }
@@ -253,6 +259,10 @@ export function activate(context: vscode.ExtensionContext) {
 
         vscode.commands.registerCommand('skalp.showSchematic', async () => {
             schematicProvider.show();
+        }),
+
+        vscode.commands.registerCommand('skalp.showExpressionViewer', async () => {
+            expressionProvider.show();
         })
     );
 

@@ -6,6 +6,7 @@ description = "Language Server Protocol implementation for SKALP"
 
 [dependencies]
 skalp-frontend = { path = "../skalp-frontend" }
+rowan = "0.15"
 tower-lsp = "0.20"
 tokio = { version = "1.0", features = ["full"] }
 serde = { version = "1.0", features = ["derive"] }

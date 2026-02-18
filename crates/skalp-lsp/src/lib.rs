@@ -28,6 +28,7 @@ use tower_lsp::{Client, LanguageServer, LspService};
 pub mod analysis;
 pub mod completion;
 pub mod diagnostics;
+pub mod expression_circuit;
 pub mod hover;
 pub mod semantic_tokens;
 pub mod symbols;
@@ -115,6 +116,10 @@ impl LanguageServer for SkalpLanguageServer {
                         },
                     ),
                 ),
+                execute_command_provider: Some(ExecuteCommandOptions {
+                    commands: vec!["skalp.getExpressionCircuit".into()],
+                    ..Default::default()
+                }),
                 ..Default::default()
             },
             ..Default::default()
@@ -327,6 +332,40 @@ impl LanguageServer for SkalpLanguageServer {
             })))
         } else {
             Ok(None)
+        }
+    }
+
+    async fn execute_command(
+        &self,
+        params: ExecuteCommandParams,
+    ) -> Result<Option<serde_json::Value>> {
+        match params.command.as_str() {
+            "skalp.getExpressionCircuit" => {
+                if params.arguments.len() < 3 {
+                    return Ok(None);
+                }
+                let uri_str: String = serde_json::from_value(params.arguments[0].clone())
+                    .unwrap_or_default();
+                let line: u32 = serde_json::from_value(params.arguments[1].clone())
+                    .unwrap_or(0);
+                let col: u32 = serde_json::from_value(params.arguments[2].clone())
+                    .unwrap_or(0);
+
+                let uri = match Url::parse(&uri_str) {
+                    Ok(u) => u,
+                    Err(_) => return Ok(None),
+                };
+
+                if let Some(doc) = self.documents.get(&uri) {
+                    let source = doc.content.to_string();
+                    let result =
+                        expression_circuit::get_expression_circuit(&source, line, col);
+                    Ok(result.and_then(|r| serde_json::to_value(r).ok()))
+                } else {
+                    Ok(None)
+                }
+            }
+            _ => Ok(None),
         }
     }
 }
