@@ -1467,6 +1467,36 @@ impl UnifiedSimulator {
         &self.waveforms
     }
 
+    /// Get signal name mapping (internal/sanitized name → display name) for debug adapters.
+    /// This maps the keys used in SimulationState to user-friendly display names.
+    pub fn get_signal_name_map(&self) -> IndexMap<String, String> {
+        match &self.backend {
+            SimulatorBackend::CompiledCpu(runtime) => {
+                runtime.get_waveform_signals().into_iter()
+                    .map(|(sanitized, display, _)| (sanitized, display))
+                    .collect()
+            }
+            _ => {
+                // For GPU and other backends, use the name registry
+                let mut map = IndexMap::new();
+                for internal_name in self.behavioral_input_names.iter()
+                    .chain(self.behavioral_output_names.iter())
+                {
+                    if let Some(entry) = self.name_registry.get_entry_by_internal(internal_name) {
+                        map.insert(internal_name.clone(), entry.hierarchical_path.clone());
+                    }
+                }
+                // Also map any registered names back through the registry
+                for entry in self.name_registry.all_entries() {
+                    if !map.contains_key(&entry.internal_name) {
+                        map.insert(entry.internal_name.clone(), entry.hierarchical_path.clone());
+                    }
+                }
+                map
+            }
+        }
+    }
+
     /// Get signal widths (display_name -> bit width) for waveform export
     pub fn get_signal_widths(&self) -> IndexMap<String, usize> {
         match &self.backend {
@@ -1478,12 +1508,13 @@ impl UnifiedSimulator {
             _ => {
                 // Use name registry to get widths for all known signals
                 let mut widths = IndexMap::new();
-                for internal_name in self.behavioral_input_names.iter()
-                    .chain(self.behavioral_output_names.iter())
-                {
-                    if let Some(entry) = self.name_registry.get_entry_by_internal(internal_name) {
-                        widths.insert(entry.hierarchical_path.clone(), entry.width);
+                // Include inputs, outputs, AND all registered names (registers, etc.)
+                for entry in self.name_registry.all_entries() {
+                    // Skip internal-only names that don't have meaningful display names
+                    if entry.hierarchical_path.starts_with("_") {
+                        continue;
                     }
+                    widths.insert(entry.hierarchical_path.clone(), entry.width);
                 }
                 widths
             }

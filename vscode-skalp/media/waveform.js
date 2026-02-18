@@ -19,6 +19,8 @@
     let displayRows = []; // [{type:'group', groupName:'...'}, {type:'signal', name:'...'}]
     let isSyncingScroll = false;
     let hoverX = -1; // mouse x position on canvas (-1 = not hovering)
+    let breakpointMarkers = []; // [{cycle, label?, color?}]
+    let highlightedSignals = new Set(); // signal names highlighted by debug session
 
     const cfg = window.skalpConfig || {};
     const FONT_SIZE = cfg.fontSize || 12;
@@ -288,6 +290,12 @@
                 ctx.fillStyle = 'rgba(255,255,255,0.05)';
                 ctx.fillRect(0, y, w, ROW_HEIGHT);
             }
+
+            // Highlight signals triggered by breakpoint (red glow)
+            if (highlightedSignals.has(sigName)) {
+                ctx.fillStyle = 'rgba(244,67,54,0.12)';
+                ctx.fillRect(0, y, w, ROW_HEIGHT);
+            }
         }
 
         // Annotations
@@ -319,6 +327,27 @@
             ctx.lineTo(hoverX, h);
             ctx.stroke();
             ctx.setLineDash([]);
+        }
+
+        // Breakpoint markers (red dashed vertical lines)
+        for (const marker of breakpointMarkers) {
+            const mx = (marker.cycle - startTime) / timePerPixel;
+            if (mx < -10 || mx > w + 10) { continue; }
+            ctx.strokeStyle = marker.color || '#f44336';
+            ctx.lineWidth = 1.5;
+            ctx.setLineDash([6, 3]);
+            ctx.beginPath();
+            ctx.moveTo(mx, HEADER_HEIGHT);
+            ctx.lineTo(mx, h);
+            ctx.stroke();
+            ctx.setLineDash([]);
+            // Label
+            if (marker.label) {
+                ctx.fillStyle = marker.color || '#f44336';
+                ctx.font = CANVAS_FONT_SMALL;
+                ctx.textAlign = 'left';
+                ctx.fillText(marker.label, mx + 4, HEADER_HEIGHT + FONT_SIZE + 14);
+            }
         }
 
         // Cursor (placed on click — solid yellow line)
@@ -592,6 +621,33 @@
             infoEl.textContent = `${waveformData.design || 'Design'} — ${waveformData.signals.length} signals, ${waveformData.endTime || '?'} ${waveformData.timescale || 'ns'}`;
             buildSignalList();
             resizeCanvas();
+        } else if (msg.type === 'scrollToCycle') {
+            // Scroll waveform to center on a specific cycle (e.g., breakpoint hit)
+            if (!waveformData) { return; }
+            cursorTime = msg.cycle;
+            const container = canvas.parentElement;
+            const w = container.clientWidth - SIGNAL_LIST_WIDTH;
+            const endTime = waveformData.endTime || 10000;
+            const timePerPixel = endTime / (w * zoom);
+            // Center the cycle on screen
+            scrollX = Math.max(0, (cursorTime / timePerPixel) - w / 2);
+            buildSignalList();
+            render();
+            updateCursorReadout();
+        } else if (msg.type === 'addBreakpointMarker') {
+            breakpointMarkers.push({
+                cycle: msg.cycle,
+                label: msg.label || null,
+                color: msg.color || '#f44336',
+            });
+            render();
+        } else if (msg.type === 'clearBreakpointMarkers') {
+            breakpointMarkers = [];
+            render();
+        } else if (msg.type === 'highlightSignals') {
+            highlightedSignals = new Set(msg.signalNames || []);
+            buildSignalList();
+            render();
         }
     });
 

@@ -94,6 +94,10 @@ cocoa = "0.25"
 name = "skalp"
 path = "src/main.rs"
 
+[[bin]]
+name = "skalp-debug"
+path = "src/debug_main.rs"
+
 [[bench]]
 name = "compilation"
 harness = false

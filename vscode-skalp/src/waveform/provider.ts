@@ -2,9 +2,27 @@ import * as vscode from 'vscode';
 
 export class WaveformViewerProvider implements vscode.CustomReadonlyEditorProvider {
     private context: vscode.ExtensionContext;
+    private activePanel: vscode.WebviewPanel | undefined;
 
     constructor(context: vscode.ExtensionContext) {
         this.context = context;
+    }
+
+    /**
+     * Get the currently active waveform webview panel (if any).
+     */
+    public getActivePanel(): vscode.WebviewPanel | undefined {
+        return this.activePanel;
+    }
+
+    /**
+     * Post a message to the active waveform webview.
+     * Used by the debug adapter to scroll to breakpoint cycles, add markers, etc.
+     */
+    public postToWaveform(message: any): void {
+        if (this.activePanel) {
+            this.activePanel.webview.postMessage(message);
+        }
     }
 
     async openCustomDocument(
@@ -20,6 +38,13 @@ export class WaveformViewerProvider implements vscode.CustomReadonlyEditorProvid
         webviewPanel: vscode.WebviewPanel,
         _token: vscode.CancellationToken
     ): Promise<void> {
+        this.activePanel = webviewPanel;
+        webviewPanel.onDidDispose(() => {
+            if (this.activePanel === webviewPanel) {
+                this.activePanel = undefined;
+            }
+        });
+
         webviewPanel.webview.options = { enableScripts: true };
 
         const scriptUri = webviewPanel.webview.asWebviewUri(

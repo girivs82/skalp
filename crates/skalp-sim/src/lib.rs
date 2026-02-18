@@ -15,6 +15,7 @@
 
 pub mod breakpoint;
 pub mod clock_manager;
+pub mod debug_server;
 pub mod compiled_cpu_runtime;
 pub mod coverage_report;
 pub mod coverage_vecgen;

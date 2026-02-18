@@ -33,7 +33,8 @@
         "onCommand:skalp.showSchematic",
         "onCommand:skalp.showExpressionViewer",
         "onView:skalpEc",
-        "onTaskType:skalp"
+        "onTaskType:skalp",
+        "onDebugResolve:skalp"
     ],
     "main": "./out/extension.js",
     "contributes": {
@@ -336,6 +337,71 @@
                 "priority": "default"
             }
         ],
+        "debuggers": [
+            {
+                "type": "skalp",
+                "label": "SKALP Debug",
+                "languages": ["skalp"],
+                "configurationAttributes": {
+                    "launch": {
+                        "required": ["program"],
+                        "properties": {
+                            "program": {
+                                "type": "string",
+                                "description": "Path to .sk file to debug"
+                            },
+                            "stopOnEntry": {
+                                "type": "boolean",
+                                "default": true,
+                                "description": "Pause at cycle 0 after loading"
+                            },
+                            "level": {
+                                "type": "string",
+                                "enum": ["behavioral", "gate"],
+                                "default": "behavioral",
+                                "description": "Simulation level"
+                            },
+                            "maxCycles": {
+                                "type": "number",
+                                "default": 100000,
+                                "description": "Maximum simulation cycles before auto-stop"
+                            },
+                            "topModule": {
+                                "type": "string",
+                                "description": "Top-level module name (auto-detected if omitted)"
+                            }
+                        }
+                    }
+                },
+                "initialConfigurations": [
+                    {
+                        "name": "Debug SKALP",
+                        "type": "skalp",
+                        "request": "launch",
+                        "program": "${file}",
+                        "stopOnEntry": true
+                    }
+                ],
+                "configurationSnippets": [
+                    {
+                        "label": "SKALP: Debug Design",
+                        "description": "Debug a SKALP hardware design with interactive simulation",
+                        "body": {
+                            "name": "Debug SKALP",
+                            "type": "skalp",
+                            "request": "launch",
+                            "program": "^\"${file}\"",
+                            "stopOnEntry": true
+                        }
+                    }
+                ]
+            }
+        ],
+        "breakpoints": [
+            {
+                "language": "skalp"
+            }
+        ],
         "configuration": {
             "type": "object",
             "title": "SKALP",
@@ -403,6 +469,8 @@
         "watch": "tsc -watch -p ./"
     },
     "dependencies": {
+        "@vscode/debugadapter": "^1.65.0",
+        "@vscode/debugprotocol": "^1.65.0",
         "elkjs": "^0.11.0",
         "vscode-languageclient": "^8.0.0"
     },

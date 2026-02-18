@@ -244,6 +244,35 @@ impl BreakpointManager {
         id
     }
 
+    /// Register a breakpoint with a specific condition
+    pub fn register_with_condition(
+        &mut self,
+        signal_name: &str,
+        name: &str,
+        condition: BreakpointCondition,
+    ) -> u32 {
+        let id = self.next_id;
+        self.next_id += 1;
+
+        let breakpoint = SimBreakpoint {
+            id,
+            signal_name: signal_name.to_string(),
+            name: name.to_string(),
+            condition: Some(condition),
+            message: None,
+            is_error: false,
+            enabled: true,
+            hit_count: 0,
+        };
+
+        self.breakpoints
+            .entry(signal_name.to_string())
+            .or_default()
+            .push(breakpoint);
+
+        id
+    }
+
     /// Register a simple breakpoint on a signal
     pub fn register_simple(&mut self, signal_name: &str) -> u32 {
         let id = self.next_id;
@@ -365,6 +394,13 @@ impl BreakpointManager {
     /// Get breakpoint by ID
     pub fn get_breakpoint(&self, id: u32) -> Option<&SimBreakpoint> {
         self.breakpoints.values().flatten().find(|bp| bp.id == id)
+    }
+
+    /// Seed a previous value for edge/change detection.
+    /// Call this when setting a breakpoint mid-simulation so that
+    /// AnyChange/RisingEdge/FallingEdge can detect the first transition.
+    pub fn seed_previous_value(&mut self, signal_name: &str, value: Vec<u8>) {
+        self.previous_values.insert(signal_name.to_string(), value);
     }
 
     /// Clear all breakpoints

@@ -13,6 +13,7 @@ import { SchematicViewerProvider } from './schematic/provider';
 import { ExpressionViewerProvider } from './expression-viewer/provider';
 import { SkalpTaskProvider } from './tasks/provider';
 import { SkalpTestController } from './testing/controller';
+import { SkalpDebugAdapterFactory } from './debug/adapter-factory';
 
 let client: LanguageClient;
 let cliRunner: CliRunner;
@@ -79,7 +80,10 @@ export function activate(context: vscode.ExtensionContext) {
         clientOptions
     );
 
-    client.start();
+    // Start LSP in background — don't block extension activation
+    client.start().catch((err: any) => {
+        outputChannel.appendLine(`LSP server failed to start: ${err.message}`);
+    });
 
     // --- EC Dashboard ---
     const ecProvider = new EcResultTreeProvider();
@@ -109,6 +113,12 @@ export function activate(context: vscode.ExtensionContext) {
     // --- Test Controller ---
     testController = new SkalpTestController(outputChannel);
     context.subscriptions.push({ dispose: () => testController.dispose() });
+
+    // --- Debug Adapter ---
+    const debugAdapterFactory = new SkalpDebugAdapterFactory(context.extensionPath);
+    context.subscriptions.push(
+        vscode.debug.registerDebugAdapterDescriptorFactory('skalp', debugAdapterFactory)
+    );
 
     // --- Commands ---
     context.subscriptions.push(
