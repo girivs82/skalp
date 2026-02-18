@@ -301,10 +301,12 @@ export class SchematicViewerProvider {
         // --- Parse impl block for signals, instances, assignments ---
         let onBlockInputPorts = new Set<string>();
         let onBlockOutputPorts = new Set<string>();
+        let onBlockSignals = new Set<string>();
         if (implBlock) {
             const result = this.parseImplBlock(lines, implBlock.start, implBlock.end, ports, signals, instances, assignments);
             onBlockInputPorts = result.onBlockInputPorts;
             onBlockOutputPorts = result.onBlockOutputPorts;
+            onBlockSignals = result.onBlockSignals;
         }
 
         // Also scan combinational assignments for field-access input port references
@@ -334,7 +336,7 @@ export class SchematicViewerProvider {
         // Build connection graph (two-phase: first without Logic, then add Logic for uncovered ports)
         const nets = this.buildConnectionGraph(
             entityName, ports, signals, instances, assignments,
-            onBlockInputPorts, logicOutputPorts
+            onBlockInputPorts, logicOutputPorts, onBlockSignals
         );
 
         return {
@@ -358,7 +360,7 @@ export class SchematicViewerProvider {
         signals: SchematicSignal[],
         instances: SchematicInstance[],
         assignments: SchematicAssignment[]
-    ): { onBlockInputPorts: Set<string>; onBlockOutputPorts: Set<string> } {
+    ): { onBlockInputPorts: Set<string>; onBlockOutputPorts: Set<string>; onBlockSignals: Set<string> } {
         const portNames = new Set(ports.map(p => p.name));
         const inputPortNames = new Set(ports.filter(p => p.direction === 'in').map(p => p.name));
         const outputPortNames = new Set(ports.filter(p => p.direction === 'out').map(p => p.name));
@@ -372,6 +374,7 @@ export class SchematicViewerProvider {
         // Ports referenced/assigned inside on() blocks (sequential logic)
         const onBlockInputPorts = new Set<string>();
         const onBlockOutputPorts = new Set<string>();
+        const onBlockSignals = new Set<string>(); // internal signals assigned in on-blocks
 
         // First pass: find on(...) blocks so we don't parse assignments inside them as combinational
         let i = implStart + 1; // skip the `impl Name {` line
@@ -404,10 +407,16 @@ export class SchematicViewerProvider {
                 const line = lines[j].replace(/\/\/.*$/, '').trim();
                 if (!line) { continue; }
 
-                // Check for output port assignments (LHS of `=`)
+                // Check for signal/port assignments (LHS of `=`)
                 const assignMatch = line.match(/^(\w+)\s*=/);
-                if (assignMatch && outputPortNames.has(assignMatch[1])) {
-                    onBlockOutputPorts.add(assignMatch[1]);
+                if (assignMatch) {
+                    const lhsName = assignMatch[1];
+                    if (outputPortNames.has(lhsName)) {
+                        onBlockOutputPorts.add(lhsName);
+                    } else if (!inputPortNames.has(lhsName) && lhsName !== 'if' &&
+                               lhsName !== 'match' && lhsName !== 'else') {
+                        onBlockSignals.add(lhsName);
+                    }
                 }
 
                 // Check for input port references (any token matching an input port)
@@ -517,6 +526,24 @@ export class SchematicViewerProvider {
                 // Remove trailing semicolons/commas if any
                 rhs = rhs.replace(/[;,]\s*$/, '').trim();
 
+                // If RHS is a struct literal (ends with `{`), capture the body fields
+                // so their signal references are visible to the connection graph builder.
+                if (rhs.endsWith('{')) {
+                    let depth = 1;
+                    for (let sli = li + 1; sli < implEnd && depth > 0; sli++) {
+                        const sLine = lines[sli].replace(/\/\/.*$/, '').trim();
+                        for (const ch of sLine) {
+                            if (ch === '{') { depth++; }
+                            if (ch === '}') { depth--; }
+                        }
+                        if (depth > 0) {
+                            // Append struct field line tokens to RHS
+                            // e.g., "current_ref: current_ref," → captures "current_ref"
+                            rhs += ' ' + sLine.replace(/[,}]/g, '');
+                        }
+                    }
+                }
+
                 assignments.push({
                     lhs,
                     rhs,
@@ -526,7 +553,7 @@ export class SchematicViewerProvider {
             }
         }
 
-        return { onBlockInputPorts, onBlockOutputPorts };
+        return { onBlockInputPorts, onBlockOutputPorts, onBlockSignals };
     }
 
     private buildConnectionGraph(
@@ -536,7 +563,8 @@ export class SchematicViewerProvider {
         instances: SchematicInstance[],
         assignments: SchematicAssignment[],
         onBlockInputPorts: Set<string>,
-        logicOutputPorts: Set<string>
+        logicOutputPorts: Set<string>,
+        onBlockSignals: Set<string>
     ): SchematicNet[] {
         const nets: SchematicNet[] = [];
         const inputPortNames = new Set(ports.filter(p => p.direction === 'in').map(p => p.name));
@@ -583,7 +611,8 @@ export class SchematicViewerProvider {
         // ── Build nets ──
 
         // 1. Entity input ports → instance inputs that reference them
-        //    Matches both exact name (e.g., `clk`) and field access (e.g., `config.protection`)
+        //    Matches exact name (e.g., `clk`), field access (e.g., `config.protection`),
+        //    and complex expressions containing the port name (e.g., `!enable`, `state_reg as nat[4]`)
         for (const port of ports) {
             if (port.direction !== 'in') { continue; }
             const sinks: SchematicEndpoint[] = [];
@@ -594,6 +623,12 @@ export class SchematicViewerProvider {
                     if (conn.signal === port.name ||
                         conn.signal.startsWith(port.name + '.')) {
                         sinks.push({ type: 'instance', name: inst.name, port: conn.port });
+                    } else {
+                        // Complex expression: check if port name appears as a token
+                        const tokens: string[] = conn.signal.match(/\b\w+\b/g) || [];
+                        if (tokens.includes(port.name)) {
+                            sinks.push({ type: 'instance', name: inst.name, port: conn.port });
+                        }
                     }
                 }
             }
@@ -608,6 +643,8 @@ export class SchematicViewerProvider {
         }
 
         // 2. Instance outputs → entity output ports and/or other instance inputs
+        //    Uses token-level matching to catch field access (prot_faults.ov),
+        //    complex expressions ((cc_cv_output >> 8) as int[10]), and struct literals.
         for (const inst of instances) {
             for (const conn of inst.connections) {
                 if (conn.direction !== 'out') { continue; }
@@ -619,22 +656,62 @@ export class SchematicViewerProvider {
                     sinks.push({ type: 'entity_port', name: sig, port: sig });
                 }
 
-                // Check if assigned to an entity output port (e.g., `charge_phase = cc_cv_phase`)
+                // Check if referenced in output port assignments (exact or as token)
                 for (const a of assignments) {
-                    if (a.isOutputPort && a.rhs === sig) {
-                        const outName = a.lhs.split('.')[0];
-                        if (!sinks.find(s => s.type === 'entity_port' && s.name === outName)) {
-                            sinks.push({ type: 'entity_port', name: outName, port: outName });
+                    if (!a.isOutputPort) { continue; }
+                    const outName = a.lhs.split('.')[0];
+                    if (sinks.find(s => s.type === 'entity_port' && s.name === outName)) { continue; }
+                    const rhsTokens: string[] = a.rhs.match(/\b\w+\b/g) || [];
+                    if (a.rhs === sig || rhsTokens.includes(sig) ||
+                        a.rhs.startsWith(sig + '.') || a.rhs.includes(' ' + sig + '.')) {
+                        sinks.push({ type: 'entity_port', name: outName, port: outName });
+                    }
+                }
+
+                // Check if referenced in non-output assignments that chain to output ports
+                // (e.g., cc_cv_output → phase_raw → phase_limited → phase_actual)
+                for (const a of assignments) {
+                    if (a.isOutputPort) { continue; }
+                    const rhsTokens: string[] = a.rhs.match(/\b\w+\b/g) || [];
+                    if (rhsTokens.includes(sig) || a.rhs.startsWith(sig + '.') ||
+                        a.rhs.includes(' ' + sig + '.')) {
+                        const derivedSig = a.lhs.split('.')[0];
+                        // Check if this derived signal feeds an output port
+                        for (const oa of assignments) {
+                            if (!oa.isOutputPort) { continue; }
+                            const outName = oa.lhs.split('.')[0];
+                            if (sinks.find(s => s.type === 'entity_port' && s.name === outName)) { continue; }
+                            const oaTokens: string[] = oa.rhs.match(/\b\w+\b/g) || [];
+                            if (oa.rhs === derivedSig || oaTokens.includes(derivedSig)) {
+                                sinks.push({ type: 'entity_port', name: outName, port: outName });
+                            }
+                        }
+                        // Check if this derived signal feeds another instance
+                        for (const otherInst of instances) {
+                            if (otherInst.name === inst.name) { continue; }
+                            for (const otherConn of otherInst.connections) {
+                                if (otherConn.direction !== 'in') { continue; }
+                                if (otherConn.signal === derivedSig) {
+                                    sinks.push({ type: 'instance', name: otherInst.name, port: otherConn.port });
+                                }
+                            }
                         }
                     }
                 }
 
-                // Check if consumed by other instances as input
+                // Check if consumed by other instances as input (exact or token match)
                 for (const otherInst of instances) {
                     if (otherInst.name === inst.name) { continue; }
                     for (const otherConn of otherInst.connections) {
-                        if (otherConn.signal === sig && otherConn.direction === 'in') {
+                        if (otherConn.direction !== 'in') { continue; }
+                        if (sinks.find(s => s.type === 'instance' && s.name === otherInst.name && s.port === otherConn.port)) { continue; }
+                        if (otherConn.signal === sig) {
                             sinks.push({ type: 'instance', name: otherInst.name, port: otherConn.port });
+                        } else {
+                            const tokens: string[] = otherConn.signal.match(/\b\w+\b/g) || [];
+                            if (tokens.includes(sig)) {
+                                sinks.push({ type: 'instance', name: otherInst.name, port: otherConn.port });
+                            }
                         }
                     }
                 }
@@ -875,6 +952,43 @@ export class SchematicViewerProvider {
                     });
                     coveredSignals.add(sig);
                 }
+            }
+        }
+
+        // 6b. On-block signals consumed by instance inputs (via complex expressions)
+        //     e.g., `state_for_enable: state_reg as nat[4]` — `state_reg` is assigned in on-block
+        for (const obSig of onBlockSignals) {
+            if (coveredSignals.has(obSig)) { continue; }
+            const sinks: SchematicEndpoint[] = [];
+            for (const inst of instances) {
+                for (const conn of inst.connections) {
+                    if (conn.direction !== 'in') { continue; }
+                    if (conn.signal === obSig) {
+                        sinks.push({ type: 'instance', name: inst.name, port: conn.port });
+                    } else {
+                        const tokens: string[] = conn.signal.match(/\b\w+\b/g) || [];
+                        if (tokens.includes(obSig)) {
+                            sinks.push({ type: 'instance', name: inst.name, port: conn.port });
+                        }
+                    }
+                }
+            }
+            // Also check if used in assignment chains to output ports or other instances
+            for (const a of assignments) {
+                const rhsTokens: string[] = a.rhs.match(/\b\w+\b/g) || [];
+                if (!rhsTokens.includes(obSig)) { continue; }
+                if (a.isOutputPort) {
+                    const outName = a.lhs.split('.')[0];
+                    sinks.push({ type: 'entity_port', name: outName, port: outName });
+                }
+            }
+            if (sinks.length > 0) {
+                logicSignalOutputs.push({
+                    sig: obSig,
+                    sinks,
+                    width: 1
+                });
+                coveredSignals.add(obSig);
             }
         }
 
