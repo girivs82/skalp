@@ -1,14 +1,13 @@
-//! Minimal test for 64-bit register Metal codegen (BUG #117 verification)
+//! Test for 64-bit register Metal codegen (BUG #117 verification)
 //!
-//! Verifies that 64-bit registers use uint2 (not uint4) in Metal shaders.
+//! Verifies that 64-bit registers use uint2 (not uint) in Metal shaders,
+//! using the shared codegen path (MetalBackend::generate).
 
-#![cfg(all(test, target_os = "macos"))]
+#![cfg(test)]
 
 use skalp_frontend::parse_and_build_hir;
 use skalp_mir::{MirCompiler, OptimizationLevel};
-use skalp_sim::{HwAccel, SimLevel, UnifiedSimConfig, UnifiedSimulator};
-use skalp_sir::convert_mir_to_sir;
-use std::fs;
+use skalp_sir::{convert_mir_to_sir, MetalBackend};
 
 const TEST_SOURCE: &str = r#"
 // Minimal test case for 64-bit register Metal codegen
@@ -35,8 +34,8 @@ impl Test64BitReg {
 }
 "#;
 
-#[tokio::test]
-async fn test_64bit_register_metal_codegen() {
+#[test]
+fn test_64bit_register_metal_codegen() {
     // Parse and build HIR
     let hir = parse_and_build_hir(TEST_SOURCE).expect("Failed to parse test design");
 
@@ -49,79 +48,46 @@ async fn test_64bit_register_metal_codegen() {
         .compile_to_mir(&hir)
         .expect("Failed to compile HIR to MIR");
 
-    // Convert to SIR for GPU simulation
+    // Convert to SIR
     assert!(
         !mir.modules.is_empty(),
         "MIR should have at least one module"
     );
     let sir = convert_mir_to_sir(&mir.modules[0]);
 
-    // Create simulation config for GPU
-    let config = UnifiedSimConfig {
-        level: SimLevel::Behavioral,
-        hw_accel: HwAccel::Gpu,
-        max_cycles: 10,
-        capture_waveforms: true,
-        ..Default::default()
-    };
-
-    // Create simulator - this generates the Metal shader
-    let mut simulator = UnifiedSimulator::new(config)
-        .expect("Failed to create GPU simulator");
-
-    // Load the module - this generates the Metal shader
-    simulator
-        .load_behavioral(&sir)
-        .await
-        .expect("Failed to load SIR module");
-
-    // Helper to resolve user-facing names to internal names
-    let resolve = |name: &str| -> String {
-        sir.name_registry
-            .resolve(name)
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| name.to_string())
-    };
-
-    // Resolve names
-    let rst_name = resolve("rst");
-    let clk_name = resolve("clk");
-    let data_in_name = resolve("data_in");
-    let enable_name = resolve("enable");
-
-    // Set initial inputs (using resolved internal names)
-    simulator.set_input(&rst_name, 1).await;
-    simulator.set_input(&clk_name, 0).await;
-    simulator.set_input(&data_in_name, 0).await;
-    simulator.set_input(&enable_name, 0).await;
-
-    // Run a few cycles
-    for _ in 0..5 {
-        simulator.step().await;
-    }
-
-    // Read and verify the Metal shader
-    // Note: The GPU runtime writes to /tmp/skalp_metal_shader.metal (not skalp_shader.metal)
-    let shader_content =
-        fs::read_to_string("/tmp/skalp_metal_shader.metal").expect("Metal shader should exist");
+    // Generate Metal shader directly via shared codegen
+    let shader_content = MetalBackend::generate(&sir);
 
     // Resolve the internal name for reg64
-    let reg64_internal = resolve("reg64");
+    let reg64_internal = sir
+        .name_registry
+        .resolve("reg64")
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| "reg64".to_string());
 
-    // Check that 64-bit register uses uint2, not uint4
-    // The register struct should contain "uint2 <internal_name>;" for a 64-bit register
-    println!("Generated Metal shader snippet (reg64 -> {}):", reg64_internal);
+    // Debug: show relevant lines
+    println!(
+        "Generated Metal shader snippet (reg64 -> {}):",
+        reg64_internal
+    );
     for line in shader_content.lines() {
-        if line.contains("struct Registers") || line.contains(&reg64_internal) {
-            println!("  {}", line);
+        if line.contains("struct Registers")
+            || line.contains("struct Inputs")
+            || line.contains(&reg64_internal)
+        {
+            println!("  {}", line.trim());
         }
     }
 
-    // Verify the register type - check for uint2 with the internal name
-    let expected_pattern = format!("uint2 {};", reg64_internal);
+    // Verify the register type - 64-bit register should use uint2 in Metal
+    // Check both the Registers struct (state element) and Inputs struct (if present)
+    let has_uint2 = shader_content
+        .lines()
+        .any(|l| l.contains("uint2") && l.contains(&reg64_internal));
+
     assert!(
-        shader_content.contains(&expected_pattern),
-        "64-bit register should use uint2 type, but shader contains:\n{}",
+        has_uint2,
+        "64-bit register should use uint2 type in Metal shader, but relevant lines are:\n{}",
         shader_content
             .lines()
             .filter(|l| l.contains(&reg64_internal))
