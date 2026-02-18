@@ -833,7 +833,9 @@ export class SchematicViewerProvider {
         }
 
         // 6. Signal-mediated connections: assignment drives a signal that instances consume
-        //    (not covered by steps 1-5)
+        //    (not covered by steps 1-5). These are internal signals driven by combinational
+        //    logic, so they are routed through the synthetic "Logic" instance.
+        const logicSignalOutputs: { sig: string; sinks: SchematicEndpoint[]; width: number }[] = [];
         for (const a of assignments) {
             if (a.isOutputPort) { continue; }
             const sig = a.lhs.split('.')[0];
@@ -866,11 +868,10 @@ export class SchematicViewerProvider {
                 }
                 if (!isInstOutput) {
                     const sigInfo = signals.find(s => s.name === sig);
-                    nets.push({
-                        name: sig,
-                        width: sigInfo ? sigInfo.width : 1,
-                        driver: { type: 'entity_port', name: sig, port: sig },
-                        sinks
+                    logicSignalOutputs.push({
+                        sig,
+                        sinks,
+                        width: sigInfo ? sigInfo.width : 1
                     });
                     coveredSignals.add(sig);
                 }
@@ -878,7 +879,7 @@ export class SchematicViewerProvider {
         }
 
         // 7. Create synthetic "Logic" instance for ports used in on() blocks / complex assignments
-        //    that are still uncovered after steps 1-6.
+        //    that are still uncovered after steps 1-6, plus internal signal outputs from step 6.
         const logicConnections: SchematicConnection[] = [];
 
         // Uncovered input ports referenced in on() blocks or field-access assignments
@@ -891,6 +892,11 @@ export class SchematicViewerProvider {
         for (const portName of logicOutputPorts) {
             if (coveredSignals.has(portName)) { continue; }
             logicConnections.push({ port: portName, signal: portName, direction: 'out' });
+        }
+
+        // Add step 6 internal signals as Logic outputs
+        for (const lso of logicSignalOutputs) {
+            logicConnections.push({ port: lso.sig, signal: lso.sig, direction: 'out' });
         }
 
         if (logicConnections.length > 0) {
@@ -927,6 +933,16 @@ export class SchematicViewerProvider {
                         coveredSignals.add(port.name);
                     }
                 }
+            }
+
+            // Create nets for step 6 internal signal outputs from Logic
+            for (const lso of logicSignalOutputs) {
+                nets.push({
+                    name: lso.sig,
+                    width: lso.width,
+                    driver: { type: 'instance', name: 'logic', port: lso.sig },
+                    sinks: lso.sinks
+                });
             }
         }
 
