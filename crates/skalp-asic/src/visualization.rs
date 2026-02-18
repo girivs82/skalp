@@ -260,7 +260,7 @@ impl Visualizer {
         println!("└{}┘", "─".repeat(80));
 
         println!("\nLegend:");
-        println!("  I: Inverter  N: NAND  O: NOR  D: DFF");
+        println!("  I: Inverter  N: NAND  O: NOR  D: DFF  A: Async DFF (ADFF)");
 
         Ok(())
     }
@@ -483,6 +483,7 @@ impl Visualizer {
             t if t.contains("INV") => "#FF6B6B",
             t if t.contains("NAND") => "#4ECDC4",
             t if t.contains("NOR") => "#45B7D1",
+            t if t.contains("ADFF") || t.contains("DffR") => "#E8A87C",
             t if t.contains("DFF") => "#96CEB4",
             t if t.contains("BUF") => "#FFEAA7",
             _ => "#DDA0DD",
@@ -519,6 +520,8 @@ impl Visualizer {
             'N'
         } else if cell_type.contains("NOR") {
             'O'
+        } else if cell_type.contains("ADFF") || cell_type.contains("DffR") {
+            'A'
         } else if cell_type.contains("DFF") {
             'D'
         } else if cell_type.contains("BUF") {

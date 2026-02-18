@@ -58,7 +58,7 @@
                 },
                 {
                     "name": "keyword.event.skalp",
-                    "match": "\\b(rise|fall)\\b"
+                    "match": "\\b(rise|fall|active|inactive)\\b"
                 },
                 {
                     "name": "keyword.intent.skalp",

@@ -180,18 +180,32 @@ pub fn get_expression_circuit(
     let mut builder = CircuitBuilder::new();
     let root_id = walk_statement_rhs(&stmt_node, &mut builder)?;
 
-    // If inside an on() block, wrap the expression with a DFF node
+    // If inside an on() block, wrap the expression with a DFF/ADFF node
     if let Some(clock_text) = find_enclosing_event_clock(&stmt_node) {
-        let dff_id = builder.add_node(
-            "dff",
-            "DFF",
-            Some(vec!["D".into(), "CLK".into()]),
-        );
+        // Check if this on() block has an async reset trigger
+        let async_reset = find_enclosing_event_block(&stmt_node)
+            .and_then(|eb| find_async_reset_in_event(&eb));
+
+        let (dff_type, dff_label, dff_inputs) = if async_reset.is_some() {
+            ("adff", "ADFF", vec!["D".into(), "CLK".into(), "RST".into()])
+        } else {
+            ("dff", "DFF", vec!["D".into(), "CLK".into()])
+        };
+
+        let dff_id = builder.add_node(dff_type, dff_label, Some(dff_inputs));
         builder.add_wire(&root_id, &dff_id, 0, Some("D"));
 
         let clk_id = builder.add_input(&clock_text);
         builder.set_input_role(&clk_id, "clock");
         builder.add_wire(&clk_id, &dff_id, 1, Some("CLK"));
+
+        // Wire async reset input if present
+        if let Some((rst_signal, rst_edge)) = async_reset {
+            let rst_text = format!("{}.{}", rst_signal, rst_edge);
+            let rst_id = builder.add_input(&rst_text);
+            builder.set_input_role(&rst_id, "reset");
+            builder.add_wire(&rst_id, &dff_id, 2, Some("RST"));
+        }
 
         // Rename any input matching the target to show it's the registered feedback
         for input in &mut builder.inputs {
@@ -517,10 +531,15 @@ fn extract_port_roles_from_entity(
 
 /// Find the enclosing EventBlock and extract the clock expression text (e.g., "clk.rising").
 fn find_enclosing_event_clock(node: &SyntaxNode) -> Option<String> {
+    find_enclosing_event_block(node).and_then(|eb| extract_event_clock(&eb))
+}
+
+/// Find the enclosing EventBlock node.
+fn find_enclosing_event_block(node: &SyntaxNode) -> Option<SyntaxNode> {
     let mut parent = node.parent();
     while let Some(p) = parent {
         if p.kind() == SyntaxKind::EventBlock {
-            return extract_event_clock(&p);
+            return Some(p);
         }
         parent = p.parent();
     }
@@ -562,6 +581,51 @@ fn find_edge_type(event_block: &SyntaxNode) -> String {
         }
     }
     "rising".to_string()
+}
+
+/// Check whether the EventBlock has an async reset trigger (active/inactive keyword).
+/// Returns Some((reset_signal_name, edge_keyword)) if found.
+///
+/// Parser structure: `on(clk.rise, rst.active)` produces:
+///   EventBlock → EventTriggerList → EventTrigger[Ident("clk"), Dot, EdgeType[RiseKw]]
+///                                   EventTrigger[Ident("rst"), Dot, EdgeType[ActiveKw]]
+fn find_async_reset_in_event(event_block: &SyntaxNode) -> Option<(String, String)> {
+    for desc in event_block.descendants() {
+        if desc.kind() == SyntaxKind::EventTrigger {
+            let mut signal_name = String::new();
+            let mut edge_kw = None;
+
+            for child in desc.children_with_tokens() {
+                if let rowan::NodeOrToken::Token(t) = &child {
+                    if t.kind() == SyntaxKind::Ident {
+                        signal_name = t.text().to_string();
+                    }
+                }
+                if let rowan::NodeOrToken::Node(n) = &child {
+                    if n.kind() == SyntaxKind::EdgeType {
+                        // Check the keyword token inside EdgeType
+                        for et_child in n.children_with_tokens() {
+                            if let rowan::NodeOrToken::Token(t) = &et_child {
+                                if t.kind() == SyntaxKind::ActiveKw {
+                                    edge_kw = Some("active".to_string());
+                                } else if t.kind() == SyntaxKind::InactiveKw {
+                                    edge_kw = Some("inactive".to_string());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            if let Some(kw) = edge_kw {
+                if !signal_name.is_empty() {
+                    return Some((signal_name, kw));
+                }
+            }
+        }
+    }
+
+    None
 }
 
 fn find_assigned_targets_in(node: &SyntaxNode) -> Vec<String> {
@@ -1345,6 +1409,45 @@ impl Foo {
         assert!(data.inputs.iter().filter(|i| i.name != "clk.rising").all(|i| i.role.is_none()));
         // Wires: 2 for ADD (counter+1), 1 from ADD→DFF D, 1 from clk→DFF CLK = 4
         assert_eq!(data.wires.len(), 4);
+    }
+
+    #[test]
+    fn test_on_block_adff_wrapping_async_reset() {
+        let source = r#"entity Foo {
+    in clk: clock
+    in rst: reset(active_high)
+    in data: nat[8]
+    out result: nat[8]
+}
+impl Foo {
+    signal state: nat[8]
+    on (clk.rise, rst.active) {
+        if rst {
+            state = 0
+        } else {
+            state = data
+        }
+    }
+    result = state
+}"#;
+        // Cursor on line 12 (state = data inside else)
+        let result = get_expression_circuit(source, 12, 10);
+        assert!(result.is_some(), "Expected circuit for assignment inside async reset on-block");
+        let data = result.unwrap();
+        // Should have an ADFF node (not DFF)
+        let adff = data.nodes.iter().find(|n| n.node_type == "adff");
+        assert!(adff.is_some(), "Expected ADFF node for async reset on-block, got: {:?}",
+            data.nodes.iter().map(|n| &n.node_type).collect::<Vec<_>>());
+        let adff = adff.unwrap();
+        assert_eq!(adff.label, "ADFF");
+        assert_eq!(adff.input_labels.as_ref().unwrap(), &["D", "CLK", "RST"]);
+        // Should have a reset input with role=reset
+        let rst_input = data.inputs.iter().find(|i| i.name.contains("active"));
+        assert!(rst_input.is_some(), "Expected rst.active input, got: {:?}",
+            data.inputs.iter().map(|i| &i.name).collect::<Vec<_>>());
+        assert_eq!(rst_input.unwrap().role.as_deref(), Some("reset"));
+        // Clock input should still be present
+        assert!(data.inputs.iter().any(|i| i.role.as_deref() == Some("clock")));
     }
 
     #[test]

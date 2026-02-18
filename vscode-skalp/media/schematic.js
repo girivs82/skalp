@@ -44,7 +44,7 @@
         portOut: '#ff9800',
         portInout: '#9c27b0',
         portClock: '#4caf50',
-        portReset: '#ff9800',
+        portReset: '#ef5350',
         wire: '#5c8dbf',
         wireBus: '#7baad4',
         wireHighlight: '#ffeb3b',
