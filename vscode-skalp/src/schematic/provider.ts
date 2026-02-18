@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import * as path from 'path';
 
 export class SchematicViewerProvider {
     private context: vscode.ExtensionContext;
@@ -23,14 +24,17 @@ export class SchematicViewerProvider {
                 'skalpSchematic',
                 'SKALP Schematic',
                 vscode.ViewColumn.Beside,
-                { enableScripts: true, retainContextWhenHidden: true }
+                {
+                    enableScripts: true,
+                    retainContextWhenHidden: true,
+                    localResourceRoots: [
+                        vscode.Uri.file(path.join(this.context.extensionPath, 'media')),
+                        vscode.Uri.file(path.join(this.context.extensionPath, 'node_modules', 'elkjs', 'lib'))
+                    ]
+                }
             );
 
-            const scriptUri = this.panel.webview.asWebviewUri(
-                vscode.Uri.joinPath(this.context.extensionUri, 'media', 'schematic.js')
-            );
-
-            this.panel.webview.html = this.getHtml(scriptUri);
+            this.panel.webview.html = this.getHtml(this.panel.webview);
 
             this.panel.webview.onDidReceiveMessage((msg) => {
                 if (msg.type === 'navigateToEntity') {
@@ -947,7 +951,14 @@ export class SchematicViewerProvider {
         return 1;
     }
 
-    private getHtml(scriptUri: vscode.Uri): string {
+    private getHtml(webview: vscode.Webview): string {
+        const elkUri = webview.asWebviewUri(
+            vscode.Uri.file(path.join(this.context.extensionPath, 'node_modules', 'elkjs', 'lib', 'elk.bundled.js'))
+        );
+        const scriptUri = webview.asWebviewUri(
+            vscode.Uri.file(path.join(this.context.extensionPath, 'media', 'schematic.js'))
+        );
+
         return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -1012,6 +1023,7 @@ export class SchematicViewerProvider {
         <button id="btn-zoom-fit">Fit</button>
     </div>
     <canvas id="schematic-canvas"></canvas>
+    <script src="${elkUri}"></script>
     <script src="${scriptUri}"></script>
 </body>
 </html>`;

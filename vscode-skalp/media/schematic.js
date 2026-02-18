@@ -73,9 +73,25 @@
         render();
     }
 
-    // ────────────────────── LAYOUT ──────────────────────
+    // ────────────────────── LAYOUT (ELK) ──────────────────────
 
-    function computeLayout() {
+    function measureTextWidth(text, fontSize) {
+        return text.length * (fontSize * 0.62);
+    }
+
+    function computeBoxSize(name, entityType, inPorts, outPorts) {
+        const portCount = Math.max(inPorts.length, outPorts.length, 1);
+        const h = HEADER_HEIGHT + INSTANCE_PADDING * 2 + portCount * PORT_SPACING;
+        let maxIn = 0, maxOut = 0;
+        for (const p of inPorts) { maxIn = Math.max(maxIn, measureTextWidth(p, FONT_SIZE)); }
+        for (const p of outPorts) { maxOut = Math.max(maxOut, measureTextWidth(p, FONT_SIZE)); }
+        const displayLabel = name === 'logic' ? 'State Machine' : (entityType || name);
+        const nameW = measureTextWidth(displayLabel, FONT_SIZE + 1);
+        const w = Math.max(INSTANCE_BOX_MIN_WIDTH, maxIn + maxOut + 40, nameW + 30);
+        return { w, h };
+    }
+
+    async function computeLayout() {
         if (!schematicData) { return; }
         layoutElements = [];
         layoutWires = [];
@@ -84,388 +100,283 @@
         const inputPorts = data.ports.filter(p => p.direction === 'in');
         const outputPorts = data.ports.filter(p => p.direction === 'out');
 
-        // ── Step 1: Assign ranks via topological sort ──
-        // Build dependency graph: instance A depends on B if A has an input signal that B outputs
-        const instByName = new Map();
-        for (const inst of data.instances) { instByName.set(inst.name, inst); }
+        // ── Build ELK graph ──
+        const elkNodes = [];
+        const elkEdges = [];
+        const netWidthMap = new Map(); // edgeId → net width
+        const netNameMap = new Map(); // edgeId → net name
 
-        // Map: signal name → instance that produces it (output connections)
-        const signalDriver = new Map();
-        for (const inst of data.instances) {
-            for (const conn of inst.connections) {
-                if (conn.direction === 'out') {
-                    signalDriver.set(conn.signal, inst.name);
-                }
-            }
-        }
-
-        // Build adjacency: inst.name → set of instance names it depends on
-        const deps = new Map();
-        for (const inst of data.instances) {
-            deps.set(inst.name, new Set());
-        }
-        for (const inst of data.instances) {
-            for (const conn of inst.connections) {
-                if (conn.direction === 'in' || !conn.direction) {
-                    const driver = signalDriver.get(conn.signal);
-                    if (driver && driver !== inst.name) {
-                        deps.get(inst.name).add(driver);
-                    }
-                }
-            }
-        }
-
-        // Kahn's topological sort → rank assignment
-        const rank = new Map();
-        const inDeg = new Map();
-        for (const inst of data.instances) {
-            inDeg.set(inst.name, deps.get(inst.name).size);
-        }
-        let queue = [];
-        for (const [name, deg] of inDeg) {
-            if (deg === 0) { queue.push(name); }
-        }
-        let currentRank = 0;
-        while (queue.length > 0) {
-            const nextQueue = [];
-            for (const name of queue) {
-                rank.set(name, currentRank);
-            }
-            currentRank++;
-            for (const name of queue) {
-                for (const [other, otherDeps] of deps) {
-                    if (otherDeps.has(name)) {
-                        otherDeps.delete(name);
-                        inDeg.set(other, inDeg.get(other) - 1);
-                        if (inDeg.get(other) === 0) {
-                            nextQueue.push(other);
-                        }
-                    }
-                }
-            }
-            queue = nextQueue;
-        }
-        // Handle cycles: assign remaining to max rank
-        for (const inst of data.instances) {
-            if (!rank.has(inst.name)) {
-                rank.set(inst.name, currentRank);
-            }
-        }
-        const maxRank = Math.max(0, ...Array.from(rank.values()));
-
-        // ── Step 2: Measure box sizes ──
-        function measureTextWidth(text, fontSize) {
-            return text.length * (fontSize * 0.62);
-        }
-
-        function computeBoxSize(name, entityType, inPorts, outPorts) {
-            const portCount = Math.max(inPorts.length, outPorts.length, 1);
-            const h = HEADER_HEIGHT + INSTANCE_PADDING * 2 + portCount * PORT_SPACING;
-            // Width: max of entity type label, longest port name on each side
-            let maxIn = 0, maxOut = 0;
-            for (const p of inPorts) { maxIn = Math.max(maxIn, measureTextWidth(p, FONT_SIZE)); }
-            for (const p of outPorts) { maxOut = Math.max(maxOut, measureTextWidth(p, FONT_SIZE)); }
-            const displayLabel = name === 'logic' ? 'State Machine' : (entityType || name);
-            const nameW = measureTextWidth(displayLabel, FONT_SIZE + 1);
-            const w = Math.max(INSTANCE_BOX_MIN_WIDTH, maxIn + maxOut + 40, nameW + 30);
-            return { w, h };
-        }
-
-        // ── Step 3: Build entity input/output port bars ──
-
-        // Entity input ports bar (left column)
+        // Entity input port bar → ELK node with output ports (drives into design)
         const entityInPortCount = Math.max(inputPorts.length, 1);
         const entityInH = HEADER_HEIGHT + ENTITY_PADDING * 2 + entityInPortCount * PORT_SPACING;
         let maxInPortNameW = 0;
         for (const p of inputPorts) { maxInPortNameW = Math.max(maxInPortNameW, measureTextWidth(p.name, FONT_SIZE)); }
         const entityInW = Math.max(ENTITY_BOX_MIN_WIDTH, maxInPortNameW + 50);
-        const entityInX = 40;
-        const entityInY = 40;
 
-        const entityInPorts = [];
-        for (let i = 0; i < inputPorts.length; i++) {
-            entityInPorts.push({
-                name: inputPorts[i].name,
-                x: entityInX + entityInW,
-                y: entityInY + HEADER_HEIGHT + ENTITY_PADDING + i * PORT_SPACING + PORT_SPACING / 2
+        elkNodes.push({
+            id: '__entity_in__',
+            width: entityInW,
+            height: entityInH,
+            layoutOptions: {
+                'elk.layered.layerConstraint': 'FIRST',
+                'elk.portConstraints': 'FIXED_ORDER'
+            },
+            ports: inputPorts.map((p, i) => ({
+                id: '__entity_in___' + p.name + '_out',
+                width: 1,
+                height: 1,
+                layoutOptions: {
+                    'elk.port.side': 'EAST',
+                    'elk.port.index': String(i)
+                }
+            }))
+        });
+
+        // Instance boxes → ELK nodes
+        for (const inst of data.instances) {
+            const inConns = inst.connections.filter(c => c.direction === 'in' || !c.direction);
+            const outConns = inst.connections.filter(c => c.direction === 'out');
+            const size = computeBoxSize(inst.name, inst.entity_type, inConns.map(c => c.port), outConns.map(c => c.port));
+
+            const ports = [];
+            for (let j = 0; j < inConns.length; j++) {
+                ports.push({
+                    id: inst.name + '_' + inConns[j].port + '_in',
+                    width: 1,
+                    height: 1,
+                    layoutOptions: {
+                        'elk.port.side': 'WEST',
+                        'elk.port.index': String(j)
+                    }
+                });
+            }
+            for (let j = 0; j < outConns.length; j++) {
+                ports.push({
+                    id: inst.name + '_' + outConns[j].port + '_out',
+                    width: 1,
+                    height: 1,
+                    layoutOptions: {
+                        'elk.port.side': 'EAST',
+                        'elk.port.index': String(j)
+                    }
+                });
+            }
+
+            elkNodes.push({
+                id: inst.name,
+                width: size.w,
+                height: size.h,
+                ports,
+                layoutOptions: {
+                    'elk.portConstraints': 'FIXED_ORDER'
+                }
             });
         }
 
-        layoutElements.push({
-            x: entityInX, y: entityInY, w: entityInW, h: entityInH,
-            name: data.entity_name, type: 'entity_in',
-            inputPorts: [], outputPorts: entityInPorts,
-            line: data.entityLine
-        });
-
-        // ── Step 4: Place instance boxes by rank ──
-        const rankBuckets = [];
-        for (let r = 0; r <= maxRank; r++) { rankBuckets.push([]); }
-        for (const inst of data.instances) {
-            const r = rank.get(inst.name) || 0;
-            rankBuckets[r].push(inst);
-        }
-
-        // Compute X offsets for each rank column and track column widths
-        const columnX = [];
-        const columnMaxW = [];
-        let currentX = entityInX + entityInW + COLUMN_GAP;
-        for (let r = 0; r <= maxRank; r++) {
-            columnX.push(currentX);
-            // Find max width in this column
-            let maxW = INSTANCE_BOX_MIN_WIDTH;
-            for (const inst of rankBuckets[r]) {
-                const inPorts = inst.connections.filter(c => c.direction === 'in' || !c.direction).map(c => c.port);
-                const outPorts = inst.connections.filter(c => c.direction === 'out').map(c => c.port);
-                const size = computeBoxSize(inst.name, inst.entity_type, inPorts, outPorts);
-                maxW = Math.max(maxW, size.w);
-            }
-            columnMaxW.push(maxW);
-            currentX += maxW + COLUMN_GAP;
-        }
-
-        // Place instances within each column
-        for (let r = 0; r <= maxRank; r++) {
-            let cy = entityInY;
-            for (const inst of rankBuckets[r]) {
-                const inConns = inst.connections.filter(c => c.direction === 'in' || !c.direction);
-                const outConns = inst.connections.filter(c => c.direction === 'out');
-                const inPortNames = inConns.map(c => c.port);
-                const outPortNames = outConns.map(c => c.port);
-                const size = computeBoxSize(inst.name, inst.entity_type, inPortNames, outPortNames);
-
-                const ix = columnX[r];
-                const iy = cy;
-
-                const instInPorts = [];
-                for (let j = 0; j < inConns.length; j++) {
-                    instInPorts.push({
-                        name: inConns[j].port,
-                        x: ix,
-                        y: iy + HEADER_HEIGHT + INSTANCE_PADDING + j * PORT_SPACING + PORT_SPACING / 2
-                    });
-                }
-
-                const instOutPorts = [];
-                for (let j = 0; j < outConns.length; j++) {
-                    instOutPorts.push({
-                        name: outConns[j].port,
-                        x: ix + size.w,
-                        y: iy + HEADER_HEIGHT + INSTANCE_PADDING + j * PORT_SPACING + PORT_SPACING / 2
-                    });
-                }
-
-                layoutElements.push({
-                    x: ix, y: iy, w: size.w, h: size.h,
-                    name: inst.name, type: 'instance',
-                    entityType: inst.entity_type,
-                    inputPorts: instInPorts, outputPorts: instOutPorts,
-                    line: inst.line
-                });
-
-                cy += size.h + ROW_GAP;
-            }
-        }
-
-        // Entity output ports bar (right column)
+        // Entity output port bar → ELK node with input ports (receives from design)
         const entityOutPortCount = Math.max(outputPorts.length, 1);
         const entityOutH = HEADER_HEIGHT + ENTITY_PADDING * 2 + entityOutPortCount * PORT_SPACING;
         let maxOutPortNameW = 0;
         for (const p of outputPorts) { maxOutPortNameW = Math.max(maxOutPortNameW, measureTextWidth(p.name, FONT_SIZE)); }
         const entityOutW = Math.max(ENTITY_BOX_MIN_WIDTH, maxOutPortNameW + 50);
-        const entityOutX = currentX;
-        const entityOutY = entityInY;
 
-        const entityOutPorts = [];
-        for (let i = 0; i < outputPorts.length; i++) {
-            entityOutPorts.push({
-                name: outputPorts[i].name,
-                x: entityOutX,
-                y: entityOutY + HEADER_HEIGHT + ENTITY_PADDING + i * PORT_SPACING + PORT_SPACING / 2
-            });
-        }
-
-        layoutElements.push({
-            x: entityOutX, y: entityOutY, w: entityOutW, h: entityOutH,
-            name: data.entity_name, type: 'entity_out',
-            inputPorts: entityOutPorts, outputPorts: [],
-            line: data.entityLine
+        elkNodes.push({
+            id: '__entity_out__',
+            width: entityOutW,
+            height: entityOutH,
+            layoutOptions: {
+                'elk.layered.layerConstraint': 'LAST',
+                'elk.portConstraints': 'FIXED_ORDER'
+            },
+            ports: outputPorts.map((p, i) => ({
+                id: '__entity_out___' + p.name + '_in',
+                width: 1,
+                height: 1,
+                layoutOptions: {
+                    'elk.port.side': 'WEST',
+                    'elk.port.index': String(i)
+                }
+            }))
         });
 
-        // ── Step 5: Compute routing channels (gaps between columns) ──
-        // Each channel is a vertical corridor between two columns where wires can route
-        const routingChannels = [];
-
-        // Channel between entity_in right edge and first instance column left edge
-        routingChannels.push({
-            left: entityInX + entityInW,
-            right: columnX.length > 0 ? columnX[0] : entityOutX,
-            center: entityInX + entityInW + COLUMN_GAP / 2
-        });
-
-        // Channels between instance columns
-        for (let r = 0; r < maxRank; r++) {
-            const rightEdge = columnX[r] + columnMaxW[r];
-            const nextLeft = columnX[r + 1];
-            routingChannels.push({
-                left: rightEdge,
-                right: nextLeft,
-                center: (rightEdge + nextLeft) / 2
-            });
+        // Build set of all valid port IDs for edge validation
+        const validPortIds = new Set();
+        for (const node of elkNodes) {
+            for (const port of (node.ports || [])) {
+                validPortIds.add(port.id);
+            }
         }
 
-        // Channel between last instance column right edge and entity_out left edge
-        if (columnX.length > 0) {
-            const lastRight = columnX[maxRank] + columnMaxW[maxRank];
-            routingChannels.push({
-                left: lastRight,
-                right: entityOutX,
-                center: (lastRight + entityOutX) / 2
-            });
-        }
-
-        // ── Step 6: Route wires ──
-        routeWires(data, routingChannels);
-    }
-
-    function routeWires(data, routingChannels) {
-        layoutWires = [];
-        if (!data.nets || data.nets.length === 0) { return; }
-
-        // Build lookup: elementName → layoutElement
-        const elemByName = new Map();
-        for (const el of layoutElements) {
-            if (el.type === 'entity_in') { elemByName.set('__entity_in__', el); }
-            else if (el.type === 'entity_out') { elemByName.set('__entity_out__', el); }
-            else { elemByName.set(el.name, el); }
-        }
-
-        // For channel allocation, track vertical segments per channel index
-        const channelUsage = new Map(); // channelIndex → nextOffset
-
-        for (const net of data.nets) {
+        // Nets → ELK edges (skip edges referencing non-existent ports)
+        let edgeIdx = 0;
+        for (const net of (data.nets || [])) {
             const driver = net.driver;
-            const srcPort = findPortPosition(elemByName, driver, 'out');
-            if (!srcPort) { continue; }
+            let sourcePortId;
+            if (driver.type === 'entity_port') {
+                sourcePortId = '__entity_in___' + driver.port + '_out';
+            } else {
+                sourcePortId = driver.name + '_' + driver.port + '_out';
+            }
+
+            if (!validPortIds.has(sourcePortId)) { continue; }
 
             for (const sink of net.sinks) {
-                const dstPort = findPortPosition(elemByName, sink, 'in');
-                if (!dstPort) { continue; }
+                let targetPortId;
+                if (sink.type === 'entity_port') {
+                    targetPortId = '__entity_out___' + sink.port + '_in';
+                } else {
+                    targetPortId = sink.name + '_' + sink.port + '_in';
+                }
 
-                const segments = routeManhattan(srcPort, dstPort, routingChannels, channelUsage);
+                if (!validPortIds.has(targetPortId)) { continue; }
 
-                layoutWires.push({
-                    from: srcPort,
-                    to: dstPort,
-                    segments,
-                    width: net.width,
-                    netName: net.name
+                const edgeId = 'e' + edgeIdx++;
+                netWidthMap.set(edgeId, net.width);
+                netNameMap.set(edgeId, net.name);
+                elkEdges.push({
+                    id: edgeId,
+                    sources: [sourcePortId],
+                    targets: [targetPortId]
                 });
             }
         }
-    }
 
-    function findPortPosition(elemByName, endpoint, side) {
-        if (endpoint.type === 'entity_port') {
-            // Input ports are on entity_in box (output side), output ports on entity_out box (input side)
-            const elIn = elemByName.get('__entity_in__');
-            const elOut = elemByName.get('__entity_out__');
-            if (side === 'out' && elIn) {
-                // Entity input port drives into the design → find on entity_in's output ports
-                const p = elIn.outputPorts.find(pp => pp.name === endpoint.port);
-                if (p) { return { x: p.x + PORT_STUB_LEN, y: p.y }; }
+        const graph = {
+            id: 'root',
+            layoutOptions: {
+                'elk.algorithm': 'layered',
+                'elk.direction': 'RIGHT',
+                'elk.layered.spacing.nodeNodeBetweenLayers': String(COLUMN_GAP),
+                'elk.spacing.nodeNode': String(ROW_GAP),
+                'elk.edgeRouting': 'ORTHOGONAL',
+                'elk.layered.crossingMinimization.strategy': 'LAYER_SWEEP',
+                'elk.layered.nodePlacement.strategy': 'BRANDES_KOEPF',
+                'elk.spacing.portPort': String(PORT_SPACING),
+                'elk.layered.spacing.edgeEdgeBetweenLayers': '15',
+                'elk.layered.spacing.edgeNodeBetweenLayers': '15'
+            },
+            children: elkNodes,
+            edges: elkEdges
+        };
+
+        // Run ELK layout
+        // @ts-ignore — ELK loaded via <script> tag
+        const elk = new ELK();
+        let result;
+        try {
+            result = await elk.layout(graph);
+        } catch (err) {
+            console.error('ELK layout failed:', err);
+            return;
+        }
+
+        // ── Extract results ──
+
+        // Build port position maps per child node
+        for (const child of (result.children || [])) {
+            const portMap = new Map(); // portId → {x, y} in absolute coords
+            for (const port of (child.ports || [])) {
+                portMap.set(port.id, {
+                    x: child.x + port.x,
+                    y: child.y + port.y
+                });
             }
-            if (side === 'in' && elOut) {
-                // Entity output port receives from the design → find on entity_out's input ports
-                const p = elOut.inputPorts.find(pp => pp.name === endpoint.port);
-                if (p) { return { x: p.x - PORT_STUB_LEN, y: p.y }; }
+
+            if (child.id === '__entity_in__') {
+                const outPorts = [];
+                for (const p of inputPorts) {
+                    const pos = portMap.get('__entity_in___' + p.name + '_out');
+                    if (pos) {
+                        outPorts.push({ name: p.name, x: pos.x, y: pos.y });
+                    }
+                }
+                layoutElements.push({
+                    x: child.x, y: child.y, w: child.width, h: child.height,
+                    name: data.entity_name, type: 'entity_in',
+                    inputPorts: [], outputPorts: outPorts,
+                    line: data.entityLine
+                });
+            } else if (child.id === '__entity_out__') {
+                const inPorts = [];
+                for (const p of outputPorts) {
+                    const pos = portMap.get('__entity_out___' + p.name + '_in');
+                    if (pos) {
+                        inPorts.push({ name: p.name, x: pos.x, y: pos.y });
+                    }
+                }
+                layoutElements.push({
+                    x: child.x, y: child.y, w: child.width, h: child.height,
+                    name: data.entity_name, type: 'entity_out',
+                    inputPorts: inPorts, outputPorts: [],
+                    line: data.entityLine
+                });
+            } else {
+                // Instance node
+                const inst = data.instances.find(i => i.name === child.id);
+                if (!inst) { continue; }
+                const inConns = inst.connections.filter(c => c.direction === 'in' || !c.direction);
+                const outConns = inst.connections.filter(c => c.direction === 'out');
+
+                const instInPorts = [];
+                for (const c of inConns) {
+                    const pos = portMap.get(inst.name + '_' + c.port + '_in');
+                    if (pos) {
+                        instInPorts.push({ name: c.port, x: pos.x, y: pos.y });
+                    }
+                }
+                const instOutPorts = [];
+                for (const c of outConns) {
+                    const pos = portMap.get(inst.name + '_' + c.port + '_out');
+                    if (pos) {
+                        instOutPorts.push({ name: c.port, x: pos.x, y: pos.y });
+                    }
+                }
+
+                layoutElements.push({
+                    x: child.x, y: child.y, w: child.width, h: child.height,
+                    name: inst.name, type: 'instance',
+                    entityType: inst.entity_type,
+                    inputPorts: instInPorts, outputPorts: instOutPorts,
+                    line: inst.line
+                });
             }
-            return null;
         }
 
-        // Instance port
-        const el = elemByName.get(endpoint.name);
-        if (!el) { return null; }
-        if (side === 'out') {
-            const p = el.outputPorts.find(pp => pp.name === endpoint.port);
-            if (p) { return { x: p.x + PORT_STUB_LEN, y: p.y }; }
-        }
-        if (side === 'in') {
-            const p = el.inputPorts.find(pp => pp.name === endpoint.port);
-            if (p) { return { x: p.x - PORT_STUB_LEN, y: p.y }; }
-        }
-        return null;
-    }
+        // Extract wire routing from ELK edges
+        for (const edge of (result.edges || [])) {
+            const segments = [];
+            let fromPt = null;
+            let toPt = null;
 
-    function routeManhattan(src, dst, routingChannels, channelUsage) {
-        // 3-segment Manhattan routing: horizontal → vertical → horizontal
-        // The vertical segment is placed in a routing channel (gap between columns)
-        // to avoid cutting through instance boxes.
-        const segments = [];
+            for (const section of (edge.sections || [])) {
+                const pts = [];
+                pts.push(section.startPoint);
+                if (section.bendPoints) {
+                    for (const bp of section.bendPoints) { pts.push(bp); }
+                }
+                pts.push(section.endPoint);
 
-        if (Math.abs(src.y - dst.y) < 2 && src.x < dst.x) {
-            // Straight horizontal line (same Y, left-to-right)
-            segments.push({ x1: src.x, y1: src.y, x2: dst.x, y2: dst.y });
-            return segments;
-        }
+                if (!fromPt) { fromPt = { x: pts[0].x, y: pts[0].y }; }
+                toPt = { x: pts[pts.length - 1].x, y: pts[pts.length - 1].y };
 
-        // Find the best routing channel for the vertical segment.
-        // Pick the channel whose center is between src.x and dst.x,
-        // or the closest one if none is strictly between them.
-        const minX = Math.min(src.x, dst.x);
-        const maxX = Math.max(src.x, dst.x);
-        const idealMidX = (src.x + dst.x) / 2;
-
-        let bestChannel = -1;
-        let bestDist = Infinity;
-
-        for (let i = 0; i < routingChannels.length; i++) {
-            const ch = routingChannels[i];
-            // Prefer channels that are between src and dst
-            if (ch.center >= minX && ch.center <= maxX) {
-                const dist = Math.abs(ch.center - idealMidX);
-                if (dist < bestDist) {
-                    bestDist = dist;
-                    bestChannel = i;
+                for (let i = 0; i < pts.length - 1; i++) {
+                    segments.push({
+                        x1: pts[i].x, y1: pts[i].y,
+                        x2: pts[i + 1].x, y2: pts[i + 1].y
+                    });
                 }
             }
-        }
 
-        // Fallback: pick closest channel overall
-        if (bestChannel < 0) {
-            for (let i = 0; i < routingChannels.length; i++) {
-                const dist = Math.abs(routingChannels[i].center - idealMidX);
-                if (dist < bestDist) {
-                    bestDist = dist;
-                    bestChannel = i;
-                }
+            if (fromPt && toPt) {
+                layoutWires.push({
+                    from: fromPt,
+                    to: toPt,
+                    segments,
+                    width: netWidthMap.get(edge.id) || 1,
+                    netName: netNameMap.get(edge.id) || ''
+                });
             }
         }
-
-        // Compute the actual X for the vertical segment, with offset for parallel wires
-        let midX;
-        if (bestChannel >= 0) {
-            const ch = routingChannels[bestChannel];
-            const offset = channelUsage.get(bestChannel) || 0;
-            channelUsage.set(bestChannel, offset + 1);
-            // Spread wires within the channel, centered on ch.center
-            const channelWidth = ch.right - ch.left;
-            const maxWires = Math.max(1, Math.floor(channelWidth / WIRE_CHANNEL_SPACING));
-            const startX = ch.center - ((Math.min(maxWires, offset + 1) - 1) * WIRE_CHANNEL_SPACING) / 2;
-            midX = startX + (offset % maxWires) * WIRE_CHANNEL_SPACING;
-        } else {
-            // No channels available (shouldn't happen), fallback to midpoint
-            midX = idealMidX;
-        }
-
-        // Horizontal from src
-        segments.push({ x1: src.x, y1: src.y, x2: midX, y2: src.y });
-        // Vertical
-        segments.push({ x1: midX, y1: src.y, x2: midX, y2: dst.y });
-        // Horizontal to dst
-        segments.push({ x1: midX, y1: dst.y, x2: dst.x, y2: dst.y });
-
-        return segments;
     }
 
     // ────────────────────── RENDERING ──────────────────────
@@ -925,8 +836,7 @@
             const portCount = schematicData.ports ? schematicData.ports.length : 0;
             statsEl.textContent = `${portCount} ports, ${instCount} instances, ${netCount} nets`;
 
-            computeLayout();
-            zoomToFit();
+            computeLayout().then(() => zoomToFit());
         }
     });
 
