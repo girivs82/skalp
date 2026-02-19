@@ -481,8 +481,8 @@ impl DebugServer {
                 .add_value(name, 0, vec![0u8; num_bytes]);
         }
 
-        // Build source map (stub — will be enhanced later)
-        self.source_map.clear();
+        // Build source map from MIR: line → signal name
+        self.build_source_map(top);
 
         eprintln!(
             "[skalp-debug] Initialized: {} inputs, {} outputs, {} registers, {} signals total",
@@ -492,15 +492,225 @@ impl DebugServer {
             self.signal_widths.len()
         );
 
-        // Emit initialized event with display names
+        // Emit initialized event with display names + source map
         let all_signals: Vec<String> = self.signal_widths.keys().cloned().collect();
+        let source_map_entries: Vec<&SourceMapping> = self
+            .source_map
+            .values()
+            .flat_map(|v| v.iter())
+            .collect();
         self.emit(&serde_json::json!({
             "event": "initialized",
             "signals": all_signals,
             "inputs": self.input_names,
             "outputs": self.output_names,
             "registers": self.register_names,
+            "source_map": source_map_entries,
         }));
+    }
+
+    // ------------------------------------------------------------------
+    // Source map construction
+    // ------------------------------------------------------------------
+
+    /// Build source map from MIR module + source text scanning.
+    ///
+    /// Two-phase approach:
+    /// 1. Collect all known signal/port names from the MIR module
+    /// 2. Scan the source file for declaration and assignment patterns
+    ///    referencing those names
+    ///
+    /// This is more robust than relying on MIR spans (which are mostly None).
+    fn build_source_map(&mut self, module: &skalp_mir::Module) {
+        self.source_map.clear();
+
+        let source_path = match self.source_file.as_ref() {
+            Some(p) => p.clone(),
+            None => return,
+        };
+        let file_key = source_path.to_string_lossy().to_string();
+
+        // Phase 1: collect known signal/port names
+        let mut known_names: std::collections::BTreeSet<String> =
+            std::collections::BTreeSet::new();
+        for sig in &module.signals {
+            known_names.insert(sig.name.clone());
+        }
+        for port in &module.ports {
+            known_names.insert(port.name.clone());
+        }
+
+        // Phase 2: scan source file for patterns
+        let source = match std::fs::read_to_string(&source_path) {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+
+        let mut mappings: Vec<SourceMapping> = Vec::new();
+
+        for (idx, line) in source.lines().enumerate() {
+            let line_num = idx + 1; // 1-indexed
+            let trimmed = line.trim();
+
+            // Skip comments and empty lines
+            if trimmed.is_empty() || trimmed.starts_with("//") {
+                continue;
+            }
+
+            // Port declarations: `in <name>:` or `out <name>:`
+            if let Some(name) = Self::extract_port_decl(trimmed) {
+                if known_names.contains(&name) {
+                    mappings.push(SourceMapping {
+                        line: line_num,
+                        signal: name,
+                    });
+                    continue;
+                }
+            }
+
+            // Signal declarations: `signal <name>:` or `signal <name> =`
+            if let Some(name) = Self::extract_signal_decl(trimmed) {
+                if known_names.contains(&name) {
+                    mappings.push(SourceMapping {
+                        line: line_num,
+                        signal: name,
+                    });
+                    continue;
+                }
+            }
+
+            // Assignment: `<name> =` or `<name>[...] =` where name is a known signal
+            if let Some(name) = Self::extract_assignment_target(trimmed) {
+                if known_names.contains(&name) {
+                    mappings.push(SourceMapping {
+                        line: line_num,
+                        signal: name,
+                    });
+                    continue;
+                }
+            }
+        }
+
+        // Dedup: keep first signal per line (declarations take priority via ordering)
+        mappings.dedup_by_key(|m| m.line);
+
+        if !mappings.is_empty() {
+            eprintln!(
+                "[skalp-debug] Source map: {} line→signal entries",
+                mappings.len()
+            );
+        }
+
+        self.source_map.insert(file_key, mappings);
+    }
+
+    /// Extract port name from `in <name>:` or `out <name>:` patterns.
+    fn extract_port_decl(line: &str) -> Option<String> {
+        let rest = if line.starts_with("in ") {
+            &line[3..]
+        } else if line.starts_with("out ") {
+            &line[4..]
+        } else {
+            return None;
+        };
+        let rest = rest.trim_start();
+        // Take identifier chars until `:` or whitespace
+        let name: String = rest
+            .chars()
+            .take_while(|c| c.is_alphanumeric() || *c == '_')
+            .collect();
+        if name.is_empty() {
+            None
+        } else {
+            Some(name)
+        }
+    }
+
+    /// Extract signal name from `signal <name>:` or `signal <name> =` patterns.
+    fn extract_signal_decl(line: &str) -> Option<String> {
+        if !line.starts_with("signal ") {
+            return None;
+        }
+        let rest = line[7..].trim_start();
+        let name: String = rest
+            .chars()
+            .take_while(|c| c.is_alphanumeric() || *c == '_')
+            .collect();
+        if name.is_empty() {
+            None
+        } else {
+            Some(name)
+        }
+    }
+
+    /// Extract assignment target from `<name> =` or `<name>[...] =` patterns.
+    /// Returns None for comparisons (`==`, `!=`, `<=`, `>=`).
+    fn extract_assignment_target(line: &str) -> Option<String> {
+        // Must start with an identifier
+        let name: String = line
+            .chars()
+            .take_while(|c| c.is_alphanumeric() || *c == '_')
+            .collect();
+        if name.is_empty() {
+            return None;
+        }
+        // Skip keywords that aren't signals
+        if matches!(
+            name.as_str(),
+            "if" | "else"
+                | "match"
+                | "for"
+                | "while"
+                | "return"
+                | "let"
+                | "signal"
+                | "in"
+                | "out"
+                | "entity"
+                | "impl"
+                | "fn"
+                | "on"
+                | "import"
+                | "use"
+                | "const"
+                | "type"
+                | "enum"
+                | "struct"
+        ) {
+            return None;
+        }
+
+        let rest = line[name.len()..].trim_start();
+
+        // Handle indexed: name[...] =
+        let rest = if rest.starts_with('[') {
+            // Skip to matching ]
+            let mut depth = 0;
+            let mut skip = 0;
+            for ch in rest.chars() {
+                skip += ch.len_utf8();
+                match ch {
+                    '[' => depth += 1,
+                    ']' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            rest[skip..].trim_start()
+        } else {
+            rest
+        };
+
+        // Must have `=` but not `==`
+        if rest.starts_with('=') && !rest.starts_with("==") {
+            Some(name)
+        } else {
+            None
+        }
     }
 
     /// Execute one full clock cycle: clk=0→step→clk=1→step, returning the

@@ -58,6 +58,8 @@ export class SkalpDebugSession extends DebugSession {
     private extensionPath: string = '';
     // Source map: line number → signal name (for breakpoint resolution)
     private sourceMap: Map<number, string> = new Map();
+    // Active gutter breakpoints: line → server breakpoint ID (for removal)
+    private activeBreakpointIds: Map<number, number> = new Map();
 
     public constructor() {
         super();
@@ -137,10 +139,19 @@ export class SkalpDebugSession extends DebugSession {
             // Wait for initialized event
             const initEvent = await this.server.waitForEvent('initialized', 60000);
 
+            // Populate source map from initialized event (before VSCode sends setBreakPointsRequest)
+            if (initEvent.source_map) {
+                this.sourceMap.clear();
+                for (const m of initEvent.source_map) {
+                    this.sourceMap.set(m.line, m.signal);
+                }
+            }
+
             this.sendEvent(new OutputEvent(
                 `Design loaded: ${initEvent.inputs?.length || 0} inputs, ` +
                 `${initEvent.outputs?.length || 0} outputs, ` +
-                `${initEvent.signals?.length || 0} signals\n`,
+                `${initEvent.signals?.length || 0} signals, ` +
+                `${this.sourceMap.size} breakpoint locations\n`,
                 'console'
             ));
         } catch (e: any) {
@@ -321,9 +332,35 @@ export class SkalpDebugSession extends DebugSession {
         args: DebugProtocol.SetBreakpointsArguments
     ): Promise<void> {
         const breakpoints: Breakpoint[] = [];
+        const requestedLines = new Set<number>(
+            (args.breakpoints || []).map(bp => bp.line)
+        );
+
+        // Remove breakpoints that are no longer in the active set
+        if (this.server) {
+            for (const [line, bpId] of this.activeBreakpointIds) {
+                if (!requestedLines.has(line)) {
+                    this.server.sendCommand({
+                        cmd: 'remove_breakpoint',
+                        id: bpId,
+                    });
+                }
+            }
+        }
+
+        // Track which lines are now active
+        const newActiveIds = new Map<number, number>();
 
         if (this.server && args.breakpoints) {
             for (const bp of args.breakpoints) {
+                // If this line already has an active breakpoint, keep it
+                const existingId = this.activeBreakpointIds.get(bp.line);
+                if (existingId !== undefined && requestedLines.has(bp.line)) {
+                    newActiveIds.set(bp.line, existingId);
+                    breakpoints.push(new Breakpoint(true, bp.line));
+                    continue;
+                }
+
                 // Try to resolve line → signal via source map
                 const signalName = this.sourceMap.get(bp.line);
 
@@ -337,6 +374,8 @@ export class SkalpDebugSession extends DebugSession {
 
                     try {
                         const event = await this.server.waitForEvent('breakpoint_set', 3000);
+                        const bpId = event.id as number;
+                        newActiveIds.set(bp.line, bpId);
                         breakpoints.push(new Breakpoint(true, bp.line));
                     } catch {
                         breakpoints.push(new Breakpoint(false, bp.line));
@@ -349,6 +388,7 @@ export class SkalpDebugSession extends DebugSession {
             }
         }
 
+        this.activeBreakpointIds = newActiveIds;
         response.body = { breakpoints };
         this.sendResponse(response);
     }
