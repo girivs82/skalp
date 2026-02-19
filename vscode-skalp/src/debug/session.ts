@@ -62,6 +62,8 @@ export class SkalpDebugSession extends DebugSession {
     private signalToLine: Map<string, number> = new Map();
     // Active gutter breakpoints: line → server breakpoint ID (for removal)
     private activeBreakpointIds: Map<number, number> = new Map();
+    // Reverse: server breakpoint ID → line (for highlight on hit)
+    private bpIdToLine: Map<number, number> = new Map();
     // Line of the entity declaration (neutral highlight anchor)
     private entityLine: number = 1;
     // Current highlight line (updated on breakpoint hit)
@@ -412,6 +414,11 @@ export class SkalpDebugSession extends DebugSession {
         }
 
         this.activeBreakpointIds = newActiveIds;
+        // Build reverse map: BP ID → line (for highlight on hit)
+        this.bpIdToLine.clear();
+        for (const [line, bpId] of newActiveIds) {
+            this.bpIdToLine.set(bpId, line);
+        }
         response.body = { breakpoints };
         this.sendResponse(response);
     }
@@ -518,11 +525,17 @@ export class SkalpDebugSession extends DebugSession {
                 // Map server reasons to DAP stop reasons
                 if (reason === 'max_cycles') { reason = 'step'; }
 
-                // On breakpoint hit, highlight the triggering signal's line
-                if (event.hit?.signal) {
-                    const line = this.signalToLine.get(event.hit.signal);
+                // On breakpoint hit, highlight the breakpoint line (not the declaration)
+                if (event.hit?.bp_id !== undefined) {
+                    const line = this.bpIdToLine.get(event.hit.bp_id);
                     if (line !== undefined) {
                         this.highlightLine = line;
+                    } else if (event.hit?.signal) {
+                        // Fallback for console-set breakpoints: use signal declaration
+                        const sigLine = this.signalToLine.get(event.hit.signal);
+                        if (sigLine !== undefined) {
+                            this.highlightLine = sigLine;
+                        }
                     }
                 } else {
                     // Step/pause: neutral anchor at entity declaration

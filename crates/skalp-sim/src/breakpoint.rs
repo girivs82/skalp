@@ -24,6 +24,8 @@ pub enum BreakpointAction {
 /// Result of checking a breakpoint condition
 #[derive(Debug, Clone)]
 pub struct BreakpointHit {
+    /// Breakpoint ID that triggered
+    pub id: u32,
     /// Name of the breakpoint (signal name or custom name)
     pub name: String,
     /// Signal that triggered the breakpoint
@@ -365,6 +367,7 @@ impl BreakpointManager {
                         };
 
                         hits.push(BreakpointHit {
+                            id: bp.id,
                             name: bp.name.clone(),
                             signal_name: signal_name.clone(),
                             signal_value: current_value.clone(),

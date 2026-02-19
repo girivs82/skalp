@@ -225,6 +225,7 @@ impl DebugServer {
                 .cloned()
                 .unwrap_or_else(|| hit.signal_name.clone());
             event["hit"] = serde_json::json!({
+                "bp_id": hit.id,
                 "name": hit.name,
                 "signal": display_signal,
                 "value": Self::format_value(&hit.signal_value),
