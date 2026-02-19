@@ -1,7 +1,7 @@
 import * as vscode from 'vscode';
 import * as cp from 'child_process';
 import * as path from 'path';
-import * as fs from 'fs';
+import { resolveBinaryPath } from '../extension';
 
 export interface CliResult {
     exitCode: number;
@@ -27,29 +27,8 @@ export class CliRunner {
         }
         const config = vscode.workspace.getConfiguration('skalp');
         const configured = config.get<string>('cliPath') || 'skalp';
-
-        // If user set a custom path, use it directly
-        if (configured !== 'skalp') {
-            this.resolvedCliPath = configured;
-            return configured;
-        }
-
-        // Auto-detect: look for built binary relative to extension (repo root)
-        const repoRoot = path.resolve(this.extensionPath, '..');
-        const releaseBin = path.join(repoRoot, 'target', 'release', 'skalp');
-        const debugBin = path.join(repoRoot, 'target', 'debug', 'skalp');
-        if (fs.existsSync(releaseBin)) {
-            this.resolvedCliPath = releaseBin;
-            return releaseBin;
-        }
-        if (fs.existsSync(debugBin)) {
-            this.resolvedCliPath = debugBin;
-            return debugBin;
-        }
-
-        // Fall back to PATH lookup
-        this.resolvedCliPath = configured;
-        return configured;
+        this.resolvedCliPath = resolveBinaryPath('skalp', configured, this.extensionPath);
+        return this.resolvedCliPath;
     }
 
     private getWorkspaceDir(): string {

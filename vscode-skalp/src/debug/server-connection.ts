@@ -3,9 +3,8 @@
  */
 
 import * as cp from 'child_process';
-import * as path from 'path';
-import * as fs from 'fs';
 import { EventEmitter } from 'events';
+import { resolveBinaryPath } from '../extension';
 
 export interface DebugServerEvent {
     event: string;
@@ -126,15 +125,6 @@ export class SkalpDebugServer extends EventEmitter {
     }
 
     private getDebugBinaryPath(): string {
-        // Auto-detect: look for built binary relative to extension
-        const repoRoot = path.resolve(this.extensionPath, '..');
-        const releaseBin = path.join(repoRoot, 'target', 'release', 'skalp-debug');
-        const debugBin = path.join(repoRoot, 'target', 'debug', 'skalp-debug');
-
-        if (fs.existsSync(releaseBin)) { return releaseBin; }
-        if (fs.existsSync(debugBin)) { return debugBin; }
-
-        // Fall back to PATH
-        return 'skalp-debug';
+        return resolveBinaryPath('skalp-debug', 'skalp-debug', this.extensionPath);
     }
 }
