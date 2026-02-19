@@ -89,7 +89,8 @@ export class SkalpDebugSession extends DebugSession {
         response.body.supportsBreakpointLocationsRequest = false;
 
         this.sendResponse(response);
-        this.sendEvent(new InitializedEvent());
+        // NOTE: InitializedEvent is sent in launchRequest AFTER the source map
+        // is populated, so that setBreakpoints sees a populated sourceMap.
     }
 
     // -----------------------------------------------------------------
@@ -160,6 +161,11 @@ export class SkalpDebugSession extends DebugSession {
         }
 
         this.sendResponse(response);
+
+        // Signal VSCode that we're ready to accept breakpoints.
+        // Sent here (after source map is populated) so setBreakPointsRequest
+        // can resolve line→signal mappings.
+        this.sendEvent(new InitializedEvent());
 
         // If stopOnEntry, emit a stopped event so the debugger pauses
         if (args.stopOnEntry !== false) {
