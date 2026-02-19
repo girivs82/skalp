@@ -32,6 +32,8 @@
         "onCommand:skalp.showWaveform",
         "onCommand:skalp.showSchematic",
         "onCommand:skalp.showExpressionViewer",
+        "onCommand:skalp.newProject",
+        "onCommand:skalp.genTestbench",
         "onView:skalpEc",
         "onTaskType:skalp",
         "onDebugResolve:skalp"
@@ -124,6 +126,18 @@
                 "title": "View Waveform",
                 "category": "SKALP",
                 "icon": "$(graph-line)"
+            },
+            {
+                "command": "skalp.newProject",
+                "title": "New Project",
+                "category": "SKALP",
+                "icon": "$(file-directory-create)"
+            },
+            {
+                "command": "skalp.genTestbench",
+                "title": "Generate Testbench",
+                "category": "SKALP",
+                "icon": "$(beaker)"
             }
         ],
         "taskDefinitions": [
@@ -242,6 +256,11 @@
                     "when": "resourceExtname == .sk || resourceExtname == .skalp",
                     "command": "skalp.format",
                     "group": "skalp@5"
+                },
+                {
+                    "when": "resourceExtname == .sk || resourceExtname == .skalp",
+                    "command": "skalp.genTestbench",
+                    "group": "skalp@6"
                 }
             ],
             "editor/context": [
@@ -279,6 +298,11 @@
                     "when": "resourceLangId == skalp",
                     "command": "skalp.showExpressionViewer",
                     "group": "skalp@7"
+                },
+                {
+                    "when": "resourceLangId == skalp",
+                    "command": "skalp.genTestbench",
+                    "group": "skalp@8"
                 }
             ],
             "editor/title": [

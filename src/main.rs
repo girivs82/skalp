@@ -914,18 +914,45 @@ fn create_new_project(name: &str) -> Result<()> {
     fs::create_dir_all(format!("{}/tests", name))?;
     fs::create_dir_all(format!("{}/examples", name))?;
 
-    // Create Cargo.toml
-    let cargo_toml = format!(
-        r#"[package]
-name = "{}"
+    // Resolve the skalp crates directory from the binary's own location
+    // Binary is at <hls_root>/target/{debug,release}/skalp
+    let crates_dir = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent()?.parent()?.parent().map(|r| r.join("crates")))
+        .filter(|p| p.join("skalp-testing").exists())
+        .map(|p| p.to_string_lossy().to_string());
+
+    // Create Cargo.toml — use path deps if local crates found, otherwise leave deps empty
+    let cargo_toml = if let Some(crates) = &crates_dir {
+        format!(
+            r#"[package]
+name = "{name}"
 version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-skalp-stdlib = {{ git = "https://github.com/skalp-lang/skalp" }}
-"#,
-        name
-    );
+
+[dev-dependencies]
+tokio = {{ version = "1", features = ["full", "test-util"] }}
+skalp-testing = {{ path = "{crates}/skalp-testing" }}
+"#
+        )
+    } else {
+        format!(
+            r#"[package]
+name = "{name}"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+
+[dev-dependencies]
+tokio = {{ version = "1", features = ["full", "test-util"] }}
+# TODO: set path to your skalp-testing crate
+# skalp-testing = {{ path = "/path/to/hls/crates/skalp-testing" }}
+"#
+        )
+    };
     fs::write(format!("{}/Cargo.toml", name), cargo_toml)?;
 
     // Create main.sk with a simple example

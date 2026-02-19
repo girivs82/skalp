@@ -31,6 +31,13 @@ export class CliRunner {
         return this.resolvedCliPath;
     }
 
+    getResolvedCliPath(): string | undefined {
+        if (!this.resolvedCliPath) {
+            this.getCliPath();
+        }
+        return this.resolvedCliPath;
+    }
+
     private getWorkspaceDir(): string {
         const folders = vscode.workspace.workspaceFolders;
         if (folders && folders.length > 0) {
@@ -93,12 +100,61 @@ export class CliRunner {
         );
     }
 
+    async runNewProject(name: string, cwd: string): Promise<CliResult> {
+        this.outputChannel.appendLine(`Creating new project '${name}' in ${cwd}...`);
+        return this.runInDir(['new', name], cwd);
+    }
+
     cancel(): void {
         if (this.runningProcess) {
             this.runningProcess.kill();
             this.runningProcess = null;
             this.outputChannel.appendLine('Process cancelled.');
         }
+    }
+
+    private runInDir(args: string[], cwd: string, outputPath?: string): Promise<CliResult> {
+        return new Promise((resolve) => {
+            const cliPath = this.getCliPath();
+
+            this.outputChannel.appendLine(`> ${cliPath} ${args.join(' ')}`);
+            this.outputChannel.show(true);
+
+            let stdout = '';
+            let stderr = '';
+
+            const proc = cp.spawn(cliPath, args, { cwd });
+            this.runningProcess = proc;
+
+            proc.stdout.on('data', (data: Buffer) => {
+                const text = data.toString();
+                stdout += text;
+                this.outputChannel.append(text);
+            });
+
+            proc.stderr.on('data', (data: Buffer) => {
+                const text = data.toString();
+                stderr += text;
+                this.outputChannel.append(text);
+            });
+
+            proc.on('close', (code: number | null) => {
+                this.runningProcess = null;
+                const exitCode = code ?? 1;
+                if (exitCode === 0) {
+                    this.outputChannel.appendLine('Done.');
+                } else {
+                    this.outputChannel.appendLine(`Exited with code ${exitCode}`);
+                }
+                resolve({ exitCode, stdout, stderr, outputPath });
+            });
+
+            proc.on('error', (err: Error) => {
+                this.runningProcess = null;
+                this.outputChannel.appendLine(`Error: ${err.message}`);
+                resolve({ exitCode: 1, stdout, stderr: err.message });
+            });
+        });
     }
 
     private run(args: string[], outputPath?: string): Promise<CliResult> {
