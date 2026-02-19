@@ -236,6 +236,13 @@ export class WaveformViewerProvider implements vscode.CustomReadonlyEditorProvid
             <option value="float">Float</option>
         </select>
         <span>|</span>
+        <label>Input:</label>
+        <select id="input-mode" title="Trackpad: pinch=zoom, swipe=pan. Mouse: wheel=zoom, drag=pan.">
+            <option value="auto">Auto</option>
+            <option value="trackpad">Trackpad</option>
+            <option value="mouse">Mouse</option>
+        </select>
+        <span>|</span>
         <input id="search" type="text" placeholder="Filter signals..." />
         <span id="info"></span>
     </div>

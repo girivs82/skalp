@@ -22,6 +22,14 @@
     let breakpointMarkers = []; // [{cycle, label?, color?}]
     let highlightedSignals = new Set(); // signal names highlighted by debug session
     let simTime = -1; // actual simulation frontier time (-1 = use endTime, i.e. file-based view)
+    let inputMode = 'auto'; // 'auto' | 'trackpad' | 'mouse'
+    let detectedMode = 'trackpad'; // heuristic guess (used when inputMode === 'auto')
+    let isDragging = false;
+    let dragStartX = -1;
+    let dragStartY = -1;
+    let dragScrollX = 0;
+    let dragScrollY = 0;
+    let dragMoved = false; // true if mouse moved beyond deadzone during drag
 
     const cfg = window.skalpConfig || {};
     const FONT_SIZE = cfg.fontSize || 12;
@@ -39,6 +47,55 @@
     const infoEl = document.getElementById('info');
     const searchInput = /** @type {HTMLInputElement} */ (document.getElementById('search'));
     const radixSelect = /** @type {HTMLSelectElement} */ (document.getElementById('radix-select'));
+    const inputModeSelect = /** @type {HTMLSelectElement} */ (document.getElementById('input-mode'));
+
+    /** Get effective input mode (resolve 'auto' to detected) */
+    function getInputMode() {
+        return inputMode === 'auto' ? detectedMode : inputMode;
+    }
+
+    /**
+     * Heuristic: detect trackpad vs mouse from wheel event characteristics.
+     * Mouse wheels produce discrete steps (deltaY is typically ±100, ±120, or ±150
+     * with deltaX === 0). Trackpads produce smaller, often fractional deltas and
+     * frequently have non-zero deltaX. Called on the first few wheel events to
+     * set detectedMode; user can always override via the picklist.
+     */
+    let wheelSampleCount = 0;
+    let mouseHints = 0;
+    let trackpadHints = 0;
+    function detectInputDevice(e) {
+        if (inputMode !== 'auto' || wheelSampleCount >= 6) { return; }
+        wheelSampleCount++;
+
+        // ctrlKey without explicit key press = pinch gesture = trackpad
+        if (e.ctrlKey) {
+            trackpadHints += 2;
+        }
+        // Non-zero deltaX without shiftKey = two-finger horizontal = trackpad
+        if (Math.abs(e.deltaX) > 0 && !e.shiftKey) {
+            trackpadHints += 2;
+        }
+        // Discrete delta typical of mouse wheel (±100, ±120, ±150)
+        const absY = Math.abs(e.deltaY);
+        if (absY > 0 && absY % 20 === 0 && e.deltaX === 0 && !e.ctrlKey) {
+            mouseHints += 2;
+        }
+        // Fractional or small delta = trackpad
+        if (absY > 0 && absY < 10 && absY !== Math.floor(absY)) {
+            trackpadHints++;
+        }
+
+        if (wheelSampleCount >= 3) {
+            const newMode = mouseHints > trackpadHints ? 'mouse' : 'trackpad';
+            if (newMode !== detectedMode) {
+                detectedMode = newMode;
+                if (inputModeSelect) {
+                    inputModeSelect.value = 'auto';
+                }
+            }
+        }
+    }
 
     // Colors by signal type
     const TYPE_COLORS = {
@@ -477,7 +534,60 @@
         render();
     });
 
+    // --- Click / Drag ---
+    // In mouse mode, click+drag = pan. A click without drag = set cursor.
+    // In trackpad mode, click always = set cursor (pan is two-finger swipe).
+
+    const DRAG_DEADZONE = 4; // pixels before a click becomes a drag
+
+    canvas.addEventListener('mousedown', (e) => {
+        if (e.button !== 0 || getInputMode() !== 'mouse') { return; }
+        isDragging = true;
+        dragMoved = false;
+        dragStartX = e.clientX;
+        dragStartY = e.clientY;
+        dragScrollX = scrollX;
+        dragScrollY = scrollY;
+        canvas.style.cursor = 'grab';
+    });
+
+    window.addEventListener('mousemove', (e) => {
+        if (!isDragging) { return; }
+        const dx = e.clientX - dragStartX;
+        const dy = e.clientY - dragStartY;
+        if (!dragMoved && Math.abs(dx) < DRAG_DEADZONE && Math.abs(dy) < DRAG_DEADZONE) {
+            return; // still inside deadzone
+        }
+        dragMoved = true;
+        canvas.style.cursor = 'grabbing';
+        scrollX = Math.max(0, dragScrollX - dx);
+        scrollY = Math.max(0, dragScrollY - dy);
+        isSyncingScroll = true;
+        signalListEl.scrollTop = scrollY;
+        isSyncingScroll = false;
+        render();
+    });
+
+    window.addEventListener('mouseup', (e) => {
+        if (!isDragging) { return; }
+        isDragging = false;
+        canvas.style.cursor = '';
+        // If we didn't drag beyond deadzone, treat as a click (set cursor)
+        if (!dragMoved && waveformData) {
+            const rect = canvas.getBoundingClientRect();
+            const x = e.clientX - rect.left;
+            const endTime = waveformData.endTime || 10000;
+            const timePerPixel = endTime / (canvas.clientWidth * zoom);
+            cursorTime = scrollX * timePerPixel + x * timePerPixel;
+            buildSignalList();
+            render();
+            updateCursorReadout();
+        }
+    });
+
+    // In trackpad mode, plain click = set cursor (no drag support needed)
     canvas.addEventListener('click', (e) => {
+        if (getInputMode() === 'mouse') { return; } // handled by mouseup above
         if (!waveformData) { return; }
         const rect = canvas.getBoundingClientRect();
         const x = e.clientX - rect.left;
@@ -489,23 +599,53 @@
         updateCursorReadout();
     });
 
+    // --- Scroll / Wheel ---
+    // Trackpad mode: pinch=zoom, two-finger-H=hpan, two-finger-V=signal-list-scroll
+    // Mouse mode:    wheel=zoom (centered on cursor), shift+wheel=hpan
+
     canvas.addEventListener('wheel', (e) => {
         e.preventDefault();
+        detectInputDevice(e);
+        const mode = getInputMode();
+
         if (e.ctrlKey || e.metaKey) {
-            // Zoom — scale factor by deltaY magnitude for smooth trackpad pinch
+            // Pinch zoom (trackpad) or ctrl+wheel (either mode)
             const sensitivity = 0.005;
             const factor = Math.exp(-e.deltaY * sensitivity);
             zoom = Math.max(0.01, Math.min(1000, zoom * factor));
-        } else if (e.shiftKey || Math.abs(e.deltaX) > Math.abs(e.deltaY)) {
-            // Horizontal scroll (shift+wheel or trackpad horizontal swipe)
-            const delta = e.shiftKey ? e.deltaY : e.deltaX;
-            scrollX = Math.max(0, scrollX + delta);
+        } else if (mode === 'mouse') {
+            // Mouse mode: wheel = zoom, shift+wheel = horizontal pan
+            if (e.shiftKey) {
+                scrollX = Math.max(0, scrollX + e.deltaY);
+            } else {
+                // Zoom centered on mouse cursor position
+                const rect = canvas.getBoundingClientRect();
+                const mouseX = e.clientX - rect.left;
+                const endTime = waveformData ? waveformData.endTime || 10000 : 10000;
+                const oldTimePerPixel = endTime / (canvas.clientWidth * zoom);
+                const mouseTime = scrollX * oldTimePerPixel + mouseX * oldTimePerPixel;
+
+                const sensitivity = 0.003;
+                const factor = Math.exp(-e.deltaY * sensitivity);
+                zoom = Math.max(0.01, Math.min(1000, zoom * factor));
+
+                // Adjust scrollX so the time under the mouse stays in place
+                const newTimePerPixel = endTime / (canvas.clientWidth * zoom);
+                scrollX = Math.max(0, (mouseTime - mouseX * newTimePerPixel) / newTimePerPixel);
+            }
         } else {
-            // Vertical scroll — sync signal list
-            scrollY = Math.max(0, scrollY + e.deltaY);
-            isSyncingScroll = true;
-            signalListEl.scrollTop = scrollY;
-            isSyncingScroll = false;
+            // Trackpad mode: two-finger gestures
+            if (e.shiftKey || Math.abs(e.deltaX) > Math.abs(e.deltaY)) {
+                // Horizontal scroll (shift+wheel or trackpad horizontal swipe)
+                const delta = e.shiftKey ? e.deltaY : e.deltaX;
+                scrollX = Math.max(0, scrollX + delta);
+            } else {
+                // Vertical scroll — sync signal list
+                scrollY = Math.max(0, scrollY + e.deltaY);
+                isSyncingScroll = true;
+                signalListEl.scrollTop = scrollY;
+                isSyncingScroll = false;
+            }
         }
         render();
     }, { passive: false });
@@ -538,6 +678,18 @@
         buildSignalList();
         render();
     });
+
+    if (inputModeSelect) {
+        inputModeSelect.addEventListener('change', () => {
+            inputMode = inputModeSelect.value;
+            // Reset detection state when user picks 'auto'
+            if (inputMode === 'auto') {
+                wheelSampleCount = 0;
+                mouseHints = 0;
+                trackpadHints = 0;
+            }
+        });
+    }
 
     searchInput.addEventListener('input', () => {
         filterText = searchInput.value;
