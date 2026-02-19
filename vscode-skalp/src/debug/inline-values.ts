@@ -50,29 +50,48 @@ export class InlineValueDecorator {
         );
         if (!editor) { return; }
 
-        const unchangedDecorations: vscode.DecorationOptions[] = [];
-        const changedDecorations: vscode.DecorationOptions[] = [];
-
+        // Group values by line, merging multiple signals into one annotation.
+        // If any signal on the line changed, the whole annotation is orange.
+        const lineMap = new Map<number, { signals: Array<{signal: string; value: string}>; anyChanged: boolean }>();
         for (const v of values) {
             const line = v.line - 1; // DAP lines are 1-indexed, VSCode is 0-indexed
             if (line < 0 || line >= editor.document.lineCount) { continue; }
+            let entry = lineMap.get(line);
+            if (!entry) {
+                entry = { signals: [], anyChanged: false };
+                lineMap.set(line, entry);
+            }
+            // Avoid duplicate signal names on same line
+            if (!entry.signals.some(s => s.signal === v.signal)) {
+                entry.signals.push({ signal: v.signal, value: v.value });
+            }
+            if (v.changed) { entry.anyChanged = true; }
+        }
 
+        const unchangedDecorations: vscode.DecorationOptions[] = [];
+        const changedDecorations: vscode.DecorationOptions[] = [];
+
+        for (const [line, entry] of lineMap) {
             const lineText = editor.document.lineAt(line);
             const range = new vscode.Range(
                 line, lineText.text.length,
                 line, lineText.text.length
             );
 
+            const text = entry.signals
+                .map(s => `${s.signal} = ${s.value}`)
+                .join('  ');
+
             const decoration: vscode.DecorationOptions = {
                 range,
                 renderOptions: {
                     after: {
-                        contentText: `  ${v.signal} = ${v.value}`,
+                        contentText: `  ${text}`,
                     },
                 },
             };
 
-            if (v.changed) {
+            if (entry.anyChanged) {
                 changedDecorations.push(decoration);
             } else {
                 unchangedDecorations.push(decoration);

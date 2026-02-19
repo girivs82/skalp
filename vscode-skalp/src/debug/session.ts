@@ -503,10 +503,47 @@ export class SkalpDebugSession extends DebugSession {
         try {
             const event = await this.server.waitForEvent('evaluate', 3000);
             const result = event.result;
-            response.body = {
-                result: typeof result === 'object' ? result.result || JSON.stringify(result) : String(result),
-                variablesReference: 0,
-            };
+
+            if (typeof result === 'object' && result.type !== 'error') {
+                // Rich result from server — format for hover vs console
+                const isHover = args.context === 'hover';
+                if (isHover) {
+                    // Multi-line hover tooltip
+                    const lines: string[] = [];
+                    lines.push(`${result.result}`);
+                    if (result.width !== undefined) {
+                        lines.push(`  width: ${result.width}`);
+                    }
+                    if (result.decimal !== undefined) {
+                        lines.push(`  dec: ${result.decimal}`);
+                    }
+                    if (result.binary !== undefined) {
+                        // Truncate long binary strings
+                        const bin = result.binary.length > 32
+                            ? result.binary.substring(0, 32) + '...'
+                            : result.binary;
+                        lines.push(`  bin: ${bin}`);
+                    }
+                    if (result.changed && result.previous !== undefined) {
+                        lines.push(`  prev: ${result.previous}`);
+                    }
+                    response.body = {
+                        result: lines.join('\n'),
+                        variablesReference: 0,
+                    };
+                } else {
+                    // Console: single-line
+                    response.body = {
+                        result: result.result || JSON.stringify(result),
+                        variablesReference: 0,
+                    };
+                }
+            } else {
+                response.body = {
+                    result: typeof result === 'object' ? result.result || JSON.stringify(result) : String(result),
+                    variablesReference: 0,
+                };
+            }
         } catch {
             response.body = { result: 'evaluation timeout', variablesReference: 0 };
         }

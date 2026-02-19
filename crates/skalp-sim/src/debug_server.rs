@@ -666,20 +666,65 @@ impl DebugServer {
                 }
             }
 
-            // Assignment: `<name> =` or `<name>[...] =` where name is a known signal
+            // Assignment target gets a mapping (for breakpoints)
             if let Some(name) = Self::extract_assignment_target(trimmed) {
                 if known_names.contains(&name) {
                     mappings.push(SourceMapping {
                         line: line_num,
                         signal: name,
                     });
+                    // Don't continue — also scan for other signal references on this line
+                }
+            }
+
+            // Scan for all signal name references on this line (for inline values).
+            // Match whole words only: signal name must be bounded by non-alphanumeric chars.
+            let mut found_on_line = std::collections::BTreeSet::new();
+            // Skip assignment target — already added above
+            if let Some(ref assign_name) = Self::extract_assignment_target(trimmed) {
+                found_on_line.insert(assign_name.clone());
+            }
+            for name in &known_names {
+                if found_on_line.contains(name) {
                     continue;
+                }
+                // Word-boundary match: check all occurrences of `name` in the line
+                let name_bytes = name.as_bytes();
+                let line_bytes = trimmed.as_bytes();
+                let mut pos = 0;
+                while pos + name_bytes.len() <= line_bytes.len() {
+                    if let Some(offset) = trimmed[pos..].find(name.as_str()) {
+                        let start = pos + offset;
+                        let end = start + name_bytes.len();
+                        let before_ok = start == 0
+                            || !line_bytes[start - 1].is_ascii_alphanumeric()
+                                && line_bytes[start - 1] != b'_';
+                        let after_ok = end >= line_bytes.len()
+                            || !line_bytes[end].is_ascii_alphanumeric()
+                                && line_bytes[end] != b'_';
+                        if before_ok && after_ok {
+                            found_on_line.insert(name.clone());
+                            break;
+                        }
+                        pos = start + 1;
+                    } else {
+                        break;
+                    }
+                }
+            }
+            for name in found_on_line {
+                // Avoid duplicate (line, signal) pairs
+                if !mappings.iter().any(|m| m.line == line_num && m.signal == name) {
+                    mappings.push(SourceMapping {
+                        line: line_num,
+                        signal: name,
+                    });
                 }
             }
         }
 
-        // Dedup: keep first signal per line (declarations take priority via ordering)
-        mappings.dedup_by_key(|m| m.line);
+        // Sort by line number (stable: declarations before references on same line)
+        mappings.sort_by_key(|m| m.line);
 
         if !mappings.is_empty() {
             eprintln!(
@@ -1080,19 +1125,52 @@ impl DebugServer {
     fn handle_evaluate(&self, expr: &str) -> Value {
         if let Some(state) = &self.last_state {
             let translated = self.translate_state(state);
-            // Look up by display name in translated state
-            if let Some(value) = translated.signals.get(expr) {
+
+            // Look up by display name in signals, registers, or inputs
+            let (value_owned, sig_type);
+            if let Some(v) = translated.signals.get(expr) {
+                value_owned = v.clone();
+                sig_type = "signal";
+            } else if let Some(v) = translated.registers.get(expr) {
+                value_owned = v.clone();
+                sig_type = "register";
+            } else if let Some(&input_val) = self.current_inputs.get(expr) {
+                let width = self.signal_widths.get(expr).copied().unwrap_or(1);
+                let num_bytes = (width + 7) / 8;
+                value_owned = input_val.to_le_bytes()[..num_bytes].to_vec();
+                sig_type = "input";
+            } else {
                 return serde_json::json!({
-                    "result": Self::format_value(value),
-                    "type": "signal",
+                    "result": "undefined",
+                    "type": "error",
                 });
-            }
-            if let Some(value) = translated.registers.get(expr) {
-                return serde_json::json!({
-                    "result": Self::format_value(value),
-                    "type": "register",
+            };
+            let value = &value_owned;
+
+            let width = self.signal_widths.get(expr).copied().unwrap_or(value.len() * 8);
+            let hex = Self::format_value(value);
+            let decimal = crate::breakpoint::bytes_to_u64(value);
+            let binary = format!("{:0>width$b}", decimal, width = width);
+            let prev = self.breakpoint_mgr.get_previous_value(expr)
+                .or_else(|| {
+                    // Also check sanitized name
+                    let sanitized = self.display_to_sanitized.get(expr)?;
+                    self.breakpoint_mgr.get_previous_value(sanitized)
                 });
+            let changed = prev.map(|p| p != value).unwrap_or(false);
+
+            let mut result = serde_json::json!({
+                "result": hex,
+                "type": sig_type,
+                "width": width,
+                "decimal": decimal,
+                "binary": binary,
+                "changed": changed,
+            });
+            if let Some(prev_bytes) = prev {
+                result["previous"] = Value::String(Self::format_value(prev_bytes));
             }
+            return result;
         }
         serde_json::json!({
             "result": "undefined",
@@ -1135,7 +1213,12 @@ impl DebugServer {
         mappings
             .iter()
             .filter_map(|m| {
-                let value_bytes = all_values.get(&m.signal)?;
+                let value_bytes = all_values.get(&m.signal)
+                    .or_else(|| {
+                        // Try sanitized name as key
+                        let sanitized = self.resolve_display_name(&m.signal);
+                        all_values.get(&sanitized)
+                    })?;
                 let formatted = Self::format_value(value_bytes);
 
                 // Check if changed from previous cycle
