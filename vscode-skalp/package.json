@@ -36,7 +36,7 @@
         "onTaskType:skalp",
         "onDebugResolve:skalp"
     ],
-    "main": "./out/extension.js",
+    "main": "./dist/extension.js",
     "contributes": {
         "languages": [
             {
@@ -464,9 +464,11 @@
         }
     },
     "scripts": {
-        "vscode:prepublish": "npm run compile",
-        "compile": "tsc -p ./",
-        "watch": "tsc -watch -p ./"
+        "vscode:prepublish": "npm run package",
+        "compile": "node esbuild.js",
+        "watch": "node esbuild.js --watch",
+        "package": "node esbuild.js --production",
+        "compile:tsc": "tsc -p ./ --noEmit"
     },
     "dependencies": {
         "@vscode/debugadapter": "^1.65.0",
@@ -477,6 +479,7 @@
     "devDependencies": {
         "@types/node": "^18.0.0",
         "@types/vscode": "^1.74.0",
+        "esbuild": "^0.20.0",
         "typescript": "^4.9.0"
     }
 }
