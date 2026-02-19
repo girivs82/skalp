@@ -533,15 +533,14 @@ export class SkalpDebugSession extends DebugSession {
                 const allHits: Array<{bp_id: number; signal: string; value: string}> =
                     event.hits || [];
                 const hitBpIds: number[] = [];
-
-                // Highlight: use the first hit's breakpoint line
-                if (allHits.length > 0) {
-                    for (const h of allHits) {
-                        if (h.bp_id !== undefined) {
-                            hitBpIds.push(h.bp_id);
-                        }
+                for (const h of allHits) {
+                    if (h.bp_id !== undefined) {
+                        hitBpIds.push(h.bp_id);
                     }
-                    // Highlight the first hit's breakpoint line
+                }
+
+                if (reason === 'breakpoint' && allHits.length > 0) {
+                    // Continue stopped by breakpoint: highlight the first hit's line
                     const firstBpId = allHits[0].bp_id;
                     if (firstBpId !== undefined) {
                         const line = this.bpIdToLine.get(firstBpId);
@@ -549,7 +548,7 @@ export class SkalpDebugSession extends DebugSession {
                             this.highlightLine = line;
                         }
                     }
-                    // Fallback: use signal declaration for console-set breakpoints
+                    // Fallback for console-set breakpoints
                     if (this.highlightLine === this.entityLine && event.hit?.signal) {
                         const sigLine = this.signalToLine.get(event.hit.signal);
                         if (sigLine !== undefined) {
@@ -557,22 +556,23 @@ export class SkalpDebugSession extends DebugSession {
                         }
                     }
                 } else {
-                    // Step/pause: neutral anchor at entity declaration
+                    // Step/pause/max_cycles: neutral anchor at entity declaration
                     this.highlightLine = this.entityLine;
                 }
 
                 const stoppedEvent = new StoppedEvent(reason, 1);
                 // Tell VSCode which breakpoints were hit (highlights them in gutter)
-                if (hitBpIds.length > 0) {
+                if (reason === 'breakpoint' && hitBpIds.length > 0) {
                     (stoppedEvent as DebugProtocol.StoppedEvent).body.hitBreakpointIds = hitBpIds;
                 }
                 this.sendEvent(stoppedEvent);
 
-                // Output all hits to debug console
+                // Console output
                 if (allHits.length > 0) {
                     const parts = allHits.map(h => `${h.signal} = ${h.value}`);
+                    const prefix = reason === 'breakpoint' ? 'breakpoint' : 'step';
                     this.sendEvent(new OutputEvent(
-                        `[cycle ${this.currentCycle}] breakpoint — ${parts.join(', ')}\n`,
+                        `[cycle ${this.currentCycle}] ${prefix} — ${parts.join(', ')}\n`,
                         'console'
                     ));
                 } else {

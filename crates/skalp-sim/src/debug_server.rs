@@ -816,7 +816,9 @@ impl DebugServer {
         if let Some(state) = state {
             self.current_cycle += 1;
 
-            // Check breakpoints (same as handle_continue)
+            // Run check_cycle to keep previous_values updated for edge detection,
+            // but don't stop on breakpoints — the user asked to step.
+            // Hits are included as informational data for the console.
             let mut all_values = state.signals.clone();
             for (k, v) in &state.registers {
                 all_values.insert(k.clone(), v.clone());
@@ -827,11 +829,9 @@ impl DebugServer {
 
             self.last_state = Some(state);
 
-            if !hits.is_empty() {
-                self.emit_stopped("breakpoint", &hits);
-            } else {
-                self.emit_stopped("step", &[]);
-            }
+            // Always "step" reason — stepping is explicit, breakpoints don't hijack it.
+            // Hits are still reported in the event for console output.
+            self.emit_stopped("step", &hits);
         } else {
             self.emit(&serde_json::json!({
                 "event": "terminated",
