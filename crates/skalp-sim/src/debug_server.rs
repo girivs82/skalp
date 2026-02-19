@@ -67,6 +67,15 @@ pub enum Command {
     GetSourceMap { file: String },
     #[serde(rename = "evaluate")]
     Evaluate { expr: String },
+    #[serde(rename = "get_inline_values")]
+    GetInlineValues { file: String },
+    #[serde(rename = "get_waveform_data")]
+    GetWaveformData {
+        from_cycle: Option<u64>,
+        to_cycle: Option<u64>,
+    },
+    #[serde(rename = "step_back")]
+    StepBack,
     #[serde(rename = "disconnect")]
     Disconnect,
 }
@@ -88,6 +97,14 @@ pub struct VariableInfo {
 pub struct SourceMapping {
     pub line: usize,
     pub signal: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InlineValueInfo {
+    pub line: usize,
+    pub signal: String,
+    pub value: String,
+    pub changed: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -122,6 +139,8 @@ pub struct DebugServer {
     waveform_path: Option<PathBuf>,
     /// Half-cycle counter for waveform time axis (allows clock toggling)
     waveform_time: u64,
+    /// Last waveform time sent to the viewer (for incremental delta)
+    last_emitted_waveform_time: u64,
     /// Line of the top-level entity declaration (for stack frame highlight)
     entity_line: usize,
 }
@@ -147,6 +166,7 @@ impl DebugServer {
             source_file: None,
             waveform_path: None,
             waveform_time: 0,
+            last_emitted_waveform_time: 0,
             entity_line: 1,
         }
     }
@@ -204,11 +224,12 @@ impl DebugServer {
         }));
     }
 
-    fn emit_stopped(&self, reason: &str, hits: &[crate::breakpoint::BreakpointHit]) {
+    fn emit_stopped(&mut self, reason: &str, hits: &[crate::breakpoint::BreakpointHit]) {
         let mut event = serde_json::json!({
             "event": "stopped",
             "reason": reason,
             "cycle": self.current_cycle,
+            "waveform_time": self.waveform_time,
         });
 
         if let Some(state) = &self.last_state {
@@ -216,6 +237,28 @@ impl DebugServer {
             let (signals, registers) = Self::state_to_json(&translated);
             event["signals"] = Value::Object(signals);
             event["registers"] = Value::Object(registers);
+
+            // Include waveform changes for live viewer sync.
+            // Pull actual data from the waveform object for all time points
+            // since last_emitted_waveform_time — this captures intermediate
+            // half-cycle values (essential for clock toggling).
+            let from_time = self.last_emitted_waveform_time;
+            let mut waveform_changes = serde_json::Map::new();
+            for (name, signal) in &self.waveform.signals {
+                let mut changes = Vec::new();
+                for (time, value) in &signal.values {
+                    if *time > from_time && *time <= self.waveform_time {
+                        changes.push(serde_json::json!([
+                            *time,
+                            Self::format_hex_raw(value)
+                        ]));
+                    }
+                }
+                if !changes.is_empty() {
+                    waveform_changes.insert(name.clone(), Value::Array(changes));
+                }
+            }
+            event["waveform_changes"] = Value::Object(waveform_changes);
         }
 
         if !hits.is_empty() {
@@ -250,6 +293,7 @@ impl DebugServer {
             event["hits"] = serde_json::json!(all_hits);
         }
 
+        self.last_emitted_waveform_time = self.waveform_time;
         self.emit(&event);
     }
 
@@ -1042,6 +1086,161 @@ impl DebugServer {
         })
     }
 
+    fn handle_get_inline_values(&self, file: &str) -> Vec<InlineValueInfo> {
+        let mappings = match self.source_map.get(file) {
+            Some(m) => m,
+            None => return Vec::new(),
+        };
+
+        let state = match &self.last_state {
+            Some(s) => s,
+            None => return Vec::new(),
+        };
+
+        let translated = self.translate_state(state);
+
+        // Build a merged signal→value map from translated state
+        let mut all_values: IndexMap<String, Vec<u8>> = IndexMap::new();
+        for (name, value) in &translated.signals {
+            all_values.insert(name.clone(), value.clone());
+        }
+        for (name, value) in &translated.registers {
+            all_values.insert(name.clone(), value.clone());
+        }
+        // Include inputs
+        for (name, &value) in &self.current_inputs {
+            let width = self.signal_widths.get(name).copied().unwrap_or(1);
+            let num_bytes = (width + 7) / 8;
+            let bytes = value.to_le_bytes();
+            all_values.insert(name.clone(), bytes[..num_bytes].to_vec());
+        }
+
+        // Previous cycle values from breakpoint manager (for change detection)
+        let previous = &self.breakpoint_mgr;
+
+        mappings
+            .iter()
+            .filter_map(|m| {
+                let value_bytes = all_values.get(&m.signal)?;
+                let formatted = Self::format_value(value_bytes);
+
+                // Check if changed from previous cycle
+                let sanitized = self.resolve_display_name(&m.signal);
+                let changed = previous
+                    .get_previous_value(&sanitized)
+                    .map(|prev| prev != value_bytes.as_slice())
+                    .unwrap_or(false);
+
+                Some(InlineValueInfo {
+                    line: m.line,
+                    signal: m.signal.clone(),
+                    value: formatted,
+                    changed,
+                })
+            })
+            .collect()
+    }
+
+    fn handle_get_waveform_data(&self, from_cycle: Option<u64>, to_cycle: Option<u64>) -> Value {
+        let from = from_cycle.unwrap_or(0);
+        let to = to_cycle.unwrap_or(self.waveform_time);
+
+        let mut changes: BTreeMap<String, Vec<(u64, String)>> = BTreeMap::new();
+
+        for (name, signal) in &self.waveform.signals {
+            let mut sig_changes = Vec::new();
+            for (time, value) in &signal.values {
+                if *time >= from && *time <= to {
+                    sig_changes.push((*time, Self::format_value(value)));
+                }
+            }
+            if !sig_changes.is_empty() {
+                changes.insert(name.clone(), sig_changes);
+            }
+        }
+
+        serde_json::json!({
+            "from_cycle": from,
+            "to_cycle": to,
+            "changes": changes,
+        })
+    }
+
+    async fn handle_step_back(&mut self) {
+        if self.current_cycle == 0 {
+            self.emit_stopped("step", &[]);
+            return;
+        }
+
+        // Decrement current cycle
+        self.current_cycle -= 1;
+
+        // Reconstruct state from waveform data at the target waveform time
+        // waveform_time tracks half-cycles; for step_back, we go back by 2 (full cycle)
+        // unless waveform_time is already low
+        if self.waveform_time >= 2 {
+            self.waveform_time -= 2;
+        } else {
+            self.waveform_time = 0;
+        }
+
+        let target_time = self.waveform_time;
+
+        // Reconstruct state from waveform
+        let values = self.waveform.get_values_at_time(target_time);
+
+        // Build a SimulationState from the waveform values
+        let mut signals = IndexMap::new();
+        let mut registers = IndexMap::new();
+        let input_set: std::collections::BTreeSet<_> = self
+            .input_names
+            .iter()
+            .flat_map(|n| self.display_to_sanitized.get(n))
+            .collect();
+        let register_set: std::collections::BTreeSet<_> = self
+            .register_names
+            .iter()
+            .flat_map(|n| self.display_to_sanitized.get(n))
+            .collect();
+
+        for (display_name, value) in &values {
+            // Get sanitized name
+            let sanitized = self
+                .display_to_sanitized
+                .get(display_name)
+                .cloned()
+                .unwrap_or_else(|| display_name.clone());
+
+            if input_set.contains(&sanitized) {
+                // Update current_inputs
+                let val = crate::breakpoint::bytes_to_u64(value);
+                self.current_inputs.insert(display_name.clone(), val);
+            } else if register_set.contains(&sanitized) {
+                registers.insert(sanitized, value.clone());
+            } else {
+                signals.insert(sanitized, value.clone());
+            }
+        }
+
+        let state = SimulationState {
+            cycle: self.current_cycle,
+            signals,
+            registers,
+        };
+
+        // Update breakpoint manager previous values for edge detection
+        let mut all_values = state.signals.clone();
+        for (k, v) in &state.registers {
+            all_values.insert(k.clone(), v.clone());
+        }
+        let hits = self
+            .breakpoint_mgr
+            .check_cycle(self.current_cycle, &all_values);
+
+        self.last_state = Some(state);
+        self.emit_stopped("step", &hits);
+    }
+
     async fn handle_disconnect(&mut self) {
         // Export waveform to disk
         if let Some(ref path) = self.waveform_path {
@@ -1222,6 +1421,30 @@ impl DebugServer {
                         "expression": expr,
                         "result": result,
                     }));
+                }
+
+                Command::GetInlineValues { file } => {
+                    let values = self.handle_get_inline_values(&file);
+                    self.emit(&serde_json::json!({
+                        "event": "inline_values",
+                        "file": file,
+                        "values": values,
+                    }));
+                }
+
+                Command::GetWaveformData {
+                    from_cycle,
+                    to_cycle,
+                } => {
+                    let data = self.handle_get_waveform_data(from_cycle, to_cycle);
+                    self.emit(&serde_json::json!({
+                        "event": "waveform_data",
+                        "data": data,
+                    }));
+                }
+
+                Command::StepBack => {
+                    self.handle_step_back().await;
                 }
 
                 Command::Disconnect => {

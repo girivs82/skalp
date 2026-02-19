@@ -444,7 +444,7 @@ impl MirToSir {
                             if clock.is_none() {
                                 clock = Some(signal_id);
                             } else {
-                                // This might be a reset signal
+                                // Second edge-sensitive signal is a reset
                                 reset = Some(ResetSpec {
                                     signal: signal_id,
                                     active_high: matches!(edge.edge, MirEdgeType::Rising),
@@ -456,7 +456,30 @@ impl MirToSir {
                                 });
                             }
                         }
-                        _ => {}
+                        MirEdgeType::Active => {
+                            // Level-sensitive async reset: active-high
+                            // on(clk.rise, rst.active) where rst=1 means reset active
+                            reset = Some(ResetSpec {
+                                signal: signal_id,
+                                active_high: true,
+                                edge: None, // Level-sensitive, not edge-triggered
+                            });
+                        }
+                        MirEdgeType::Inactive => {
+                            // Level-sensitive async reset: active-low
+                            // on(clk.rise, rst.inactive) where rst=0 means reset active
+                            reset = Some(ResetSpec {
+                                signal: signal_id,
+                                active_high: false,
+                                edge: None,
+                            });
+                        }
+                        MirEdgeType::Both => {
+                            // Both edges — treat as clock if no clock yet
+                            if clock.is_none() {
+                                clock = Some(signal_id);
+                            }
+                        }
                     }
                 }
 

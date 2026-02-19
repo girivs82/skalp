@@ -21,6 +21,7 @@
     let hoverX = -1; // mouse x position on canvas (-1 = not hovering)
     let breakpointMarkers = []; // [{cycle, label?, color?}]
     let highlightedSignals = new Set(); // signal names highlighted by debug session
+    let simTime = -1; // actual simulation frontier time (-1 = use endTime, i.e. file-based view)
 
     const cfg = window.skalpConfig || {};
     const FONT_SIZE = cfg.fontSize || 12;
@@ -369,8 +370,9 @@
 
         let prevVal = 0;
         let started = false;
-        const endTime = waveformData ? (waveformData.endTime || 10000) : 10000;
-        const endX = Math.min(canvasWidth, (endTime - startTime) / timePerPixel);
+        // Use simTime (live frontier) if set, otherwise endTime (file-based)
+        const drawEnd = simTime >= 0 ? simTime : (waveformData ? (waveformData.endTime || 10000) : 10000);
+        const endX = Math.min(canvasWidth, (drawEnd - startTime) / timePerPixel);
 
         for (let ci = 0; ci < changes.length; ci++) {
             const [t, hexVal] = changes[ci];
@@ -410,7 +412,8 @@
 
         for (let ci = 0; ci < changes.length; ci++) {
             const [t, hexVal] = changes[ci];
-            const nextT = ci + 1 < changes.length ? changes[ci + 1][0] : (waveformData.endTime || t + 100);
+            const drawEnd = simTime >= 0 ? simTime : (waveformData.endTime || t + 100);
+            const nextT = ci + 1 < changes.length ? changes[ci + 1][0] : drawEnd;
 
             const x1 = Math.max(0, (t - startTime) / timePerPixel);
             const x2 = Math.min(canvasWidth, (nextT - startTime) / timePerPixel);
@@ -647,6 +650,65 @@
         } else if (msg.type === 'highlightSignals') {
             highlightedSignals = new Set(msg.signalNames || []);
             buildSignalList();
+            render();
+        } else if (msg.type === 'jumpToCycle') {
+            // Alias for scrollToCycle — used by live debug sync
+            if (!waveformData) { return; }
+            cursorTime = msg.cycle;
+            const container = canvas.parentElement;
+            const w = container.clientWidth - SIGNAL_LIST_WIDTH;
+            const endTime = waveformData.endTime || 10000;
+            const timePerPixel = endTime / (w * zoom);
+            scrollX = Math.max(0, (cursorTime / timePerPixel) - w / 2);
+            buildSignalList();
+            render();
+            updateCursorReadout();
+        } else if (msg.type === 'addChanges') {
+            // Incremental waveform data from live debug session
+            if (!waveformData || !msg.changes) { return; }
+            let maxTime = 0;
+            for (const [sigName, newChanges] of Object.entries(msg.changes)) {
+                if (!waveformData.changes[sigName]) {
+                    waveformData.changes[sigName] = [];
+                }
+                // Add signal to signal list if not already present
+                if (!waveformData.signals.find(s => s.name === sigName)) {
+                    waveformData.signals.push({
+                        name: sigName,
+                        width: 1,
+                        type: 'nat',
+                    });
+                }
+                for (const [time, value] of /** @type {Array} */ (newChanges)) {
+                    // Only add if value actually changed from last recorded
+                    const existing = waveformData.changes[sigName];
+                    const lastVal = existing.length > 0 ? existing[existing.length - 1][1] : null;
+                    if (value !== lastVal) {
+                        existing.push([time, value]);
+                    }
+                    if (time > maxTime) { maxTime = time; }
+                }
+            }
+            // Track live simulation frontier (waveforms stop here, no extension)
+            if (msg.time !== undefined) {
+                simTime = msg.time;
+            } else if (maxTime > 0) {
+                simTime = maxTime;
+            }
+            // Extend viewport endTime with headroom so time axis has room
+            const viewEnd = simTime >= 0 ? simTime : maxTime;
+            if (viewEnd > waveformData.endTime * 0.8) {
+                waveformData.endTime = viewEnd + Math.max(10, Math.ceil(viewEnd * 0.2));
+            }
+            buildSignalList();
+            render();
+        } else if (msg.type === 'addMarker') {
+            // Generic marker (alias for addBreakpointMarker)
+            breakpointMarkers.push({
+                cycle: msg.cycle,
+                label: msg.label || null,
+                color: msg.color || '#f44336',
+            });
             render();
         }
     });

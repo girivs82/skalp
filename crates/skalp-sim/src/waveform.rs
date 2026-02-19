@@ -324,6 +324,18 @@ impl Waveform {
         }
     }
 
+    /// Get all signal values at a given waveform time.
+    /// Returns display_name → value for every signal that has a value at or before `time`.
+    pub fn get_values_at_time(&self, time: u64) -> IndexMap<String, Vec<u8>> {
+        let mut result = IndexMap::new();
+        for (name, signal) in &self.signals {
+            if let Some(value) = self.get_signal_at_cycle(name, time) {
+                result.insert(name.clone(), value);
+            }
+        }
+        result
+    }
+
     pub fn get_signal_transitions(&self, signal_name: &str) -> Vec<(u64, Vec<u8>)> {
         if let Some(signal) = self.signals.get(signal_name) {
             signal.values.clone()

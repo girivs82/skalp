@@ -27,6 +27,9 @@ export class SkalpDebugAdapterFactory implements vscode.DebugAdapterDescriptorFa
         console.log('[SKALP Debug] createDebugAdapterDescriptor called for', session.name);
         const debugSession = new SkalpDebugSession();
         debugSession.setExtensionPath(this.extensionPath);
+        if (this.waveformPostMessage) {
+            debugSession.setWaveformCallback(this.waveformPostMessage);
+        }
         console.log('[SKALP Debug] extensionPath:', this.extensionPath);
         return new vscode.DebugAdapterInlineImplementation(debugSession);
     }

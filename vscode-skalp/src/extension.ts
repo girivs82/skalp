@@ -116,6 +116,8 @@ export function activate(context: vscode.ExtensionContext) {
 
     // --- Debug Adapter ---
     const debugAdapterFactory = new SkalpDebugAdapterFactory(context.extensionPath);
+    // Wire waveform provider into debug adapter for live waveform sync
+    debugAdapterFactory.setWaveformCallback((msg: any) => waveformProvider.postToWaveform(msg));
     context.subscriptions.push(
         vscode.debug.registerDebugAdapterDescriptorFactory('skalp', debugAdapterFactory)
     );

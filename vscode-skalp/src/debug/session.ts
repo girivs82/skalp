@@ -26,8 +26,10 @@ import {
     Breakpoint,
 } from '@vscode/debugadapter';
 import { DebugProtocol } from '@vscode/debugprotocol';
+import * as vscode from 'vscode';
 import * as path from 'path';
 import { SkalpDebugServer, DebugServerEvent } from './server-connection';
+import { InlineValueDecorator } from './inline-values';
 
 // Variable reference IDs for scopes
 const SCOPE_INPUTS = 1;
@@ -56,6 +58,9 @@ export class SkalpDebugSession extends DebugSession {
     private currentCycle: number = 0;
     private variableCache: Map<string, any[]> = new Map();
     private extensionPath: string = '';
+    private inlineDecorator: InlineValueDecorator = new InlineValueDecorator();
+    // Callback to post messages to the waveform viewer (set by adapter-factory)
+    private waveformPostMessage: ((message: any) => void) | null = null;
     // Source map: line number → signal name (for breakpoint resolution)
     private sourceMap: Map<number, string> = new Map();
     // Reverse source map: signal name → first line (for highlight on breakpoint hit)
@@ -79,6 +84,10 @@ export class SkalpDebugSession extends DebugSession {
         this.extensionPath = p;
     }
 
+    public setWaveformCallback(callback: ((message: any) => void) | null): void {
+        this.waveformPostMessage = callback;
+    }
+
     // -----------------------------------------------------------------
     // DAP: Initialize
     // -----------------------------------------------------------------
@@ -90,11 +99,12 @@ export class SkalpDebugSession extends DebugSession {
         response.body = response.body || {};
         response.body.supportsConfigurationDoneRequest = true;
         response.body.supportsEvaluateForHovers = true;
-        response.body.supportsStepBack = false;
+        response.body.supportsStepBack = true;
         response.body.supportsSetVariable = false;
         response.body.supportsRestartRequest = false;
         response.body.supportTerminateDebuggee = true;
         response.body.supportsBreakpointLocationsRequest = false;
+        response.body.supportsConditionalBreakpoints = true;
 
         this.sendResponse(response);
         // NOTE: InitializedEvent is sent in launchRequest AFTER the source map
@@ -167,6 +177,9 @@ export class SkalpDebugSession extends DebugSession {
             }
             this.highlightLine = this.entityLine;
 
+            // Capture signal names for waveform viewer initialization
+            this.signalNames = initEvent.signals || [];
+
             this.sendEvent(new OutputEvent(
                 `Design loaded: ${initEvent.inputs?.length || 0} inputs, ` +
                 `${initEvent.outputs?.length || 0} outputs, ` +
@@ -185,6 +198,9 @@ export class SkalpDebugSession extends DebugSession {
         // Sent here (after source map is populated) so setBreakPointsRequest
         // can resolve line→signal mappings.
         this.sendEvent(new InitializedEvent());
+
+        // Auto-open waveform viewer alongside the source during debug
+        this.openDebugWaveform();
 
         // If stopOnEntry, emit a stopped event so the debugger pauses
         if (args.stopOnEntry !== false) {
@@ -392,11 +408,14 @@ export class SkalpDebugSession extends DebugSession {
                 const signalName = this.sourceMap.get(bp.line);
 
                 if (signalName) {
-                    // Register AnyChange watchpoint on the resolved signal
+                    // Parse condition string from gutter breakpoint
+                    const parsed = this.parseBreakpointCondition(bp.condition);
+
                     this.server.sendCommand({
                         cmd: 'set_breakpoint',
                         signal: signalName,
-                        condition: 'any_change',
+                        condition: parsed.condition,
+                        value: parsed.value,
                     });
 
                     try {
@@ -501,18 +520,85 @@ export class SkalpDebugSession extends DebugSession {
     }
 
     // -----------------------------------------------------------------
-    // DAP: Disconnect
+    // DAP: Step Back
     // -----------------------------------------------------------------
 
-    protected disconnectRequest(
-        response: DebugProtocol.DisconnectResponse,
-        _args: DebugProtocol.DisconnectArguments
+    protected stepBackRequest(
+        response: DebugProtocol.StepBackResponse,
+        _args: DebugProtocol.StepBackArguments
     ): void {
         if (this.server) {
-            this.server.stop();
-            this.server = null;
+            this.server.sendCommand({ cmd: 'step_back' });
         }
         this.sendResponse(response);
+    }
+
+    // -----------------------------------------------------------------
+    // Breakpoint condition parsing
+    // -----------------------------------------------------------------
+
+    /**
+     * Parse a user-supplied breakpoint condition string into the server's
+     * condition/value format.
+     *
+     * Supported formats:
+     *   rising_edge / rising   → { condition: 'rising_edge' }
+     *   falling_edge / falling → { condition: 'falling_edge' }
+     *   == N                   → { condition: 'equals', value: N }
+     *   != N                   → { condition: 'not_equals', value: N }
+     *   > N                    → { condition: 'greater_than', value: N }
+     *   < N                    → { condition: 'less_than', value: N }
+     *   empty / absent         → { condition: 'any_change' }
+     */
+    private parseBreakpointCondition(conditionStr?: string): { condition: string; value?: number } {
+        if (!conditionStr || conditionStr.trim() === '') {
+            return { condition: 'any_change' };
+        }
+
+        const cond = conditionStr.trim().toLowerCase();
+
+        if (cond === 'rising_edge' || cond === 'rising') {
+            return { condition: 'rising_edge' };
+        }
+        if (cond === 'falling_edge' || cond === 'falling') {
+            return { condition: 'falling_edge' };
+        }
+        if (cond === 'any_change' || cond === 'change') {
+            return { condition: 'any_change' };
+        }
+        if (cond === 'non_zero' || cond === 'nonzero') {
+            return { condition: 'non_zero' };
+        }
+
+        // Comparison operators: == != > <
+        let m: RegExpMatchArray | null;
+        m = conditionStr.trim().match(/^==\s*(\d+)$/);
+        if (m) { return { condition: 'equals', value: parseInt(m[1], 10) }; }
+
+        m = conditionStr.trim().match(/^!=\s*(\d+)$/);
+        if (m) { return { condition: 'not_equals', value: parseInt(m[1], 10) }; }
+
+        m = conditionStr.trim().match(/^>\s*(\d+)$/);
+        if (m) { return { condition: 'greater_than', value: parseInt(m[1], 10) }; }
+
+        m = conditionStr.trim().match(/^<\s*(\d+)$/);
+        if (m) { return { condition: 'less_than', value: parseInt(m[1], 10) }; }
+
+        // Hex values: == 0xFF
+        m = conditionStr.trim().match(/^==\s*0x([0-9a-fA-F]+)$/);
+        if (m) { return { condition: 'equals', value: parseInt(m[1], 16) }; }
+
+        m = conditionStr.trim().match(/^!=\s*0x([0-9a-fA-F]+)$/);
+        if (m) { return { condition: 'not_equals', value: parseInt(m[1], 16) }; }
+
+        m = conditionStr.trim().match(/^>\s*0x([0-9a-fA-F]+)$/);
+        if (m) { return { condition: 'greater_than', value: parseInt(m[1], 16) }; }
+
+        m = conditionStr.trim().match(/^<\s*0x([0-9a-fA-F]+)$/);
+        if (m) { return { condition: 'less_than', value: parseInt(m[1], 16) }; }
+
+        // Fallback: pass as-is (the server's BreakpointCondition::parse handles it)
+        return { condition: conditionStr.trim() };
     }
 
     // -----------------------------------------------------------------
@@ -581,14 +667,22 @@ export class SkalpDebugSession extends DebugSession {
                         'console'
                     ));
                 }
+
+                // Request inline values for decoration
+                this.requestInlineValues();
+
+                // Sync waveform viewer to current cycle
+                this.syncWaveformToCycle(event);
                 break;
             }
 
             case 'continued':
-                // Nothing to do — DAP already knows we're running
+                // Clear inline decorations when simulation resumes
+                this.inlineDecorator.clear();
                 break;
 
             case 'terminated':
+                this.inlineDecorator.clear();
                 this.sendEvent(new TerminatedEvent());
                 break;
 
@@ -608,6 +702,128 @@ export class SkalpDebugSession extends DebugSession {
                     }
                 }
                 break;
+
+            case 'inline_values':
+                // Apply inline value decorations from server response
+                if (event.file && event.values) {
+                    this.inlineDecorator.applyValues(event.file, event.values);
+                }
+                break;
         }
+    }
+
+    // -----------------------------------------------------------------
+    // Inline value decorations
+    // -----------------------------------------------------------------
+
+    private requestInlineValues(): void {
+        if (!this.server || !this.sourceFile) { return; }
+        this.server.sendCommand({
+            cmd: 'get_inline_values',
+            file: this.sourceFile,
+        });
+        // Response handled asynchronously via 'inline_values' event in handleServerEvent
+    }
+
+    // -----------------------------------------------------------------
+    // Live waveform sync
+    // -----------------------------------------------------------------
+
+    private syncWaveformToCycle(event: DebugServerEvent): void {
+        if (!this.waveformPostMessage) { return; }
+
+        const waveformTime = event.waveform_time ?? this.currentCycle;
+
+        // Send incremental waveform data (signal changes at this time point)
+        if (event.waveform_changes) {
+            this.waveformPostMessage({
+                type: 'addChanges',
+                changes: event.waveform_changes,
+                time: waveformTime,
+            });
+        }
+
+        // Jump waveform cursor to current cycle's waveform time
+        this.waveformPostMessage({
+            type: 'jumpToCycle',
+            cycle: waveformTime,
+        });
+
+        // If this was a breakpoint hit, add a marker
+        if (event.reason === 'breakpoint' && event.hit) {
+            this.waveformPostMessage({
+                type: 'addBreakpointMarker',
+                cycle: waveformTime,
+                label: `BP: ${event.hit.signal}`,
+            });
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // Waveform viewer auto-open
+    // -----------------------------------------------------------------
+
+    // Track known signal names for waveform initialization
+    private signalNames: string[] = [];
+
+    private openDebugWaveform(): void {
+        // Create a minimal stub .debug.skw file so the waveform viewer can open it.
+        // Live data will be streamed via addChanges messages on each stopped event.
+        const skwPath = this.sourceFile.replace(/\.(sk|skalp)$/, '.debug.skw');
+        const fs = require('fs');
+
+        // Build empty waveform structure from signal names
+        const signals = this.signalNames.map((name: string) => ({
+            name,
+            width: 1,
+            type: 'nat',
+        }));
+        const changes: Record<string, any[]> = {};
+        for (const name of this.signalNames) {
+            changes[name] = [];
+        }
+        const stubData = {
+            version: 1,
+            design: path.basename(this.sourceFile, path.extname(this.sourceFile)),
+            timescale: '1ns',
+            endTime: 100,
+            simCycles: 0,
+            signals,
+            changes,
+            annotations: [],
+            displayConfig: { defaultRadix: 'hex', signalGroups: [] },
+        };
+
+        try {
+            fs.writeFileSync(skwPath, JSON.stringify(stubData));
+        } catch {
+            return; // Can't write stub file — skip waveform
+        }
+
+        const uri = vscode.Uri.file(skwPath);
+        vscode.commands.executeCommand(
+            'vscode.openWith',
+            uri,
+            'skalp.waveformViewer',
+            vscode.ViewColumn.Beside
+        ).then(undefined, () => {
+            // Silently ignore if waveform viewer can't open
+        });
+    }
+
+    // -----------------------------------------------------------------
+    // Cleanup
+    // -----------------------------------------------------------------
+
+    protected disconnectRequest(
+        response: DebugProtocol.DisconnectResponse,
+        _args: DebugProtocol.DisconnectArguments
+    ): void {
+        this.inlineDecorator.dispose();
+        if (this.server) {
+            this.server.stop();
+            this.server = null;
+        }
+        this.sendResponse(response);
     }
 }

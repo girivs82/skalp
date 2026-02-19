@@ -406,6 +406,11 @@ impl BreakpointManager {
         self.previous_values.insert(signal_name.to_string(), value);
     }
 
+    /// Get the previous value for a signal (used by inline value change detection).
+    pub fn get_previous_value(&self, signal_name: &str) -> Option<&[u8]> {
+        self.previous_values.get(signal_name).map(|v| v.as_slice())
+    }
+
     /// Clear all breakpoints
     pub fn clear(&mut self) {
         self.breakpoints.clear();
@@ -446,7 +451,7 @@ fn parse_value_to_bytes(value_str: &str) -> Option<Vec<u8>> {
     None
 }
 
-fn bytes_to_u64(bytes: &[u8]) -> u64 {
+pub fn bytes_to_u64(bytes: &[u8]) -> u64 {
     let mut result = 0u64;
     for (i, &byte) in bytes.iter().take(8).enumerate() {
         result |= (byte as u64) << (i * 8);
