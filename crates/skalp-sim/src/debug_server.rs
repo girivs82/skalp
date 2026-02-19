@@ -796,16 +796,29 @@ impl DebugServer {
 
         if let Some(state) = state {
             self.current_cycle += 1;
+
+            // Check breakpoints (same as handle_continue)
+            let mut all_values = state.signals.clone();
+            for (k, v) in &state.registers {
+                all_values.insert(k.clone(), v.clone());
+            }
+            let hits = self
+                .breakpoint_mgr
+                .check_cycle(self.current_cycle, &all_values);
+
             self.last_state = Some(state);
+
+            if !hits.is_empty() {
+                self.emit_stopped("breakpoint", Some(&hits[0]));
+            } else {
+                self.emit_stopped("step", None);
+            }
         } else {
             self.emit(&serde_json::json!({
                 "event": "terminated",
                 "cycle": self.current_cycle,
             }));
-            return;
         }
-
-        self.emit_stopped("step", None);
     }
 
     async fn handle_continue(&mut self, max_cycles: Option<u64>, pause_flag: &Arc<AtomicBool>) {
