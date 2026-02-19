@@ -2,9 +2,10 @@
  * Manages the skalp-debug subprocess and JSON-line communication.
  */
 
+import * as vscode from 'vscode';
 import * as cp from 'child_process';
 import { EventEmitter } from 'events';
-import { resolveBinaryPath } from '../extension';
+import { resolveBinaryPath } from '../utils/resolve-binary';
 
 export interface DebugServerEvent {
     event: string;
@@ -125,6 +126,9 @@ export class SkalpDebugServer extends EventEmitter {
     }
 
     private getDebugBinaryPath(): string {
-        return resolveBinaryPath('skalp-debug', 'skalp-debug', this.extensionPath);
+        const config = vscode.workspace.getConfiguration('skalp');
+        const cliPath = config.get<string>('cliPath') || 'skalp';
+        const serverPath = config.get<string>('serverPath') || 'skalp-lsp';
+        return resolveBinaryPath('skalp-debug', 'skalp-debug', this.extensionPath, [cliPath, serverPath]);
     }
 }

@@ -14,6 +14,7 @@ import { ExpressionViewerProvider } from './expression-viewer/provider';
 import { SkalpTaskProvider } from './tasks/provider';
 import { SkalpTestController } from './testing/controller';
 import { SkalpDebugAdapterFactory } from './debug/adapter-factory';
+import { resolveBinaryPath } from './utils/resolve-binary';
 
 let client: LanguageClient;
 let cliRunner: CliRunner;
@@ -290,58 +291,6 @@ function resolveFilePath(uri?: vscode.Uri): string | undefined {
     }
     vscode.window.showWarningMessage('No SKALP file selected.');
     return undefined;
-}
-
-/**
- * Resolve a SKALP binary path with the following priority:
- * 1. User-configured explicit path (if not the default name)
- * 2. Bundled binary inside extension (bin/)
- * 3. PATH lookup (covers cargo install, homebrew, etc.)
- * 4. Dev mode: repo-relative (../target/release/ or ../target/debug/)
- */
-export function resolveBinaryPath(
-    binaryName: string,
-    configured: string,
-    extensionPath: string
-): string {
-    const fs = require('fs');
-
-    // 1. User set an explicit path — use it directly
-    if (configured !== binaryName) {
-        return configured;
-    }
-
-    // 2. Bundled binary inside extension
-    const bundled = path.join(extensionPath, 'bin', binaryName);
-    if (fs.existsSync(bundled)) {
-        return bundled;
-    }
-
-    // 3. PATH lookup — check if the binary is available on PATH
-    const { execFileSync } = require('child_process');
-    try {
-        const which = process.platform === 'win32' ? 'where' : 'which';
-        const result = execFileSync(which, [binaryName], { encoding: 'utf8', timeout: 3000 }).trim();
-        if (result) {
-            return result.split('\n')[0];
-        }
-    } catch {
-        // not on PATH
-    }
-
-    // 4. Dev mode: repo-relative
-    const repoRoot = path.resolve(extensionPath, '..');
-    const releaseBin = path.join(repoRoot, 'target', 'release', binaryName);
-    if (fs.existsSync(releaseBin)) {
-        return releaseBin;
-    }
-    const debugBin = path.join(repoRoot, 'target', 'debug', binaryName);
-    if (fs.existsSync(debugBin)) {
-        return debugBin;
-    }
-
-    // Fallback: hope it's on PATH (will fail with a clear error if not)
-    return binaryName;
 }
 
 export function deactivate(): Thenable<void> | undefined {

@@ -1,7 +1,7 @@
 import * as vscode from 'vscode';
 import * as cp from 'child_process';
 import * as path from 'path';
-import { resolveBinaryPath } from '../extension';
+import { resolveBinaryPath } from '../utils/resolve-binary';
 
 export interface CliResult {
     exitCode: number;
