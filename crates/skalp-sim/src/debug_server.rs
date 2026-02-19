@@ -204,7 +204,7 @@ impl DebugServer {
         }));
     }
 
-    fn emit_stopped(&self, reason: &str, hit: Option<&crate::breakpoint::BreakpointHit>) {
+    fn emit_stopped(&self, reason: &str, hits: &[crate::breakpoint::BreakpointHit]) {
         let mut event = serde_json::json!({
             "event": "stopped",
             "reason": reason,
@@ -218,8 +218,9 @@ impl DebugServer {
             event["registers"] = Value::Object(registers);
         }
 
-        if let Some(hit) = hit {
-            // Translate the breakpoint signal name to display name
+        if !hits.is_empty() {
+            // Primary hit (first) for backwards compatibility
+            let hit = &hits[0];
             let display_signal = self.sanitized_to_display
                 .get(&hit.signal_name)
                 .cloned()
@@ -230,6 +231,23 @@ impl DebugServer {
                 "signal": display_signal,
                 "value": Self::format_value(&hit.signal_value),
             });
+
+            // All hits (for multi-breakpoint support)
+            let all_hits: Vec<serde_json::Value> = hits
+                .iter()
+                .map(|h| {
+                    let sig = self.sanitized_to_display
+                        .get(&h.signal_name)
+                        .cloned()
+                        .unwrap_or_else(|| h.signal_name.clone());
+                    serde_json::json!({
+                        "bp_id": h.id,
+                        "signal": sig,
+                        "value": Self::format_value(&h.signal_value),
+                    })
+                })
+                .collect();
+            event["hits"] = serde_json::json!(all_hits);
         }
 
         self.emit(&event);
@@ -810,9 +828,9 @@ impl DebugServer {
             self.last_state = Some(state);
 
             if !hits.is_empty() {
-                self.emit_stopped("breakpoint", Some(&hits[0]));
+                self.emit_stopped("breakpoint", &hits);
             } else {
-                self.emit_stopped("step", None);
+                self.emit_stopped("step", &[]);
             }
         } else {
             self.emit(&serde_json::json!({
@@ -837,7 +855,7 @@ impl DebugServer {
             // Check for pause (set by stdin reader thread)
             if pause_flag.load(Ordering::Relaxed) {
                 pause_flag.store(false, Ordering::Relaxed);
-                self.emit_stopped("pause", None);
+                self.emit_stopped("pause", &[]);
                 return;
             }
 
@@ -859,12 +877,12 @@ impl DebugServer {
                 self.last_state = Some(state);
 
                 if !hits.is_empty() {
-                    self.emit_stopped("breakpoint", Some(&hits[0]));
+                    self.emit_stopped("breakpoint", &hits);
                     return;
                 }
 
                 if self.current_cycle - start >= limit {
-                    self.emit_stopped("max_cycles", None);
+                    self.emit_stopped("max_cycles", &[]);
                     return;
                 }
             } else {
@@ -1127,7 +1145,7 @@ impl DebugServer {
                 Command::Pause => {
                     // If not in a continue loop, just acknowledge.
                     // (During continue, the flag is handled by handle_continue.)
-                    self.emit_stopped("pause", None);
+                    self.emit_stopped("pause", &[]);
                 }
 
                 Command::SetBreakpoint {

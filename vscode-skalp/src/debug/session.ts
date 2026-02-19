@@ -382,7 +382,9 @@ export class SkalpDebugSession extends DebugSession {
                 const existingId = this.activeBreakpointIds.get(bp.line);
                 if (existingId !== undefined && requestedLines.has(bp.line)) {
                     newActiveIds.set(bp.line, existingId);
-                    breakpoints.push(new Breakpoint(true, bp.line));
+                    const dbp = new Breakpoint(true, bp.line);
+                    dbp.setId(existingId);
+                    breakpoints.push(dbp);
                     continue;
                 }
 
@@ -401,7 +403,9 @@ export class SkalpDebugSession extends DebugSession {
                         const event = await this.server.waitForEvent('breakpoint_set', 3000);
                         const bpId = event.id as number;
                         newActiveIds.set(bp.line, bpId);
-                        breakpoints.push(new Breakpoint(true, bp.line));
+                        const dbp = new Breakpoint(true, bp.line);
+                        dbp.setId(bpId);
+                        breakpoints.push(dbp);
                     } catch {
                         breakpoints.push(new Breakpoint(false, bp.line));
                     }
@@ -525,13 +529,28 @@ export class SkalpDebugSession extends DebugSession {
                 // Map server reasons to DAP stop reasons
                 if (reason === 'max_cycles') { reason = 'step'; }
 
-                // On breakpoint hit, highlight the breakpoint line (not the declaration)
-                if (event.hit?.bp_id !== undefined) {
-                    const line = this.bpIdToLine.get(event.hit.bp_id);
-                    if (line !== undefined) {
-                        this.highlightLine = line;
-                    } else if (event.hit?.signal) {
-                        // Fallback for console-set breakpoints: use signal declaration
+                // Collect all hit breakpoint IDs (for DAP hitBreakpointIds)
+                const allHits: Array<{bp_id: number; signal: string; value: string}> =
+                    event.hits || [];
+                const hitBpIds: number[] = [];
+
+                // Highlight: use the first hit's breakpoint line
+                if (allHits.length > 0) {
+                    for (const h of allHits) {
+                        if (h.bp_id !== undefined) {
+                            hitBpIds.push(h.bp_id);
+                        }
+                    }
+                    // Highlight the first hit's breakpoint line
+                    const firstBpId = allHits[0].bp_id;
+                    if (firstBpId !== undefined) {
+                        const line = this.bpIdToLine.get(firstBpId);
+                        if (line !== undefined) {
+                            this.highlightLine = line;
+                        }
+                    }
+                    // Fallback: use signal declaration for console-set breakpoints
+                    if (this.highlightLine === this.entityLine && event.hit?.signal) {
                         const sigLine = this.signalToLine.get(event.hit.signal);
                         if (sigLine !== undefined) {
                             this.highlightLine = sigLine;
@@ -543,16 +562,25 @@ export class SkalpDebugSession extends DebugSession {
                 }
 
                 const stoppedEvent = new StoppedEvent(reason, 1);
+                // Tell VSCode which breakpoints were hit (highlights them in gutter)
+                if (hitBpIds.length > 0) {
+                    (stoppedEvent as DebugProtocol.StoppedEvent).body.hitBreakpointIds = hitBpIds;
+                }
                 this.sendEvent(stoppedEvent);
 
-                // Output cycle info to debug console
-                const hitInfo = event.hit
-                    ? ` — ${event.hit.signal} = ${event.hit.value}`
-                    : '';
-                this.sendEvent(new OutputEvent(
-                    `[cycle ${this.currentCycle}] ${reason}${hitInfo}\n`,
-                    'console'
-                ));
+                // Output all hits to debug console
+                if (allHits.length > 0) {
+                    const parts = allHits.map(h => `${h.signal} = ${h.value}`);
+                    this.sendEvent(new OutputEvent(
+                        `[cycle ${this.currentCycle}] breakpoint — ${parts.join(', ')}\n`,
+                        'console'
+                    ));
+                } else {
+                    this.sendEvent(new OutputEvent(
+                        `[cycle ${this.currentCycle}] ${reason}\n`,
+                        'console'
+                    ));
+                }
                 break;
             }
 
