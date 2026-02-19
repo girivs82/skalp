@@ -58,8 +58,14 @@ export class SkalpDebugSession extends DebugSession {
     private extensionPath: string = '';
     // Source map: line number → signal name (for breakpoint resolution)
     private sourceMap: Map<number, string> = new Map();
+    // Reverse source map: signal name → first line (for highlight on breakpoint hit)
+    private signalToLine: Map<string, number> = new Map();
     // Active gutter breakpoints: line → server breakpoint ID (for removal)
     private activeBreakpointIds: Map<number, number> = new Map();
+    // Line of the entity declaration (neutral highlight anchor)
+    private entityLine: number = 1;
+    // Current highlight line (updated on breakpoint hit)
+    private highlightLine: number = 1;
 
     public constructor() {
         super();
@@ -143,10 +149,21 @@ export class SkalpDebugSession extends DebugSession {
             // Populate source map from initialized event (before VSCode sends setBreakPointsRequest)
             if (initEvent.source_map) {
                 this.sourceMap.clear();
+                this.signalToLine.clear();
                 for (const m of initEvent.source_map) {
                     this.sourceMap.set(m.line, m.signal);
+                    // Reverse map: keep first occurrence (declaration line)
+                    if (!this.signalToLine.has(m.signal)) {
+                        this.signalToLine.set(m.signal, m.line);
+                    }
                 }
             }
+
+            // Entity declaration line (for neutral highlight)
+            if (initEvent.entity_line) {
+                this.entityLine = initEvent.entity_line;
+            }
+            this.highlightLine = this.entityLine;
 
             this.sendEvent(new OutputEvent(
                 `Design loaded: ${initEvent.inputs?.length || 0} inputs, ` +
@@ -214,7 +231,7 @@ export class SkalpDebugSession extends DebugSession {
                     0,
                     `cycle ${this.currentCycle}`,
                     source,
-                    1  // line 1 (we don't have exact line mapping yet)
+                    this.highlightLine
                 ),
             ],
             totalFrames: 1,
@@ -500,6 +517,17 @@ export class SkalpDebugSession extends DebugSession {
                 let reason = event.reason || 'step';
                 // Map server reasons to DAP stop reasons
                 if (reason === 'max_cycles') { reason = 'step'; }
+
+                // On breakpoint hit, highlight the triggering signal's line
+                if (event.hit?.signal) {
+                    const line = this.signalToLine.get(event.hit.signal);
+                    if (line !== undefined) {
+                        this.highlightLine = line;
+                    }
+                } else {
+                    // Step/pause: neutral anchor at entity declaration
+                    this.highlightLine = this.entityLine;
+                }
 
                 const stoppedEvent = new StoppedEvent(reason, 1);
                 this.sendEvent(stoppedEvent);

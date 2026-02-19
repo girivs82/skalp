@@ -122,6 +122,8 @@ pub struct DebugServer {
     waveform_path: Option<PathBuf>,
     /// Half-cycle counter for waveform time axis (allows clock toggling)
     waveform_time: u64,
+    /// Line of the top-level entity declaration (for stack frame highlight)
+    entity_line: usize,
 }
 
 impl DebugServer {
@@ -145,6 +147,7 @@ impl DebugServer {
             source_file: None,
             waveform_path: None,
             waveform_time: 0,
+            entity_line: 1,
         }
     }
 
@@ -506,6 +509,7 @@ impl DebugServer {
             "outputs": self.output_names,
             "registers": self.register_names,
             "source_map": source_map_entries,
+            "entity_line": self.entity_line,
         }));
     }
 
@@ -547,6 +551,7 @@ impl DebugServer {
         };
 
         let mut mappings: Vec<SourceMapping> = Vec::new();
+        let entity_prefix = format!("entity {}", module.name);
 
         for (idx, line) in source.lines().enumerate() {
             let line_num = idx + 1; // 1-indexed
@@ -555,6 +560,11 @@ impl DebugServer {
             // Skip comments and empty lines
             if trimmed.is_empty() || trimmed.starts_with("//") {
                 continue;
+            }
+
+            // Entity declaration: `entity <ModuleName> {`
+            if trimmed.starts_with(&entity_prefix) {
+                self.entity_line = line_num;
             }
 
             // Port declarations: `in <name>:` or `out <name>:`
