@@ -969,9 +969,9 @@ impl Counter {
 
     on(clk.rise) {
         if (rst) {
-            count_reg <= 0
+            count_reg = 0
         } else {
-            count_reg <= count_reg + 1
+            count_reg = count_reg + 1
         }
     }
 
