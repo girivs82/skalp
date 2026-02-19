@@ -259,6 +259,14 @@ impl DebugServer {
                 }
             }
             event["waveform_changes"] = Value::Object(waveform_changes);
+
+            // Include signal widths so waveform viewer can render bit vs bus correctly
+            let widths_json: serde_json::Map<String, Value> = self
+                .signal_widths
+                .iter()
+                .map(|(name, &w)| (name.clone(), Value::Number(serde_json::Number::from(w))))
+                .collect();
+            event["signal_widths"] = Value::Object(widths_json);
         }
 
         if !hits.is_empty() {
@@ -558,8 +566,13 @@ impl DebugServer {
             self.signal_widths.len()
         );
 
-        // Emit initialized event with display names + source map
+        // Emit initialized event with display names, widths + source map
         let all_signals: Vec<String> = self.signal_widths.keys().cloned().collect();
+        let signal_widths_json: serde_json::Map<String, Value> = self
+            .signal_widths
+            .iter()
+            .map(|(name, &width)| (name.clone(), Value::Number(serde_json::Number::from(width))))
+            .collect();
         let source_map_entries: Vec<&SourceMapping> = self
             .source_map
             .values()
@@ -568,6 +581,7 @@ impl DebugServer {
         self.emit(&serde_json::json!({
             "event": "initialized",
             "signals": all_signals,
+            "signal_widths": signal_widths_json,
             "inputs": self.input_names,
             "outputs": self.output_names,
             "registers": self.register_names,

@@ -177,8 +177,14 @@ export class SkalpDebugSession extends DebugSession {
             }
             this.highlightLine = this.entityLine;
 
-            // Capture signal names for waveform viewer initialization
-            this.signalNames = initEvent.signals || [];
+            // Capture signal names and widths for waveform viewer initialization
+            this.signalWidths = initEvent.signal_widths || {};
+            if (Object.keys(this.signalWidths).length === 0 && initEvent.signals) {
+                // Fallback: if server didn't send widths, use names with width 1
+                for (const name of initEvent.signals) {
+                    this.signalWidths[name] = 1;
+                }
+            }
 
             this.sendEvent(new OutputEvent(
                 `Design loaded: ${initEvent.inputs?.length || 0} inputs, ` +
@@ -377,15 +383,14 @@ export class SkalpDebugSession extends DebugSession {
             (args.breakpoints || []).map(bp => bp.line)
         );
 
-        // Remove breakpoints that are no longer in the active set
+        // Remove all existing breakpoints — DAP sends the full set each time,
+        // and conditions may have changed, so always recreate from scratch
         if (this.server) {
-            for (const [line, bpId] of this.activeBreakpointIds) {
-                if (!requestedLines.has(line)) {
-                    this.server.sendCommand({
-                        cmd: 'remove_breakpoint',
-                        id: bpId,
-                    });
-                }
+            for (const [_line, bpId] of this.activeBreakpointIds) {
+                this.server.sendCommand({
+                    cmd: 'remove_breakpoint',
+                    id: bpId,
+                });
             }
         }
 
@@ -394,16 +399,6 @@ export class SkalpDebugSession extends DebugSession {
 
         if (this.server && args.breakpoints) {
             for (const bp of args.breakpoints) {
-                // If this line already has an active breakpoint, keep it
-                const existingId = this.activeBreakpointIds.get(bp.line);
-                if (existingId !== undefined && requestedLines.has(bp.line)) {
-                    newActiveIds.set(bp.line, existingId);
-                    const dbp = new Breakpoint(true, bp.line);
-                    dbp.setId(existingId);
-                    breakpoints.push(dbp);
-                    continue;
-                }
-
                 // Try to resolve line → signal via source map
                 const signalName = this.sourceMap.get(bp.line);
 
@@ -736,10 +731,17 @@ export class SkalpDebugSession extends DebugSession {
 
         // Send incremental waveform data (signal changes at this time point)
         if (event.waveform_changes) {
+            // Use signal_widths from stopped event if available, else fall back
+            const widths = event.signal_widths || this.signalWidths;
+            // Also update our cached widths from server
+            if (event.signal_widths) {
+                this.signalWidths = event.signal_widths;
+            }
             this.waveformPostMessage({
                 type: 'addChanges',
                 changes: event.waveform_changes,
                 time: waveformTime,
+                signalWidths: widths,
             });
         }
 
@@ -763,8 +765,8 @@ export class SkalpDebugSession extends DebugSession {
     // Waveform viewer auto-open
     // -----------------------------------------------------------------
 
-    // Track known signal names for waveform initialization
-    private signalNames: string[] = [];
+    // Track known signal names and widths for waveform initialization
+    private signalWidths: Record<string, number> = {};
 
     private openDebugWaveform(): void {
         // Create a minimal stub .debug.skw file so the waveform viewer can open it.
@@ -772,14 +774,14 @@ export class SkalpDebugSession extends DebugSession {
         const skwPath = this.sourceFile.replace(/\.(sk|skalp)$/, '.debug.skw');
         const fs = require('fs');
 
-        // Build empty waveform structure from signal names
-        const signals = this.signalNames.map((name: string) => ({
+        // Build empty waveform structure from signal names + widths
+        const signals = Object.entries(this.signalWidths).map(([name, width]) => ({
             name,
-            width: 1,
-            type: 'nat',
+            width,
+            type: width === 1 ? 'bit' : 'nat',
         }));
         const changes: Record<string, any[]> = {};
-        for (const name of this.signalNames) {
+        for (const name of Object.keys(this.signalWidths)) {
             changes[name] = [];
         }
         const stubData = {

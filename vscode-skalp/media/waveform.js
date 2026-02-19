@@ -673,11 +673,19 @@
                 }
                 // Add signal to signal list if not already present
                 if (!waveformData.signals.find(s => s.name === sigName)) {
+                    const w = (msg.signalWidths && msg.signalWidths[sigName]) || 1;
                     waveformData.signals.push({
                         name: sigName,
-                        width: 1,
-                        type: 'nat',
+                        width: w,
+                        type: w === 1 ? 'bit' : 'nat',
                     });
+                } else if (msg.signalWidths && msg.signalWidths[sigName]) {
+                    // Update width if it was initially unknown (e.g. stub file had width 1)
+                    const sig = waveformData.signals.find(s => s.name === sigName);
+                    if (sig && sig.width === 1 && msg.signalWidths[sigName] > 1) {
+                        sig.width = msg.signalWidths[sigName];
+                        sig.type = 'nat';
+                    }
                 }
                 for (const [time, value] of /** @type {Array} */ (newChanges)) {
                     // Only add if value actually changed from last recorded
