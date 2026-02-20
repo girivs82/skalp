@@ -10,7 +10,6 @@ use skalp_lir::{
 };
 use skalp_mir::MirCompiler;
 use skalp_sim::ncl_sim::{NclSimConfig, NclSimulator};
-use std::io::Write;
 
 fn setup_stdlib_path() {
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
@@ -27,7 +26,8 @@ fn compile_to_gates(fixture_name: &str) -> GateNetlist {
     setup_stdlib_path();
 
     let source_path = fixture_path(fixture_name);
-    let context = parse_and_build_compilation_context(std::path::Path::new(&source_path)).expect("Failed to parse");
+    let context = parse_and_build_compilation_context(std::path::Path::new(&source_path))
+        .expect("Failed to parse");
     let mir_compiler = MirCompiler::new();
     let mir = mir_compiler
         .compile_to_mir_with_modules(&context.main_hir, &context.module_hirs)
@@ -49,21 +49,39 @@ fn compile_to_gates(fixture_name: &str) -> GateNetlist {
 
 #[test]
 fn test_fpmul_via_operator() {
-    run_mul_test("fpmul_direct.sk", "Operator (*)", "top.a", "top.b", "top.result");
+    run_mul_test(
+        "fpmul_direct.sk",
+        "Operator (*)",
+        "top.a",
+        "top.b",
+        "top.result",
+    );
 }
 
 #[test]
 fn test_fpmul_direct_instantiation() {
     // Note: This test uses the same fixture as test_fpmul_via_operator
     // because both test the * operator (which instantiates FpMul)
-    run_mul_test("fpmul_direct.sk", "Direct FpMul", "top.a", "top.b", "top.result");
+    run_mul_test(
+        "fpmul_direct.sk",
+        "Direct FpMul",
+        "top.a",
+        "top.b",
+        "top.result",
+    );
 }
 
 #[test]
 fn test_inline_mul_logic() {
     // Note: This test uses the same fixture as the operator test
     // The fixture uses the * operator which is the standard approach
-    run_mul_test("fpmul_direct.sk", "Inline logic", "top.a", "top.b", "top.result");
+    run_mul_test(
+        "fpmul_direct.sk",
+        "Inline logic",
+        "top.a",
+        "top.b",
+        "top.result",
+    );
 }
 
 fn run_mul_test(fixture_name: &str, name: &str, a_port: &str, b_port: &str, result_port: &str) {

@@ -111,15 +111,18 @@ mod pipelined_processor_tests {
         // Create simulation config
         let config = UnifiedSimConfig {
             level: SimLevel::Behavioral,
-            hw_accel: if cfg!(target_os = "macos") { HwAccel::Gpu } else { HwAccel::Cpu },
+            hw_accel: if cfg!(target_os = "macos") {
+                HwAccel::Gpu
+            } else {
+                HwAccel::Cpu
+            },
             max_cycles: 100,
             capture_waveforms: false,
             ..Default::default()
         };
 
         // Create simulator
-        let mut simulator = UnifiedSimulator::new(config)
-            .expect("Failed to create simulator");
+        let mut simulator = UnifiedSimulator::new(config).expect("Failed to create simulator");
 
         // Load the module
         simulator

@@ -371,7 +371,7 @@ impl ModuleResolver {
             let has_dep_type_aliases = dep_paths.iter().any(|(_, dep_path)| {
                 self.loaded_modules
                     .get(dep_path)
-                    .map_or(false, |dep_hir| !dep_hir.type_aliases.is_empty())
+                    .is_some_and(|dep_hir| !dep_hir.type_aliases.is_empty())
             });
 
             if has_dep_type_aliases {

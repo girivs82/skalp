@@ -344,12 +344,10 @@ impl LanguageServer for SkalpLanguageServer {
                 if params.arguments.len() < 3 {
                     return Ok(None);
                 }
-                let uri_str: String = serde_json::from_value(params.arguments[0].clone())
-                    .unwrap_or_default();
-                let line: u32 = serde_json::from_value(params.arguments[1].clone())
-                    .unwrap_or(0);
-                let col: u32 = serde_json::from_value(params.arguments[2].clone())
-                    .unwrap_or(0);
+                let uri_str: String =
+                    serde_json::from_value(params.arguments[0].clone()).unwrap_or_default();
+                let line: u32 = serde_json::from_value(params.arguments[1].clone()).unwrap_or(0);
+                let col: u32 = serde_json::from_value(params.arguments[2].clone()).unwrap_or(0);
 
                 let uri = match Url::parse(&uri_str) {
                     Ok(u) => u,
@@ -358,8 +356,7 @@ impl LanguageServer for SkalpLanguageServer {
 
                 if let Some(doc) = self.documents.get(&uri) {
                     let source = doc.content.to_string();
-                    let result =
-                        expression_circuit::get_expression_circuit(&source, line, col);
+                    let result = expression_circuit::get_expression_circuit(&source, line, col);
                     Ok(result.and_then(|r| serde_json::to_value(r).ok()))
                 } else {
                     Ok(None)

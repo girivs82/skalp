@@ -42,8 +42,7 @@ mod simulation_suite {
             ..Default::default()
         };
 
-        let mut simulator = UnifiedSimulator::new(config)
-            .expect("Failed to create simulator");
+        let mut simulator = UnifiedSimulator::new(config).expect("Failed to create simulator");
 
         simulator
             .load_behavioral(&sir)

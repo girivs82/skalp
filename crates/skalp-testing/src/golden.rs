@@ -151,7 +151,6 @@ impl GoldenTest {
         // Write the golden file
         fs::write(path, content)
             .unwrap_or_else(|e| panic!("Failed to write golden file {:?}: {}", path, e));
-
     }
 
     /// Compare actual output against golden file

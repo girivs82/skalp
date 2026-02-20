@@ -26,7 +26,8 @@ async fn test_simple_add_function() {
     tb.clock(1).await;
     tb.expect("result", 30u8).await;
 
-    tb.export_waveform("build/test_simple_add_function.skw.gz").ok();
+    tb.export_waveform("build/test_simple_add_function.skw.gz")
+        .ok();
 }
 
 #[tokio::test]
@@ -39,7 +40,8 @@ async fn test_simple_sub_function() {
     tb.clock(1).await;
     tb.expect("result", 7u8).await;
 
-    tb.export_waveform("build/test_simple_sub_function.skw.gz").ok();
+    tb.export_waveform("build/test_simple_sub_function.skw.gz")
+        .ok();
 }
 
 #[tokio::test]
@@ -52,7 +54,8 @@ async fn test_simple_bitwise_and() {
     tb.clock(1).await;
     tb.expect("result", 0b10100000u8).await;
 
-    tb.export_waveform("build/test_simple_bitwise_and.skw.gz").ok();
+    tb.export_waveform("build/test_simple_bitwise_and.skw.gz")
+        .ok();
 }
 
 #[tokio::test]
@@ -74,7 +77,8 @@ async fn test_multiple_function_calls() {
     // r3 = mul(a, c) = 5 * 2 = 10
     tb.expect("r3", 10u8).await;
 
-    tb.export_waveform("build/test_multiple_function_calls.skw.gz").ok();
+    tb.export_waveform("build/test_multiple_function_calls.skw.gz")
+        .ok();
 }
 
 #[tokio::test]
@@ -90,7 +94,8 @@ async fn test_nested_function_calls() {
     // add(add(5, 3), 2) = add(8, 2) = 10
     tb.expect("result", 10u8).await;
 
-    tb.export_waveform("build/test_nested_function_calls.skw.gz").ok();
+    tb.export_waveform("build/test_nested_function_calls.skw.gz")
+        .ok();
 }
 
 #[tokio::test]
@@ -106,7 +111,8 @@ async fn test_function_in_expression() {
     // (5 + 3) * 2 = 8 * 2 = 16
     tb.expect("result", 16u8).await;
 
-    tb.export_waveform("build/test_function_in_expression.skw.gz").ok();
+    tb.export_waveform("build/test_function_in_expression.skw.gz")
+        .ok();
 }
 
 /// Phase 3 Tests: Functions with Let Bindings
@@ -124,7 +130,8 @@ async fn test_function_with_single_let() {
     // (5 + 3) * 2 = 16
     tb.expect("result", 16u8).await;
 
-    tb.export_waveform("build/test_function_with_single_let.skw.gz").ok();
+    tb.export_waveform("build/test_function_with_single_let.skw.gz")
+        .ok();
 }
 
 #[tokio::test]
@@ -144,7 +151,8 @@ async fn test_function_with_multiple_lets() {
     // ((5 + 3) * 2) = 16
     tb.expect("result", 16u8).await;
 
-    tb.export_waveform("build/test_function_with_multiple_lets.skw.gz").ok();
+    tb.export_waveform("build/test_function_with_multiple_lets.skw.gz")
+        .ok();
 }
 
 #[tokio::test]
@@ -167,7 +175,8 @@ async fn test_function_with_dependent_lets() {
     // z = 20 + 2 = 22
     tb.expect("result", 22u8).await;
 
-    tb.export_waveform("build/test_function_with_dependent_lets.skw.gz").ok();
+    tb.export_waveform("build/test_function_with_dependent_lets.skw.gz")
+        .ok();
 }
 
 /// Phase 4 Tests: Control Flow (If/Match Expressions)
@@ -189,7 +198,8 @@ async fn test_function_with_if_expr() {
     tb.clock(1).await;
     tb.expect("result", 8u8).await;
 
-    tb.export_waveform("build/test_function_with_if_expr.skw.gz").ok();
+    tb.export_waveform("build/test_function_with_if_expr.skw.gz")
+        .ok();
 }
 
 #[tokio::test]
@@ -218,7 +228,8 @@ async fn test_function_with_nested_if() {
     tb.clock(1).await;
     tb.expect("result", 5u8).await;
 
-    tb.export_waveform("build/test_function_with_nested_if.skw.gz").ok();
+    tb.export_waveform("build/test_function_with_nested_if.skw.gz")
+        .ok();
 }
 
 #[tokio::test]
@@ -251,7 +262,8 @@ async fn test_function_with_match_expr() {
     tb.clock(1).await;
     tb.expect("result", 0xFFu8).await;
 
-    tb.export_waveform("build/test_function_with_match_expr.skw.gz").ok();
+    tb.export_waveform("build/test_function_with_match_expr.skw.gz")
+        .ok();
 }
 
 /// Phase 5 Tests: Edge Cases and Limitations
@@ -277,7 +289,8 @@ async fn test_function_with_wide_types() {
     tb.clock(1).await;
     tb.expect("result", 1234u32).await;
 
-    tb.export_waveform("build/test_function_with_wide_types.skw.gz").ok();
+    tb.export_waveform("build/test_function_with_wide_types.skw.gz")
+        .ok();
 }
 
 #[tokio::test]
@@ -299,7 +312,8 @@ async fn test_function_in_sequential_block() {
     tb.clock(1).await;
     tb.expect("result", 30u8).await;
 
-    tb.export_waveform("build/test_function_in_sequential_block.skw.gz").ok();
+    tb.export_waveform("build/test_function_in_sequential_block.skw.gz")
+        .ok();
 }
 
 #[tokio::test]
@@ -321,5 +335,6 @@ async fn test_multiple_functions_same_impl() {
     tb.clock(1).await;
     tb.expect("result", 30u8).await; // mul
 
-    tb.export_waveform("build/test_multiple_functions_same_impl.skw.gz").ok();
+    tb.export_waveform("build/test_multiple_functions_same_impl.skw.gz")
+        .ok();
 }

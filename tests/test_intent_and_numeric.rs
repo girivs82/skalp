@@ -24,7 +24,8 @@ async fn test_intent_latency_optimized() {
     // Default behavior: is_latency_optimized() returns true (1)
     tb.expect("is_lat_opt", 1u8).await;
 
-    tb.export_waveform("build/test_intent_latency_optimized.skw.gz").ok();
+    tb.export_waveform("build/test_intent_latency_optimized.skw.gz")
+        .ok();
 }
 
 /// Test is_area_optimized() returns false (1'b0) by default
@@ -40,7 +41,8 @@ async fn test_intent_area_optimized() {
     // Default behavior: is_area_optimized() returns false (0)
     tb.expect("is_area_opt", 0u8).await;
 
-    tb.export_waveform("build/test_intent_area_optimized.skw.gz").ok();
+    tb.export_waveform("build/test_intent_area_optimized.skw.gz")
+        .ok();
 }
 
 /// Test is_throughput_optimized() returns false (1'b0) by default
@@ -56,7 +58,8 @@ async fn test_intent_throughput_optimized() {
     // Default behavior: is_throughput_optimized() returns false (0)
     tb.expect("is_tput_opt", 0u8).await;
 
-    tb.export_waveform("build/test_intent_throughput_optimized.skw.gz").ok();
+    tb.export_waveform("build/test_intent_throughput_optimized.skw.gz")
+        .ok();
 }
 
 /// Test all three intent helpers together
@@ -74,7 +77,8 @@ async fn test_intent_all_three() {
     tb.expect("is_area", 0u8).await;
     tb.expect("is_tput", 0u8).await;
 
-    tb.export_waveform("build/test_intent_all_three.skw.gz").ok();
+    tb.export_waveform("build/test_intent_all_three.skw.gz")
+        .ok();
 }
 
 /// Test conditional behavior based on intent helpers
@@ -97,7 +101,8 @@ async fn test_intent_conditional() {
     tb.step().await;
     tb.expect("result", 155u8).await;
 
-    tb.export_waveform("build/test_intent_conditional.skw.gz").ok();
+    tb.export_waveform("build/test_intent_conditional.skw.gz")
+        .ok();
 }
 
 // ============================================================================
@@ -154,7 +159,8 @@ async fn test_fp32_comparison_less() {
     tb.expect("is_eq", 0u8).await; // 2.5 == 3.5 is false
     tb.expect("is_ne", 1u8).await; // 2.5 != 3.5 is true
 
-    tb.export_waveform("build/test_fp32_comparison_less.skw.gz").ok();
+    tb.export_waveform("build/test_fp32_comparison_less.skw.gz")
+        .ok();
 }
 
 /// Test FP32 comparison with equal values
@@ -178,7 +184,8 @@ async fn test_fp32_comparison_equal() {
     tb.expect("is_eq", 1u8).await; // 5.0 == 5.0 is true
     tb.expect("is_ne", 0u8).await; // 5.0 != 5.0 is false
 
-    tb.export_waveform("build/test_fp32_comparison_equal.skw.gz").ok();
+    tb.export_waveform("build/test_fp32_comparison_equal.skw.gz")
+        .ok();
 }
 
 // ============================================================================
@@ -221,7 +228,8 @@ async fn test_fp32_sqrt_perfect_squares() {
     tb.step().await;
     tb.expect_fp32("result", 10.0, 0.001).await;
 
-    tb.export_waveform("build/test_fp32_sqrt_perfect_squares.skw.gz").ok();
+    tb.export_waveform("build/test_fp32_sqrt_perfect_squares.skw.gz")
+        .ok();
 }
 
 /// Test FP32 sqrt with non-perfect squares
@@ -247,7 +255,8 @@ async fn test_fp32_sqrt_non_perfect() {
     tb.step().await;
     tb.expect_fp32("result", 2.236_068, 0.001).await;
 
-    tb.export_waveform("build/test_fp32_sqrt_non_perfect.skw.gz").ok();
+    tb.export_waveform("build/test_fp32_sqrt_non_perfect.skw.gz")
+        .ok();
 }
 
 /// Test FP32 sqrt with small values
@@ -272,7 +281,8 @@ async fn test_fp32_sqrt_small_values() {
     tb.step().await;
     tb.expect_fp32("result", 1.0, 0.001).await;
 
-    tb.export_waveform("build/test_fp32_sqrt_small_values.skw.gz").ok();
+    tb.export_waveform("build/test_fp32_sqrt_small_values.skw.gz")
+        .ok();
 }
 
 // ============================================================================
@@ -296,7 +306,8 @@ async fn test_fp32_quadratic_simple() {
     tb.expect_fp32("discriminant", 1.0, 0.001).await;
     tb.expect_fp32("x1", 3.0, 0.001).await;
 
-    tb.export_waveform("build/test_fp32_quadratic_simple.skw.gz").ok();
+    tb.export_waveform("build/test_fp32_quadratic_simple.skw.gz")
+        .ok();
 }
 
 /// Test quadratic formula: x^2 - 4x + 4 = 0 has double root x=2
@@ -315,7 +326,8 @@ async fn test_fp32_quadratic_double_root() {
     tb.expect_fp32("discriminant", 0.0, 0.001).await;
     tb.expect_fp32("x1", 2.0, 0.001).await;
 
-    tb.export_waveform("build/test_fp32_quadratic_double_root.skw.gz").ok();
+    tb.export_waveform("build/test_fp32_quadratic_double_root.skw.gz")
+        .ok();
 }
 
 /// Test quadratic formula: 2x^2 - 8x + 6 = 0 has roots x=1, x=3
@@ -334,7 +346,8 @@ async fn test_fp32_quadratic_non_unit_a() {
     tb.expect_fp32("discriminant", 16.0, 0.001).await;
     tb.expect_fp32("x1", 3.0, 0.001).await;
 
-    tb.export_waveform("build/test_fp32_quadratic_non_unit_a.skw.gz").ok();
+    tb.export_waveform("build/test_fp32_quadratic_non_unit_a.skw.gz")
+        .ok();
 }
 
 // ============================================================================
@@ -357,7 +370,8 @@ async fn test_fp32_distance_345_triangle() {
 
     tb.expect_fp32("distance", 5.0, 0.001).await;
 
-    tb.export_waveform("build/test_fp32_distance_345_triangle.skw.gz").ok();
+    tb.export_waveform("build/test_fp32_distance_345_triangle.skw.gz")
+        .ok();
 }
 
 /// Test 2D distance calculation: distance between (1,1) and (4,5) = 5
@@ -376,7 +390,8 @@ async fn test_fp32_distance_offset_345_triangle() {
 
     tb.expect_fp32("distance", 5.0, 0.001).await;
 
-    tb.export_waveform("build/test_fp32_distance_offset_345_triangle.skw.gz").ok();
+    tb.export_waveform("build/test_fp32_distance_offset_345_triangle.skw.gz")
+        .ok();
 }
 
 /// Test 2D distance calculation: distance along x-axis
@@ -395,7 +410,8 @@ async fn test_fp32_distance_horizontal() {
 
     tb.expect_fp32("distance", 5.0, 0.001).await;
 
-    tb.export_waveform("build/test_fp32_distance_horizontal.skw.gz").ok();
+    tb.export_waveform("build/test_fp32_distance_horizontal.skw.gz")
+        .ok();
 }
 
 /// Test 2D distance calculation: distance along y-axis
@@ -414,7 +430,8 @@ async fn test_fp32_distance_vertical() {
 
     tb.expect_fp32("distance", 8.0, 0.001).await;
 
-    tb.export_waveform("build/test_fp32_distance_vertical.skw.gz").ok();
+    tb.export_waveform("build/test_fp32_distance_vertical.skw.gz")
+        .ok();
 }
 
 /// Test 2D distance calculation: distance = 0 (same point)
@@ -433,7 +450,8 @@ async fn test_fp32_distance_zero() {
 
     tb.expect_fp32("distance", 0.0, 0.001).await;
 
-    tb.export_waveform("build/test_fp32_distance_zero.skw.gz").ok();
+    tb.export_waveform("build/test_fp32_distance_zero.skw.gz")
+        .ok();
 }
 
 /// Test 2D distance with irrational result
@@ -453,7 +471,8 @@ async fn test_fp32_distance_irrational() {
     tb.expect_fp32("distance", std::f32::consts::SQRT_2, 0.001)
         .await;
 
-    tb.export_waveform("build/test_fp32_distance_irrational.skw.gz").ok();
+    tb.export_waveform("build/test_fp32_distance_irrational.skw.gz")
+        .ok();
 }
 
 // ============================================================================
@@ -478,7 +497,8 @@ async fn test_impl_style_parallel() {
     tb.step().await;
     tb.expect("result", 1500u32).await;
 
-    tb.export_waveform("build/test_impl_style_parallel.skw.gz").ok();
+    tb.export_waveform("build/test_impl_style_parallel.skw.gz")
+        .ok();
 }
 
 /// Test #[impl_style::tree] attribute on let statement
@@ -520,7 +540,8 @@ async fn test_impl_style_sequential() {
     tb.step().await;
     tb.expect("result", 700u32).await;
 
-    tb.export_waveform("build/test_impl_style_sequential.skw.gz").ok();
+    tb.export_waveform("build/test_impl_style_sequential.skw.gz")
+        .ok();
 }
 
 /// Test #[impl_style::auto] attribute on let statement (default behavior)

@@ -32,14 +32,22 @@ pub fn get_completions(
     } else if prefix.ends_with('.') {
         // Member completions — try instance-aware completions
         let before_dot = extract_word_before_dot(prefix);
-        completions.extend(get_member_completions(before_dot.as_deref(), analysis, position.line));
+        completions.extend(get_member_completions(
+            before_dot.as_deref(),
+            analysis,
+            position.line,
+        ));
     } else if is_type_position(prefix) {
         // Type completions: after `:` in declarations
         completions.extend(get_type_completions(analysis));
     } else if is_expression_position(prefix) {
         // Expression context: suggest signals, ports, constants, instances, enum variants
         if let Some(ctx) = analysis {
-            completions.extend(get_expression_completions(ctx, position.line, typing_word.as_deref()));
+            completions.extend(get_expression_completions(
+                ctx,
+                position.line,
+                typing_word.as_deref(),
+            ));
         }
     } else if prefix.trim().is_empty() || prefix.ends_with(' ') {
         // Top-level or after space — keywords + context-aware suggestions
@@ -53,7 +61,11 @@ pub fn get_completions(
     } else {
         // General typing — suggest everything in scope
         if let Some(ctx) = analysis {
-            completions.extend(get_expression_completions(ctx, position.line, typing_word.as_deref()));
+            completions.extend(get_expression_completions(
+                ctx,
+                position.line,
+                typing_word.as_deref(),
+            ));
         }
     }
 
@@ -246,14 +258,17 @@ fn get_keyword_completions() -> Vec<CompletionItem> {
 }
 
 /// Get event completions for on() blocks — uses actual clock/reset port names
-fn get_event_completions(analysis: Option<&AnalysisContext>, cursor_line: u32) -> Vec<CompletionItem> {
+fn get_event_completions(
+    analysis: Option<&AnalysisContext>,
+    cursor_line: u32,
+) -> Vec<CompletionItem> {
     let mut completions = Vec::new();
 
     if let Some(ctx) = analysis {
         // Find clock and reset ports in the current entity scope
         let scope = ctx.scope_map.get(&cursor_line);
         for port in &ctx.ports {
-            let in_scope = scope.map_or(true, |s| port.entity == *s);
+            let in_scope = scope.is_none_or(|s| port.entity == *s);
             if !in_scope {
                 continue;
             }
@@ -426,9 +441,7 @@ fn get_expression_completions(
     // Helper: check if item matches the typing filter
     let matches_filter = |name: &str| -> bool {
         match filter {
-            Some(f) if !f.is_empty() => {
-                name.to_lowercase().starts_with(&f.to_lowercase())
-            }
+            Some(f) if !f.is_empty() => name.to_lowercase().starts_with(&f.to_lowercase()),
             _ => true,
         }
     };
@@ -459,7 +472,7 @@ fn get_expression_completions(
         if !matches_filter(&port.name) {
             continue;
         }
-        let in_scope = scope.map_or(true, |s| port.entity == *s);
+        let in_scope = scope.is_none_or(|s| port.entity == *s);
         if in_scope {
             let icon = match port.direction.as_str() {
                 "in" => CompletionItemKind::FIELD,
@@ -494,9 +507,11 @@ fn get_expression_completions(
         if !matches_filter(&generic.name) {
             continue;
         }
-        let in_scope = scope.map_or(true, |s| generic.entity == *s);
+        let in_scope = scope.is_none_or(|s| generic.entity == *s);
         if in_scope {
-            let default = generic.default_value.as_deref()
+            let default = generic
+                .default_value
+                .as_deref()
                 .map(|v| format!(" = {}", v))
                 .unwrap_or_default();
             completions.push(CompletionItem {
@@ -513,7 +528,7 @@ fn get_expression_completions(
         if !matches_filter(&instance.name) {
             continue;
         }
-        let in_scope = scope.map_or(true, |s| instance.scope == *s);
+        let in_scope = scope.is_none_or(|s| instance.scope == *s);
         if in_scope {
             completions.push(CompletionItem {
                 label: instance.name.clone(),
@@ -529,16 +544,17 @@ fn get_expression_completions(
         let underlying = ta.type_str.as_deref().unwrap_or("");
         if underlying.starts_with("enum {") {
             // Offer EnumName::Variant completions
-            if let Some(inner) = underlying.strip_prefix("enum { ")
+            if let Some(inner) = underlying
+                .strip_prefix("enum { ")
                 .and_then(|s| s.strip_suffix(" }"))
             {
                 for variant in inner.split(", ") {
-                    let variant_name = variant.split(|c| c == '=' || c == ':')
-                        .next()
-                        .unwrap_or(variant)
-                        .trim();
+                    let variant_name = variant.split(['=', ':']).next().unwrap_or(variant).trim();
                     let qualified = format!("{}::{}", ta.name, variant_name);
-                    if !matches_filter(&qualified) && !matches_filter(variant_name) && !matches_filter(&ta.name) {
+                    if !matches_filter(&qualified)
+                        && !matches_filter(variant_name)
+                        && !matches_filter(&ta.name)
+                    {
                         continue;
                     }
                     completions.push(CompletionItem {
@@ -634,7 +650,8 @@ fn get_member_completions(
                 if let Some(ta) = ctx.type_aliases.iter().find(|t| t.name == *type_name) {
                     if let Some(ref underlying) = ta.type_str {
                         if underlying.starts_with("struct {") {
-                            if let Some(inner) = underlying.strip_prefix("struct { ")
+                            if let Some(inner) = underlying
+                                .strip_prefix("struct { ")
                                 .and_then(|s| s.strip_suffix(" }"))
                             {
                                 for field in inner.split(", ") {
@@ -660,7 +677,8 @@ fn get_member_completions(
             if let Some(ta) = ctx.type_aliases.iter().find(|t| t.name == port.type_str) {
                 if let Some(ref underlying) = ta.type_str {
                     if underlying.starts_with("struct {") {
-                        if let Some(inner) = underlying.strip_prefix("struct { ")
+                        if let Some(inner) = underlying
+                            .strip_prefix("struct { ")
                             .and_then(|s| s.strip_suffix(" }"))
                         {
                             for field in inner.split(", ") {
@@ -793,11 +811,12 @@ mod tests {
 
     #[test]
     fn test_context_aware_event_completions() {
-        let source = "entity Foo {\n  in sys_clk: clock\n  in rst_n: reset\n}\nimpl Foo {\n  on(\n}";
+        let source =
+            "entity Foo {\n  in sys_clk: clock\n  in rst_n: reset\n}\nimpl Foo {\n  on(\n}";
         let ctx = AnalysisContext::from_source(source);
 
         let doc = DocumentState {
-            content: Rope::from_str(&source),
+            content: Rope::from_str(source),
             version: 1,
             ast: None,
             diagnostics: Vec::new(),

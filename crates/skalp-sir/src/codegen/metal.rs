@@ -95,7 +95,8 @@ impl<'a> MetalBackend<'a> {
 
         // Generate sequential body using shared codegen
         self.shared.indent();
-        self.shared.generate_sequential_body("current_registers", "next_registers");
+        self.shared
+            .generate_sequential_body("current_registers", "next_registers");
         output.push_str(&self.shared.take_output());
 
         output.push_str("}\n\n");
@@ -128,7 +129,8 @@ impl<'a> MetalBackend<'a> {
         output.push_str(&self.shared.take_output());
 
         // Sequential updates
-        self.shared.generate_sequential_body("registers", "registers");
+        self.shared
+            .generate_sequential_body("registers", "registers");
         output.push_str(&self.shared.take_output());
         self.shared.set_batched_mode(false);
 
@@ -139,7 +141,9 @@ impl<'a> MetalBackend<'a> {
 
         // Final combinational pass: propagate updated register values to output signals
         // Without this, output signals are stale by one cycle (reflect pre-update state)
-        output.push_str("\n    // Final combinational pass (FWFT: outputs reflect latest register state)\n");
+        output.push_str(
+            "\n    // Final combinational pass (FWFT: outputs reflect latest register state)\n",
+        );
         self.shared.generate_combinational_body();
         output.push_str(&self.shared.take_output());
 
@@ -176,7 +180,8 @@ impl<'a> MetalBackend<'a> {
             // Only create local copies for scalar registers (≤128 bits)
             if signal_width <= 128 {
                 let sanitized = self.shared.sanitize_name(name);
-                let (base_type, array_size) = self.shared.type_mapper.get_type_for_width(signal_width);
+                let (base_type, array_size) =
+                    self.shared.type_mapper.get_type_for_width(signal_width);
 
                 if array_size.is_none() {
                     output.push_str(&format!(
@@ -192,14 +197,20 @@ impl<'a> MetalBackend<'a> {
         for node in &self.shared.module.sequential_nodes {
             if let SirNodeKind::FlipFlop { .. } = &node.kind {
                 for ff_output in &node.outputs {
-                    if !self.shared.module.state_elements.contains_key(&ff_output.signal_id) {
+                    if !self
+                        .shared
+                        .module
+                        .state_elements
+                        .contains_key(&ff_output.signal_id)
+                    {
                         let sanitized = self.shared.sanitize_name(&ff_output.signal_id);
                         if declared_locals.contains(&sanitized) {
                             continue;
                         }
                         let width = self.shared.get_signal_width(&ff_output.signal_id);
                         if width <= 128 {
-                            let (base_type, array_size) = self.shared.type_mapper.get_type_for_width(width);
+                            let (base_type, array_size) =
+                                self.shared.type_mapper.get_type_for_width(width);
                             if array_size.is_none() {
                                 output.push_str(&format!(
                                     "    {} local_{} = registers->{};\n",
@@ -257,7 +268,12 @@ impl<'a> MetalBackend<'a> {
         for node in &self.shared.module.sequential_nodes {
             if let SirNodeKind::FlipFlop { .. } = &node.kind {
                 for ff_output in &node.outputs {
-                    if !self.shared.module.state_elements.contains_key(&ff_output.signal_id) {
+                    if !self
+                        .shared
+                        .module
+                        .state_elements
+                        .contains_key(&ff_output.signal_id)
+                    {
                         let sanitized = self.shared.sanitize_name(&ff_output.signal_id);
                         if written_back.contains(&sanitized) {
                             continue;

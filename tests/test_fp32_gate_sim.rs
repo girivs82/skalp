@@ -3,7 +3,6 @@
 //! Verifies that FP32 operations produce correct arithmetic results
 //! after gate-level synthesis and optimization.
 
-
 use skalp_frontend::parse_and_build_compilation_context;
 use skalp_lir::{
     apply_boundary_ncl_to_hierarchy, get_stdlib_library, lower_mir_hierarchical_for_optimize_first,
@@ -60,7 +59,10 @@ fn compile_fp32_sync_test(source_path: &Path) -> skalp_lir::GateNetlist {
 
     // Sync entity: has_async will be false, no NCL expansion
     let (hier_lir_raw, has_async) = lower_mir_hierarchical_for_optimize_first(&mir);
-    assert!(!has_async, "Sync test fixture should not have async entities");
+    assert!(
+        !has_async,
+        "Sync test fixture should not have async entities"
+    );
 
     let library = get_stdlib_library("generic_asic").expect("Failed to load library");
     let hier_result = map_hierarchical_to_gates(&hier_lir_raw, &library);
@@ -69,7 +71,11 @@ fn compile_fp32_sync_test(source_path: &Path) -> skalp_lir::GateNetlist {
 
 /// Direct gate-level evaluation of a synchronous (non-NCL) GateNetlist.
 /// Sets single-rail inputs, iterates combinational logic until stable, reads outputs.
-fn evaluate_sync_gate_netlist(netlist: &skalp_lir::GateNetlist, input_a: u32, input_b: u32) -> Option<u32> {
+fn evaluate_sync_gate_netlist(
+    netlist: &skalp_lir::GateNetlist,
+    input_a: u32,
+    input_b: u32,
+) -> Option<u32> {
     // Use NclSimulator's iterate() for combinational propagation (works for non-NCL too)
     let config = NclSimConfig {
         max_iterations: 10000,
@@ -101,7 +107,10 @@ fn evaluate_sync_gate_netlist(netlist: &skalp_lir::GateNetlist, input_a: u32, in
     // Iterate until stable
     let iterations = sim.run_until_stable(10000);
     let is_stable = sim.stats().is_stable;
-    println!("  Converged after {} iterations, stable={}", iterations, is_stable);
+    println!(
+        "  Converged after {} iterations, stable={}",
+        iterations, is_stable
+    );
 
     if !is_stable {
         println!("  WARNING: did not converge");
@@ -193,8 +202,8 @@ async fn simulate_fp32_add(netlist: &skalp_lir::GateNetlist, a: f32, b: f32) -> 
 
 #[tokio::test]
 async fn test_fp32_add_simple() {
-    let source_path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/test_fpadd_sim.sk");
+    let source_path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/test_fpadd_sim.sk");
 
     println!("Compiling FP32 add test (async/NCL)...");
     let netlist = compile_fp32_test(&source_path);
@@ -255,8 +264,8 @@ async fn test_fp32_add_simple() {
 /// This isolates whether the bug is in NCL boundary expansion or gate-level synthesis.
 #[test]
 fn test_fp32_add_sync() {
-    let source_path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/test_fpadd_sync.sk");
+    let source_path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/test_fpadd_sync.sk");
 
     println!("Compiling FP32 add test (sync, no NCL)...");
     let netlist = compile_fp32_sync_test(&source_path);
@@ -276,8 +285,8 @@ fn test_fp32_add_sync() {
         // Edge cases
         (0.0f32, 5.0f32, 5.0f32),
         (5.0f32, -5.0f32, 0.0f32),
-        (1.0f32, 1e-7f32, 1.0f32),       // large exp_diff
-        (1e10f32, 1.0f32, 1e10f32),       // large exp_diff
+        (1.0f32, 1e-7f32, 1.0f32),  // large exp_diff
+        (1e10f32, 1.0f32, 1e10f32), // large exp_diff
         (-1.0f32, -2.0f32, -3.0f32),
     ];
 
@@ -313,8 +322,13 @@ fn test_fp32_add_sync() {
                     let sign = (result_bits >> 31) & 1;
                     let exp = (result_bits >> 23) & 0xFF;
                     let frac = result_bits & 0x7FFFFF;
-                    println!("    Decoded: sign={}, exp={} (bias={}), frac=0x{:06X}",
-                        sign, exp, exp as i32 - 127, frac);
+                    println!(
+                        "    Decoded: sign={}, exp={} (bias={}), frac=0x{:06X}",
+                        sign,
+                        exp,
+                        exp as i32 - 127,
+                        frac
+                    );
                     failed += 1;
                 }
             }
@@ -331,8 +345,8 @@ fn test_fp32_add_sync() {
 
 #[tokio::test]
 async fn test_fp32_add_edge_cases() {
-    let source_path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/test_fpadd_sim.sk");
+    let source_path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/test_fpadd_sim.sk");
 
     let netlist = compile_fp32_test(&source_path);
 
@@ -383,12 +397,16 @@ async fn test_fp32_add_edge_cases() {
 /// Test that BitSelect and simple if-else chains compile correctly
 #[test]
 fn test_bitselect_isolation() {
-    let source_path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/test_bitselect.sk");
+    let source_path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/test_bitselect.sk");
 
     println!("Compiling BitSelect test...");
     let netlist = compile_fp32_sync_test(&source_path);
-    println!("Compiled: {} cells, {} nets", netlist.cells.len(), netlist.nets.len());
+    println!(
+        "Compiled: {} cells, {} nets",
+        netlist.cells.len(),
+        netlist.nets.len()
+    );
 
     // Test with 0xA0000000 (bits 31 and 29 set)
     let test_input: u32 = 0xA0000000;

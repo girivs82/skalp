@@ -255,7 +255,7 @@ impl ModelChecker {
     /// Block bad states in IC3
     async fn block_bad_states(
         &self,
-        frames: &mut Vec<StateSet>,
+        frames: &mut [StateSet],
         bad_states: &StateSet,
         level: usize,
     ) -> BlockResult {
@@ -271,8 +271,7 @@ impl ModelChecker {
     fn formula_to_string(&self, formula: &TemporalFormula) -> String {
         const STACK_RED_ZONE: usize = 256 * 1024;
         const STACK_GROW_SIZE: usize = 8 * 1024 * 1024;
-        stacker::maybe_grow(STACK_RED_ZONE, STACK_GROW_SIZE, || {
-        match formula {
+        stacker::maybe_grow(STACK_RED_ZONE, STACK_GROW_SIZE, || match formula {
             TemporalFormula::Atomic(s) => s.clone(),
             TemporalFormula::Always(f) => format!("G({})", self.formula_to_string(f)),
             TemporalFormula::Eventually(f) => format!("F({})", self.formula_to_string(f)),
@@ -288,20 +287,13 @@ impl ModelChecker {
             ),
             TemporalFormula::Not(f) => format!("!({})", self.formula_to_string(f)),
             _ => "true".to_string(),
-        }
         })
     }
 
     /// Parse temporal formula
     fn parse_temporal_formula(&self, formula: &str) -> FormalResult<TemporalFormula> {
         // Simple parser for temporal formulas
-        if formula.contains("G") || formula.contains("F") || formula.contains("X") {
-            Ok(TemporalFormula::Atomic(formula.to_string()))
-        } else if formula.contains("AG") || formula.contains("AF") || formula.contains("EG") {
-            Ok(TemporalFormula::Atomic(formula.to_string()))
-        } else {
-            Ok(TemporalFormula::Atomic(formula.to_string()))
-        }
+        Ok(TemporalFormula::Atomic(formula.to_string()))
     }
 
     /// Check CTL formula

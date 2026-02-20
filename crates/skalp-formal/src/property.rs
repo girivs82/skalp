@@ -249,74 +249,72 @@ fn parse_temporal_formula(spec: &str) -> Result<TemporalFormula, String> {
     const STACK_RED_ZONE: usize = 256 * 1024;
     const STACK_GROW_SIZE: usize = 8 * 1024 * 1024;
     stacker::maybe_grow(STACK_RED_ZONE, STACK_GROW_SIZE, || {
-    // Simplified parser - would need full grammar in production
-    let spec = spec.trim();
+        // Simplified parser - would need full grammar in production
+        let spec = spec.trim();
 
-    if spec == "true" {
-        return Ok(TemporalFormula::Bool(true));
-    }
-    if spec == "false" {
-        return Ok(TemporalFormula::Bool(false));
-    }
+        if spec == "true" {
+            return Ok(TemporalFormula::Bool(true));
+        }
+        if spec == "false" {
+            return Ok(TemporalFormula::Bool(false));
+        }
 
-    // Handle temporal operators
-    if spec.starts_with("G ") || spec.starts_with("[] ") {
-        let inner = if spec.starts_with("G ") {
-            &spec[2..]
-        } else {
-            &spec[3..]
-        };
-        return Ok(TemporalFormula::Always(Box::new(parse_temporal_formula(
-            inner,
-        )?)));
-    }
+        // Handle temporal operators
+        if let Some(inner) = spec.strip_prefix("G ") {
+            return Ok(TemporalFormula::Always(Box::new(parse_temporal_formula(
+                inner,
+            )?)));
+        }
+        if let Some(inner) = spec.strip_prefix("[] ") {
+            return Ok(TemporalFormula::Always(Box::new(parse_temporal_formula(
+                inner,
+            )?)));
+        }
 
-    if spec.starts_with("F ") || spec.starts_with("<> ") {
-        let inner = if spec.starts_with("F ") {
-            &spec[2..]
-        } else {
-            &spec[3..]
-        };
-        return Ok(TemporalFormula::Eventually(Box::new(
-            parse_temporal_formula(inner)?,
-        )));
-    }
+        if let Some(inner) = spec.strip_prefix("F ") {
+            return Ok(TemporalFormula::Eventually(Box::new(
+                parse_temporal_formula(inner)?,
+            )));
+        }
+        if let Some(inner) = spec.strip_prefix("<> ") {
+            return Ok(TemporalFormula::Eventually(Box::new(
+                parse_temporal_formula(inner)?,
+            )));
+        }
 
-    if spec.starts_with("X ") {
-        let inner = &spec[2..];
-        return Ok(TemporalFormula::Next(Box::new(parse_temporal_formula(
-            inner,
-        )?)));
-    }
+        if let Some(inner) = spec.strip_prefix("X ") {
+            return Ok(TemporalFormula::Next(Box::new(parse_temporal_formula(
+                inner,
+            )?)));
+        }
 
-    // Handle boolean operators
-    if let Some(pos) = spec.find(" && ") {
-        let left = parse_temporal_formula(&spec[..pos])?;
-        let right = parse_temporal_formula(&spec[pos + 4..])?;
-        return Ok(TemporalFormula::And(Box::new(left), Box::new(right)));
-    }
+        // Handle boolean operators
+        if let Some(pos) = spec.find(" && ") {
+            let left = parse_temporal_formula(&spec[..pos])?;
+            let right = parse_temporal_formula(&spec[pos + 4..])?;
+            return Ok(TemporalFormula::And(Box::new(left), Box::new(right)));
+        }
 
-    if let Some(pos) = spec.find(" || ") {
-        let left = parse_temporal_formula(&spec[..pos])?;
-        let right = parse_temporal_formula(&spec[pos + 4..])?;
-        return Ok(TemporalFormula::Or(Box::new(left), Box::new(right)));
-    }
+        if let Some(pos) = spec.find(" || ") {
+            let left = parse_temporal_formula(&spec[..pos])?;
+            let right = parse_temporal_formula(&spec[pos + 4..])?;
+            return Ok(TemporalFormula::Or(Box::new(left), Box::new(right)));
+        }
 
-    if let Some(pos) = spec.find(" -> ") {
-        let left = parse_temporal_formula(&spec[..pos])?;
-        let right = parse_temporal_formula(&spec[pos + 4..])?;
-        return Ok(TemporalFormula::Implies(Box::new(left), Box::new(right)));
-    }
+        if let Some(pos) = spec.find(" -> ") {
+            let left = parse_temporal_formula(&spec[..pos])?;
+            let right = parse_temporal_formula(&spec[pos + 4..])?;
+            return Ok(TemporalFormula::Implies(Box::new(left), Box::new(right)));
+        }
 
-    if spec.starts_with("! ") {
-        let inner = &spec[2..];
-        return Ok(TemporalFormula::Not(Box::new(parse_temporal_formula(
-            inner,
-        )?)));
-    }
+        if let Some(inner) = spec.strip_prefix("! ") {
+            return Ok(TemporalFormula::Not(Box::new(parse_temporal_formula(
+                inner,
+            )?)));
+        }
 
-    // Otherwise treat as atomic proposition
-    Ok(TemporalFormula::Atomic(spec.to_string()))
+        // Otherwise treat as atomic proposition
+        Ok(TemporalFormula::Atomic(spec.to_string()))
     })
 }
 
@@ -325,30 +323,30 @@ fn formula_to_smt(formula: &TemporalFormula) -> String {
     const STACK_RED_ZONE: usize = 256 * 1024;
     const STACK_GROW_SIZE: usize = 8 * 1024 * 1024;
     stacker::maybe_grow(STACK_RED_ZONE, STACK_GROW_SIZE, || {
-    match formula {
-        TemporalFormula::Atomic(prop) => prop.clone(),
-        TemporalFormula::Bool(b) => b.to_string(),
-        TemporalFormula::Not(f) => format!("(not {})", formula_to_smt(f)),
-        TemporalFormula::And(l, r) => {
-            format!("(and {} {})", formula_to_smt(l), formula_to_smt(r))
+        match formula {
+            TemporalFormula::Atomic(prop) => prop.clone(),
+            TemporalFormula::Bool(b) => b.to_string(),
+            TemporalFormula::Not(f) => format!("(not {})", formula_to_smt(f)),
+            TemporalFormula::And(l, r) => {
+                format!("(and {} {})", formula_to_smt(l), formula_to_smt(r))
+            }
+            TemporalFormula::Or(l, r) => {
+                format!("(or {} {})", formula_to_smt(l), formula_to_smt(r))
+            }
+            TemporalFormula::Implies(l, r) => {
+                format!("(=> {} {})", formula_to_smt(l), formula_to_smt(r))
+            }
+            TemporalFormula::Always(f) => {
+                format!("(G {})", formula_to_smt(f))
+            }
+            TemporalFormula::Eventually(f) => {
+                format!("(F {})", formula_to_smt(f))
+            }
+            TemporalFormula::Next(f) => {
+                format!("(X {})", formula_to_smt(f))
+            }
+            _ => "unsupported".to_string(), // Simplified for now
         }
-        TemporalFormula::Or(l, r) => {
-            format!("(or {} {})", formula_to_smt(l), formula_to_smt(r))
-        }
-        TemporalFormula::Implies(l, r) => {
-            format!("(=> {} {})", formula_to_smt(l), formula_to_smt(r))
-        }
-        TemporalFormula::Always(f) => {
-            format!("(G {})", formula_to_smt(f))
-        }
-        TemporalFormula::Eventually(f) => {
-            format!("(F {})", formula_to_smt(f))
-        }
-        TemporalFormula::Next(f) => {
-            format!("(X {})", formula_to_smt(f))
-        }
-        _ => "unsupported".to_string(), // Simplified for now
-    }
     })
 }
 
@@ -356,8 +354,7 @@ fn formula_to_smt(formula: &TemporalFormula) -> String {
 fn formula_to_nusmv(formula: &TemporalFormula) -> String {
     const STACK_RED_ZONE: usize = 256 * 1024;
     const STACK_GROW_SIZE: usize = 8 * 1024 * 1024;
-    stacker::maybe_grow(STACK_RED_ZONE, STACK_GROW_SIZE, || {
-    match formula {
+    stacker::maybe_grow(STACK_RED_ZONE, STACK_GROW_SIZE, || match formula {
         TemporalFormula::Atomic(prop) => prop.clone(),
         TemporalFormula::Bool(b) => if *b { "TRUE" } else { "FALSE" }.to_string(),
         TemporalFormula::Not(f) => format!("! {}", formula_to_nusmv(f)),
@@ -386,13 +383,18 @@ fn formula_to_nusmv(formula: &TemporalFormula) -> String {
             format!("EF {}", formula_to_nusmv(f))
         }
         _ => "unsupported".to_string(),
-    }
     })
 }
 
 /// Property library with common hardware verification properties
 pub struct PropertyLibrary {
     properties: HashMap<String, Property>,
+}
+
+impl Default for PropertyLibrary {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl PropertyLibrary {

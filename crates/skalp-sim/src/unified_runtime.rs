@@ -351,7 +351,6 @@ impl UnifiedSimulator {
                 // For now, we use the module name as a prefix for outputs
                 self.latency_adjustments
                     .insert(module.name.clone(), adjustment);
-
             }
         }
 
@@ -447,7 +446,6 @@ impl UnifiedSimulator {
         // This ensures gate-level simulation uses the same signal name mappings
         // as behavioral simulation
         self.name_registry = sir.name_registry.clone();
-
     }
 
     /// Load a gate-level GateNetlist for NCL (async) simulation
@@ -481,8 +479,7 @@ impl UnifiedSimulator {
                 }
             }
             #[cfg(not(target_os = "macos"))]
-            {
-            }
+            {}
         }
 
         // CPU fallback
@@ -528,7 +525,6 @@ impl UnifiedSimulator {
             HwAccel::Auto => cfg!(target_os = "macos"),
         };
 
-
         if use_gpu {
             #[cfg(target_os = "macos")]
             {
@@ -557,8 +553,7 @@ impl UnifiedSimulator {
         }
 
         // Use compiled CPU runtime
-        let mut runtime = CompiledCpuRuntime::new(module)
-            .map_err(|e| format!("{}", e))?;
+        let mut runtime = CompiledCpuRuntime::new(module).map_err(|e| format!("{}", e))?;
         runtime
             .initialize(module)
             .await
@@ -615,7 +610,8 @@ impl UnifiedSimulator {
         let internal_name = self.resolve_path(name);
 
         // Track current input value for waveform capture
-        self.current_input_values.insert(internal_name.clone(), value);
+        self.current_input_values
+            .insert(internal_name.clone(), value);
 
         match &mut self.backend {
             SimulatorBackend::Uninitialized => {
@@ -789,13 +785,12 @@ impl UnifiedSimulator {
     ///
     /// Returns None if any bit is NULL or Invalid (not yet stable)
     pub fn get_ncl_output(&self, name: &str, width: usize) -> Option<u64> {
-        let result = match &self.backend {
+        match &self.backend {
             SimulatorBackend::NclCpu(ncl_sim) => ncl_sim.get_dual_rail_value(name, width),
             #[cfg(target_os = "macos")]
             SimulatorBackend::NclGpu(runtime) => runtime.get_dual_rail_value(name, width),
             _ => None,
-        };
-        result
+        }
     }
 
     /// Check if NCL outputs are complete (all bits have valid DATA values)
@@ -997,7 +992,9 @@ impl UnifiedSimulator {
 
         // Include tracked input values (clk, rst, and all user inputs) for waveform capture
         for (internal_name, value) in &self.current_input_values {
-            let display = self.name_registry.reverse_resolve(internal_name)
+            let display = self
+                .name_registry
+                .reverse_resolve(internal_name)
                 .unwrap_or(internal_name)
                 .to_string();
             outputs.insert(display, *value);
@@ -1032,7 +1029,9 @@ impl UnifiedSimulator {
                 };
                 for name in output_names {
                     if let Some(value) = self.get_output(&name).await {
-                        let display = self.name_registry.reverse_resolve(&name)
+                        let display = self
+                            .name_registry
+                            .reverse_resolve(&name)
                             .unwrap_or(&name)
                             .to_string();
                         outputs.insert(display, value);
@@ -1121,9 +1120,7 @@ impl UnifiedSimulator {
     /// For behavioral CPU: returns `SimulationState.signals` from the step.
     /// For gate-level CPU: returns signal snapshot as byte-encoded values.
     /// For other backends: steps normally and returns None.
-    pub async fn step_with_snapshot(
-        &mut self,
-    ) -> Option<crate::simulator::SimulationState> {
+    pub async fn step_with_snapshot(&mut self) -> Option<crate::simulator::SimulationState> {
         let result = match &mut self.backend {
             SimulatorBackend::CompiledCpu(runtime) => {
                 // step() returns SimulationState with signals and registers
@@ -1380,11 +1377,11 @@ impl UnifiedSimulator {
         };
 
         let signal_widths = match &self.backend {
-            SimulatorBackend::CompiledCpu(runtime) => {
-                runtime.get_waveform_signals().into_iter()
-                    .map(|(_, display, width)| (display, width))
-                    .collect()
-            }
+            SimulatorBackend::CompiledCpu(runtime) => runtime
+                .get_waveform_signals()
+                .into_iter()
+                .map(|(_, display, width)| (display, width))
+                .collect(),
             _ => IndexMap::new(),
         };
 
@@ -1471,15 +1468,17 @@ impl UnifiedSimulator {
     /// This maps the keys used in SimulationState to user-friendly display names.
     pub fn get_signal_name_map(&self) -> IndexMap<String, String> {
         match &self.backend {
-            SimulatorBackend::CompiledCpu(runtime) => {
-                runtime.get_waveform_signals().into_iter()
-                    .map(|(sanitized, display, _)| (sanitized, display))
-                    .collect()
-            }
+            SimulatorBackend::CompiledCpu(runtime) => runtime
+                .get_waveform_signals()
+                .into_iter()
+                .map(|(sanitized, display, _)| (sanitized, display))
+                .collect(),
             _ => {
                 // For GPU and other backends, use the name registry
                 let mut map = IndexMap::new();
-                for internal_name in self.behavioral_input_names.iter()
+                for internal_name in self
+                    .behavioral_input_names
+                    .iter()
                     .chain(self.behavioral_output_names.iter())
                 {
                     if let Some(entry) = self.name_registry.get_entry_by_internal(internal_name) {
@@ -1500,11 +1499,11 @@ impl UnifiedSimulator {
     /// Get signal widths (display_name -> bit width) for waveform export
     pub fn get_signal_widths(&self) -> IndexMap<String, usize> {
         match &self.backend {
-            SimulatorBackend::CompiledCpu(runtime) => {
-                runtime.get_waveform_signals().into_iter()
-                    .map(|(_, display, width)| (display, width))
-                    .collect()
-            }
+            SimulatorBackend::CompiledCpu(runtime) => runtime
+                .get_waveform_signals()
+                .into_iter()
+                .map(|(_, display, width)| (display, width))
+                .collect(),
             _ => {
                 // Use name registry to get widths for all known signals
                 let mut widths = IndexMap::new();
@@ -1605,7 +1604,9 @@ impl UnifiedSimulator {
             SimulatorBackend::Uninitialized => None,
             SimulatorBackend::CompiledCpu(runtime) => runtime.get_output(&internal_name).await.ok(),
             #[cfg(target_os = "macos")]
-            SimulatorBackend::BehavioralGpu(runtime) => runtime.get_output(&internal_name).await.ok(),
+            SimulatorBackend::BehavioralGpu(runtime) => {
+                runtime.get_output(&internal_name).await.ok()
+            }
             // For non-behavioral backends, get u64 and convert to bytes
             _ => self
                 .get_output_raw(name)

@@ -269,14 +269,14 @@ impl GateNetlistToSirConverter {
     fn create_output_buffers(&mut self, netlist: &GateNetlist, comb_ops: &mut Vec<SirOperation>) {
         for net in &netlist.nets {
             // Only process output ports that have a driver
-            if net.is_output && net.driver.is_some() {
+            if let Some(driver_cell_id) = net.driver {
+                if !net.is_output {
+                    continue;
+                }
                 let output_signal_id = match self.net_to_signal.get(&net.id) {
                     Some(id) => *id,
                     None => continue,
                 };
-
-                // Find the driver cell and its output net
-                let driver_cell_id = net.driver.unwrap();
                 let driver_pin = net.driver_pin.unwrap_or(0);
 
                 // Find the driver cell to get its output net
@@ -335,8 +335,7 @@ impl GateNetlistToSirConverter {
 
             // Check if D input is driven by a ResetMux cell
             let reset_mux = netlist.cells.iter().find(|c| {
-                c.outputs.iter().any(|&out| out == d_input_net_id)
-                    && c.source_op.as_deref() == Some("ResetMux")
+                c.outputs.contains(&d_input_net_id) && c.source_op.as_deref() == Some("ResetMux")
             });
 
             if let Some(mux_cell) = reset_mux {
@@ -345,19 +344,22 @@ impl GateNetlistToSirConverter {
                 if let Some(&reset_bit_net_id) = mux_cell.inputs.get(2) {
                     // Find the TIE cell driving this net
                     let tie_cell = netlist.cells.iter().find(|c| {
-                        c.outputs.iter().any(|&out| out == reset_bit_net_id)
+                        c.outputs.contains(&reset_bit_net_id)
                             && c.source_op.as_deref() == Some("ResetValue")
                     });
 
                     if let Some(tie) = tie_cell {
                         // Determine reset value: TIE_HIGH = 1, TIE_LOW = 0
-                        let reset_bit = tie.cell_type.contains("HIGH") || tie.cell_type.contains("HI");
+                        let reset_bit =
+                            tie.cell_type.contains("HIGH") || tie.cell_type.contains("HI");
 
                         // Get DFF output net and corresponding signal
                         if let Some(&q_net_id) = cell.outputs.first() {
                             if let Some(&signal_id) = self.net_to_signal.get(&q_net_id) {
                                 // Find and update the signal's initial_value
-                                if let Some(signal) = module.signals.iter_mut().find(|s| s.id == signal_id) {
+                                if let Some(signal) =
+                                    module.signals.iter_mut().find(|s| s.id == signal_id)
+                                {
                                     // Create BitVec with default storage type (usize)
                                     let mut bv: BitVec = BitVec::with_capacity(1);
                                     bv.push(reset_bit);
@@ -670,12 +672,12 @@ impl GateNetlistToSirConverter {
 
             // Sequential - D Flip-Flops
             "DFF" | "DFFR" | "DFFRQ" => PrimitiveType::DffP, // Rising edge, with reset
-            "DFFN" | "DFFRN" => PrimitiveType::DffN, // Active-low reset
-            "DFFNEG" => PrimitiveType::DffNeg,      // Falling edge
-            "DFFE" | "DFFER" => PrimitiveType::DffE, // With enable (and optional reset)
-            "DFFAR" => PrimitiveType::DffAR,        // Async reset
-            "DFFAS" => PrimitiveType::DffAS,        // Async set
-            "DFFSCAN" => PrimitiveType::DffScan,    // Scan chain
+            "DFFN" | "DFFRN" => PrimitiveType::DffN,         // Active-low reset
+            "DFFNEG" => PrimitiveType::DffNeg,               // Falling edge
+            "DFFE" | "DFFER" => PrimitiveType::DffE,         // With enable (and optional reset)
+            "DFFAR" => PrimitiveType::DffAR,                 // Async reset
+            "DFFAS" => PrimitiveType::DffAS,                 // Async set
+            "DFFSCAN" => PrimitiveType::DffScan,             // Scan chain
 
             // Latches
             "LATCH" | "LAT" | "DLATCH" => PrimitiveType::Dlatch,

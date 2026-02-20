@@ -492,7 +492,11 @@ impl NclSimulator {
         for net in &self.netlist.nets {
             if net.name.contains(pattern) {
                 let resolved = self.netlist.resolve_alias(net.id);
-                let value = self.net_values.get(resolved.0 as usize).copied().unwrap_or(false);
+                let value = self
+                    .net_values
+                    .get(resolved.0 as usize)
+                    .copied()
+                    .unwrap_or(false);
                 let alias_info = if resolved != net.id {
                     format!(" (alias->{})", resolved.0)
                 } else {
@@ -504,7 +508,13 @@ impl NclSimulator {
         matches.sort_by(|a, b| a.0.cmp(&b.0));
         println!("  [NETS matching '{}'] {} matches:", pattern, matches.len());
         for (name, id, value, alias) in &matches {
-            println!("    net[{}]{} '{}' = {}", id, alias, name, if *value { "1" } else { "0" });
+            println!(
+                "    net[{}]{} '{}' = {}",
+                id,
+                alias,
+                name,
+                if *value { "1" } else { "0" }
+            );
         }
     }
 
@@ -544,7 +554,11 @@ impl NclSimulator {
     pub fn count_undriven_nets(&self) -> (usize, Vec<String>) {
         let mut undriven = Vec::new();
         for net in &self.netlist.nets {
-            if !net.is_input && net.driver.is_none() && !net.fanout.is_empty() && net.alias_of.is_none() {
+            if !net.is_input
+                && net.driver.is_none()
+                && !net.fanout.is_empty()
+                && net.alias_of.is_none()
+            {
                 undriven.push(net.name.clone());
             }
         }

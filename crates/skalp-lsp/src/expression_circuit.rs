@@ -126,7 +126,11 @@ fn is_constant_text(text: &str) -> bool {
     if text == "true" || text == "false" {
         return true;
     }
-    if text.starts_with("0x") || text.starts_with("0X") || text.starts_with("0b") || text.starts_with("0B") {
+    if text.starts_with("0x")
+        || text.starts_with("0X")
+        || text.starts_with("0b")
+        || text.starts_with("0B")
+    {
         return true;
     }
     // Numeric: digits possibly with dots, fp suffix, etc.
@@ -183,8 +187,8 @@ pub fn get_expression_circuit(
     // If inside an on() block, wrap the expression with a DFF/ADFF node
     if let Some(clock_text) = find_enclosing_event_clock(&stmt_node) {
         // Check if this on() block has an async reset trigger
-        let async_reset = find_enclosing_event_block(&stmt_node)
-            .and_then(|eb| find_async_reset_in_event(&eb));
+        let async_reset =
+            find_enclosing_event_block(&stmt_node).and_then(|eb| find_async_reset_in_event(&eb));
 
         let (dff_type, dff_label, dff_inputs) = if async_reset.is_some() {
             ("adff", "ADFF", vec!["D".into(), "CLK".into(), "RST".into()])
@@ -234,8 +238,7 @@ pub fn get_expression_circuit(
     }
 
     // Compute source range from the statement's tokens
-    let (start_line, end_line) =
-        node_source_line_range(&stmt_node, &tree_offset_to_source_line);
+    let (start_line, end_line) = node_source_line_range(&stmt_node, &tree_offset_to_source_line);
 
     Some(ExpressionCircuitData {
         target_name,
@@ -293,10 +296,7 @@ fn build_offset_to_line_map(
 }
 
 /// Get the source line number for a tree node by looking up its first token.
-fn node_source_line(
-    node: &SyntaxNode,
-    map: &std::collections::HashMap<u32, u32>,
-) -> Option<u32> {
+fn node_source_line(node: &SyntaxNode, map: &std::collections::HashMap<u32, u32>) -> Option<u32> {
     // Find first token in this node
     for event in node.preorder_with_tokens() {
         if let rowan::WalkEvent::Enter(rowan::NodeOrToken::Token(token)) = event {
@@ -358,16 +358,14 @@ fn find_statement_on_line(
             }
             SyntaxKind::IfStmt | SyntaxKind::MatchStmt => {
                 let (start, end) = node_source_line_range(&node, map);
-                if cursor_line >= start && cursor_line <= end {
-                    if is_inside_on_block(&node) {
-                        let targets = find_assigned_targets_in(&node);
-                        let target_name = if targets.is_empty() {
-                            "?".to_string()
-                        } else {
-                            targets.join(", ")
-                        };
-                        best = Some((node.clone(), target_name));
-                    }
+                if cursor_line >= start && cursor_line <= end && is_inside_on_block(&node) {
+                    let targets = find_assigned_targets_in(&node);
+                    let target_name = if targets.is_empty() {
+                        "?".to_string()
+                    } else {
+                        targets.join(", ")
+                    };
+                    best = Some((node.clone(), target_name));
                 }
             }
             _ => {}
@@ -665,9 +663,7 @@ fn walk_statement_rhs(stmt: &SyntaxNode, builder: &mut CircuitBuilder) -> Option
             }
             walk_expression_chain(&rhs_children, builder)
         }
-        SyntaxKind::IfStmt | SyntaxKind::MatchStmt => {
-            walk_expr(stmt, builder)
-        }
+        SyntaxKind::IfStmt | SyntaxKind::MatchStmt => walk_expr(stmt, builder),
         _ => None,
     }
 }
@@ -774,7 +770,7 @@ fn walk_compound_operand(nodes: &[SyntaxNode], builder: &mut CircuitBuilder) -> 
         let mut name = nodes[0].text().to_string().trim().to_string();
         for n in &nodes[1..] {
             if matches!(n.kind(), SyntaxKind::FieldExpr | SyntaxKind::IndexExpr) {
-                name.push_str(&n.text().to_string().trim().to_string());
+                name.push_str(n.text().to_string().trim());
             }
         }
         return Some(builder.add_input(&name));
@@ -1257,16 +1253,13 @@ fn walk_index(node: &SyntaxNode, builder: &mut CircuitBuilder) -> Option<String>
     let mut index_text = String::new();
 
     for child in node.children_with_tokens() {
-        match child {
-            rowan::NodeOrToken::Node(n) => {
-                if base.is_none() {
-                    base = Some(n);
-                } else {
-                    // This is the index expression
-                    index_text = n.text().to_string().trim().to_string();
-                }
+        if let rowan::NodeOrToken::Node(n) = child {
+            if base.is_none() {
+                base = Some(n);
+            } else {
+                // This is the index expression
+                index_text = n.text().to_string().trim().to_string();
             }
-            _ => {}
         }
     }
 
@@ -1366,7 +1359,13 @@ mod tests {
         } else {
             String::new()
         };
-        eprintln!("{}{:?} [{:?}]{}", indent, node.kind(), node.text_range(), text_preview);
+        eprintln!(
+            "{}{:?} [{:?}]{}",
+            indent,
+            node.kind(),
+            node.text_range(),
+            text_preview
+        );
         for child in node.children_with_tokens() {
             match child {
                 rowan::NodeOrToken::Token(t) => {
@@ -1390,23 +1389,48 @@ impl Foo {
     }
 }"#;
         let result = get_expression_circuit(source, 6, 10);
-        assert!(result.is_some(), "Expected circuit for assignment inside on-block");
+        assert!(
+            result.is_some(),
+            "Expected circuit for assignment inside on-block"
+        );
         let data = result.unwrap();
         assert_eq!(data.target_name, "counter");
         // 2 nodes: ADD gate + DFF
         assert_eq!(data.nodes.len(), 2);
-        assert!(data.nodes.iter().any(|n| n.node_type == "add"), "Expected ADD gate");
-        let dff = data.nodes.iter().find(|n| n.node_type == "dff").expect("Expected DFF node");
+        assert!(
+            data.nodes.iter().any(|n| n.node_type == "add"),
+            "Expected ADD gate"
+        );
+        let dff = data
+            .nodes
+            .iter()
+            .find(|n| n.node_type == "dff")
+            .expect("Expected DFF node");
         assert_eq!(dff.label, "DFF");
         assert_eq!(dff.input_labels.as_ref().unwrap(), &["D", "CLK"]);
         // 3 inputs: counter (Q), 1, clk.rising
         assert_eq!(data.inputs.len(), 3);
-        assert!(data.inputs.iter().any(|i| i.name == "counter (Q)"), "Expected feedback input renamed");
+        assert!(
+            data.inputs.iter().any(|i| i.name == "counter (Q)"),
+            "Expected feedback input renamed"
+        );
         assert!(data.inputs.iter().any(|i| i.name == "1" && i.is_constant));
-        let clk_input = data.inputs.iter().find(|i| i.name == "clk.rising").expect("Expected clk input");
-        assert_eq!(clk_input.role.as_deref(), Some("clock"), "Clock input should have role=clock");
+        let clk_input = data
+            .inputs
+            .iter()
+            .find(|i| i.name == "clk.rising")
+            .expect("Expected clk input");
+        assert_eq!(
+            clk_input.role.as_deref(),
+            Some("clock"),
+            "Clock input should have role=clock"
+        );
         // Non-clock inputs should not have a role
-        assert!(data.inputs.iter().filter(|i| i.name != "clk.rising").all(|i| i.role.is_none()));
+        assert!(data
+            .inputs
+            .iter()
+            .filter(|i| i.name != "clk.rising")
+            .all(|i| i.role.is_none()));
         // Wires: 2 for ADD (counter+1), 1 from ADD→DFF D, 1 from clk→DFF CLK = 4
         assert_eq!(data.wires.len(), 4);
     }
@@ -1432,22 +1456,34 @@ impl Foo {
 }"#;
         // Cursor on line 12 (state = data inside else)
         let result = get_expression_circuit(source, 12, 10);
-        assert!(result.is_some(), "Expected circuit for assignment inside async reset on-block");
+        assert!(
+            result.is_some(),
+            "Expected circuit for assignment inside async reset on-block"
+        );
         let data = result.unwrap();
         // Should have an ADFF node (not DFF)
         let adff = data.nodes.iter().find(|n| n.node_type == "adff");
-        assert!(adff.is_some(), "Expected ADFF node for async reset on-block, got: {:?}",
-            data.nodes.iter().map(|n| &n.node_type).collect::<Vec<_>>());
+        assert!(
+            adff.is_some(),
+            "Expected ADFF node for async reset on-block, got: {:?}",
+            data.nodes.iter().map(|n| &n.node_type).collect::<Vec<_>>()
+        );
         let adff = adff.unwrap();
         assert_eq!(adff.label, "ADFF");
         assert_eq!(adff.input_labels.as_ref().unwrap(), &["D", "CLK", "RST"]);
         // Should have a reset input with role=reset
         let rst_input = data.inputs.iter().find(|i| i.name.contains("active"));
-        assert!(rst_input.is_some(), "Expected rst.active input, got: {:?}",
-            data.inputs.iter().map(|i| &i.name).collect::<Vec<_>>());
+        assert!(
+            rst_input.is_some(),
+            "Expected rst.active input, got: {:?}",
+            data.inputs.iter().map(|i| &i.name).collect::<Vec<_>>()
+        );
         assert_eq!(rst_input.unwrap().role.as_deref(), Some("reset"));
         // Clock input should still be present
-        assert!(data.inputs.iter().any(|i| i.role.as_deref() == Some("clock")));
+        assert!(data
+            .inputs
+            .iter()
+            .any(|i| i.role.as_deref() == Some("clock")));
     }
 
     #[test]
@@ -1465,10 +1501,18 @@ impl Foo {
         assert!(result.is_some());
         let data = result.unwrap();
         // rst input should have role=reset
-        let rst_input = data.inputs.iter().find(|i| i.name == "rst").expect("Expected rst input");
+        let rst_input = data
+            .inputs
+            .iter()
+            .find(|i| i.name == "rst")
+            .expect("Expected rst input");
         assert_eq!(rst_input.role.as_deref(), Some("reset"));
         // enable input should have no role
-        let en_input = data.inputs.iter().find(|i| i.name == "enable").expect("Expected enable input");
+        let en_input = data
+            .inputs
+            .iter()
+            .find(|i| i.name == "enable")
+            .expect("Expected enable input");
         assert!(en_input.role.is_none());
     }
 
@@ -1490,7 +1534,11 @@ impl Foo {
         let data = result.unwrap();
         assert_eq!(data.target_name, "any_fault_flag");
         // 7 OR gates for 8-input chain
-        assert_eq!(data.nodes.len(), 7, "Expected 7 OR gates for 8-input OR chain");
+        assert_eq!(
+            data.nodes.len(),
+            7,
+            "Expected 7 OR gates for 8-input OR chain"
+        );
         assert!(data.nodes.iter().all(|n| n.node_type == "or"));
         // 8 distinct inputs with proper field names
         assert_eq!(data.inputs.len(), 8, "Expected 8 distinct inputs");
@@ -1533,8 +1581,7 @@ impl Foo {
 
     #[test]
     fn test_chained_or() {
-        let source =
-            "entity Foo { out x: bit; }\nimpl Foo { x = a | b | c | d; }";
+        let source = "entity Foo { out x: bit; }\nimpl Foo { x = a | b | c | d; }";
         let result = get_expression_circuit(source, 1, 15);
         assert!(result.is_some());
         let data = result.unwrap();
@@ -1547,8 +1594,7 @@ impl Foo {
 
     #[test]
     fn test_cast_expression() {
-        let source =
-            "entity Foo { out x: nat[32]; }\nimpl Foo { x = counter as nat[32]; }";
+        let source = "entity Foo { out x: nat[32]; }\nimpl Foo { x = counter as nat[32]; }";
         let result = get_expression_circuit(source, 1, 15);
         assert!(result.is_some());
         let data = result.unwrap();
@@ -1586,8 +1632,14 @@ impl Foo {
         let data = result.unwrap();
         assert_eq!(data.target_name, "temp_max");
         // Should have a MUX node and a CMP node
-        assert!(data.nodes.iter().any(|n| n.node_type == "mux"), "Expected MUX node");
-        assert!(data.nodes.iter().any(|n| n.node_type == "cmp"), "Expected CMP node");
+        assert!(
+            data.nodes.iter().any(|n| n.node_type == "mux"),
+            "Expected MUX node"
+        );
+        assert!(
+            data.nodes.iter().any(|n| n.node_type == "cmp"),
+            "Expected CMP node"
+        );
         // temp_pri and temp_sec as inputs
         assert!(data.inputs.iter().any(|i| i.name == "temp_pri"));
         assert!(data.inputs.iter().any(|i| i.name == "temp_sec"));
@@ -1608,10 +1660,16 @@ impl Foo {
 }"#;
         // Cursor on line 7 (inside the else block)
         let result = get_expression_circuit(source, 7, 8);
-        assert!(result.is_some(), "Expected circuit for multiline if/else, cursor in else block");
+        assert!(
+            result.is_some(),
+            "Expected circuit for multiline if/else, cursor in else block"
+        );
         let data = result.unwrap();
         assert_eq!(data.target_name, "limit");
-        assert!(data.nodes.iter().any(|n| n.node_type == "mux"), "Expected MUX");
+        assert!(
+            data.nodes.iter().any(|n| n.node_type == "mux"),
+            "Expected MUX"
+        );
         // Source range should span multiple lines
         assert!(
             data.source_range[1] > data.source_range[0],
@@ -1642,7 +1700,10 @@ impl Foo {
         assert_eq!(muls, 1, "Expected 1 MUL node");
         assert_eq!(divs, 1, "Expected 1 DIV node");
         // 1000 should be a constant input
-        assert!(data.inputs.iter().any(|i| i.name == "1000" && i.is_constant));
+        assert!(data
+            .inputs
+            .iter()
+            .any(|i| i.name == "1000" && i.is_constant));
     }
 
     #[test]
@@ -1656,15 +1717,23 @@ impl Foo {
         // Find a line with an assignment
         for (line_num, line) in source.lines().enumerate() {
             let trimmed = line.trim();
-            if trimmed.contains(" = ") && !trimmed.starts_with("//") && !trimmed.starts_with("const") {
+            if trimmed.contains(" = ")
+                && !trimmed.starts_with("//")
+                && !trimmed.starts_with("const")
+            {
                 let result = get_expression_circuit(&source, line_num as u32, 10);
                 if let Some(data) = result {
-                    assert!(!data.target_name.is_empty(), "Target name should not be empty on line {}", line_num);
+                    assert!(
+                        !data.target_name.is_empty(),
+                        "Target name should not be empty on line {}",
+                        line_num
+                    );
                     // At minimum we should get either nodes or inputs
                     assert!(
                         !data.nodes.is_empty() || !data.inputs.is_empty(),
                         "Expected some circuit elements on line {}: {}",
-                        line_num, trimmed
+                        line_num,
+                        trimmed
                     );
                     return; // One success is enough
                 }

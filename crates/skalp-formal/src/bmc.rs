@@ -89,7 +89,7 @@ impl BoundedModelChecker {
             }
 
             // Assert negated property at step k
-            let property_at_k = instantiate_at_step(&negated_property, k as u32);
+            let property_at_k = instantiate_at_step(&negated_property, k);
             solver.assert(&property_at_k);
 
             // Check satisfiability
@@ -146,17 +146,17 @@ impl BoundedModelChecker {
         const STACK_RED_ZONE: usize = 256 * 1024;
         const STACK_GROW_SIZE: usize = 8 * 1024 * 1024;
         stacker::maybe_grow(STACK_RED_ZONE, STACK_GROW_SIZE, || {
-        match formula {
-            TemporalFormula::Always(inner) => {
-                // ¬G(φ) = F(¬φ)
-                format!("(eventually (not {}))", self.formula_to_smt(inner))
+            match formula {
+                TemporalFormula::Always(inner) => {
+                    // ¬G(φ) = F(¬φ)
+                    format!("(eventually (not {}))", self.formula_to_smt(inner))
+                }
+                TemporalFormula::Eventually(inner) => {
+                    // ¬F(φ) = G(¬φ)
+                    format!("(always (not {}))", self.formula_to_smt(inner))
+                }
+                _ => format!("(not {})", self.formula_to_smt(formula)),
             }
-            TemporalFormula::Eventually(inner) => {
-                // ¬F(φ) = G(¬φ)
-                format!("(always (not {}))", self.formula_to_smt(inner))
-            }
-            _ => format!("(not {})", self.formula_to_smt(formula)),
-        }
         })
     }
 
@@ -164,22 +164,22 @@ impl BoundedModelChecker {
         const STACK_RED_ZONE: usize = 256 * 1024;
         const STACK_GROW_SIZE: usize = 8 * 1024 * 1024;
         stacker::maybe_grow(STACK_RED_ZONE, STACK_GROW_SIZE, || {
-        match formula {
-            TemporalFormula::Atomic(prop) => prop.clone(),
-            TemporalFormula::Bool(b) => b.to_string(),
-            TemporalFormula::Not(f) => format!("(not {})", self.formula_to_smt(f)),
-            TemporalFormula::And(l, r) => {
-                format!(
-                    "(and {} {})",
-                    self.formula_to_smt(l),
-                    self.formula_to_smt(r)
-                )
+            match formula {
+                TemporalFormula::Atomic(prop) => prop.clone(),
+                TemporalFormula::Bool(b) => b.to_string(),
+                TemporalFormula::Not(f) => format!("(not {})", self.formula_to_smt(f)),
+                TemporalFormula::And(l, r) => {
+                    format!(
+                        "(and {} {})",
+                        self.formula_to_smt(l),
+                        self.formula_to_smt(r)
+                    )
+                }
+                TemporalFormula::Or(l, r) => {
+                    format!("(or {} {})", self.formula_to_smt(l), self.formula_to_smt(r))
+                }
+                _ => "true".to_string(), // Simplified
             }
-            TemporalFormula::Or(l, r) => {
-                format!("(or {} {})", self.formula_to_smt(l), self.formula_to_smt(r))
-            }
-            _ => "true".to_string(), // Simplified
-        }
         })
     }
 

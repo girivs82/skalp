@@ -549,8 +549,8 @@ impl SirModule {
     /// Returns nodes in evaluation order (inputs before outputs).
     /// This is computed once when extracting cones and stored in sorted_nodes.
     fn topological_sort_cone_nodes(&self, node_ids: &[usize]) -> Vec<usize> {
-        use std::collections::BinaryHeap;
         use std::cmp::Reverse;
+        use std::collections::BinaryHeap;
 
         // Build a map from output signal_id to node_id (which node produces each signal)
         let mut signal_to_producer: BTreeMap<String, usize> = BTreeMap::new();

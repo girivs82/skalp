@@ -27,18 +27,9 @@ pub struct InputVector {
 enum SysState {
     AllZeros,
     AllOnes,
-    WalkingOne {
-        input_idx: usize,
-        bit: usize,
-    },
-    WalkingZero {
-        input_idx: usize,
-        bit: usize,
-    },
-    Boundary {
-        input_idx: usize,
-        case: usize,
-    },
+    WalkingOne { input_idx: usize, bit: usize },
+    WalkingZero { input_idx: usize, bit: usize },
+    Boundary { input_idx: usize, case: usize },
     Done,
 }
 
@@ -445,7 +436,9 @@ impl CoverageVectorGen {
         }
 
         // Simple PRNG for biased generation
-        let mut seed = current_seed.wrapping_mul(6364136223846793005).wrapping_add(0xCAFEBABE);
+        let mut seed = current_seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(0xCAFEBABE);
 
         let values = if let Some(cov) = coverage {
             let v = self.generate_biased_vector(cov, seed);
@@ -468,7 +461,10 @@ impl CoverageVectorGen {
         };
 
         // Write back the mutated state
-        if let Phase::CoverageBiased { spent: s, seed: sd, .. } = &mut self.phase {
+        if let Phase::CoverageBiased {
+            spent: s, seed: sd, ..
+        } = &mut self.phase
+        {
             *s = spent + 1;
             *sd = seed;
         }
@@ -477,11 +473,7 @@ impl CoverageVectorGen {
     }
 
     /// Generate a biased vector targeting coverage gaps
-    fn generate_biased_vector(
-        &self,
-        cov: &SimCoverageDb,
-        mut seed: u64,
-    ) -> Vec<(String, u64)> {
+    fn generate_biased_vector(&self, cov: &SimCoverageDb, mut seed: u64) -> Vec<(String, u64)> {
         // Start with random base
         let mut values: Vec<(String, u64)> = self
             .input_info
@@ -539,7 +531,7 @@ impl CoverageVectorGen {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use skalp_sir::{SirType, sir::PortDirection};
+    use skalp_sir::{sir::PortDirection, SirType};
 
     fn make_port(name: &str, width: usize) -> SirPort {
         SirPort {

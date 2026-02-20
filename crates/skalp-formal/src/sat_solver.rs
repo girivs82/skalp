@@ -27,7 +27,10 @@ pub struct Lit {
 
 impl Lit {
     pub fn positive(var: Var) -> Self {
-        Lit { var, negated: false }
+        Lit {
+            var,
+            negated: false,
+        }
     }
 
     pub fn negative(var: Var) -> Self {
@@ -47,7 +50,8 @@ impl Lit {
     }
 
     /// Convert to CaDiCaL literal format (1-indexed, negative for negation)
-    fn to_cadical(&self) -> i32 {
+    #[allow(clippy::wrong_self_convention)]
+    fn to_cadical(self) -> i32 {
         let var_num = (self.var.0 + 1) as i32; // CaDiCaL is 1-indexed
         if self.negated {
             -var_num
@@ -72,6 +76,12 @@ impl std::ops::Not for Lit {
 pub struct CnfFormula {
     clauses: Vec<Vec<Lit>>,
     max_var: usize,
+}
+
+impl Default for CnfFormula {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl CnfFormula {
@@ -176,7 +186,8 @@ impl Solver {
 
     /// Solve with assumptions (assumptions are cleared after solve)
     pub fn solve_with(&mut self, assumptions: &[Lit]) -> Result<bool, SolverError> {
-        let cadical_assumptions: Vec<i32> = assumptions.iter().map(|lit| lit.to_cadical()).collect();
+        let cadical_assumptions: Vec<i32> =
+            assumptions.iter().map(|lit| lit.to_cadical()).collect();
         match self.solver.solve_with(cadical_assumptions) {
             Some(true) => {
                 let mut model = Vec::new();
@@ -196,9 +207,7 @@ impl Solver {
                 self.model = None;
                 Ok(false)
             }
-            None => {
-                Err(SolverError::Unknown)
-            }
+            None => Err(SolverError::Unknown),
         }
     }
 

@@ -775,7 +775,6 @@ impl GateNetlist {
                 }
             }
         }
-
     }
 
     /// Get a mutable net by ID
@@ -1154,8 +1153,10 @@ impl GateNetlist {
                     connections.push(format!("        .E({})", en_name));
                 }
                 // Add reset for DFFR variants
-                if (prim_type.contains("R") || prim_type.contains("S")) && cell.reset.is_some() {
-                    let rst_id = cell.reset.unwrap();
+                if let Some(rst_id) = cell
+                    .reset
+                    .filter(|_| prim_type.contains("R") || prim_type.contains("S"))
+                {
                     let rst_name = &self.nets[rst_id.0 as usize].name;
                     connections.push(format!("        .R({})", rst_name));
                 }

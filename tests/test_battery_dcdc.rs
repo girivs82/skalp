@@ -35,7 +35,8 @@ async fn test_battery_dcdc_init() {
     assert_eq!(state, 0, "Should be in Init state after reset");
 
     println!("✓ Battery DCDC initialization test passed");
-    tb.export_waveform("build/test_battery_dcdc_init.skw.gz").ok();
+    tb.export_waveform("build/test_battery_dcdc_init.skw.gz")
+        .ok();
 }
 
 /// Test state machine transition from Init to WaitBms
@@ -61,16 +62,16 @@ async fn test_state_transition_init_to_waitbms() {
     assert_eq!(state, 0, "Should be in Init state initially");
 
     // Clear all fault inputs - these are the hardware fault inputs
-    tb.set("hw_ov", 0u8);  // Hardware overvoltage
-    tb.set("hw_uv", 0u8);  // Hardware undervoltage
-    tb.set("hw_oc", 0u8);  // Hardware overcurrent
-    tb.set("hw_ot", 0u8);  // Hardware overtemperature
-    tb.set("desat", 0u8);  // MOSFET desaturation
+    tb.set("hw_ov", 0u8); // Hardware overvoltage
+    tb.set("hw_uv", 0u8); // Hardware undervoltage
+    tb.set("hw_oc", 0u8); // Hardware overcurrent
+    tb.set("hw_ot", 0u8); // Hardware overtemperature
+    tb.set("desat", 0u8); // MOSFET desaturation
 
     // Set BMS data to indicate no fault
     tb.set("bms.connected", 1u8);
     tb.set("bms.fault", 0u8);
-    tb.set("bms_rx_valid", 1u8);  // Reset watchdog to prevent timeout
+    tb.set("bms_rx_valid", 1u8); // Reset watchdog to prevent timeout
     tb.clock(1).await;
 
     // Keep sending BMS valid to prevent watchdog timeout
@@ -110,17 +111,24 @@ async fn test_state_transition_init_to_waitbms() {
 
     // Debug: check fault status after transition
     let faults_bms_timeout_after: u8 = tb.get_as("faults.bms_timeout").await;
-    println!("After clock: faults.bms_timeout = {}", faults_bms_timeout_after);
+    println!(
+        "After clock: faults.bms_timeout = {}",
+        faults_bms_timeout_after
+    );
 
     // Debug: check state after clock
     let state_after: u8 = tb.get_as("state").await;
     println!("After transition: state={}", state_after);
 
     // Should now be in WaitBms (state = 1)
-    assert_eq!(state_after, 1, "Should be in WaitBms state (1) after enable");
+    assert_eq!(
+        state_after, 1,
+        "Should be in WaitBms state (1) after enable"
+    );
 
     println!("✓ State transition Init->WaitBms test passed");
-    tb.export_waveform("build/test_state_transition_init_to_waitbms.skw.gz").ok();
+    tb.export_waveform("build/test_state_transition_init_to_waitbms.skw.gz")
+        .ok();
 }
 
 /// Test that any_fault_flag prevents state transition
@@ -157,7 +165,7 @@ async fn test_fault_prevents_transition() {
     tb.clock(1).await;
 
     // Set a hardware fault
-    tb.set("hw_ov", 1u8);  // Hardware overvoltage fault
+    tb.set("hw_ov", 1u8); // Hardware overvoltage fault
     tb.clock(1).await;
 
     // Try to enable - should NOT transition because of fault
@@ -175,8 +183,8 @@ async fn test_fault_prevents_transition() {
     // Clear fault, disable, then reset
     // Note: FaultLatch clears when clear_faults = !enable, so we need enable=0
     tb.set("hw_ov", 0u8);
-    tb.set("enable", 0u8);  // Disable to allow fault latch to clear
-    tb.clock(1).await;      // Let fault latch clear
+    tb.set("enable", 0u8); // Disable to allow fault latch to clear
+    tb.clock(1).await; // Let fault latch clear
 
     tb.set("rst", 1u8);
     tb.clock(1).await;
@@ -185,7 +193,7 @@ async fn test_fault_prevents_transition() {
 
     // Now should be able to transition
     tb.set("enable", 1u8);
-    tb.set("bms_rx_valid", 1u8);  // Keep BMS watchdog happy
+    tb.set("bms_rx_valid", 1u8); // Keep BMS watchdog happy
     tb.clock(1).await;
 
     let state: u8 = tb.get_as("state").await;
@@ -195,7 +203,8 @@ async fn test_fault_prevents_transition() {
     );
 
     println!("✓ Fault prevents transition test passed");
-    tb.export_waveform("build/test_fault_prevents_transition.skw.gz").ok();
+    tb.export_waveform("build/test_fault_prevents_transition.skw.gz")
+        .ok();
 }
 
 /// Test timer reset behavior (BUG #222 verification)
@@ -241,7 +250,8 @@ async fn test_timer_reset_on_state_change() {
     // wasn't reset, the state machine would behave incorrectly in subsequent transitions
 
     println!("✓ Timer reset on state change test passed (BUG #222 verification)");
-    tb.export_waveform("build/test_timer_reset_on_state_change.skw.gz").ok();
+    tb.export_waveform("build/test_timer_reset_on_state_change.skw.gz")
+        .ok();
 }
 
 // ============================================================================
@@ -252,7 +262,9 @@ async fn test_timer_reset_on_state_change() {
 #[tokio::test]
 async fn test_debug_gate_level_structure() {
     use skalp_frontend::parse_and_build_hir_from_file;
-    use skalp_lir::{get_stdlib_library, lower_mir_hierarchical_with_top, map_hierarchical_to_gates};
+    use skalp_lir::{
+        get_stdlib_library, lower_mir_hierarchical_with_top, map_hierarchical_to_gates,
+    };
     use skalp_mir::MirCompiler;
     use std::path::Path;
 
@@ -270,7 +282,12 @@ async fn test_debug_gate_level_structure() {
     // Check per-instance netlists before flatten
     println!("\n=== Per-instance netlist stats (before flatten) ===");
     for (path, inst) in &hier_netlist.instances {
-        let seq_count = inst.netlist.cells.iter().filter(|c| c.is_sequential()).count();
+        let seq_count = inst
+            .netlist
+            .cells
+            .iter()
+            .filter(|c| c.is_sequential())
+            .count();
         let total = inst.netlist.cells.len();
         if seq_count > 0 {
             println!("  {}: {} cells, {} sequential", path, total, seq_count);
@@ -286,21 +303,34 @@ async fn test_debug_gate_level_structure() {
     println!("Sequential cells: {}", seq_count);
 
     // Show first few sequential cells
-    let seq_cells: Vec<_> = netlist.cells.iter().filter(|c| c.is_sequential()).take(5).collect();
+    let seq_cells: Vec<_> = netlist
+        .cells
+        .iter()
+        .filter(|c| c.is_sequential())
+        .take(5)
+        .collect();
     for cell in &seq_cells {
-        println!("  {} (type: {}, clock: {:?})", cell.path, cell.cell_type, cell.clock);
+        println!(
+            "  {} (type: {}, clock: {:?})",
+            cell.path, cell.cell_type, cell.clock
+        );
     }
 
     // Check cell types
-    let dff_count = netlist.cells.iter()
+    let dff_count = netlist
+        .cells
+        .iter()
         .filter(|c| c.cell_type.to_lowercase().contains("dff"))
         .count();
     println!("DFF-type cells: {}", dff_count);
 
     // Check what net GateNetId(0) is
     println!("\n=== Checking clock net ===");
-    if let Some(net0) = netlist.nets.get(0) {
-        println!("Net 0: name='{}', is_clock={}, is_reset={}", net0.name, net0.is_clock, net0.is_reset);
+    if let Some(net0) = netlist.nets.first() {
+        println!(
+            "Net 0: name='{}', is_clock={}, is_reset={}",
+            net0.name, net0.is_clock, net0.is_reset
+        );
     }
 
     // Find the actual clock net
@@ -318,7 +348,9 @@ async fn test_debug_gate_level_structure() {
 
     // Check a sample of sequential cells' clock fields
     println!("\n=== Sample sequential cell clocks ===");
-    let sample_seq: Vec<_> = netlist.cells.iter()
+    let sample_seq: Vec<_> = netlist
+        .cells
+        .iter()
         .filter(|c| c.is_sequential() && c.path.contains("DabBatteryController"))
         .take(10)
         .collect();
@@ -331,7 +363,10 @@ async fn test_debug_gate_level_structure() {
         }
     }
 
-    assert!(seq_count > 0, "Should have sequential cells in gate netlist");
+    assert!(
+        seq_count > 0,
+        "Should have sequential cells in gate netlist"
+    );
 
     // Write gate-level Verilog to file for debugging
     let verilog = netlist.to_verilog();
@@ -343,7 +378,10 @@ async fn test_debug_gate_level_structure() {
     let sir_result = convert_gate_netlist_to_sir(&netlist);
 
     println!("\n=== SIR Structure ===");
-    println!("Comb blocks: {}", sir_result.sir.top_module.comb_blocks.len());
+    println!(
+        "Comb blocks: {}",
+        sir_result.sir.top_module.comb_blocks.len()
+    );
     println!("Seq blocks: {}", sir_result.sir.top_module.seq_blocks.len());
 
     for (i, seq_block) in sir_result.sir.top_module.seq_blocks.iter().enumerate() {
@@ -353,7 +391,11 @@ async fn test_debug_gate_level_structure() {
         println!("  reset: {:?}", seq_block.reset);
 
         // Find the clock signal name
-        if let Some(clk_sig) = sir_result.sir.top_module.signals.iter()
+        if let Some(clk_sig) = sir_result
+            .sir
+            .top_module
+            .signals
+            .iter()
             .find(|s| s.id == seq_block.clock)
         {
             println!("  clock signal name: {}", clk_sig.name);
@@ -385,7 +427,8 @@ async fn test_battery_dcdc_init_gate_level() {
     assert_eq!(state, 0, "Gate-level: Should be in Init state after reset");
 
     println!("✓ Gate-level: Battery DCDC initialization test passed");
-    tb.export_waveform("build/test_battery_dcdc_init_gate_level.skw.gz").ok();
+    tb.export_waveform("build/test_battery_dcdc_init_gate_level.skw.gz")
+        .ok();
 }
 
 /// Gate-level test: state machine transition from Init to WaitBms
@@ -410,13 +453,13 @@ async fn test_state_transition_init_to_waitbms_gate_level() {
     tb.set("desat", 0u8);
 
     // Initialize lockstep signals to prevent false mismatch detection
-    tb.set("lockstep_rx_valid", 0u8);  // No lockstep data yet
+    tb.set("lockstep_rx_valid", 0u8); // No lockstep data yet
     tb.set("lockstep_rx_state", 0u8);
     tb.set("lockstep_rx_enable", 0u8);
     tb.set("lockstep_rx_faults", 0u8);
 
     // Set BMS data - NOT connected yet to prevent WaitBms->Precharge transition
-    tb.set("bms.connected", 0u8);  // Will be connected later in test
+    tb.set("bms.connected", 0u8); // Will be connected later in test
     tb.set("bms.fault", 0u8);
     tb.set("bms_rx_valid", 1u8); // Set valid to prevent watchdog timeout
 
@@ -433,9 +476,16 @@ async fn test_state_transition_init_to_waitbms_gate_level() {
     // Debug: check fault outputs before enable
     println!("\n=== Fault outputs before enable ===");
     let fault_signals = [
-        "faults.ov", "faults.uv", "faults.oc", "faults.ot", "faults.desat",
-        "faults.bms_fault", "faults.bms_timeout", "faults.lockstep",
-        "lockstep_fault", "master_enable",
+        "faults.ov",
+        "faults.uv",
+        "faults.oc",
+        "faults.ot",
+        "faults.desat",
+        "faults.bms_fault",
+        "faults.bms_timeout",
+        "faults.lockstep",
+        "lockstep_fault",
+        "master_enable",
     ];
     for sig in fault_signals {
         let val: u8 = tb.get_as(sig).await;
@@ -469,8 +519,12 @@ async fn test_state_transition_init_to_waitbms_gate_level() {
     // Should now be in WaitBms (state = 1)
     let state_after: u8 = tb.get_as("state").await;
     println!("Gate-level: state after enable = {}", state_after);
-    assert_eq!(state_after, 1, "Gate-level: Should be in WaitBms state (1) after enable");
+    assert_eq!(
+        state_after, 1,
+        "Gate-level: Should be in WaitBms state (1) after enable"
+    );
 
     println!("✓ Gate-level: State transition Init->WaitBms test passed");
-    tb.export_waveform("build/test_state_transition_init_to_waitbms_gate_level.skw.gz").ok();
+    tb.export_waveform("build/test_state_transition_init_to_waitbms_gate_level.skw.gz")
+        .ok();
 }

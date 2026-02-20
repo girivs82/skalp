@@ -8,7 +8,6 @@ use indexmap::IndexMap;
 use std::collections::HashSet;
 
 /// Set to true to enable verbose AIG builder debug output
-
 use crate::tech_library::CellFunction;
 
 use super::aig::{Aig, AigLit, AigNodeId, AigSafetyInfo, BarrierType};

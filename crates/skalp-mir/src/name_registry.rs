@@ -437,12 +437,8 @@ mod tests {
     fn test_struct_field_registration() {
         let mut registry = NameRegistry::for_module("test_module");
 
-        let name = registry.register_port_field(
-            "bms",
-            &["connected".to_string()],
-            NameKind::Input,
-            1,
-        );
+        let name =
+            registry.register_port_field("bms", &["connected".to_string()], NameKind::Input, 1);
 
         assert_eq!(name, "_s0");
         assert_eq!(registry.resolve("bms.connected"), Some("_s0"));

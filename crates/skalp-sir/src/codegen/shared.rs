@@ -173,7 +173,8 @@ impl<'a> SharedCodegen<'a> {
                         .get(&input.signal_id)
                         .copied()
                         .unwrap_or_else(|| {
-                            self.type_mapper.get_signal_width(self.module, &input.signal_id)
+                            self.type_mapper
+                                .get_signal_width(self.module, &input.signal_id)
                         })
                 })
                 .sum(),
@@ -209,9 +210,14 @@ impl<'a> SharedCodegen<'a> {
                     // Check if the signal comes from a SignalRef to an array state element
                     for comb_node in &self.module.combinational_nodes {
                         if let SirNodeKind::SignalRef { signal } = &comb_node.kind {
-                            if comb_node.outputs.iter().any(|o| o.signal_id == *array_signal) {
+                            if comb_node
+                                .outputs
+                                .iter()
+                                .any(|o| o.signal_id == *array_signal)
+                            {
                                 if let Some(state_elem) = self.module.state_elements.get(signal) {
-                                    if let Some(SirType::Array(elem_type, _)) = &state_elem.sir_type {
+                                    if let Some(SirType::Array(elem_type, _)) = &state_elem.sir_type
+                                    {
                                         return elem_type.width();
                                     }
                                 }
@@ -534,10 +540,11 @@ impl<'a> SharedCodegen<'a> {
     /// Check if a signal is used as the array source (first input) for any ArrayRead node
     fn is_array_read_source(&self, signal: &str) -> bool {
         for node in &self.module.combinational_nodes {
-            if matches!(node.kind, SirNodeKind::ArrayRead) && !node.inputs.is_empty() {
-                if node.inputs[0].signal_id == signal {
-                    return true;
-                }
+            if matches!(node.kind, SirNodeKind::ArrayRead)
+                && !node.inputs.is_empty()
+                && node.inputs[0].signal_id == signal
+            {
+                return true;
             }
         }
         false
@@ -547,21 +554,20 @@ impl<'a> SharedCodegen<'a> {
     /// Returns the array size from the ArrayRead operation's context, or None if not found
     fn get_array_read_source_size(&self, signal: &str) -> Option<usize> {
         for node in &self.module.combinational_nodes {
-            if matches!(node.kind, SirNodeKind::ArrayRead) && !node.inputs.is_empty() {
-                if node.inputs[0].signal_id == signal {
-                    // Try to get array size from the source signal's type
-                    if let Some(array_type) = self.get_array_type_for_signal(signal) {
-                        if let SirType::Array(_, size) = array_type {
-                            return Some(size);
-                        }
-                    }
-                    // Fall back to checking the source of this signal
-                    // via SignalRef chain
-                    let resolved = self.resolve_array_source(signal);
-                    if let Some(state_elem) = self.module.state_elements.get(&resolved) {
-                        if let Some(SirType::Array(_, size)) = &state_elem.sir_type {
-                            return Some(*size);
-                        }
+            if matches!(node.kind, SirNodeKind::ArrayRead)
+                && !node.inputs.is_empty()
+                && node.inputs[0].signal_id == signal
+            {
+                // Try to get array size from the source signal's type
+                if let Some(SirType::Array(_, size)) = self.get_array_type_for_signal(signal) {
+                    return Some(size);
+                }
+                // Fall back to checking the source of this signal
+                // via SignalRef chain
+                let resolved = self.resolve_array_source(signal);
+                if let Some(state_elem) = self.module.state_elements.get(&resolved) {
+                    if let Some(SirType::Array(_, size)) = &state_elem.sir_type {
+                        return Some(*size);
                     }
                 }
             }
@@ -607,7 +613,10 @@ impl<'a> SharedCodegen<'a> {
         } else {
             // Normal case: single field
             let (base_type, array_suffix) = self.type_mapper.get_struct_field_parts(sir_type);
-            self.write_indented(&format!("{} {}{};\n", base_type, sanitized_name, array_suffix));
+            self.write_indented(&format!(
+                "{} {}{};\n",
+                base_type, sanitized_name, array_suffix
+            ));
             false
         }
     }
@@ -804,7 +813,11 @@ impl<'a> SharedCodegen<'a> {
                             if !node.inputs.is_empty() {
                                 let array_signal = &node.inputs[0].signal_id;
                                 self.get_array_type_for_signal(array_signal)
-                                    .unwrap_or_else(|| self.create_sir_type_for_width(self.get_signal_width(signal_id)))
+                                    .unwrap_or_else(|| {
+                                        self.create_sir_type_for_width(
+                                            self.get_signal_width(signal_id),
+                                        )
+                                    })
                             } else {
                                 self.create_sir_type_for_width(self.get_signal_width(signal_id))
                             }
@@ -816,7 +829,9 @@ impl<'a> SharedCodegen<'a> {
                                     if matches!(sir_type, SirType::Array(_, _)) {
                                         sir_type.clone()
                                     } else {
-                                        self.create_sir_type_for_width(self.get_signal_width(signal_id))
+                                        self.create_sir_type_for_width(
+                                            self.get_signal_width(signal_id),
+                                        )
                                     }
                                 } else {
                                     self.create_sir_type_for_width(self.get_signal_width(signal_id))
@@ -929,7 +944,7 @@ impl<'a> SharedCodegen<'a> {
 
         // Check for wide bit operations that need element-wise handling
         if output_width > 128 {
-            self.generate_wide_binary_op(node, op, &op_str);
+            self.generate_wide_binary_op(node, op, op_str);
             return;
         }
 
@@ -945,7 +960,7 @@ impl<'a> SharedCodegen<'a> {
         // For 33-64 bit add/sub, use uint64_t arithmetic for proper carry
         let is_add_sub = matches!(op, BinaryOperation::Add | BinaryOperation::Sub);
         if is_add_sub && output_width > 32 && output_width <= 64 {
-            self.generate_64bit_add_sub(node, &op_str, left_width, right_width);
+            self.generate_64bit_add_sub(node, op_str, left_width, right_width);
             return;
         }
 
@@ -1027,7 +1042,8 @@ impl<'a> SharedCodegen<'a> {
             let left_expr = if left_uses_vector {
                 format!(
                     "((uint64_t)signals->{}.x | ((uint64_t)signals->{}.y << 32))",
-                    self.sanitize_name(left), self.sanitize_name(left)
+                    self.sanitize_name(left),
+                    self.sanitize_name(left)
                 )
             } else {
                 format!("(uint64_t)signals->{}", self.sanitize_name(left))
@@ -1035,7 +1051,8 @@ impl<'a> SharedCodegen<'a> {
             let right_expr = if right_uses_vector {
                 format!(
                     "((uint64_t)signals->{}.x | ((uint64_t)signals->{}.y << 32))",
-                    self.sanitize_name(right), self.sanitize_name(right)
+                    self.sanitize_name(right),
+                    self.sanitize_name(right)
                 )
             } else {
                 format!("(uint64_t)signals->{}", self.sanitize_name(right))
@@ -1126,10 +1143,18 @@ impl<'a> SharedCodegen<'a> {
         // Generate signed expressions for comparison
         // Using needs_64bit=true for comparisons involving 33-64 bit values
         let needs_64bit = left_width > 32 || right_width > 32;
-        let left_expr =
-            self.generate_signed_operand_expr(&left_sanitized, left_width, left_uses_array, needs_64bit);
-        let right_expr =
-            self.generate_signed_operand_expr(&right_sanitized, right_width, right_uses_array, needs_64bit);
+        let left_expr = self.generate_signed_operand_expr(
+            &left_sanitized,
+            left_width,
+            left_uses_array,
+            needs_64bit,
+        );
+        let right_expr = self.generate_signed_operand_expr(
+            &right_sanitized,
+            right_width,
+            right_uses_array,
+            needs_64bit,
+        );
 
         self.write_indented(&format!(
             "signals->{} = {} {} {};\n",
@@ -1160,8 +1185,7 @@ impl<'a> SharedCodegen<'a> {
 
         // For signed multiply, the result can be up to left_width + right_width bits
         // For SMul of 16-bit x 32-bit, we need 48-bit result, use int64_t
-        let needs_64bit = matches!(op, BinaryOperation::SMul)
-            && (left_width + right_width > 32);
+        let needs_64bit = matches!(op, BinaryOperation::SMul) && (left_width + right_width > 32);
 
         // Calculate the actual output width for SMul (may differ from stored signal width)
         // SMul output is left_width + right_width bits
@@ -1215,11 +1239,7 @@ impl<'a> SharedCodegen<'a> {
             // Check the raw right operand signal for zero before performing the operation
             self.write_indented(&format!(
                 "signals->{} = (signals->{} != 0) ? (uint32_t)({} {} {}) : 0;\n",
-                output_sanitized,
-                right_sanitized,
-                left_expr,
-                op_str,
-                right_expr
+                output_sanitized, right_sanitized, left_expr, op_str, right_expr
             ));
             return;
         }
@@ -1255,21 +1275,14 @@ impl<'a> SharedCodegen<'a> {
                 // C++: Direct assignment to uint64_t
                 self.write_indented(&format!(
                     "signals->{} = (uint64_t)({} {} {});\n",
-                    output_sanitized,
-                    left_expr,
-                    op_str,
-                    right_expr
+                    output_sanitized, left_expr, op_str, right_expr
                 ));
             } else {
                 // C++: Mask to actual width to ensure upper bits don't affect sign extension
                 let mask = (1u64 << actual_output_width) - 1;
                 self.write_indented(&format!(
                     "signals->{} = (uint64_t)({} {} {}) & 0x{:X}ULL;\n",
-                    output_sanitized,
-                    left_expr,
-                    op_str,
-                    right_expr,
-                    mask
+                    output_sanitized, left_expr, op_str, right_expr, mask
                 ));
             }
         } else if actual_output_width < 32 {
@@ -1277,20 +1290,13 @@ impl<'a> SharedCodegen<'a> {
             let mask = (1u64 << actual_output_width) - 1;
             self.write_indented(&format!(
                 "signals->{} = (uint32_t)({} {} {}) & 0x{:X};\n",
-                output_sanitized,
-                left_expr,
-                op_str,
-                right_expr,
-                mask
+                output_sanitized, left_expr, op_str, right_expr, mask
             ));
         } else {
             // 32-bit output
             self.write_indented(&format!(
                 "signals->{} = (uint32_t)({} {} {});\n",
-                output_sanitized,
-                left_expr,
-                op_str,
-                right_expr
+                output_sanitized, left_expr, op_str, right_expr
             ));
         }
     }
@@ -1367,8 +1373,8 @@ impl<'a> SharedCodegen<'a> {
         &mut self,
         node: &SirNode,
         op: &BinaryOperation,
-        left_width: usize,
-        right_width: usize,
+        _left_width: usize,
+        _right_width: usize,
         output_width: usize,
     ) {
         let left = &node.inputs[0].signal_id;
@@ -1427,21 +1433,16 @@ impl<'a> SharedCodegen<'a> {
                 // For now, use the __fp16 type if available (clang/gcc), otherwise fall back to float
                 self.write_indented("{\n");
                 self.indent();
-                self.write_indented(&format!(
-                    "// FP16 operation: convert to float, operate, convert back\n"
-                ));
-                self.write_indented(&format!(
-                    "uint32_t _a = signals->{};\n", left_sanitized
-                ));
-                self.write_indented(&format!(
-                    "uint32_t _b = signals->{};\n", right_sanitized
-                ));
+                self.write_indented("// FP16 operation: convert to float, operate, convert back\n");
+                self.write_indented(&format!("uint32_t _a = signals->{};\n", left_sanitized));
+                self.write_indented(&format!("uint32_t _b = signals->{};\n", right_sanitized));
                 // Use the fp16 to fp32 conversion formula
                 self.write_indented("float _fa = _fp16_to_fp32(_a);\n");
-                self.write_indented(&format!("float _fb = _fp16_to_fp32(_b);\n"));
+                self.write_indented("float _fb = _fp16_to_fp32(_b);\n");
                 self.write_indented(&format!("float _fr = _fa {} _fb;\n", op_str));
                 self.write_indented(&format!(
-                    "signals->{} = _fp32_to_fp16(_fr);\n", output_sanitized
+                    "signals->{} = _fp32_to_fp16(_fr);\n",
+                    output_sanitized
                 ));
                 self.dedent();
                 self.write_indented("}\n");
@@ -1536,7 +1537,12 @@ impl<'a> SharedCodegen<'a> {
     }
 
     /// Get binary operation string
-    fn get_binary_op_str(&self, op: &BinaryOperation, left_width: usize, right_width: usize) -> &'static str {
+    fn get_binary_op_str(
+        &self,
+        op: &BinaryOperation,
+        left_width: usize,
+        right_width: usize,
+    ) -> &'static str {
         let is_boolean_context = left_width == 1 && right_width == 1;
 
         match op {
@@ -1545,8 +1551,20 @@ impl<'a> SharedCodegen<'a> {
             BinaryOperation::Mul | BinaryOperation::SMul => "*",
             BinaryOperation::Div | BinaryOperation::SDiv => "/",
             BinaryOperation::Mod | BinaryOperation::SMod => "%",
-            BinaryOperation::And => if is_boolean_context { "&&" } else { "&" },
-            BinaryOperation::Or => if is_boolean_context { "||" } else { "|" },
+            BinaryOperation::And => {
+                if is_boolean_context {
+                    "&&"
+                } else {
+                    "&"
+                }
+            }
+            BinaryOperation::Or => {
+                if is_boolean_context {
+                    "||"
+                } else {
+                    "|"
+                }
+            }
             BinaryOperation::Xor => "^",
             BinaryOperation::Eq => "==",
             BinaryOperation::Neq => "!=",
@@ -1580,7 +1598,10 @@ impl<'a> SharedCodegen<'a> {
         let right_width = self.get_signal_width(right);
         let output_width = self.get_signal_width(output);
 
-        let is_shift_op = matches!(op, BinaryOperation::Shl | BinaryOperation::Shr | BinaryOperation::Sar);
+        let is_shift_op = matches!(
+            op,
+            BinaryOperation::Shl | BinaryOperation::Shr | BinaryOperation::Sar
+        );
         let left_is_scalar = left_width <= 32;
         let right_is_scalar = right_width <= 32;
 
@@ -1589,7 +1610,10 @@ impl<'a> SharedCodegen<'a> {
             "// Element-wise {} for {}-bit output\n",
             op_str, output_width
         ));
-        self.write_indented(&format!("for (uint32_t i = 0; i < {}; i++) {{\n", array_size));
+        self.write_indented(&format!(
+            "for (uint32_t i = 0; i < {}; i++) {{\n",
+            array_size
+        ));
         self.indent();
 
         // Handle scalar/vector/array operand combinations
@@ -1662,7 +1686,11 @@ impl<'a> SharedCodegen<'a> {
 
             if output_width <= 32 {
                 // Output fits in a scalar - just take low bits
-                let mask = if output_width == 32 { "".to_string() } else { format!(" & 0x{:X}", (1u64 << output_width) - 1) };
+                let mask = if output_width == 32 {
+                    "".to_string()
+                } else {
+                    format!(" & 0x{:X}", (1u64 << output_width) - 1)
+                };
                 self.write_indented(&format!(
                     "signals->{} = (uint32_t)_result{};\n",
                     output_sanitized, mask
@@ -1675,14 +1703,17 @@ impl<'a> SharedCodegen<'a> {
                 ));
             } else if output_uses_array {
                 // C++: output is uint32_t[2] array (width > 64)
-                self.write_indented(&format!("signals->{}[0] = (uint32_t)_result;\n", output_sanitized));
-                self.write_indented(&format!("signals->{}[1] = (uint32_t)(_result >> 32);\n", output_sanitized));
-            } else {
-                // C++: output is uint64_t scalar
                 self.write_indented(&format!(
-                    "signals->{} = _result;\n",
+                    "signals->{}[0] = (uint32_t)_result;\n",
                     output_sanitized
                 ));
+                self.write_indented(&format!(
+                    "signals->{}[1] = (uint32_t)(_result >> 32);\n",
+                    output_sanitized
+                ));
+            } else {
+                // C++: output is uint64_t scalar
+                self.write_indented(&format!("signals->{} = _result;\n", output_sanitized));
             }
 
             self.dedent();
@@ -1694,16 +1725,30 @@ impl<'a> SharedCodegen<'a> {
             self.indent();
 
             // Get the low 32 bits and high 32 bits of each operand
-            let (left_lo, left_hi) = self.get_32bit_parts_expr(&left_sanitized, left_width, is_metal);
-            let (right_lo, right_hi) = self.get_32bit_parts_expr(&right_sanitized, right_width, is_metal);
+            let (left_lo, left_hi) =
+                self.get_32bit_parts_expr(&left_sanitized, left_width, is_metal);
+            let (right_lo, right_hi) =
+                self.get_32bit_parts_expr(&right_sanitized, right_width, is_metal);
 
             // Schoolbook multiplication:
             // (a_hi * 2^32 + a_lo) * (b_hi * 2^32 + b_lo)
             // = a_hi * b_hi * 2^64 + (a_hi * b_lo + a_lo * b_hi) * 2^32 + a_lo * b_lo
-            self.write_indented(&format!("uint64_t _ll = (uint64_t){} * (uint64_t){};\n", left_lo, right_lo));
-            self.write_indented(&format!("uint64_t _lh = (uint64_t){} * (uint64_t){};\n", left_lo, right_hi));
-            self.write_indented(&format!("uint64_t _hl = (uint64_t){} * (uint64_t){};\n", left_hi, right_lo));
-            self.write_indented(&format!("uint64_t _hh = (uint64_t){} * (uint64_t){};\n", left_hi, right_hi));
+            self.write_indented(&format!(
+                "uint64_t _ll = (uint64_t){} * (uint64_t){};\n",
+                left_lo, right_lo
+            ));
+            self.write_indented(&format!(
+                "uint64_t _lh = (uint64_t){} * (uint64_t){};\n",
+                left_lo, right_hi
+            ));
+            self.write_indented(&format!(
+                "uint64_t _hl = (uint64_t){} * (uint64_t){};\n",
+                left_hi, right_lo
+            ));
+            self.write_indented(&format!(
+                "uint64_t _hh = (uint64_t){} * (uint64_t){};\n",
+                left_hi, right_hi
+            ));
 
             // Combine: result_lo64 = _ll + ((_lh + _hl) << 32)
             //          result_hi64 = _hh + ((_lh + _hl) >> 32) + carry
@@ -1723,15 +1768,27 @@ impl<'a> SharedCodegen<'a> {
                 ));
             } else {
                 // C++: output is uint32_t[N] array - only write elements that exist
-                self.write_indented(&format!("signals->{}[0] = (uint32_t)_result_lo;\n", output_sanitized));
+                self.write_indented(&format!(
+                    "signals->{}[0] = (uint32_t)_result_lo;\n",
+                    output_sanitized
+                ));
                 if num_elements > 1 {
-                    self.write_indented(&format!("signals->{}[1] = (uint32_t)(_result_lo >> 32);\n", output_sanitized));
+                    self.write_indented(&format!(
+                        "signals->{}[1] = (uint32_t)(_result_lo >> 32);\n",
+                        output_sanitized
+                    ));
                 }
                 if num_elements > 2 {
-                    self.write_indented(&format!("signals->{}[2] = (uint32_t)_result_hi;\n", output_sanitized));
+                    self.write_indented(&format!(
+                        "signals->{}[2] = (uint32_t)_result_hi;\n",
+                        output_sanitized
+                    ));
                 }
                 if num_elements > 3 {
-                    self.write_indented(&format!("signals->{}[3] = (uint32_t)(_result_hi >> 32);\n", output_sanitized));
+                    self.write_indented(&format!(
+                        "signals->{}[3] = (uint32_t)(_result_hi >> 32);\n",
+                        output_sanitized
+                    ));
                 }
             }
 
@@ -1772,7 +1829,10 @@ impl<'a> SharedCodegen<'a> {
             (format!("signals->{}", name), "0".to_string())
         } else if is_metal {
             // Metal: uint2 with .x and .y components
-            (format!("signals->{}.x", name), format!("signals->{}.y", name))
+            (
+                format!("signals->{}.x", name),
+                format!("signals->{}.y", name),
+            )
         } else if width <= 64 {
             // C++: uint64_t scalar
             (
@@ -1781,12 +1841,21 @@ impl<'a> SharedCodegen<'a> {
             )
         } else {
             // C++: uint32_t array
-            (format!("signals->{}[0]", name), format!("signals->{}[1]", name))
+            (
+                format!("signals->{}[0]", name),
+                format!("signals->{}[1]", name),
+            )
         }
     }
 
     /// Generate 64-bit add/sub with proper carry propagation
-    fn generate_64bit_add_sub(&mut self, node: &SirNode, op_str: &str, left_width: usize, right_width: usize) {
+    fn generate_64bit_add_sub(
+        &mut self,
+        node: &SirNode,
+        op_str: &str,
+        left_width: usize,
+        right_width: usize,
+    ) {
         let left = &node.inputs[0].signal_id;
         let right = &node.inputs[1].signal_id;
         let output = &node.outputs[0].signal_id;
@@ -1851,7 +1920,9 @@ impl<'a> SharedCodegen<'a> {
             self.write_indented(&format!(
                 "signals->{} = {} {} {};\n",
                 self.sanitize_name(output),
-                left_expr, op_str, right_expr
+                left_expr,
+                op_str,
+                right_expr
             ));
         } else {
             // C++: > 64 bits stored as uint32_t[N] array
@@ -1962,15 +2033,22 @@ impl<'a> SharedCodegen<'a> {
                 self.write_indented("{\n");
                 self.indent();
                 self.write_indented("union { uint32_t u; float f; } _in, _out;\n");
-                self.write_indented(&format!("_in.u = signals->{};\n", self.sanitize_name(input)));
+                self.write_indented(&format!(
+                    "_in.u = signals->{};\n",
+                    self.sanitize_name(input)
+                ));
                 self.write_indented("_out.f = sqrtf(_in.f);\n");
-                self.write_indented(&format!("signals->{} = _out.u;\n", self.sanitize_name(output)));
+                self.write_indented(&format!(
+                    "signals->{} = _out.u;\n",
+                    self.sanitize_name(output)
+                ));
                 self.dedent();
                 self.write_indented("}\n");
             }
         } else {
             let output_width = self.get_signal_width(output);
-            let needs_mask = output_width < 32 && matches!(op, UnaryOperation::Not | UnaryOperation::Neg);
+            let needs_mask =
+                output_width < 32 && matches!(op, UnaryOperation::Not | UnaryOperation::Neg);
             if needs_mask {
                 let mask = (1u64 << output_width) - 1;
                 self.write_indented(&format!(
@@ -2044,7 +2122,10 @@ impl<'a> SharedCodegen<'a> {
         if self.uses_array_storage(output_width) {
             // Array mux - element-wise
             let array_size = self.get_array_size(output_width);
-            self.write_indented(&format!("for (uint32_t i = 0; i < {}; i++) {{\n", array_size));
+            self.write_indented(&format!(
+                "for (uint32_t i = 0; i < {}; i++) {{\n",
+                array_size
+            ));
             self.indent();
             self.write_indented(&format!(
                 "signals->{}[i] = signals->{} ? signals->{}[i] : signals->{}[i];\n",
@@ -2164,8 +2245,11 @@ impl<'a> SharedCodegen<'a> {
         } else if input_uses_array {
             // Input is array, output is scalar - extract from array elements
             // Check if this is an array-of-vectors in Metal (e.g., uint2[8] for Array(Bits(64), 8))
-            let source_signal = self.resolve_to_array_source(input).unwrap_or_else(|| input.to_string());
-            let (is_array_of_vectors, elem_bits, vector_size) = self.is_array_of_vectors(&source_signal);
+            let source_signal = self
+                .resolve_to_array_source(input)
+                .unwrap_or_else(|| input.to_string());
+            let (is_array_of_vectors, elem_bits, vector_size) =
+                self.is_array_of_vectors(&source_signal);
 
             if is_array_of_vectors && self.type_mapper.target == BackendTarget::Metal {
                 // Metal array of vectors: need to access array[i].x/y/z/w
@@ -2177,7 +2261,11 @@ impl<'a> SharedCodegen<'a> {
                 if width <= 32 && bit_in_component + width <= 32 {
                     // Slice fits in single component
                     let comp = self.get_vector_component(component_idx);
-                    let mask = if width >= 32 { 0xFFFFFFFF_u32 } else { (1u32 << width) - 1 };
+                    let mask = if width >= 32 {
+                        0xFFFFFFFF_u32
+                    } else {
+                        (1u32 << width) - 1
+                    };
                     self.write_indented(&format!(
                         "signals->{} = ({}[{}]{} >> {}) & 0x{:X};\n",
                         self.sanitize_name(output),
@@ -2204,7 +2292,11 @@ impl<'a> SharedCodegen<'a> {
                 } else {
                     // Fallback: just use first component
                     let comp = self.get_vector_component(component_idx.min(vector_size - 1));
-                    let mask = if width >= 32 { 0xFFFFFFFF_u32 } else { (1u32 << width.min(32)) - 1 };
+                    let mask = if width >= 32 {
+                        0xFFFFFFFF_u32
+                    } else {
+                        (1u32 << width.min(32)) - 1
+                    };
                     self.write_indented(&format!(
                         "signals->{} = ({}[{}]{} >> {}) & 0x{:X};\n",
                         self.sanitize_name(output),
@@ -2222,7 +2314,11 @@ impl<'a> SharedCodegen<'a> {
 
                 if width <= 32 && bit_in_element + width <= 32 {
                     // Slice fits in single element
-                    let elem_mask = if width >= 32 { 0xFFFFFFFF } else { (1u32 << width) - 1 };
+                    let elem_mask = if width >= 32 {
+                        0xFFFFFFFF
+                    } else {
+                        (1u32 << width) - 1
+                    };
                     self.write_indented(&format!(
                         "signals->{} = ({}[{}] >> {}) & 0x{:X};\n",
                         self.sanitize_name(output),
@@ -2280,14 +2376,15 @@ impl<'a> SharedCodegen<'a> {
 
             if component_idx >= input_vec_size {
                 // Shift exceeds input width - result is 0
-                self.write_indented(&format!(
-                    "signals->{} = 0;\n",
-                    self.sanitize_name(output)
-                ));
+                self.write_indented(&format!("signals->{} = 0;\n", self.sanitize_name(output)));
             } else if width <= 32 && bit_in_component + width <= 32 {
                 // Slice fits in single component
                 let comp = self.get_vector_component(component_idx);
-                let mask = if width >= 32 { 0xFFFFFFFF_u32 } else { (1u32 << width) - 1 };
+                let mask = if width >= 32 {
+                    0xFFFFFFFF_u32
+                } else {
+                    (1u32 << width) - 1
+                };
                 self.write_indented(&format!(
                     "signals->{} = ({}{} >> {}) & 0x{:X};\n",
                     self.sanitize_name(output),
@@ -2307,13 +2404,23 @@ impl<'a> SharedCodegen<'a> {
                 self.write_indented(&format!(
                     "signals->{} = (({}{} >> {}) & 0x{:X}) | (({}{} & 0x{:X}) << {});\n",
                     self.sanitize_name(output),
-                    input_base, comp1, bit_in_component, first_mask,
-                    input_base, comp2, second_mask, bits_from_first
+                    input_base,
+                    comp1,
+                    bit_in_component,
+                    first_mask,
+                    input_base,
+                    comp2,
+                    second_mask,
+                    bits_from_first
                 ));
             } else {
                 // Extract from first matching component only (fallback)
                 let comp = self.get_vector_component(component_idx.min(input_vec_size - 1));
-                let mask = if width >= 32 { 0xFFFFFFFF_u32 } else { (1u32 << width.min(32)) - 1 };
+                let mask = if width >= 32 {
+                    0xFFFFFFFF_u32
+                } else {
+                    (1u32 << width.min(32)) - 1
+                };
                 self.write_indented(&format!(
                     "signals->{} = ({}{} >> {}) & 0x{:X};\n",
                     self.sanitize_name(output),
@@ -2327,10 +2434,7 @@ impl<'a> SharedCodegen<'a> {
             // Both input and output are scalar - simple shift and mask
             // BUG FIX: If shift exceeds input width, the result is 0
             if shift >= input_width {
-                self.write_indented(&format!(
-                    "signals->{} = 0;\n",
-                    self.sanitize_name(output)
-                ));
+                self.write_indented(&format!("signals->{} = 0;\n", self.sanitize_name(output)));
             } else {
                 let mask = if width >= 64 {
                     u64::MAX
@@ -2374,11 +2478,19 @@ impl<'a> SharedCodegen<'a> {
         if output_width > 128 {
             // Wide concat - use array
             let array_size = output_width.div_ceil(32);
-            self.write_indented(&format!("// Concat: {} inputs -> {}-bit output\n", node.inputs.len(), output_width));
+            self.write_indented(&format!(
+                "// Concat: {} inputs -> {}-bit output\n",
+                node.inputs.len(),
+                output_width
+            ));
 
             // Initialize to zero
             for i in 0..array_size {
-                self.write_indented(&format!("signals->{}[{}] = 0;\n", self.sanitize_name(output), i));
+                self.write_indented(&format!(
+                    "signals->{}[{}] = 0;\n",
+                    self.sanitize_name(output),
+                    i
+                ));
             }
 
             // Pack inputs (LSB to MSB - reverse order)
@@ -2475,14 +2587,18 @@ impl<'a> SharedCodegen<'a> {
                     if bit_in_component == 0 && *width <= 32 {
                         components[component_idx] = input_ref;
                     } else if *width <= 32 {
-                        components[component_idx] = format!("({} | ({} << {}))", components[component_idx], input_ref, bit_in_component);
+                        components[component_idx] = format!(
+                            "({} | ({} << {}))",
+                            components[component_idx], input_ref, bit_in_component
+                        );
                     } else if *width <= 64 && is_cpp {
                         // 33-64 bit input stored as uint64_t scalar in C++
                         // Split into low and high 32-bit parts
                         if bit_in_component == 0 {
                             components[component_idx] = format!("(uint32_t){}", input_ref);
                             if component_idx + 1 < num_elements {
-                                components[component_idx + 1] = format!("(uint32_t)({} >> 32)", input_ref);
+                                components[component_idx + 1] =
+                                    format!("(uint32_t)({} >> 32)", input_ref);
                             }
                         }
                     }
@@ -2525,7 +2641,8 @@ impl<'a> SharedCodegen<'a> {
                         break;
                     }
 
-                    let input_ref = format!("(uint64_t)signals->{}", self.sanitize_name(input_name));
+                    let input_ref =
+                        format!("(uint64_t)signals->{}", self.sanitize_name(input_name));
 
                     if !concat_expr.is_empty() {
                         concat_expr.push_str(" | ");
@@ -2559,7 +2676,10 @@ impl<'a> SharedCodegen<'a> {
                         if bit_in_component == 0 && *width <= 32 {
                             components[component_idx] = input_ref;
                         } else if *width <= 32 {
-                            components[component_idx] = format!("({} | ({} << {}))", components[component_idx], input_ref, bit_in_component);
+                            components[component_idx] = format!(
+                                "({} | ({} << {}))",
+                                components[component_idx], input_ref, bit_in_component
+                            );
                         }
                     }
                     bit_offset += width;
@@ -2665,8 +2785,8 @@ impl<'a> SharedCodegen<'a> {
                 // Case 2: Width-based 2D - Array(Bits(N), M) where N > 64 (C++) or N > 128 (Metal)
                 let elem_width = elem_type.width();
                 let (_, elem_array_size) = self.type_mapper.get_type_for_width(elem_width);
-                let is_effectively_2d = matches!(elem_type.as_ref(), SirType::Array(_, _))
-                    || elem_array_size.is_some();
+                let is_effectively_2d =
+                    matches!(elem_type.as_ref(), SirType::Array(_, _)) || elem_array_size.is_some();
 
                 if is_effectively_2d {
                     // Get inner size either from explicit Array or from width-based storage
@@ -2745,7 +2865,10 @@ impl<'a> SharedCodegen<'a> {
         if source_uses_array && (output_uses_array || output_is_array_source) {
             // Both are arrays - element-wise copy
             let array_size = self.get_array_size(output_width);
-            self.write_indented(&format!("for (uint32_t i = 0; i < {}; i++) {{\n", array_size));
+            self.write_indented(&format!(
+                "for (uint32_t i = 0; i < {}; i++) {{\n",
+                array_size
+            ));
             self.indent();
             self.write_indented(&format!(
                 "signals->{}[i] = {}[i];\n",
@@ -2768,7 +2891,11 @@ impl<'a> SharedCodegen<'a> {
                 // uint4 - copy 4 elements
                 self.write_indented(&format!(
                     "signals->{} = uint4({}[0], {}[1], {}[2], {}[3]);\n",
-                    output_sanitized, source_location, source_location, source_location, source_location
+                    output_sanitized,
+                    source_location,
+                    source_location,
+                    source_location,
+                    source_location
                 ));
             }
         } else if source_uses_array {
@@ -2801,7 +2928,9 @@ impl<'a> SharedCodegen<'a> {
             // but signals use uint storage. Use as_type<> to preserve IEEE 754 bit patterns.
             let is_metal = matches!(self.type_mapper.target, BackendTarget::Metal);
             let input_fp_cast = if is_metal && is_input {
-                self.module.inputs.iter()
+                self.module
+                    .inputs
+                    .iter()
                     .find(|i| i.name == signal)
                     .and_then(|i| match &i.sir_type {
                         SirType::Float16 => Some("ushort"),
@@ -2815,7 +2944,9 @@ impl<'a> SharedCodegen<'a> {
             if let Some(cast_type) = input_fp_cast {
                 self.write_indented(&format!(
                     "signals->{} = as_type<{}>({});\n",
-                    self.sanitize_name(output), cast_type, source_location
+                    self.sanitize_name(output),
+                    cast_type,
+                    source_location
                 ));
             } else {
                 self.write_indented(&format!(
@@ -2848,6 +2979,7 @@ impl<'a> SharedCodegen<'a> {
     }
 
     /// Get the inner array size for a 2D array (either explicit or width-based)
+    #[allow(dead_code)]
     fn get_2d_inner_size(&self, signal: &str) -> Option<usize> {
         if let Some(state_elem) = self.module.state_elements.get(signal) {
             if let Some(SirType::Array(elem_type, _)) = &state_elem.sir_type {
@@ -2865,6 +2997,7 @@ impl<'a> SharedCodegen<'a> {
     }
 
     /// Get the outer array size for a 2D array
+    #[allow(dead_code)]
     fn get_2d_outer_size(&self, signal: &str) -> Option<usize> {
         if let Some(state_elem) = self.module.state_elements.get(signal) {
             if let Some(SirType::Array(_, outer_size)) = &state_elem.sir_type {
@@ -3004,7 +3137,10 @@ impl<'a> SharedCodegen<'a> {
                 }
             } else {
                 // True 1D array - simple loop
-                self.write_indented(&format!("for (uint32_t i = 0; i < {}; i++) {{\n", outer_size));
+                self.write_indented(&format!(
+                    "for (uint32_t i = 0; i < {}; i++) {{\n",
+                    outer_size
+                ));
                 self.indent();
                 self.write_indented(&format!(
                     "signals->{}[i] = signals->{}[i];\n",
@@ -3049,7 +3185,11 @@ impl<'a> SharedCodegen<'a> {
             let uses_array = self.uses_array_storage(first_width);
 
             for additional_output in &node.outputs[1..] {
-                if self.module.state_elements.contains_key(&additional_output.signal_id) {
+                if self
+                    .module
+                    .state_elements
+                    .contains_key(&additional_output.signal_id)
+                {
                     continue;
                 }
                 if uses_array {
@@ -3077,7 +3217,12 @@ impl<'a> SharedCodegen<'a> {
     pub fn generate_combinational_body(&mut self) {
         // Use pre-computed topological order
         for node_id in &self.module.sorted_combinational_node_ids.clone() {
-            if let Some(node) = self.module.combinational_nodes.iter().find(|n| n.id == *node_id) {
+            if let Some(node) = self
+                .module
+                .combinational_nodes
+                .iter()
+                .find(|n| n.id == *node_id)
+            {
                 self.generate_node(node);
             }
         }
@@ -3092,7 +3237,10 @@ impl<'a> SharedCodegen<'a> {
         // Initialize next registers from current
         // In batched mode with local variables, skip this - locals already have current values
         if !self.in_batched_mode {
-            self.write_indented(&format!("// Initialize {} from {}\n", next_reg, current_reg));
+            self.write_indented(&format!(
+                "// Initialize {} from {}\n",
+                next_reg, current_reg
+            ));
             for (state_name, elem) in &sorted_states {
                 let sanitized = self.sanitize_name(state_name);
 
@@ -3120,7 +3268,12 @@ impl<'a> SharedCodegen<'a> {
                             if self.type_mapper.target == BackendTarget::Cpp {
                                 self.write_indented(&format!(
                                     "memcpy({}->{}, {}->{}, sizeof({}->{}));\n",
-                                    next_reg, sanitized, current_reg, sanitized, current_reg, sanitized
+                                    next_reg,
+                                    sanitized,
+                                    current_reg,
+                                    sanitized,
+                                    current_reg,
+                                    sanitized
                                 ));
                             } else {
                                 // Metal: nested loops
@@ -3146,14 +3299,20 @@ impl<'a> SharedCodegen<'a> {
                         } else {
                             // Check if element type requires array storage (width-based 2D)
                             let elem_width = elem_type.width();
-                            let (_, elem_array_size) = self.type_mapper.get_type_for_width(elem_width);
+                            let (_, elem_array_size) =
+                                self.type_mapper.get_type_for_width(elem_width);
                             let is_width_based_2d = elem_array_size.is_some();
 
                             if self.type_mapper.target == BackendTarget::Cpp {
                                 // C++: memcpy works for both 1D and 2D
                                 self.write_indented(&format!(
                                     "memcpy({}->{}, {}->{}, sizeof({}->{}));\n",
-                                    next_reg, sanitized, current_reg, sanitized, current_reg, sanitized
+                                    next_reg,
+                                    sanitized,
+                                    current_reg,
+                                    sanitized,
+                                    current_reg,
+                                    sanitized
                                 ));
                             } else if is_width_based_2d {
                                 // Metal width-based 2D: nested loops
@@ -3213,8 +3372,16 @@ impl<'a> SharedCodegen<'a> {
         // Sort sequential nodes by output name
         let mut sorted_seq_nodes: Vec<_> = self.module.sequential_nodes.iter().collect();
         sorted_seq_nodes.sort_by(|a, b| {
-            let a_name = a.outputs.first().map(|o| o.signal_id.as_str()).unwrap_or("");
-            let b_name = b.outputs.first().map(|o| o.signal_id.as_str()).unwrap_or("");
+            let a_name = a
+                .outputs
+                .first()
+                .map(|o| o.signal_id.as_str())
+                .unwrap_or("");
+            let b_name = b
+                .outputs
+                .first()
+                .map(|o| o.signal_id.as_str())
+                .unwrap_or("");
             a_name.cmp(b_name)
         });
 
@@ -3281,7 +3448,9 @@ impl<'a> SharedCodegen<'a> {
 
         if is_array && array_size > 0 {
             // Array type - check for 2D arrays (explicit or width-based)
-            let (is_2d, inner_size) = if let Some(state_elem) = self.module.state_elements.get(output_signal) {
+            let (is_2d, inner_size) = if let Some(state_elem) =
+                self.module.state_elements.get(output_signal)
+            {
                 if let Some(SirType::Array(elem_type, _)) = &state_elem.sir_type {
                     // Case 1: Explicit 2D array
                     if let SirType::Array(_, inner_sz) = elem_type.as_ref() {
@@ -3337,9 +3506,7 @@ impl<'a> SharedCodegen<'a> {
 
             self.write_indented(&format!(
                 "{} = signals->{}{};\n",
-                target,
-                sanitized_data,
-                mask
+                target, sanitized_data, mask
             ));
         }
     }

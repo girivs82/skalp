@@ -1,6 +1,5 @@
 //! Standalone FpAdd test - tests FP32 and FP16 addition directly
 
-
 use skalp_testing::Testbench;
 
 fn setup_stdlib_path() {
@@ -30,8 +29,7 @@ async fn test_fp32_add_standalone() {
     ];
 
     for (a, b, expected) in tests {
-        tb.set("a", a.to_bits() as u64)
-            .set("b", b.to_bits() as u64);
+        tb.set("a", a.to_bits() as u64).set("b", b.to_bits() as u64);
         tb.step().await;
 
         let result_bits: u32 = tb.get_as("result").await;
@@ -43,10 +41,15 @@ async fn test_fp32_add_standalone() {
         assert!(
             (result - expected).abs() < 1e-6,
             "FP32_ADD: {} + {} = {}, got {} (0x{:08X})",
-            a, b, expected, result, result_bits
+            a,
+            b,
+            expected,
+            result,
+            result_bits
         );
     }
-    tb.export_waveform("build/test_fp32_add_standalone.skw.gz").ok();
+    tb.export_waveform("build/test_fp32_add_standalone.skw.gz")
+        .ok();
 }
 
 #[tokio::test]
@@ -82,5 +85,6 @@ async fn test_fp16_add_standalone() {
             a, b, expected, result_bits
         );
     }
-    tb.export_waveform("build/test_fp16_add_standalone.skw.gz").ok();
+    tb.export_waveform("build/test_fp16_add_standalone.skw.gz")
+        .ok();
 }

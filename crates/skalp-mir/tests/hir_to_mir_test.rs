@@ -23,6 +23,7 @@ fn create_simple_entity() -> Hir {
         imports: vec![],
         functions: vec![],
         safety_definitions: ModuleSafetyDefinitions::default(),
+        entity_aliases: vec![],
     };
 
     // Create entity

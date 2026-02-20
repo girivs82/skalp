@@ -232,7 +232,12 @@ impl TypeFlattener {
         if field_chain.is_empty() {
             base_name.to_string()
         } else {
-            format!("{}{}{}", base_name, FIELD_SEPARATOR, field_chain.join(FIELD_SEPARATOR))
+            format!(
+                "{}{}{}",
+                base_name,
+                FIELD_SEPARATOR,
+                field_chain.join(FIELD_SEPARATOR)
+            )
         }
     }
 

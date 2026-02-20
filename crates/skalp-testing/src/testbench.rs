@@ -168,7 +168,13 @@ impl Testbench {
             ..Default::default()
         };
 
-        Self::from_source_gate_level_with_library(source_path, config, library_name, Some(top_module)).await
+        Self::from_source_gate_level_with_library(
+            source_path,
+            config,
+            library_name,
+            Some(top_module),
+        )
+        .await
     }
 
     /// Create an NCL (asynchronous) testbench from source
@@ -478,8 +484,8 @@ impl Testbench {
         } else {
             mir.modules.first()
         };
-        let behavioral_sir = top_mir_module
-            .map(|top_module| convert_mir_to_sir_with_hierarchy(&mir, top_module));
+        let behavioral_sir =
+            top_mir_module.map(|top_module| convert_mir_to_sir_with_hierarchy(&mir, top_module));
         if let Some(ref beh_sir) = behavioral_sir {
             sir_result.sir.name_registry = beh_sir.name_registry.clone();
         }
@@ -791,7 +797,8 @@ impl Testbench {
             // specialized versions (e.g., "TriangularCarrier" should match "TriangularCarrier_1000").
             // Collect both exact matches and specialized versions.
             let prefix = format!("{}_", explicit_name);
-            let candidates: Vec<_> = mir.modules
+            let candidates: Vec<_> = mir
+                .modules
                 .iter()
                 .filter(|m| m.name == explicit_name || m.name.starts_with(&prefix))
                 .collect();
@@ -803,16 +810,23 @@ impl Testbench {
             // BUG #232: Prefer specialized versions (with suffix) over generic templates (exact match).
             // Specialized versions have concrete const values, while generic templates don't.
             // Among specialized versions, prefer the one with most signals.
-            let specialized: Vec<_> = candidates.iter()
+            let specialized: Vec<_> = candidates
+                .iter()
                 .filter(|m| m.name.starts_with(&prefix))
                 .collect();
 
             if !specialized.is_empty() {
                 // Use the specialized version with most signals
-                **specialized.iter().max_by_key(|m| m.signals.len() + m.processes.len()).unwrap()
+                **specialized
+                    .iter()
+                    .max_by_key(|m| m.signals.len() + m.processes.len())
+                    .unwrap()
             } else {
                 // No specialized version, use the exact match with most signals
-                *candidates.iter().max_by_key(|m| m.signals.len() + m.processes.len()).unwrap()
+                *candidates
+                    .iter()
+                    .max_by_key(|m| m.signals.len() + m.processes.len())
+                    .unwrap()
             }
         } else if let Some(ref basename) = source_basename {
             let pascal_basename: String = basename
@@ -1221,9 +1235,9 @@ impl Testbench {
 
     /// Build a coverage report from the current coverage state
     pub fn coverage_report(&self) -> Option<CoverageReport> {
-        self.coverage_db.as_ref().map(|db| {
-            CoverageReport::from_coverage_dbs(db, None, true, self.cycle_count)
-        })
+        self.coverage_db
+            .as_ref()
+            .map(|db| CoverageReport::from_coverage_dbs(db, None, true, self.cycle_count))
     }
 
     /// Print a basic coverage summary to stdout
@@ -1231,12 +1245,18 @@ impl Testbench {
         if let Some(metrics) = self.coverage_metrics() {
             println!();
             println!("Coverage Summary (after {} cycles):", self.cycle_count);
-            println!("  Toggle:     {:6.1}%  ({}/{} bits)",
-                metrics.toggle_pct, metrics.toggle_covered, metrics.toggle_total);
-            println!("  Mux arms:   {:6.1}%  ({}/{} arms)",
-                metrics.mux_pct, metrics.mux_arms_covered, metrics.mux_arms_total);
-            println!("  Comparison: {:6.1}%  ({}/{} outcomes)",
-                metrics.comparison_pct, metrics.cmp_covered, metrics.cmp_total);
+            println!(
+                "  Toggle:     {:6.1}%  ({}/{} bits)",
+                metrics.toggle_pct, metrics.toggle_covered, metrics.toggle_total
+            );
+            println!(
+                "  Mux arms:   {:6.1}%  ({}/{} arms)",
+                metrics.mux_pct, metrics.mux_arms_covered, metrics.mux_arms_total
+            );
+            println!(
+                "  Comparison: {:6.1}%  ({}/{} outcomes)",
+                metrics.comparison_pct, metrics.cmp_covered, metrics.cmp_total
+            );
             println!("  Overall:    {:6.1}%", metrics.overall_pct);
             println!("  Vectors:    {}", metrics.vectors_applied);
             println!();
@@ -1262,8 +1282,10 @@ impl Testbench {
         let name_registry = self.sir_module.as_ref().map(|sir| &sir.name_registry);
 
         println!();
-        println!("Coverage Guidance (after {} cycles, {:.1}% toggle coverage):",
-            self.cycle_count, metrics.toggle_pct);
+        println!(
+            "Coverage Guidance (after {} cycles, {:.1}% toggle coverage):",
+            self.cycle_count, metrics.toggle_pct
+        );
         println!("{}", "\u{2501}".repeat(60));
         println!();
 
@@ -1290,20 +1312,31 @@ impl Testbench {
                     // Entire signal never toggled
                     println!("  {} ({}-bit): never toggled", display_name, total_width);
                     if total_width == 1 {
-                        println!("    \u{2192} Set {} to both 0 and 1 in separate test phases",
-                            display_name);
+                        println!(
+                            "    \u{2192} Set {} to both 0 and 1 in separate test phases",
+                            display_name
+                        );
                     } else {
-                        println!("    \u{2192} Exercise {} with varying values (try 0x0, 0xFF, 0x55AA)",
-                            display_name);
+                        println!(
+                            "    \u{2192} Exercise {} with varying values (try 0x0, 0xFF, 0x55AA)",
+                            display_name
+                        );
                     }
                 } else {
                     // Partial toggle coverage
                     let uncovered_bits: Vec<usize> = bits.iter().map(|(b, _)| *b).collect();
                     let bit_range = Self::format_bit_ranges(&uncovered_bits);
-                    println!("  {} ({}-bit): {}/{} bits untoggled",
-                        display_name, total_width, bits.len(), total_width);
-                    println!("    \u{2192} bits {} need exercise with different values",
-                        bit_range);
+                    println!(
+                        "  {} ({}-bit): {}/{} bits untoggled",
+                        display_name,
+                        total_width,
+                        bits.len(),
+                        total_width
+                    );
+                    println!(
+                        "    \u{2192} bits {} need exercise with different values",
+                        bit_range
+                    );
                 }
             }
             println!();
@@ -1321,17 +1354,18 @@ impl Testbench {
                         .iter()
                         .find(|n| format!("node_{}", n.id) == *node_name)
                         .and_then(|n| n.outputs.first())
-                        .map(|out_ref| {
-                            Self::resolve_signal_name(&out_ref.signal_id, name_registry)
-                        })
+                        .map(|out_ref| Self::resolve_signal_name(&out_ref.signal_id, name_registry))
                         .unwrap_or_else(|| node_name.to_string())
                 } else {
                     node_name.to_string()
                 };
 
-                let total_arms = self.sir_module.as_ref()
+                let total_arms = self
+                    .sir_module
+                    .as_ref()
                     .and_then(|sir| {
-                        sir.combinational_nodes.iter()
+                        sir.combinational_nodes
+                            .iter()
                             .find(|n| format!("node_{}", n.id) == *node_name)
                     })
                     .map(|n| match &n.kind {
@@ -1342,15 +1376,18 @@ impl Testbench {
                     .unwrap_or(2);
 
                 for &arm in arms {
-                    println!("  {} arm {} (of {}): not taken",
-                        display_name, arm, total_arms);
+                    println!(
+                        "  {} arm {} (of {}): not taken",
+                        display_name, arm, total_arms
+                    );
                     if total_arms == 2 {
                         let path_desc = if arm == 0 { "false/else" } else { "true/then" };
-                        println!("    \u{2192} Exercise the '{}' path of {}",
-                            path_desc, display_name);
+                        println!(
+                            "    \u{2192} Exercise the '{}' path of {}",
+                            path_desc, display_name
+                        );
                     } else {
-                        println!("    \u{2192} Drive selector to match case {}",
-                            arm);
+                        println!("    \u{2192} Drive selector to match case {}", arm);
                     }
                 }
             }
@@ -1367,9 +1404,7 @@ impl Testbench {
                         .iter()
                         .find(|n| format!("node_{}", n.id) == *node_name)
                         .and_then(|n| n.outputs.first())
-                        .map(|out_ref| {
-                            Self::resolve_signal_name(&out_ref.signal_id, name_registry)
-                        })
+                        .map(|out_ref| Self::resolve_signal_name(&out_ref.signal_id, name_registry))
                         .unwrap_or_else(|| node_name.to_string())
                 } else {
                     node_name.to_string()
@@ -1383,8 +1418,10 @@ impl Testbench {
                     "false outcome"
                 };
                 println!("  {} ({}): missing {}", display_name, op, missing);
-                println!("    \u{2192} Choose inputs that make this comparison {}",
-                    if !*seen_true { "true" } else { "false" });
+                println!(
+                    "    \u{2192} Choose inputs that make this comparison {}",
+                    if !*seen_true { "true" } else { "false" }
+                );
             }
             println!();
         }
@@ -1395,14 +1432,17 @@ impl Testbench {
         }
 
         // Summary line
-        let total_gaps = uncovered_toggles.len() + uncovered_mux.iter().map(|(_, a)| a.len()).sum::<usize>()
+        let total_gaps = uncovered_toggles.len()
+            + uncovered_mux.iter().map(|(_, a)| a.len()).sum::<usize>()
             + uncovered_cmps.len();
         if total_gaps > 0 {
-            println!("Summary: {} coverage gaps remaining ({} toggle bits, {} mux arms, {} comparisons)",
+            println!(
+                "Summary: {} coverage gaps remaining ({} toggle bits, {} mux arms, {} comparisons)",
                 total_gaps,
                 uncovered_toggles.len(),
                 uncovered_mux.iter().map(|(_, a)| a.len()).sum::<usize>(),
-                uncovered_cmps.len());
+                uncovered_cmps.len()
+            );
         } else {
             println!("Summary: all coverage goals met");
         }
@@ -1491,7 +1531,9 @@ impl Testbench {
             vectors_applied += 1;
         }
 
-        let metrics = self.coverage_db.as_ref()
+        let metrics = self
+            .coverage_db
+            .as_ref()
             .map(|db| db.metrics())
             .unwrap_or(CoverageMetrics {
                 toggle_pct: 0.0,
@@ -1667,8 +1709,12 @@ impl Testbench {
             .export_skw_compressed(path, &design_name)
             .map_err(|e| anyhow::anyhow!("Failed to write waveform: {}", e))?;
 
-        eprintln!("Waveform exported to {:?} ({} cycles, {} signals)",
-            path, self.cycle_count, waveform.signals.len());
+        eprintln!(
+            "Waveform exported to {:?} ({} cycles, {} signals)",
+            path,
+            self.cycle_count,
+            waveform.signals.len()
+        );
 
         Ok(())
     }

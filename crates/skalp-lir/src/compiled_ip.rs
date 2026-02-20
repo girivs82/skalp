@@ -178,7 +178,7 @@ impl CompiledIp {
         // Write magic number
         writer.write_all(&SKB_MAGIC)?;
 
-        if key.is_some() {
+        if let Some(encryption_key) = key {
             #[cfg(feature = "encryption")]
             {
                 // Write format marker
@@ -196,7 +196,7 @@ impl CompiledIp {
                 ))?;
 
                 // Encrypt
-                let encrypted = encryption::encrypt(&content, key.unwrap())?;
+                let encrypted = encryption::encrypt(&content, encryption_key)?;
 
                 // Write header separately (unencrypted for inspection)
                 let header_bytes = bincode::serialize(&compiled.header)?;

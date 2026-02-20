@@ -193,29 +193,27 @@ impl DeadCodeElimination {
                         }
                     }
                 }
-                Statement::Loop(loop_stmt) => {
-                    match loop_stmt {
-                        LoopStatement::For {
-                            init,
-                            condition,
-                            update,
-                            body,
-                        } => {
-                            self.mark_used_in_expression(&init.rhs);
-                            self.mark_used_in_expression(condition);
-                            self.mark_used_in_expression(&update.rhs);
-                            for s in &body.statements {
-                                stmt_stack.push(s);
-                            }
-                        }
-                        LoopStatement::While { condition, body } => {
-                            self.mark_used_in_expression(condition);
-                            for s in &body.statements {
-                                stmt_stack.push(s);
-                            }
+                Statement::Loop(loop_stmt) => match loop_stmt {
+                    LoopStatement::For {
+                        init,
+                        condition,
+                        update,
+                        body,
+                    } => {
+                        self.mark_used_in_expression(&init.rhs);
+                        self.mark_used_in_expression(condition);
+                        self.mark_used_in_expression(&update.rhs);
+                        for s in &body.statements {
+                            stmt_stack.push(s);
                         }
                     }
-                }
+                    LoopStatement::While { condition, body } => {
+                        self.mark_used_in_expression(condition);
+                        for s in &body.statements {
+                            stmt_stack.push(s);
+                        }
+                    }
+                },
                 Statement::Block(block) => {
                     for s in &block.statements {
                         stmt_stack.push(s);

@@ -611,7 +611,6 @@ impl GlobalRouter {
             return Ok(());
         }
 
-
         // Rip up and reroute affected nets
         // (Simplified - full implementation would be more sophisticated)
 

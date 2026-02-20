@@ -192,7 +192,9 @@ mod async_reset_pipeline_tests {
     fn compile_to_mir(source: &str) -> skalp_mir::Mir {
         let hir = parse_and_build_hir(source).expect("Failed to parse");
         let compiler = MirCompiler::new().with_optimization_level(OptimizationLevel::None);
-        compiler.compile_to_mir(&hir).expect("Failed to compile to MIR")
+        compiler
+            .compile_to_mir(&hir)
+            .expect("Failed to compile to MIR")
     }
 
     #[test]
@@ -314,7 +316,11 @@ mod async_reset_pipeline_tests {
         let tech_result = map_lir_to_gates(&lir_result.lir, &library);
         let netlist = &tech_result.netlist;
 
-        println!("Gate netlist: {} cells, {} nets", netlist.cells.len(), netlist.nets.len());
+        println!(
+            "Gate netlist: {} cells, {} nets",
+            netlist.cells.len(),
+            netlist.nets.len()
+        );
 
         // Async reset should use DffR cells (with async reset pin), NOT plain Dff
         let mut dffr_count = 0;
@@ -338,7 +344,8 @@ mod async_reset_pipeline_tests {
         assert!(
             dffr_count > 0,
             "Async reset should produce DffR cells, got {} DffR and {} Dff",
-            dffr_count, dff_count
+            dffr_count,
+            dff_count
         );
         assert_eq!(
             reset_mux_count, 0,
@@ -394,23 +401,14 @@ mod async_reset_pipeline_tests {
         println!("Dff cells: {}", dff_count);
         println!("ResetMux cells: {}", reset_mux_count);
 
-        assert_eq!(
-            dffr_count, 0,
-            "Sync reset should NOT produce DffR cells"
-        );
-        assert!(
-            dff_count > 0,
-            "Sync reset should produce plain Dff cells"
-        );
-        assert!(
-            reset_mux_count > 0,
-            "Sync reset should have ResetMux cells"
-        );
+        assert_eq!(dffr_count, 0, "Sync reset should NOT produce DffR cells");
+        assert!(dff_count > 0, "Sync reset should produce plain Dff cells");
+        assert!(reset_mux_count > 0, "Sync reset should have ResetMux cells");
     }
 
     #[test]
     fn test_async_reset_equivalence_check() {
-        use skalp_formal::{GateNetlistToAig, LirToAig, check_sequential_equivalence_sat};
+        use skalp_formal::{check_sequential_equivalence_sat, GateNetlistToAig, LirToAig};
 
         let source = r#"
         entity AsyncEc {
@@ -438,17 +436,35 @@ mod async_reset_pipeline_tests {
         let library = get_stdlib_library("generic_asic").expect("Failed to load library");
         let tech_result = map_lir_to_gates(&lir_result.lir, &library);
 
-        println!("LIR: {} signals, {} nodes", lir_result.lir.signals.len(), lir_result.lir.nodes.len());
-        println!("Gate: {} cells, {} nets", tech_result.netlist.cells.len(), tech_result.netlist.nets.len());
+        println!(
+            "LIR: {} signals, {} nodes",
+            lir_result.lir.signals.len(),
+            lir_result.lir.nodes.len()
+        );
+        println!(
+            "Gate: {} cells, {} nets",
+            tech_result.netlist.cells.len(),
+            tech_result.netlist.nets.len()
+        );
 
         // Build AIGs for both representations
         let lir_aig = LirToAig::new().convert_sequential(&lir_result.lir);
         let gate_aig = GateNetlistToAig::new().convert_sequential(&tech_result.netlist);
 
-        println!("LIR AIG: {} nodes, {} inputs, {} outputs, {} latches",
-            lir_aig.nodes.len(), lir_aig.inputs.len(), lir_aig.outputs.len(), lir_aig.latches.len());
-        println!("Gate AIG: {} nodes, {} inputs, {} outputs, {} latches",
-            gate_aig.nodes.len(), gate_aig.inputs.len(), gate_aig.outputs.len(), gate_aig.latches.len());
+        println!(
+            "LIR AIG: {} nodes, {} inputs, {} outputs, {} latches",
+            lir_aig.nodes.len(),
+            lir_aig.inputs.len(),
+            lir_aig.outputs.len(),
+            lir_aig.latches.len()
+        );
+        println!(
+            "Gate AIG: {} nodes, {} inputs, {} outputs, {} latches",
+            gate_aig.nodes.len(),
+            gate_aig.inputs.len(),
+            gate_aig.outputs.len(),
+            gate_aig.latches.len()
+        );
 
         // Run sequential equivalence check
         let result = check_sequential_equivalence_sat(&lir_aig, &gate_aig, false)
@@ -515,7 +531,10 @@ mod async_reset_pipeline_tests {
             }
         }
 
-        println!("DffR cells: {}, AsyncReset inverters: {}", dffr_count, async_inv_count);
+        println!(
+            "DffR cells: {}, AsyncReset inverters: {}",
+            dffr_count, async_inv_count
+        );
 
         assert_eq!(dffr_count, 4, "Should have 4 DffR cells (4-bit register)");
         // 5 = 0b0101: bits 0 and 2 are 1, need INV pairs (2 INV each)
@@ -527,7 +546,7 @@ mod async_reset_pipeline_tests {
 
     #[test]
     fn test_async_reset_nonzero_equivalence_check() {
-        use skalp_formal::{GateNetlistToAig, LirToAig, check_sequential_equivalence_sat};
+        use skalp_formal::{check_sequential_equivalence_sat, GateNetlistToAig, LirToAig};
 
         let source = r#"
         entity AsyncNonZeroEc {

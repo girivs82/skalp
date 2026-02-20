@@ -16,6 +16,12 @@ pub struct BuchiAutomaton {
     transitions: Vec<(usize, String, usize)>,
 }
 
+impl Default for BuchiAutomaton {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl BuchiAutomaton {
     pub fn new() -> Self {
         Self {
@@ -42,6 +48,12 @@ pub struct TreeNode {
     id: usize,
     label: String,
     children: Vec<usize>,
+}
+
+impl Default for ComputationTree {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl ComputationTree {

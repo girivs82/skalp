@@ -59,9 +59,7 @@ pub struct AigCone {
 #[cfg(target_os = "macos")]
 mod gpu_impl {
     use super::AigCone;
-    use metal::{
-        CommandQueue, CompileOptions, Device, MTLResourceOptions, MTLSize,
-    };
+    use metal::{CommandQueue, CompileOptions, Device, MTLResourceOptions, MTLSize};
 
     /// GPU-accelerated AIG cone evaluator using Metal compute shaders.
     pub struct GpuAigConeSim {
@@ -135,10 +133,7 @@ kernel void eval_aig_cone(
             if !cone.state_input_map.is_empty() {
                 shader.push_str("\n    // Copy latch values to state inputs\n");
                 for &(si, latch) in &cone.state_input_map {
-                    shader.push_str(&format!(
-                        "    signals[{}] = signals[{}];\n",
-                        si, latch
-                    ));
+                    shader.push_str(&format!("    signals[{}] = signals[{}];\n", si, latch));
                 }
             }
 
@@ -245,10 +240,7 @@ kernel void eval_aig_cone(
                         failures.push(cone.name.clone());
                     }
                     Err(e) => {
-                        return Err(format!(
-                            "GPU cone sim error on '{}': {}",
-                            cone.name, e
-                        ));
+                        return Err(format!("GPU cone sim error on '{}': {}", cone.name, e));
                     }
                 }
             }
@@ -349,13 +341,17 @@ pub fn find_counterexample_cpu(cone: &AigCone, num_patterns: u32) -> Option<Vec<
             // Collect input values with names
             let mut result: Vec<(String, bool)> = Vec::new();
             for (i, &input_id) in cone.input_indices.iter().enumerate() {
-                let name = cone.input_names.get(i)
+                let name = cone
+                    .input_names
+                    .get(i)
                     .cloned()
                     .unwrap_or_else(|| format!("input_{}", input_id));
                 result.push((name, signals[input_id as usize] != 0));
             }
             for (i, &latch_id) in cone.latch_indices.iter().enumerate() {
-                let name = cone.latch_names.get(i)
+                let name = cone
+                    .latch_names
+                    .get(i)
                     .cloned()
                     .unwrap_or_else(|| format!("latch_{}", latch_id));
                 result.push((name, signals[latch_id as usize] != 0));

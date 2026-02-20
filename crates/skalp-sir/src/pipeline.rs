@@ -398,7 +398,6 @@ impl<'a> PipelineInserter<'a> {
                 }
             }
         }
-
     }
 }
 

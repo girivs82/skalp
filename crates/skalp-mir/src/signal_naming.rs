@@ -66,7 +66,12 @@ pub fn make_nested_field_name(base: &str, field_path: &[&str]) -> String {
     if field_path.is_empty() {
         base.to_string()
     } else {
-        format!("{}{}{}", base, FIELD_SEPARATOR, field_path.join(FIELD_SEPARATOR))
+        format!(
+            "{}{}{}",
+            base,
+            FIELD_SEPARATOR,
+            field_path.join(FIELD_SEPARATOR)
+        )
     }
 }
 

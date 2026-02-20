@@ -28,7 +28,8 @@ use std::ffi::c_void;
 
 /// Function pointer types for the compiled kernel
 type CombinationalEvalFn = unsafe extern "C" fn(*const c_void, *const c_void, *mut c_void);
-type SequentialUpdateFn = unsafe extern "C" fn(*const c_void, *const c_void, *const c_void, *mut c_void);
+type SequentialUpdateFn =
+    unsafe extern "C" fn(*const c_void, *const c_void, *const c_void, *mut c_void);
 type BatchedSimulationFn = unsafe extern "C" fn(*mut c_void, *mut c_void, *mut c_void, u32);
 
 /// The kernel export table structure (must match C++ layout)
@@ -93,7 +94,14 @@ impl FieldMap {
     }
 
     fn add(&mut self, name: String, offset: usize, size: usize, width_bits: usize) {
-        self.fields.insert(name, FieldInfo { offset, size, width_bits });
+        self.fields.insert(
+            name,
+            FieldInfo {
+                offset,
+                size,
+                width_bits,
+            },
+        );
     }
 
     fn get(&self, name: &str) -> Option<&FieldInfo> {
@@ -166,20 +174,25 @@ impl CompiledCpuRuntime {
         let lib_path = compile_cpp_kernel(&source)?;
 
         // Load library
-        let library = unsafe { Library::new(&lib_path) }
-            .map_err(|e| CompileError::CompilationFailed(format!("Failed to load library: {}", e)))?;
+        let library = unsafe { Library::new(&lib_path) }.map_err(|e| {
+            CompileError::CompilationFailed(format!("Failed to load library: {}", e))
+        })?;
 
         // Get kernel export table
         let kernel: *const SkalpKernel = unsafe {
-            let sym: Symbol<*const SkalpKernel> = library
-                .get(b"SKALP_KERNEL")
-                .map_err(|e| CompileError::CompilationFailed(format!("Failed to find SKALP_KERNEL: {}", e)))?;
+            let sym: Symbol<*const SkalpKernel> = library.get(b"SKALP_KERNEL").map_err(|e| {
+                CompileError::CompilationFailed(format!("Failed to find SKALP_KERNEL: {}", e))
+            })?;
             *sym
         };
 
         // Get buffer sizes
         let (inputs_size, registers_size, signals_size) = unsafe {
-            ((*kernel).inputs_size, (*kernel).registers_size, (*kernel).signals_size)
+            (
+                (*kernel).inputs_size,
+                (*kernel).registers_size,
+                (*kernel).signals_size,
+            )
         };
 
         // Create buffers
@@ -194,15 +207,20 @@ impl CompiledCpuRuntime {
 
         // Find clock signal name from clock_domains, name_registry, or inputs
         // First try clock_domains (key is the clock signal name)
-        let clock_name = module.clock_domains.keys()
+        let clock_name = module
+            .clock_domains
+            .keys()
             .next()
             .cloned()
             .or_else(|| {
                 // Fall back to name_registry lookup for inputs containing clk/clock
-                module.inputs.iter()
+                module
+                    .inputs
+                    .iter()
                     .find(|input| {
                         // Check if the user-facing name (via name_registry) contains clk/clock
-                        if let Some(entry) = module.name_registry.get_entry_by_internal(&input.name) {
+                        if let Some(entry) = module.name_registry.get_entry_by_internal(&input.name)
+                        {
                             let path = &entry.hierarchical_path;
                             path.contains("clk") || path.contains("clock")
                         } else {
@@ -213,7 +231,9 @@ impl CompiledCpuRuntime {
             })
             .or_else(|| {
                 // Last resort: first input with width 1 (often clock in simple designs)
-                module.inputs.iter()
+                module
+                    .inputs
+                    .iter()
                     .find(|p| p.sir_type.width() == 1)
                     .map(|p| p.name.clone())
             });
@@ -237,7 +257,9 @@ impl CompiledCpuRuntime {
     }
 
     /// Build field offset maps from the SIR module
-    fn build_field_maps(module: &SirModule) -> (FieldMap, FieldMap, FieldMap, HashMap<String, String>) {
+    fn build_field_maps(
+        module: &SirModule,
+    ) -> (FieldMap, FieldMap, FieldMap, HashMap<String, String>) {
         let mut input_fields = FieldMap::new();
         let mut register_fields = FieldMap::new();
         let mut signal_fields = FieldMap::new();
@@ -286,7 +308,8 @@ impl CompiledCpuRuntime {
         }
 
         // Add other signals
-        let input_names: std::collections::HashSet<_> = module.inputs.iter().map(|i| i.name.clone()).collect();
+        let input_names: std::collections::HashSet<_> =
+            module.inputs.iter().map(|i| i.name.clone()).collect();
         for signal in &module.signals {
             if signal.is_state || input_names.contains(&signal.name) {
                 continue;
@@ -300,7 +323,12 @@ impl CompiledCpuRuntime {
             }
         }
 
-        (input_fields, register_fields, signal_fields, output_mappings)
+        (
+            input_fields,
+            register_fields,
+            signal_fields,
+            output_mappings,
+        )
     }
 
     /// Get byte size for a bit width
@@ -353,7 +381,9 @@ impl CompiledCpuRuntime {
         for input in &self.module.inputs {
             let sanitized = input.name.replace('.', "_");
             if self.input_fields.get(&sanitized).is_some() {
-                let display = self.module.name_registry
+                let display = self
+                    .module
+                    .name_registry
                     .reverse_resolve(&input.name)
                     .unwrap_or(&input.name)
                     .to_string();
@@ -367,7 +397,9 @@ impl CompiledCpuRuntime {
         for output in &self.module.outputs {
             let sanitized = output.name.replace('.', "_");
             if self.signal_fields.get(&sanitized).is_some() {
-                let display = self.module.name_registry
+                let display = self
+                    .module
+                    .name_registry
                     .reverse_resolve(&output.name)
                     .unwrap_or(&output.name)
                     .to_string();
@@ -381,7 +413,9 @@ impl CompiledCpuRuntime {
         for (name, elem) in &self.module.state_elements {
             let sanitized = name.replace('.', "_");
             if self.register_fields.get(&sanitized).is_some() {
-                let display = self.module.name_registry
+                let display = self
+                    .module
+                    .name_registry
                     .reverse_resolve(name)
                     .map(|s| s.to_string())
                     .unwrap_or_else(|| name.clone());
@@ -401,7 +435,9 @@ impl CompiledCpuRuntime {
             // Try signal_fields first, then register_fields
             let in_fields = self.signal_fields.get(&sanitized).is_some()
                 || self.register_fields.get(&sanitized).is_some();
-            if !in_fields { continue; }
+            if !in_fields {
+                continue;
+            }
 
             if let Some(display) = self.module.name_registry.reverse_resolve(&signal.name) {
                 let display = display.to_string();
@@ -461,7 +497,11 @@ impl SimulationRuntime for CompiledCpuRuntime {
             let sanitized = clock_name.replace('.', "_");
             if let Some(info) = self.input_fields.get(&sanitized) {
                 let bytes = self.inputs.read(info.offset, info.size);
-                if !bytes.is_empty() { bytes[0] as u64 & 1 } else { 0 }
+                if !bytes.is_empty() {
+                    bytes[0] as u64 & 1
+                } else {
+                    0
+                }
             } else {
                 // Clock not found in inputs, assume always rising
                 1

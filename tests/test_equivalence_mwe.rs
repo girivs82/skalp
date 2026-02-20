@@ -3,7 +3,7 @@
 //! Tests LIR vs Gate netlist equivalence using a self-contained MWE
 //! that exercises key patterns: sibling ifs, FaultLatch, sequential logic.
 
-use skalp_formal::{LirToAig, BoundedModelChecker, GateNetlistToAig};
+use skalp_formal::{BoundedModelChecker, GateNetlistToAig, LirToAig};
 use skalp_frontend::parse_and_build_hir_from_file;
 use skalp_lir::{get_stdlib_library, lower_mir_hierarchical_with_top, map_hierarchical_to_gates};
 use skalp_mir::MirCompiler;
@@ -31,13 +31,21 @@ fn test_mwe_lir_compilation() {
     println!("Nodes: {}", lir.nodes.len());
 
     // Basic sanity checks
-    assert!(lir.inputs.len() > 0, "Should have inputs");
-    assert!(lir.outputs.len() > 0, "Should have outputs");
+    assert!(!lir.inputs.is_empty(), "Should have inputs");
+    assert!(!lir.outputs.is_empty(), "Should have outputs");
 
     // Check for expected signals
     let signal_names: Vec<_> = lir.signals.iter().map(|s| s.name.as_str()).collect();
-    assert!(signal_names.iter().any(|n| n.contains("fault")), "Should have fault signals");
-    assert!(signal_names.iter().any(|n| n.contains("counter") || n.contains("cnt")), "Should have counter signals");
+    assert!(
+        signal_names.iter().any(|n| n.contains("fault")),
+        "Should have fault signals"
+    );
+    assert!(
+        signal_names
+            .iter()
+            .any(|n| n.contains("counter") || n.contains("cnt")),
+        "Should have counter signals"
+    );
 }
 
 /// Test that MWE compiles to gate netlist successfully
@@ -62,7 +70,7 @@ fn test_mwe_gate_compilation() {
     let seq_count = netlist.cells.iter().filter(|c| c.is_sequential()).count();
     println!("Sequential cells: {}", seq_count);
 
-    assert!(netlist.cells.len() > 0, "Should have cells");
+    assert!(!netlist.cells.is_empty(), "Should have cells");
     assert!(seq_count > 0, "Should have sequential cells (registers)");
 }
 
@@ -86,10 +94,13 @@ fn test_mwe_lir_to_aig() {
     println!("AIG Latches: {}", aig.latches.len());
     println!("AIG AND gates: {}", aig.and_count());
 
-    assert!(aig.inputs.len() > 0, "Should have AIG inputs");
-    assert!(aig.outputs.len() > 0, "Should have AIG outputs");
+    assert!(!aig.inputs.is_empty(), "Should have AIG inputs");
+    assert!(!aig.outputs.is_empty(), "Should have AIG outputs");
     // Note: LirToAig standalone may not produce latches - BMC handles them separately
-    println!("Latches: {} (may be 0 for standalone conversion)", aig.latches.len());
+    println!(
+        "Latches: {} (may be 0 for standalone conversion)",
+        aig.latches.len()
+    );
 }
 
 /// Test Gate netlist to AIG conversion
@@ -115,10 +126,13 @@ fn test_mwe_gate_to_aig() {
     println!("AIG Latches: {}", aig.latches.len());
     println!("AIG AND gates: {}", aig.and_count());
 
-    assert!(aig.inputs.len() > 0, "Should have AIG inputs");
-    assert!(aig.outputs.len() > 0, "Should have AIG outputs");
+    assert!(!aig.inputs.is_empty(), "Should have AIG inputs");
+    assert!(!aig.outputs.is_empty(), "Should have AIG outputs");
     // Note: GateToAig standalone may not produce latches - BMC handles them separately
-    println!("Latches: {} (may be 0 for standalone conversion)", aig.latches.len());
+    println!(
+        "Latches: {} (may be 0 for standalone conversion)",
+        aig.latches.len()
+    );
 }
 
 /// Main equivalence test: LIR vs Gate using BMC
@@ -150,7 +164,10 @@ fn test_mwe_lir_gate_equivalence() {
     match result {
         Ok(equiv_result) => {
             println!("\n=== BMC Equivalence Result ===");
-            println!("Equivalent (up to {} cycles): {}", bmc_bound, equiv_result.equivalent);
+            println!(
+                "Equivalent (up to {} cycles): {}",
+                bmc_bound, equiv_result.equivalent
+            );
             println!("Time: {}ms", equiv_result.time_ms);
             println!("SAT calls: {}", equiv_result.sat_calls);
 
@@ -163,7 +180,10 @@ fn test_mwe_lir_gate_equivalence() {
                 }
                 panic!("BMC found mismatch between LIR and Gate netlist!");
             } else {
-                println!("SUCCESS: LIR and GateNetlist are equivalent (up to {} cycles)!", bmc_bound);
+                println!(
+                    "SUCCESS: LIR and GateNetlist are equivalent (up to {} cycles)!",
+                    bmc_bound
+                );
             }
         }
         Err(e) => {
@@ -191,7 +211,6 @@ fn test_fault_latch_priority() {
 
     // Find registers that relate to fault latching
     // Signal names may vary based on flattening: latch_state, latched, fl_latched, etc.
-    let mut found_latched_reg = false;
     for node in &lir.nodes {
         let out_name = &lir.signals[node.output.0 as usize].name;
         let is_fault_related = out_name.contains("latch_state")
@@ -200,7 +219,6 @@ fn test_fault_latch_priority() {
 
         if is_fault_related {
             if let LirOp::Reg { .. } = &node.op {
-                found_latched_reg = true;
                 println!("Found fault latch register: {}", out_name);
 
                 // Trace the D input to verify mux chain structure
@@ -214,7 +232,11 @@ fn test_fault_latch_priority() {
     }
 
     // Also check for any Reg nodes in the lir
-    let reg_count = lir.nodes.iter().filter(|n| matches!(n.op, LirOp::Reg { .. })).count();
+    let reg_count = lir
+        .nodes
+        .iter()
+        .filter(|n| matches!(n.op, LirOp::Reg { .. }))
+        .count();
     println!("\nTotal registers in LIR: {}", reg_count);
 
     // List all register names for debugging
@@ -244,7 +266,9 @@ fn test_counter_overflow() {
     let lir = hier_lir.flatten();
 
     // Find counter_overflow output
-    let overflow_signals: Vec<_> = lir.signals.iter()
+    let overflow_signals: Vec<_> = lir
+        .signals
+        .iter()
         .filter(|s| s.name.contains("overflow"))
         .collect();
 
@@ -270,7 +294,9 @@ fn test_state_machine() {
     let lir = hier_lir.flatten();
 
     // Find state machine signals
-    let sm_signals: Vec<_> = lir.signals.iter()
+    let sm_signals: Vec<_> = lir
+        .signals
+        .iter()
         .filter(|s| s.name.contains("state_machine") || s.name.contains("current_state"))
         .collect();
 

@@ -134,7 +134,6 @@ impl EcReport {
         }
         let file = File::create(path)?;
         let writer = BufWriter::new(file);
-        serde_json::to_writer_pretty(writer, self)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
+        serde_json::to_writer_pretty(writer, self).map_err(std::io::Error::other)
     }
 }

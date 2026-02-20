@@ -388,9 +388,9 @@ impl<'hir> HirToMir<'hir> {
             pending_param_var_to_name: IndexMap::new(),
             placeholder_signal_to_entity_output: IndexMap::new(),
             placeholder_hir_signal_to_entity_output: IndexMap::new(),
-            pending_temp_signals: Vec::new(), // BUG #256 FIX
-            current_module_var_to_signal: None, // BUG #200 FIX
-            current_module_param_to_port: None, // BUG #205 FIX
+            pending_temp_signals: Vec::new(),    // BUG #256 FIX
+            current_module_var_to_signal: None,  // BUG #200 FIX
+            current_module_param_to_port: None,  // BUG #205 FIX
             entity_scope_cache: IndexMap::new(), // BUG #237 FIX
         }
     }
@@ -801,7 +801,8 @@ impl<'hir> HirToMir<'hir> {
                         let base_name = &entity.name;
                         let has_monomorphized_version = hir.entities.iter().any(|e| {
                             e.id != entity.id
-                                && (e.name == *base_name || e.name.starts_with(&format!("{}_", base_name)))
+                                && (e.name == *base_name
+                                    || e.name.starts_with(&format!("{}_", base_name)))
                                 && e.generics.is_empty() // Monomorphized entities have no generics
                         });
 
@@ -1017,7 +1018,9 @@ impl<'hir> HirToMir<'hir> {
 
                                         // BUG #256 FIX: Drain pending temp signals created during
                                         // signal initializer conversion (e.g., clz32 inlining in FpAdd)
-                                        for (sig_id, name, dtype, rhs) in self.pending_temp_signals.drain(..) {
+                                        for (sig_id, name, dtype, rhs) in
+                                            self.pending_temp_signals.drain(..)
+                                        {
                                             module.signals.push(Signal {
                                                 id: sig_id,
                                                 name,
@@ -1216,11 +1219,16 @@ impl<'hir> HirToMir<'hir> {
                                     );
 
                                     // BUG #249 FIX: Check if this output port is connected to a parent signal
-                                    let connected_parent_signal = hir_instance.connections.iter()
+                                    let connected_parent_signal = hir_instance
+                                        .connections
+                                        .iter()
                                         .find(|conn| conn.port == port.name)
                                         .and_then(|conn| {
-                                            if let hir::HirExpression::Signal(hir_sig_id) = &conn.expr {
-                                                let mir_id = self.signal_map.get(hir_sig_id).copied();
+                                            if let hir::HirExpression::Signal(hir_sig_id) =
+                                                &conn.expr
+                                            {
+                                                let mir_id =
+                                                    self.signal_map.get(hir_sig_id).copied();
                                                 mir_id
                                             } else {
                                                 None
@@ -1237,9 +1245,14 @@ impl<'hir> HirToMir<'hir> {
                                         );
 
                                         // Find the parent signal's name to look up flattened fields
-                                        if let Some(parent_signal) = module.signals.iter().find(|s| s.id == parent_mir_signal_id) {
+                                        if let Some(parent_signal) = module
+                                            .signals
+                                            .iter()
+                                            .find(|s| s.id == parent_mir_signal_id)
+                                        {
                                             // For scalar types, just map directly
-                                            output_ports.insert(port.name.clone(), parent_mir_signal_id);
+                                            output_ports
+                                                .insert(port.name.clone(), parent_mir_signal_id);
                                             trace!(
                                                 "🔍 BUG #249 FIX: Mapped '{}' -> parent signal '{}' (id={})",
                                                 port.name, parent_signal.name, parent_mir_signal_id.0
@@ -1247,10 +1260,14 @@ impl<'hir> HirToMir<'hir> {
                                         } else {
                                             // Parent signal may be flattened - look for flattened siblings
                                             // Find all signals whose name starts with parent signal's base name
-                                            if let Some((hir_sig_id, _)) = hir_instance.connections.iter()
+                                            if let Some((hir_sig_id, _)) = hir_instance
+                                                .connections
+                                                .iter()
                                                 .find(|conn| conn.port == port.name)
                                                 .and_then(|conn| {
-                                                    if let hir::HirExpression::Signal(id) = &conn.expr {
+                                                    if let hir::HirExpression::Signal(id) =
+                                                        &conn.expr
+                                                    {
                                                         Some((*id, ()))
                                                     } else {
                                                         None
@@ -1258,14 +1275,26 @@ impl<'hir> HirToMir<'hir> {
                                                 })
                                             {
                                                 // Look up the flattened signals from the parent
-                                                if let Some(flattened_fields) = self.flattened_signals.get(&hir_sig_id) {
+                                                if let Some(flattened_fields) =
+                                                    self.flattened_signals.get(&hir_sig_id)
+                                                {
                                                     for field in flattened_fields {
                                                         let key = if field.field_path.is_empty() {
                                                             port.name.clone()
                                                         } else {
-                                                            format!("{}{}{}", port.name, FIELD_SEPARATOR, field.field_path.join(FIELD_SEPARATOR))
+                                                            format!(
+                                                                "{}{}{}",
+                                                                port.name,
+                                                                FIELD_SEPARATOR,
+                                                                field
+                                                                    .field_path
+                                                                    .join(FIELD_SEPARATOR)
+                                                            )
                                                         };
-                                                        output_ports.insert(key.clone(), SignalId(field.id));
+                                                        output_ports.insert(
+                                                            key.clone(),
+                                                            SignalId(field.id),
+                                                        );
                                                         trace!(
                                                             "🔍 BUG #249 FIX: Mapped '{}' -> parent flattened field id={}",
                                                             key, field.id
@@ -1275,7 +1304,8 @@ impl<'hir> HirToMir<'hir> {
                                                 }
                                             }
                                             // Fallback: just map the port directly
-                                            output_ports.insert(port.name.clone(), parent_mir_signal_id);
+                                            output_ports
+                                                .insert(port.name.clone(), parent_mir_signal_id);
                                         }
 
                                         // Skip creating new signals - use parent's signals
@@ -1287,14 +1317,15 @@ impl<'hir> HirToMir<'hir> {
                                         let signal_type = self.convert_type(&port.port_type);
 
                                         // Use flatten_signal to properly handle struct types
-                                        let (flattened_signals, flattened_fields) = self.flatten_signal(
-                                            &signal_name,
-                                            &signal_type,
-                                            None,
-                                            None,
-                                            None,
-                                            false,
-                                        );
+                                        let (flattened_signals, flattened_fields) = self
+                                            .flatten_signal(
+                                                &signal_name,
+                                                &signal_type,
+                                                None,
+                                                None,
+                                                None,
+                                                false,
+                                            );
 
                                         // Add all flattened signals to the module
                                         for mut signal in flattened_signals {
@@ -1315,7 +1346,12 @@ impl<'hir> HirToMir<'hir> {
                                             let key = if field.field_path.is_empty() {
                                                 port.name.clone()
                                             } else {
-                                                format!("{}{}{}", port.name, FIELD_SEPARATOR, field.field_path.join(FIELD_SEPARATOR))
+                                                format!(
+                                                    "{}{}{}",
+                                                    port.name,
+                                                    FIELD_SEPARATOR,
+                                                    field.field_path.join(FIELD_SEPARATOR)
+                                                )
                                             };
                                             output_ports.insert(key, SignalId(field.id));
                                         }
@@ -2036,7 +2072,11 @@ impl<'hir> HirToMir<'hir> {
                         // Entity alias resolution: check if type_name is an entity alias
                         // If so, resolve to the target entity with its generic args
                         let (resolved_type_name, resolved_generic_args) =
-                            if let Some(entity_alias) = hir.entity_aliases.iter().find(|a| a.name == struct_lit.type_name) {
+                            if let Some(entity_alias) = hir
+                                .entity_aliases
+                                .iter()
+                                .find(|a| a.name == struct_lit.type_name)
+                            {
                                 // Extract entity name from alias target type
                                 // Use the alias's generic_args if present, otherwise fall back to struct_lit's
                                 let name = match &entity_alias.target_type {
@@ -2050,7 +2090,10 @@ impl<'hir> HirToMir<'hir> {
                                 };
                                 (name, args)
                             } else {
-                                (struct_lit.type_name.clone(), struct_lit.generic_args.clone())
+                                (
+                                    struct_lit.type_name.clone(),
+                                    struct_lit.generic_args.clone(),
+                                )
                             };
 
                         // BUG #207 FIX: When struct_lit has generic_args, construct the specialized entity name
@@ -2131,8 +2174,14 @@ impl<'hir> HirToMir<'hir> {
                                 // (e.g., chained `a * b * c`) clones the same method body with identical
                                 // variable IDs, so the inner inline's placeholder mapping can overwrite
                                 // the outer's. Re-inserting after field conversion restores correctness.
-                                let mut saved_var_mappings: Vec<((String, hir::VariableId), (SignalId, Type))> = Vec::new();
-                                let mut saved_hir_signal_mappings: Vec<(hir::SignalId, (SignalId, Type))> = Vec::new();
+                                let mut saved_var_mappings: Vec<(
+                                    (String, hir::VariableId),
+                                    (SignalId, Type),
+                                )> = Vec::new();
+                                let mut saved_hir_signal_mappings: Vec<(
+                                    hir::SignalId,
+                                    (SignalId, Type),
+                                )> = Vec::new();
                                 trace!(
                                     "[HIER_PORTS] Entity '{}' has {} ports",
                                     entity.name,
@@ -2226,10 +2275,8 @@ impl<'hir> HirToMir<'hir> {
                                                 // BUG #209 FIX: Use (prefix, var_id) as key for uniqueness per context
                                                 let key = (prefix, var_id);
                                                 let value = (signal_id, expr_type);
-                                                self.placeholder_signal_to_entity_output.insert(
-                                                    key.clone(),
-                                                    value.clone(),
-                                                );
+                                                self.placeholder_signal_to_entity_output
+                                                    .insert(key.clone(), value.clone());
                                                 // BUG #260 FIX: Save for re-insertion after field conversion
                                                 saved_var_mappings.push((key, value));
                                             }
@@ -2283,7 +2330,8 @@ impl<'hir> HirToMir<'hir> {
                                                 self.placeholder_hir_signal_to_entity_output
                                                     .insert(hir_sig_id, hir_sig_value.clone());
                                                 // BUG #260 FIX: Save for re-insertion after field conversion
-                                                saved_hir_signal_mappings.push((hir_sig_id, hir_sig_value));
+                                                saved_hir_signal_mappings
+                                                    .push((hir_sig_id, hir_sig_value));
                                             }
                                         }
 
@@ -2322,7 +2370,8 @@ impl<'hir> HirToMir<'hir> {
 
                                         // BUG #117r FIX: Check if this output port is a struct type that needs expansion
                                         // Find the port to check its type
-                                        let port_opt = entity.ports.iter().find(|p| p.name == field_init.name);
+                                        let port_opt =
+                                            entity.ports.iter().find(|p| p.name == field_init.name);
                                         let needs_expansion = port_opt.map(|port| {
                                             match &port.port_type {
                                                 hir::HirType::Struct(_) | hir::HirType::Array(_, _) => true,
@@ -2340,7 +2389,10 @@ impl<'hir> HirToMir<'hir> {
 
                                         // Try to expand connection if needed
                                         let expanded_opt = if needs_expansion {
-                                            self.expand_instance_connection(&field_init.name, &field_init.value)
+                                            self.expand_instance_connection(
+                                                &field_init.name,
+                                                &field_init.value,
+                                            )
                                         } else {
                                             None
                                         };
@@ -2351,12 +2403,14 @@ impl<'hir> HirToMir<'hir> {
                                             }
                                         } else {
                                             // Fall back to single connection using pre-created signal
-                                            if let Some(&sig_id) = output_ports.get(&field_init.name) {
+                                            if let Some(&sig_id) =
+                                                output_ports.get(&field_init.name)
+                                            {
                                                 connections.insert(
                                                     field_init.name.clone(),
-                                                    Expression::with_unknown_type(ExpressionKind::Ref(
-                                                        LValue::Signal(sig_id),
-                                                    )),
+                                                    Expression::with_unknown_type(
+                                                        ExpressionKind::Ref(LValue::Signal(sig_id)),
+                                                    ),
                                                 );
                                             }
                                         }
@@ -2417,7 +2471,8 @@ impl<'hir> HirToMir<'hir> {
 
                                         // BUG #117r FIX: Check if this port needs connection expansion (struct/array types)
                                         // Find the port to check its type
-                                        let port_opt = entity.ports.iter().find(|p| p.name == field_init.name);
+                                        let port_opt =
+                                            entity.ports.iter().find(|p| p.name == field_init.name);
                                         let needs_expansion = port_opt.map(|port| {
                                             match &port.port_type {
                                                 hir::HirType::Struct(_) | hir::HirType::Array(_, _) => true,
@@ -2435,7 +2490,10 @@ impl<'hir> HirToMir<'hir> {
 
                                         // Try to expand connection if needed
                                         let expanded_opt = if needs_expansion {
-                                            self.expand_instance_connection(&field_init.name, &field_init.value)
+                                            self.expand_instance_connection(
+                                                &field_init.name,
+                                                &field_init.value,
+                                            )
                                         } else {
                                             None
                                         };
@@ -2469,10 +2527,12 @@ impl<'hir> HirToMir<'hir> {
                                 // that uses the same cloned method body with identical variable IDs,
                                 // overwriting the outer multiply's result → signal mapping.
                                 for (key, value) in &saved_var_mappings {
-                                    self.placeholder_signal_to_entity_output.insert(key.clone(), value.clone());
+                                    self.placeholder_signal_to_entity_output
+                                        .insert(key.clone(), value.clone());
                                 }
                                 for (key, value) in &saved_hir_signal_mappings {
-                                    self.placeholder_hir_signal_to_entity_output.insert(*key, value.clone());
+                                    self.placeholder_hir_signal_to_entity_output
+                                        .insert(*key, value.clone());
                                 }
 
                                 // Store the output port mappings for field access resolution
@@ -3557,14 +3617,17 @@ impl<'hir> HirToMir<'hir> {
         // BUG #237 FIX: Also verify the port/signal belongs to the current entity
         let (lhs_hir_id, lhs_is_signal) = match &assign.lhs {
             hir::HirLValue::Signal(id) => {
-                if self.flattened_signals.contains_key(id) && self.signal_belongs_to_current_entity(id) {
+                if self.flattened_signals.contains_key(id)
+                    && self.signal_belongs_to_current_entity(id)
+                {
                     (id.0, true)
                 } else {
                     return None;
                 }
             }
             hir::HirLValue::Port(id) => {
-                if self.flattened_ports.contains_key(id) && self.port_belongs_to_current_entity(id) {
+                if self.flattened_ports.contains_key(id) && self.port_belongs_to_current_entity(id)
+                {
                     (id.0, false)
                 } else {
                     return None;
@@ -3584,7 +3647,8 @@ impl<'hir> HirToMir<'hir> {
             }
             hir::HirExpression::Port(id) => {
                 // BUG #237 FIX: Verify port belongs to current entity
-                if self.flattened_ports.contains_key(id) && self.port_belongs_to_current_entity(id) {
+                if self.flattened_ports.contains_key(id) && self.port_belongs_to_current_entity(id)
+                {
                     (id.0, false, vec![])
                 } else {
                     return None;
@@ -3612,7 +3676,9 @@ impl<'hir> HirToMir<'hir> {
                         }
                         hir::HirExpression::Port(id) => {
                             // BUG #237 FIX: Verify port belongs to current entity
-                            if self.flattened_ports.contains_key(id) && self.port_belongs_to_current_entity(id) {
+                            if self.flattened_ports.contains_key(id)
+                                && self.port_belongs_to_current_entity(id)
+                            {
                                 break (id.0, false, field_path);
                             } else {
                                 return None;
@@ -4293,11 +4359,14 @@ impl<'hir> HirToMir<'hir> {
                         let mut connections = IndexMap::new();
                         for field_init in &struct_lit.fields {
                             // First try to expand the connection (for struct-typed input ports)
-                            if let Some(expanded_conns) = self.expand_instance_connection(&field_init.name, &field_init.value) {
+                            if let Some(expanded_conns) =
+                                self.expand_instance_connection(&field_init.name, &field_init.value)
+                            {
                                 for (port_field_name, rhs_expr) in expanded_conns {
                                     connections.insert(port_field_name, rhs_expr);
                                 }
-                            } else if let Some(expr) = self.convert_expression(&field_init.value, 0) {
+                            } else if let Some(expr) = self.convert_expression(&field_init.value, 0)
+                            {
                                 // Fallback: direct conversion
                                 connections.insert(field_init.name.clone(), expr);
                             }
@@ -4312,18 +4381,26 @@ impl<'hir> HirToMir<'hir> {
                                 // BUG #117r FIX: Check if there's a connection to this output port
                                 // and if the RHS is a flattened signal, use those signals instead
                                 // of creating new ones
-                                let field_init_opt = struct_lit.fields.iter().find(|f| f.name == port.name);
+                                let field_init_opt =
+                                    struct_lit.fields.iter().find(|f| f.name == port.name);
 
                                 // Check if this port needs connection expansion
                                 let needs_expansion = match &port.port_type {
                                     hir::HirType::Struct(_) | hir::HirType::Array(_, _) => true,
                                     hir::HirType::Custom(name) => {
                                         // Check if Custom type resolves to a struct
-                                        self.hir.as_ref().map(|hir| {
-                                            hir.user_defined_types.iter().any(|ut| {
-                                                &ut.name == name && matches!(ut.type_def, hir::HirType::Struct(_))
+                                        self.hir
+                                            .as_ref()
+                                            .map(|hir| {
+                                                hir.user_defined_types.iter().any(|ut| {
+                                                    &ut.name == name
+                                                        && matches!(
+                                                            ut.type_def,
+                                                            hir::HirType::Struct(_)
+                                                        )
+                                                })
                                             })
-                                        }).unwrap_or(false)
+                                            .unwrap_or(false)
                                     }
                                     _ => false,
                                 };
@@ -4344,10 +4421,13 @@ impl<'hir> HirToMir<'hir> {
 
                                     // Add all expanded connections
                                     for (port_field_name, rhs_expr) in &expanded_conns {
-                                        connections.insert(port_field_name.clone(), rhs_expr.clone());
+                                        connections
+                                            .insert(port_field_name.clone(), rhs_expr.clone());
 
                                         // Also track in output_ports for field access resolution
-                                        if let ExpressionKind::Ref(LValue::Signal(sig_id)) = &rhs_expr.kind {
+                                        if let ExpressionKind::Ref(LValue::Signal(sig_id)) =
+                                            &rhs_expr.kind
+                                        {
                                             output_ports.insert(port_field_name.clone(), *sig_id);
                                         }
                                     }
@@ -4361,14 +4441,15 @@ impl<'hir> HirToMir<'hir> {
                                     let detection_cfg = port.detection_config.clone();
 
                                     // Use flatten_signal to properly handle struct types
-                                    let (flattened_signals, flattened_fields) = self.flatten_signal(
-                                        &signal_name,
-                                        &signal_type,
-                                        None,
-                                        None,
-                                        None,
-                                        false,
-                                    );
+                                    let (flattened_signals, flattened_fields) = self
+                                        .flatten_signal(
+                                            &signal_name,
+                                            &signal_type,
+                                            None,
+                                            None,
+                                            None,
+                                            false,
+                                        );
 
                                     // Add all flattened signals to output_signals for later processing
                                     for signal in flattened_signals {
@@ -4387,7 +4468,12 @@ impl<'hir> HirToMir<'hir> {
                                         let key = if field.field_path.is_empty() {
                                             port.name.clone()
                                         } else {
-                                            format!("{}{}{}", port.name, FIELD_SEPARATOR, field.field_path.join(FIELD_SEPARATOR))
+                                            format!(
+                                                "{}{}{}",
+                                                port.name,
+                                                FIELD_SEPARATOR,
+                                                field.field_path.join(FIELD_SEPARATOR)
+                                            )
                                         };
                                         output_ports.insert(key.clone(), SignalId(field.id));
 
@@ -4396,7 +4482,12 @@ impl<'hir> HirToMir<'hir> {
                                         let flattened_port_name = if field.field_path.is_empty() {
                                             port.name.clone()
                                         } else {
-                                            format!("{}{}{}", port.name, FIELD_SEPARATOR, field.field_path.join(FIELD_SEPARATOR))
+                                            format!(
+                                                "{}{}{}",
+                                                port.name,
+                                                FIELD_SEPARATOR,
+                                                field.field_path.join(FIELD_SEPARATOR)
+                                            )
                                         };
                                         connections.insert(
                                             flattened_port_name,
@@ -4520,10 +4611,19 @@ impl<'hir> HirToMir<'hir> {
                 }
                 hir::HirExpression::Match(match_expr) => {
                     // BUG #234 DEBUG: Show match expression details
-                    let arm_descs: Vec<String> = match_expr.arms.iter().enumerate().map(|(i, arm)| {
-                        format!("  arm[{}]: pattern={:?}, expr_type={:?}",
-                            i, arm.pattern, std::mem::discriminant(&arm.expr))
-                    }).collect();
+                    let arm_descs: Vec<String> = match_expr
+                        .arms
+                        .iter()
+                        .enumerate()
+                        .map(|(i, arm)| {
+                            format!(
+                                "  arm[{}]: pattern={:?}, expr_type={:?}",
+                                i,
+                                arm.pattern,
+                                std::mem::discriminant(&arm.expr)
+                            )
+                        })
+                        .collect();
                     format!(
                         "Match expression with {} arms, scrutinee={:?}:\n{}",
                         match_expr.arms.len(),
@@ -4534,22 +4634,28 @@ impl<'hir> HirToMir<'hir> {
                 hir::HirExpression::Binary(bin) => {
                     // BUG #237 DEBUG: Show binary expression details
                     let left_desc = match &*bin.left {
-                        hir::HirExpression::Cast(c) => format!("Cast(inner={:?}, target={:?})", std::mem::discriminant(&*c.expr), c.target_type),
+                        hir::HirExpression::Cast(c) => format!(
+                            "Cast(inner={:?}, target={:?})",
+                            std::mem::discriminant(&*c.expr),
+                            c.target_type
+                        ),
                         hir::HirExpression::Signal(id) => format!("Signal({:?})", id),
                         hir::HirExpression::Port(id) => format!("Port({:?})", id),
                         other => format!("{:?}", std::mem::discriminant(other)),
                     };
                     let right_desc = match &*bin.right {
-                        hir::HirExpression::Cast(c) => format!("Cast(inner={:?}, target={:?})", std::mem::discriminant(&*c.expr), c.target_type),
+                        hir::HirExpression::Cast(c) => format!(
+                            "Cast(inner={:?}, target={:?})",
+                            std::mem::discriminant(&*c.expr),
+                            c.target_type
+                        ),
                         hir::HirExpression::Signal(id) => format!("Signal({:?})", id),
                         hir::HirExpression::Port(id) => format!("Port({:?})", id),
                         other => format!("{:?}", std::mem::discriminant(other)),
                     };
                     format!(
                         "Binary(op={:?}, left={}, right={})",
-                        bin.op,
-                        left_desc,
-                        right_desc
+                        bin.op, left_desc, right_desc
                     )
                 }
                 _ => format!(
@@ -4701,14 +4807,17 @@ impl<'hir> HirToMir<'hir> {
         // BUG #237 FIX: Also verify the port/signal belongs to the current entity
         let (lhs_hir_id, lhs_is_signal) = match &assign.lhs {
             hir::HirLValue::Signal(id) => {
-                if self.flattened_signals.contains_key(id) && self.signal_belongs_to_current_entity(id) {
+                if self.flattened_signals.contains_key(id)
+                    && self.signal_belongs_to_current_entity(id)
+                {
                     (id.0, true)
                 } else {
                     return None;
                 }
             }
             hir::HirLValue::Port(id) => {
-                if self.flattened_ports.contains_key(id) && self.port_belongs_to_current_entity(id) {
+                if self.flattened_ports.contains_key(id) && self.port_belongs_to_current_entity(id)
+                {
                     (id.0, false)
                 } else {
                     return None;
@@ -4721,7 +4830,9 @@ impl<'hir> HirToMir<'hir> {
         // BUG #237 FIX: Also verify the port/signal belongs to the current entity
         let (rhs_hir_id, rhs_is_signal, rhs_field_path) = match &assign.rhs {
             hir::HirExpression::Signal(id) => {
-                if self.flattened_signals.contains_key(id) && self.signal_belongs_to_current_entity(id) {
+                if self.flattened_signals.contains_key(id)
+                    && self.signal_belongs_to_current_entity(id)
+                {
                     (id.0, true, vec![])
                 } else {
                     return None;
@@ -4729,7 +4840,8 @@ impl<'hir> HirToMir<'hir> {
             }
             hir::HirExpression::Port(id) => {
                 // BUG #237 FIX: Verify port belongs to current entity
-                if self.flattened_ports.contains_key(id) && self.port_belongs_to_current_entity(id) {
+                if self.flattened_ports.contains_key(id) && self.port_belongs_to_current_entity(id)
+                {
                     (id.0, false, vec![])
                 } else {
                     return None;
@@ -4757,7 +4869,9 @@ impl<'hir> HirToMir<'hir> {
                         }
                         hir::HirExpression::Port(id) => {
                             // BUG #237 FIX: Verify port belongs to current entity
-                            if self.flattened_ports.contains_key(id) && self.port_belongs_to_current_entity(id) {
+                            if self.flattened_ports.contains_key(id)
+                                && self.port_belongs_to_current_entity(id)
+                            {
                                 break (id.0, false, field_path);
                             } else {
                                 return None;
@@ -4870,7 +4984,8 @@ impl<'hir> HirToMir<'hir> {
             }
             hir::HirLValue::Port(id) => {
                 // BUG #237 FIX: Only use flattened_ports if the port belongs to the current entity
-                if self.flattened_ports.contains_key(id) && self.port_belongs_to_current_entity(id) {
+                if self.flattened_ports.contains_key(id) && self.port_belongs_to_current_entity(id)
+                {
                     if let Some(fields) = self.flattened_ports.get(id) {
                         if fields.len() > 1 {
                             // Multiple flattened fields indicates struct/composite type
@@ -5032,7 +5147,6 @@ impl<'hir> HirToMir<'hir> {
             // Find the port in the entity
             let port_opt = entity.ports.iter().find(|p| p.name == conn.port);
 
-
             // Check if the RHS expression is a reference to a flattened signal/port
             let expanded_connections = if let Some(port) = port_opt {
                 // Check if port type is a struct or array that gets flattened
@@ -5042,12 +5156,14 @@ impl<'hir> HirToMir<'hir> {
                     hir::HirType::Custom(name) => {
                         // BUG #117r FIX: Check if this Custom type resolves to a struct in the HIR
                         let hir_is_some = self.hir.is_some();
-                        let result = self.hir
+                        let result = self
+                            .hir
                             .as_ref()
                             .map(|hir| {
-                                hir.user_defined_types
-                                    .iter()
-                                    .any(|ut| &ut.name == name && matches!(ut.type_def, hir::HirType::Struct(_)))
+                                hir.user_defined_types.iter().any(|ut| {
+                                    &ut.name == name
+                                        && matches!(ut.type_def, hir::HirType::Struct(_))
+                                })
                             })
                             .unwrap_or(false);
                         result
@@ -5116,7 +5232,10 @@ impl<'hir> HirToMir<'hir> {
                 let mut current = base.as_ref();
                 loop {
                     match current {
-                        hir::HirExpression::FieldAccess { base: inner_base, field: inner_field } => {
+                        hir::HirExpression::FieldAccess {
+                            base: inner_base,
+                            field: inner_field,
+                        } => {
                             field_path.insert(0, inner_field.clone());
                             current = inner_base.as_ref();
                         }
@@ -5138,7 +5257,9 @@ impl<'hir> HirToMir<'hir> {
         // Get flattened fields for the RHS signal/port
         // BUG #237 FIX: Only use flattened_ports if port belongs to current entity
         let rhs_fields = if is_signal {
-            self.flattened_signals.get(&hir::SignalId(base_hir_id))?.clone()
+            self.flattened_signals
+                .get(&hir::SignalId(base_hir_id))?
+                .clone()
         } else {
             let port_id = hir::PortId(base_hir_id);
             if !self.port_belongs_to_current_entity(&port_id) {
@@ -5172,7 +5293,12 @@ impl<'hir> HirToMir<'hir> {
             let port_field_name = if remaining_path.is_empty() {
                 base_port_name.to_string()
             } else {
-                format!("{}{}{}", base_port_name, FIELD_SEPARATOR, remaining_path.join(FIELD_SEPARATOR))
+                format!(
+                    "{}{}{}",
+                    base_port_name,
+                    FIELD_SEPARATOR,
+                    remaining_path.join(FIELD_SEPARATOR)
+                )
             };
 
             // Create expression referencing the flattened RHS field
@@ -5435,13 +5561,17 @@ impl<'hir> HirToMir<'hir> {
                 hir::HirExpression::Literal(hir::HirLiteral::Integer(value as u64))
             }
             hir::HirExpression::Binary(bin) => {
-                let left = Self::substitute_hir_variable_in_expr_named(&bin.left, var_id, var_name, value);
-                let right = Self::substitute_hir_variable_in_expr_named(&bin.right, var_id, var_name, value);
+                let left =
+                    Self::substitute_hir_variable_in_expr_named(&bin.left, var_id, var_name, value);
+                let right = Self::substitute_hir_variable_in_expr_named(
+                    &bin.right, var_id, var_name, value,
+                );
                 // Constant fold when both sides are integer literals
                 if let (
                     hir::HirExpression::Literal(hir::HirLiteral::Integer(l)),
                     hir::HirExpression::Literal(hir::HirLiteral::Integer(r)),
-                ) = (&left, &right) {
+                ) = (&left, &right)
+                {
                     let result = match bin.op {
                         hir::HirBinaryOp::Add => Some(l.wrapping_add(*r)),
                         hir::HirBinaryOp::Sub => Some(l.wrapping_sub(*r)),
@@ -5466,108 +5596,187 @@ impl<'hir> HirToMir<'hir> {
                     is_trait_op: bin.is_trait_op,
                 })
             }
-            hir::HirExpression::Unary(un) => {
-                hir::HirExpression::Unary(hir::HirUnaryExpr {
-                    op: un.op.clone(),
-                    operand: Box::new(Self::substitute_hir_variable_in_expr_named(&un.operand, var_id, var_name, value)),
-                })
-            }
-            hir::HirExpression::Index(base, idx) => {
-                hir::HirExpression::Index(
-                    Box::new(Self::substitute_hir_variable_in_expr_named(base, var_id, var_name, value)),
-                    Box::new(Self::substitute_hir_variable_in_expr_named(idx, var_id, var_name, value)),
-                )
-            }
-            hir::HirExpression::Range(base, lo, hi) => {
-                hir::HirExpression::Range(
-                    Box::new(Self::substitute_hir_variable_in_expr_named(base, var_id, var_name, value)),
-                    Box::new(Self::substitute_hir_variable_in_expr_named(lo, var_id, var_name, value)),
-                    Box::new(Self::substitute_hir_variable_in_expr_named(hi, var_id, var_name, value)),
-                )
-            }
-            hir::HirExpression::Cast(cast) => {
-                hir::HirExpression::Cast(hir::HirCastExpr {
-                    expr: Box::new(Self::substitute_hir_variable_in_expr_named(&cast.expr, var_id, var_name, value)),
-                    target_type: cast.target_type.clone(),
-                })
-            }
-            hir::HirExpression::Call(call) => {
-                hir::HirExpression::Call(hir::HirCallExpr {
-                    function: call.function.clone(),
-                    type_args: call.type_args.clone(),
-                    named_type_args: call.named_type_args.clone(),
-                    args: call.args.iter().map(|a| Self::substitute_hir_variable_in_expr_named(a, var_id, var_name, value)).collect(),
-                    impl_style: call.impl_style.clone(),
-                })
-            }
-            hir::HirExpression::If(if_expr) => {
-                hir::HirExpression::If(hir::HirIfExpr {
-                    condition: Box::new(Self::substitute_hir_variable_in_expr_named(&if_expr.condition, var_id, var_name, value)),
-                    then_expr: Box::new(Self::substitute_hir_variable_in_expr_named(&if_expr.then_expr, var_id, var_name, value)),
-                    else_expr: Box::new(Self::substitute_hir_variable_in_expr_named(&if_expr.else_expr, var_id, var_name, value)),
-                })
-            }
-            hir::HirExpression::Ternary { condition, true_expr, false_expr } => {
-                hir::HirExpression::Ternary {
-                    condition: Box::new(Self::substitute_hir_variable_in_expr_named(condition, var_id, var_name, value)),
-                    true_expr: Box::new(Self::substitute_hir_variable_in_expr_named(true_expr, var_id, var_name, value)),
-                    false_expr: Box::new(Self::substitute_hir_variable_in_expr_named(false_expr, var_id, var_name, value)),
-                }
-            }
-            hir::HirExpression::Concat(exprs) => {
-                hir::HirExpression::Concat(
-                    exprs.iter().map(|e| Self::substitute_hir_variable_in_expr_named(e, var_id, var_name, value)).collect(),
-                )
-            }
-            hir::HirExpression::TupleLiteral(exprs) => {
-                hir::HirExpression::TupleLiteral(
-                    exprs.iter().map(|e| Self::substitute_hir_variable_in_expr_named(e, var_id, var_name, value)).collect(),
-                )
-            }
-            hir::HirExpression::ArrayLiteral(exprs) => {
-                hir::HirExpression::ArrayLiteral(
-                    exprs.iter().map(|e| Self::substitute_hir_variable_in_expr_named(e, var_id, var_name, value)).collect(),
-                )
-            }
+            hir::HirExpression::Unary(un) => hir::HirExpression::Unary(hir::HirUnaryExpr {
+                op: un.op.clone(),
+                operand: Box::new(Self::substitute_hir_variable_in_expr_named(
+                    &un.operand,
+                    var_id,
+                    var_name,
+                    value,
+                )),
+            }),
+            hir::HirExpression::Index(base, idx) => hir::HirExpression::Index(
+                Box::new(Self::substitute_hir_variable_in_expr_named(
+                    base, var_id, var_name, value,
+                )),
+                Box::new(Self::substitute_hir_variable_in_expr_named(
+                    idx, var_id, var_name, value,
+                )),
+            ),
+            hir::HirExpression::Range(base, lo, hi) => hir::HirExpression::Range(
+                Box::new(Self::substitute_hir_variable_in_expr_named(
+                    base, var_id, var_name, value,
+                )),
+                Box::new(Self::substitute_hir_variable_in_expr_named(
+                    lo, var_id, var_name, value,
+                )),
+                Box::new(Self::substitute_hir_variable_in_expr_named(
+                    hi, var_id, var_name, value,
+                )),
+            ),
+            hir::HirExpression::Cast(cast) => hir::HirExpression::Cast(hir::HirCastExpr {
+                expr: Box::new(Self::substitute_hir_variable_in_expr_named(
+                    &cast.expr, var_id, var_name, value,
+                )),
+                target_type: cast.target_type.clone(),
+            }),
+            hir::HirExpression::Call(call) => hir::HirExpression::Call(hir::HirCallExpr {
+                function: call.function.clone(),
+                type_args: call.type_args.clone(),
+                named_type_args: call.named_type_args.clone(),
+                args: call
+                    .args
+                    .iter()
+                    .map(|a| {
+                        Self::substitute_hir_variable_in_expr_named(a, var_id, var_name, value)
+                    })
+                    .collect(),
+                impl_style: call.impl_style,
+            }),
+            hir::HirExpression::If(if_expr) => hir::HirExpression::If(hir::HirIfExpr {
+                condition: Box::new(Self::substitute_hir_variable_in_expr_named(
+                    &if_expr.condition,
+                    var_id,
+                    var_name,
+                    value,
+                )),
+                then_expr: Box::new(Self::substitute_hir_variable_in_expr_named(
+                    &if_expr.then_expr,
+                    var_id,
+                    var_name,
+                    value,
+                )),
+                else_expr: Box::new(Self::substitute_hir_variable_in_expr_named(
+                    &if_expr.else_expr,
+                    var_id,
+                    var_name,
+                    value,
+                )),
+            }),
+            hir::HirExpression::Ternary {
+                condition,
+                true_expr,
+                false_expr,
+            } => hir::HirExpression::Ternary {
+                condition: Box::new(Self::substitute_hir_variable_in_expr_named(
+                    condition, var_id, var_name, value,
+                )),
+                true_expr: Box::new(Self::substitute_hir_variable_in_expr_named(
+                    true_expr, var_id, var_name, value,
+                )),
+                false_expr: Box::new(Self::substitute_hir_variable_in_expr_named(
+                    false_expr, var_id, var_name, value,
+                )),
+            },
+            hir::HirExpression::Concat(exprs) => hir::HirExpression::Concat(
+                exprs
+                    .iter()
+                    .map(|e| {
+                        Self::substitute_hir_variable_in_expr_named(e, var_id, var_name, value)
+                    })
+                    .collect(),
+            ),
+            hir::HirExpression::TupleLiteral(exprs) => hir::HirExpression::TupleLiteral(
+                exprs
+                    .iter()
+                    .map(|e| {
+                        Self::substitute_hir_variable_in_expr_named(e, var_id, var_name, value)
+                    })
+                    .collect(),
+            ),
+            hir::HirExpression::ArrayLiteral(exprs) => hir::HirExpression::ArrayLiteral(
+                exprs
+                    .iter()
+                    .map(|e| {
+                        Self::substitute_hir_variable_in_expr_named(e, var_id, var_name, value)
+                    })
+                    .collect(),
+            ),
             hir::HirExpression::ArrayRepeat { value: val, count } => {
                 hir::HirExpression::ArrayRepeat {
-                    value: Box::new(Self::substitute_hir_variable_in_expr_named(val, var_id, var_name, value)),
-                    count: Box::new(Self::substitute_hir_variable_in_expr_named(count, var_id, var_name, value)),
+                    value: Box::new(Self::substitute_hir_variable_in_expr_named(
+                        val, var_id, var_name, value,
+                    )),
+                    count: Box::new(Self::substitute_hir_variable_in_expr_named(
+                        count, var_id, var_name, value,
+                    )),
                 }
             }
-            hir::HirExpression::FieldAccess { base, field } => {
-                hir::HirExpression::FieldAccess {
-                    base: Box::new(Self::substitute_hir_variable_in_expr_named(base, var_id, var_name, value)),
-                    field: field.clone(),
-                }
-            }
+            hir::HirExpression::FieldAccess { base, field } => hir::HirExpression::FieldAccess {
+                base: Box::new(Self::substitute_hir_variable_in_expr_named(
+                    base, var_id, var_name, value,
+                )),
+                field: field.clone(),
+            },
             hir::HirExpression::StructLiteral(lit) => {
                 hir::HirExpression::StructLiteral(hir::HirStructLiteral {
                     type_name: lit.type_name.clone(),
-                    generic_args: lit.generic_args.iter().map(|e| Self::substitute_hir_variable_in_expr_named(e, var_id, var_name, value)).collect(),
-                    fields: lit.fields.iter().map(|f| hir::HirStructFieldInit {
-                        name: f.name.clone(),
-                        value: Self::substitute_hir_variable_in_expr_named(&f.value, var_id, var_name, value),
-                    }).collect(),
+                    generic_args: lit
+                        .generic_args
+                        .iter()
+                        .map(|e| {
+                            Self::substitute_hir_variable_in_expr_named(e, var_id, var_name, value)
+                        })
+                        .collect(),
+                    fields: lit
+                        .fields
+                        .iter()
+                        .map(|f| hir::HirStructFieldInit {
+                            name: f.name.clone(),
+                            value: Self::substitute_hir_variable_in_expr_named(
+                                &f.value, var_id, var_name, value,
+                            ),
+                        })
+                        .collect(),
                 })
             }
-            hir::HirExpression::Match(match_expr) => {
-                hir::HirExpression::Match(hir::HirMatchExpr {
-                    expr: Box::new(Self::substitute_hir_variable_in_expr_named(&match_expr.expr, var_id, var_name, value)),
-                    arms: match_expr.arms.iter().map(|arm| hir::HirMatchArmExpr {
+            hir::HirExpression::Match(match_expr) => hir::HirExpression::Match(hir::HirMatchExpr {
+                expr: Box::new(Self::substitute_hir_variable_in_expr_named(
+                    &match_expr.expr,
+                    var_id,
+                    var_name,
+                    value,
+                )),
+                arms: match_expr
+                    .arms
+                    .iter()
+                    .map(|arm| hir::HirMatchArmExpr {
                         pattern: arm.pattern.clone(),
-                        guard: arm.guard.as_ref().map(|g| Self::substitute_hir_variable_in_expr_named(g, var_id, var_name, value)),
-                        expr: Self::substitute_hir_variable_in_expr_named(&arm.expr, var_id, var_name, value),
-                    }).collect(),
-                    mux_style: match_expr.mux_style.clone(),
-                })
-            }
-            hir::HirExpression::Block { statements, result_expr } => {
-                hir::HirExpression::Block {
-                    statements: statements.iter().map(|s| Self::substitute_hir_variable_in_stmt(s, var_id, var_name, value)).collect(),
-                    result_expr: Box::new(Self::substitute_hir_variable_in_expr_named(result_expr, var_id, var_name, value)),
-                }
-            }
+                        guard: arm.guard.as_ref().map(|g| {
+                            Self::substitute_hir_variable_in_expr_named(g, var_id, var_name, value)
+                        }),
+                        expr: Self::substitute_hir_variable_in_expr_named(
+                            &arm.expr, var_id, var_name, value,
+                        ),
+                    })
+                    .collect(),
+                mux_style: match_expr.mux_style,
+            }),
+            hir::HirExpression::Block {
+                statements,
+                result_expr,
+            } => hir::HirExpression::Block {
+                statements: statements
+                    .iter()
+                    .map(|s| Self::substitute_hir_variable_in_stmt(s, var_id, var_name, value))
+                    .collect(),
+                result_expr: Box::new(Self::substitute_hir_variable_in_expr_named(
+                    result_expr,
+                    var_id,
+                    var_name,
+                    value,
+                )),
+            },
             // Leaf nodes that don't contain sub-expressions or the target variable
             _ => expr.clone(),
         }
@@ -5581,25 +5790,25 @@ impl<'hir> HirToMir<'hir> {
         value: i64,
     ) -> hir::HirLValue {
         match lvalue {
-            hir::HirLValue::Index(base, idx) => {
-                hir::HirLValue::Index(
-                    Box::new(Self::substitute_hir_variable_in_lvalue(base, var_id, var_name, value)),
-                    Self::substitute_hir_variable_in_expr_named(idx, var_id, var_name, value),
-                )
-            }
-            hir::HirLValue::Range(base, lo, hi) => {
-                hir::HirLValue::Range(
-                    Box::new(Self::substitute_hir_variable_in_lvalue(base, var_id, var_name, value)),
-                    Self::substitute_hir_variable_in_expr_named(lo, var_id, var_name, value),
-                    Self::substitute_hir_variable_in_expr_named(hi, var_id, var_name, value),
-                )
-            }
-            hir::HirLValue::FieldAccess { base, field } => {
-                hir::HirLValue::FieldAccess {
-                    base: Box::new(Self::substitute_hir_variable_in_lvalue(base, var_id, var_name, value)),
-                    field: field.clone(),
-                }
-            }
+            hir::HirLValue::Index(base, idx) => hir::HirLValue::Index(
+                Box::new(Self::substitute_hir_variable_in_lvalue(
+                    base, var_id, var_name, value,
+                )),
+                Self::substitute_hir_variable_in_expr_named(idx, var_id, var_name, value),
+            ),
+            hir::HirLValue::Range(base, lo, hi) => hir::HirLValue::Range(
+                Box::new(Self::substitute_hir_variable_in_lvalue(
+                    base, var_id, var_name, value,
+                )),
+                Self::substitute_hir_variable_in_expr_named(lo, var_id, var_name, value),
+                Self::substitute_hir_variable_in_expr_named(hi, var_id, var_name, value),
+            ),
+            hir::HirLValue::FieldAccess { base, field } => hir::HirLValue::FieldAccess {
+                base: Box::new(Self::substitute_hir_variable_in_lvalue(
+                    base, var_id, var_name, value,
+                )),
+                field: field.clone(),
+            },
             _ => lvalue.clone(),
         }
     }
@@ -5616,65 +5825,128 @@ impl<'hir> HirToMir<'hir> {
             hir::HirStatement::Assignment(assign) => {
                 hir::HirStatement::Assignment(hir::HirAssignment {
                     id: assign.id,
-                    lhs: Self::substitute_hir_variable_in_lvalue(&assign.lhs, var_id, var_name, value),
+                    lhs: Self::substitute_hir_variable_in_lvalue(
+                        &assign.lhs,
+                        var_id,
+                        var_name,
+                        value,
+                    ),
                     assignment_type: assign.assignment_type.clone(),
-                    rhs: Self::substitute_hir_variable_in_expr_named(&assign.rhs, var_id, var_name, value),
+                    rhs: Self::substitute_hir_variable_in_expr_named(
+                        &assign.rhs,
+                        var_id,
+                        var_name,
+                        value,
+                    ),
                 })
             }
-            hir::HirStatement::If(if_stmt) => {
-                hir::HirStatement::If(hir::HirIfStatement {
-                    condition: Self::substitute_hir_variable_in_expr_named(&if_stmt.condition, var_id, var_name, value),
-                    then_statements: if_stmt.then_statements.iter().map(|s| Self::substitute_hir_variable_in_stmt(s, var_id, var_name, value)).collect(),
-                    else_statements: if_stmt.else_statements.as_ref().map(|stmts| stmts.iter().map(|s| Self::substitute_hir_variable_in_stmt(s, var_id, var_name, value)).collect()),
-                    mux_style: if_stmt.mux_style.clone(),
-                })
-            }
+            hir::HirStatement::If(if_stmt) => hir::HirStatement::If(hir::HirIfStatement {
+                condition: Self::substitute_hir_variable_in_expr_named(
+                    &if_stmt.condition,
+                    var_id,
+                    var_name,
+                    value,
+                ),
+                then_statements: if_stmt
+                    .then_statements
+                    .iter()
+                    .map(|s| Self::substitute_hir_variable_in_stmt(s, var_id, var_name, value))
+                    .collect(),
+                else_statements: if_stmt.else_statements.as_ref().map(|stmts| {
+                    stmts
+                        .iter()
+                        .map(|s| Self::substitute_hir_variable_in_stmt(s, var_id, var_name, value))
+                        .collect()
+                }),
+                mux_style: if_stmt.mux_style,
+            }),
             hir::HirStatement::Match(match_stmt) => {
                 hir::HirStatement::Match(hir::HirMatchStatement {
-                    expr: Self::substitute_hir_variable_in_expr_named(&match_stmt.expr, var_id, var_name, value),
-                    arms: match_stmt.arms.iter().map(|arm| hir::HirMatchArm {
-                        pattern: arm.pattern.clone(),
-                        guard: arm.guard.as_ref().map(|g| Self::substitute_hir_variable_in_expr_named(g, var_id, var_name, value)),
-                        statements: arm.statements.iter().map(|s| Self::substitute_hir_variable_in_stmt(s, var_id, var_name, value)).collect(),
-                    }).collect(),
-                    mux_style: match_stmt.mux_style.clone(),
+                    expr: Self::substitute_hir_variable_in_expr_named(
+                        &match_stmt.expr,
+                        var_id,
+                        var_name,
+                        value,
+                    ),
+                    arms: match_stmt
+                        .arms
+                        .iter()
+                        .map(|arm| hir::HirMatchArm {
+                            pattern: arm.pattern.clone(),
+                            guard: arm.guard.as_ref().map(|g| {
+                                Self::substitute_hir_variable_in_expr_named(
+                                    g, var_id, var_name, value,
+                                )
+                            }),
+                            statements: arm
+                                .statements
+                                .iter()
+                                .map(|s| {
+                                    Self::substitute_hir_variable_in_stmt(
+                                        s, var_id, var_name, value,
+                                    )
+                                })
+                                .collect(),
+                        })
+                        .collect(),
+                    mux_style: match_stmt.mux_style,
                 })
             }
-            hir::HirStatement::Let(let_stmt) => {
-                hir::HirStatement::Let(hir::HirLetStatement {
-                    id: let_stmt.id,
-                    name: let_stmt.name.clone(),
-                    mutable: let_stmt.mutable,
-                    var_type: let_stmt.var_type.clone(),
-                    value: Self::substitute_hir_variable_in_expr_named(&let_stmt.value, var_id, var_name, value),
-                })
-            }
-            hir::HirStatement::Return(Some(expr)) => {
-                hir::HirStatement::Return(Some(Self::substitute_hir_variable_in_expr_named(expr, var_id, var_name, value)))
-            }
-            hir::HirStatement::Expression(expr) => {
-                hir::HirStatement::Expression(Self::substitute_hir_variable_in_expr_named(expr, var_id, var_name, value))
-            }
-            hir::HirStatement::For(for_stmt) => {
-                hir::HirStatement::For(hir::HirForStatement {
-                    id: for_stmt.id,
-                    iterator: for_stmt.iterator.clone(),
-                    iterator_var_id: for_stmt.iterator_var_id,
-                    range: hir::HirRange {
-                        start: Self::substitute_hir_variable_in_expr_named(&for_stmt.range.start, var_id, var_name, value),
-                        end: Self::substitute_hir_variable_in_expr_named(&for_stmt.range.end, var_id, var_name, value),
-                        inclusive: for_stmt.range.inclusive,
-                        step: for_stmt.range.step.as_ref().map(|s| Box::new(Self::substitute_hir_variable_in_expr_named(s, var_id, var_name, value))),
-                    },
-                    body: for_stmt.body.iter().map(|s| Self::substitute_hir_variable_in_stmt(s, var_id, var_name, value)).collect(),
-                    unroll: for_stmt.unroll.clone(),
-                })
-            }
-            hir::HirStatement::Block(stmts) => {
-                hir::HirStatement::Block(
-                    stmts.iter().map(|s| Self::substitute_hir_variable_in_stmt(s, var_id, var_name, value)).collect(),
-                )
-            }
+            hir::HirStatement::Let(let_stmt) => hir::HirStatement::Let(hir::HirLetStatement {
+                id: let_stmt.id,
+                name: let_stmt.name.clone(),
+                mutable: let_stmt.mutable,
+                var_type: let_stmt.var_type.clone(),
+                value: Self::substitute_hir_variable_in_expr_named(
+                    &let_stmt.value,
+                    var_id,
+                    var_name,
+                    value,
+                ),
+            }),
+            hir::HirStatement::Return(Some(expr)) => hir::HirStatement::Return(Some(
+                Self::substitute_hir_variable_in_expr_named(expr, var_id, var_name, value),
+            )),
+            hir::HirStatement::Expression(expr) => hir::HirStatement::Expression(
+                Self::substitute_hir_variable_in_expr_named(expr, var_id, var_name, value),
+            ),
+            hir::HirStatement::For(for_stmt) => hir::HirStatement::For(hir::HirForStatement {
+                id: for_stmt.id,
+                iterator: for_stmt.iterator.clone(),
+                iterator_var_id: for_stmt.iterator_var_id,
+                range: hir::HirRange {
+                    start: Self::substitute_hir_variable_in_expr_named(
+                        &for_stmt.range.start,
+                        var_id,
+                        var_name,
+                        value,
+                    ),
+                    end: Self::substitute_hir_variable_in_expr_named(
+                        &for_stmt.range.end,
+                        var_id,
+                        var_name,
+                        value,
+                    ),
+                    inclusive: for_stmt.range.inclusive,
+                    step: for_stmt.range.step.as_ref().map(|s| {
+                        Box::new(Self::substitute_hir_variable_in_expr_named(
+                            s, var_id, var_name, value,
+                        ))
+                    }),
+                },
+                body: for_stmt
+                    .body
+                    .iter()
+                    .map(|s| Self::substitute_hir_variable_in_stmt(s, var_id, var_name, value))
+                    .collect(),
+                unroll: for_stmt.unroll.clone(),
+            }),
+            hir::HirStatement::Block(stmts) => hir::HirStatement::Block(
+                stmts
+                    .iter()
+                    .map(|s| Self::substitute_hir_variable_in_stmt(s, var_id, var_name, value))
+                    .collect(),
+            ),
             // Leaf statement types that don't need variable substitution
             _ => stmt.clone(),
         }
@@ -5695,7 +5967,11 @@ impl<'hir> HirToMir<'hir> {
                     let start = self.eval_const_hir_expression(&for_stmt.range.start);
                     let end = self.eval_const_hir_expression(&for_stmt.range.end);
                     if let (Some(start), Some(end)) = (start, end) {
-                        let range_end = if for_stmt.range.inclusive { end + 1 } else { end };
+                        let range_end = if for_stmt.range.inclusive {
+                            end + 1
+                        } else {
+                            end
+                        };
                         // Unroll: for each iteration, clone body and substitute iterator variable
                         for i in start..range_end {
                             for body_stmt in &for_stmt.body {
@@ -5709,7 +5985,7 @@ impl<'hir> HirToMir<'hir> {
                                 match substituted {
                                     hir::HirStatement::For(_) => {
                                         result.extend(
-                                            self.unroll_const_for_loops_in_body(vec![substituted])
+                                            self.unroll_const_for_loops_in_body(vec![substituted]),
                                         );
                                     }
                                     other => result.push(other),
@@ -6074,13 +6350,19 @@ impl<'hir> HirToMir<'hir> {
                 left_expr: &'a hir::HirExpression, // for op conversion
             },
             // Build unary expression: pop operand, wrap
-            BuildUnary { op: hir::HirUnaryOp },
+            BuildUnary {
+                op: hir::HirUnaryOp,
+            },
             // Build concat: pop N elements, wrap in Concat
-            BuildConcat { count: usize },
+            BuildConcat {
+                count: usize,
+            },
             // Build conditional: pop else, pop then, pop cond, wrap
             BuildConditional,
             // Build cast: pop inner, wrap
-            BuildCast { target_type: DataType },
+            BuildCast {
+                target_type: DataType,
+            },
             // Build replicate: pop count, pop value, wrap
             BuildReplicate,
             // Build index: pop index, pop base, wrap
@@ -6119,7 +6401,9 @@ impl<'hir> HirToMir<'hir> {
 
                         // Binary - check for trait-based resolution first (FP types, custom types)
                         hir::HirExpression::Binary(bin) => {
-                            let has_trait = self.try_resolve_trait_operator(&bin.op, &bin.left).is_some();
+                            let has_trait = self
+                                .try_resolve_trait_operator(&bin.op, &bin.left)
+                                .is_some();
                             if has_trait {
                                 // Delegate to impl path which handles trait method inlining
                                 // (e.g., fp32 + fp32 -> FpAdd entity instantiation)
@@ -6181,7 +6465,8 @@ impl<'hir> HirToMir<'hir> {
                         // Index - process iteratively
                         hir::HirExpression::Index(base, index) => {
                             // Check flattened array element access before iterative path
-                            if let Some(expr) = self.try_resolve_flattened_array_index(base, index) {
+                            if let Some(expr) = self.try_resolve_flattened_array_index(base, index)
+                            {
                                 result_stack.push(Some(expr));
                             } else {
                                 work_stack.push(ExprWork::BuildIndex);
@@ -6238,8 +6523,7 @@ impl<'hir> HirToMir<'hir> {
 
                 ExprWork::BuildConcat { count } => {
                     let start = result_stack.len().saturating_sub(count);
-                    let elements: Vec<Expression> =
-                        result_stack.drain(start..).filter_map(|x| x).collect();
+                    let elements: Vec<Expression> = result_stack.drain(start..).flatten().collect();
                     if elements.len() == count {
                         result_stack.push(Some(Expression::with_unknown_type(
                             ExpressionKind::Concat(elements),
@@ -6329,7 +6613,9 @@ impl<'hir> HirToMir<'hir> {
                             // Extract constant index value if available
                             let const_index = match &index.kind {
                                 ExpressionKind::Literal(Value::Integer(n)) => Some(*n as u64),
-                                ExpressionKind::Literal(Value::BitVector { value: n, .. }) => Some(*n),
+                                ExpressionKind::Literal(Value::BitVector { value: n, .. }) => {
+                                    Some(*n)
+                                }
                                 _ => None,
                             };
 
@@ -6371,16 +6657,19 @@ impl<'hir> HirToMir<'hir> {
                                         let index_literal = Expression::with_unknown_type(
                                             ExpressionKind::Literal(Value::Integer(i as i64)),
                                         );
-                                        let condition = Expression::with_unknown_type(ExpressionKind::Binary {
-                                            op: BinaryOp::Equal,
-                                            left: Box::new(index.clone()),
-                                            right: Box::new(index_literal),
-                                        });
-                                        mux_expr = Some(Expression::with_unknown_type(ExpressionKind::Conditional {
-                                            cond: Box::new(condition),
-                                            then_expr: Box::new(elem_expr.clone()),
-                                            else_expr: Box::new(else_expr),
-                                        }));
+                                        let condition =
+                                            Expression::with_unknown_type(ExpressionKind::Binary {
+                                                op: BinaryOp::Equal,
+                                                left: Box::new(index.clone()),
+                                                right: Box::new(index_literal),
+                                            });
+                                        mux_expr = Some(Expression::with_unknown_type(
+                                            ExpressionKind::Conditional {
+                                                cond: Box::new(condition),
+                                                then_expr: Box::new(elem_expr.clone()),
+                                                else_expr: Box::new(else_expr),
+                                            },
+                                        ));
                                     } else {
                                         mux_expr = Some(elem_expr.clone());
                                     }
@@ -6537,10 +6826,7 @@ impl<'hir> HirToMir<'hir> {
                         // This happens when a monomorphized entity inherits code from a wrapper
                         // that references the wrapper's ports by their original IDs
                         if let Some(lvalue) = self.try_remap_port_by_name(id) {
-                            Some(Expression::new(
-                                ExpressionKind::Ref(lvalue),
-                                ty,
-                            ))
+                            Some(Expression::new(ExpressionKind::Ref(lvalue), ty))
                         } else {
                             trace!("[PORT_DEBUG] Port({}) doesn't belong to current entity and remap failed", id.0);
                             None
@@ -6549,10 +6835,7 @@ impl<'hir> HirToMir<'hir> {
                 } else {
                     // Port not in port_map, try name-based remap
                     if let Some(lvalue) = self.try_remap_port_by_name(id) {
-                        Some(Expression::new(
-                            ExpressionKind::Ref(lvalue),
-                            ty,
-                        ))
+                        Some(Expression::new(ExpressionKind::Ref(lvalue), ty))
                     } else {
                         trace!("[PORT_DEBUG] Port({}) not found in port_map", id.0);
                         None
@@ -6786,7 +7069,8 @@ impl<'hir> HirToMir<'hir> {
                     // that weren't explicitly imported into the main HIR.
                     // Only search module HIRs for constants belonging to GLOBAL_IMPL entities
                     // to avoid picking up constants from unrelated entity impl blocks.
-                    let mut module_const_result: Option<Result<ConstValue, hir::HirExpression>> = None;
+                    let mut module_const_result: Option<Result<ConstValue, hir::HirExpression>> =
+                        None;
                     for (_path, module_hir) in &self.module_hirs {
                         let mut module_eval = ConstEvaluator::new();
                         for implementation in &module_hir.implementations {
@@ -6833,7 +7117,8 @@ impl<'hir> HirToMir<'hir> {
                     // BUG FIX: Constant ID not found after module merging
                     trace!(
                         "Constant ID {:?} not found after module merging, current_entity={:?}",
-                        id, self.current_entity_id
+                        id,
+                        self.current_entity_id
                     );
                     return None;
                 }
@@ -7649,7 +7934,9 @@ impl<'hir> HirToMir<'hir> {
                         }
                         hir::HirExpression::Port(id) => {
                             // BUG #237 FIX: Only use flattened_ports if port belongs to current entity
-                            if self.flattened_ports.contains_key(id) && self.port_belongs_to_current_entity(id) {
+                            if self.flattened_ports.contains_key(id)
+                                && self.port_belongs_to_current_entity(id)
+                            {
                                 (id.0, false)
                             } else {
                                 return None;
@@ -10014,7 +10301,10 @@ impl<'hir> HirToMir<'hir> {
         })
     }
 
-    fn convert_body_to_expression_impl(&self, body: &[hir::HirStatement]) -> Option<hir::HirExpression> {
+    fn convert_body_to_expression_impl(
+        &self,
+        body: &[hir::HirStatement],
+    ) -> Option<hir::HirExpression> {
         if body.is_empty() {
             trace!("[DEBUG] convert_body_to_expression: empty body");
             return None;
@@ -13357,17 +13647,23 @@ impl<'hir> HirToMir<'hir> {
             // Apply parameter substitution to each statement and result_expr individually,
             // without let-binding resolution (so entity output Variables survive)
             let empty_lets = IndexMap::new();
-            if let hir::HirExpression::Block { statements, result_expr } = &body_expr {
+            if let hir::HirExpression::Block {
+                statements,
+                result_expr,
+            } = &body_expr
+            {
                 let mut substituted_stmts = Vec::new();
                 for stmt in statements {
                     match stmt {
                         hir::HirStatement::Let(let_stmt) => {
-                            let rhs_sub = self.substitute_hir_expr_recursively(
-                                &let_stmt.value,
-                                &substitution_map,
-                                &empty_lets,
-                                &var_id_to_name,
-                            ).unwrap_or_else(|| let_stmt.value.clone());
+                            let rhs_sub = self
+                                .substitute_hir_expr_recursively(
+                                    &let_stmt.value,
+                                    &substitution_map,
+                                    &empty_lets,
+                                    &var_id_to_name,
+                                )
+                                .unwrap_or_else(|| let_stmt.value.clone());
                             substituted_stmts.push(hir::HirStatement::Let(hir::HirLetStatement {
                                 id: let_stmt.id,
                                 name: let_stmt.name.clone(),
@@ -13380,12 +13676,14 @@ impl<'hir> HirToMir<'hir> {
                     }
                 }
                 // result_expr: only substitute parameters, NOT let bindings
-                let result_sub = self.substitute_hir_expr_recursively(
-                    result_expr,
-                    &substitution_map,
-                    &empty_lets,
-                    &var_id_to_name,
-                ).unwrap_or_else(|| (**result_expr).clone());
+                let result_sub = self
+                    .substitute_hir_expr_recursively(
+                        result_expr,
+                        &substitution_map,
+                        &empty_lets,
+                        &var_id_to_name,
+                    )
+                    .unwrap_or_else(|| (**result_expr).clone());
                 hir::HirExpression::Block {
                     statements: substituted_stmts,
                     result_expr: Box::new(result_sub),
@@ -15693,7 +15991,12 @@ impl<'hir> HirToMir<'hir> {
                 } => {
                     for stmt in statements {
                         if let hir::HirStatement::Let(let_stmt) = stmt {
-                            find_entity_instantiations(&let_stmt.value, entities, entity_aliases, found);
+                            find_entity_instantiations(
+                                &let_stmt.value,
+                                entities,
+                                entity_aliases,
+                                found,
+                            );
                         }
                     }
                     find_entity_instantiations(result_expr, entities, entity_aliases, found);
@@ -15732,10 +16035,20 @@ impl<'hir> HirToMir<'hir> {
             .unwrap_or_default();
         let mut entity_insts = Vec::new();
         for binding_value in let_bindings.values() {
-            find_entity_instantiations(binding_value, &entities, &entity_aliases, &mut entity_insts);
+            find_entity_instantiations(
+                binding_value,
+                &entities,
+                &entity_aliases,
+                &mut entity_insts,
+            );
         }
         // Also check the substituted body itself
-        find_entity_instantiations(&substituted_body, &entities, &entity_aliases, &mut entity_insts);
+        find_entity_instantiations(
+            &substituted_body,
+            &entities,
+            &entity_aliases,
+            &mut entity_insts,
+        );
 
         // Process found entity instantiations
         for (name, struct_lit) in entity_insts {
@@ -15899,14 +16212,18 @@ impl<'hir> HirToMir<'hir> {
                                 hir::HirLiteral::Boolean(_) => Some(hir::HirType::Bool),
                                 hir::HirLiteral::Float(_) => Some(hir::HirType::Float32),
                                 hir::HirLiteral::String(_) => None,
-                                hir::HirLiteral::BitVector(bits) => Some(hir::HirType::Bit(bits.len() as u32)),
+                                hir::HirLiteral::BitVector(bits) => {
+                                    Some(hir::HirType::Bit(bits.len() as u32))
+                                }
                             });
                         }
                         hir::HirExpression::Signal(signal_id) => {
                             let result = (|| {
                                 let entity_id = self.current_entity_id?;
-                                let impl_block = hir.implementations.iter().find(|i| i.entity == entity_id)?;
-                                let signal = impl_block.signals.iter().find(|s| s.id == *signal_id)?;
+                                let impl_block =
+                                    hir.implementations.iter().find(|i| i.entity == entity_id)?;
+                                let signal =
+                                    impl_block.signals.iter().find(|s| s.id == *signal_id)?;
                                 Some(signal.signal_type.clone())
                             })();
                             result_stack.push(result);
@@ -15931,7 +16248,9 @@ impl<'hir> HirToMir<'hir> {
                                     if let Some(impl_block) =
                                         hir.implementations.iter().find(|i| i.entity == entity_id)
                                     {
-                                        if let Some(var) = impl_block.variables.iter().find(|v| v.id == *var_id) {
+                                        if let Some(var) =
+                                            impl_block.variables.iter().find(|v| v.id == *var_id)
+                                        {
                                             trace!(
                                                 "[INFER_TYPE_DEBUG] Variable {:?} found in impl_block: {:?}",
                                                 var_id,
@@ -15948,8 +16267,11 @@ impl<'hir> HirToMir<'hir> {
 
                                 if let Some(context) = self.get_current_context() {
                                     let context_key = (Some(context.clone()), *var_id);
-                                    if let Some(&mir_id) = self.context_variable_map.get(&context_key) {
-                                        if let Some(var_type) = self.mir_variable_types.get(&mir_id) {
+                                    if let Some(&mir_id) =
+                                        self.context_variable_map.get(&context_key)
+                                    {
+                                        if let Some(var_type) = self.mir_variable_types.get(&mir_id)
+                                        {
                                             trace!(
                                                 "[BUG #IMPORT_MATCH] infer_hir_type: Found context-aware type for HIR {:?} via MIR {:?}: {:?}",
                                                 var_id, mir_id, var_type
@@ -15959,8 +16281,11 @@ impl<'hir> HirToMir<'hir> {
                                     }
                                 }
 
-                                if let Some((mir_id, _, var_type)) = self.dynamic_variables.get(var_id) {
-                                    if let Some(accurate_type) = self.mir_variable_types.get(mir_id) {
+                                if let Some((mir_id, _, var_type)) =
+                                    self.dynamic_variables.get(var_id)
+                                {
+                                    if let Some(accurate_type) = self.mir_variable_types.get(mir_id)
+                                    {
                                         trace!(
                                             "[BUG #IMPORT_MATCH] infer_hir_type: Using mir_variable_types for HIR {:?} -> MIR {:?}: {:?}",
                                             var_id, mir_id, accurate_type
@@ -16011,8 +16336,11 @@ impl<'hir> HirToMir<'hir> {
                                 }
 
                                 let entity_id = self.current_entity_id?;
-                                let impl_block = hir.implementations.iter().find(|i| i.entity == entity_id)?;
-                                if let Some(var) = impl_block.variables.iter().find(|v| v.name == *name) {
+                                let impl_block =
+                                    hir.implementations.iter().find(|i| i.entity == entity_id)?;
+                                if let Some(var) =
+                                    impl_block.variables.iter().find(|v| v.name == *name)
+                                {
                                     return Some(var.var_type.clone());
                                 }
                                 None
@@ -16047,8 +16375,12 @@ impl<'hir> HirToMir<'hir> {
                                 }
                             }
 
-                            if let (Ok(high_val), Ok(low_val)) = (evaluator.eval(high), evaluator.eval(low)) {
-                                if let (ConstValue::Nat(h), ConstValue::Nat(l)) = (high_val, low_val) {
+                            if let (Ok(high_val), Ok(low_val)) =
+                                (evaluator.eval(high), evaluator.eval(low))
+                            {
+                                if let (ConstValue::Nat(h), ConstValue::Nat(l)) =
+                                    (high_val, low_val)
+                                {
                                     let width = (h - l + 1) as u32;
                                     result_stack.push(Some(hir::HirType::Bit(width)));
                                     continue;
@@ -17384,7 +17716,9 @@ impl<'hir> HirToMir<'hir> {
         match expr {
             hir::HirExpression::Literal(hir::HirLiteral::Integer(val)) => Some(*val),
             // BUG FIX: Handle boolean literals for fixed<W, F, SIGNED> type parameters
-            hir::HirExpression::Literal(hir::HirLiteral::Boolean(val)) => Some(if *val { 1 } else { 0 }),
+            hir::HirExpression::Literal(hir::HirLiteral::Boolean(val)) => {
+                Some(if *val { 1 } else { 0 })
+            }
             hir::HirExpression::Binary(bin_expr) => {
                 // Recursively evaluate binary expressions
                 let left = self.try_eval_const_expr(&bin_expr.left)?;
@@ -17773,9 +18107,9 @@ impl<'hir> HirToMir<'hir> {
                             // Find the flattened field with matching path
                             for flat_field in flattened {
                                 if flat_field.field_path == field_path {
-                                    return Some(Expression::with_unknown_type(ExpressionKind::Ref(
-                                        LValue::Port(PortId(flat_field.id)),
-                                    )));
+                                    return Some(Expression::with_unknown_type(
+                                        ExpressionKind::Ref(LValue::Port(PortId(flat_field.id))),
+                                    ));
                                 }
                             }
                         }
@@ -18565,7 +18899,9 @@ impl<'hir> HirToMir<'hir> {
                                     // Look up the type in user_defined_types
                                     for udt in &hir.user_defined_types {
                                         if udt.name == *type_name {
-                                            if let hir::HirType::Struct(ref struct_type) = udt.type_def {
+                                            if let hir::HirType::Struct(ref struct_type) =
+                                                udt.type_def
+                                            {
                                                 return Some(struct_type);
                                             }
                                         }
@@ -18582,11 +18918,23 @@ impl<'hir> HirToMir<'hir> {
                 trace!("[STRUCT_TYPE_DEBUG] Handling Port expression, id={:?}", id);
                 // Look up the port in entities
                 for entity in &hir.entities {
-                    trace!("[STRUCT_TYPE_DEBUG] Checking entity '{}' with {} ports", entity.name, entity.ports.len());
+                    trace!(
+                        "[STRUCT_TYPE_DEBUG] Checking entity '{}' with {} ports",
+                        entity.name,
+                        entity.ports.len()
+                    );
                     for port in &entity.ports {
-                        trace!("[STRUCT_TYPE_DEBUG] Checking port '{}' (id={:?})", port.name, port.id);
+                        trace!(
+                            "[STRUCT_TYPE_DEBUG] Checking port '{}' (id={:?})",
+                            port.name,
+                            port.id
+                        );
                         if port.id == *id {
-                            trace!("[STRUCT_TYPE_DEBUG] Found matching port '{}', type={:?}", port.name, std::mem::discriminant(&port.port_type));
+                            trace!(
+                                "[STRUCT_TYPE_DEBUG] Found matching port '{}', type={:?}",
+                                port.name,
+                                std::mem::discriminant(&port.port_type)
+                            );
                             match &port.port_type {
                                 hir::HirType::Struct(ref struct_type) => {
                                     trace!("[STRUCT_TYPE_DEBUG] Port has Struct type, returning");
@@ -18616,7 +18964,9 @@ impl<'hir> HirToMir<'hir> {
                                         trace!("[STRUCT_TYPE_DEBUG] Checking UDT '{}'", udt.name);
                                         if udt.name == *type_name {
                                             trace!("[STRUCT_TYPE_DEBUG] Found matching UDT, type_def discriminant={:?}", std::mem::discriminant(&udt.type_def));
-                                            if let hir::HirType::Struct(ref struct_type) = udt.type_def {
+                                            if let hir::HirType::Struct(ref struct_type) =
+                                                udt.type_def
+                                            {
                                                 trace!("[STRUCT_TYPE_DEBUG] Resolved Custom to Struct, returning");
                                                 return Some(struct_type);
                                             }
@@ -18625,7 +18975,9 @@ impl<'hir> HirToMir<'hir> {
                                     trace!("[STRUCT_TYPE_DEBUG] Custom type '{}' not found in user_defined_types!", type_name);
                                 }
                                 _ => {
-                                    trace!("[STRUCT_TYPE_DEBUG] Port type is not Struct/Tuple/Custom");
+                                    trace!(
+                                        "[STRUCT_TYPE_DEBUG] Port type is not Struct/Tuple/Custom"
+                                    );
                                 }
                             }
                         }
@@ -20681,7 +21033,9 @@ impl<'hir> HirToMir<'hir> {
                                     let maybe_var_id = match &field.value {
                                         hir::HirExpression::Variable(var_id) => Some(*var_id),
                                         hir::HirExpression::Cast(cast_expr) => {
-                                            if let hir::HirExpression::Variable(var_id) = &*cast_expr.expr {
+                                            if let hir::HirExpression::Variable(var_id) =
+                                                &*cast_expr.expr
+                                            {
                                                 Some(*var_id)
                                             } else {
                                                 None
@@ -20694,10 +21048,13 @@ impl<'hir> HirToMir<'hir> {
                                         if let Some((signal_id, signal_type)) =
                                             self.placeholder_signal_to_entity_output.get(&key)
                                         {
-                                            var_id_to_mir.insert(var_id, Expression::new(
-                                                ExpressionKind::Ref(LValue::Signal(*signal_id)),
-                                                signal_type.clone(),
-                                            ));
+                                            var_id_to_mir.insert(
+                                                var_id,
+                                                Expression::new(
+                                                    ExpressionKind::Ref(LValue::Signal(*signal_id)),
+                                                    signal_type.clone(),
+                                                ),
+                                            );
                                         }
                                     }
                                 }
@@ -20991,14 +21348,14 @@ impl<'hir> HirToMir<'hir> {
                     {
                         // For single-output entities like FpSqrt, get "result" port
                         if let Some(&signal_id) = output_ports.get("result") {
-                            Some(Expression::with_unknown_type(
-                                ExpressionKind::Ref(LValue::Signal(signal_id)),
-                            ))
+                            Some(Expression::with_unknown_type(ExpressionKind::Ref(
+                                LValue::Signal(signal_id),
+                            )))
                         } else if output_ports.len() == 1 {
                             let &signal_id = output_ports.values().next().unwrap();
-                            Some(Expression::with_unknown_type(
-                                ExpressionKind::Ref(LValue::Signal(signal_id)),
-                            ))
+                            Some(Expression::with_unknown_type(ExpressionKind::Ref(
+                                LValue::Signal(signal_id),
+                            )))
                         } else {
                             self.convert_expression(expr, depth)
                         }
@@ -22624,34 +22981,24 @@ impl<'hir> HirToMir<'hir> {
         let current_entity_id = self.current_entity_id?;
 
         // Find which entity owns the foreign port
-        let owner_id = self.port_owner.get(foreign_port_id);
-        if owner_id.is_none() {
-            return None;
-        }
-        let owner_id = owner_id?;
+        let owner_id = self.port_owner.get(foreign_port_id)?;
         let owner_entity = hir.entities.iter().find(|e| e.id == *owner_id)?;
         let current_entity = hir.entities.iter().find(|e| e.id == current_entity_id)?;
 
         // Find the port by ID in the owner entity
-        let foreign_port = owner_entity.ports.iter().find(|p| p.id == *foreign_port_id);
-        if foreign_port.is_none() {
-            return None;
-        }
-        let foreign_port = foreign_port?;
+        let foreign_port = owner_entity
+            .ports
+            .iter()
+            .find(|p| p.id == *foreign_port_id)?;
 
         // Look for a port with the same name in the current entity
-        let current_port = current_entity.ports.iter().find(|p| p.name == foreign_port.name);
-        if current_port.is_none() {
-            return None;
-        }
-        let current_port = current_port?;
+        let current_port = current_entity
+            .ports
+            .iter()
+            .find(|p| p.name == foreign_port.name)?;
 
         // Get the MIR port ID for the current entity's port
-        let mir_port_id = self.port_map.get(&current_port.id);
-        if mir_port_id.is_none() {
-            return None;
-        }
-        let mir_port_id = mir_port_id?;
+        let mir_port_id = self.port_map.get(&current_port.id)?;
 
         Some(LValue::Port(*mir_port_id))
     }
@@ -22672,7 +23019,8 @@ impl<'hir> HirToMir<'hir> {
                 }
             }
             hir::HirExpression::Port(id) => {
-                if self.flattened_ports.contains_key(id) && self.port_belongs_to_current_entity(id) {
+                if self.flattened_ports.contains_key(id) && self.port_belongs_to_current_entity(id)
+                {
                     (id.0, false)
                 } else {
                     return None;
@@ -22803,7 +23151,8 @@ impl<'hir> HirToMir<'hir> {
                     }
                 }
                 // Check impl block signals
-                if let Some(impl_block) = hir.implementations.iter().find(|i| i.entity == entity_id) {
+                if let Some(impl_block) = hir.implementations.iter().find(|i| i.entity == entity_id)
+                {
                     if impl_block.signals.iter().any(|s| s.id == *signal_id) {
                         return true;
                     }
@@ -23201,8 +23550,14 @@ impl<'hir> HirToMir<'hir> {
     ) -> (Vec<Signal>, Vec<FlattenedField>) {
         // Use shared TypeFlattener with current signal ID counter
         let mut flattener = TypeFlattener::new(self.next_signal_id);
-        let (signals, type_fields) =
-            flattener.flatten_signal_with_span(base_name, signal_type, initial, clock_domain, span, is_memory);
+        let (signals, type_fields) = flattener.flatten_signal_with_span(
+            base_name,
+            signal_type,
+            initial,
+            clock_domain,
+            span,
+            is_memory,
+        );
 
         // Update our signal ID counter based on how many signals were created
         self.next_signal_id += signals.len() as u32;

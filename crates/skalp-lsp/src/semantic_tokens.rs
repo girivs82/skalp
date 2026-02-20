@@ -27,18 +27,18 @@ pub const MOD_READONLY: u32 = 2;
 pub fn semantic_token_legend() -> SemanticTokensLegend {
     SemanticTokensLegend {
         token_types: vec![
-            SemanticTokenType::CLASS,        // 0: entity
-            SemanticTokenType::VARIABLE,     // 1: signal
-            SemanticTokenType::PROPERTY,     // 2: port
-            SemanticTokenType::TYPE,         // 3: type
-            SemanticTokenType::INTERFACE,    // 4: trait
+            SemanticTokenType::CLASS,           // 0: entity
+            SemanticTokenType::VARIABLE,        // 1: signal
+            SemanticTokenType::PROPERTY,        // 2: port
+            SemanticTokenType::TYPE,            // 3: type
+            SemanticTokenType::INTERFACE,       // 4: trait
             SemanticTokenType::new("constant"), // 5: constant
-            SemanticTokenType::VARIABLE,     // 6: variable
-            SemanticTokenType::FUNCTION,     // 7: function
-            SemanticTokenType::KEYWORD,      // 8: keyword
-            SemanticTokenType::OPERATOR,     // 9: operator
-            SemanticTokenType::NUMBER,       // 10: number
-            SemanticTokenType::COMMENT,      // 11: comment
+            SemanticTokenType::VARIABLE,        // 6: variable
+            SemanticTokenType::FUNCTION,        // 7: function
+            SemanticTokenType::KEYWORD,         // 8: keyword
+            SemanticTokenType::OPERATOR,        // 9: operator
+            SemanticTokenType::NUMBER,          // 10: number
+            SemanticTokenType::COMMENT,         // 11: comment
         ],
         token_modifiers: vec![
             SemanticTokenModifier::DECLARATION,
@@ -56,16 +56,24 @@ pub fn get_semantic_tokens(content: &str) -> Vec<SemanticToken> {
 
     // Known keywords
     let keywords: &[&str] = &[
-        "entity", "impl", "on", "signal", "in", "out", "inout", "let", "if", "else",
-        "match", "for", "while", "return", "use", "import", "fn", "trait", "protocol",
-        "generate", "async", "const", "type", "struct", "enum", "pub", "mod",
-        "true", "false", "as", "ref", "mut",
+        "entity", "impl", "on", "signal", "in", "out", "inout", "let", "if", "else", "match",
+        "for", "while", "return", "use", "import", "fn", "trait", "protocol", "generate", "async",
+        "const", "type", "struct", "enum", "pub", "mod", "true", "false", "as", "ref", "mut",
     ];
 
     // Known types
     let types: &[&str] = &[
-        "bit", "nat", "int", "bool", "clock", "reset", "logic",
-        "fp16", "fp32", "fp64", "IEEE754_16",
+        "bit",
+        "nat",
+        "int",
+        "bool",
+        "clock",
+        "reset",
+        "logic",
+        "fp16",
+        "fp32",
+        "fp64",
+        "IEEE754_16",
     ];
 
     // Track declarations for context
@@ -125,7 +133,9 @@ pub fn get_semantic_tokens(content: &str) -> Vec<SemanticToken> {
 
             // Numbers (decimal and hex literals)
             if chars[i].is_ascii_digit()
-                || (chars[i] == '0' && i + 1 < chars.len() && (chars[i + 1] == 'x' || chars[i + 1] == 'b'))
+                || (chars[i] == '0'
+                    && i + 1 < chars.len()
+                    && (chars[i + 1] == 'x' || chars[i + 1] == 'b'))
             {
                 let start = i;
                 while i < chars.len()
@@ -133,31 +143,16 @@ pub fn get_semantic_tokens(content: &str) -> Vec<SemanticToken> {
                 {
                     i += 1;
                 }
-                // Check for type suffix like fp32, fp16
-                let word: String = chars[start..i].iter().collect();
-                if word.ends_with("fp32") || word.ends_with("fp16") || word.ends_with("fp64") {
-                    push_token(
-                        &mut tokens,
-                        &mut prev_line,
-                        &mut prev_start,
-                        line_u32,
-                        start as u32,
-                        (i - start) as u32,
-                        TOKEN_NUMBER,
-                        0,
-                    );
-                } else {
-                    push_token(
-                        &mut tokens,
-                        &mut prev_line,
-                        &mut prev_start,
-                        line_u32,
-                        start as u32,
-                        (i - start) as u32,
-                        TOKEN_NUMBER,
-                        0,
-                    );
-                }
+                push_token(
+                    &mut tokens,
+                    &mut prev_line,
+                    &mut prev_start,
+                    line_u32,
+                    start as u32,
+                    (i - start) as u32,
+                    TOKEN_NUMBER,
+                    0,
+                );
                 continue;
             }
 
@@ -264,19 +259,38 @@ fn classify_word(
     let trimmed = line.trim();
 
     // Entity name (after "entity" keyword)
-    if trimmed.starts_with("entity ") && trimmed.split_whitespace().nth(1).map(|s| s.trim_end_matches(|c: char| !c.is_alphanumeric() && c != '_')) == Some(word) {
+    if trimmed.starts_with("entity ")
+        && trimmed
+            .split_whitespace()
+            .nth(1)
+            .map(|s| s.trim_end_matches(|c: char| !c.is_alphanumeric() && c != '_'))
+            == Some(word)
+    {
         return (TOKEN_ENTITY, 1 << MOD_DEFINITION);
     }
 
     // Impl target (after "impl" keyword)
-    if trimmed.starts_with("impl ") && trimmed.split_whitespace().nth(1).map(|s| s.trim_end_matches(|c: char| !c.is_alphanumeric() && c != '_')) == Some(word) {
+    if trimmed.starts_with("impl ")
+        && trimmed
+            .split_whitespace()
+            .nth(1)
+            .map(|s| s.trim_end_matches(|c: char| !c.is_alphanumeric() && c != '_'))
+            == Some(word)
+    {
         return (TOKEN_ENTITY, 0);
     }
 
     // Port declaration
-    if (trimmed.starts_with("in ") || trimmed.starts_with("out ") || trimmed.starts_with("inout ")) && *in_port_section {
+    if (trimmed.starts_with("in ") || trimmed.starts_with("out ") || trimmed.starts_with("inout "))
+        && *in_port_section
+    {
         // The name after in/out/inout
-        if trimmed.split_whitespace().nth(1).map(|s| s.trim_end_matches(':')) == Some(word) {
+        if trimmed
+            .split_whitespace()
+            .nth(1)
+            .map(|s| s.trim_end_matches(':'))
+            == Some(word)
+        {
             return (TOKEN_PORT, 1 << MOD_DECLARATION);
         }
         // Type after ":"
@@ -289,27 +303,39 @@ fn classify_word(
     }
 
     // Signal name (after "signal" keyword)
-    if trimmed.starts_with("signal ") {
-        if trimmed.split_whitespace().nth(1).map(|s| s.trim_end_matches(':')) == Some(word) {
-            return (TOKEN_SIGNAL, 1 << MOD_DECLARATION);
-        }
+    if trimmed.starts_with("signal ")
+        && trimmed
+            .split_whitespace()
+            .nth(1)
+            .map(|s| s.trim_end_matches(':'))
+            == Some(word)
+    {
+        return (TOKEN_SIGNAL, 1 << MOD_DECLARATION);
     }
 
     // Constant (after "const" keyword or ALL_CAPS)
-    if trimmed.starts_with("const ") {
-        if trimmed.split_whitespace().nth(1).map(|s| s.trim_end_matches(':')) == Some(word) {
-            return (TOKEN_CONSTANT, 1 << MOD_DECLARATION | 1 << MOD_READONLY);
-        }
+    if trimmed.starts_with("const ")
+        && trimmed
+            .split_whitespace()
+            .nth(1)
+            .map(|s| s.trim_end_matches(':'))
+            == Some(word)
+    {
+        return (TOKEN_CONSTANT, 1 << MOD_DECLARATION | 1 << MOD_READONLY);
     }
     if word.chars().all(|c| c.is_ascii_uppercase() || c == '_') && word.len() > 1 {
         return (TOKEN_CONSTANT, 1 << MOD_READONLY);
     }
 
     // Trait name (after "trait" keyword)
-    if trimmed.starts_with("trait ") {
-        if trimmed.split_whitespace().nth(1).map(|s| s.trim_end_matches(|c: char| !c.is_alphanumeric() && c != '_')) == Some(word) {
-            return (TOKEN_TRAIT, 1 << MOD_DEFINITION);
-        }
+    if trimmed.starts_with("trait ")
+        && trimmed
+            .split_whitespace()
+            .nth(1)
+            .map(|s| s.trim_end_matches(|c: char| !c.is_alphanumeric() && c != '_'))
+            == Some(word)
+    {
+        return (TOKEN_TRAIT, 1 << MOD_DEFINITION);
     }
 
     // Function call (word followed by "(")
@@ -318,14 +344,21 @@ fn classify_word(
     }
 
     // Let binding
-    if trimmed.starts_with("let ") {
-        if trimmed.split_whitespace().nth(1).map(|s| s.trim_end_matches(|c: char| !c.is_alphanumeric() && c != '_')) == Some(word) {
-            return (TOKEN_VARIABLE, 1 << MOD_DECLARATION);
-        }
+    if trimmed.starts_with("let ")
+        && trimmed
+            .split_whitespace()
+            .nth(1)
+            .map(|s| s.trim_end_matches(|c: char| !c.is_alphanumeric() && c != '_'))
+            == Some(word)
+    {
+        return (TOKEN_VARIABLE, 1 << MOD_DECLARATION);
     }
 
     // PascalCase → likely entity/type reference
-    if word.len() > 1 && word.chars().next().unwrap().is_uppercase() && word.contains(|c: char| c.is_lowercase()) {
+    if word.len() > 1
+        && word.chars().next().unwrap().is_uppercase()
+        && word.contains(|c: char| c.is_lowercase())
+    {
         return (TOKEN_ENTITY, 0);
     }
 
@@ -333,6 +366,7 @@ fn classify_word(
     (TOKEN_VARIABLE, 0)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn push_token(
     tokens: &mut Vec<SemanticToken>,
     prev_line: &mut u32,

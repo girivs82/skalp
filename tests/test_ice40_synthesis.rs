@@ -499,7 +499,8 @@ impl TestAnd {
         );
     }
 
-    tb.export_waveform("build/test_ice40_gate_level_and_gate.skw.gz").ok();
+    tb.export_waveform("build/test_ice40_gate_level_and_gate.skw.gz")
+        .ok();
 }
 
 #[tokio::test]
@@ -539,7 +540,8 @@ impl TestXor {
         );
     }
 
-    tb.export_waveform("build/test_ice40_gate_level_xor_gate.skw.gz").ok();
+    tb.export_waveform("build/test_ice40_gate_level_xor_gate.skw.gz")
+        .ok();
 }
 
 #[tokio::test]
@@ -585,7 +587,8 @@ impl TestMux {
         result
     );
 
-    tb.export_waveform("build/test_ice40_gate_level_mux.skw.gz").ok();
+    tb.export_waveform("build/test_ice40_gate_level_mux.skw.gz")
+        .ok();
 }
 
 #[tokio::test]
@@ -631,7 +634,8 @@ impl TestAdder {
         );
     }
 
-    tb.export_waveform("build/test_ice40_gate_level_adder.skw.gz").ok();
+    tb.export_waveform("build/test_ice40_gate_level_adder.skw.gz")
+        .ok();
 }
 
 #[tokio::test]
@@ -677,7 +681,8 @@ impl TestSubtractor {
         );
     }
 
-    tb.export_waveform("build/test_ice40_gate_level_subtractor.skw.gz").ok();
+    tb.export_waveform("build/test_ice40_gate_level_subtractor.skw.gz")
+        .ok();
 }
 
 #[tokio::test]
@@ -737,7 +742,8 @@ impl TestCounter {
     let held = tb.get_u32("count").await;
     assert_eq!(held, 5, "Counter should hold at 5 when disabled");
 
-    tb.export_waveform("build/test_ice40_gate_level_counter.skw.gz").ok();
+    tb.export_waveform("build/test_ice40_gate_level_counter.skw.gz")
+        .ok();
 }
 
 #[tokio::test]
@@ -788,7 +794,8 @@ impl TestAlu {
     tb.clock(1).await;
     assert_eq!(tb.get_u32("result").await, 0xFF, "OR failed");
 
-    tb.export_waveform("build/test_ice40_gate_level_alu.skw.gz").ok();
+    tb.export_waveform("build/test_ice40_gate_level_alu.skw.gz")
+        .ok();
 }
 
 // =============================================================================

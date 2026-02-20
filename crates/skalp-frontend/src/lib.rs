@@ -251,12 +251,7 @@ fn rebuild_instances_with_imports(hir: &Hir, file_path: &Path) -> Result<Hir> {
     let mut final_hir = hir.clone();
 
     // Find the maximum entity ID in hir to start remapping from
-    let max_existing_id = hir
-        .entities
-        .iter()
-        .map(|e| e.id.0)
-        .max()
-        .unwrap_or(0);
+    let max_existing_id = hir.entities.iter().map(|e| e.id.0).max().unwrap_or(0);
 
     // Build a remapping table for rebuilt entity IDs
     // Map each rebuilt entity ID to a new unique ID
@@ -457,7 +452,8 @@ fn rebuild_instances_for_all_modules(
             Ok(rebuilt) => {
                 // Build a map of entity name -> instances in rebuilt HIR
                 // Only update implementations that now have MORE instances
-                let mut rebuilt_instances_by_name: IndexMap<String, Vec<hir::HirInstance>> = IndexMap::new();
+                let mut rebuilt_instances_by_name: IndexMap<String, Vec<hir::HirInstance>> =
+                    IndexMap::new();
                 for rebuilt_impl in &rebuilt.implementations {
                     // Find entity name - first try rebuilt.entities, then result_hir.entities
                     let entity_name = rebuilt
@@ -475,7 +471,8 @@ fn rebuild_instances_for_all_modules(
 
                     if let Some(ref name) = entity_name {
                         if !rebuilt_impl.instances.is_empty() {
-                            rebuilt_instances_by_name.insert(name.clone(), rebuilt_impl.instances.clone());
+                            rebuilt_instances_by_name
+                                .insert(name.clone(), rebuilt_impl.instances.clone());
                         }
                     }
                 }
@@ -499,13 +496,21 @@ fn rebuild_instances_for_all_modules(
                     if let Some(ref result_ent) = result_entity {
                         // Build port/signal ID remap from rebuilt entity to result entity
                         // This maps port names to (rebuilt_id, result_id) for remapping
-                        let mut port_remap: std::collections::HashMap<hir::PortId, hir::PortId> = std::collections::HashMap::new();
-                        let mut signal_remap: std::collections::HashMap<hir::SignalId, hir::SignalId> = std::collections::HashMap::new();
+                        let mut port_remap: std::collections::HashMap<hir::PortId, hir::PortId> =
+                            std::collections::HashMap::new();
+                        let mut signal_remap: std::collections::HashMap<
+                            hir::SignalId,
+                            hir::SignalId,
+                        > = std::collections::HashMap::new();
 
                         if let Some(ref rebuilt_ent) = rebuilt_entity {
                             // Build port ID remap by name
                             for rebuilt_port in &rebuilt_ent.ports {
-                                if let Some(result_port) = result_ent.ports.iter().find(|p| p.name == rebuilt_port.name) {
+                                if let Some(result_port) = result_ent
+                                    .ports
+                                    .iter()
+                                    .find(|p| p.name == rebuilt_port.name)
+                                {
                                     if rebuilt_port.id != result_port.id {
                                         port_remap.insert(rebuilt_port.id, result_port.id);
                                     }
@@ -514,14 +519,23 @@ fn rebuild_instances_for_all_modules(
                         }
 
                         // Also check signals from the implementation
-                        if let Some(rebuilt_impl) = rebuilt.implementations.iter()
-                            .find(|i| rebuilt_entity.as_ref().map(|e| i.entity == e.id).unwrap_or(false))
-                        {
-                            if let Some(result_impl) = result_hir.implementations.iter()
+                        if let Some(rebuilt_impl) = rebuilt.implementations.iter().find(|i| {
+                            rebuilt_entity
+                                .as_ref()
+                                .map(|e| i.entity == e.id)
+                                .unwrap_or(false)
+                        }) {
+                            if let Some(result_impl) = result_hir
+                                .implementations
+                                .iter()
                                 .find(|i| i.entity == result_ent.id)
                             {
                                 for rebuilt_sig in &rebuilt_impl.signals {
-                                    if let Some(result_sig) = result_impl.signals.iter().find(|s| s.name == rebuilt_sig.name) {
+                                    if let Some(result_sig) = result_impl
+                                        .signals
+                                        .iter()
+                                        .find(|s| s.name == rebuilt_sig.name)
+                                    {
                                         if rebuilt_sig.id != result_sig.id {
                                             signal_remap.insert(rebuilt_sig.id, result_sig.id);
                                         }
@@ -572,7 +586,11 @@ fn rebuild_instances_for_all_modules(
 
                                             // Remap port/signal IDs in connection expressions
                                             for conn in &mut remapped.connections {
-                                                remap_port_signal_ids_in_expr(&mut conn.expr, &port_remap, &signal_remap);
+                                                remap_port_signal_ids_in_expr(
+                                                    &mut conn.expr,
+                                                    &port_remap,
+                                                    &signal_remap,
+                                                );
                                             }
 
                                             remapped_instances.push(remapped);
@@ -651,7 +669,11 @@ fn remap_port_signal_ids_in_expr(
                 remap_port_signal_ids_in_expr(e, port_remap, signal_remap);
             }
         }
-        HirExpression::Ternary { condition, true_expr, false_expr } => {
+        HirExpression::Ternary {
+            condition,
+            true_expr,
+            false_expr,
+        } => {
             remap_port_signal_ids_in_expr(condition, port_remap, signal_remap);
             remap_port_signal_ids_in_expr(true_expr, port_remap, signal_remap);
             remap_port_signal_ids_in_expr(false_expr, port_remap, signal_remap);
@@ -680,7 +702,10 @@ fn remap_port_signal_ids_in_expr(
         HirExpression::Cast(cast) => {
             remap_port_signal_ids_in_expr(&mut cast.expr, port_remap, signal_remap);
         }
-        HirExpression::Block { statements, result_expr } => {
+        HirExpression::Block {
+            statements,
+            result_expr,
+        } => {
             // Recursively handle statements if they contain expressions
             for stmt in statements {
                 remap_port_signal_ids_in_stmt(stmt, port_remap, signal_remap);
@@ -1112,7 +1137,7 @@ fn remap_expr_ports(
             hir::HirExpression::Match(hir::HirMatchExpr {
                 expr: Box::new(new_scrutinee),
                 arms: new_arms,
-                mux_style: match_expr.mux_style.clone(),
+                mux_style: match_expr.mux_style,
             })
         }
         // BUG #223 FIX: Handle StructLiteral expressions
@@ -1595,7 +1620,11 @@ fn merge_symbol(target: &mut Hir, source: &Hir, symbol_name: &str) -> Result<()>
                         .iter_mut()
                         .find(|i| i.entity == hir::EntityId::GLOBAL_IMPL)
                     {
-                        if !global_impl.constants.iter().any(|c| c.name == constant.name) {
+                        if !global_impl
+                            .constants
+                            .iter()
+                            .any(|c| c.name == constant.name)
+                        {
                             global_impl.constants.push(constant.clone());
                         }
                     }
@@ -2277,7 +2306,11 @@ fn merge_all_symbols(target: &mut Hir, source: &Hir) -> Result<()> {
                     .iter_mut()
                     .find(|i| i.entity == hir::EntityId::GLOBAL_IMPL)
                 {
-                    if !global_impl.functions.iter().any(|f| f.name == function.name) {
+                    if !global_impl
+                        .functions
+                        .iter()
+                        .any(|f| f.name == function.name)
+                    {
                         global_impl.functions.push(function.clone());
                     }
                 }

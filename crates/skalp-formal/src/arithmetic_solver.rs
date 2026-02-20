@@ -12,9 +12,9 @@
 //!    substituting each node variable with its gate equation polynomial (a·b)
 //! 4. If W reduces to zero, the group is proven equivalent
 
-use std::collections::{BTreeMap, BTreeSet, HashSet};
 use crate::equivalence::{Aig, AigLit, AigNode};
 use rayon::prelude::*;
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 /// Maximum number of terms before bailing out (prevents exponential blowup on non-multiplier cones)
 const TERM_LIMIT: usize = 1_000_000;
@@ -38,7 +38,11 @@ pub enum AlgebraicGroupStatus {
     /// Group proven equivalent (W reduced to zero)
     Proven { substitutions: usize, time_ms: u64 },
     /// Could not prove — includes diagnostic reason
-    Unknown { reason: String, cone_size: usize, terms_at_failure: usize },
+    Unknown {
+        reason: String,
+        cone_size: usize,
+        terms_at_failure: usize,
+    },
 }
 
 /// Report for a single group of diff gates
@@ -226,7 +230,12 @@ impl Polynomial {
     /// Substitute a variable: replace all occurrences of `var_id` with `replacement` polynomial.
     /// Uses the identity: mono containing var = (mono without var) * replacement
     /// Returns None if term limit is exceeded or deadline is reached.
-    fn substitute(&self, var_id: u32, replacement: &Polynomial, deadline: std::time::Instant) -> Option<Polynomial> {
+    fn substitute(
+        &self,
+        var_id: u32,
+        replacement: &Polynomial,
+        deadline: std::time::Instant,
+    ) -> Option<Polynomial> {
         if !self.contains_var(var_id) {
             return Some(self.clone());
         }
@@ -238,7 +247,7 @@ impl Polynomial {
         for (mono, &coeff) in &self.terms {
             // Check deadline every 500 iterations within substitute
             iter_count += 1;
-            if iter_count % 500 == 0 && std::time::Instant::now() >= deadline {
+            if iter_count.is_multiple_of(500) && std::time::Instant::now() >= deadline {
                 return None;
             }
 
@@ -329,7 +338,9 @@ fn lit_to_poly(lit: &AigLit) -> Polynomial {
 /// Group unresolved diff gates by base signal name.
 /// E.g., "diff_output[top.voltage_loop.output_reg[5]]" → base="top.voltage_loop.output_reg", bit=5
 /// Returns: BTreeMap<base_name, Vec<(miter_output_index, full_name, bit_index)>>
-fn group_gates_by_signal(unresolved: &[(usize, String)]) -> BTreeMap<String, Vec<(usize, String, u32)>> {
+fn group_gates_by_signal(
+    unresolved: &[(usize, String)],
+) -> BTreeMap<String, Vec<(usize, String, u32)>> {
     let mut groups: BTreeMap<String, Vec<(usize, String, u32)>> = BTreeMap::new();
 
     for (idx, name) in unresolved {
@@ -346,7 +357,10 @@ fn group_gates_by_signal(unresolved: &[(usize, String)]) -> BTreeMap<String, Vec
             Some(s) => s,
             None => {
                 // Can't parse — put in its own group
-                groups.entry(name.clone()).or_default().push((*idx, name.clone(), 0));
+                groups
+                    .entry(name.clone())
+                    .or_default()
+                    .push((*idx, name.clone(), 0));
                 continue;
             }
         };
@@ -357,14 +371,20 @@ fn group_gates_by_signal(unresolved: &[(usize, String)]) -> BTreeMap<String, Vec
             let bit_str = &inner[bracket_pos + 1..];
             if let Some(bit_str) = bit_str.strip_suffix(']') {
                 if let Ok(bit) = bit_str.parse::<u32>() {
-                    groups.entry(base.to_string()).or_default().push((*idx, name.clone(), bit));
+                    groups
+                        .entry(base.to_string())
+                        .or_default()
+                        .push((*idx, name.clone(), bit));
                     continue;
                 }
             }
         }
 
         // No bit index — single-bit signal, bit_index=0
-        groups.entry(inner.to_string()).or_default().push((*idx, name.clone(), 0));
+        groups
+            .entry(inner.to_string())
+            .or_default()
+            .push((*idx, name.clone(), 0));
     }
 
     groups
@@ -405,8 +425,15 @@ fn collect_cone_nodes(miter: &Aig, root_node_ids: &BTreeSet<u32>) -> Option<Vec<
 
 /// Result of algebraic verification for a single group (internal)
 enum AlgebraicResult {
-    Proven { substitutions: usize, time_ms: u64 },
-    Unknown { reason: String, cone_size: usize, terms_at_failure: usize },
+    Proven {
+        substitutions: usize,
+        time_ms: u64,
+    },
+    Unknown {
+        reason: String,
+        cone_size: usize,
+        terms_at_failure: usize,
+    },
 }
 
 /// Verify a word-level group of related diff gates using backward polynomial rewriting.
@@ -415,7 +442,7 @@ enum AlgebraicResult {
 /// If W reduces to 0, all bits in the group are proven equivalent.
 fn verify_word_level_group(
     miter: &Aig,
-    group: &[(usize, String, u32)],  // (miter_output_idx, name, bit_index)
+    group: &[(usize, String, u32)], // (miter_output_idx, name, bit_index)
     matched_pairs: &[(String, AigLit, AigLit)],
 ) -> AlgebraicResult {
     let group_start = std::time::Instant::now();
@@ -428,9 +455,7 @@ fn verify_word_level_group(
         // Find the matched pair for this diff gate
         // The diff gate name is "diff_output[X]" or "diff_next_state[X]"
         // The matched pair name is "output[X]" or "next_state[X]"
-        let pair_name = name
-            .strip_prefix("diff_")
-            .unwrap_or(name);
+        let pair_name = name.strip_prefix("diff_").unwrap_or(name);
 
         let pair = matched_pairs.iter().find(|(n, _, _)| n == pair_name);
         let (mir_lit, gate_lit) = match pair {
@@ -508,7 +533,10 @@ fn verify_word_level_group(
                 Some(p) => p,
                 None => {
                     return AlgebraicResult::Unknown {
-                        reason: format!("intermediate AND product exceeded {} term limit", WORKING_TERM_LIMIT),
+                        reason: format!(
+                            "intermediate AND product exceeded {} term limit",
+                            WORKING_TERM_LIMIT
+                        ),
                         cone_size,
                         terms_at_failure: w.term_count(),
                     };
@@ -520,8 +548,11 @@ fn verify_word_level_group(
                 Some(p) => p,
                 None => {
                     return AlgebraicResult::Unknown {
-                        reason: format!("substitution exceeded term/time limit ({} subs, {} terms)",
-                            substitutions, w.term_count()),
+                        reason: format!(
+                            "substitution exceeded term/time limit ({} subs, {} terms)",
+                            substitutions,
+                            w.term_count()
+                        ),
                         cone_size,
                         terms_at_failure: w.term_count(),
                     };
@@ -540,8 +571,12 @@ fn verify_word_level_group(
             // Working term limit — if polynomial is too large, this isn't a clean multiplier
             if w.term_count() > WORKING_TERM_LIMIT {
                 return AlgebraicResult::Unknown {
-                    reason: format!("working term limit {} exceeded ({} terms after {} subs)",
-                        WORKING_TERM_LIMIT, w.term_count(), substitutions),
+                    reason: format!(
+                        "working term limit {} exceeded ({} terms after {} subs)",
+                        WORKING_TERM_LIMIT,
+                        w.term_count(),
+                        substitutions
+                    ),
                     cone_size,
                     terms_at_failure: w.term_count(),
                 };
@@ -558,8 +593,11 @@ fn verify_word_level_group(
         // Count remaining variables in the polynomial
         let remaining_vars = w.active_vars.len();
         AlgebraicResult::Unknown {
-            reason: format!("non-zero remainder after all substitutions ({} terms, {} variables remaining)",
-                w.term_count(), remaining_vars),
+            reason: format!(
+                "non-zero remainder after all substitutions ({} terms, {} variables remaining)",
+                w.term_count(),
+                remaining_vars
+            ),
             cone_size,
             terms_at_failure: w.term_count(),
         }
@@ -591,9 +629,10 @@ pub fn verify_unresolved_algebraic(
     let groups = group_gates_by_signal(unresolved);
     let total_groups = groups.len();
 
-
     // Process groups in parallel — each group is independent
+    #[allow(clippy::type_complexity)]
     let groups_vec: Vec<(String, Vec<(usize, String, u32)>)> = groups.into_iter().collect();
+    #[allow(clippy::type_complexity)]
     let raw_results: Vec<(String, Vec<(usize, String, u32)>, AlgebraicResult)> = groups_vec
         .par_iter()
         .map(|(base_name, group)| {
@@ -609,7 +648,10 @@ pub fn verify_unresolved_algebraic(
     for (base_name, group, result) in &raw_results {
         let num_bits = group.len();
         match result {
-            AlgebraicResult::Proven { substitutions, time_ms } => {
+            AlgebraicResult::Proven {
+                substitutions,
+                time_ms,
+            } => {
                 for (_, name, _) in group {
                     proven_names.push(name.clone());
                 }
@@ -622,7 +664,11 @@ pub fn verify_unresolved_algebraic(
                     },
                 });
             }
-            AlgebraicResult::Unknown { reason, cone_size, terms_at_failure } => {
+            AlgebraicResult::Unknown {
+                reason,
+                cone_size,
+                terms_at_failure,
+            } => {
                 group_results.push(AlgebraicGroupReport {
                     name: base_name.clone(),
                     num_bits,
@@ -783,12 +829,8 @@ mod tests {
         use crate::equivalence::AigNodeId;
 
         let lit = AigLit::new(AigNodeId(0), false); // constant false
-        let matched_pairs = vec![
-            ("output[x]".to_string(), lit, lit),
-        ];
-        let unresolved = vec![
-            (0, "diff_output[x]".to_string()),
-        ];
+        let matched_pairs = vec![("output[x]".to_string(), lit, lit)];
+        let unresolved = vec![(0, "diff_output[x]".to_string())];
 
         let miter = Aig::new();
         let result = verify_unresolved_algebraic(&miter, &matched_pairs, &unresolved);
@@ -812,12 +854,8 @@ mod tests {
         // Node 4: AND(a, b) — "gate side" (same function, different node)
         let gate_out = miter.add_and(a_lit, b_lit);
 
-        let matched_pairs = vec![
-            ("output[x[0]]".to_string(), mir_out, gate_out),
-        ];
-        let unresolved = vec![
-            (0, "diff_output[x[0]]".to_string()),
-        ];
+        let matched_pairs = vec![("output[x[0]]".to_string(), mir_out, gate_out)];
+        let unresolved = vec![(0, "diff_output[x[0]]".to_string())];
 
         let result = verify_unresolved_algebraic(&miter, &matched_pairs, &unresolved);
         assert_eq!(result.proven_names.len(), 1);

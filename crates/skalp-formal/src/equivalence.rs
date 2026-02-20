@@ -22,19 +22,16 @@
 //! - Check that outputs match at each cycle given same inputs
 //! - This proves equivalence up to bound K (not full proof)
 
+use crate::sat_solver::{CnfFormula, ExtendFormula, Lit, Solver, Var};
 use crate::{Counterexample, FormalError, FormalResult, TraceStep};
-use rayon::prelude::*;
 use rand::Rng;
+use rayon::prelude::*;
+use skalp_lir::synth::{Aig as SynthAig, AigLit as SynthAigLit, Fraig, FraigConfig, Pass, Strash};
 use skalp_lir::{CellFunction, GateNetlist, Lir, LirNode, LirOp, LirSignalId};
-pub use skalp_sim::gpu_aig_cone_sim::AigCone;
-use skalp_lir::synth::{
-    Aig as SynthAig, AigLit as SynthAigLit,
-    Fraig, FraigConfig, Pass, Strash,
-};
 use skalp_mir::Type;
+pub use skalp_sim::gpu_aig_cone_sim::AigCone;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::atomic::{AtomicBool, Ordering};
-use crate::sat_solver::{CnfFormula, ExtendFormula, Lit, Solver, Var};
 
 // ============================================================================
 // AIG (And-Inverter Graph) Representation
@@ -322,8 +319,14 @@ impl LirToAig {
                 }
             }
             if node.output.0 >= num_signals {
-                log::warn!("[LIR_AIG] ❌ Node {} ({:?}) has invalid output signal {} (max={}), path={}",
-                    idx, std::mem::discriminant(&node.op), node.output.0, num_signals - 1, node.path);
+                log::warn!(
+                    "[LIR_AIG] ❌ Node {} ({:?}) has invalid output signal {} (max={}), path={}",
+                    idx,
+                    std::mem::discriminant(&node.op),
+                    node.output.0,
+                    num_signals - 1,
+                    node.path
+                );
             }
         }
 
@@ -401,13 +404,21 @@ impl LirToAig {
 
         // Now create Latch nodes for registers
         for (_, node) in &register_nodes {
-            if let LirOp::Reg { width, reset_value, has_reset, .. } = &node.op {
+            if let LirOp::Reg {
+                width,
+                reset_value,
+                has_reset,
+                ..
+            } = &node.op
+            {
                 let output_signal = &lir.signals[node.output.0 as usize];
-                let d_input = node.inputs.get(0).copied().unwrap_or(LirSignalId(0));
+                let d_input = node.inputs.first().copied().unwrap_or(LirSignalId(0));
                 let reset_val = reset_value.unwrap_or(0);
 
                 // Get the actual width of the D input signal for proper zero-extension
-                let d_input_width = lir.signals.get(d_input.0 as usize)
+                let d_input_width = lir
+                    .signals
+                    .get(d_input.0 as usize)
                     .map(|s| s.width)
                     .unwrap_or(*width);
 
@@ -434,8 +445,7 @@ impl LirToAig {
                             // MUX: rst ? reset_bit : d
                             if reset_bit {
                                 // rst | (!rst & d) = rst | d
-                                let result = self.aig.add_or(rst_lit, d_lit);
-                                result
+                                self.aig.add_or(rst_lit, d_lit)
                             } else {
                                 // !rst & d
                                 self.aig.add_and(rst_lit.invert(), d_lit)
@@ -456,7 +466,8 @@ impl LirToAig {
 
                     // Link state input to latch (metadata-based, no name matching needed)
                     if let Some(state_input_lit) = reg_current_map.get(&(node.output.0, bit)) {
-                        self.aig.link_state_input_to_latch(state_input_lit.node.0, latch_id);
+                        self.aig
+                            .link_state_input_to_latch(state_input_lit.node.0, latch_id);
                     }
 
                     // Update signal_map to use latch output
@@ -531,9 +542,7 @@ impl LirToAig {
         }
 
         // Kahn's algorithm for topological sort
-        let mut in_degree: Vec<usize> = dependencies.iter()
-            .map(|deps| deps.len())
-            .collect();
+        let mut in_degree: Vec<usize> = dependencies.iter().map(|deps| deps.len()).collect();
 
         // Build reverse adjacency: node -> nodes that depend on it
         let mut dependents: Vec<Vec<usize>> = vec![Vec::new(); lir.nodes.len()];
@@ -544,7 +553,8 @@ impl LirToAig {
         }
 
         // Start with nodes that have no dependencies
-        let mut queue: std::collections::VecDeque<usize> = in_degree.iter()
+        let mut queue: std::collections::VecDeque<usize> = in_degree
+            .iter()
             .enumerate()
             .filter(|(_, &d)| d == 0)
             .map(|(i, _)| i)
@@ -564,8 +574,11 @@ impl LirToAig {
 
         // If not all nodes were sorted, there's a cycle - just return original order
         if sorted.len() != lir.nodes.len() {
-            log::warn!("[LIR_TOPO_SORT] Cycle detected (sorted {} of {}), using original order",
-                      sorted.len(), lir.nodes.len());
+            log::warn!(
+                "[LIR_TOPO_SORT] Cycle detected (sorted {} of {}), using original order",
+                sorted.len(),
+                lir.nodes.len()
+            );
             (0..lir.nodes.len()).collect()
         } else {
             sorted
@@ -713,13 +726,19 @@ impl LirToAig {
         let mut result: Vec<AigLit> = vec![self.aig.false_lit(); result_width as usize];
 
         for i in 0..width {
-            let b_bit = b.get(i as usize).copied().unwrap_or_else(|| self.aig.false_lit());
+            let b_bit = b
+                .get(i as usize)
+                .copied()
+                .unwrap_or_else(|| self.aig.false_lit());
 
             let mut carry = self.aig.false_lit();
             for j in 0..width {
                 let out_idx = (i + j) as usize;
                 if out_idx < result_width as usize {
-                    let a_bit = a.get(j as usize).copied().unwrap_or_else(|| self.aig.false_lit());
+                    let a_bit = a
+                        .get(j as usize)
+                        .copied()
+                        .unwrap_or_else(|| self.aig.false_lit());
                     let gated = self.aig.add_and(a_bit, b_bit);
 
                     let sum_ab = self.aig.add_xor(result[out_idx], gated);
@@ -870,13 +889,13 @@ impl LirToAig {
                 // We want: sel ? then_value : else_value
                 // So call add_mux(sel, else_value, then_value)
                 let sel = node.inputs[0];
-                let a = node.inputs[1];  // else_value (when sel=0)
-                let b = node.inputs[2];  // then_value (when sel=1)
+                let a = node.inputs[1]; // else_value (when sel=0)
+                let b = node.inputs[2]; // then_value (when sel=1)
                 let sel_lit = self.get_input_bit(sel, 0);
 
                 for bit in 0..*width {
-                    let a_lit = self.get_input_bit(a, bit);  // else_value
-                    let b_lit = self.get_input_bit(b, bit);  // then_value
+                    let a_lit = self.get_input_bit(a, bit); // else_value
+                    let b_lit = self.get_input_bit(b, bit); // then_value
                     let result = self.aig.add_mux(sel_lit, a_lit, b_lit);
                     self.set_output_bit(node.output, bit, result);
                 }
@@ -1240,7 +1259,11 @@ impl LirToAig {
 
             // Multiplication - creates grade-school multiplier
             // BUG FIX #247: Handle signed multiplication properly
-            LirOp::Mul { width, result_width, signed } => {
+            LirOp::Mul {
+                width,
+                result_width,
+                signed,
+            } => {
                 let a = node.inputs[0];
                 let b = node.inputs[1];
 
@@ -1249,7 +1272,14 @@ impl LirToAig {
                     // BUG FIX #247: Look up actual signal widths for asymmetric inputs (e.g., 16×32)
                     let a_actual_width = lir.signals[a.0 as usize].width;
                     let b_actual_width = lir.signals[b.0 as usize].width;
-                    self.build_signed_mul_lir(a, b, *width, *result_width, a_actual_width, b_actual_width)
+                    self.build_signed_mul_lir(
+                        a,
+                        b,
+                        *width,
+                        *result_width,
+                        a_actual_width,
+                        b_actual_width,
+                    )
                 } else {
                     // Unsigned multiplication (zero-extension is correct, handled by get_input_bit returning 0)
                     self.build_unsigned_mul_lir(a, b, *width, *result_width)
@@ -1442,9 +1472,7 @@ impl GateNetlistToAig {
         self.net_map
             .get(&net_id.0)
             .copied()
-            .unwrap_or_else(|| {
-                self.aig.false_lit()
-            })
+            .unwrap_or_else(|| self.aig.false_lit())
     }
 
     fn set_net(&mut self, net_id: skalp_lir::GateNetId, lit: AigLit) {
@@ -1630,8 +1658,8 @@ impl GateNetlistToAig {
                 // add_mux(sel, a, b) returns sel ? b : a
                 // So call add_mux(sel, d0, d1) for sel ? d1 : d0
                 let sel = self.get_net(cell.inputs[0]);
-                let d0 = self.get_net(cell.inputs[1]);  // else_value (when sel=0)
-                let d1 = self.get_net(cell.inputs[2]);  // then_value (when sel=1)
+                let d0 = self.get_net(cell.inputs[1]); // else_value (when sel=0)
+                let d1 = self.get_net(cell.inputs[2]); // then_value (when sel=1)
 
                 let result = self.aig.add_mux(sel, d0, d1);
 
@@ -1647,7 +1675,9 @@ impl GateNetlistToAig {
                 let cell_type_upper = cell.cell_type.to_uppercase();
                 let inputs: Vec<_> = cell.inputs.iter().map(|&id| self.get_net(id)).collect();
 
-                let handled = if cell_type_upper.starts_with("BUF") || cell_type_upper.contains("BUFFER") {
+                let handled = if cell_type_upper.starts_with("BUF")
+                    || cell_type_upper.contains("BUFFER")
+                {
                     // Buffer: output = input
                     if !inputs.is_empty() {
                         if let Some(out) = output_net {
@@ -1756,13 +1786,19 @@ impl GateNetlistToAig {
                     } else {
                         false
                     }
-                } else if cell_type_upper.contains("TIE0") || cell_type_upper.contains("TIELOW") || cell_type_upper.contains("TIE_LOW") {
+                } else if cell_type_upper.contains("TIE0")
+                    || cell_type_upper.contains("TIELOW")
+                    || cell_type_upper.contains("TIE_LOW")
+                {
                     // Tie to 0
                     if let Some(out) = output_net {
                         self.set_net(out, self.aig.false_lit());
                     }
                     true
-                } else if cell_type_upper.contains("TIE1") || cell_type_upper.contains("TIEHIGH") || cell_type_upper.contains("TIE_HIGH") {
+                } else if cell_type_upper.contains("TIE1")
+                    || cell_type_upper.contains("TIEHIGH")
+                    || cell_type_upper.contains("TIE_HIGH")
+                {
                     // Tie to 1
                     if let Some(out) = output_net {
                         self.set_net(out, self.aig.true_lit());
@@ -1894,7 +1930,9 @@ impl GateNetlistToAig {
                     // Pattern: DFF Q → AsyncResetInvQ → actual state output
                     // If so, the temp input represents the ACTUAL state (non-inverted).
                     // The DFF Q net gets the INVERTED temp input (since DFF stores complement).
-                    let inv_q_info = netlist.cells.iter()
+                    let inv_q_info = netlist
+                        .cells
+                        .iter()
                         .find(|c| {
                             c.inputs.iter().any(|i| i.0 == out.0)
                                 && c.source_op.as_deref() == Some("AsyncResetInvQ")
@@ -1970,10 +2008,16 @@ impl GateNetlistToAig {
             });
 
             let d_lit = if let Some(&d_net) = d_input {
-                self.net_map.get(&d_net.0).copied().unwrap_or_else(|| self.aig.false_lit())
+                self.net_map
+                    .get(&d_net.0)
+                    .copied()
+                    .unwrap_or_else(|| self.aig.false_lit())
             } else {
                 // No D input found, latch holds its value
-                self.net_map.get(&out_net.0).copied().unwrap_or_else(|| self.aig.false_lit())
+                self.net_map
+                    .get(&out_net.0)
+                    .copied()
+                    .unwrap_or_else(|| self.aig.false_lit())
             };
 
             // Determine reset handling using source_op metadata from tech mapper:
@@ -2000,7 +2044,9 @@ impl GateNetlistToAig {
                         && c.source_op.as_deref() == Some("AsyncResetInvQ")
                 });
                 match (inv_d, inv_q) {
-                    (Some(id), Some(iq)) => Some((id.inputs.first().copied(), iq.outputs.first().copied())),
+                    (Some(id), Some(iq)) => {
+                        Some((id.inputs.first().copied(), iq.outputs.first().copied()))
+                    }
                     _ => None,
                 }
             } else {
@@ -2018,7 +2064,10 @@ impl GateNetlistToAig {
                         self.net_map.insert(rst_net.0, lit);
                         lit
                     });
-                    let d_orig_lit = self.net_map.get(&d_orig_net.0).copied()
+                    let d_orig_lit = self
+                        .net_map
+                        .get(&d_orig_net.0)
+                        .copied()
                         .unwrap_or_else(|| self.aig.false_lit());
                     // next = rst | d_orig (matches LIR AIG: rst ? 1 : d)
                     let next = self.aig.add_or(rst_lit, d_orig_lit);
@@ -2034,14 +2083,20 @@ impl GateNetlistToAig {
 
                     if let Some(mux_cell) = reset_mux {
                         // D is driven by ResetMux: non-zero reset value
-                        let reset_val = mux_cell.inputs.get(2).and_then(|&reset_net| {
-                            netlist.cells.iter().find(|c| {
-                                c.outputs.iter().any(|o| o.0 == reset_net.0)
-                                    && c.source_op.as_deref() == Some("ResetValue")
+                        let reset_val = mux_cell
+                            .inputs
+                            .get(2)
+                            .and_then(|&reset_net| {
+                                netlist.cells.iter().find(|c| {
+                                    c.outputs.iter().any(|o| o.0 == reset_net.0)
+                                        && c.source_op.as_deref() == Some("ResetValue")
+                                })
                             })
-                        }).map(|tie_cell| {
-                            tie_cell.cell_type.contains("HIGH") || tie_cell.cell_type.contains("HI")
-                        }).unwrap_or(false);
+                            .map(|tie_cell| {
+                                tie_cell.cell_type.contains("HIGH")
+                                    || tie_cell.cell_type.contains("HI")
+                            })
+                            .unwrap_or(false);
 
                         (d_lit, reset_val, latch_name.clone(), None)
                     } else if let Some(rst_net) = cell.reset {
@@ -2052,7 +2107,12 @@ impl GateNetlistToAig {
                             self.net_map.insert(rst_net.0, lit);
                             lit
                         });
-                        (self.aig.add_and(rst_lit.invert(), d_lit), false, latch_name.clone(), None)
+                        (
+                            self.aig.add_and(rst_lit.invert(), d_lit),
+                            false,
+                            latch_name.clone(),
+                            None,
+                        )
                     } else {
                         // No reset
                         (d_lit, false, latch_name.clone(), None)
@@ -2066,7 +2126,8 @@ impl GateNetlistToAig {
             let latch_id = latch_lit.node.0;
 
             // Link state input to latch (metadata-based, no name matching needed)
-            self.aig.link_state_input_to_latch(*state_input_id, latch_id);
+            self.aig
+                .link_state_input_to_latch(*state_input_id, latch_id);
 
             // Update net_map to use latch output
             self.net_map.insert(out_net.0, latch_lit);
@@ -2179,7 +2240,10 @@ pub fn build_miter(aig1: &Aig, aig2: &Aig) -> FormalResult<Aig> {
 }
 
 fn remap_lit(lit: AigLit, map: &BTreeMap<u32, AigLit>) -> AigLit {
-    let mapped = map.get(&lit.node.0).copied().unwrap_or(AigLit::positive(AigNodeId(0)));
+    let mapped = map
+        .get(&lit.node.0)
+        .copied()
+        .unwrap_or(AigLit::positive(AigNodeId(0)));
     if lit.inverted {
         mapped.invert()
     } else {
@@ -2229,7 +2293,11 @@ fn copy_aig_structure(target: &mut Aig, source: &Aig, map: &mut BTreeMap<u32, Ai
 /// This can find bugs in slow state machines without needing to simulate to reach the state.
 ///
 /// The check asks: "Exists state S, input I: next_state_A(S,I) != next_state_B(S,I) OR output_A(S,I) != output_B(S,I)"
-pub fn check_sequential_equivalence_sat(aig1: &Aig, aig2: &Aig, thorough: bool) -> FormalResult<SymbolicEquivalenceResult> {
+pub fn check_sequential_equivalence_sat(
+    aig1: &Aig,
+    aig2: &Aig,
+    thorough: bool,
+) -> FormalResult<SymbolicEquivalenceResult> {
     let start = std::time::Instant::now();
 
     // Build a miter that compares both outputs AND next-state (latch D inputs)
@@ -2245,7 +2313,11 @@ pub fn check_sequential_equivalence_sat(aig1: &Aig, aig2: &Aig, thorough: bool) 
         }
     }
 
-    let and_count = miter.nodes.iter().filter(|n| matches!(n, AigNode::And { .. })).count();
+    let and_count = miter
+        .nodes
+        .iter()
+        .filter(|n| matches!(n, AigNode::And { .. }))
+        .count();
 
     // Quick check: if the miter output is already a constant, skip all solving
     let miter_out = miter.outputs.last().unwrap();
@@ -2285,40 +2357,35 @@ pub fn check_sequential_equivalence_sat(aig1: &Aig, aig2: &Aig, thorough: bool) 
             let _ = tx.send((synth_miter, before_ands, after_ands));
         });
 
-        match rx.recv_timeout(fraig_timeout) {
-            Ok((synth_miter, before_ands, after_ands)) => {
-
-                // Check if miter output was reduced to constant (last output = OR of all diffs)
-                let outputs = synth_miter.outputs();
-                if let Some((_, out_lit)) = outputs.last() {
-                    if let Some(val) = out_lit.const_value() {
-                        if !val {
-                            return Ok(SymbolicEquivalenceResult {
-                                equivalent: true,
-                                counterexample: None,
-                                checked_outputs: true,
-                                checked_next_state: true,
-                                time_ms: start.elapsed().as_millis() as u64,
-                                proven_gates: Vec::new(),
-                                unresolved_gates: Vec::new(),
-                                algebraic_result: None,
-                            });
-                        } else {
-                            return Ok(SymbolicEquivalenceResult {
-                                equivalent: false,
-                                counterexample: None,
-                                checked_outputs: true,
-                                checked_next_state: true,
-                                time_ms: start.elapsed().as_millis() as u64,
-                                proven_gates: Vec::new(),
-                                unresolved_gates: Vec::new(),
-                                algebraic_result: None,
-                            });
-                        }
+        if let Ok((synth_miter, _before_ands, _after_ands)) = rx.recv_timeout(fraig_timeout) {
+            // Check if miter output was reduced to constant (last output = OR of all diffs)
+            let outputs = synth_miter.outputs();
+            if let Some((_, out_lit)) = outputs.last() {
+                if let Some(val) = out_lit.const_value() {
+                    if !val {
+                        return Ok(SymbolicEquivalenceResult {
+                            equivalent: true,
+                            counterexample: None,
+                            checked_outputs: true,
+                            checked_next_state: true,
+                            time_ms: start.elapsed().as_millis() as u64,
+                            proven_gates: Vec::new(),
+                            unresolved_gates: Vec::new(),
+                            algebraic_result: None,
+                        });
+                    } else {
+                        return Ok(SymbolicEquivalenceResult {
+                            equivalent: false,
+                            counterexample: None,
+                            checked_outputs: true,
+                            checked_next_state: true,
+                            time_ms: start.elapsed().as_millis() as u64,
+                            proven_gates: Vec::new(),
+                            unresolved_gates: Vec::new(),
+                            algebraic_result: None,
+                        });
                     }
                 }
-            }
-            Err(_) => {
             }
         }
     }
@@ -2331,12 +2398,19 @@ pub fn check_sequential_equivalence_sat(aig1: &Aig, aig2: &Aig, thorough: bool) 
     let (formula, var_map, _miter_output_lit) = aig_to_cnf(&miter);
 
     // Build init-state constraints for k-induction base case
-    let init_constraints: Vec<Lit> = miter.nodes.iter().enumerate()
+    let init_constraints: Vec<Lit> = miter
+        .nodes
+        .iter()
+        .enumerate()
         .filter_map(|(idx, node)| {
             if let AigNode::Input { name } = node {
                 state_init_map.get(name).and_then(|&init_val| {
                     var_map.get(&(idx as u32)).map(|&var| {
-                        if init_val { Lit::positive(var) } else { Lit::negative(var) }
+                        if init_val {
+                            Lit::positive(var)
+                        } else {
+                            Lit::negative(var)
+                        }
                     })
                 })
             } else {
@@ -2346,7 +2420,6 @@ pub fn check_sequential_equivalence_sat(aig1: &Aig, aig2: &Aig, thorough: bool) 
         .collect();
 
     let diff_count = miter.outputs.len().saturating_sub(1);
-
 
     // Separate output diffs (required) from latch next-state diffs (best-effort)
     let mut output_gates: Vec<(usize, String, Lit)> = Vec::new();
@@ -2368,8 +2441,6 @@ pub fn check_sequential_equivalence_sat(aig1: &Aig, aig2: &Aig, thorough: bool) 
             // Skip mir_next[*] and gate_next[*] diagnostic outputs
         }
     }
-
-
 
     // Helper: validate a SAT counterexample by evaluating the miter AIG
     // Returns true if the diff gate actually outputs 1 with the given model
@@ -2413,16 +2484,22 @@ pub fn check_sequential_equivalence_sat(aig1: &Aig, aig2: &Aig, thorough: bool) 
     // Helper: run parallel SAT on a set of diff gates
     // limit=0 means no conflict limit (run to completion); limit>0 sets per-gate conflict limit
     // Returns: (validated SAT counterexample if found, proven gate names, unresolved gate (idx, name) pairs)
-    let run_parallel_sat = |gates: &[(usize, String, Lit)], _label: &str, limit: i32|
-        -> (Option<(String, Vec<Lit>)>, Vec<String>, Vec<(usize, String)>)
-    {
+    #[allow(clippy::type_complexity)]
+    let run_parallel_sat = |gates: &[(usize, String, Lit)],
+                            _label: &str,
+                            limit: i32|
+     -> (
+        Option<(String, Vec<Lit>)>,
+        Vec<String>,
+        Vec<(usize, String)>,
+    ) {
         // Collect per-gate results using parallel map, then partition
         use std::sync::Mutex;
         let proven_names: Mutex<Vec<String>> = Mutex::new(Vec::new());
         let unresolved_names: Mutex<Vec<(usize, String)>> = Mutex::new(Vec::new());
 
-        let sat_result: Option<(usize, String, Vec<Lit>)> = gates.par_iter()
-            .find_map_any(|(idx, diff_name, sat_lit)| {
+        let sat_result: Option<(usize, String, Vec<Lit>)> =
+            gates.par_iter().find_map_any(|(idx, diff_name, sat_lit)| {
                 let mut solver = Solver::new();
                 solver.add_formula(&formula);
                 solver.add_clause(&[*sat_lit]);
@@ -2440,7 +2517,10 @@ pub fn check_sequential_equivalence_sat(aig1: &Aig, aig2: &Aig, thorough: bool) 
                         None
                     }
                     Err(_) => {
-                        unresolved_names.lock().unwrap().push((*idx, diff_name.clone()));
+                        unresolved_names
+                            .lock()
+                            .unwrap()
+                            .push((*idx, diff_name.clone()));
                         None
                     }
                 }
@@ -2465,9 +2545,15 @@ pub fn check_sequential_equivalence_sat(aig1: &Aig, aig2: &Aig, thorough: bool) 
     // Used for latch gates where SAT counterexamples are demoted to unresolved,
     // so we must check every gate. find_map_any would cancel in-flight gates when
     // any gate finds SAT, silently losing their results and causing non-determinism.
-    let run_parallel_sat_exhaustive = |gates: &[(usize, String, Lit)], _label: &str, limit: i32|
-        -> (Vec<(usize, String, Vec<Lit>)>, Vec<String>, Vec<(usize, String)>)
-    {
+    #[allow(clippy::type_complexity)]
+    let run_parallel_sat_exhaustive = |gates: &[(usize, String, Lit)],
+                                       _label: &str,
+                                       limit: i32|
+     -> (
+        Vec<(usize, String, Vec<Lit>)>,
+        Vec<String>,
+        Vec<(usize, String)>,
+    ) {
         use std::sync::Mutex;
         let proven_names: Mutex<Vec<String>> = Mutex::new(Vec::new());
         let unresolved_names: Mutex<Vec<(usize, String)>> = Mutex::new(Vec::new());
@@ -2484,13 +2570,19 @@ pub fn check_sequential_equivalence_sat(aig1: &Aig, aig2: &Aig, thorough: bool) 
             match solver.solve() {
                 Ok(true) => {
                     let model = solver.model().unwrap().to_vec();
-                    sat_results.lock().unwrap().push((*idx, diff_name.clone(), model));
+                    sat_results
+                        .lock()
+                        .unwrap()
+                        .push((*idx, diff_name.clone(), model));
                 }
                 Ok(false) => {
                     proven_names.lock().unwrap().push(diff_name.clone());
                 }
                 Err(_) => {
-                    unresolved_names.lock().unwrap().push((*idx, diff_name.clone()));
+                    unresolved_names
+                        .lock()
+                        .unwrap()
+                        .push((*idx, diff_name.clone()));
                 }
             }
         });
@@ -2507,10 +2599,12 @@ pub fn check_sequential_equivalence_sat(aig1: &Aig, aig2: &Aig, thorough: bool) 
 
     if !output_gates.is_empty() {
         let output_conflict_limit = if thorough { 0 } else { 5_000_000 };
-        let (sat_result, proven, unresolved) = run_parallel_sat(&output_gates, "outputs", output_conflict_limit);
+        let (sat_result, proven, unresolved) =
+            run_parallel_sat(&output_gates, "outputs", output_conflict_limit);
         if let Some((diff_name, model)) = sat_result {
             print_counterexample_diagnosis(&miter, &var_map, &model, &diff_name);
-            let counterexample = extract_symbolic_counterexample(&miter, &var_map, &model, Some(diff_name.clone()));
+            let counterexample =
+                extract_symbolic_counterexample(&miter, &var_map, &model, Some(diff_name.clone()));
             return Ok(SymbolicEquivalenceResult {
                 equivalent: false,
                 counterexample: Some(counterexample),
@@ -2539,7 +2633,8 @@ pub fn check_sequential_equivalence_sat(aig1: &Aig, aig2: &Aig, thorough: bool) 
         // Use exhaustive SAT (not find_map_any) to ensure ALL latch gates are checked.
         // Latch counterexamples are demoted to unresolved, so early termination would
         // silently lose results from cancelled threads, causing non-deterministic counts.
-        let (sat_results, proven, mut unresolved) = run_parallel_sat_exhaustive(&latch_gates, "latches", latch_conflict_limit);
+        let (sat_results, proven, mut unresolved) =
+            run_parallel_sat_exhaustive(&latch_gates, "latches", latch_conflict_limit);
         for (idx, diff_name, model) in &sat_results {
             print_counterexample_diagnosis(&miter, &var_map, model, diff_name);
             unresolved.push((*idx, diff_name.clone()));
@@ -2547,7 +2642,6 @@ pub fn check_sequential_equivalence_sat(aig1: &Aig, aig2: &Aig, thorough: bool) 
         all_proven.extend(proven);
         all_unresolved.extend(unresolved);
     }
-
 
     // --- Phase 2b-2.5: k-Induction base case (constrained SAT with init state + proven lemmas) ---
     if !all_unresolved.is_empty() && !init_constraints.is_empty() {
@@ -2572,9 +2666,9 @@ pub fn check_sequential_equivalence_sat(aig1: &Aig, aig2: &Aig, thorough: bool) 
             }
         }
 
-
         // Build constrained gate list from all_unresolved
-        let constrained_gates: Vec<(usize, String, Lit)> = all_unresolved.iter()
+        let constrained_gates: Vec<(usize, String, Lit)> = all_unresolved
+            .iter()
             .filter_map(|(idx, name)| {
                 let diff_lit = &miter.outputs[*idx];
                 var_map.get(&diff_lit.node.0).map(|&var| {
@@ -2589,7 +2683,8 @@ pub fn check_sequential_equivalence_sat(aig1: &Aig, aig2: &Aig, thorough: bool) 
             .collect();
 
         // Run per-gate SAT with init constraints + proven lemmas
-        let newly_proven: Vec<String> = constrained_gates.par_iter()
+        let newly_proven: Vec<String> = constrained_gates
+            .par_iter()
             .filter_map(|(_idx, diff_name, sat_lit)| {
                 let mut solver = Solver::new();
                 solver.add_formula(&formula);
@@ -2619,7 +2714,6 @@ pub fn check_sequential_equivalence_sat(aig1: &Aig, aig2: &Aig, thorough: bool) 
             let newly_proven_set: BTreeSet<String> = newly_proven.iter().cloned().collect();
             all_unresolved.retain(|(_, name)| !newly_proven_set.contains(name));
             all_proven.extend(newly_proven.iter().cloned());
-        } else {
         }
     }
 
@@ -2645,8 +2739,12 @@ pub fn check_sequential_equivalence_sat(aig1: &Aig, aig2: &Aig, thorough: bool) 
     Ok(SymbolicEquivalenceResult {
         equivalent: true,
         counterexample: None,
-        checked_outputs: all_unresolved.iter().all(|(_, n)| !n.starts_with("diff_output[")),
-        checked_next_state: all_unresolved.iter().all(|(_, n)| !n.starts_with("diff_next_state[")),
+        checked_outputs: all_unresolved
+            .iter()
+            .all(|(_, n)| !n.starts_with("diff_output[")),
+        checked_next_state: all_unresolved
+            .iter()
+            .all(|(_, n)| !n.starts_with("diff_next_state[")),
         time_ms: start.elapsed().as_millis() as u64,
         proven_gates: all_proven,
         unresolved_gates: all_unresolved,
@@ -2669,15 +2767,36 @@ fn simulate_miter_random(
     let mut rng = rand::rngs::StdRng::seed_from_u64(42); // deterministic seed
 
     // Identify input and latch node indices for random assignment
-    let input_indices: Vec<usize> = miter.nodes.iter().enumerate()
-        .filter_map(|(i, n)| if matches!(n, AigNode::Input { .. }) { Some(i) } else { None })
+    let input_indices: Vec<usize> = miter
+        .nodes
+        .iter()
+        .enumerate()
+        .filter_map(|(i, n)| {
+            if matches!(n, AigNode::Input { .. }) {
+                Some(i)
+            } else {
+                None
+            }
+        })
         .collect();
-    let latch_indices: Vec<usize> = miter.nodes.iter().enumerate()
-        .filter_map(|(i, n)| if matches!(n, AigNode::Latch { .. }) { Some(i) } else { None })
+    let latch_indices: Vec<usize> = miter
+        .nodes
+        .iter()
+        .enumerate()
+        .filter_map(|(i, n)| {
+            if matches!(n, AigNode::Latch { .. }) {
+                Some(i)
+            } else {
+                None
+            }
+        })
         .collect();
 
     // Pre-collect AND gate info for fast evaluation
-    let and_info: Vec<(usize, u32, bool, u32, bool)> = miter.nodes.iter().enumerate()
+    let and_info: Vec<(usize, u32, bool, u32, bool)> = miter
+        .nodes
+        .iter()
+        .enumerate()
         .filter_map(|(i, n)| {
             if let AigNode::And { left, right } = n {
                 Some((i, left.node.0, left.inverted, right.node.0, right.inverted))
@@ -2688,7 +2807,8 @@ fn simulate_miter_random(
         .collect();
 
     // Pre-collect diff gate output info (excluding the last output which is the miter OR)
-    let diff_outputs: Vec<(usize, u32, bool, &str)> = diff_gate_indices.iter()
+    let diff_outputs: Vec<(usize, u32, bool, &str)> = diff_gate_indices
+        .iter()
         .filter_map(|(idx, name)| {
             let lit = miter.outputs.get(*idx)?;
             Some((*idx, lit.node.0, lit.inverted, name.as_str()))
@@ -2696,7 +2816,9 @@ fn simulate_miter_random(
         .collect();
 
     // Map state_input nodes to their latch values
-    let state_input_map: Vec<(usize, usize)> = miter.state_input_to_latch.iter()
+    let state_input_map: Vec<(usize, usize)> = miter
+        .state_input_to_latch
+        .iter()
         .map(|(si, latch)| (*si as usize, *latch as usize))
         .collect();
 
@@ -2749,7 +2871,9 @@ fn simulate_miter_random(
 /// with node IDs remapped to [0..N) for efficient GPU evaluation.
 pub fn extract_aig_cone(miter: &Aig, diff_gate_idx: usize) -> AigCone {
     let diff_lit = &miter.outputs[diff_gate_idx];
-    let diff_name = miter.output_names.get(diff_gate_idx)
+    let diff_name = miter
+        .output_names
+        .get(diff_gate_idx)
         .cloned()
         .unwrap_or_else(|| format!("diff_{}", diff_gate_idx));
 
@@ -2788,8 +2912,20 @@ pub fn extract_aig_cone(miter: &Aig, diff_gate_idx: usize) -> AigCone {
     }
 
     // Build input node_id → name mapping
-    let input_id_to_name: BTreeMap<u32, String> = miter.inputs.iter().enumerate()
-        .map(|(i, id)| (id.0, miter.input_names.get(i).cloned().unwrap_or_else(|| format!("input_{}", i))))
+    let input_id_to_name: BTreeMap<u32, String> = miter
+        .inputs
+        .iter()
+        .enumerate()
+        .map(|(i, id)| {
+            (
+                id.0,
+                miter
+                    .input_names
+                    .get(i)
+                    .cloned()
+                    .unwrap_or_else(|| format!("input_{}", i)),
+            )
+        })
         .collect();
 
     // Phase 3: Collect cone components with remapped IDs
@@ -2806,11 +2942,22 @@ pub fn extract_aig_cone(miter: &Aig, diff_gate_idx: usize) -> AigCone {
             AigNode::And { left, right } => {
                 let l_compact = id_map[&left.node.0];
                 let r_compact = id_map[&right.node.0];
-                and_gates.push((compact_id, l_compact, left.inverted, r_compact, right.inverted));
+                and_gates.push((
+                    compact_id,
+                    l_compact,
+                    left.inverted,
+                    r_compact,
+                    right.inverted,
+                ));
             }
             AigNode::Input { .. } => {
                 input_indices.push(compact_id);
-                input_names.push(input_id_to_name.get(&orig_id).cloned().unwrap_or_else(|| format!("node_{}", orig_id)));
+                input_names.push(
+                    input_id_to_name
+                        .get(&orig_id)
+                        .cloned()
+                        .unwrap_or_else(|| format!("node_{}", orig_id)),
+                );
                 // Map state_input → latch if applicable
                 if let Some(&latch_orig) = miter.state_input_to_latch.get(&orig_id) {
                     if let Some(&latch_compact) = id_map.get(&latch_orig) {
@@ -2860,8 +3007,17 @@ pub fn inject_random_bugs(aig: &Aig, count: usize) -> Vec<(Aig, String)> {
             .as_nanos() as u64,
     );
 
-    let latch_indices: Vec<usize> = aig.nodes.iter().enumerate()
-        .filter_map(|(i, n)| if matches!(n, AigNode::Latch { .. }) { Some(i) } else { None })
+    let latch_indices: Vec<usize> = aig
+        .nodes
+        .iter()
+        .enumerate()
+        .filter_map(|(i, n)| {
+            if matches!(n, AigNode::Latch { .. }) {
+                Some(i)
+            } else {
+                None
+            }
+        })
         .collect();
 
     let mut results = Vec::new();
@@ -2870,9 +3026,15 @@ pub fn inject_random_bugs(aig: &Aig, count: usize) -> Vec<(Aig, String)> {
         // Pick a strategy — only use always-observable mutations that validate
         // miter construction/matching (not stuck-at, which can hit redundant logic)
         let mut strategies: Vec<u8> = Vec::new();
-        if !aig.outputs.is_empty() { strategies.push(0); } // invert output
-        if !latch_indices.is_empty() { strategies.push(1); } // invert latch next-state
-        if aig.outputs.len() >= 2 { strategies.push(2); } // swap outputs
+        if !aig.outputs.is_empty() {
+            strategies.push(0);
+        } // invert output
+        if !latch_indices.is_empty() {
+            strategies.push(1);
+        } // invert latch next-state
+        if aig.outputs.len() >= 2 {
+            strategies.push(2);
+        } // swap outputs
 
         if strategies.is_empty() {
             break;
@@ -2886,13 +3048,22 @@ pub fn inject_random_bugs(aig: &Aig, count: usize) -> Vec<(Aig, String)> {
                 // Invert a random output literal
                 let idx = rng.gen_range(0..mutant.outputs.len());
                 mutant.outputs[idx].inverted = !mutant.outputs[idx].inverted;
-                let name = mutant.output_names.get(idx).cloned().unwrap_or_else(|| format!("out_{}", idx));
+                let name = mutant
+                    .output_names
+                    .get(idx)
+                    .cloned()
+                    .unwrap_or_else(|| format!("out_{}", idx));
                 format!("invert output '{}'", name)
             }
             1 => {
                 // Invert a random latch next-state literal
                 let li = latch_indices[rng.gen_range(0..latch_indices.len())];
-                if let AigNode::Latch { ref name, ref mut next, .. } = mutant.nodes[li] {
+                if let AigNode::Latch {
+                    ref name,
+                    ref mut next,
+                    ..
+                } = mutant.nodes[li]
+                {
                     next.inverted = !next.inverted;
                     format!("invert latch next-state '{}'", name)
                 } else {
@@ -2913,12 +3084,24 @@ pub fn inject_random_bugs(aig: &Aig, count: usize) -> Vec<(Aig, String)> {
                     // All outputs have the same literal — fall back to invert
                     let idx = rng.gen_range(0..mutant.outputs.len());
                     mutant.outputs[idx].inverted = !mutant.outputs[idx].inverted;
-                    let name = mutant.output_names.get(idx).cloned().unwrap_or_else(|| format!("out_{}", idx));
+                    let name = mutant
+                        .output_names
+                        .get(idx)
+                        .cloned()
+                        .unwrap_or_else(|| format!("out_{}", idx));
                     format!("invert output '{}'", name)
                 } else {
                     mutant.outputs.swap(a, b);
-                    let name_a = aig.output_names.get(a).cloned().unwrap_or_else(|| format!("out_{}", a));
-                    let name_b = aig.output_names.get(b).cloned().unwrap_or_else(|| format!("out_{}", b));
+                    let name_a = aig
+                        .output_names
+                        .get(a)
+                        .cloned()
+                        .unwrap_or_else(|| format!("out_{}", a));
+                    let name_b = aig
+                        .output_names
+                        .get(b)
+                        .cloned()
+                        .unwrap_or_else(|| format!("out_{}", b));
                     format!("swap outputs '{}' <-> '{}'", name_a, name_b)
                 }
             }
@@ -2962,22 +3145,25 @@ pub fn check_non_equivalence_fast(aig1: &Aig, aig2: &Aig) -> bool {
         .filter_map(|idx| {
             let diff_lit = &miter.outputs[idx];
             let var = var_map.get(&diff_lit.node.0)?;
-            Some(if diff_lit.inverted { Lit::negative(*var) } else { Lit::positive(*var) })
+            Some(if diff_lit.inverted {
+                Lit::negative(*var)
+            } else {
+                Lit::positive(*var)
+            })
         })
         .collect();
 
     // Try all diff gates in parallel with 100K conflict limit (fast detection, not proof)
-    let detected = diff_gates.par_iter()
-        .find_map_any(|sat_lit| {
-            let mut solver = Solver::new();
-            solver.add_formula(&formula);
-            solver.add_clause(&[*sat_lit]);
-            solver.set_conflict_limit(100_000);
-            match solver.solve() {
-                Ok(true) => Some(true), // SAT = non-equivalent detected
-                _ => None,
-            }
-        });
+    let detected = diff_gates.par_iter().find_map_any(|sat_lit| {
+        let mut solver = Solver::new();
+        solver.add_formula(&formula);
+        solver.add_clause(&[*sat_lit]);
+        solver.set_conflict_limit(100_000);
+        match solver.solve() {
+            Ok(true) => Some(true), // SAT = non-equivalent detected
+            _ => None,
+        }
+    });
 
     if detected.is_some() {
         return true;
@@ -2986,7 +3172,11 @@ pub fn check_non_equivalence_fast(aig1: &Aig, aig2: &Aig) -> bool {
     // SAT couldn't detect — fall back to miter simulation (catches multiplier-cone mutations)
     let diff_gate_indices: Vec<(usize, String)> = (0..diff_count)
         .map(|idx| {
-            let name = miter.output_names.get(idx).cloned().unwrap_or_else(|| format!("diff_{}", idx));
+            let name = miter
+                .output_names
+                .get(idx)
+                .cloned()
+                .unwrap_or_else(|| format!("diff_{}", idx));
             (idx, name)
         })
         .collect();
@@ -3051,8 +3241,14 @@ fn compute_structural_latch_matches(aig1: &Aig, aig2: &Aig) -> BTreeMap<String, 
     }
 
     // Unmatched latches (present in one side but not the other)
-    let unmatched_mir: std::collections::HashSet<String> = mir_latch_names.difference(&gate_latch_names).cloned().collect();
-    let unmatched_gate: std::collections::HashSet<String> = gate_latch_names.difference(&mir_latch_names).cloned().collect();
+    let unmatched_mir: std::collections::HashSet<String> = mir_latch_names
+        .difference(&gate_latch_names)
+        .cloned()
+        .collect();
+    let unmatched_gate: std::collections::HashSet<String> = gate_latch_names
+        .difference(&mir_latch_names)
+        .cloned()
+        .collect();
 
     if unmatched_mir.is_empty() || unmatched_gate.is_empty() {
         return result;
@@ -3188,7 +3384,10 @@ fn compute_structural_io_matches(
     let aig2_input_keys = build_input_key_map(aig2);
 
     // Compute "input signature" of an output: the set of matched input keys in its backward cone
-    let compute_input_signature = |aig: &Aig, out_lit: AigLit, input_keys: &BTreeMap<u32, String>| -> std::collections::BTreeSet<String> {
+    let compute_input_signature = |aig: &Aig,
+                                   out_lit: AigLit,
+                                   input_keys: &BTreeMap<u32, String>|
+     -> std::collections::BTreeSet<String> {
         let mut sig = std::collections::BTreeSet::new();
         let mut stack = vec![out_lit.node.0];
         let mut visited = std::collections::HashSet::new();
@@ -3200,19 +3399,17 @@ fn compute_structural_io_matches(
                 sig.insert(key.clone());
                 continue;
             }
-            match &aig.nodes[node_id as usize] {
-                AigNode::And { left, right } => {
-                    stack.push(left.node.0);
-                    stack.push(right.node.0);
-                }
-                _ => {}
+            if let AigNode::And { left, right } = &aig.nodes[node_id as usize] {
+                stack.push(left.node.0);
+                stack.push(right.node.0);
             }
         }
         sig
     };
 
     // Collect unmatched outputs from both AIGs with their input signatures
-    let mut aig1_unmatched_outputs: Vec<(String, String, std::collections::BTreeSet<String>)> = Vec::new(); // (key, original_name, signature)
+    let mut aig1_unmatched_outputs: Vec<(String, String, std::collections::BTreeSet<String>)> =
+        Vec::new(); // (key, original_name, signature)
     for (i, &out_lit) in aig1.outputs.iter().enumerate() {
         if let Some(name) = aig1.output_names.get(i) {
             let key = normalize_port_name_with_entity(name, entity_name).key();
@@ -3225,7 +3422,8 @@ fn compute_structural_io_matches(
         }
     }
 
-    let mut aig2_unmatched_outputs: Vec<(String, String, std::collections::BTreeSet<String>)> = Vec::new();
+    let mut aig2_unmatched_outputs: Vec<(String, String, std::collections::BTreeSet<String>)> =
+        Vec::new();
     for (i, &out_lit) in aig2.outputs.iter().enumerate() {
         if let Some(name) = aig2.output_names.get(i) {
             let key = normalize_port_name_with_entity(name, entity_name).key();
@@ -3239,7 +3437,8 @@ fn compute_structural_io_matches(
     }
 
     // Match outputs with identical input signatures (must be unique on both sides)
-    let mut aig1_sig_map: BTreeMap<std::collections::BTreeSet<String>, Vec<usize>> = BTreeMap::new();
+    let mut aig1_sig_map: BTreeMap<std::collections::BTreeSet<String>, Vec<usize>> =
+        BTreeMap::new();
     for (i, (_, _, sig)) in aig1_unmatched_outputs.iter().enumerate() {
         aig1_sig_map.entry(sig.clone()).or_default().push(i);
     }
@@ -3248,7 +3447,10 @@ fn compute_structural_io_matches(
     for (aig2_key, _, aig2_sig) in &aig2_unmatched_outputs {
         if let Some(aig1_indices) = aig1_sig_map.get(aig2_sig) {
             // Only match if there's exactly one candidate on the aig1 side
-            let available: Vec<_> = aig1_indices.iter().filter(|i| !used_aig1.contains(i)).collect();
+            let available: Vec<_> = aig1_indices
+                .iter()
+                .filter(|i| !used_aig1.contains(i))
+                .collect();
             if available.len() == 1 {
                 let aig1_idx = *available[0];
                 let aig1_key = &aig1_unmatched_outputs[aig1_idx].0;
@@ -3261,48 +3463,51 @@ fn compute_structural_io_matches(
     // --- Input matching via forward cone (output signature) ---
 
     // Build node→output_key maps: for each input, find which matched outputs it feeds
-    let compute_output_signature_for_input = |aig: &Aig, input_node_id: u32| -> std::collections::BTreeSet<String> {
-        let mut sig = std::collections::BTreeSet::new();
-        // Forward analysis: check each matched output's backward cone for this input
-        for (i, &out_lit) in aig.outputs.iter().enumerate() {
-            if let Some(name) = aig.output_names.get(i) {
-                let key = normalize_port_name_with_entity(name, entity_name).key();
-                let all_matched: std::collections::HashSet<_> = matched_output_keys.iter()
-                    .chain(output_matches.values())
-                    .chain(output_matches.keys())
-                    .cloned()
-                    .collect();
-                if all_matched.contains(&key) {
-                    // Check if input_node_id is in backward cone of this output
-                    let mut stack = vec![out_lit.node.0];
-                    let mut visited = std::collections::HashSet::new();
-                    let mut found = false;
-                    while let Some(nid) = stack.pop() {
-                        if !visited.insert(nid) { continue; }
-                        if nid == input_node_id {
-                            found = true;
-                            break;
-                        }
-                        match &aig.nodes[nid as usize] {
-                            AigNode::And { left, right } => {
+    let compute_output_signature_for_input =
+        |aig: &Aig, input_node_id: u32| -> std::collections::BTreeSet<String> {
+            let mut sig = std::collections::BTreeSet::new();
+            // Forward analysis: check each matched output's backward cone for this input
+            for (i, &out_lit) in aig.outputs.iter().enumerate() {
+                if let Some(name) = aig.output_names.get(i) {
+                    let key = normalize_port_name_with_entity(name, entity_name).key();
+                    let all_matched: std::collections::HashSet<_> = matched_output_keys
+                        .iter()
+                        .chain(output_matches.values())
+                        .chain(output_matches.keys())
+                        .cloned()
+                        .collect();
+                    if all_matched.contains(&key) {
+                        // Check if input_node_id is in backward cone of this output
+                        let mut stack = vec![out_lit.node.0];
+                        let mut visited = std::collections::HashSet::new();
+                        let mut found = false;
+                        while let Some(nid) = stack.pop() {
+                            if !visited.insert(nid) {
+                                continue;
+                            }
+                            if nid == input_node_id {
+                                found = true;
+                                break;
+                            }
+                            if let AigNode::And { left, right } = &aig.nodes[nid as usize] {
                                 stack.push(left.node.0);
                                 stack.push(right.node.0);
                             }
-                            _ => {}
                         }
-                    }
-                    if found {
-                        sig.insert(key);
+                        if found {
+                            sig.insert(key);
+                        }
                     }
                 }
             }
-        }
-        sig
-    };
+            sig
+        };
 
     // Collect unmatched inputs
-    let mut aig1_unmatched_inputs: Vec<(String, u32, std::collections::BTreeSet<String>)> = Vec::new();
-    let mut aig2_unmatched_inputs: Vec<(String, u32, std::collections::BTreeSet<String>)> = Vec::new();
+    let mut aig1_unmatched_inputs: Vec<(String, u32, std::collections::BTreeSet<String>)> =
+        Vec::new();
+    let mut aig2_unmatched_inputs: Vec<(String, u32, std::collections::BTreeSet<String>)> =
+        Vec::new();
 
     for (idx, node) in aig1.nodes.iter().enumerate() {
         if let AigNode::Input { name } = node {
@@ -3329,7 +3534,8 @@ fn compute_structural_io_matches(
     }
 
     // Match inputs with identical output signatures
-    let mut aig1_input_sig_map: BTreeMap<std::collections::BTreeSet<String>, Vec<usize>> = BTreeMap::new();
+    let mut aig1_input_sig_map: BTreeMap<std::collections::BTreeSet<String>, Vec<usize>> =
+        BTreeMap::new();
     for (i, (_, _, sig)) in aig1_unmatched_inputs.iter().enumerate() {
         aig1_input_sig_map.entry(sig.clone()).or_default().push(i);
     }
@@ -3337,7 +3543,10 @@ fn compute_structural_io_matches(
     let mut used_aig1_inputs: std::collections::HashSet<usize> = std::collections::HashSet::new();
     for (aig2_key, _, aig2_sig) in &aig2_unmatched_inputs {
         if let Some(aig1_indices) = aig1_input_sig_map.get(aig2_sig) {
-            let available: Vec<_> = aig1_indices.iter().filter(|i| !used_aig1_inputs.contains(i)).collect();
+            let available: Vec<_> = aig1_indices
+                .iter()
+                .filter(|i| !used_aig1_inputs.contains(i))
+                .collect();
             if available.len() == 1 {
                 let aig1_idx = *available[0];
                 let aig1_key = &aig1_unmatched_inputs[aig1_idx].0;
@@ -3351,7 +3560,11 @@ fn compute_structural_io_matches(
 }
 
 /// Build a miter that checks both output AND next-state equivalence
-pub fn build_sequential_miter(aig1: &Aig, aig2: &Aig) -> FormalResult<(Aig, Vec<(String, AigLit, AigLit)>)> {
+#[allow(clippy::type_complexity)]
+pub fn build_sequential_miter(
+    aig1: &Aig,
+    aig2: &Aig,
+) -> FormalResult<(Aig, Vec<(String, AigLit, AigLit)>)> {
     let mut miter = Aig::new();
 
     // Pre-compute structural latch matches (gate_name → mir_name)
@@ -3420,14 +3633,22 @@ pub fn build_sequential_miter(aig1: &Aig, aig2: &Aig) -> FormalResult<(Aig, Vec<
     // causing different miter AIG structures and non-deterministic SAT results).
     let mut out1_by_name: BTreeMap<String, AigLit> = BTreeMap::new();
     for (i, out1) in aig1.outputs.iter().enumerate() {
-        let name = aig1.output_names.get(i).cloned().unwrap_or_else(|| format!("output_{}", i));
+        let name = aig1
+            .output_names
+            .get(i)
+            .cloned()
+            .unwrap_or_else(|| format!("output_{}", i));
         let normalized = normalize_signal_name_for_matching(&name);
         let lit = remap_lit(*out1, &map1);
         out1_by_name.insert(normalized, lit);
     }
     let mut out2_by_name: BTreeMap<String, AigLit> = BTreeMap::new();
     for (i, out2) in aig2.outputs.iter().enumerate() {
-        let name = aig2.output_names.get(i).cloned().unwrap_or_else(|| format!("output_{}", i));
+        let name = aig2
+            .output_names
+            .get(i)
+            .cloned()
+            .unwrap_or_else(|| format!("output_{}", i));
         let normalized = normalize_signal_name_for_matching(&name);
         let lit = remap_lit(*out2, &map2);
         out2_by_name.insert(normalized, lit);
@@ -3475,7 +3696,6 @@ pub fn build_sequential_miter(aig1: &Aig, aig2: &Aig) -> FormalResult<(Aig, Vec<
             latch2_by_name.insert(shared_key.clone(), gate_next);
         }
     }
-
 
     // Compare next-state for matching latches
     for (name, next1) in &latch1_by_name {
@@ -3532,7 +3752,8 @@ fn extract_symbolic_counterexample(
                 let lit_pos = Lit::positive(var);
                 let value = model_set.contains(&lit_pos);
 
-                if name.starts_with("__reg_cur_") || name.contains("state") || name.contains("cnt") {
+                if name.starts_with("__reg_cur_") || name.contains("state") || name.contains("cnt")
+                {
                     state.insert(name.clone(), value);
                 } else {
                     inputs.insert(name.clone(), value);
@@ -3616,21 +3837,43 @@ fn extract_entity_name(aig: &Aig) -> Option<String> {
     }
 
     // Return the most common entity name
-    candidates.into_iter()
+    candidates
+        .into_iter()
         .max_by_key(|(_, count)| *count)
         .map(|(name, _)| name)
 }
 
 /// Known operation prefixes used in AIG hierarchy (deterministic, not heuristic)
 const OPERATION_PREFIXES: &[&str] = &[
-    "Mul_", "Add_", "Sub_", "And_", "Or_", "Xor_",
-    "Greater_", "Less_", "Equal_", "Mux_",
-    "LeftShift_", "RightShift_", "Not_", "Neg_",
-    "Div_", "Mod_", "Shl_", "Shr_",
-    "SignedMul_", "SignedDiv_", "SignedMod_",
-    "SignedGreater_", "SignedLess_",
-    "Concat_", "Replicate_", "Select_",
-    "Comparator_", "Counter_", "Register_",
+    "Mul_",
+    "Add_",
+    "Sub_",
+    "And_",
+    "Or_",
+    "Xor_",
+    "Greater_",
+    "Less_",
+    "Equal_",
+    "Mux_",
+    "LeftShift_",
+    "RightShift_",
+    "Not_",
+    "Neg_",
+    "Div_",
+    "Mod_",
+    "Shl_",
+    "Shr_",
+    "SignedMul_",
+    "SignedDiv_",
+    "SignedMod_",
+    "SignedGreater_",
+    "SignedLess_",
+    "Concat_",
+    "Replicate_",
+    "Select_",
+    "Comparator_",
+    "Counter_",
+    "Register_",
     "ThresholdComparator",
 ];
 
@@ -3667,7 +3910,10 @@ fn strip_hierarchy_prefix_with_entity(name: &str, entity_name: Option<&str>) -> 
         while working.contains('.') {
             if let Some(dot_pos) = working.find('.') {
                 let before = &working[..dot_pos];
-                if is_operation_prefix(before) || before.starts_with("inst_") || before.starts_with("_t") {
+                if is_operation_prefix(before)
+                    || before.starts_with("inst_")
+                    || before.starts_with("_t")
+                {
                     working = working[dot_pos + 1..].to_string();
                 } else {
                     break;
@@ -3681,9 +3927,7 @@ fn strip_hierarchy_prefix_with_entity(name: &str, entity_name: Option<&str>) -> 
         while working.contains('.') {
             if let Some(dot_pos) = working.find('.') {
                 let before = &working[..dot_pos];
-                if before.chars().any(|c| c.is_ascii_uppercase())
-                    || before.starts_with("inst_")
-                {
+                if before.chars().any(|c| c.is_ascii_uppercase()) || before.starts_with("inst_") {
                     working = working[dot_pos + 1..].to_string();
                 } else {
                     break;
@@ -3753,7 +3997,10 @@ pub fn normalize_port_name_with_entity(name: &str, entity_name: Option<&str>) ->
         while working.contains('.') {
             if let Some(dot_pos) = working.find('.') {
                 let before = &working[..dot_pos];
-                if is_operation_prefix(before) || before.starts_with("inst_") || before.starts_with("_t") {
+                if is_operation_prefix(before)
+                    || before.starts_with("inst_")
+                    || before.starts_with("_t")
+                {
                     working = working[dot_pos + 1..].to_string();
                 } else {
                     break;
@@ -3833,9 +4080,13 @@ fn is_internal_signal(name: &str) -> bool {
 
     // Temporary signals generated by compiler (e.g., _t63, _t290[30])
     // Match _t followed by digits
-    if name.starts_with("_t") {
-        let rest = &name[2..];
-        if rest.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false) {
+    if let Some(rest) = name.strip_prefix("_t") {
+        if rest
+            .chars()
+            .next()
+            .map(|c| c.is_ascii_digit())
+            .unwrap_or(false)
+        {
             return true;
         }
     }
@@ -3845,19 +4096,27 @@ fn is_internal_signal(name: &str) -> bool {
 
     // Internal computation signals (can be at start or after hierarchy)
     // These are internal arithmetic operation intermediates
-    if name.starts_with("sum_") || name.contains(".sum_")
-        || name.starts_with("pp_") || name.contains(".pp_")
-        || name.starts_with("zero_") || name.contains(".zero_")
-        || name.starts_with("carry_") || name.contains(".carry_")
-        || name.starts_with("partial_") || name.contains(".partial_")
+    if name.starts_with("sum_")
+        || name.contains(".sum_")
+        || name.starts_with("pp_")
+        || name.contains(".pp_")
+        || name.starts_with("zero_")
+        || name.contains(".zero_")
+        || name.starts_with("carry_")
+        || name.contains(".carry_")
+        || name.starts_with("partial_")
+        || name.contains(".partial_")
     {
         return true;
     }
 
     // Comparator internals
-    if name.starts_with("lt_") || name.contains(".lt_")
-        || name.starts_with("eq_") || name.contains(".eq_")
-        || name.starts_with("not_a_") || name.contains(".not_a_")
+    if name.starts_with("lt_")
+        || name.contains(".lt_")
+        || name.starts_with("eq_")
+        || name.contains(".eq_")
+        || name.starts_with("not_a_")
+        || name.contains(".not_a_")
         || name.contains("_combined")
         || name.contains("_bit[")
         || name.contains("_and_prev_")
@@ -3971,14 +4230,21 @@ pub fn build_miter_with_port_matching(aig1: &Aig, aig2: &Aig) -> FormalResult<Ai
     }
 
     // Structural I/O matching for any unmatched ports
-    let matched_input_keys: std::collections::HashSet<String> = shared_input_map.keys().cloned().collect();
+    let matched_input_keys: std::collections::HashSet<String> =
+        shared_input_map.keys().cloned().collect();
     if !aig1_only_inputs.is_empty() && !aig2_only_inputs.is_empty() {
         let (structural_input_matches, _) = compute_structural_io_matches(
-            aig1, aig2, &matched_input_keys, &std::collections::HashSet::new(), entity_ref,
+            aig1,
+            aig2,
+            &matched_input_keys,
+            &std::collections::HashSet::new(),
+            entity_ref,
         );
         // Apply structural input matches
         for (aig2_key, aig1_key) in &structural_input_matches {
-            if let (Some((idx1, name1)), Some((idx2, _))) = (aig1_inputs.get(aig1_key), aig2_inputs.get(aig2_key)) {
+            if let (Some((idx1, name1)), Some((idx2, _))) =
+                (aig1_inputs.get(aig1_key), aig2_inputs.get(aig2_key))
+            {
                 if !map1.contains_key(idx1) || !map2.contains_key(idx2) {
                     let lit = miter.add_input(name1.clone());
                     map1.insert(*idx1, lit);
@@ -4006,14 +4272,22 @@ pub fn build_miter_with_port_matching(aig1: &Aig, aig2: &Aig) -> FormalResult<Ai
     let mut aig2_outputs_map: BTreeMap<String, AigLit> = BTreeMap::new();
 
     for (i, output) in aig1.outputs.iter().enumerate() {
-        let name = aig1.output_names.get(i).cloned().unwrap_or_else(|| format!("out_{}", i));
+        let name = aig1
+            .output_names
+            .get(i)
+            .cloned()
+            .unwrap_or_else(|| format!("out_{}", i));
         let normalized = normalize_port_name_with_entity(&name, entity_ref);
         let lit = remap_lit(*output, &map1);
         aig1_outputs.push((normalized.key(), lit));
     }
 
     for (i, output) in aig2.outputs.iter().enumerate() {
-        let name = aig2.output_names.get(i).cloned().unwrap_or_else(|| format!("out_{}", i));
+        let name = aig2
+            .output_names
+            .get(i)
+            .cloned()
+            .unwrap_or_else(|| format!("out_{}", i));
         let normalized = normalize_port_name_with_entity(&name, entity_ref);
         let lit = remap_lit(*output, &map2);
         aig2_outputs_map.insert(normalized.key(), lit);
@@ -4079,7 +4353,11 @@ fn simulate_aig(aig: &Aig, input_values: &HashMap<u32, bool>) -> HashMap<u32, bo
                 let left_val = values.get(&left.node.0).copied().unwrap_or(false);
                 let right_val = values.get(&right.node.0).copied().unwrap_or(false);
                 let left_val = if left.inverted { !left_val } else { left_val };
-                let right_val = if right.inverted { !right_val } else { right_val };
+                let right_val = if right.inverted {
+                    !right_val
+                } else {
+                    right_val
+                };
                 values.insert(idx, left_val && right_val);
             }
             AigNode::Latch { .. } => {
@@ -4095,10 +4373,17 @@ fn simulate_aig(aig: &Aig, input_values: &HashMap<u32, bool>) -> HashMap<u32, bo
 
 /// Get output values from simulated AIG
 fn get_output_values(aig: &Aig, values: &HashMap<u32, bool>) -> Vec<bool> {
-    aig.outputs.iter().map(|out| {
-        let val = values.get(&out.node.0).copied().unwrap_or(false);
-        if out.inverted { !val } else { val }
-    }).collect()
+    aig.outputs
+        .iter()
+        .map(|out| {
+            let val = values.get(&out.node.0).copied().unwrap_or(false);
+            if out.inverted {
+                !val
+            } else {
+                val
+            }
+        })
+        .collect()
 }
 
 /// Quick random simulation to find easy counterexamples
@@ -4155,18 +4440,27 @@ pub fn simulation_based_check(
     if aig2_dff_filtered > 0 {
         log::debug!(
             "AIG2 DFF outputs: {} total, {} filtered out",
-            aig2_dff_count, aig2_dff_filtered
+            aig2_dff_count,
+            aig2_dff_filtered
         );
     }
 
     // Build output matching
     let mut output_pairs: Vec<(usize, usize)> = Vec::new();
     for (i, _) in aig1.outputs.iter().enumerate() {
-        let name = aig1.output_names.get(i).cloned().unwrap_or_else(|| format!("out_{}", i));
+        let name = aig1
+            .output_names
+            .get(i)
+            .cloned()
+            .unwrap_or_else(|| format!("out_{}", i));
         let normalized = normalize_port_name_with_entity(&name, entity_ref);
 
         for (j, _) in aig2.outputs.iter().enumerate() {
-            let name2 = aig2.output_names.get(j).cloned().unwrap_or_else(|| format!("out_{}", j));
+            let name2 = aig2
+                .output_names
+                .get(j)
+                .cloned()
+                .unwrap_or_else(|| format!("out_{}", j));
             let normalized2 = normalize_port_name_with_entity(&name2, entity_ref);
             if normalized.key() == normalized2.key() {
                 output_pairs.push((i, j));
@@ -4176,11 +4470,13 @@ pub fn simulation_based_check(
     }
 
     // Debug: count how many inputs/outputs match
-    let matched_inputs: usize = aig1_input_nodes.iter()
+    let matched_inputs: usize = aig1_input_nodes
+        .iter()
         .filter(|(_, name)| {
             let normalized = normalize_port_name_with_entity(name, entity_ref);
             aig2_input_map.contains_key(&normalized.key())
-        }).count();
+        })
+        .count();
 
     log::debug!(
         "Simulation check: {} MIR inputs, {} Gate inputs, {} matched",
@@ -4196,10 +4492,12 @@ pub fn simulation_based_check(
     );
 
     // Check for unmatched inputs
-    let aig1_keys: std::collections::HashSet<_> = aig1_input_nodes.iter()
+    let aig1_keys: std::collections::HashSet<_> = aig1_input_nodes
+        .iter()
         .map(|(_, name)| normalize_port_name_with_entity(name, entity_ref).key())
         .collect();
-    let unmatched_aig2_count = aig2_input_map.keys()
+    let unmatched_aig2_count = aig2_input_map
+        .keys()
         .filter(|key| !aig1_keys.contains(*key))
         .count();
 
@@ -4269,7 +4567,10 @@ pub fn simulation_based_check(
                 // Found counterexample
                 log::debug!(
                     "Output mismatch: {} (MIR={}, Gate={})",
-                    aig1.output_names.get(i).cloned().unwrap_or_else(|| format!("out_{}", i)),
+                    aig1.output_names
+                        .get(i)
+                        .cloned()
+                        .unwrap_or_else(|| format!("out_{}", i)),
                     outputs1.get(i).copied().unwrap_or(false) as u8,
                     outputs2.get(j).copied().unwrap_or(false) as u8
                 );
@@ -4288,7 +4589,10 @@ pub fn fast_equivalence_check(aig1: &Aig, aig2: &Aig) -> FormalResult<Equivalenc
     // Phase 1: Quick random simulation (very fast)
     log::info!("Phase 1: Random simulation check (1000 vectors)...");
     if let Some(ce_assignments) = simulation_based_check(aig1, aig2, 1000) {
-        log::info!("Counterexample found by simulation in {}ms", start.elapsed().as_millis());
+        log::info!(
+            "Counterexample found by simulation in {}ms",
+            start.elapsed().as_millis()
+        );
         return Ok(EquivalenceResult {
             equivalent: false,
             counterexample: Some(Counterexample {
@@ -4348,7 +4652,7 @@ pub fn check_equivalence_sat(miter: &Aig) -> FormalResult<EquivalenceResult> {
         Ok(true) => {
             // SAT - found counterexample (designs differ)
             let model = solver.model().unwrap();
-            let counterexample = extract_counterexample(miter, &var_map, &model);
+            let counterexample = extract_counterexample(miter, &var_map, model);
 
             Ok(EquivalenceResult {
                 equivalent: false,
@@ -4511,11 +4815,7 @@ fn formal_aig_to_synth_aig(formal: &Aig) -> (SynthAig, HashMap<u32, SynthAigLit>
 
     // Add outputs
     for (i, out_lit) in formal.outputs.iter().enumerate() {
-        let name = formal
-            .output_names
-            .get(i)
-            .cloned()
-            .unwrap_or_default();
+        let name = formal.output_names.get(i).cloned().unwrap_or_default();
         let lit = remap_to_synth(*out_lit, &map);
         synth.add_output(name, lit);
     }
@@ -4589,7 +4889,6 @@ impl EquivalenceChecker {
         let start = std::time::Instant::now();
         let fraig_timeout = std::time::Duration::from_secs(30);
 
-
         let (tx, rx) = std::sync::mpsc::channel();
         let miter_clone = miter.clone();
         std::thread::spawn(move || {
@@ -4638,14 +4937,12 @@ impl EquivalenceChecker {
                         .to_string(),
                 ))
             }
-            Err(_) => {
-                Err(FormalError::SolverError(format!(
-                    "FRAIG timed out after {}s on {}-node miter (multiplier-hard). \
+            Err(_) => Err(FormalError::SolverError(format!(
+                "FRAIG timed out after {}s on {}-node miter (multiplier-hard). \
                      Simulation-based equivalence passed.",
-                    fraig_timeout.as_secs(),
-                    miter.and_count()
-                )))
-            }
+                fraig_timeout.as_secs(),
+                miter.and_count()
+            ))),
         }
     }
 
@@ -4663,11 +4960,7 @@ impl EquivalenceChecker {
     }
 
     /// Check equivalence between two AIG representations directly
-    pub fn check_aig_equivalence(
-        &self,
-        aig1: &Aig,
-        aig2: &Aig,
-    ) -> FormalResult<EquivalenceResult> {
+    pub fn check_aig_equivalence(&self, aig1: &Aig, aig2: &Aig) -> FormalResult<EquivalenceResult> {
         let miter = build_miter(aig1, aig2)?;
         check_equivalence_sat(&miter)
     }
@@ -4746,7 +5039,7 @@ pub fn extract_registers(lir: &Lir) -> Vec<RegisterInfo> {
                 ..
             } => {
                 // The first input is always D (data)
-                let d_input = node.inputs.get(0).copied().unwrap_or(LirSignalId(0));
+                let d_input = node.inputs.first().copied().unwrap_or(LirSignalId(0));
 
                 // Enable is second input if present
                 let enable = if *has_enable {
@@ -4770,7 +5063,7 @@ pub fn extract_registers(lir: &Lir) -> Vec<RegisterInfo> {
             LirOp::Latch { width } => {
                 // Latch: inputs are [enable, data]
                 let d_input = node.inputs.get(1).copied().unwrap_or(LirSignalId(0));
-                let enable = node.inputs.get(0).copied();
+                let enable = node.inputs.first().copied();
 
                 let output_signal = &lir.signals[node.output.0 as usize];
 
@@ -4934,10 +5227,8 @@ impl SequentialEquivalenceChecker {
                 (Some(reg1), None) => {
                     all_equivalent = false;
                     if failure_reason.is_none() {
-                        failure_reason = Some(format!(
-                            "Register '{}' exists only in design 1",
-                            reg1.name
-                        ));
+                        failure_reason =
+                            Some(format!("Register '{}' exists only in design 1", reg1.name));
                     }
                     register_results.push(RegisterMatchResult {
                         name1: reg1.name.clone(),
@@ -4950,10 +5241,8 @@ impl SequentialEquivalenceChecker {
                 (None, Some(reg2)) => {
                     all_equivalent = false;
                     if failure_reason.is_none() {
-                        failure_reason = Some(format!(
-                            "Register '{}' exists only in design 2",
-                            reg2.name
-                        ));
+                        failure_reason =
+                            Some(format!("Register '{}' exists only in design 2", reg2.name));
                     }
                     register_results.push(RegisterMatchResult {
                         name1: "(missing)".to_string(),
@@ -5201,10 +5490,10 @@ impl Default for SequentialEquivalenceChecker {
 // ============================================================================
 
 use skalp_mir::{
-    Assignment, AssignmentKind, BinaryOp, Block, CaseStatement, ContinuousAssign,
-    DataType, Expression, ExpressionKind, IfStatement, LValue, Mir, Module, ModuleId,
-    ModuleInstance, Port, PortDirection, PortId, Process, ProcessKind, ReduceOp, Signal,
-    SignalId, Statement, UnaryOp, Value, VariableId,
+    Assignment, AssignmentKind, BinaryOp, Block, CaseStatement, ContinuousAssign, DataType,
+    Expression, ExpressionKind, IfStatement, LValue, Mir, Module, ModuleId, ModuleInstance, Port,
+    PortDirection, PortId, Process, ProcessKind, ReduceOp, Signal, SignalId, Statement, UnaryOp,
+    Value, VariableId,
 };
 
 /// Signal reference in MIR (either port or signal)
@@ -5300,8 +5589,12 @@ impl<'a> MirToAig<'a> {
             return;
         }
         let current_map = std::mem::take(&mut self.signal_map);
-        self.instance_signal_maps.insert(self.current_instance_path.clone(), current_map);
-        self.signal_map = self.instance_signal_maps.remove(instance_path).unwrap_or_default();
+        self.instance_signal_maps
+            .insert(self.current_instance_path.clone(), current_map);
+        self.signal_map = self
+            .instance_signal_maps
+            .remove(instance_path)
+            .unwrap_or_default();
         self.current_instance_path = instance_path.to_string();
     }
 
@@ -5465,7 +5758,8 @@ impl<'a> MirToAig<'a> {
 
                 // Link state input to latch (metadata-based, no name matching needed)
                 if let Some(state_input_lit) = reg_current_lits.get(&(*sig_ref, bit)) {
-                    self.aig.link_state_input_to_latch(state_input_lit.node.0, latch_id);
+                    self.aig
+                        .link_state_input_to_latch(state_input_lit.node.0, latch_id);
                 }
 
                 // Update signal_map to point to latch output
@@ -5517,7 +5811,10 @@ impl<'a> MirToAig<'a> {
         let mut all_instances: Vec<(String, &Module)> = Vec::new();
         self.collect_instances_recursive("", self.module, mir, &mut all_instances);
 
-        log::debug!("[HIER_AIG] Found {} instances in hierarchy", all_instances.len());
+        log::debug!(
+            "[HIER_AIG] Found {} instances in hierarchy",
+            all_instances.len()
+        );
 
         // First pass: collect all registers from all instances
         // (instance_path, sig_ref, name, width)
@@ -5527,7 +5824,11 @@ impl<'a> MirToAig<'a> {
             for process in &module.processes {
                 if matches!(process.kind, ProcessKind::Sequential) {
                     let mut module_regs: Vec<(MirSignalRef, String, u32)> = Vec::new();
-                    self.collect_register_signals_from_module(module, &process.body, &mut module_regs);
+                    self.collect_register_signals_from_module(
+                        module,
+                        &process.body,
+                        &mut module_regs,
+                    );
 
                     for (sig_ref, name, width) in module_regs {
                         let prefixed_name = if inst_path.is_empty() {
@@ -5554,7 +5855,8 @@ impl<'a> MirToAig<'a> {
                         format!("{}[{}]", port.name, bit)
                     };
                     let lit = self.aig.add_input(name);
-                    self.signal_map.insert((MirSignalRef::Port(port.id), bit as u32), lit);
+                    self.signal_map
+                        .insert((MirSignalRef::Port(port.id), bit as u32), lit);
                 }
             }
         }
@@ -5575,7 +5877,10 @@ impl<'a> MirToAig<'a> {
                     if let Some(prefix_end) = port.name.find("__") {
                         let prefix = port.name[..prefix_end].to_string();
                         let width = self.get_type_width(&port.port_type) as u32;
-                        struct_groups.entry(prefix).or_default().push((port.id, width));
+                        struct_groups
+                            .entry(prefix)
+                            .or_default()
+                            .push((port.id, width));
                     }
                 }
             }
@@ -5589,7 +5894,8 @@ impl<'a> MirToAig<'a> {
                 let mut cumulative_offset = ports[0].1; // skip first port's own bits (already mapped)
                 for &(port_id, width) in &ports[1..] {
                     for bit in 0..width {
-                        if let Some(&lit) = self.signal_map.get(&(MirSignalRef::Port(port_id), bit)) {
+                        if let Some(&lit) = self.signal_map.get(&(MirSignalRef::Port(port_id), bit))
+                        {
                             self.signal_map.insert(
                                 (MirSignalRef::Port(base_port_id), cumulative_offset + bit),
                                 lit,
@@ -5625,13 +5931,24 @@ impl<'a> MirToAig<'a> {
         // D passes to fully propagate leaf values to the root.
         //
         // Compute max hierarchy depth from instance paths.
-        let max_depth = all_instances.iter()
-            .map(|(path, _)| if path.is_empty() { 0 } else { path.matches('.').count() + 1 })
+        let max_depth = all_instances
+            .iter()
+            .map(|(path, _)| {
+                if path.is_empty() {
+                    0
+                } else {
+                    path.matches('.').count() + 1
+                }
+            })
             .max()
             .unwrap_or(0);
         let num_passes = max_depth.max(2); // At least 2 passes for cross-sibling dependencies
 
-        log::debug!("[HIER_AIG] Max hierarchy depth: {}, running {} pre-order passes", max_depth, num_passes);
+        log::debug!(
+            "[HIER_AIG] Max hierarchy depth: {}, running {} pre-order passes",
+            max_depth,
+            num_passes
+        );
 
         for pass in 0..num_passes {
             for (inst_path, module) in all_instances.iter().rev() {
@@ -5642,7 +5959,8 @@ impl<'a> MirToAig<'a> {
                 for (path, sig_ref, _, width) in &all_registers {
                     if path == inst_path {
                         for bit in 0..*width {
-                            if let Some(&lit) = reg_current_lits.get(&(path.clone(), *sig_ref, bit)) {
+                            if let Some(&lit) = reg_current_lits.get(&(path.clone(), *sig_ref, bit))
+                            {
                                 self.signal_map.insert((*sig_ref, bit), lit);
                             }
                         }
@@ -5678,7 +5996,11 @@ impl<'a> MirToAig<'a> {
                 }
             }
 
-            log::debug!("[HIER_AIG] Pre-order pass {}/{} complete", pass + 1, num_passes);
+            log::debug!(
+                "[HIER_AIG] Pre-order pass {}/{} complete",
+                pass + 1,
+                num_passes
+            );
         }
 
         // Main pass: process in POST-ORDER (children first) for sequential logic
@@ -5742,7 +6064,9 @@ impl<'a> MirToAig<'a> {
                         let child_exists = self.instance_signal_maps.contains_key(&child_path)
                             || self.current_instance_path == child_path;
                         if child_exists {
-                            if let Some(child_mod) = mir.modules.iter().find(|m| m.id == child_inst.module) {
+                            if let Some(child_mod) =
+                                mir.modules.iter().find(|m| m.id == child_inst.module)
+                            {
                                 self.switch_to_instance(&child_path);
                                 self.current_module = Some(child_mod);
                                 self.connect_instance_outputs(&child_path, mir);
@@ -5803,7 +6127,8 @@ impl<'a> MirToAig<'a> {
             // Process sequential processes (only in post-order pass)
             for process in &module.processes {
                 if matches!(process.kind, ProcessKind::Sequential) {
-                    let mut inst_next_state: BTreeMap<(MirSignalRef, u32), AigLit> = BTreeMap::new();
+                    let mut inst_next_state: BTreeMap<(MirSignalRef, u32), AigLit> =
+                        BTreeMap::new();
                     self.convert_sequential_process_for_bmc(process, &mut inst_next_state);
 
                     // Transfer to global next_state_map with instance prefix
@@ -5859,8 +6184,11 @@ impl<'a> MirToAig<'a> {
                 let latch_id = latch_lit.node.0;
 
                 // Link state input to latch
-                if let Some(state_input_lit) = reg_current_lits.get(&(inst_path.clone(), *sig_ref, bit)) {
-                    self.aig.link_state_input_to_latch(state_input_lit.node.0, latch_id);
+                if let Some(state_input_lit) =
+                    reg_current_lits.get(&(inst_path.clone(), *sig_ref, bit))
+                {
+                    self.aig
+                        .link_state_input_to_latch(state_input_lit.node.0, latch_id);
                 }
 
                 self.signal_map.insert((*sig_ref, bit), latch_lit);
@@ -5881,7 +6209,8 @@ impl<'a> MirToAig<'a> {
                     } else {
                         format!("{}[{}]", port.name, bit)
                     };
-                    let lit = self.signal_map
+                    let lit = self
+                        .signal_map
                         .get(&(MirSignalRef::Port(port.id), bit as u32))
                         .copied()
                         .unwrap_or_else(|| self.aig.false_lit());
@@ -5918,14 +6247,14 @@ impl<'a> MirToAig<'a> {
                 if m.instances.is_empty() {
                     // Look for monomorphized version (e.g., "Foo" -> "Foo_10" or "Foo_10_1000")
                     let base_name = &m.name;
-                    mir.modules.iter()
-                        .filter(|mm| {
-                            mm.name.starts_with(base_name) &&
-                            mm.name.len() > base_name.len() &&
-                            mm.name.chars().nth(base_name.len()) == Some('_') &&
-                            !mm.instances.is_empty() // Must have instances
+                    mir.modules
+                        .iter()
+                        .find(|mm| {
+                            mm.name.starts_with(base_name)
+                                && mm.name.len() > base_name.len()
+                                && mm.name.chars().nth(base_name.len()) == Some('_')
+                                && !mm.instances.is_empty() // Must have instances
                         })
-                        .next()
                         .unwrap_or(m)
                 } else {
                     m
@@ -5975,7 +6304,11 @@ impl<'a> MirToAig<'a> {
                     }
                 }
                 Statement::If(if_stmt) => {
-                    self.collect_register_signals_from_module(module, &if_stmt.then_block, registers);
+                    self.collect_register_signals_from_module(
+                        module,
+                        &if_stmt.then_block,
+                        registers,
+                    );
                     if let Some(else_block) = &if_stmt.else_block {
                         self.collect_register_signals_from_module(module, else_block, registers);
                     }
@@ -6038,14 +6371,20 @@ impl<'a> MirToAig<'a> {
         match sig_ref {
             MirSignalRef::Port(id) => {
                 if let Some(port) = module.ports.iter().find(|p| p.id == id) {
-                    (port.name.clone(), self.get_type_width(&port.port_type) as u32)
+                    (
+                        port.name.clone(),
+                        self.get_type_width(&port.port_type) as u32,
+                    )
                 } else {
                     ("unknown".to_string(), 1)
                 }
             }
             MirSignalRef::Signal(id) => {
                 if let Some(signal) = module.signals.iter().find(|s| s.id == id) {
-                    (signal.name.clone(), self.get_type_width(&signal.signal_type) as u32)
+                    (
+                        signal.name.clone(),
+                        self.get_type_width(&signal.signal_type) as u32,
+                    )
                 } else {
                     ("unknown".to_string(), 1)
                 }
@@ -6094,7 +6433,9 @@ impl<'a> MirToAig<'a> {
         if let Some(instance) = parent_module.instances.iter().find(|i| i.name == inst_name) {
             if let Some(child_module) = mir.modules.iter().find(|m| m.id == instance.module) {
                 for (port_name, conn_expr) in &instance.connections {
-                    if let Some(child_port) = child_module.ports.iter().find(|p| p.name == *port_name) {
+                    if let Some(child_port) =
+                        child_module.ports.iter().find(|p| p.name == *port_name)
+                    {
                         if child_port.direction != PortDirection::Input {
                             continue;
                         }
@@ -6112,11 +6453,9 @@ impl<'a> MirToAig<'a> {
 
         for (port_id, width, conn_lits) in port_connections {
             let max_bits = width.min(conn_lits.len());
-            for bit in 0..max_bits {
-                self.signal_map.insert(
-                    (MirSignalRef::Port(port_id), bit as u32),
-                    conn_lits[bit],
-                );
+            for (bit, &lit) in conn_lits.iter().enumerate().take(max_bits) {
+                self.signal_map
+                    .insert((MirSignalRef::Port(port_id), bit as u32), lit);
             }
         }
     }
@@ -6146,7 +6485,9 @@ impl<'a> MirToAig<'a> {
         if let Some(instance) = parent_module.instances.iter().find(|i| i.name == inst_name) {
             if let Some(child_module) = mir.modules.iter().find(|m| m.id == instance.module) {
                 for (port_name, conn_expr) in &instance.connections {
-                    if let Some(child_port) = child_module.ports.iter().find(|p| p.name == *port_name) {
+                    if let Some(child_port) =
+                        child_module.ports.iter().find(|p| p.name == *port_name)
+                    {
                         if child_port.direction != PortDirection::Output {
                             continue;
                         }
@@ -6218,207 +6559,224 @@ impl<'a> MirToAig<'a> {
         const STACK_RED_ZONE: usize = 256 * 1024;
         const STACK_GROW_SIZE: usize = 8 * 1024 * 1024;
         stacker::maybe_grow(STACK_RED_ZONE, STACK_GROW_SIZE, || {
-        match stmt {
-            Statement::Assignment(assign) => {
-                // Check if this is a register assignment
-                if let Some(sig_ref) = self.lvalue_to_ref(&assign.lhs) {
-                    if self.register_outputs.contains(&sig_ref) {
-                        // This is a register - compute next-state value
-                        let rhs_lits = self.convert_expression(&assign.rhs);
-                        // Store as next-state
-                        for (bit, lit) in rhs_lits.iter().enumerate() {
-                            next_state_map.insert((sig_ref, bit as u32), *lit);
+            match stmt {
+                Statement::Assignment(assign) => {
+                    // Check if this is a register assignment
+                    if let Some(sig_ref) = self.lvalue_to_ref(&assign.lhs) {
+                        if self.register_outputs.contains(&sig_ref) {
+                            // This is a register - compute next-state value
+                            let rhs_lits = self.convert_expression(&assign.rhs);
+                            // Store as next-state
+                            for (bit, lit) in rhs_lits.iter().enumerate() {
+                                next_state_map.insert((sig_ref, bit as u32), *lit);
+                            }
+                            return;
                         }
-                        return;
                     }
+                    // Not a register - normal assignment (update signal_map)
+                    self.convert_assignment(assign, &BTreeMap::new());
                 }
-                // Not a register - normal assignment (update signal_map)
-                self.convert_assignment(assign, &BTreeMap::new());
-            }
-            Statement::If(if_stmt) => {
-                // For conditionals with register assignments, we need proper MUXing:
-                // 1. Save current next_state_map values for all registers
-                // 2. Process then branch -> get then_updates
-                // 3. Restore to saved state
-                // 4. Process else branch -> get else_updates
-                // 5. For each register, create MUX: cond ? then_value : else_value
+                Statement::If(if_stmt) => {
+                    // For conditionals with register assignments, we need proper MUXing:
+                    // 1. Save current next_state_map values for all registers
+                    // 2. Process then branch -> get then_updates
+                    // 3. Restore to saved state
+                    // 4. Process else branch -> get else_updates
+                    // 5. For each register, create MUX: cond ? then_value : else_value
 
-                let cond_lits = self.convert_expression(&if_stmt.condition);
-                let cond = cond_lits.first().copied().unwrap_or_else(|| self.aig.false_lit());
-
-                // Save current state of next_state_map
-                let saved_state = next_state_map.clone();
-
-                // Process then branch
-                self.convert_block_for_bmc(&if_stmt.then_block, next_state_map);
-                let then_state = next_state_map.clone();
-
-                // Restore to saved state for else branch
-                *next_state_map = saved_state.clone();
-
-                // Process else branch (or keep saved state if no else)
-                if let Some(else_block) = &if_stmt.else_block {
-                    self.convert_block_for_bmc(else_block, next_state_map);
-                }
-                let else_state = next_state_map.clone();
-
-                // Merge: for each register bit, create MUX if values differ
-                // Collect all keys from both then and else states
-                let mut all_keys: std::collections::BTreeSet<(MirSignalRef, u32)> =
-                    std::collections::BTreeSet::new();
-                for key in then_state.keys() {
-                    all_keys.insert(*key);
-                }
-                for key in else_state.keys() {
-                    all_keys.insert(*key);
-                }
-
-                for key in all_keys {
-                    let then_val = then_state.get(&key).copied();
-                    let else_val = else_state.get(&key).copied();
-                    let saved_val = saved_state.get(&key).copied();
-
-                    // Get current register value from signal_map as fallback
-                    // This is what the register holds if neither branch updates it
-                    let current_reg_val = self.signal_map.get(&key).copied()
+                    let cond_lits = self.convert_expression(&if_stmt.condition);
+                    let cond = cond_lits
+                        .first()
+                        .copied()
                         .unwrap_or_else(|| self.aig.false_lit());
 
-                    // Determine the final value based on which branches updated it
-                    let final_val = match (then_val, else_val) {
-                        (Some(t), Some(e)) => {
-                            // Both branches updated this register - create MUX
-                            if t == e {
-                                t // Same value, no MUX needed
-                            } else {
-                                self.aig.add_mux(cond, e, t) // cond ? t : e (note: add_mux is sel ? b : a)
+                    // Save current state of next_state_map
+                    let saved_state = next_state_map.clone();
+
+                    // Process then branch
+                    self.convert_block_for_bmc(&if_stmt.then_block, next_state_map);
+                    let then_state = next_state_map.clone();
+
+                    // Restore to saved state for else branch
+                    *next_state_map = saved_state.clone();
+
+                    // Process else branch (or keep saved state if no else)
+                    if let Some(else_block) = &if_stmt.else_block {
+                        self.convert_block_for_bmc(else_block, next_state_map);
+                    }
+                    let else_state = next_state_map.clone();
+
+                    // Merge: for each register bit, create MUX if values differ
+                    // Collect all keys from both then and else states
+                    let mut all_keys: std::collections::BTreeSet<(MirSignalRef, u32)> =
+                        std::collections::BTreeSet::new();
+                    for key in then_state.keys() {
+                        all_keys.insert(*key);
+                    }
+                    for key in else_state.keys() {
+                        all_keys.insert(*key);
+                    }
+
+                    for key in all_keys {
+                        let then_val = then_state.get(&key).copied();
+                        let else_val = else_state.get(&key).copied();
+                        let saved_val = saved_state.get(&key).copied();
+
+                        // Get current register value from signal_map as fallback
+                        // This is what the register holds if neither branch updates it
+                        let current_reg_val = self
+                            .signal_map
+                            .get(&key)
+                            .copied()
+                            .unwrap_or_else(|| self.aig.false_lit());
+
+                        // Determine the final value based on which branches updated it
+                        let final_val = match (then_val, else_val) {
+                            (Some(t), Some(e)) => {
+                                // Both branches updated this register - create MUX
+                                if t == e {
+                                    t // Same value, no MUX needed
+                                } else {
+                                    self.aig.add_mux(cond, e, t) // cond ? t : e (note: add_mux is sel ? b : a)
+                                }
                             }
-                        }
-                        (Some(t), None) => {
-                            // Only then branch updated - MUX with else value
-                            // Else value is saved_val if it was already computed, otherwise current register
-                            let else_default = saved_val.unwrap_or(current_reg_val);
-                            if t == else_default {
-                                t
-                            } else {
-                                self.aig.add_mux(cond, else_default, t)
+                            (Some(t), None) => {
+                                // Only then branch updated - MUX with else value
+                                // Else value is saved_val if it was already computed, otherwise current register
+                                let else_default = saved_val.unwrap_or(current_reg_val);
+                                if t == else_default {
+                                    t
+                                } else {
+                                    self.aig.add_mux(cond, else_default, t)
+                                }
                             }
-                        }
-                        (None, Some(e)) => {
-                            // Only else branch updated - MUX with then value
-                            // Then value is saved_val if it was already computed, otherwise current register
-                            let then_default = saved_val.unwrap_or(current_reg_val);
-                            if e == then_default {
-                                e
-                            } else {
-                                self.aig.add_mux(cond, e, then_default)
+                            (None, Some(e)) => {
+                                // Only else branch updated - MUX with then value
+                                // Then value is saved_val if it was already computed, otherwise current register
+                                let then_default = saved_val.unwrap_or(current_reg_val);
+                                if e == then_default {
+                                    e
+                                } else {
+                                    self.aig.add_mux(cond, e, then_default)
+                                }
                             }
-                        }
-                        (None, None) => {
-                            // Neither branch updated - keep saved value or current register
-                            saved_val.unwrap_or(current_reg_val)
-                        }
+                            (None, None) => {
+                                // Neither branch updated - keep saved value or current register
+                                saved_val.unwrap_or(current_reg_val)
+                            }
+                        };
+
+                        next_state_map.insert(key, final_val);
+                    }
+                }
+                Statement::Case(case_stmt) => {
+                    // For case statements, we need to handle each arm with proper MUXing
+                    // Similar to nested if-else
+                    let selector_lits = self.convert_expression(&case_stmt.expr);
+
+                    // Save initial state
+                    let initial_state = next_state_map.clone();
+
+                    // Collect updates from each case item
+                    #[allow(clippy::type_complexity)]
+                    let mut case_updates: Vec<(
+                        AigLit,
+                        BTreeMap<(MirSignalRef, u32), AigLit>,
+                    )> = Vec::new();
+
+                    for item in &case_stmt.items {
+                        // Compute condition for this case item
+                        let item_cond =
+                            self.compute_case_item_condition(&item.values, &selector_lits);
+
+                        // Reset to initial state
+                        *next_state_map = initial_state.clone();
+
+                        // Process this case arm
+                        self.convert_block_for_bmc(&item.block, next_state_map);
+
+                        case_updates.push((item_cond, next_state_map.clone()));
+                    }
+
+                    // Process default case if present
+                    let default_state = if let Some(default) = &case_stmt.default {
+                        *next_state_map = initial_state.clone();
+                        self.convert_block_for_bmc(default, next_state_map);
+                        next_state_map.clone()
+                    } else {
+                        initial_state.clone()
                     };
 
-                    next_state_map.insert(key, final_val);
-                }
-            }
-            Statement::Case(case_stmt) => {
-                // For case statements, we need to handle each arm with proper MUXing
-                // Similar to nested if-else
-                let selector_lits = self.convert_expression(&case_stmt.expr);
+                    // Merge all case arms: chain of MUXes
+                    // Start with default, then overlay each case in reverse order
+                    *next_state_map = default_state;
 
-                // Save initial state
-                let initial_state = next_state_map.clone();
+                    for (item_cond, item_state) in case_updates.into_iter().rev() {
+                        // For each register bit, create MUX: item_cond ? item_value : current_value
+                        for (key, item_val) in &item_state {
+                            // BUG #265 FIX: Fall back to signal_map (current latch output) when a
+                            // register isn't updated by the default arm or previous overlays.
+                            // Without this, registers not assigned in all case arms get incorrectly
+                            // zeroed (false_lit) instead of holding their current value.
+                            let current_val =
+                                next_state_map.get(key).copied().unwrap_or_else(|| {
+                                    initial_state.get(key).copied().unwrap_or_else(|| {
+                                        self.signal_map
+                                            .get(key)
+                                            .copied()
+                                            .unwrap_or_else(|| self.aig.false_lit())
+                                    })
+                                });
 
-                // Collect updates from each case item
-                let mut case_updates: Vec<(AigLit, BTreeMap<(MirSignalRef, u32), AigLit>)> =
-                    Vec::new();
-
-                for item in &case_stmt.items {
-                    // Compute condition for this case item
-                    let item_cond = self.compute_case_item_condition(&item.values, &selector_lits);
-
-                    // Reset to initial state
-                    *next_state_map = initial_state.clone();
-
-                    // Process this case arm
-                    self.convert_block_for_bmc(&item.block, next_state_map);
-
-                    case_updates.push((item_cond, next_state_map.clone()));
-                }
-
-                // Process default case if present
-                let default_state = if let Some(default) = &case_stmt.default {
-                    *next_state_map = initial_state.clone();
-                    self.convert_block_for_bmc(default, next_state_map);
-                    next_state_map.clone()
-                } else {
-                    initial_state.clone()
-                };
-
-                // Merge all case arms: chain of MUXes
-                // Start with default, then overlay each case in reverse order
-                *next_state_map = default_state;
-
-                for (item_cond, item_state) in case_updates.into_iter().rev() {
-                    // For each register bit, create MUX: item_cond ? item_value : current_value
-                    for (key, item_val) in &item_state {
-                        // BUG #265 FIX: Fall back to signal_map (current latch output) when a
-                        // register isn't updated by the default arm or previous overlays.
-                        // Without this, registers not assigned in all case arms get incorrectly
-                        // zeroed (false_lit) instead of holding their current value.
-                        let current_val = next_state_map
-                            .get(key)
-                            .copied()
-                            .unwrap_or_else(|| initial_state.get(key).copied()
-                                .unwrap_or_else(|| self.signal_map.get(key).copied()
-                                    .unwrap_or_else(|| self.aig.false_lit())));
-
-                        if *item_val != current_val {
-                            let muxed = self.aig.add_mux(item_cond, current_val, *item_val);
-                            next_state_map.insert(*key, muxed);
+                            if *item_val != current_val {
+                                let muxed = self.aig.add_mux(item_cond, current_val, *item_val);
+                                next_state_map.insert(*key, muxed);
+                            }
                         }
                     }
                 }
-            }
-            Statement::Block(inner_block) => {
-                self.convert_block_for_bmc(inner_block, next_state_map);
-            }
-            Statement::ResolvedConditional(resolved) => {
-                // Handle resolved if-else-if chains (priority mux)
-                // Check if target is a register
-                if let Some(sig_ref) = self.lvalue_to_ref(&resolved.target) {
-                    if self.register_outputs.contains(&sig_ref) {
-                        // Build priority MUX: if cond1 then val1, else if cond2 then val2, ... else default
-                        let default_lits = self.convert_expression(&resolved.resolved.default);
-                        let mut result_lits = default_lits;
-
-                        // Process cases in reverse order (lowest priority first)
-                        // so that higher priority conditions override
-                        for case in resolved.resolved.cases.iter().rev() {
-                            let cond_lits = self.convert_expression(&case.condition);
-                            let cond = cond_lits.first().copied().unwrap_or_else(|| self.aig.false_lit());
-                            let value_lits = self.convert_expression(&case.value);
-
-                            // MUX: cond ? value : current_result
-                            result_lits = self.build_mux_vector(cond, &value_lits, &result_lits);
-                        }
-
-                        // Store as next-state
-                        for (bit, lit) in result_lits.iter().enumerate() {
-                            next_state_map.insert((sig_ref, bit as u32), *lit);
-                        }
-                        return;
-                    }
+                Statement::Block(inner_block) => {
+                    self.convert_block_for_bmc(inner_block, next_state_map);
                 }
-                // Not a register - use normal conversion
-                self.convert_statement(stmt, &BTreeMap::new());
+                Statement::ResolvedConditional(resolved) => {
+                    // Handle resolved if-else-if chains (priority mux)
+                    // Check if target is a register
+                    if let Some(sig_ref) = self.lvalue_to_ref(&resolved.target) {
+                        if self.register_outputs.contains(&sig_ref) {
+                            // Build priority MUX: if cond1 then val1, else if cond2 then val2, ... else default
+                            let default_lits = self.convert_expression(&resolved.resolved.default);
+                            let mut result_lits = default_lits;
+
+                            // Process cases in reverse order (lowest priority first)
+                            // so that higher priority conditions override
+                            for case in resolved.resolved.cases.iter().rev() {
+                                let cond_lits = self.convert_expression(&case.condition);
+                                let cond = cond_lits
+                                    .first()
+                                    .copied()
+                                    .unwrap_or_else(|| self.aig.false_lit());
+                                let value_lits = self.convert_expression(&case.value);
+
+                                // MUX: cond ? value : current_result
+                                result_lits =
+                                    self.build_mux_vector(cond, &value_lits, &result_lits);
+                            }
+
+                            // Store as next-state
+                            for (bit, lit) in result_lits.iter().enumerate() {
+                                next_state_map.insert((sig_ref, bit as u32), *lit);
+                            }
+                            return;
+                        }
+                    }
+                    // Not a register - use normal conversion
+                    self.convert_statement(stmt, &BTreeMap::new());
+                }
+                _ => {
+                    // Other statements handled normally
+                    self.convert_statement(stmt, &BTreeMap::new());
+                }
             }
-            _ => {
-                // Other statements handled normally
-                self.convert_statement(stmt, &BTreeMap::new());
-            }
-        }
         });
     }
 
@@ -6553,7 +6911,9 @@ impl<'a> MirToAig<'a> {
             DataType::Ncl(w) => w * 2, // Dual-rail
             DataType::Struct(struct_type) => {
                 // Sum of all field widths
-                struct_type.fields.iter()
+                struct_type
+                    .fields
+                    .iter()
                     .map(|f| self.get_type_width(&f.field_type))
                     .sum()
             }
@@ -6591,7 +6951,11 @@ impl<'a> MirToAig<'a> {
     }
 
     /// Get the bit offset and width of a field within a MIR struct
-    fn get_struct_field_offset(&self, struct_type: &skalp_mir::StructType, field_name: &str) -> (usize, usize) {
+    fn get_struct_field_offset(
+        &self,
+        struct_type: &skalp_mir::StructType,
+        field_name: &str,
+    ) -> (usize, usize) {
         let mut offset = 0;
         for field in &struct_type.fields {
             let width = self.get_type_width(&field.field_type);
@@ -6605,7 +6969,11 @@ impl<'a> MirToAig<'a> {
     }
 
     /// Get the bit offset and width of a field within a frontend struct
-    fn get_frontend_struct_field_offset(&self, struct_type: &skalp_frontend::types::StructType, field_name: &str) -> (usize, usize) {
+    fn get_frontend_struct_field_offset(
+        &self,
+        struct_type: &skalp_frontend::types::StructType,
+        field_name: &str,
+    ) -> (usize, usize) {
         let mut offset = 0;
         for field in &struct_type.fields {
             let width = self.get_frontend_type_width(&field.field_type);
@@ -6629,19 +6997,29 @@ impl<'a> MirToAig<'a> {
             }
             Type::Bool => 1,
             Type::Clock(_) | Type::Reset(_) | Type::Event => 1,
-            Type::Fixed { integer_bits, fractional_bits } => (*integer_bits + *fractional_bits) as usize,
-            Type::Array { element_type, size } => self.get_frontend_type_width(element_type) * (*size as usize),
-            Type::Struct(struct_type) => {
-                struct_type.fields.iter()
-                    .map(|f| self.get_frontend_type_width(&f.field_type))
-                    .sum()
+            Type::Fixed {
+                integer_bits,
+                fractional_bits,
+            } => (*integer_bits + *fractional_bits) as usize,
+            Type::Array { element_type, size } => {
+                self.get_frontend_type_width(element_type) * (*size as usize)
             }
-            Type::Tuple(element_types) => {
-                element_types.iter().map(|t| self.get_frontend_type_width(t)).sum()
-            }
+            Type::Struct(struct_type) => struct_type
+                .fields
+                .iter()
+                .map(|f| self.get_frontend_type_width(&f.field_type))
+                .sum(),
+            Type::Tuple(element_types) => element_types
+                .iter()
+                .map(|t| self.get_frontend_type_width(t))
+                .sum(),
             Type::Enum(enum_type) => {
                 let variant_count = enum_type.variants.len();
-                if variant_count <= 1 { 1 } else { (variant_count as f64).log2().ceil() as usize }
+                if variant_count <= 1 {
+                    1
+                } else {
+                    (variant_count as f64).log2().ceil() as usize
+                }
             }
             _ => 32, // Default for unknown types
         }
@@ -6656,7 +7034,8 @@ impl<'a> MirToAig<'a> {
         for stmt in &block.statements {
             match stmt {
                 Statement::Assignment(assign) => {
-                    if let Some((sig_ref, name, width)) = self.lvalue_to_ref_with_info(&assign.lhs) {
+                    if let Some((sig_ref, name, width)) = self.lvalue_to_ref_with_info(&assign.lhs)
+                    {
                         // Check if already in the list
                         if !registers.iter().any(|(r, _, _)| *r == sig_ref) {
                             registers.push((sig_ref, name, width));
@@ -6682,7 +7061,9 @@ impl<'a> MirToAig<'a> {
                 }
                 Statement::ResolvedConditional(resolved) => {
                     // ResolvedConditional wraps an if-else-if chain — extract register from target
-                    if let Some((sig_ref, name, width)) = self.lvalue_to_ref_with_info(&resolved.target) {
+                    if let Some((sig_ref, name, width)) =
+                        self.lvalue_to_ref_with_info(&resolved.target)
+                    {
                         if !registers.iter().any(|(r, _, _)| *r == sig_ref) {
                             registers.push((sig_ref, name, width));
                         }
@@ -6731,12 +7112,14 @@ impl<'a> MirToAig<'a> {
             ExpressionKind::Ref(lvalue) => {
                 // Check if lvalue references a port/signal named "rst"
                 match lvalue {
-                    LValue::Port(id) => {
-                        self.find_port(*id).map(|p| p.name == "rst").unwrap_or(false)
-                    }
-                    LValue::Signal(id) => {
-                        self.find_signal(*id).map(|s| s.name == "rst").unwrap_or(false)
-                    }
+                    LValue::Port(id) => self
+                        .find_port(*id)
+                        .map(|p| p.name == "rst")
+                        .unwrap_or(false),
+                    LValue::Signal(id) => self
+                        .find_signal(*id)
+                        .map(|s| s.name == "rst")
+                        .unwrap_or(false),
                     _ => false,
                 }
             }
@@ -6786,13 +7169,11 @@ impl<'a> MirToAig<'a> {
     /// Try to extract a constant integer value from an expression (for reset values)
     fn try_extract_reset_constant(&self, expr: &Expression) -> Option<u64> {
         match &expr.kind {
-            ExpressionKind::Literal(val) => {
-                match val {
-                    Value::Integer(n) => Some(*n as u64),
-                    Value::BitVector { value, .. } => Some(*value),
-                    _ => None,
-                }
-            }
+            ExpressionKind::Literal(val) => match val {
+                Value::Integer(n) => Some(*n as u64),
+                Value::BitVector { value, .. } => Some(*value),
+                _ => None,
+            },
             _ => None,
         }
     }
@@ -6800,21 +7181,18 @@ impl<'a> MirToAig<'a> {
     /// Get the width of a signal reference
     fn get_signal_ref_width(&self, sig_ref: MirSignalRef) -> u32 {
         match sig_ref {
-            MirSignalRef::Port(id) => {
-                self.find_port(id)
-                    .map(|p| self.get_type_width(&p.port_type) as u32)
-                    .unwrap_or(1)
-            }
-            MirSignalRef::Signal(id) => {
-                self.find_signal(id)
-                    .map(|s| self.get_type_width(&s.signal_type) as u32)
-                    .unwrap_or(1)
-            }
-            MirSignalRef::Variable(id) => {
-                self.find_variable(id)
-                    .map(|v| self.get_type_width(&v.var_type) as u32)
-                    .unwrap_or(1)
-            }
+            MirSignalRef::Port(id) => self
+                .find_port(id)
+                .map(|p| self.get_type_width(&p.port_type) as u32)
+                .unwrap_or(1),
+            MirSignalRef::Signal(id) => self
+                .find_signal(id)
+                .map(|s| self.get_type_width(&s.signal_type) as u32)
+                .unwrap_or(1),
+            MirSignalRef::Variable(id) => self
+                .find_variable(id)
+                .map(|v| self.get_type_width(&v.var_type) as u32)
+                .unwrap_or(1),
         }
     }
 
@@ -6910,11 +7288,7 @@ impl<'a> MirToAig<'a> {
     }
 
     /// Convert a block of statements, tracking conditional context
-    fn convert_block(
-        &mut self,
-        block: &Block,
-        conditions: &BTreeMap<MirSignalRef, Vec<AigLit>>,
-    ) {
+    fn convert_block(&mut self, block: &Block, conditions: &BTreeMap<MirSignalRef, Vec<AigLit>>) {
         const STACK_RED_ZONE: usize = 256 * 1024;
         const STACK_GROW_SIZE: usize = 8 * 1024 * 1024;
         stacker::maybe_grow(STACK_RED_ZONE, STACK_GROW_SIZE, || {
@@ -6932,35 +7306,35 @@ impl<'a> MirToAig<'a> {
         const STACK_RED_ZONE: usize = 256 * 1024;
         const STACK_GROW_SIZE: usize = 8 * 1024 * 1024;
         stacker::maybe_grow(STACK_RED_ZONE, STACK_GROW_SIZE, || {
-        match stmt {
-            Statement::Assignment(assign) => {
-                self.convert_assignment(assign, conditions);
-            }
-            Statement::If(if_stmt) => {
-                self.convert_if_statement(if_stmt, conditions);
-            }
-            Statement::Case(case_stmt) => {
-                self.convert_case_statement(case_stmt, conditions);
-            }
-            Statement::Block(inner_block) => {
-                self.convert_block(inner_block, conditions);
-            }
-            Statement::ResolvedConditional(resolved) => {
-                // Already resolved to mux form - convert directly
-                for case in &resolved.resolved.cases {
-                    let cond_lits = self.convert_expression(&case.condition);
-                    let value_lits = self.convert_expression(&case.value);
-                    // This is a priority mux structure
-                    if !cond_lits.is_empty() {
-                        let cond = cond_lits[0];
-                        let current = self.get_signal_lits(&resolved.target);
-                        let muxed = self.build_mux_vector(cond, &value_lits, &current);
-                        self.assign_lvalue(&resolved.target, &muxed);
+            match stmt {
+                Statement::Assignment(assign) => {
+                    self.convert_assignment(assign, conditions);
+                }
+                Statement::If(if_stmt) => {
+                    self.convert_if_statement(if_stmt, conditions);
+                }
+                Statement::Case(case_stmt) => {
+                    self.convert_case_statement(case_stmt, conditions);
+                }
+                Statement::Block(inner_block) => {
+                    self.convert_block(inner_block, conditions);
+                }
+                Statement::ResolvedConditional(resolved) => {
+                    // Already resolved to mux form - convert directly
+                    for case in &resolved.resolved.cases {
+                        let cond_lits = self.convert_expression(&case.condition);
+                        let value_lits = self.convert_expression(&case.value);
+                        // This is a priority mux structure
+                        if !cond_lits.is_empty() {
+                            let cond = cond_lits[0];
+                            let current = self.get_signal_lits(&resolved.target);
+                            let muxed = self.build_mux_vector(cond, &value_lits, &current);
+                            self.assign_lvalue(&resolved.target, &muxed);
+                        }
                     }
                 }
+                _ => {} // Assert, Assume, Cover, Loop - skip for now
             }
-            _ => {} // Assert, Assume, Cover, Loop - skip for now
-        }
         });
     }
 
@@ -6981,75 +7355,69 @@ impl<'a> MirToAig<'a> {
         const STACK_RED_ZONE: usize = 256 * 1024;
         const STACK_GROW_SIZE: usize = 8 * 1024 * 1024;
         stacker::maybe_grow(STACK_RED_ZONE, STACK_GROW_SIZE, || {
-        // Convert condition to single bit
-        let cond_lits = self.convert_expression(&if_stmt.condition);
-        let cond = if !cond_lits.is_empty() {
-            cond_lits[0]
-        } else {
-            self.aig.false_lit()
-        };
+            // Convert condition to single bit
+            let cond_lits = self.convert_expression(&if_stmt.condition);
+            let cond = if !cond_lits.is_empty() {
+                cond_lits[0]
+            } else {
+                self.aig.false_lit()
+            };
 
-        // Get all signals assigned in then/else branches
-        // Use (MirSignalRef, bit) as key to properly track bit positions
-        let mut then_assigns: BTreeMap<(MirSignalRef, u32), AigLit> = BTreeMap::new();
-        let mut else_assigns: BTreeMap<(MirSignalRef, u32), AigLit> = BTreeMap::new();
+            // Get all signals assigned in then/else branches
+            // Use (MirSignalRef, bit) as key to properly track bit positions
+            let mut then_assigns: BTreeMap<(MirSignalRef, u32), AigLit> = BTreeMap::new();
+            let mut else_assigns: BTreeMap<(MirSignalRef, u32), AigLit> = BTreeMap::new();
 
-        // Save current state
-        let saved_state = self.signal_map.clone();
+            // Save current state
+            let saved_state = self.signal_map.clone();
 
-        // Process then branch
-        self.convert_block(&if_stmt.then_block, conditions);
-        for (key, lit) in &self.signal_map {
-            if saved_state.get(key) != Some(lit) {
-                then_assigns.insert(*key, *lit);
+            // Process then branch
+            self.convert_block(&if_stmt.then_block, conditions);
+            for (key, lit) in &self.signal_map {
+                if saved_state.get(key) != Some(lit) {
+                    then_assigns.insert(*key, *lit);
+                }
             }
-        }
 
-        // Restore and process else branch
-        self.signal_map = saved_state.clone();
-        if let Some(else_block) = &if_stmt.else_block {
-            self.convert_block(else_block, conditions);
-        }
-        for (key, lit) in &self.signal_map {
-            if saved_state.get(key) != Some(lit) {
-                else_assigns.insert(*key, *lit);
+            // Restore and process else branch
+            self.signal_map = saved_state.clone();
+            if let Some(else_block) = &if_stmt.else_block {
+                self.convert_block(else_block, conditions);
             }
-        }
+            for (key, lit) in &self.signal_map {
+                if saved_state.get(key) != Some(lit) {
+                    else_assigns.insert(*key, *lit);
+                }
+            }
 
-        // Build muxes for all modified signal bits
-        self.signal_map = saved_state;
-        let all_keys: std::collections::BTreeSet<_> = then_assigns
-            .keys()
-            .chain(else_assigns.keys())
-            .cloned()
-            .collect();
+            // Build muxes for all modified signal bits
+            self.signal_map = saved_state;
+            let all_keys: std::collections::BTreeSet<_> = then_assigns
+                .keys()
+                .chain(else_assigns.keys())
+                .cloned()
+                .collect();
 
-        for key in all_keys {
-            let (sig_ref, bit) = key;
-            let then_lit = then_assigns
-                .get(&key)
-                .copied()
-                .unwrap_or_else(|| {
+            for key in all_keys {
+                let (sig_ref, bit) = key;
+                let then_lit = then_assigns.get(&key).copied().unwrap_or_else(|| {
                     self.signal_map
                         .get(&key)
                         .copied()
                         .unwrap_or_else(|| self.aig.false_lit())
                 });
-            let else_lit = else_assigns
-                .get(&key)
-                .copied()
-                .unwrap_or_else(|| {
+                let else_lit = else_assigns.get(&key).copied().unwrap_or_else(|| {
                     self.signal_map
                         .get(&key)
                         .copied()
                         .unwrap_or_else(|| self.aig.false_lit())
                 });
 
-            // MUX: cond ? then_lit : else_lit
-            // add_mux(sel, a, b) returns sel ? b : a, so pass (cond, else_lit, then_lit)
-            let mux_result = self.aig.add_mux(cond, else_lit, then_lit);
-            self.signal_map.insert((sig_ref, bit), mux_result);
-        }
+                // MUX: cond ? then_lit : else_lit
+                // add_mux(sel, a, b) returns sel ? b : a, so pass (cond, else_lit, then_lit)
+                let mux_result = self.aig.add_mux(cond, else_lit, then_lit);
+                self.signal_map.insert((sig_ref, bit), mux_result);
+            }
         });
     }
 
@@ -7061,67 +7429,64 @@ impl<'a> MirToAig<'a> {
         const STACK_RED_ZONE: usize = 256 * 1024;
         const STACK_GROW_SIZE: usize = 8 * 1024 * 1024;
         stacker::maybe_grow(STACK_RED_ZONE, STACK_GROW_SIZE, || {
-        let selector_lits = self.convert_expression(&case_stmt.expr);
-        let _selector_width = selector_lits.len();
+            let selector_lits = self.convert_expression(&case_stmt.expr);
+            let _selector_width = selector_lits.len();
 
-        // Build a priority mux chain for case items
-        // Start with default value (or current value)
-        let saved_state = self.signal_map.clone();
+            // Build a priority mux chain for case items
+            // Start with default value (or current value)
+            let saved_state = self.signal_map.clone();
 
-        // Use (MirSignalRef, bit) as key to properly track bit positions
-        let mut result_map: BTreeMap<(MirSignalRef, u32), AigLit> = BTreeMap::new();
+            // Use (MirSignalRef, bit) as key to properly track bit positions
+            let mut result_map: BTreeMap<(MirSignalRef, u32), AigLit> = BTreeMap::new();
 
-        // First, collect all assignments from default case
-        if let Some(default_block) = &case_stmt.default {
-            self.convert_block(default_block, conditions);
-            for (key, lit) in &self.signal_map {
-                if saved_state.get(key) != Some(lit) {
-                    result_map.insert(*key, *lit);
+            // First, collect all assignments from default case
+            if let Some(default_block) = &case_stmt.default {
+                self.convert_block(default_block, conditions);
+                for (key, lit) in &self.signal_map {
+                    if saved_state.get(key) != Some(lit) {
+                        result_map.insert(*key, *lit);
+                    }
                 }
             }
-        }
 
-        // Process case items in reverse order (last match wins for priority)
-        for item in case_stmt.items.iter().rev() {
-            self.signal_map = saved_state.clone();
+            // Process case items in reverse order (last match wins for priority)
+            for item in case_stmt.items.iter().rev() {
+                self.signal_map = saved_state.clone();
 
-            // Build condition: selector == value for any value in item.values
-            let mut item_cond = self.aig.false_lit();
-            for value_expr in &item.values {
-                let value_lits = self.convert_expression(value_expr);
-                let eq_cond = self.build_equality(&selector_lits, &value_lits);
-                item_cond = self.aig.add_or(item_cond, eq_cond);
-            }
+                // Build condition: selector == value for any value in item.values
+                let mut item_cond = self.aig.false_lit();
+                for value_expr in &item.values {
+                    let value_lits = self.convert_expression(value_expr);
+                    let eq_cond = self.build_equality(&selector_lits, &value_lits);
+                    item_cond = self.aig.add_or(item_cond, eq_cond);
+                }
 
-            // Process case body
-            self.convert_block(&item.block, conditions);
+                // Process case body
+                self.convert_block(&item.block, conditions);
 
-            // Mux the results
-            for (key, lit) in &self.signal_map {
-                if saved_state.get(key) != Some(lit) {
-                    let current = result_map
-                        .get(key)
-                        .copied()
-                        .unwrap_or_else(|| {
+                // Mux the results
+                for (key, lit) in &self.signal_map {
+                    if saved_state.get(key) != Some(lit) {
+                        let current = result_map.get(key).copied().unwrap_or_else(|| {
                             saved_state
                                 .get(key)
                                 .copied()
                                 .unwrap_or_else(|| self.aig.false_lit())
                         });
-                    // add_mux(sel, a, b) returns sel ? b : a
-                    // We want: item_cond ? *lit : current
-                    // So call add_mux(item_cond, current, *lit)
-                    let muxed = self.aig.add_mux(item_cond, current, *lit);
-                    result_map.insert(*key, muxed);
+                        // add_mux(sel, a, b) returns sel ? b : a
+                        // We want: item_cond ? *lit : current
+                        // So call add_mux(item_cond, current, *lit)
+                        let muxed = self.aig.add_mux(item_cond, current, *lit);
+                        result_map.insert(*key, muxed);
+                    }
                 }
             }
-        }
 
-        // Apply final results
-        self.signal_map = saved_state;
-        for (key, lit) in result_map {
-            self.signal_map.insert(key, lit);
-        }
+            // Apply final results
+            self.signal_map = saved_state;
+            for (key, lit) in result_map {
+                self.signal_map.insert(key, lit);
+            }
         });
     }
 
@@ -7152,8 +7517,14 @@ impl<'a> MirToAig<'a> {
         let max_len = then_lits.len().max(else_lits.len());
         let mut result = Vec::with_capacity(max_len);
         for i in 0..max_len {
-            let then_bit = then_lits.get(i).copied().unwrap_or_else(|| self.aig.false_lit());
-            let else_bit = else_lits.get(i).copied().unwrap_or_else(|| self.aig.false_lit());
+            let then_bit = then_lits
+                .get(i)
+                .copied()
+                .unwrap_or_else(|| self.aig.false_lit());
+            let else_bit = else_lits
+                .get(i)
+                .copied()
+                .unwrap_or_else(|| self.aig.false_lit());
             // add_mux(sel, a, b) returns sel ? b : a
             // We want cond ? then_bit : else_bit
             // So call add_mux(cond, else_bit, then_bit)
@@ -7348,178 +7719,178 @@ impl<'a> MirToAig<'a> {
         const STACK_RED_ZONE: usize = 256 * 1024;
         const STACK_GROW_SIZE: usize = 8 * 1024 * 1024;
         stacker::maybe_grow(STACK_RED_ZONE, STACK_GROW_SIZE, || {
-        match &expr.kind {
-            ExpressionKind::Literal(value) => self.convert_literal(value),
+            match &expr.kind {
+                ExpressionKind::Literal(value) => self.convert_literal(value),
 
-            ExpressionKind::Ref(lvalue) => self.convert_lvalue_ref(lvalue),
+                ExpressionKind::Ref(lvalue) => self.convert_lvalue_ref(lvalue),
 
-            ExpressionKind::Binary { op, left, right } => {
-                let left_lits = self.convert_expression(left);
-                let right_lits = self.convert_expression(right);
-                // Determine signedness by recursively inspecting operand expression trees.
-                // Cannot use left.ty/right.ty because compound expressions have Type::Unknown.
-                let signed = self.infer_expression_is_signed(left) || self.infer_expression_is_signed(right);
-                self.convert_binary_op(*op, &left_lits, &right_lits, signed)
-            }
-
-            ExpressionKind::Unary { op, operand } => {
-                let operand_lits = self.convert_expression(operand);
-                self.convert_unary_op(*op, &operand_lits)
-            }
-
-            ExpressionKind::Conditional {
-                cond,
-                then_expr,
-                else_expr,
-            } => {
-                let cond_lits = self.convert_expression(cond);
-                let then_lits = self.convert_expression(then_expr);
-                let else_lits = self.convert_expression(else_expr);
-
-                let cond_bit = if !cond_lits.is_empty() {
-                    cond_lits[0]
-                } else {
-                    self.aig.false_lit()
-                };
-
-                self.build_mux_vector(cond_bit, &then_lits, &else_lits)
-            }
-
-            ExpressionKind::Concat(exprs) => {
-                let mut result = Vec::new();
-                for e in exprs.iter().rev() {
-                    result.extend(self.convert_expression(e));
+                ExpressionKind::Binary { op, left, right } => {
+                    let left_lits = self.convert_expression(left);
+                    let right_lits = self.convert_expression(right);
+                    // Determine signedness by recursively inspecting operand expression trees.
+                    // Cannot use left.ty/right.ty because compound expressions have Type::Unknown.
+                    let signed = self.infer_expression_is_signed(left)
+                        || self.infer_expression_is_signed(right);
+                    self.convert_binary_op(*op, &left_lits, &right_lits, signed)
                 }
-                result
-            }
 
-            ExpressionKind::Replicate { count, value } => {
-                let value_lits = self.convert_expression(value);
-                if let ExpressionKind::Literal(Value::Integer(n)) = &count.kind {
+                ExpressionKind::Unary { op, operand } => {
+                    let operand_lits = self.convert_expression(operand);
+                    self.convert_unary_op(*op, &operand_lits)
+                }
+
+                ExpressionKind::Conditional {
+                    cond,
+                    then_expr,
+                    else_expr,
+                } => {
+                    let cond_lits = self.convert_expression(cond);
+                    let then_lits = self.convert_expression(then_expr);
+                    let else_lits = self.convert_expression(else_expr);
+
+                    let cond_bit = if !cond_lits.is_empty() {
+                        cond_lits[0]
+                    } else {
+                        self.aig.false_lit()
+                    };
+
+                    self.build_mux_vector(cond_bit, &then_lits, &else_lits)
+                }
+
+                ExpressionKind::Concat(exprs) => {
                     let mut result = Vec::new();
-                    for _ in 0..*n {
-                        result.extend(value_lits.iter().copied());
+                    for e in exprs.iter().rev() {
+                        result.extend(self.convert_expression(e));
                     }
                     result
-                } else {
-                    value_lits
                 }
-            }
 
-            ExpressionKind::Cast { expr, target_type } => {
-                let expr_lits = self.convert_expression(expr);
-                let target_width = self.get_type_width(target_type);
-                // Sign-extend for signed source types, zero-extend for unsigned.
-                // Use recursive inference since expr.ty is often Type::Unknown.
-                let source_signed = self.infer_expression_is_signed(expr);
-                let extend_bit = if source_signed && !expr_lits.is_empty() {
-                    *expr_lits.last().unwrap() // MSB = sign bit
-                } else {
-                    self.aig.false_lit() // zero
-                };
-                let mut result = expr_lits;
-                while result.len() < target_width {
-                    result.push(extend_bit);
+                ExpressionKind::Replicate { count, value } => {
+                    let value_lits = self.convert_expression(value);
+                    if let ExpressionKind::Literal(Value::Integer(n)) = &count.kind {
+                        let mut result = Vec::new();
+                        for _ in 0..*n {
+                            result.extend(value_lits.iter().copied());
+                        }
+                        result
+                    } else {
+                        value_lits
+                    }
                 }
-                result.truncate(target_width);
-                result
-            }
 
-            ExpressionKind::FunctionCall { name, args } => {
-                // Built-in functions
-                match name.as_str() {
-                    "$clog2" => {
-                        if !args.is_empty() {
-                            if let ExpressionKind::Literal(Value::Integer(n)) = &args[0].kind {
-                                let result = (*n as f64).log2().ceil() as u64;
-                                return self.convert_literal(&Value::Integer(result as i64));
+                ExpressionKind::Cast { expr, target_type } => {
+                    let expr_lits = self.convert_expression(expr);
+                    let target_width = self.get_type_width(target_type);
+                    // Sign-extend for signed source types, zero-extend for unsigned.
+                    // Use recursive inference since expr.ty is often Type::Unknown.
+                    let source_signed = self.infer_expression_is_signed(expr);
+                    let extend_bit = if source_signed && !expr_lits.is_empty() {
+                        *expr_lits.last().unwrap() // MSB = sign bit
+                    } else {
+                        self.aig.false_lit() // zero
+                    };
+                    let mut result = expr_lits;
+                    while result.len() < target_width {
+                        result.push(extend_bit);
+                    }
+                    result.truncate(target_width);
+                    result
+                }
+
+                ExpressionKind::FunctionCall { name, args } => {
+                    // Built-in functions
+                    match name.as_str() {
+                        "$clog2" => {
+                            if !args.is_empty() {
+                                if let ExpressionKind::Literal(Value::Integer(n)) = &args[0].kind {
+                                    let result = (*n as f64).log2().ceil() as u64;
+                                    return self.convert_literal(&Value::Integer(result as i64));
+                                }
+                            }
+                            vec![self.aig.false_lit()]
+                        }
+                        _ => vec![self.aig.false_lit()], // Unknown function
+                    }
+                }
+
+                ExpressionKind::FieldAccess { base, field } => {
+                    // Handle struct field access
+                    // Get all bits from base expression
+                    let base_lits = self.convert_expression(base);
+
+                    // Try to find the MIR DataType struct from the base expression
+                    // This gives us correct type widths including enum base types
+                    let mir_struct = self.get_mir_struct_type_from_expr(base);
+
+                    if let Some(struct_type) = mir_struct {
+                        // Use MIR struct type for accurate field offsets
+                        let (offset, width) = self.get_struct_field_offset(&struct_type, field);
+                        let end = (offset + width).min(base_lits.len());
+                        if offset < base_lits.len() {
+                            base_lits[offset..end].to_vec()
+                        } else {
+                            vec![self.aig.false_lit()]
+                        }
+                    } else if let Type::Struct(struct_type) = &base.ty {
+                        // Fall back to frontend type (may have wrong enum widths)
+                        let (offset, width) =
+                            self.get_frontend_struct_field_offset(struct_type, field);
+                        let end = (offset + width).min(base_lits.len());
+                        if offset < base_lits.len() {
+                            base_lits[offset..end].to_vec()
+                        } else {
+                            vec![self.aig.false_lit()]
+                        }
+                    } else {
+                        // If not a struct type, try to treat base bits directly
+                        base_lits
+                    }
+                }
+
+                ExpressionKind::TupleFieldAccess { base, index } => {
+                    // Handle tuple field access
+                    let base_lits = self.convert_expression(base);
+
+                    // If the base is a Tuple type, extract the element at the given index
+                    if let Type::Tuple(element_types) = &base.ty {
+                        if *index < element_types.len() {
+                            let mut offset = 0;
+                            for (i, elem_type) in element_types.iter().enumerate() {
+                                let elem_width = self.get_frontend_type_width(elem_type);
+                                if i == *index {
+                                    let end = (offset + elem_width).min(base_lits.len());
+                                    if offset < base_lits.len() {
+                                        return base_lits[offset..end].to_vec();
+                                    } else {
+                                        return vec![self.aig.false_lit()];
+                                    }
+                                }
+                                offset += elem_width;
                             }
                         }
-                        vec![self.aig.false_lit()]
                     }
-                    _ => vec![self.aig.false_lit()], // Unknown function
-                }
-            }
-
-            ExpressionKind::FieldAccess { base, field } => {
-                // Handle struct field access
-                // Get all bits from base expression
-                let base_lits = self.convert_expression(base);
-
-                // Try to find the MIR DataType struct from the base expression
-                // This gives us correct type widths including enum base types
-                let mir_struct = self.get_mir_struct_type_from_expr(base);
-
-                if let Some(struct_type) = mir_struct {
-                    // Use MIR struct type for accurate field offsets
-                    let (offset, width) = self.get_struct_field_offset(&struct_type, field);
-                    let end = (offset + width).min(base_lits.len());
-                    if offset < base_lits.len() {
-                        base_lits[offset..end].to_vec()
-                    } else {
-                        vec![self.aig.false_lit()]
+                    // Also handle if tuples are lowered to structs
+                    if let Type::Struct(struct_type) = &base.ty {
+                        if *index < struct_type.fields.len() {
+                            let mut offset = 0;
+                            for (i, field) in struct_type.fields.iter().enumerate() {
+                                let field_width = self.get_frontend_type_width(&field.field_type);
+                                if i == *index {
+                                    let end = (offset + field_width).min(base_lits.len());
+                                    if offset < base_lits.len() {
+                                        return base_lits[offset..end].to_vec();
+                                    } else {
+                                        return vec![self.aig.false_lit()];
+                                    }
+                                }
+                                offset += field_width;
+                            }
+                        }
                     }
-                } else if let Type::Struct(struct_type) = &base.ty {
-                    // Fall back to frontend type (may have wrong enum widths)
-                    let (offset, width) = self.get_frontend_struct_field_offset(struct_type, field);
-                    let end = (offset + width).min(base_lits.len());
-                    if offset < base_lits.len() {
-                        base_lits[offset..end].to_vec()
-                    } else {
-                        vec![self.aig.false_lit()]
-                    }
-                } else {
-                    // If not a struct type, try to treat base bits directly
+                    // Fallback: return all bits
                     base_lits
                 }
             }
-
-            ExpressionKind::TupleFieldAccess { base, index } => {
-                // Handle tuple field access
-                let base_lits = self.convert_expression(base);
-
-                // If the base is a Tuple type, extract the element at the given index
-                if let Type::Tuple(element_types) = &base.ty {
-                    if *index < element_types.len() {
-                        let mut offset = 0;
-                        for (i, elem_type) in element_types.iter().enumerate() {
-                            let elem_width = self.get_frontend_type_width(elem_type);
-                            if i == *index {
-                                let end = (offset + elem_width).min(base_lits.len());
-                                if offset < base_lits.len() {
-                                    return base_lits[offset..end].to_vec();
-                                } else {
-                                    return vec![self.aig.false_lit()];
-                                }
-                            }
-                            offset += elem_width;
-                        }
-                    }
-                }
-                // Also handle if tuples are lowered to structs
-                if let Type::Struct(struct_type) = &base.ty {
-                    if *index < struct_type.fields.len() {
-                        let mut offset = 0;
-                        for (i, field) in struct_type.fields.iter().enumerate() {
-                            let field_width = self.get_frontend_type_width(&field.field_type);
-                            if i == *index {
-                                let end = (offset + field_width).min(base_lits.len());
-                                if offset < base_lits.len() {
-                                    return base_lits[offset..end].to_vec();
-                                } else {
-                                    return vec![self.aig.false_lit()];
-                                }
-                            }
-                            offset += field_width;
-                        }
-                    }
-                }
-                // Fallback: return all bits
-                base_lits
-            }
-
-            _ => vec![self.aig.false_lit()],
-        }
         })
     }
 
@@ -7663,11 +8034,11 @@ impl<'a> MirToAig<'a> {
     /// Check if a frontend type is signed
     fn is_signed_type(&self, ty: &Type) -> bool {
         match ty {
-            Type::Bit(_) => false,   // bit[n] is unsigned
-            Type::Int(_) => true,    // int[n] is signed
-            Type::Nat(_) => false,   // nat[n] is unsigned
-            Type::Bool => false,     // bool is unsigned
-            Type::Logic(_) => false, // logic[n] is unsigned
+            Type::Bit(_) => false,      // bit[n] is unsigned
+            Type::Int(_) => true,       // int[n] is signed
+            Type::Nat(_) => false,      // nat[n] is unsigned
+            Type::Bool => false,        // bool is unsigned
+            Type::Logic(_) => false,    // logic[n] is unsigned
             Type::Fixed { .. } => true, // fixed-point is typically signed
             // Array element signedness determines array signedness
             Type::Array { element_type, .. } => self.is_signed_type(element_type),
@@ -7678,27 +8049,27 @@ impl<'a> MirToAig<'a> {
 
     /// Check if a MIR DataType is signed
     fn is_datatype_signed(dt: &DataType) -> bool {
-        matches!(dt, DataType::Int(_) | DataType::IntParam { .. } | DataType::IntExpr { .. })
+        matches!(
+            dt,
+            DataType::Int(_) | DataType::IntParam { .. } | DataType::IntExpr { .. }
+        )
     }
 
     /// Check if an lvalue references a signed signal/port/variable
     fn is_lvalue_signed(&self, lvalue: &LValue) -> bool {
         match lvalue {
-            LValue::Port(id) => {
-                self.find_port(*id)
-                    .map(|p| Self::is_datatype_signed(&p.port_type))
-                    .unwrap_or(false)
-            }
-            LValue::Signal(id) => {
-                self.find_signal(*id)
-                    .map(|s| Self::is_datatype_signed(&s.signal_type))
-                    .unwrap_or(false)
-            }
-            LValue::Variable(id) => {
-                self.find_variable(*id)
-                    .map(|v| Self::is_datatype_signed(&v.var_type))
-                    .unwrap_or(false)
-            }
+            LValue::Port(id) => self
+                .find_port(*id)
+                .map(|p| Self::is_datatype_signed(&p.port_type))
+                .unwrap_or(false),
+            LValue::Signal(id) => self
+                .find_signal(*id)
+                .map(|s| Self::is_datatype_signed(&s.signal_type))
+                .unwrap_or(false),
+            LValue::Variable(id) => self
+                .find_variable(*id)
+                .map(|v| Self::is_datatype_signed(&v.var_type))
+                .unwrap_or(false),
             LValue::BitSelect { base, .. } => self.is_lvalue_signed(base),
             LValue::RangeSelect { base, .. } => self.is_lvalue_signed(base),
             LValue::Concat(_) => false,
@@ -7730,7 +8101,11 @@ impl<'a> MirToAig<'a> {
                         self.infer_expression_is_signed(operand)
                     }
                 }
-                ExpressionKind::Conditional { then_expr, else_expr, .. } => {
+                ExpressionKind::Conditional {
+                    then_expr,
+                    else_expr,
+                    ..
+                } => {
                     self.infer_expression_is_signed(then_expr)
                         || self.infer_expression_is_signed(else_expr)
                 }
@@ -7785,27 +8160,15 @@ impl<'a> MirToAig<'a> {
         };
 
         match op {
-            BinaryOp::BitwiseAnd | BinaryOp::And => {
-                (0..max_width)
-                    .map(|i| {
-                        self.aig.add_and(left[i], right[i])
-                    })
-                    .collect()
-            }
-            BinaryOp::BitwiseOr | BinaryOp::Or => {
-                (0..max_width)
-                    .map(|i| {
-                        self.aig.add_or(left[i], right[i])
-                    })
-                    .collect()
-            }
-            BinaryOp::BitwiseXor | BinaryOp::Xor => {
-                (0..max_width)
-                    .map(|i| {
-                        self.aig.add_xor(left[i], right[i])
-                    })
-                    .collect()
-            }
+            BinaryOp::BitwiseAnd | BinaryOp::And => (0..max_width)
+                .map(|i| self.aig.add_and(left[i], right[i]))
+                .collect(),
+            BinaryOp::BitwiseOr | BinaryOp::Or => (0..max_width)
+                .map(|i| self.aig.add_or(left[i], right[i]))
+                .collect(),
+            BinaryOp::BitwiseXor | BinaryOp::Xor => (0..max_width)
+                .map(|i| self.aig.add_xor(left[i], right[i]))
+                .collect(),
             BinaryOp::LogicalAnd => {
                 // OR all bits of each operand, then AND
                 let l_any = self.reduce_or(&left);
@@ -7852,9 +8215,16 @@ impl<'a> MirToAig<'a> {
                 let width = left.len();
                 let mut current = left.to_vec();
 
-                let num_stages = if width <= 1 { 1 } else { (width as f32).log2().ceil() as usize };
+                let num_stages = if width <= 1 {
+                    1
+                } else {
+                    (width as f32).log2().ceil() as usize
+                };
                 for stage in 0..num_stages {
-                    let shift_bit = right.get(stage).copied().unwrap_or_else(|| self.aig.false_lit());
+                    let shift_bit = right
+                        .get(stage)
+                        .copied()
+                        .unwrap_or_else(|| self.aig.false_lit());
                     let shift_amount = 1usize << stage;
                     let mut next = vec![self.aig.false_lit(); width];
 
@@ -7881,9 +8251,16 @@ impl<'a> MirToAig<'a> {
                 };
                 let mut current = left.to_vec();
 
-                let num_stages = if width <= 1 { 1 } else { (width as f32).log2().ceil() as usize };
+                let num_stages = if width <= 1 {
+                    1
+                } else {
+                    (width as f32).log2().ceil() as usize
+                };
                 for stage in 0..num_stages {
-                    let shift_bit = right.get(stage).copied().unwrap_or_else(|| self.aig.false_lit());
+                    let shift_bit = right
+                        .get(stage)
+                        .copied()
+                        .unwrap_or_else(|| self.aig.false_lit());
                     let shift_amount = 1usize << stage;
                     let mut next = vec![self.aig.false_lit(); width];
 
@@ -8554,13 +8931,13 @@ impl BoundedModelChecker {
 
         if matched_inputs.is_empty() {
             return Err(FormalError::PropertyFailed(
-                "No matching primary inputs between designs".to_string()
+                "No matching primary inputs between designs".to_string(),
             ));
         }
 
         if matched_outputs.is_empty() {
             return Err(FormalError::PropertyFailed(
-                "No matching primary outputs between designs".to_string()
+                "No matching primary outputs between designs".to_string(),
             ));
         }
 
@@ -8575,6 +8952,7 @@ impl BoundedModelChecker {
         // We use simulation first for speed, then SAT for proof
 
         // Quick simulation checks with deterministic patterns
+        #[allow(clippy::type_complexity)]
         let test_patterns: Vec<(&str, Box<dyn Fn(&str) -> bool>)> = vec![
             ("all-zeros", Box::new(|_| false)),
             ("all-ones", Box::new(|_| true)),
@@ -8583,26 +8961,40 @@ impl BoundedModelChecker {
 
         for (name, pattern) in &test_patterns {
             let result = self.simulate_trace_with_inputs(
-                aig1, aig2,
-                &matched_inputs, &aig1_input_map, &aig2_input_map,
+                aig1,
+                aig2,
+                &matched_inputs,
+                &aig1_input_map,
+                &aig2_input_map,
                 &matched_outputs,
                 bound,
                 |k| pattern(k),
             );
             if let Some((cycle, output_name)) = result {
-                log::debug!("BMC: {} mismatch at cycle {} on output '{}'", name, cycle, output_name);
+                log::debug!(
+                    "BMC: {} mismatch at cycle {} on output '{}'",
+                    name,
+                    cycle,
+                    output_name
+                );
             }
         }
 
         // Deterministic pattern simulation
         for seed in 0u64..100 {
             let sim_result = self.simulate_trace_with_inputs(
-                aig1, aig2,
-                &matched_inputs, &aig1_input_map, &aig2_input_map,
+                aig1,
+                aig2,
+                &matched_inputs,
+                &aig1_input_map,
+                &aig2_input_map,
                 &matched_outputs,
                 bound,
                 |key| {
-                    let hash = key.as_bytes().iter().fold(seed, |acc, &b| acc.wrapping_mul(31).wrapping_add(b as u64));
+                    let hash = key
+                        .as_bytes()
+                        .iter()
+                        .fold(seed, |acc, &b| acc.wrapping_mul(31).wrapping_add(b as u64));
                     hash % 2 == 0
                 },
             );
@@ -8616,8 +9008,11 @@ impl BoundedModelChecker {
         // Random simulation (1000 traces)
         for trace in 0..1000 {
             let sim_result = self.simulate_bmc_trace(
-                aig1, aig2,
-                &matched_inputs, &aig1_input_map, &aig2_input_map,
+                aig1,
+                aig2,
+                &matched_inputs,
+                &aig1_input_map,
+                &aig2_input_map,
                 &matched_outputs,
                 bound,
                 &mut rng,
@@ -8626,7 +9021,9 @@ impl BoundedModelChecker {
             if let Some((cycle, output_name)) = sim_result {
                 log::info!(
                     "BMC: Simulation found mismatch at cycle {} on output '{}' (trace {})",
-                    cycle, output_name, trace
+                    cycle,
+                    output_name,
+                    trace
                 );
 
                 return Ok(BmcEquivalenceResult {
@@ -8648,14 +9045,21 @@ impl BoundedModelChecker {
             sat_calls += 1;
 
             let sat_result = self.check_cycle_equivalence_sat(
-                aig1, aig2,
-                &matched_inputs, &aig1_input_map, &aig2_input_map,
+                aig1,
+                aig2,
+                &matched_inputs,
+                &aig1_input_map,
+                &aig2_input_map,
                 &matched_outputs,
                 k,
             )?;
 
             if !sat_result.0 {
-                log::info!("BMC: SAT found mismatch at cycle {} on output '{:?}'", k, sat_result.2);
+                log::info!(
+                    "BMC: SAT found mismatch at cycle {} on output '{:?}'",
+                    k,
+                    sat_result.2
+                );
                 return Ok(BmcEquivalenceResult {
                     equivalent: false,
                     bound: k,
@@ -8732,7 +9136,9 @@ impl BoundedModelChecker {
         let entity_ref = entity_name.as_deref();
         let mut matched = Vec::new();
 
-        let aig2_outputs: HashMap<String, usize> = aig2.output_names.iter()
+        let aig2_outputs: HashMap<String, usize> = aig2
+            .output_names
+            .iter()
             .enumerate()
             .map(|(i, name)| (normalize_port_name_with_entity(name, entity_ref).key(), i))
             .collect();
@@ -8748,6 +9154,7 @@ impl BoundedModelChecker {
     }
 
     /// Simulate a random BMC trace and check for mismatches
+    #[allow(clippy::too_many_arguments)]
     fn simulate_bmc_trace(
         &self,
         aig1: &Aig,
@@ -8775,21 +9182,19 @@ impl BoundedModelChecker {
             let mut input_values: HashMap<String, bool> = HashMap::new();
             for key in matched_inputs {
                 let val = if key == "rst" {
-                    cycle < reset_cycles  // Reset only during reset phase
+                    cycle < reset_cycles // Reset only during reset phase
                 } else if key == "enable" {
-                    cycle >= reset_cycles  // Enable only after reset
+                    cycle >= reset_cycles // Enable only after reset
                 } else {
-                    rng.gen()  // Random for other inputs
+                    rng.gen() // Random for other inputs
                 };
                 input_values.insert(key.clone(), val);
             }
             // Simulate both AIGs
-            let (outputs1, next_state1) = self.simulate_aig_cycle(
-                aig1, &input_values, &state1, aig1_input_map
-            );
-            let (outputs2, next_state2) = self.simulate_aig_cycle(
-                aig2, &input_values, &state2, aig2_input_map
-            );
+            let (outputs1, next_state1) =
+                self.simulate_aig_cycle(aig1, &input_values, &state1, aig1_input_map);
+            let (outputs2, next_state2) =
+                self.simulate_aig_cycle(aig2, &input_values, &state2, aig2_input_map);
 
             // Check output equivalence (skip during reset phase since outputs are "don't care")
             if cycle >= reset_cycles {
@@ -8797,9 +9202,9 @@ impl BoundedModelChecker {
                     let o1 = outputs1.get(*i1).copied().unwrap_or(false);
                     let o2 = outputs2.get(*i2).copied().unwrap_or(false);
                     if o1 != o2 {
-                    return Some((cycle, name.clone()));
+                        return Some((cycle, name.clone()));
+                    }
                 }
-            }
             } // end if cycle >= reset_cycles
 
             // Update state for next cycle
@@ -8811,6 +9216,7 @@ impl BoundedModelChecker {
     }
 
     /// Simulate a BMC trace with specified input pattern
+    #[allow(clippy::too_many_arguments)]
     fn simulate_trace_with_inputs<F>(
         &self,
         aig1: &Aig,
@@ -8834,12 +9240,10 @@ impl BoundedModelChecker {
                 input_values.insert(key.clone(), input_fn(key));
             }
 
-            let (outputs1, next_state1) = self.simulate_aig_cycle(
-                aig1, &input_values, &state1, aig1_input_map
-            );
-            let (outputs2, next_state2) = self.simulate_aig_cycle(
-                aig2, &input_values, &state2, aig2_input_map
-            );
+            let (outputs1, next_state1) =
+                self.simulate_aig_cycle(aig1, &input_values, &state1, aig1_input_map);
+            let (outputs2, next_state2) =
+                self.simulate_aig_cycle(aig2, &input_values, &state2, aig2_input_map);
 
             for (i1, i2, name) in matched_outputs {
                 let o1 = outputs1.get(*i1).copied().unwrap_or(false);
@@ -8859,7 +9263,7 @@ impl BoundedModelChecker {
 
     /// Simulate a BMC trace with detailed debug output for each cycle
     /// Note: This is now just an alias for simulate_trace_with_inputs
-    #[allow(dead_code)]
+    #[allow(dead_code, clippy::too_many_arguments)]
     fn simulate_trace_with_detailed_debug<F>(
         &self,
         aig1: &Aig,
@@ -8875,12 +9279,18 @@ impl BoundedModelChecker {
         F: Fn(&str) -> bool,
     {
         self.simulate_trace_with_inputs(
-            aig1, aig2, matched_inputs, aig1_input_map, aig2_input_map,
-            matched_outputs, bound, input_fn
+            aig1,
+            aig2,
+            matched_inputs,
+            aig1_input_map,
+            aig2_input_map,
+            matched_outputs,
+            bound,
+            input_fn,
         )
     }
 
-    #[allow(dead_code)]
+    #[allow(dead_code, clippy::too_many_arguments)]
     fn debug_trace_mismatch(
         &self,
         _aig1: &Aig,
@@ -8985,15 +9395,15 @@ impl BoundedModelChecker {
                 }
                 AigNode::Input { name } => {
                     // Already set from inputs or use default
-                    if !values.contains_key(&idx) {
+                    values.entry(idx).or_insert_with(|| {
                         // Check if it's an internal signal that wasn't in matched inputs
                         let normalized = normalize_port_name(name);
                         if let Some(&val) = inputs.get(&normalized.key()) {
-                            values.insert(idx, val);
+                            val
                         } else {
-                            values.insert(idx, false);
+                            false
                         }
-                    }
+                    });
                 }
                 AigNode::And { left, right } => {
                     let l = values.get(&left.node.0).copied().unwrap_or(false);
@@ -9004,18 +9414,24 @@ impl BoundedModelChecker {
                 }
                 AigNode::Latch { .. } => {
                     // Latch output already set from latch_state
-                    if !values.contains_key(&idx) {
-                        values.insert(idx, false);
-                    }
+                    values.entry(idx).or_insert(false);
                 }
             }
         }
 
         // Get outputs
-        let outputs: Vec<bool> = aig.outputs.iter().map(|lit| {
-            let val = values.get(&lit.node.0).copied().unwrap_or(false);
-            if lit.inverted { !val } else { val }
-        }).collect();
+        let outputs: Vec<bool> = aig
+            .outputs
+            .iter()
+            .map(|lit| {
+                let val = values.get(&lit.node.0).copied().unwrap_or(false);
+                if lit.inverted {
+                    !val
+                } else {
+                    val
+                }
+            })
+            .collect();
 
         // Compute next latch state
         let mut next_state: HashMap<u32, bool> = HashMap::new();
@@ -9032,6 +9448,7 @@ impl BoundedModelChecker {
     }
 
     /// SAT-based check for equivalence up to cycle K
+    #[allow(clippy::too_many_arguments)]
     fn check_cycle_equivalence_sat(
         &self,
         aig1: &Aig,
@@ -9083,16 +9500,24 @@ impl BoundedModelChecker {
 
             // Encode AIG1 for this cycle
             self.encode_aig_cycle(
-                aig1, 1, cycle,
-                &cycle_inputs, aig1_input_map,
-                &mut formula, &mut get_node_var,
+                aig1,
+                1,
+                cycle,
+                &cycle_inputs,
+                aig1_input_map,
+                &mut formula,
+                &mut get_node_var,
             );
 
             // Encode AIG2 for this cycle
             self.encode_aig_cycle(
-                aig2, 2, cycle,
-                &cycle_inputs, aig2_input_map,
-                &mut formula, &mut get_node_var,
+                aig2,
+                2,
+                cycle,
+                &cycle_inputs,
+                aig2_input_map,
+                &mut formula,
+                &mut get_node_var,
             );
 
             // Connect latch outputs at cycle+1 to latch inputs at cycle (if cycle > 0)
@@ -9139,7 +9564,8 @@ impl BoundedModelChecker {
 
         // At least one output must differ (for SAT to find counterexample)
         if !miter_clauses.is_empty() {
-            let clause: Vec<Lit> = miter_clauses.iter()
+            let clause: Vec<Lit> = miter_clauses
+                .iter()
                 .map(|(v, _, _)| Lit::positive(*v))
                 .collect();
             formula.add_clause(&clause);
@@ -9170,11 +9596,12 @@ impl BoundedModelChecker {
                 }
 
                 // Report the first differing output
-                let (mismatch_cycle, mismatch_output) = if let Some((c, n)) = differing_outputs.first() {
-                    (Some(*c), Some(n.clone()))
-                } else {
-                    (Some(k), None)
-                };
+                let (mismatch_cycle, mismatch_output) =
+                    if let Some((c, n)) = differing_outputs.first() {
+                        (Some(*c), Some(n.clone()))
+                    } else {
+                        (Some(k), None)
+                    };
 
                 // Log all differing outputs for debugging
                 if !differing_outputs.is_empty() {
@@ -9190,13 +9617,15 @@ impl BoundedModelChecker {
                 // UNSAT = no counterexample = equivalent up to this bound
                 Ok((true, None, None))
             }
-            Err(e) => {
-                Err(FormalError::SolverError(format!("SAT solver error: {:?}", e)))
-            }
+            Err(e) => Err(FormalError::SolverError(format!(
+                "SAT solver error: {:?}",
+                e
+            ))),
         }
     }
 
     /// Encode one cycle of an AIG as CNF
+    #[allow(clippy::too_many_arguments)]
     fn encode_aig_cycle(
         &self,
         aig: &Aig,
@@ -9407,7 +9836,7 @@ impl SemanticFingerprint {
 
     /// LFSR for deterministic pseudo-random generation
     fn lfsr_next(state: u64) -> u64 {
-        let bit = ((state >> 0) ^ (state >> 2) ^ (state >> 3) ^ (state >> 5)) & 1;
+        let bit = (state ^ (state >> 2) ^ (state >> 3) ^ (state >> 5)) & 1;
         (state >> 1) | (bit << 63)
     }
 
@@ -9455,9 +9884,7 @@ impl SemanticFingerprint {
                 AigNode::False => {}
                 AigNode::Input { .. } => {
                     // Already set from inputs or state
-                    if !values.contains_key(&idx) {
-                        values.insert(idx, false);
-                    }
+                    values.entry(idx).or_insert(false);
                 }
                 AigNode::And { left, right } => {
                     let l = values.get(&left.node.0).copied().unwrap_or(false);
@@ -9468,9 +9895,7 @@ impl SemanticFingerprint {
                 }
                 AigNode::Latch { .. } => {
                     // Latch output already set from state
-                    if !values.contains_key(&idx) {
-                        values.insert(idx, false);
-                    }
+                    values.entry(idx).or_insert(false);
                 }
             }
         }
@@ -9578,18 +10003,17 @@ impl HierarchicalEquivalenceChecker {
         };
 
         // Step 2: Match inputs (by normalized name, inputs should be stable)
-        let (matched_inputs, aig1_input_map, aig2_input_map) =
-            self.match_inputs(aig1, aig2);
+        let (matched_inputs, aig1_input_map, aig2_input_map) = self.match_inputs(aig1, aig2);
 
         if matched_inputs.is_empty() {
             return Err(FormalError::PropertyFailed(
-                "No matching primary inputs".to_string()
+                "No matching primary inputs".to_string(),
             ));
         }
 
         if matched_outputs.is_empty() {
             return Err(FormalError::PropertyFailed(
-                "No matching primary outputs".to_string()
+                "No matching primary outputs".to_string(),
             ));
         }
 
@@ -9605,8 +10029,10 @@ impl HierarchicalEquivalenceChecker {
         // First do simulation-based quick check
         for (key, o1_idx, o2_idx) in &matched_outputs {
             let sim_result = self.simulate_output_equivalence(
-                aig1, aig2,
-                *o1_idx, *o2_idx,
+                aig1,
+                aig2,
+                *o1_idx,
+                *o2_idx,
                 &matched_inputs,
                 &aig1_input_map,
                 &aig2_input_map,
@@ -9633,7 +10059,8 @@ impl HierarchicalEquivalenceChecker {
             // SAT-based verification for proof
             for k in 1..=bound {
                 let sat_result = self.check_cycle_sat(
-                    aig1, aig2,
+                    aig1,
+                    aig2,
                     &matched_outputs,
                     &matched_inputs,
                     &aig1_input_map,
@@ -9653,10 +10080,8 @@ impl HierarchicalEquivalenceChecker {
                     });
                     break;
                 }
-
             }
         }
-
 
         Ok(HierarchicalEquivalenceResult {
             equivalent: all_equivalent,
@@ -9706,7 +10131,7 @@ impl HierarchicalEquivalenceChecker {
                         // Use a composite key: try name match first, else use index
                         let key = if let (Some(n1), Some(n2)) = (
                             aig1.output_names.get(fp.output_idx),
-                            aig2.output_names.get(o2_idx)
+                            aig2.output_names.get(o2_idx),
                         ) {
                             let k1 = normalize_port_name_with_entity(n1, entity_ref).key();
                             let k2 = normalize_port_name_with_entity(n2, entity_ref).key();
@@ -9732,7 +10157,9 @@ impl HierarchicalEquivalenceChecker {
         let matched_1: std::collections::HashSet<_> = matched.iter().map(|(_, i, _)| *i).collect();
         let matched_2: std::collections::HashSet<_> = matched.iter().map(|(_, _, i)| *i).collect();
 
-        let aig2_by_name: HashMap<String, usize> = aig2.output_names.iter()
+        let aig2_by_name: HashMap<String, usize> = aig2
+            .output_names
+            .iter()
             .enumerate()
             .filter(|(i, _)| !matched_2.contains(i))
             .map(|(i, n)| (normalize_port_name_with_entity(n, entity_ref).key(), i))
@@ -9757,7 +10184,9 @@ impl HierarchicalEquivalenceChecker {
         let entity_ref = entity_name.as_deref();
         let mut matched = Vec::new();
 
-        let aig2_outputs: HashMap<String, usize> = aig2.output_names.iter()
+        let aig2_outputs: HashMap<String, usize> = aig2
+            .output_names
+            .iter()
             .enumerate()
             .map(|(i, name)| (normalize_port_name_with_entity(name, entity_ref).key(), i))
             .collect();
@@ -9826,7 +10255,8 @@ impl HierarchicalEquivalenceChecker {
             matched.iter().map(|(_, _, i)| *i).collect()
         };
 
-        aig.output_names.iter()
+        aig.output_names
+            .iter()
             .enumerate()
             .filter(|(i, _)| !matched_set.contains(i))
             .map(|(_, n)| n.clone())
@@ -9834,6 +10264,7 @@ impl HierarchicalEquivalenceChecker {
     }
 
     /// Simulate output equivalence using deterministic and random patterns
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
     fn simulate_output_equivalence(
         &self,
         aig1: &Aig,
@@ -9855,8 +10286,13 @@ impl HierarchicalEquivalenceChecker {
 
         for (name, pattern) in &test_patterns {
             let result = self.simulate_pattern(
-                aig1, aig2, o1_idx, o2_idx,
-                matched_inputs, aig1_input_map, aig2_input_map,
+                aig1,
+                aig2,
+                o1_idx,
+                o2_idx,
+                matched_inputs,
+                aig1_input_map,
+                aig2_input_map,
                 bound,
                 |key, cycle| pattern(key, cycle),
             );
@@ -9870,14 +10306,22 @@ impl HierarchicalEquivalenceChecker {
         for seed in 0u64..500 {
             // Use LFSR-based pattern for reproducibility
             let result = self.simulate_pattern(
-                aig1, aig2, o1_idx, o2_idx,
-                matched_inputs, aig1_input_map, aig2_input_map,
+                aig1,
+                aig2,
+                o1_idx,
+                o2_idx,
+                matched_inputs,
+                aig1_input_map,
+                aig2_input_map,
                 bound,
                 |key, cycle| {
                     // LFSR-based deterministic pseudo-random
-                    let hash = key.as_bytes().iter().fold(seed.wrapping_add(cycle as u64), |acc, &b| {
-                        acc.wrapping_mul(31).wrapping_add(b as u64)
-                    });
+                    let hash = key
+                        .as_bytes()
+                        .iter()
+                        .fold(seed.wrapping_add(cycle as u64), |acc, &b| {
+                            acc.wrapping_mul(31).wrapping_add(b as u64)
+                        });
                     hash % 2 == 0
                 },
             );
@@ -9890,6 +10334,7 @@ impl HierarchicalEquivalenceChecker {
     }
 
     /// Simulate a specific input pattern
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
     fn simulate_pattern<F>(
         &self,
         aig1: &Aig,
@@ -9928,17 +10373,27 @@ impl HierarchicalEquivalenceChecker {
             input_history.push(input_record);
 
             // Simulate both designs
-            let (values1, next_state1) = SemanticFingerprint::simulate_cycle(aig1, &inputs1, &state1);
-            let (values2, next_state2) = SemanticFingerprint::simulate_cycle(aig2, &inputs2, &state2);
+            let (values1, next_state1) =
+                SemanticFingerprint::simulate_cycle(aig1, &inputs1, &state1);
+            let (values2, next_state2) =
+                SemanticFingerprint::simulate_cycle(aig2, &inputs2, &state2);
 
             // Extract output values
             let out1_lit = &aig1.outputs[o1_idx];
             let out1_val = values1.get(&out1_lit.node.0).copied().unwrap_or(false);
-            let out1_val = if out1_lit.inverted { !out1_val } else { out1_val };
+            let out1_val = if out1_lit.inverted {
+                !out1_val
+            } else {
+                out1_val
+            };
 
             let out2_lit = &aig2.outputs[o2_idx];
             let out2_val = values2.get(&out2_lit.node.0).copied().unwrap_or(false);
-            let out2_val = if out2_lit.inverted { !out2_val } else { out2_val };
+            let out2_val = if out2_lit.inverted {
+                !out2_val
+            } else {
+                out2_val
+            };
 
             if out1_val != out2_val {
                 return Some((cycle, out1_val, out2_val, input_history));
@@ -9952,6 +10407,7 @@ impl HierarchicalEquivalenceChecker {
     }
 
     /// SAT-based verification for a specific cycle
+    #[allow(clippy::too_many_arguments)]
     fn check_cycle_sat(
         &self,
         aig1: &Aig,
@@ -9970,15 +10426,33 @@ impl HierarchicalEquivalenceChecker {
             let mut var_counter = 0usize;
 
             // Build CNF for both AIGs unrolled k cycles
-            Self::build_unrolled_cnf_direct(aig1, 1, k, &mut formula, &mut var_map, &mut var_counter);
-            Self::build_unrolled_cnf_direct(aig2, 2, k, &mut formula, &mut var_map, &mut var_counter);
+            Self::build_unrolled_cnf_direct(
+                aig1,
+                1,
+                k,
+                &mut formula,
+                &mut var_map,
+                &mut var_counter,
+            );
+            Self::build_unrolled_cnf_direct(
+                aig2,
+                2,
+                k,
+                &mut formula,
+                &mut var_map,
+                &mut var_counter,
+            );
 
             // Tie inputs together at each cycle
             for cycle in 0..k {
                 for inp_key in matched_inputs {
-                    if let (Some(&id1), Some(&id2)) = (aig1_input_map.get(inp_key), aig2_input_map.get(inp_key)) {
-                        let var1 = Self::get_or_create_var(&mut var_map, &mut var_counter, 1, id1, cycle);
-                        let var2 = Self::get_or_create_var(&mut var_map, &mut var_counter, 2, id2, cycle);
+                    if let (Some(&id1), Some(&id2)) =
+                        (aig1_input_map.get(inp_key), aig2_input_map.get(inp_key))
+                    {
+                        let var1 =
+                            Self::get_or_create_var(&mut var_map, &mut var_counter, 1, id1, cycle);
+                        let var2 =
+                            Self::get_or_create_var(&mut var_map, &mut var_counter, 2, id2, cycle);
                         // var1 <=> var2
                         formula.add_clause(&[Lit::negative(var1), Lit::positive(var2)]);
                         formula.add_clause(&[Lit::positive(var1), Lit::negative(var2)]);
@@ -9989,12 +10463,22 @@ impl HierarchicalEquivalenceChecker {
             let out1_lit = &aig1.outputs[*o1_idx];
             let out2_lit = &aig2.outputs[*o2_idx];
 
-            let var1 = Self::get_or_create_var(&mut var_map, &mut var_counter, 1, out1_lit.node.0, k - 1);
-            let var2 = Self::get_or_create_var(&mut var_map, &mut var_counter, 2, out2_lit.node.0, k - 1);
+            let var1 =
+                Self::get_or_create_var(&mut var_map, &mut var_counter, 1, out1_lit.node.0, k - 1);
+            let var2 =
+                Self::get_or_create_var(&mut var_map, &mut var_counter, 2, out2_lit.node.0, k - 1);
 
             // Create miter: XOR of outputs
-            let lit1 = if out1_lit.inverted { Lit::negative(var1) } else { Lit::positive(var1) };
-            let lit2 = if out2_lit.inverted { Lit::negative(var2) } else { Lit::positive(var2) };
+            let lit1 = if out1_lit.inverted {
+                Lit::negative(var1)
+            } else {
+                Lit::positive(var1)
+            };
+            let lit2 = if out2_lit.inverted {
+                Lit::negative(var2)
+            } else {
+                Lit::positive(var2)
+            };
 
             // Check if XOR can be true (outputs can differ)
             // XOR(a,b) = (a v b) & (!a v !b)
@@ -10012,7 +10496,10 @@ impl HierarchicalEquivalenceChecker {
                     // UNSAT for this output - they're equivalent at this cycle
                 }
                 Err(e) => {
-                    return Err(FormalError::PropertyFailed(format!("SAT solver error: {:?}", e)));
+                    return Err(FormalError::PropertyFailed(format!(
+                        "SAT solver error: {:?}",
+                        e
+                    )));
                 }
             }
         }
@@ -10070,8 +10557,10 @@ impl HierarchicalEquivalenceChecker {
                 let idx = idx as u32;
                 if let AigNode::And { left, right } = node {
                     let out_var = Self::get_or_create_var(var_map, var_counter, aig_id, idx, cycle);
-                    let left_var = Self::get_or_create_var(var_map, var_counter, aig_id, left.node.0, cycle);
-                    let right_var = Self::get_or_create_var(var_map, var_counter, aig_id, right.node.0, cycle);
+                    let left_var =
+                        Self::get_or_create_var(var_map, var_counter, aig_id, left.node.0, cycle);
+                    let right_var =
+                        Self::get_or_create_var(var_map, var_counter, aig_id, right.node.0, cycle);
 
                     let left_lit = if left.inverted {
                         Lit::negative(left_var)
@@ -10096,8 +10585,20 @@ impl HierarchicalEquivalenceChecker {
             if cycle + 1 < k {
                 for latch_id in &aig.latches {
                     if let AigNode::Latch { next, .. } = &aig.nodes[latch_id.0 as usize] {
-                        let next_var = Self::get_or_create_var(var_map, var_counter, aig_id, next.node.0, cycle);
-                        let latch_var = Self::get_or_create_var(var_map, var_counter, aig_id, latch_id.0, cycle + 1);
+                        let next_var = Self::get_or_create_var(
+                            var_map,
+                            var_counter,
+                            aig_id,
+                            next.node.0,
+                            cycle,
+                        );
+                        let latch_var = Self::get_or_create_var(
+                            var_map,
+                            var_counter,
+                            aig_id,
+                            latch_id.0,
+                            cycle + 1,
+                        );
 
                         let next_lit = if next.inverted {
                             Lit::negative(next_var)
@@ -10114,8 +10615,10 @@ impl HierarchicalEquivalenceChecker {
 
             // Connect state inputs to their linked latches
             for (&state_input_id, &latch_id) in &aig.state_input_to_latch {
-                let input_var = Self::get_or_create_var(var_map, var_counter, aig_id, state_input_id, cycle);
-                let latch_var = Self::get_or_create_var(var_map, var_counter, aig_id, latch_id, cycle);
+                let input_var =
+                    Self::get_or_create_var(var_map, var_counter, aig_id, state_input_id, cycle);
+                let latch_var =
+                    Self::get_or_create_var(var_map, var_counter, aig_id, latch_id, cycle);
                 formula.add_clause(&[Lit::negative(input_var), Lit::positive(latch_var)]);
                 formula.add_clause(&[Lit::positive(input_var), Lit::negative(latch_var)]);
             }
@@ -10168,10 +10671,9 @@ impl Default for HierarchicalEquivalenceChecker {
 // and simulate them in lockstep with the same inputs.
 
 use skalp_sim::{
-    convert_gate_netlist_to_sir,
-    gate_simulator::GateLevelSimulator,
-    UnifiedSimulator, UnifiedSimConfig, SimLevel, HwAccel,
-    SimCoverageDb, CoverageVectorGen, CoverageReport, MuxArmStatus,
+    convert_gate_netlist_to_sir, gate_simulator::GateLevelSimulator, CoverageReport,
+    CoverageVectorGen, HwAccel, MuxArmStatus, SimCoverageDb, SimLevel, UnifiedSimConfig,
+    UnifiedSimulator,
 };
 use skalp_sir::convert_mir_to_sir_with_hierarchy;
 
@@ -10206,9 +10708,9 @@ pub struct MismatchDiagnostics {
     /// Input values at the time of mismatch (name -> value)
     pub input_values: Vec<(String, u64)>,
     /// MIR internal signal values relevant to the failing output
-    pub mir_signals: Vec<(String, String, u64)>,  // (hierarchical_path, internal_name, value)
+    pub mir_signals: Vec<(String, String, u64)>, // (hierarchical_path, internal_name, value)
     /// Gate internal signal values relevant to the failing output
-    pub gate_signals: Vec<(String, u64)>,  // (signal_name, value)
+    pub gate_signals: Vec<(String, u64)>, // (signal_name, value)
     /// SIR node chain for the failing output (for dataflow tracing)
     pub sir_dataflow: Vec<String>,
     /// Per-cycle trace of the failing signal and its dependencies
@@ -10220,6 +10722,7 @@ pub struct MismatchDiagnostics {
 
 /// Per-cycle trace entry for debugging signal propagation
 #[derive(Debug, Clone)]
+#[allow(clippy::type_complexity)]
 pub struct CycleTraceEntry {
     /// Cycle number (0 = after reset)
     pub cycle: u64,
@@ -10320,26 +10823,32 @@ impl SimBasedEquivalenceChecker {
         let outputs2 = sim2.get_output_names();
 
         // Match inputs (by normalized name)
-        let matched_inputs: Vec<(String, String)> = inputs1.iter()
+        let matched_inputs: Vec<(String, String)> = inputs1
+            .iter()
             .filter_map(|n1| {
                 let key1 = normalize_port_name(n1).key();
-                inputs2.iter().find(|n2| normalize_port_name(n2).key() == key1)
+                inputs2
+                    .iter()
+                    .find(|n2| normalize_port_name(n2).key() == key1)
                     .map(|n2| (n1.clone(), n2.clone()))
             })
             .collect();
 
         // Match outputs (these are both gate SIR designs — no hierarchy to strip)
-        let matched_outputs: Vec<(String, String)> = outputs1.iter()
+        let matched_outputs: Vec<(String, String)> = outputs1
+            .iter()
             .filter_map(|n1| {
                 let key1 = normalize_port_name(n1).key();
-                outputs2.iter().find(|n2| normalize_port_name(n2).key() == key1)
+                outputs2
+                    .iter()
+                    .find(|n2| normalize_port_name(n2).key() == key1)
                     .map(|n2| (n1.clone(), n2.clone()))
             })
             .collect();
 
         if matched_outputs.is_empty() {
             return Err(FormalError::PropertyFailed(
-                "No matching outputs between designs".to_string()
+                "No matching outputs between designs".to_string(),
             ));
         }
 
@@ -10372,8 +10881,11 @@ impl SimBasedEquivalenceChecker {
             // Generate deterministic pseudo-random inputs
             for (name1, name2) in &matched_inputs {
                 // Skip clock and reset
-                if name1.contains("clk") || name1.contains("clock") ||
-                   name1.contains("rst") || name1.contains("reset") {
+                if name1.contains("clk")
+                    || name1.contains("clock")
+                    || name1.contains("rst")
+                    || name1.contains("reset")
+                {
                     continue;
                 }
 
@@ -10417,12 +10929,10 @@ impl SimBasedEquivalenceChecker {
                             coverage_report: None,
                         });
                     }
-                    (None, Some(_)) | (Some(_), None) => {
-                    }
+                    (None, Some(_)) | (Some(_), None) => {}
                     _ => {}
                 }
             }
-
         }
 
         Ok(SimEquivalenceResult {
@@ -10463,6 +10973,7 @@ impl SimBasedEquivalenceChecker {
     /// - Outputs are compared at each cycle
     ///
     /// This catches bugs introduced during synthesis/tech-mapping.
+    #[allow(clippy::type_complexity)]
     pub async fn check_mir_vs_gate(
         &self,
         mir: &skalp_mir::Mir,
@@ -10478,22 +10989,29 @@ impl SimBasedEquivalenceChecker {
         let gate_sir_result = convert_gate_netlist_to_sir(netlist);
 
         // Create behavioral simulator for MIR
-        let mut mir_config = UnifiedSimConfig::default();
-        mir_config.level = SimLevel::Behavioral;
-        mir_config.hw_accel = HwAccel::Cpu; // Force CPU for consistent behavior with gate simulation
+        let mir_config = UnifiedSimConfig {
+            level: SimLevel::Behavioral,
+            hw_accel: HwAccel::Cpu, // Force CPU for consistent behavior with gate simulation
+            ..Default::default()
+        };
         let mut mir_sim = UnifiedSimulator::new(mir_config)
             .map_err(|e| FormalError::SolverError(format!("MIR simulator init failed: {}", e)))?;
-        mir_sim.load_behavioral(&sir_module).await
+        mir_sim
+            .load_behavioral(&sir_module)
+            .await
             .map_err(|e| FormalError::SolverError(format!("MIR load failed: {}", e)))?;
 
         // Create gate-level simulator
         // Force CPU mode to enable internal signal inspection for debugging
-        let mut gate_config = UnifiedSimConfig::default();
-        gate_config.level = SimLevel::GateLevel;
-        gate_config.hw_accel = HwAccel::Cpu; // Force CPU for signal inspection
+        let gate_config = UnifiedSimConfig {
+            level: SimLevel::GateLevel,
+            hw_accel: HwAccel::Cpu, // Force CPU for signal inspection
+            ..Default::default()
+        };
         let mut gate_sim = UnifiedSimulator::new(gate_config)
             .map_err(|e| FormalError::SolverError(format!("Gate simulator init failed: {}", e)))?;
-        gate_sim.load_gate_level(&gate_sir_result.sir)
+        gate_sim
+            .load_gate_level(&gate_sir_result.sir)
             .map_err(|e| FormalError::SolverError(format!("Gate load failed: {}", e)))?;
 
         // Get input and output names
@@ -10504,7 +11022,9 @@ impl SimBasedEquivalenceChecker {
 
         // Use name_registry to resolve MIR internal names (_s0, _s1) to user-facing paths (clk, rst)
         let resolve_mir_name = |internal: &str| -> String {
-            sir_module.name_registry.get_entry_by_internal(internal)
+            sir_module
+                .name_registry
+                .get_entry_by_internal(internal)
                 .map(|entry| entry.hierarchical_path.clone())
                 .unwrap_or_else(|| internal.to_string())
         };
@@ -10517,43 +11037,52 @@ impl SimBasedEquivalenceChecker {
             std::collections::HashMap::new();
         for name in &gate_inputs {
             let np = normalize_port_name(name);
-            gate_inputs_by_base.entry(np.base_name.clone())
+            gate_inputs_by_base
+                .entry(np.base_name.clone())
                 .or_default()
                 .push((name.clone(), np.bit_index));
         }
 
-        let mut gate_outputs_by_base: std::collections::HashMap<String, Vec<(String, Option<u32>)>> =
-            std::collections::HashMap::new();
+        let mut gate_outputs_by_base: std::collections::HashMap<
+            String,
+            Vec<(String, Option<u32>)>,
+        > = std::collections::HashMap::new();
         for name in &gate_outputs {
             let np = normalize_port_name(name);
-            gate_outputs_by_base.entry(np.base_name.clone())
+            gate_outputs_by_base
+                .entry(np.base_name.clone())
                 .or_default()
                 .push((name.clone(), np.bit_index));
         }
 
         // Match inputs by base_name (MIR multi-bit to Gate bit-exploded)
         // Returns: (mir_name, vec of (gate_name, bit_idx))
-        let matched_inputs: Vec<(String, Vec<(String, Option<u32>)>)> = mir_inputs.iter()
+        let matched_inputs: Vec<(String, Vec<(String, Option<u32>)>)> = mir_inputs
+            .iter()
             .filter_map(|n1| {
                 let user_name = resolve_mir_name(n1);
                 let base1 = normalize_port_name(&user_name).base_name;
-                gate_inputs_by_base.get(&base1)
+                gate_inputs_by_base
+                    .get(&base1)
                     .map(|bits| (n1.clone(), bits.clone()))
             })
             .collect();
 
         // Match outputs by base_name
-        let matched_outputs: Vec<(String, Vec<(String, Option<u32>)>)> = mir_outputs.iter()
+        let matched_outputs: Vec<(String, Vec<(String, Option<u32>)>)> = mir_outputs
+            .iter()
             .filter_map(|n1| {
                 let user_name = resolve_mir_name(n1);
                 let base1 = normalize_port_name(&user_name).base_name;
-                gate_outputs_by_base.get(&base1)
+                gate_outputs_by_base
+                    .get(&base1)
                     .map(|bits| (n1.clone(), bits.clone()))
             })
             .collect();
 
         // Build input matching info for diagnostics
-        let matched_mir_inputs: std::collections::HashSet<_> = matched_inputs.iter().map(|(m, _)| m.clone()).collect();
+        let matched_mir_inputs: std::collections::HashSet<_> =
+            matched_inputs.iter().map(|(m, _)| m.clone()).collect();
 
         // Build InputMatchingInfo struct for diagnostics
         let mut input_matching_info = InputMatchingInfo::default();
@@ -10562,7 +11091,9 @@ impl SimBasedEquivalenceChecker {
         for (mir_name, gate_bits) in &matched_inputs {
             let user_name = resolve_mir_name(mir_name);
             let gate_names: Vec<String> = gate_bits.iter().map(|(n, _)| n.clone()).collect();
-            input_matching_info.matched.push((user_name, mir_name.clone(), gate_names));
+            input_matching_info
+                .matched
+                .push((user_name, mir_name.clone(), gate_names));
         }
 
         // Record unmatched MIR inputs with reasons
@@ -10575,12 +11106,15 @@ impl SimBasedEquivalenceChecker {
                 } else {
                     format!("No gate input with base name '{}'", base)
                 };
-                input_matching_info.unmatched_mir.push((user_name, mir_name.clone(), reason));
+                input_matching_info
+                    .unmatched_mir
+                    .push((user_name, mir_name.clone(), reason));
             }
         }
 
         // Record unmatched Gate inputs
-        let matched_gate_bases: std::collections::HashSet<_> = matched_inputs.iter()
+        let matched_gate_bases: std::collections::HashSet<_> = matched_inputs
+            .iter()
             .flat_map(|(mir_name, _)| {
                 let user_name = resolve_mir_name(mir_name);
                 Some(normalize_port_name(&user_name).base_name)
@@ -10591,24 +11125,28 @@ impl SimBasedEquivalenceChecker {
                 let gate_names: Vec<String> = gate_bits.iter().map(|(n, _)| n.clone()).collect();
                 let reason = format!("No MIR input resolves to base name '{}'", gate_base);
                 for gate_name in gate_names {
-                    input_matching_info.unmatched_gate.push((gate_name, reason.clone()));
+                    input_matching_info
+                        .unmatched_gate
+                        .push((gate_name, reason.clone()));
                 }
             }
         }
 
         if matched_outputs.is_empty() {
             return Err(FormalError::PropertyFailed(
-                "No matching outputs between MIR and Gate".to_string()
+                "No matching outputs between MIR and Gate".to_string(),
             ));
         }
 
         // Find the actual reset signal name in the gate simulator
-        let gate_reset_name = gate_inputs_by_base.get(&self.reset_name)
+        let gate_reset_name = gate_inputs_by_base
+            .get(&self.reset_name)
             .and_then(|bits| bits.first())
             .map(|(name, _)| name.clone())
             .unwrap_or_else(|| self.reset_name.clone());
 
-        let gate_clock_name = gate_inputs_by_base.get(&self.clock_name)
+        let gate_clock_name = gate_inputs_by_base
+            .get(&self.clock_name)
             .and_then(|bits| bits.first())
             .map(|(name, _)| name.clone())
             .unwrap_or_else(|| self.clock_name.clone());
@@ -10686,8 +11224,11 @@ impl SimBasedEquivalenceChecker {
             // Keep all inputs at 0
             for (mir_name, gate_bits) in &matched_inputs {
                 let user_name = resolve_mir_name(mir_name);
-                if user_name.contains("clk") || user_name.contains("clock") ||
-                   user_name.contains("rst") || user_name.contains("reset") {
+                if user_name.contains("clk")
+                    || user_name.contains("clock")
+                    || user_name.contains("rst")
+                    || user_name.contains("reset")
+                {
                     continue;
                 }
                 mir_sim.set_input(mir_name, 0).await;
@@ -10716,8 +11257,11 @@ impl SimBasedEquivalenceChecker {
             for (mir_name, gate_bits) in &matched_inputs {
                 let user_name = resolve_mir_name(mir_name);
                 // Skip clock and reset
-                if user_name.contains("clk") || user_name.contains("clock") ||
-                   user_name.contains("rst") || user_name.contains("reset") {
+                if user_name.contains("clk")
+                    || user_name.contains("clock")
+                    || user_name.contains("rst")
+                    || user_name.contains("reset")
+                {
                     continue;
                 }
 
@@ -10731,10 +11275,18 @@ impl SimBasedEquivalenceChecker {
                 // BUG #250 FIX: Mask the value to the actual port width
                 // The gate_bits length tells us the port width in bits
                 let port_width = gate_bits.len() as u32;
-                let width_mask = if port_width >= 64 { u64::MAX } else { (1u64 << port_width) - 1 };
+                let width_mask = if port_width >= 64 {
+                    u64::MAX
+                } else {
+                    (1u64 << port_width) - 1
+                };
 
                 // For single-bit signals, use only bit 0; for multi-bit, mask to port width
-                let mir_value = if is_single_bit { value & 1 } else { value & width_mask };
+                let mir_value = if is_single_bit {
+                    value & 1
+                } else {
+                    value & width_mask
+                };
 
                 // Set MIR input
                 mir_sim.set_input(mir_name, mir_value).await;
@@ -10775,8 +11327,11 @@ impl SimBasedEquivalenceChecker {
             // Collect input values applied this cycle
             for (mir_name, _) in &matched_inputs {
                 let user_name = resolve_mir_name(mir_name);
-                if user_name.contains("clk") || user_name.contains("clock") ||
-                   user_name.contains("rst") || user_name.contains("reset") {
+                if user_name.contains("clk")
+                    || user_name.contains("clock")
+                    || user_name.contains("rst")
+                    || user_name.contains("reset")
+                {
                     continue;
                 }
                 if let Some(val) = mir_sim.get_output_raw(mir_name).await {
@@ -10806,12 +11361,17 @@ impl SimBasedEquivalenceChecker {
                 }
 
                 // Mask MIR value to gate port width for correct comparison
-                let trace_port_width = sorted_bits.iter()
+                let trace_port_width = sorted_bits
+                    .iter()
                     .filter_map(|(_, idx)| *idx)
                     .max()
                     .map(|max_idx| max_idx + 1)
-                    .unwrap_or(1) as u32;
-                let trace_mask = if trace_port_width >= 64 { u64::MAX } else { (1u64 << trace_port_width) - 1 };
+                    .unwrap_or(1);
+                let trace_mask = if trace_port_width >= 64 {
+                    u64::MAX
+                } else {
+                    (1u64 << trace_port_width) - 1
+                };
                 let mir_val_masked = mir_val.map(|v| v & trace_mask);
                 let matches = mir_val_masked == Some(gate_val);
                 trace_entry.signals.push((
@@ -10819,7 +11379,7 @@ impl SimBasedEquivalenceChecker {
                     mir_name.clone(),
                     mir_val_masked,
                     if has_gate { Some(gate_val) } else { None },
-                    matches
+                    matches,
                 ));
             }
 
@@ -10857,12 +11417,17 @@ impl SimBasedEquivalenceChecker {
                 // MIR simulation may return wider values (e.g., 32-bit for int[10] due to
                 // Value::Integer not carrying width info). The gate side has the correct
                 // width from synthesis. Mask ensures we compare only the relevant bits.
-                let port_width = sorted_bits.iter()
+                let port_width = sorted_bits
+                    .iter()
                     .filter_map(|(_, idx)| *idx)
                     .max()
                     .map(|max_idx| max_idx + 1)
-                    .unwrap_or(1) as u32;
-                let width_mask = if port_width >= 64 { u64::MAX } else { (1u64 << port_width) - 1 };
+                    .unwrap_or(1);
+                let width_mask = if port_width >= 64 {
+                    u64::MAX
+                } else {
+                    (1u64 << port_width) - 1
+                };
                 let mir_val_masked = mir_val & width_mask;
 
                 if has_bits && mir_val_masked != gate_val {
@@ -10875,7 +11440,7 @@ impl SimBasedEquivalenceChecker {
                             diagnostics.mir_signals.push((
                                 entry.hierarchical_path.clone(),
                                 entry.internal_name.clone(),
-                                val
+                                val,
                             ));
                         }
                     }
@@ -10883,7 +11448,8 @@ impl SimBasedEquivalenceChecker {
                     // Collect ALL Gate internal signals
                     let all_gate_signals = gate_sim.dump_gate_signals();
                     for (sig_name, bits) in &all_gate_signals {
-                        let val: u64 = bits.iter()
+                        let val: u64 = bits
+                            .iter()
                             .enumerate()
                             .fold(0u64, |acc, (i, &b)| acc | ((b as u64) << i));
                         diagnostics.gate_signals.push((sig_name.clone(), val));
@@ -10899,16 +11465,34 @@ impl SimBasedEquivalenceChecker {
 
                     // Extract SIR dataflow for the failing output
                     // Find the output in SIR and trace its driver chain
-                    if let Some(output) = sir_module.outputs.iter().find(|o| o.name == *mir_name || resolve_mir_name(&o.name) == user_name) {
-                        diagnostics.sir_dataflow.push(format!("Output '{}' (SIR name: '{}')", user_name, output.name));
+                    if let Some(output) = sir_module
+                        .outputs
+                        .iter()
+                        .find(|o| o.name == *mir_name || resolve_mir_name(&o.name) == user_name)
+                    {
+                        diagnostics.sir_dataflow.push(format!(
+                            "Output '{}' (SIR name: '{}')",
+                            user_name, output.name
+                        ));
                         // Find driver node for this output
-                        if let Some(signal) = sir_module.signals.iter().find(|s| s.name == output.name) {
+                        if let Some(signal) =
+                            sir_module.signals.iter().find(|s| s.name == output.name)
+                        {
                             if let Some(driver_id) = signal.driver_node {
-                                if let Some(driver_node) = sir_module.combinational_nodes.iter().find(|n| n.id == driver_id) {
-                                    diagnostics.sir_dataflow.push(format!("  Driven by node {}: {:?}", driver_id, driver_node.kind));
+                                if let Some(driver_node) = sir_module
+                                    .combinational_nodes
+                                    .iter()
+                                    .find(|n| n.id == driver_id)
+                                {
+                                    diagnostics.sir_dataflow.push(format!(
+                                        "  Driven by node {}: {:?}",
+                                        driver_id, driver_node.kind
+                                    ));
                                     // Trace inputs to this node
                                     for input in &driver_node.inputs {
-                                        diagnostics.sir_dataflow.push(format!("    Input: {}", input.signal_id));
+                                        diagnostics
+                                            .sir_dataflow
+                                            .push(format!("    Input: {}", input.signal_id));
                                     }
                                 }
                             }
@@ -10936,7 +11520,6 @@ impl SimBasedEquivalenceChecker {
                     });
                 }
             }
-
         }
 
         Ok(SimEquivalenceResult {
@@ -10961,6 +11544,7 @@ impl SimBasedEquivalenceChecker {
     /// 3. Coverage-biased targeted generation
     ///
     /// Returns coverage report alongside equivalence result.
+    #[allow(clippy::type_complexity)]
     pub async fn check_mir_vs_gate_coverage(
         &self,
         mir: &skalp_mir::Mir,
@@ -10976,28 +11560,38 @@ impl SimBasedEquivalenceChecker {
         let gate_sir_result = convert_gate_netlist_to_sir(netlist);
 
         // Create behavioral simulator
-        let mut mir_config = UnifiedSimConfig::default();
-        mir_config.level = SimLevel::Behavioral;
-        mir_config.hw_accel = HwAccel::Cpu;
+        let mir_config = UnifiedSimConfig {
+            level: SimLevel::Behavioral,
+            hw_accel: HwAccel::Cpu,
+            ..Default::default()
+        };
         let mut mir_sim = UnifiedSimulator::new(mir_config)
             .map_err(|e| FormalError::SolverError(format!("MIR simulator init failed: {}", e)))?;
-        mir_sim.load_behavioral(&sir_module).await
+        mir_sim
+            .load_behavioral(&sir_module)
+            .await
             .map_err(|e| FormalError::SolverError(format!("MIR load failed: {}", e)))?;
 
         // Create gate-level simulator
-        let mut gate_config = UnifiedSimConfig::default();
-        gate_config.level = SimLevel::GateLevel;
-        gate_config.hw_accel = HwAccel::Cpu;
+        let gate_config = UnifiedSimConfig {
+            level: SimLevel::GateLevel,
+            hw_accel: HwAccel::Cpu,
+            ..Default::default()
+        };
         let mut gate_sim = UnifiedSimulator::new(gate_config)
             .map_err(|e| FormalError::SolverError(format!("Gate simulator init failed: {}", e)))?;
-        gate_sim.load_gate_level(&gate_sir_result.sir)
+        gate_sim
+            .load_gate_level(&gate_sir_result.sir)
             .map_err(|e| FormalError::SolverError(format!("Gate load failed: {}", e)))?;
 
         // Build behavioral coverage database from SirModule
         let mut behav_cov = SimCoverageDb::from_sir_module(&sir_module);
 
         // Build gate coverage database from gate signal info
-        let gate_signal_info: Vec<(String, usize)> = gate_sir_result.sir.top_module.signals
+        let gate_signal_info: Vec<(String, usize)> = gate_sir_result
+            .sir
+            .top_module
+            .signals
             .iter()
             .map(|s| (s.name.clone(), s.width))
             .collect();
@@ -11010,7 +11604,9 @@ impl SimBasedEquivalenceChecker {
         let gate_outputs = gate_sim.get_output_names();
 
         let resolve_mir_name = |internal: &str| -> String {
-            sir_module.name_registry.get_entry_by_internal(internal)
+            sir_module
+                .name_registry
+                .get_entry_by_internal(internal)
                 .map(|entry| entry.hierarchical_path.clone())
                 .unwrap_or_else(|| internal.to_string())
         };
@@ -11020,53 +11616,63 @@ impl SimBasedEquivalenceChecker {
             std::collections::HashMap::new();
         for name in &gate_inputs {
             let np = normalize_port_name(name);
-            gate_inputs_by_base.entry(np.base_name.clone())
+            gate_inputs_by_base
+                .entry(np.base_name.clone())
                 .or_default()
                 .push((name.clone(), np.bit_index));
         }
 
-        let mut gate_outputs_by_base: std::collections::HashMap<String, Vec<(String, Option<u32>)>> =
-            std::collections::HashMap::new();
+        let mut gate_outputs_by_base: std::collections::HashMap<
+            String,
+            Vec<(String, Option<u32>)>,
+        > = std::collections::HashMap::new();
         for name in &gate_outputs {
             let np = normalize_port_name(name);
-            gate_outputs_by_base.entry(np.base_name.clone())
+            gate_outputs_by_base
+                .entry(np.base_name.clone())
                 .or_default()
                 .push((name.clone(), np.bit_index));
         }
 
         // Match inputs
-        let matched_inputs: Vec<(String, Vec<(String, Option<u32>)>)> = mir_inputs.iter()
+        let matched_inputs: Vec<(String, Vec<(String, Option<u32>)>)> = mir_inputs
+            .iter()
             .filter_map(|n1| {
                 let user_name = resolve_mir_name(n1);
                 let base1 = normalize_port_name(&user_name).base_name;
-                gate_inputs_by_base.get(&base1)
+                gate_inputs_by_base
+                    .get(&base1)
                     .map(|bits| (n1.clone(), bits.clone()))
             })
             .collect();
 
         // Match outputs
-        let matched_outputs: Vec<(String, Vec<(String, Option<u32>)>)> = mir_outputs.iter()
+        let matched_outputs: Vec<(String, Vec<(String, Option<u32>)>)> = mir_outputs
+            .iter()
             .filter_map(|n1| {
                 let user_name = resolve_mir_name(n1);
                 let base1 = normalize_port_name(&user_name).base_name;
-                gate_outputs_by_base.get(&base1)
+                gate_outputs_by_base
+                    .get(&base1)
                     .map(|bits| (n1.clone(), bits.clone()))
             })
             .collect();
 
         if matched_outputs.is_empty() {
             return Err(FormalError::PropertyFailed(
-                "No matching outputs between MIR and Gate".to_string()
+                "No matching outputs between MIR and Gate".to_string(),
             ));
         }
 
         // Find actual reset/clock names in gate simulator
-        let gate_reset_name = gate_inputs_by_base.get(&self.reset_name)
+        let gate_reset_name = gate_inputs_by_base
+            .get(&self.reset_name)
             .and_then(|bits| bits.first())
             .map(|(name, _)| name.clone())
             .unwrap_or_else(|| self.reset_name.clone());
 
-        let gate_clock_name = gate_inputs_by_base.get(&self.clock_name)
+        let gate_clock_name = gate_inputs_by_base
+            .get(&self.clock_name)
             .and_then(|bits| bits.first())
             .map(|(name, _)| name.clone())
             .unwrap_or_else(|| self.clock_name.clone());
@@ -11121,22 +11727,29 @@ impl SimBasedEquivalenceChecker {
 
         // Build input info for vector generator
         // Collect (user_name, width) for each matched input
-        let input_info: Vec<(String, usize)> = matched_inputs.iter()
+        let input_info: Vec<(String, usize)> = matched_inputs
+            .iter()
             .filter_map(|(mir_name, gate_bits)| {
                 let user_name = resolve_mir_name(mir_name);
-                if user_name.contains("clk") || user_name.contains("clock") ||
-                   user_name.contains("rst") || user_name.contains("reset") {
+                if user_name.contains("clk")
+                    || user_name.contains("clock")
+                    || user_name.contains("rst")
+                    || user_name.contains("reset")
+                {
                     return None;
                 }
                 // Width = number of gate bits (or 1 if single signal)
                 let width = if gate_bits.len() == 1 && gate_bits[0].1.is_none() {
                     // Single-bit signal, check MIR port for width
-                    sir_module.inputs.iter()
+                    sir_module
+                        .inputs
+                        .iter()
                         .find(|p| p.name == *mir_name)
                         .map(|p| p.width)
                         .unwrap_or(1)
                 } else {
-                    gate_bits.iter()
+                    gate_bits
+                        .iter()
                         .filter_map(|(_, idx)| *idx)
                         .max()
                         .map(|max| max as usize + 1)
@@ -11156,7 +11769,6 @@ impl SimBasedEquivalenceChecker {
 
         // Main simulation loop driven by vector generator
         while let Some(vec) = vecgen.next(Some(&behav_cov)) {
-
             // Apply vector to both simulators
             for (user_name, value) in &vec.values {
                 // Find the matching MIR/gate input pair
@@ -11229,18 +11841,27 @@ impl SimBasedEquivalenceChecker {
                 }
 
                 // BUG FIX: Mask MIR value to gate port width before comparing
-                let cov_port_width = sorted_bits.iter()
+                let cov_port_width = sorted_bits
+                    .iter()
                     .filter_map(|(_, idx)| *idx)
                     .max()
                     .map(|max_idx| max_idx + 1)
-                    .unwrap_or(1) as u32;
-                let cov_width_mask = if cov_port_width >= 64 { u64::MAX } else { (1u64 << cov_port_width) - 1 };
+                    .unwrap_or(1);
+                let cov_width_mask = if cov_port_width >= 64 {
+                    u64::MAX
+                } else {
+                    (1u64 << cov_port_width) - 1
+                };
                 let mir_val_masked = mir_val & cov_width_mask;
 
                 if has_bits && mir_val_masked != gate_val {
                     let user_name = resolve_mir_name(mir_name);
                     let coverage_report = CoverageReport::from_coverage_dbs(
-                        &behav_cov, Some(&gate_cov), false, cycle);
+                        &behav_cov,
+                        Some(&gate_cov),
+                        false,
+                        cycle,
+                    );
 
                     return Ok(SimEquivalenceResult {
                         equivalent: false,
@@ -11265,26 +11886,34 @@ impl SimBasedEquivalenceChecker {
             std::collections::HashMap::new();
 
         // Build set of gate signal names for lookup
-        let gate_signal_names: std::collections::HashSet<String> =
-            gate_sir_result.sir.top_module.signals
-                .iter()
-                .map(|s| s.name.clone())
-                .collect();
+        let gate_signal_names: std::collections::HashSet<String> = gate_sir_result
+            .sir
+            .top_module
+            .signals
+            .iter()
+            .map(|s| s.name.clone())
+            .collect();
 
         for (node_name, _arms, output_sig) in behav_cov.uncovered_mux_arms_with_signals() {
             let status = if let Some(sig_id) = output_sig {
                 // Resolve internal name to hierarchical path
-                let hier_path = sir_module.name_registry
+                let hier_path = sir_module
+                    .name_registry
                     .get_entry_by_internal(sig_id)
                     .map(|e| e.hierarchical_path.clone())
                     .unwrap_or_else(|| sig_id.to_string());
 
                 // Check if any gate signal matches (exact or prefix match for bus signals)
                 let found = gate_signal_names.contains(&hier_path)
-                    || gate_signal_names.iter().any(|gs|
-                        gs.starts_with(&hier_path) || hier_path.starts_with(gs));
+                    || gate_signal_names
+                        .iter()
+                        .any(|gs| gs.starts_with(&hier_path) || hier_path.starts_with(gs));
 
-                if found { MuxArmStatus::CoverageGap } else { MuxArmStatus::OptimizedAway }
+                if found {
+                    MuxArmStatus::CoverageGap
+                } else {
+                    MuxArmStatus::OptimizedAway
+                }
             } else {
                 MuxArmStatus::Unknown
             };
@@ -11297,23 +11926,35 @@ impl SimBasedEquivalenceChecker {
 
         for (sig_name, _width) in behav_cov.tracked_toggle_signals() {
             // Resolve internal name to hierarchical path
-            let hier_path = sir_module.name_registry
+            let hier_path = sir_module
+                .name_registry
                 .get_entry_by_internal(sig_name)
                 .map(|e| e.hierarchical_path.clone())
                 .unwrap_or_else(|| sig_name.to_string());
 
             // Check if any gate signal matches (exact or prefix match for bus signals)
             let found = gate_signal_names.contains(&hier_path)
-                || gate_signal_names.iter().any(|gs|
-                    gs.starts_with(&hier_path) || hier_path.starts_with(gs));
+                || gate_signal_names
+                    .iter()
+                    .any(|gs| gs.starts_with(&hier_path) || hier_path.starts_with(gs));
 
-            let status = if found { MuxArmStatus::CoverageGap } else { MuxArmStatus::OptimizedAway };
+            let status = if found {
+                MuxArmStatus::CoverageGap
+            } else {
+                MuxArmStatus::OptimizedAway
+            };
             toggle_xref.insert(sig_name.clone(), status);
         }
 
         // Build final coverage report with cross-reference data
         let coverage_report = CoverageReport::from_coverage_dbs_with_xref(
-            &behav_cov, Some(&gate_cov), &mux_xref, &toggle_xref, true, cycle);
+            &behav_cov,
+            Some(&gate_cov),
+            &mux_xref,
+            &toggle_xref,
+            true,
+            cycle,
+        );
 
         Ok(SimEquivalenceResult {
             equivalent: true,
@@ -11419,10 +12060,7 @@ mod tests {
         let miter = build_miter(&aig1, &aig2).unwrap();
         let result = check_equivalence_sat(&miter).unwrap();
 
-        assert!(
-            !result.equivalent,
-            "AND vs OR should not be equivalent"
-        );
+        assert!(!result.equivalent, "AND vs OR should not be equivalent");
         assert!(
             result.counterexample.is_some(),
             "Should have counterexample"
@@ -11543,9 +12181,7 @@ mod tests {
         let lir2 = create_counter();
 
         let checker = SequentialEquivalenceChecker::new();
-        let result = checker
-            .check_sequential_equivalence(&lir1, &lir2)
-            .unwrap();
+        let result = checker.check_sequential_equivalence(&lir1, &lir2).unwrap();
 
         assert!(
             result.equivalent,
@@ -11611,9 +12247,7 @@ mod tests {
         );
 
         let checker = SequentialEquivalenceChecker::new();
-        let result = checker
-            .check_sequential_equivalence(&lir1, &lir2)
-            .unwrap();
+        let result = checker.check_sequential_equivalence(&lir1, &lir2).unwrap();
 
         assert!(
             !result.equivalent,
@@ -11629,9 +12263,9 @@ mod tests {
     #[test]
     fn test_mir_to_aig_basic() {
         use skalp_mir::{
-            DataType, Expression, ExpressionKind, LValue, Module, ModuleId, Port, PortDirection,
-            PortId, Process, ProcessId, ProcessKind, SensitivityList, Block, Statement,
-            Assignment, AssignmentKind, BinaryOp,
+            Assignment, AssignmentKind, BinaryOp, Block, DataType, Expression, ExpressionKind,
+            LValue, Module, ModuleId, Port, PortDirection, PortId, Process, ProcessId, ProcessKind,
+            SensitivityList, Statement,
         };
 
         // Create a simple MIR module: out = a & b
@@ -11719,9 +12353,9 @@ mod tests {
     #[test]
     fn test_mir_equivalence_identical() {
         use skalp_mir::{
-            DataType, Expression, ExpressionKind, LValue, Module, ModuleId, Port, PortDirection,
-            PortId, Process, ProcessId, ProcessKind, SensitivityList, Block, Statement,
-            Assignment, AssignmentKind, BinaryOp,
+            Assignment, AssignmentKind, BinaryOp, Block, DataType, Expression, ExpressionKind,
+            LValue, Module, ModuleId, Port, PortDirection, PortId, Process, ProcessId, ProcessKind,
+            SensitivityList, Statement,
         };
 
         // Create two identical MIR modules
@@ -11773,9 +12407,9 @@ mod tests {
                                 left: Box::new(Expression::with_unknown_type(ExpressionKind::Ref(
                                     LValue::Port(PortId(0)),
                                 ))),
-                                right: Box::new(Expression::with_unknown_type(ExpressionKind::Ref(
-                                    LValue::Port(PortId(1)),
-                                ))),
+                                right: Box::new(Expression::with_unknown_type(
+                                    ExpressionKind::Ref(LValue::Port(PortId(1))),
+                                )),
                             }),
                             kind: AssignmentKind::Blocking,
                             span: None,
@@ -11807,7 +12441,10 @@ mod tests {
         let checker = MirEquivalenceChecker::new();
         let result = checker.check_mir_equivalence(&module1, &module2).unwrap();
 
-        assert!(result.equivalent, "Identical MIR modules should be equivalent");
+        assert!(
+            result.equivalent,
+            "Identical MIR modules should be equivalent"
+        );
     }
 
     #[test]
@@ -11910,7 +12547,10 @@ mod tests {
 
         // a = 0
         lir.add_node(
-            LirOp::Constant { width: 16, value: 0 },
+            LirOp::Constant {
+                width: 16,
+                value: 0,
+            },
             vec![],
             a,
             "const_a".to_string(),
@@ -11918,7 +12558,10 @@ mod tests {
 
         // b = 0
         lir.add_node(
-            LirOp::Constant { width: 16, value: 0 },
+            LirOp::Constant {
+                width: 16,
+                value: 0,
+            },
             vec![],
             b,
             "const_b".to_string(),
@@ -11980,7 +12623,10 @@ mod tests {
 
         // a = 0
         lir.add_node(
-            LirOp::Constant { width: 16, value: 0 },
+            LirOp::Constant {
+                width: 16,
+                value: 0,
+            },
             vec![],
             a,
             "const_a".to_string(),
@@ -11988,7 +12634,10 @@ mod tests {
 
         // b = 0
         lir.add_node(
-            LirOp::Constant { width: 16, value: 0 },
+            LirOp::Constant {
+                width: 16,
+                value: 0,
+            },
             vec![],
             b,
             "const_b".to_string(),
@@ -12013,8 +12662,12 @@ mod tests {
         for (idx, node) in aig.nodes.iter().enumerate() {
             let idx = idx as u32;
             match node {
-                AigNode::False => { sim_values.insert(idx, false); }
-                AigNode::Input { .. } => { sim_values.insert(idx, false); }
+                AigNode::False => {
+                    sim_values.insert(idx, false);
+                }
+                AigNode::Input { .. } => {
+                    sim_values.insert(idx, false);
+                }
                 AigNode::And { left, right } => {
                     let l = sim_values.get(&left.node.0).copied().unwrap_or(false);
                     let r = sim_values.get(&right.node.0).copied().unwrap_or(false);
@@ -12047,7 +12700,10 @@ mod tests {
 
         // a = -1 (0xFFFF in two's complement)
         lir.add_node(
-            LirOp::Constant { width: 16, value: 0xFFFF },
+            LirOp::Constant {
+                width: 16,
+                value: 0xFFFF,
+            },
             vec![],
             a,
             "const_a".to_string(),
@@ -12055,7 +12711,10 @@ mod tests {
 
         // b = 0
         lir.add_node(
-            LirOp::Constant { width: 16, value: 0 },
+            LirOp::Constant {
+                width: 16,
+                value: 0,
+            },
             vec![],
             b,
             "const_b".to_string(),
@@ -12080,8 +12739,12 @@ mod tests {
         for (idx, node) in aig.nodes.iter().enumerate() {
             let idx = idx as u32;
             match node {
-                AigNode::False => { sim_values.insert(idx, false); }
-                AigNode::Input { .. } => { sim_values.insert(idx, false); }
+                AigNode::False => {
+                    sim_values.insert(idx, false);
+                }
+                AigNode::Input { .. } => {
+                    sim_values.insert(idx, false);
+                }
                 AigNode::And { left, right } => {
                     let l = sim_values.get(&left.node.0).copied().unwrap_or(false);
                     let r = sim_values.get(&right.node.0).copied().unwrap_or(false);
@@ -12113,7 +12776,10 @@ mod tests {
 
         // a = 100
         lir.add_node(
-            LirOp::Constant { width: 16, value: 100 },
+            LirOp::Constant {
+                width: 16,
+                value: 100,
+            },
             vec![],
             a,
             "const_a".to_string(),
@@ -12121,7 +12787,10 @@ mod tests {
 
         // b = 50
         lir.add_node(
-            LirOp::Constant { width: 16, value: 50 },
+            LirOp::Constant {
+                width: 16,
+                value: 50,
+            },
             vec![],
             b,
             "const_b".to_string(),
@@ -12146,8 +12815,12 @@ mod tests {
         for (idx, node) in aig.nodes.iter().enumerate() {
             let idx = idx as u32;
             match node {
-                AigNode::False => { sim_values.insert(idx, false); }
-                AigNode::Input { .. } => { sim_values.insert(idx, false); }
+                AigNode::False => {
+                    sim_values.insert(idx, false);
+                }
+                AigNode::Input { .. } => {
+                    sim_values.insert(idx, false);
+                }
                 AigNode::And { left, right } => {
                     let l = sim_values.get(&left.node.0).copied().unwrap_or(false);
                     let r = sim_values.get(&right.node.0).copied().unwrap_or(false);
@@ -12179,7 +12852,10 @@ mod tests {
 
         // a = 50
         lir.add_node(
-            LirOp::Constant { width: 16, value: 50 },
+            LirOp::Constant {
+                width: 16,
+                value: 50,
+            },
             vec![],
             a,
             "const_a".to_string(),
@@ -12187,7 +12863,10 @@ mod tests {
 
         // b = 100
         lir.add_node(
-            LirOp::Constant { width: 16, value: 100 },
+            LirOp::Constant {
+                width: 16,
+                value: 100,
+            },
             vec![],
             b,
             "const_b".to_string(),
@@ -12212,8 +12891,12 @@ mod tests {
         for (idx, node) in aig.nodes.iter().enumerate() {
             let idx = idx as u32;
             match node {
-                AigNode::False => { sim_values.insert(idx, false); }
-                AigNode::Input { .. } => { sim_values.insert(idx, false); }
+                AigNode::False => {
+                    sim_values.insert(idx, false);
+                }
+                AigNode::Input { .. } => {
+                    sim_values.insert(idx, false);
+                }
                 AigNode::And { left, right } => {
                     let l = sim_values.get(&left.node.0).copied().unwrap_or(false);
                     let r = sim_values.get(&right.node.0).copied().unwrap_or(false);
@@ -12287,7 +12970,10 @@ mod tests {
 
         // value = 100
         lir.add_node(
-            LirOp::Constant { width: 16, value: 100 },
+            LirOp::Constant {
+                width: 16,
+                value: 100,
+            },
             vec![],
             value,
             "const_value".to_string(),
@@ -12295,7 +12981,10 @@ mod tests {
 
         // threshold = 50
         lir.add_node(
-            LirOp::Constant { width: 16, value: 50 },
+            LirOp::Constant {
+                width: 16,
+                value: 50,
+            },
             vec![],
             threshold,
             "const_threshold".to_string(),
@@ -12303,7 +12992,10 @@ mod tests {
 
         // threshold_hysteresis = 40
         lir.add_node(
-            LirOp::Constant { width: 16, value: 40 },
+            LirOp::Constant {
+                width: 16,
+                value: 40,
+            },
             vec![],
             threshold_hysteresis,
             "const_threshold_hysteresis".to_string(),
@@ -12370,8 +13062,12 @@ mod tests {
         for (idx, node) in aig.nodes.iter().enumerate() {
             let idx = idx as u32;
             match node {
-                AigNode::False => { sim_values.insert(idx, false); }
-                AigNode::Input { .. } => { sim_values.insert(idx, false); }
+                AigNode::False => {
+                    sim_values.insert(idx, false);
+                }
+                AigNode::Input { .. } => {
+                    sim_values.insert(idx, false);
+                }
                 AigNode::And { left, right } => {
                     let l = sim_values.get(&left.node.0).copied().unwrap_or(false);
                     let r = sim_values.get(&right.node.0).copied().unwrap_or(false);

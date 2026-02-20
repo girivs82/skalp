@@ -10,7 +10,6 @@ use skalp_lir::{
 };
 use skalp_mir::MirCompiler;
 use skalp_sim::ncl_sim::{NclSimConfig, NclSimulator};
-use std::io::Write;
 
 fn setup_stdlib_path() {
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
@@ -27,7 +26,8 @@ fn compile_to_gates(fixture_name: &str) -> GateNetlist {
     setup_stdlib_path();
 
     let source_path = fixture_path(fixture_name);
-    let context = parse_and_build_compilation_context(std::path::Path::new(&source_path)).expect("Failed to parse");
+    let context = parse_and_build_compilation_context(std::path::Path::new(&source_path))
+        .expect("Failed to parse");
     let mir_compiler = MirCompiler::new();
     let mir = mir_compiler
         .compile_to_mir_with_modules(&context.main_hir, &context.module_hirs)

@@ -296,7 +296,10 @@ mod tests {
         assert_eq!(mapper.get_type_for_width(32), ("uint".to_string(), None));
         assert_eq!(mapper.get_type_for_width(64), ("uint2".to_string(), None));
         assert_eq!(mapper.get_type_for_width(128), ("uint4".to_string(), None));
-        assert_eq!(mapper.get_type_for_width(256), ("uint".to_string(), Some(8)));
+        assert_eq!(
+            mapper.get_type_for_width(256),
+            ("uint".to_string(), Some(8))
+        );
     }
 
     #[test]
@@ -304,9 +307,18 @@ mod tests {
         let mapper = TypeMapper::new(BackendTarget::Cpp);
 
         assert_eq!(mapper.get_type_for_width(1), ("uint32_t".to_string(), None));
-        assert_eq!(mapper.get_type_for_width(32), ("uint32_t".to_string(), None));
-        assert_eq!(mapper.get_type_for_width(64), ("uint64_t".to_string(), None));
-        assert_eq!(mapper.get_type_for_width(128), ("uint32_t".to_string(), Some(4)));
+        assert_eq!(
+            mapper.get_type_for_width(32),
+            ("uint32_t".to_string(), None)
+        );
+        assert_eq!(
+            mapper.get_type_for_width(64),
+            ("uint64_t".to_string(), None)
+        );
+        assert_eq!(
+            mapper.get_type_for_width(128),
+            ("uint32_t".to_string(), Some(4))
+        );
     }
 
     #[test]

@@ -366,17 +366,16 @@ impl Waveform {
         let skw = self.build_skw_data(design_name);
         let file = File::create(path)?;
         let writer = BufWriter::new(file);
-        serde_json::to_writer_pretty(writer, &skw)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
+        serde_json::to_writer_pretty(writer, &skw).map_err(std::io::Error::other)
     }
 
     /// Export waveform in compressed SKALP Waveform (.skw.gz) format
     pub fn export_skw_compressed(&self, path: &Path, design_name: &str) -> std::io::Result<()> {
         let skw = self.build_skw_data(design_name);
         let file = File::create(path)?;
-        let encoder = flate2::write::GzEncoder::new(BufWriter::new(file), flate2::Compression::fast());
-        serde_json::to_writer(encoder, &skw)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
+        let encoder =
+            flate2::write::GzEncoder::new(BufWriter::new(file), flate2::Compression::fast());
+        serde_json::to_writer(encoder, &skw).map_err(std::io::Error::other)
     }
 
     fn build_skw_data(&self, design_name: &str) -> SkwData {
@@ -416,10 +415,7 @@ impl Waveform {
             });
 
             if !group.is_empty() {
-                groups
-                    .entry(group)
-                    .or_default()
-                    .push(name.clone());
+                groups.entry(group).or_default().push(name.clone());
             }
 
             // Build sparse changes (only record when value actually changes)

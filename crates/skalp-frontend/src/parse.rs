@@ -825,8 +825,11 @@ impl<'a> ParseState<'a> {
             self.bump();
 
             self.start_node(SyntaxKind::EdgeType);
-            if self.at(SyntaxKind::RiseKw) || self.at(SyntaxKind::FallKw)
-                || self.at(SyntaxKind::ActiveKw) || self.at(SyntaxKind::InactiveKw) {
+            if self.at(SyntaxKind::RiseKw)
+                || self.at(SyntaxKind::FallKw)
+                || self.at(SyntaxKind::ActiveKw)
+                || self.at(SyntaxKind::InactiveKw)
+            {
                 self.bump();
             } else {
                 self.error("expected 'rise', 'fall', 'active', or 'inactive'");

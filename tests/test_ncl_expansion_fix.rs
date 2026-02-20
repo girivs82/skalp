@@ -1,7 +1,6 @@
 //! Test to verify NCL expansion handlers for RedOr, RedAnd, RedXor, Slt, Sge, Sgt, Sle
 //! are correctly implemented (no undriven signals)
 
-
 use skalp_frontend::parse_and_build_compilation_context;
 use skalp_lir::lower_mir_hierarchical;
 use skalp_mir::MirCompiler;
@@ -14,8 +13,8 @@ fn test_fp32_ncl_no_undriven_signals() {
         "/Users/girivs/src/hw/hls/crates/skalp-stdlib",
     );
 
-    let source_path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/test_fpadd_sim.sk");
+    let source_path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/test_fpadd_sim.sk");
     let context = parse_and_build_compilation_context(&source_path).expect("Failed to parse");
     let mir_compiler = MirCompiler::new();
     let mir = mir_compiler
@@ -24,9 +23,10 @@ fn test_fp32_ncl_no_undriven_signals() {
     let hier_lir = lower_mir_hierarchical(&mir);
 
     // Find the FpAdd instance dynamically (name suffix depends on compiler-assigned IDs)
-    let adder_entry = hier_lir.instances.iter().find(|(path, inst)| {
-        path.contains("adder") || inst.module_name.contains("FpAdd")
-    });
+    let adder_entry = hier_lir
+        .instances
+        .iter()
+        .find(|(path, inst)| path.contains("adder") || inst.module_name.contains("FpAdd"));
 
     let (adder_path, adder_inst) = adder_entry.expect("FP32 adder instance not found in hierarchy");
 

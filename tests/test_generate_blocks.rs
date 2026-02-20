@@ -368,8 +368,8 @@ mod generate_block_tests {
         }
         "#;
 
-        let hir = parse_and_build_hir(source)
-            .expect("Failed to parse generate-for with compile-time if");
+        let hir =
+            parse_and_build_hir(source).expect("Failed to parse generate-for with compile-time if");
 
         let implementation = &hir.implementations[0];
         // x[0]=a (1) + 3 from if branches (i=0,1,2) + b=x[3] (1) = 5 assignments

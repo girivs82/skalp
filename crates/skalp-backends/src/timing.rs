@@ -219,7 +219,11 @@ impl TimingAnalyzer {
                 TimingConstraint::FalsePath { from: _, to: _ } => {
                     // Would create false path constraint
                 }
-                TimingConstraint::MulticyclePath { from: _, to: _, cycles: _ } => {
+                TimingConstraint::MulticyclePath {
+                    from: _,
+                    to: _,
+                    cycles: _,
+                } => {
                     // Would create multicycle path constraint
                 }
             }

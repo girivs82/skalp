@@ -19,7 +19,9 @@ const TOP_MODULE: &str = "GenericFsm";
     ignore = "GPU simulation only available on macOS"
 )]
 async fn test_fsm_init() {
-    let mut tb = Testbench::behavioral_with_top(FSM_PATH, TOP_MODULE).await.unwrap();
+    let mut tb = Testbench::behavioral_with_top(FSM_PATH, TOP_MODULE)
+        .await
+        .unwrap();
 
     // Apply reset
     tb.set("rst", 1u8);
@@ -53,7 +55,9 @@ async fn test_fsm_init() {
     ignore = "GPU simulation only available on macOS"
 )]
 async fn test_not_operation() {
-    let mut tb = Testbench::behavioral_with_top(FSM_PATH, TOP_MODULE).await.unwrap();
+    let mut tb = Testbench::behavioral_with_top(FSM_PATH, TOP_MODULE)
+        .await
+        .unwrap();
 
     // Reset
     tb.set("rst", 1u8);
@@ -90,7 +94,9 @@ async fn test_not_operation() {
     ignore = "GPU simulation only available on macOS"
 )]
 async fn test_state_transition_idle_to_waitready() {
-    let mut tb = Testbench::behavioral_with_top(FSM_PATH, TOP_MODULE).await.unwrap();
+    let mut tb = Testbench::behavioral_with_top(FSM_PATH, TOP_MODULE)
+        .await
+        .unwrap();
 
     // Reset
     tb.set("rst", 1u8);
@@ -117,8 +123,10 @@ async fn test_state_transition_idle_to_waitready() {
     let fault_b_before: u8 = tb.get_as("faults.error_b").await;
     let fault_t_before: u8 = tb.get_as("faults.timeout").await;
     let state_before: u8 = tb.get_as("state").await;
-    println!("Before clock: enable={}, fault_a={}, fault_b={}, fault_t={}, state={}",
-        en_before, fault_a_before, fault_b_before, fault_t_before, state_before);
+    println!(
+        "Before clock: enable={}, fault_a={}, fault_b={}, fault_t={}, state={}",
+        en_before, fault_a_before, fault_b_before, fault_t_before, state_before
+    );
 
     tb.clock(1).await;
 
@@ -126,13 +134,17 @@ async fn test_state_transition_idle_to_waitready() {
     let en_after: u8 = tb.get_as("enable").await;
     let state_after: u8 = tb.get_as("state").await;
     let not_en: u8 = tb.get_as("not_enable").await;
-    println!("After clock: enable={}, not_enable={}, state={}", en_after, not_en, state_after);
+    println!(
+        "After clock: enable={}, not_enable={}, state={}",
+        en_after, not_en, state_after
+    );
 
     let state: u8 = tb.get_as("state").await;
     assert_eq!(state, 1, "Should be in WaitReady state after enable");
 
     println!("✓ State transition Idle->WaitReady test passed");
-    tb.export_waveform("build/test_state_transition_idle_to_waitready.skw.gz").ok();
+    tb.export_waveform("build/test_state_transition_idle_to_waitready.skw.gz")
+        .ok();
 }
 
 /// Test full transition sequence: Idle -> WaitReady -> Active -> Done
@@ -142,7 +154,9 @@ async fn test_state_transition_idle_to_waitready() {
     ignore = "GPU simulation only available on macOS"
 )]
 async fn test_full_transition_sequence() {
-    let mut tb = Testbench::behavioral_with_top(FSM_PATH, TOP_MODULE).await.unwrap();
+    let mut tb = Testbench::behavioral_with_top(FSM_PATH, TOP_MODULE)
+        .await
+        .unwrap();
 
     // Reset
     tb.set("rst", 1u8);
@@ -187,7 +201,8 @@ async fn test_full_transition_sequence() {
     assert_eq!(state, 0, "Should be back in Idle (0) after clearing enable");
 
     println!("✓ Full transition sequence test passed");
-    tb.export_waveform("build/test_full_transition_sequence.skw.gz").ok();
+    tb.export_waveform("build/test_full_transition_sequence.skw.gz")
+        .ok();
 }
 
 /// Test fault detection and latching
@@ -197,7 +212,9 @@ async fn test_full_transition_sequence() {
     ignore = "GPU simulation only available on macOS"
 )]
 async fn test_fault_detection() {
-    let mut tb = Testbench::behavioral_with_top(FSM_PATH, TOP_MODULE).await.unwrap();
+    let mut tb = Testbench::behavioral_with_top(FSM_PATH, TOP_MODULE)
+        .await
+        .unwrap();
 
     // Reset
     tb.set("rst", 1u8);
@@ -256,7 +273,9 @@ async fn test_fault_detection() {
     ignore = "GPU simulation only available on macOS"
 )]
 async fn test_fault_blocks_transition() {
-    let mut tb = Testbench::behavioral_with_top(FSM_PATH, TOP_MODULE).await.unwrap();
+    let mut tb = Testbench::behavioral_with_top(FSM_PATH, TOP_MODULE)
+        .await
+        .unwrap();
 
     // Reset
     tb.set("rst", 1u8);
@@ -281,7 +300,8 @@ async fn test_fault_blocks_transition() {
     assert_eq!(state, 0, "Should remain in Idle when fault is latched");
 
     println!("✓ Fault blocks transition test passed");
-    tb.export_waveform("build/test_fault_blocks_transition.skw.gz").ok();
+    tb.export_waveform("build/test_fault_blocks_transition.skw.gz")
+        .ok();
 }
 
 /// Test hierarchical signal access (struct fields via name registry)
@@ -291,7 +311,9 @@ async fn test_fault_blocks_transition() {
     ignore = "GPU simulation only available on macOS"
 )]
 async fn test_hierarchical_signal_access() {
-    let mut tb = Testbench::behavioral_with_top(FSM_PATH, TOP_MODULE).await.unwrap();
+    let mut tb = Testbench::behavioral_with_top(FSM_PATH, TOP_MODULE)
+        .await
+        .unwrap();
 
     // Reset
     tb.set("rst", 1u8);
@@ -316,7 +338,8 @@ async fn test_hierarchical_signal_access() {
     assert_eq!(fault_a, 1, "faults.error_a should be 1 after error_input");
 
     println!("✓ Hierarchical signal access test passed");
-    tb.export_waveform("build/test_hierarchical_signal_access.skw.gz").ok();
+    tb.export_waveform("build/test_hierarchical_signal_access.skw.gz")
+        .ok();
 }
 
 /// Test counter comparison
@@ -326,7 +349,9 @@ async fn test_hierarchical_signal_access() {
     ignore = "GPU simulation only available on macOS"
 )]
 async fn test_counter_comparison() {
-    let mut tb = Testbench::behavioral_with_top(FSM_PATH, TOP_MODULE).await.unwrap();
+    let mut tb = Testbench::behavioral_with_top(FSM_PATH, TOP_MODULE)
+        .await
+        .unwrap();
 
     // Reset
     tb.set("rst", 1u8);
@@ -342,13 +367,20 @@ async fn test_counter_comparison() {
 
     // Check counter_match output
     let match_out: u8 = tb.get_as("counter_match").await;
-    assert_eq!(match_out, 1, "counter_match should be 1 when counter equals threshold");
+    assert_eq!(
+        match_out, 1,
+        "counter_match should be 1 when counter equals threshold"
+    );
 
     // Run one more cycle - counter will be 11, should no longer match
     tb.clock(1).await;
     let match_out: u8 = tb.get_as("counter_match").await;
-    assert_eq!(match_out, 0, "counter_match should be 0 when counter != threshold");
+    assert_eq!(
+        match_out, 0,
+        "counter_match should be 0 when counter != threshold"
+    );
 
     println!("✓ Counter comparison test passed");
-    tb.export_waveform("build/test_counter_comparison.skw.gz").ok();
+    tb.export_waveform("build/test_counter_comparison.skw.gz")
+        .ok();
 }

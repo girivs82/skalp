@@ -25,7 +25,8 @@ async fn test_alu_with_new_api() {
     tb.clock(2).await;
     tb.expect("result", 0x0Fu32).await;
 
-    tb.export_waveform("build/test_alu_with_new_api.skw.gz").ok();
+    tb.export_waveform("build/test_alu_with_new_api.skw.gz")
+        .ok();
 }
 
 #[tokio::test]
@@ -55,7 +56,8 @@ async fn test_alu_table_driven() {
         );
     }
 
-    tb.export_waveform("build/test_alu_table_driven.skw.gz").ok();
+    tb.export_waveform("build/test_alu_table_driven.skw.gz")
+        .ok();
 }
 
 #[tokio::test]
@@ -79,7 +81,8 @@ async fn test_fifo_with_new_api() {
     println!("✓ FIFO write operations completed with clean API");
     println!("✓ Compare this to the old API which required manual byte arrays!");
 
-    tb.export_waveform("build/test_fifo_with_new_api.skw.gz").ok();
+    tb.export_waveform("build/test_fifo_with_new_api.skw.gz")
+        .ok();
 }
 
 #[tokio::test]
@@ -102,7 +105,8 @@ async fn test_fifo_full_condition() {
 
     println!("✓ FIFO filled with 16 values");
 
-    tb.export_waveform("build/test_fifo_full_condition.skw.gz").ok();
+    tb.export_waveform("build/test_fifo_full_condition.skw.gz")
+        .ok();
 }
 
 #[tokio::test]

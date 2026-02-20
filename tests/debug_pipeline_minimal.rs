@@ -68,8 +68,7 @@ mod minimal_pipeline_tests {
         };
 
         // Create simulator
-        let mut simulator = UnifiedSimulator::new(config)
-            .expect("Failed to create simulator");
+        let mut simulator = UnifiedSimulator::new(config).expect("Failed to create simulator");
 
         // Load the module
         simulator

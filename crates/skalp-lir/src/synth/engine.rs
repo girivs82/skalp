@@ -719,9 +719,7 @@ impl SynthEngine {
                 let mut pass = Dchoice::new();
                 Some(pass.run(aig))
             }
-            _ => {
-                None
-            }
+            _ => None,
         }
     }
 

@@ -41,7 +41,8 @@ async fn test_multi_clock_api_basic() {
     println!("  - clock_signal(name, num_cycles) works correctly");
     println!("  - Cycle count tracking works");
 
-    tb.export_waveform("build/test_multi_clock_api_basic.skw.gz").ok();
+    tb.export_waveform("build/test_multi_clock_api_basic.skw.gz")
+        .ok();
 }
 
 #[tokio::test]
@@ -68,7 +69,8 @@ async fn test_clock_multi_independent_clocks() {
     println!("  - clock_multi(&[(name, num_cycles)]) controls individual clocks");
     println!("  - The second parameter is NUMBER OF CYCLES, not a signal value");
 
-    tb.export_waveform("build/test_clock_multi_independent_clocks.skw.gz").ok();
+    tb.export_waveform("build/test_clock_multi_independent_clocks.skw.gz")
+        .ok();
 }
 
 #[tokio::test]
@@ -88,7 +90,8 @@ async fn test_default_clock_still_works() {
     println!("✓ Backward compatibility test passed!");
     println!("  - clock(n) still works (internally calls clock_signal(\"clk\", n))");
 
-    tb.export_waveform("build/test_default_clock_still_works.skw.gz").ok();
+    tb.export_waveform("build/test_default_clock_still_works.skw.gz")
+        .ok();
 }
 
 #[tokio::test]
@@ -118,7 +121,8 @@ async fn test_fifo_with_named_clock() {
     println!("✓ FIFO with clock_signal API test passed!");
     println!("  - Named clock control works with FIFO");
 
-    tb.export_waveform("build/test_fifo_with_named_clock.skw.gz").ok();
+    tb.export_waveform("build/test_fifo_with_named_clock.skw.gz")
+        .ok();
 }
 
 #[tokio::test]
@@ -145,7 +149,8 @@ async fn test_dual_clock_reset_pattern() {
     println!("  - clock_multi can be used for synchronized multi-clock operations");
     println!("  - Parameters are (clock_name, number_of_cycles)");
 
-    tb.export_waveform("build/test_dual_clock_reset_pattern.skw.gz").ok();
+    tb.export_waveform("build/test_dual_clock_reset_pattern.skw.gz")
+        .ok();
 }
 
 // Example showing what a real async FIFO test would look like (conceptual)
@@ -203,5 +208,6 @@ async fn test_async_fifo_conceptual() {
     println!("  - Demonstrates multi-clock patterns for CDC designs");
     println!("  - clock_multi(&[(clk1, N), (clk2, M)]) runs N cycles on clk1, M on clk2");
 
-    tb.export_waveform("build/test_async_fifo_conceptual.skw.gz").ok();
+    tb.export_waveform("build/test_async_fifo_conceptual.skw.gz")
+        .ok();
 }

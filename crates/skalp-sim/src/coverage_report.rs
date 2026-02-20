@@ -148,10 +148,7 @@ impl CoverageReport {
 
         // Mux arm uncovered items with cross-reference status
         for (node, arms) in behavioral_db.uncovered_mux_arms() {
-            let status = mux_xref
-                .get(node)
-                .cloned()
-                .unwrap_or(MuxArmStatus::Unknown);
+            let status = mux_xref.get(node).cloned().unwrap_or(MuxArmStatus::Unknown);
             for arm in arms {
                 uncovered.push(UncoveredItem::MuxArm {
                     node: node.to_string(),
@@ -185,8 +182,7 @@ impl CoverageReport {
             if matches!(status, MuxArmStatus::OptimizedAway) {
                 if let Some(&width) = tracked.get(sig_name.as_str()) {
                     toggle_optimized_bits += width;
-                    toggle_optimized_covered +=
-                        behavioral_db.toggle_covered_for_signal(sig_name);
+                    toggle_optimized_covered += behavioral_db.toggle_covered_for_signal(sig_name);
                 }
             }
         }
@@ -238,18 +234,10 @@ impl CoverageReport {
         );
         println!(
             "  Comparison: {:6.1}%  ({}/{} outcomes)",
-            self.behavioral.comparison_pct,
-            self.behavioral.cmp_covered,
-            self.behavioral.cmp_total
+            self.behavioral.comparison_pct, self.behavioral.cmp_covered, self.behavioral.cmp_total
         );
-        println!(
-            "  Overall:    {:6.1}%",
-            self.behavioral.overall_pct
-        );
-        println!(
-            "  Vectors:    {}",
-            self.behavioral.vectors_applied
-        );
+        println!("  Overall:    {:6.1}%", self.behavioral.overall_pct);
+        println!("  Vectors:    {}", self.behavioral.vectors_applied);
 
         // Gate coverage (if present)
         if let Some(gate) = &self.gate {
@@ -259,10 +247,7 @@ impl CoverageReport {
                 "  Toggle:     {:6.1}%  ({}/{} bits)",
                 gate.toggle_pct, gate.toggle_covered, gate.toggle_total
             );
-            println!(
-                "  Vectors:    {}",
-                gate.vectors_applied
-            );
+            println!("  Vectors:    {}", gate.vectors_applied);
         }
 
         // Equivalence result
@@ -270,7 +255,10 @@ impl CoverageReport {
         if self.equivalence_ok {
             println!("Equivalence: PASS ({} cycles)", self.cycles);
         } else {
-            println!("Equivalence: FAIL (mismatch at or before cycle {})", self.cycles);
+            println!(
+                "Equivalence: FAIL (mismatch at or before cycle {})",
+                self.cycles
+            );
         }
 
         // Uncovered items summary
@@ -289,12 +277,28 @@ impl CoverageReport {
             let mux_optimized = self
                 .uncovered
                 .iter()
-                .filter(|u| matches!(u, UncoveredItem::MuxArm { status: MuxArmStatus::OptimizedAway, .. }))
+                .filter(|u| {
+                    matches!(
+                        u,
+                        UncoveredItem::MuxArm {
+                            status: MuxArmStatus::OptimizedAway,
+                            ..
+                        }
+                    )
+                })
                 .count();
             let mux_gaps = self
                 .uncovered
                 .iter()
-                .filter(|u| matches!(u, UncoveredItem::MuxArm { status: MuxArmStatus::CoverageGap, .. }))
+                .filter(|u| {
+                    matches!(
+                        u,
+                        UncoveredItem::MuxArm {
+                            status: MuxArmStatus::CoverageGap,
+                            ..
+                        }
+                    )
+                })
                 .count();
             let cmp_count = self
                 .uncovered
@@ -305,12 +309,28 @@ impl CoverageReport {
             let toggle_optimized = self
                 .uncovered
                 .iter()
-                .filter(|u| matches!(u, UncoveredItem::Toggle { status: MuxArmStatus::OptimizedAway, .. }))
+                .filter(|u| {
+                    matches!(
+                        u,
+                        UncoveredItem::Toggle {
+                            status: MuxArmStatus::OptimizedAway,
+                            ..
+                        }
+                    )
+                })
                 .count();
             let toggle_gaps = self
                 .uncovered
                 .iter()
-                .filter(|u| matches!(u, UncoveredItem::Toggle { status: MuxArmStatus::CoverageGap, .. }))
+                .filter(|u| {
+                    matches!(
+                        u,
+                        UncoveredItem::Toggle {
+                            status: MuxArmStatus::CoverageGap,
+                            ..
+                        }
+                    )
+                })
                 .count();
 
             println!(
@@ -320,19 +340,23 @@ impl CoverageReport {
             if toggle_count > 0 && (toggle_optimized > 0 || toggle_gaps > 0) {
                 println!(
                     "  Toggle breakdown: {} optimized away, {} coverage gaps, {} unknown",
-                    toggle_optimized, toggle_gaps, toggle_count - toggle_optimized - toggle_gaps
+                    toggle_optimized,
+                    toggle_gaps,
+                    toggle_count - toggle_optimized - toggle_gaps
                 );
             }
             if mux_count > 0 && (mux_optimized > 0 || mux_gaps > 0) {
                 println!(
                     "  Mux arm breakdown: {} optimized away, {} coverage gaps, {} unknown",
-                    mux_optimized, mux_gaps, mux_count - mux_optimized - mux_gaps
+                    mux_optimized,
+                    mux_gaps,
+                    mux_count - mux_optimized - mux_gaps
                 );
             }
 
             // Show first few uncovered items
             let show_limit = 10;
-            if self.uncovered.len() > 0 {
+            if !self.uncovered.is_empty() {
                 println!();
                 println!("Top uncovered items:");
                 for item in self.uncovered.iter().take(show_limit) {
@@ -348,7 +372,10 @@ impl CoverageReport {
                                 MuxArmStatus::OptimizedAway => " (optimized away)",
                                 MuxArmStatus::Unknown => "",
                             };
-                            println!("  - Toggle: {}[{}] missing {}{}", signal, bit, direction, status_str);
+                            println!(
+                                "  - Toggle: {}[{}] missing {}{}",
+                                signal, bit, direction, status_str
+                            );
                         }
                         UncoveredItem::MuxArm { node, arm, status } => {
                             let status_str = match status {
@@ -364,10 +391,7 @@ impl CoverageReport {
                     }
                 }
                 if self.uncovered.len() > show_limit {
-                    println!(
-                        "  ... and {} more",
-                        self.uncovered.len() - show_limit
-                    );
+                    println!("  ... and {} more", self.uncovered.len() - show_limit);
                 }
             }
         }
@@ -422,23 +446,11 @@ impl CoverageReport {
         writeln!(
             report,
             "  Comparison: {:6.1}%  ({}/{} outcomes)",
-            self.behavioral.comparison_pct,
-            self.behavioral.cmp_covered,
-            self.behavioral.cmp_total
+            self.behavioral.comparison_pct, self.behavioral.cmp_covered, self.behavioral.cmp_total
         )
         .unwrap();
-        writeln!(
-            report,
-            "  Overall:    {:6.1}%",
-            self.behavioral.overall_pct
-        )
-        .unwrap();
-        writeln!(
-            report,
-            "  Vectors:    {}",
-            self.behavioral.vectors_applied
-        )
-        .unwrap();
+        writeln!(report, "  Overall:    {:6.1}%", self.behavioral.overall_pct).unwrap();
+        writeln!(report, "  Vectors:    {}", self.behavioral.vectors_applied).unwrap();
 
         if let Some(gate) = &self.gate {
             writeln!(report).unwrap();
@@ -481,8 +493,12 @@ impl CoverageReport {
                             MuxArmStatus::OptimizedAway => " (optimized away)",
                             MuxArmStatus::Unknown => "",
                         };
-                        writeln!(report, "  Toggle: {}[{}] missing {}{}", signal, bit, direction, status_str)
-                            .unwrap();
+                        writeln!(
+                            report,
+                            "  Toggle: {}[{}] missing {}{}",
+                            signal, bit, direction, status_str
+                        )
+                        .unwrap();
                     }
                     UncoveredItem::MuxArm { node, arm, status } => {
                         let status_str = match status {
@@ -490,7 +506,12 @@ impl CoverageReport {
                             MuxArmStatus::OptimizedAway => " (optimized away)",
                             MuxArmStatus::Unknown => "",
                         };
-                        writeln!(report, "  Mux: {} arm {} not taken{}", node, arm, status_str).unwrap();
+                        writeln!(
+                            report,
+                            "  Mux: {} arm {} not taken{}",
+                            node, arm, status_str
+                        )
+                        .unwrap();
                     }
                     UncoveredItem::Comparison { node, op, missing } => {
                         writeln!(

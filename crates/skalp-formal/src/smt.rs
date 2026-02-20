@@ -30,6 +30,12 @@ pub mod z3_impl {
         // Z3 context and solver would go here
     }
 
+    impl Default for Z3Solver {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+
     impl Z3Solver {
         pub fn new() -> Self {
             Self {}
@@ -64,6 +70,12 @@ pub mod z3_impl {
 pub struct MockSolver {
     assertions: Vec<String>,
     result: SatResult,
+}
+
+impl Default for MockSolver {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl MockSolver {

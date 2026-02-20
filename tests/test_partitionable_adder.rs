@@ -29,9 +29,12 @@ const MODE_QUAD: u64 = 2; // FP8×4
 async fn test_single_mode_basic() {
     setup_stdlib_path();
 
-    let mut tb = Testbench::with_top_module(&fixture_path("partitionable_adder_test.sk"), "TestPartitionableAdder")
-        .await
-        .expect("Failed to create testbench");
+    let mut tb = Testbench::with_top_module(
+        &fixture_path("partitionable_adder_test.sk"),
+        "TestPartitionableAdder",
+    )
+    .await
+    .expect("Failed to create testbench");
 
     // Test: 0x1000000 + 0x2000000 = 0x3000000 (basic addition)
     tb.set("a", 0x1000000u64)
@@ -85,16 +88,20 @@ async fn test_single_mode_basic() {
     assert_eq!(cout & 0x8, 0x8, "Single mode should have final carry out");
 
     println!("Single mode tests passed!");
-    tb.export_waveform("build/test_single_mode_basic.skw.gz").ok();
+    tb.export_waveform("build/test_single_mode_basic.skw.gz")
+        .ok();
 }
 
 #[tokio::test]
 async fn test_dual_mode_independent() {
     setup_stdlib_path();
 
-    let mut tb = Testbench::with_top_module(&fixture_path("partitionable_adder_test.sk"), "TestPartitionableAdder")
-        .await
-        .expect("Failed to create testbench");
+    let mut tb = Testbench::with_top_module(
+        &fixture_path("partitionable_adder_test.sk"),
+        "TestPartitionableAdder",
+    )
+    .await
+    .expect("Failed to create testbench");
 
     // In dual mode, we have two independent 14-bit adders:
     // - Low:  bits [13:0]
@@ -165,16 +172,20 @@ async fn test_dual_mode_independent() {
     );
 
     println!("Dual mode tests passed!");
-    tb.export_waveform("build/test_dual_mode_independent.skw.gz").ok();
+    tb.export_waveform("build/test_dual_mode_independent.skw.gz")
+        .ok();
 }
 
 #[tokio::test]
 async fn test_quad_mode_independent() {
     setup_stdlib_path();
 
-    let mut tb = Testbench::with_top_module(&fixture_path("partitionable_adder_test.sk"), "TestPartitionableAdder")
-        .await
-        .expect("Failed to create testbench");
+    let mut tb = Testbench::with_top_module(
+        &fixture_path("partitionable_adder_test.sk"),
+        "TestPartitionableAdder",
+    )
+    .await
+    .expect("Failed to create testbench");
 
     // In quad mode, we have four independent 7-bit adders:
     // - sec0: bits [6:0]
@@ -242,16 +253,20 @@ async fn test_quad_mode_independent() {
     assert_eq!(cout & 0x1, 0x1, "Quad mode section 0 should have carry out");
 
     println!("Quad mode tests passed!");
-    tb.export_waveform("build/test_quad_mode_independent.skw.gz").ok();
+    tb.export_waveform("build/test_quad_mode_independent.skw.gz")
+        .ok();
 }
 
 #[tokio::test]
 async fn test_mode_switching() {
     setup_stdlib_path();
 
-    let mut tb = Testbench::with_top_module(&fixture_path("partitionable_adder_test.sk"), "TestPartitionableAdder")
-        .await
-        .expect("Failed to create testbench");
+    let mut tb = Testbench::with_top_module(
+        &fixture_path("partitionable_adder_test.sk"),
+        "TestPartitionableAdder",
+    )
+    .await
+    .expect("Failed to create testbench");
 
     // Use inputs that will trigger overflow in section 1 to test carry cut behavior
     // We need section 1 to overflow (produce a carry) so that single vs quad mode differs

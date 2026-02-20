@@ -572,7 +572,6 @@ impl Monomorphizer {
                 }
             }
         }
-
     }
 
     /// Collect all calls to generic functions
@@ -600,7 +599,6 @@ impl Monomorphizer {
                 self.collect_calls_from_expression(&assignment.rhs, "assignment");
             }
         }
-
     }
 
     /// Collect calls from a list of statements
@@ -670,12 +668,12 @@ impl Monomorphizer {
                                         match ty {
                                             HirType::NatExpr(expr) => {
                                                 // Extract literal value from expression
-                                                if let hir::HirExpression::Literal(lit) = expr.as_ref() {
+                                                if let hir::HirExpression::Literal(lit) =
+                                                    expr.as_ref()
+                                                {
                                                     let value = match lit {
                                                         hir::HirLiteral::Integer(v) => *v,
-                                                        _ => {
-                                                            0
-                                                        }
+                                                        _ => 0,
                                                     };
                                                     ConcreteType::ConstValue(value)
                                                 } else {
@@ -822,7 +820,6 @@ impl Monomorphizer {
         while let Some(req) = self.pending.pop() {
             self.generate_specialization(req);
         }
-
     }
 
     /// Generate a single specialization
@@ -1141,22 +1138,10 @@ impl Monomorphizer {
     fn infer_simple_type(&self, expr: &hir::HirExpression, ctx: &TypeContext) -> Option<HirType> {
         match expr {
             // Generic parameters - look up in context!
-            hir::HirExpression::GenericParam(name) => {
-                if let Some(ty) = ctx.get_variable_type(name) {
-                    Some(ty.clone())
-                } else {
-                    None
-                }
-            }
+            hir::HirExpression::GenericParam(name) => ctx.get_variable_type(name).cloned(),
 
             // Variables - look up by ID in context!
-            hir::HirExpression::Variable(var_id) => {
-                if let Some(ty) = ctx.get_variable_id_type(var_id) {
-                    Some(ty.clone())
-                } else {
-                    None
-                }
-            }
+            hir::HirExpression::Variable(var_id) => ctx.get_variable_id_type(var_id).cloned(),
 
             // Literals have obvious types
             hir::HirExpression::Literal(lit) => {
@@ -1175,9 +1160,7 @@ impl Monomorphizer {
             // In the future, we could:
             // - Infer from function return types
             // - Use trait bounds from generic parameters
-            _ => {
-                None
-            }
+            _ => None,
         }
     }
 

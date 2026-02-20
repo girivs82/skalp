@@ -67,8 +67,7 @@ mod debug_pipeline_valid_tests {
         };
 
         // Create simulator
-        let mut simulator = UnifiedSimulator::new(config)
-            .expect("Failed to create simulator");
+        let mut simulator = UnifiedSimulator::new(config).expect("Failed to create simulator");
 
         // Load the module
         simulator

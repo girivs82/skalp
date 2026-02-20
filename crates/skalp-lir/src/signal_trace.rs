@@ -135,7 +135,10 @@ impl SignalTrace {
 
         if self.truncated {
             println!();
-            println!("⚠️  Trace truncated at depth {} (use --depth to increase)", self.max_depth);
+            println!(
+                "⚠️  Trace truncated at depth {} (use --depth to increase)",
+                self.max_depth
+            );
         }
     }
 }
@@ -210,7 +213,8 @@ impl<'a> SignalTracer<'a> {
     /// Find signals matching a pattern (for suggestions)
     pub fn find_matching_signals(&self, pattern: &str, limit: usize) -> Vec<String> {
         let pattern_lower = pattern.to_lowercase();
-        let mut matches: Vec<_> = self.net_by_name
+        let mut matches: Vec<_> = self
+            .net_by_name
             .keys()
             .filter(|name| name.to_lowercase().contains(&pattern_lower))
             .cloned()
@@ -294,7 +298,14 @@ impl<'a> SignalTracer<'a> {
         let mut visited = HashSet::new();
         let mut truncated = false;
 
-        self.trace_backward_recursive(start_id, 0, max_depth, &mut nodes, &mut visited, &mut truncated);
+        self.trace_backward_recursive(
+            start_id,
+            0,
+            max_depth,
+            &mut nodes,
+            &mut visited,
+            &mut truncated,
+        );
 
         Ok(SignalTrace {
             start_signal: start_name.to_string(),
@@ -333,22 +344,28 @@ impl<'a> SignalTracer<'a> {
         // We must use cell_by_id (keyed by CellId) not driver_map (keyed by net ID)
         let driver_cell = if let Some(driver_id) = net.driver {
             self.cell_by_id.get(&driver_id.0).map(|cell| {
-                let inputs: Vec<_> = cell.inputs.iter().map(|&input_id| {
-                    let input_net = &self.netlist.nets[input_id.0 as usize];
-                    (input_net.name.clone(), input_id)
-                }).collect();
+                let inputs: Vec<_> = cell
+                    .inputs
+                    .iter()
+                    .map(|&input_id| {
+                        let input_net = &self.netlist.nets[input_id.0 as usize];
+                        (input_net.name.clone(), input_id)
+                    })
+                    .collect();
 
-                let outputs: Vec<_> = cell.outputs.iter().map(|&output_id| {
-                    self.netlist.nets[output_id.0 as usize].name.clone()
-                }).collect();
+                let outputs: Vec<_> = cell
+                    .outputs
+                    .iter()
+                    .map(|&output_id| self.netlist.nets[output_id.0 as usize].name.clone())
+                    .collect();
 
-                let clock = cell.clock.map(|clk_id| {
-                    self.netlist.nets[clk_id.0 as usize].name.clone()
-                });
+                let clock = cell
+                    .clock
+                    .map(|clk_id| self.netlist.nets[clk_id.0 as usize].name.clone());
 
-                let reset = cell.reset.map(|rst_id| {
-                    self.netlist.nets[rst_id.0 as usize].name.clone()
-                });
+                let reset = cell
+                    .reset
+                    .map(|rst_id| self.netlist.nets[rst_id.0 as usize].name.clone());
 
                 let is_sequential = cell.cell_type.contains("DFF")
                     || cell.cell_type.contains("LATCH")
@@ -388,7 +405,14 @@ impl<'a> SignalTracer<'a> {
             // This keeps the trace focused on the combinational cone
             if !cell_info.is_sequential {
                 for (_, input_id) in &cell_info.inputs {
-                    self.trace_backward_recursive(*input_id, depth + 1, max_depth, nodes, visited, truncated);
+                    self.trace_backward_recursive(
+                        *input_id,
+                        depth + 1,
+                        max_depth,
+                        nodes,
+                        visited,
+                        truncated,
+                    );
                 }
             }
         }
@@ -405,7 +429,14 @@ impl<'a> SignalTracer<'a> {
         let mut visited = HashSet::new();
         let mut truncated = false;
 
-        self.trace_forward_recursive(start_id, 0, max_depth, &mut nodes, &mut visited, &mut truncated);
+        self.trace_forward_recursive(
+            start_id,
+            0,
+            max_depth,
+            &mut nodes,
+            &mut visited,
+            &mut truncated,
+        );
 
         Ok(SignalTrace {
             start_signal: start_name.to_string(),
@@ -454,7 +485,14 @@ impl<'a> SignalTracer<'a> {
             if let Some(cell) = self.cell_by_id.get(&cell_id.0) {
                 // Trace to each output of this cell
                 for &output_id in &cell.outputs {
-                    self.trace_forward_recursive(output_id, depth + 1, max_depth, nodes, visited, truncated);
+                    self.trace_forward_recursive(
+                        output_id,
+                        depth + 1,
+                        max_depth,
+                        nodes,
+                        visited,
+                        truncated,
+                    );
                 }
             }
         }

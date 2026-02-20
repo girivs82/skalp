@@ -97,7 +97,6 @@ impl AnalysisContext {
         let mut current_entity: Option<String> = None;
         let mut brace_depth = 0u32;
         let mut entity_depth = 0u32;
-        let mut in_port_section = false;
         let mut in_generic_params = false;
         let mut generic_entity_name = String::new();
         let mut in_struct: Option<String> = None;
@@ -109,21 +108,24 @@ impl AnalysisContext {
 
             // Track braces
             for ch in line.chars() {
-                if ch == '{' { brace_depth += 1; }
+                if ch == '{' {
+                    brace_depth += 1;
+                }
                 if ch == '}' {
-                    if brace_depth > 0 { brace_depth -= 1; }
+                    brace_depth = brace_depth.saturating_sub(1);
                     if brace_depth <= entity_depth && current_entity.is_some() {
                         current_entity = None;
-                        in_port_section = false;
                     }
                 }
             }
 
             // Entity declarations: entity Name or entity Name< or pub entity Name
-            let entity_rest = trimmed.strip_prefix("pub entity ")
+            let entity_rest = trimmed
+                .strip_prefix("pub entity ")
                 .or_else(|| trimmed.strip_prefix("entity "));
             if let Some(rest) = entity_rest {
-                let name = rest.split(|c: char| !c.is_alphanumeric() && c != '_')
+                let name = rest
+                    .split(|c: char| !c.is_alphanumeric() && c != '_')
                     .next()
                     .unwrap_or("")
                     .to_string();
@@ -150,15 +152,17 @@ impl AnalysisContext {
                     }
                     current_entity = Some(name);
                     entity_depth = brace_depth;
-                    in_port_section = true;
                 }
             }
 
             // Multi-line generic parameters (inside entity<...> block)
             if in_generic_params {
                 // Check if this line closes the generic block: a '>' not balanced by '<'
-                let angle_depth: i32 = trimmed.chars()
-                    .fold(0i32, |d, c| match c { '<' => d + 1, '>' => d - 1, _ => d });
+                let angle_depth: i32 = trimmed.chars().fold(0i32, |d, c| match c {
+                    '<' => d + 1,
+                    '>' => d - 1,
+                    _ => d,
+                });
                 let closes_generics = angle_depth < 0;
 
                 if closes_generics {
@@ -170,7 +174,10 @@ impl AnalysisContext {
                         match c {
                             '<' => depth += 1,
                             '>' => {
-                                if depth == 0 { close_pos = i; break; }
+                                if depth == 0 {
+                                    close_pos = i;
+                                    break;
+                                }
                                 depth -= 1;
                             }
                             _ => {}
@@ -178,25 +185,39 @@ impl AnalysisContext {
                     }
                     let before_close = &trimmed[..close_pos];
                     if !before_close.is_empty() && before_close.contains(':') {
-                        parse_generic_params(before_close, line_u32, &generic_entity_name, &mut ctx.generics);
+                        parse_generic_params(
+                            before_close,
+                            line_u32,
+                            &generic_entity_name,
+                            &mut ctx.generics,
+                        );
                     }
                     in_generic_params = false;
-                } else if trimmed.contains(':') && !trimmed.starts_with("//") && !trimmed.starts_with("in ") && !trimmed.starts_with("out ") {
+                } else if trimmed.contains(':')
+                    && !trimmed.starts_with("//")
+                    && !trimmed.starts_with("in ")
+                    && !trimmed.starts_with("out ")
+                {
                     // Generic param line like: PARAM_NAME: type = default,
-                    parse_generic_params(trimmed, line_u32, &generic_entity_name, &mut ctx.generics);
+                    parse_generic_params(
+                        trimmed,
+                        line_u32,
+                        &generic_entity_name,
+                        &mut ctx.generics,
+                    );
                 }
             }
 
             // Impl blocks (enter entity scope)
             if let Some(rest) = trimmed.strip_prefix("impl ") {
-                let name = rest.split(|c: char| !c.is_alphanumeric() && c != '_')
+                let name = rest
+                    .split(|c: char| !c.is_alphanumeric() && c != '_')
                     .next()
                     .unwrap_or("")
                     .to_string();
                 if !name.is_empty() {
                     current_entity = Some(name);
                     entity_depth = brace_depth;
-                    in_port_section = false;
                 }
             }
 
@@ -206,7 +227,9 @@ impl AnalysisContext {
             }
 
             // Port declarations
-            if (trimmed.starts_with("in ") || trimmed.starts_with("out ") || trimmed.starts_with("inout "))
+            if (trimmed.starts_with("in ")
+                || trimmed.starts_with("out ")
+                || trimmed.starts_with("inout "))
                 && current_entity.is_some()
             {
                 let direction;
@@ -225,10 +248,16 @@ impl AnalysisContext {
                 }
 
                 let parts: Vec<&str> = rest.splitn(2, ':').collect();
-                if parts.len() >= 1 {
-                    let name = parts[0].trim().trim_end_matches(|c: char| !c.is_alphanumeric() && c != '_');
+                if !parts.is_empty() {
+                    let name = parts[0]
+                        .trim()
+                        .trim_end_matches(|c: char| !c.is_alphanumeric() && c != '_');
                     let type_str = if parts.len() > 1 {
-                        parts[1].trim().trim_end_matches(|c: char| c == ';' || c == ',' || c == '{').trim().to_string()
+                        parts[1]
+                            .trim()
+                            .trim_end_matches([';', ',', '{'])
+                            .trim()
+                            .to_string()
                     } else {
                         String::new()
                     };
@@ -269,7 +298,8 @@ impl AnalysisContext {
             }
 
             // Constants: const NAME: TYPE = VALUE; or pub const NAME: TYPE = VALUE;
-            let const_rest = trimmed.strip_prefix("pub const ")
+            let const_rest = trimmed
+                .strip_prefix("pub const ")
                 .or_else(|| trimmed.strip_prefix("const "));
             if let Some(rest) = const_rest {
                 // Split on '=' first to get name:type and value
@@ -295,7 +325,9 @@ impl AnalysisContext {
                     display.push_str(t);
                 }
                 if let Some(ref v) = value {
-                    if !display.is_empty() { display.push_str(" = "); }
+                    if !display.is_empty() {
+                        display.push_str(" = ");
+                    }
                     display.push_str(v);
                 }
 
@@ -304,14 +336,19 @@ impl AnalysisContext {
                     line: line_u32,
                     column: col,
                     scope: current_entity.clone(),
-                    type_str: if display.is_empty() { None } else { Some(display) },
+                    type_str: if display.is_empty() {
+                        None
+                    } else {
+                        Some(display)
+                    },
                     ..Default::default()
                 });
             }
 
             // Type aliases: type Name = Type; or pub type Name = Type;
             // Also: distinct type Name = Type;
-            let type_rest = trimmed.strip_prefix("pub type ")
+            let type_rest = trimmed
+                .strip_prefix("pub type ")
                 .or_else(|| trimmed.strip_prefix("pub distinct type "))
                 .or_else(|| trimmed.strip_prefix("distinct type "))
                 .or_else(|| trimmed.strip_prefix("type "));
@@ -339,10 +376,17 @@ impl AnalysisContext {
                 if trimmed == "}" || trimmed.starts_with('}') {
                     // Close struct/enum — update the type_aliases entry with collected fields
                     let fields_str = struct_fields.join(", ");
-                    if let Some(ta) = ctx.type_aliases.iter_mut().rev()
+                    if let Some(ta) = ctx
+                        .type_aliases
+                        .iter_mut()
+                        .rev()
                         .find(|t| t.name == *struct_name)
                     {
-                        let kind = if ta.type_str.as_deref() == Some("enum") { "enum" } else { "struct" };
+                        let kind = if ta.type_str.as_deref() == Some("enum") {
+                            "enum"
+                        } else {
+                            "struct"
+                        };
                         ta.type_str = Some(format!("{} {{ {} }}", kind, fields_str));
                     }
                     in_struct = None;
@@ -353,9 +397,12 @@ impl AnalysisContext {
                         let parts: Vec<&str> = trimmed.splitn(2, ':').collect();
                         if parts.len() == 2 {
                             let fname = parts[0].trim();
-                            let ftype = parts[1].trim()
-                                .trim_end_matches(',').trim()
-                                .trim_end_matches(';').trim();
+                            let ftype = parts[1]
+                                .trim()
+                                .trim_end_matches(',')
+                                .trim()
+                                .trim_end_matches(';')
+                                .trim();
                             // Strip trailing comment
                             let ftype = ftype.split("//").next().unwrap_or(ftype).trim();
                             struct_fields.push(format!("{}: {}", fname, ftype));
@@ -365,9 +412,12 @@ impl AnalysisContext {
                         let parts: Vec<&str> = trimmed.splitn(2, '=').collect();
                         if parts.len() == 2 {
                             let vname = parts[0].trim();
-                            let vval = parts[1].trim()
-                                .trim_end_matches(',').trim()
-                                .trim_end_matches(';').trim();
+                            let vval = parts[1]
+                                .trim()
+                                .trim_end_matches(',')
+                                .trim()
+                                .trim_end_matches(';')
+                                .trim();
                             let vval = vval.split("//").next().unwrap_or(vval).trim();
                             struct_fields.push(format!("{} = {}", vname, vval));
                         }
@@ -376,10 +426,12 @@ impl AnalysisContext {
             }
 
             // Struct declarations: struct Name { or pub struct Name {
-            let struct_rest = trimmed.strip_prefix("pub struct ")
+            let struct_rest = trimmed
+                .strip_prefix("pub struct ")
                 .or_else(|| trimmed.strip_prefix("struct "));
             if let Some(rest) = struct_rest {
-                let name = rest.split(|c: char| !c.is_alphanumeric() && c != '_')
+                let name = rest
+                    .split(|c: char| !c.is_alphanumeric() && c != '_')
                     .next()
                     .unwrap_or("")
                     .to_string();
@@ -399,10 +451,12 @@ impl AnalysisContext {
             }
 
             // Enum declarations: enum Name { or pub enum Name {
-            let enum_rest = trimmed.strip_prefix("pub enum ")
+            let enum_rest = trimmed
+                .strip_prefix("pub enum ")
                 .or_else(|| trimmed.strip_prefix("enum "));
             if let Some(rest) = enum_rest {
-                let name = rest.split(|c: char| !c.is_alphanumeric() && c != '_')
+                let name = rest
+                    .split(|c: char| !c.is_alphanumeric() && c != '_')
                     .next()
                     .unwrap_or("")
                     .to_string();
@@ -423,7 +477,8 @@ impl AnalysisContext {
 
             // Trait declarations
             if let Some(rest) = trimmed.strip_prefix("trait ") {
-                let name = rest.split(|c: char| !c.is_alphanumeric() && c != '_')
+                let name = rest
+                    .split(|c: char| !c.is_alphanumeric() && c != '_')
                     .next()
                     .unwrap_or("")
                     .to_string();
@@ -448,7 +503,9 @@ impl AnalysisContext {
                     // Check for Entity(...) pattern
                     if let Some(paren_pos) = rhs.find('(') {
                         let entity_type = rhs[..paren_pos].trim();
-                        if !entity_type.is_empty() && entity_type.chars().next().unwrap().is_uppercase() {
+                        if !entity_type.is_empty()
+                            && entity_type.chars().next().unwrap().is_uppercase()
+                        {
                             let col = line.find(name).unwrap_or(0) as u32;
                             ctx.instances.push(InstanceInfo {
                                 name: name.to_string(),
@@ -552,10 +609,22 @@ impl AnalysisContext {
                         if let Ok(mod_content) = std::fs::read_to_string(candidate) {
                             let mod_ctx = Self::from_source(&mod_content);
                             let src = candidate.to_string_lossy().to_string();
-                            for mut c in mod_ctx.constants { c.source_file = Some(src.clone()); ctx.constants.push(c); }
-                            for mut e in mod_ctx.entities { e.source_file = Some(src.clone()); ctx.entities.push(e); }
-                            for mut t in mod_ctx.traits { t.source_file = Some(src.clone()); ctx.traits.push(t); }
-                            for mut ta in mod_ctx.type_aliases { ta.source_file = Some(src.clone()); ctx.type_aliases.push(ta); }
+                            for mut c in mod_ctx.constants {
+                                c.source_file = Some(src.clone());
+                                ctx.constants.push(c);
+                            }
+                            for mut e in mod_ctx.entities {
+                                e.source_file = Some(src.clone());
+                                ctx.entities.push(e);
+                            }
+                            for mut t in mod_ctx.traits {
+                                t.source_file = Some(src.clone());
+                                ctx.traits.push(t);
+                            }
+                            for mut ta in mod_ctx.type_aliases {
+                                ta.source_file = Some(src.clone());
+                                ctx.type_aliases.push(ta);
+                            }
                             resolved.insert(mod_name.as_str());
                             break;
                         }
@@ -606,14 +675,12 @@ impl AnalysisContext {
         for ta in &self.type_aliases {
             let underlying = ta.type_str.as_deref().unwrap_or("");
             if underlying.starts_with("enum {") {
-                if let Some(inner) = underlying.strip_prefix("enum { ")
+                if let Some(inner) = underlying
+                    .strip_prefix("enum { ")
                     .and_then(|s| s.strip_suffix(" }"))
                 {
                     for variant in inner.split(", ") {
-                        let vname = variant.split(|c| c == '=' || c == ':')
-                            .next()
-                            .unwrap_or(variant)
-                            .trim();
+                        let vname = variant.split(['=', ':']).next().unwrap_or(variant).trim();
                         if vname == name {
                             return Some((ta.line, ta.column, ta.source_file.as_deref()));
                         }
@@ -634,11 +701,11 @@ impl AnalysisContext {
                 // Verify it's a word boundary
                 let before_ok = abs_pos == 0
                     || !line.as_bytes()[abs_pos - 1].is_ascii_alphanumeric()
-                    && line.as_bytes()[abs_pos - 1] != b'_';
+                        && line.as_bytes()[abs_pos - 1] != b'_';
                 let after_pos = abs_pos + name.len();
                 let after_ok = after_pos >= line.len()
                     || !line.as_bytes()[after_pos].is_ascii_alphanumeric()
-                    && line.as_bytes()[after_pos] != b'_';
+                        && line.as_bytes()[after_pos] != b'_';
 
                 if before_ok && after_ok {
                     refs.push((line_num as u32, abs_pos as u32, name.len() as u32));
@@ -666,7 +733,10 @@ impl AnalysisContext {
 
         // Port
         if let Some(p) = self.ports.iter().find(|p| p.name == name) {
-            let width_str = p.width.map(|w| format!(" ({} bits)", w)).unwrap_or_default();
+            let width_str = p
+                .width
+                .map(|w| format!(" ({} bits)", w))
+                .unwrap_or_default();
             return Some(format!(
                 "**{} port** `{}`: `{}`{}\n\nIn entity `{}`",
                 p.direction, p.name, p.type_str, width_str, p.entity
@@ -677,7 +747,10 @@ impl AnalysisContext {
         if let Some(s) = self.signals.iter().find(|s| s.name == name) {
             let type_str = s.type_str.as_deref().unwrap_or("unknown");
             let scope = s.scope.as_deref().unwrap_or("global");
-            return Some(format!("**signal** `{}`: `{}`\n\nIn `{}`", s.name, type_str, scope));
+            return Some(format!(
+                "**signal** `{}`: `{}`\n\nIn `{}`",
+                s.name, type_str, scope
+            ));
         }
 
         // Constant
@@ -697,12 +770,17 @@ impl AnalysisContext {
 
         // Instance
         if let Some(i) = self.instances.iter().find(|i| i.name == name) {
-            return Some(format!("**instance** `{}`: `{}`\n\nIn `{}`", i.name, i.entity_type, i.scope));
+            return Some(format!(
+                "**instance** `{}`: `{}`\n\nIn `{}`",
+                i.name, i.entity_type, i.scope
+            ));
         }
 
         // Generic parameter
         if let Some(g) = self.generics.iter().find(|g| g.name == name) {
-            let default = g.default_value.as_deref()
+            let default = g
+                .default_value
+                .as_deref()
                 .map(|v| format!(" = {}", v))
                 .unwrap_or_default();
             let mut info = format!(
@@ -727,7 +805,8 @@ impl AnalysisContext {
                 let is_enum = underlying.starts_with("enum");
                 let kind = if is_enum { "enum" } else { "struct" };
                 let prefix = format!("{} {{ ", kind);
-                let inner = underlying.strip_prefix(&prefix)
+                let inner = underlying
+                    .strip_prefix(&prefix)
                     .and_then(|s| s.strip_suffix(" }"))
                     .unwrap_or("");
                 let mut info = format!("**{}** `{}`\n\n", kind, t.name);
@@ -751,18 +830,19 @@ impl AnalysisContext {
         for ta in &self.type_aliases {
             let underlying = ta.type_str.as_deref().unwrap_or("");
             if underlying.starts_with("enum {") {
-                if let Some(inner) = underlying.strip_prefix("enum { ")
+                if let Some(inner) = underlying
+                    .strip_prefix("enum { ")
                     .and_then(|s| s.strip_suffix(" }"))
                 {
                     for variant in inner.split(", ") {
-                        let vname = variant.split(|c| c == '=' || c == ':')
-                            .next()
-                            .unwrap_or(variant)
-                            .trim();
+                        let vname = variant.split(['=', ':']).next().unwrap_or(variant).trim();
                         if vname == name {
                             return Some(format!(
                                 "**variant** `{}::{}` \n\n`{}`\n\nIn enum `{}`",
-                                ta.name, vname, variant.trim(), ta.name
+                                ta.name,
+                                vname,
+                                variant.trim(),
+                                ta.name
                             ));
                         }
                     }
@@ -818,10 +898,18 @@ fn parse_generic_params(
 
 fn infer_width(type_str: &str) -> Option<u32> {
     let t = type_str.trim();
-    if t == "bit" || t == "bool" || t == "clock" || t == "reset" { return Some(1); }
-    if t == "fp32" { return Some(32); }
-    if t == "fp16" { return Some(16); }
-    if t == "fp64" { return Some(64); }
+    if t == "bit" || t == "bool" || t == "clock" || t == "reset" {
+        return Some(1);
+    }
+    if t == "fp32" {
+        return Some(32);
+    }
+    if t == "fp16" {
+        return Some(16);
+    }
+    if t == "fp64" {
+        return Some(64);
+    }
 
     // bit<N>, nat<N>, int<N>
     for prefix in &["bit<", "nat<", "int<"] {
@@ -922,14 +1010,21 @@ entity DabBatteryController<
         let ctx = AnalysisContext::from_source(source);
 
         // All 4 generics should be parsed
-        assert_eq!(ctx.generics.len(), 4, "Expected 4 generics, got: {:?}",
-            ctx.generics.iter().map(|g| &g.name).collect::<Vec<_>>());
+        assert_eq!(
+            ctx.generics.len(),
+            4,
+            "Expected 4 generics, got: {:?}",
+            ctx.generics.iter().map(|g| &g.name).collect::<Vec<_>>()
+        );
         assert_eq!(ctx.generics[0].name, "SOFT_START_CYCLES");
         assert_eq!(ctx.generics[1].name, "PRECHARGE_CYCLES");
         assert_eq!(ctx.generics[2].name, "BMS_TIMEOUT_CYCLES");
         assert_eq!(ctx.generics[3].name, "CC_CV_FLOAT_ENTRY_CYCLES");
         assert_eq!(ctx.generics[3].type_str, "nat[32]");
-        assert_eq!(ctx.generics[3].default_value, Some("FLOAT_ENTRY_DELAY".to_string()));
+        assert_eq!(
+            ctx.generics[3].default_value,
+            Some("FLOAT_ENTRY_DELAY".to_string())
+        );
 
         // Hover should work on all generics
         assert!(ctx.hover_info("SOFT_START_CYCLES").is_some());
@@ -944,7 +1039,8 @@ entity DabBatteryController<
 
     #[test]
     fn test_find_definition() {
-        let source = "entity Foo {\n  in x: bit;\n  out y: bit;\n}\nimpl Foo {\n  signal z: nat<4>;\n}";
+        let source =
+            "entity Foo {\n  in x: bit;\n  out y: bit;\n}\nimpl Foo {\n  signal z: nat<4>;\n}";
         let ctx = AnalysisContext::from_source(source);
         assert!(ctx.find_definition("Foo").is_some());
         assert!(ctx.find_definition("x").is_some());

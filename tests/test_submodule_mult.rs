@@ -32,7 +32,8 @@ async fn test_submodule_multiplication() {
     let product: u64 = tb.get_as("z").await;
     println!("Via submodule: 7 × 8 = {} (expected 56)", product);
     assert_eq!(product, 56, "7 × 8 should equal 56 via submodule");
-    tb.export_waveform("build/test_submodule_multiplication.skw.gz").ok();
+    tb.export_waveform("build/test_submodule_multiplication.skw.gz")
+        .ok();
 }
 
 #[tokio::test]
@@ -55,7 +56,8 @@ async fn test_multiple_multiplier_instances() {
     );
     assert_eq!(p0, 15, "p0 should be 3×5=15");
     assert_eq!(p1, 56, "p1 should be 7×8=56");
-    tb.export_waveform("build/test_multiple_multiplier_instances.skw.gz").ok();
+    tb.export_waveform("build/test_multiple_multiplier_instances.skw.gz")
+        .ok();
 }
 
 #[tokio::test]
@@ -87,7 +89,8 @@ async fn test_nested_hierarchy() {
     assert_eq!(r1, 56, "r1 should be 7×8=56");
     assert_eq!(r2, 24, "r2 should be 4×6=24");
     assert_eq!(r3, 90, "r3 should be 9×10=90");
-    tb.export_waveform("build/test_nested_hierarchy.skw.gz").ok();
+    tb.export_waveform("build/test_nested_hierarchy.skw.gz")
+        .ok();
 }
 
 #[tokio::test]
@@ -139,7 +142,8 @@ async fn test_partial_product_generation() {
     assert_eq!(p01, exp_p01, "p01 should be a_lo * b_hi");
     assert_eq!(p10, exp_p10, "p10 should be a_hi * b_lo");
     assert_eq!(p11, exp_p11, "p11 should be a_hi * b_hi");
-    tb.export_waveform("build/test_partial_product_generation.skw.gz").ok();
+    tb.export_waveform("build/test_partial_product_generation.skw.gz")
+        .ok();
 }
 
 #[tokio::test]
@@ -183,7 +187,8 @@ async fn test_accum_stdlib_import() {
     let prod0: u64 = tb.get_as("prod0").await;
     println!("Accum stdlib: prod0 = {} (expected 15 in quad mode)", prod0);
     assert_eq!(prod0, 15, "prod0 should passthrough p00 in quad mode");
-    tb.export_waveform("build/test_accum_stdlib_import.skw.gz").ok();
+    tb.export_waveform("build/test_accum_stdlib_import.skw.gz")
+        .ok();
 }
 
 #[tokio::test]
@@ -202,5 +207,6 @@ async fn test_pmult_direct_import() {
     let prod0: u64 = tb.get_as("prod0").await;
     println!("PMult direct: prod0 = {} (expected 15)", prod0);
     assert_eq!(prod0, 15, "prod0 should be 3×5=15 in quad mode");
-    tb.export_waveform("build/test_pmult_direct_import.skw.gz").ok();
+    tb.export_waveform("build/test_pmult_direct_import.skw.gz")
+        .ok();
 }

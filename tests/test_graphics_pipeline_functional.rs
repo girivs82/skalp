@@ -171,7 +171,8 @@ impl GeometryProcessor4 {
         println!("   ✅ Processor returned to ready state");
         println!("✅ GeometryProcessor4 test PASSED!");
 
-        tb.export_waveform("build/test_geometry_processor_vertex_passthrough.skw.gz").ok();
+        tb.export_waveform("build/test_geometry_processor_vertex_passthrough.skw.gz")
+            .ok();
     }
 
     // GPU simulator captures outputs AFTER phase 3 (after combinational re-evaluation)
@@ -346,7 +347,8 @@ impl FifoTest {
         println!("   ✅ FIFO CDC test complete");
         println!("✅ AsyncFIFO CDC test PASSED!");
 
-        tb.export_waveform("build/test_async_fifo_clock_domain_crossing.skw.gz").ok();
+        tb.export_waveform("build/test_async_fifo_clock_domain_crossing.skw.gz")
+            .ok();
     }
 
     #[tokio::test]
@@ -532,7 +534,8 @@ impl FifoTest {
             test_vertices.len()
         );
 
-        tb.export_waveform("build/test_graphics_pipeline_multi_clock_domains.skw.gz").ok();
+        tb.export_waveform("build/test_graphics_pipeline_multi_clock_domains.skw.gz")
+            .ok();
     }
 
     #[tokio::test]
@@ -627,7 +630,8 @@ impl FifoTest {
 
         println!("✅ AsyncFIFO Single Value test PASSED!");
 
-        tb.export_waveform("build/test_async_fifo_single_value.skw.gz").ok();
+        tb.export_waveform("build/test_async_fifo_single_value.skw.gz")
+            .ok();
     }
 
     #[tokio::test]
@@ -745,7 +749,8 @@ async fn test_struct_output_read() {
 
     println!("✅ All struct fields read correctly!");
 
-    tb.export_waveform("build/test_struct_output_read.skw.gz").ok();
+    tb.export_waveform("build/test_struct_output_read.skw.gz")
+        .ok();
 }
 #[cfg(all(test, target_os = "macos"))]
 #[tokio::test]

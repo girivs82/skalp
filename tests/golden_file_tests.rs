@@ -367,4 +367,3 @@ impl FPVariants {
 
     golden.assert_eq("sv", &verilog);
 }
-

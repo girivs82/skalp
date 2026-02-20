@@ -6,10 +6,12 @@
 
 #[test]
 fn test_slow_fsm_bmc_equivalence() {
+    use skalp_formal::equivalence::{
+        check_sequential_equivalence_sat, BoundedModelChecker, LirToAig,
+    };
     use skalp_frontend::parse_and_build_hir_from_file;
-    use skalp_mir::MirCompiler;
     use skalp_lir::mir_to_lir::lower_mir_module_to_lir;
-    use skalp_formal::equivalence::{LirToAig, BoundedModelChecker, check_sequential_equivalence_sat};
+    use skalp_mir::MirCompiler;
 
     // Two FSMs that differ only in a state reachable after LONG timeout
     // FsmA: state 2 -> state 3 (correct)
@@ -112,7 +114,10 @@ impl FsmB {
 
     println!("\n=== Slow FSM BMC Equivalence Test ===");
     println!("FsmA and FsmB differ only in timeout path (state 2)");
-    println!("State 2 requires {} cycles (~16 million) to reach via timeout!", 16777215u32);
+    println!(
+        "State 2 requires {} cycles (~16 million) to reach via timeout!",
+        16777215u32
+    );
     println!("LFSR simulation would need millions of cycles to find this bug.");
     println!("BMC should find it instantly by reasoning symbolically.\n");
 
@@ -123,8 +128,16 @@ impl FsmB {
     let conv_b = LirToAig::new();
     let aig_b = conv_b.convert_sequential(&lir_b);
 
-    println!("FsmA: {} AIG nodes, {} latches", aig_a.nodes.len(), aig_a.latches.len());
-    println!("FsmB: {} AIG nodes, {} latches", aig_b.nodes.len(), aig_b.latches.len());
+    println!(
+        "FsmA: {} AIG nodes, {} latches",
+        aig_a.nodes.len(),
+        aig_a.latches.len()
+    );
+    println!(
+        "FsmB: {} AIG nodes, {} latches",
+        aig_b.nodes.len(),
+        aig_b.latches.len()
+    );
 
     // Run BMC-style equivalence check
     println!("\nRunning bounded model checking equivalence...");
@@ -136,7 +149,10 @@ impl FsmB {
     match result {
         Ok(res) => {
             if res.equivalent {
-                println!("\nResult: Simulation-based BMC reports EQUIVALENT (up to {} cycles)", res.bound);
+                println!(
+                    "\nResult: Simulation-based BMC reports EQUIVALENT (up to {} cycles)",
+                    res.bound
+                );
                 println!("\nIMPORTANT LIMITATION:");
                 println!("The simulation-based BMC cannot find this bug because:");
                 println!("  1. State 2 is only reachable after 16 million cycles");
@@ -182,7 +198,9 @@ impl FsmB {
                     println!("\nCounterexample (state/input where designs differ):");
 
                     // Show state assignment
-                    let mut state_bits: Vec<_> = ce.state.iter()
+                    let mut state_bits: Vec<_> = ce
+                        .state
+                        .iter()
                         .filter(|(k, _)| k.contains("state"))
                         .collect();
                     state_bits.sort_by_key(|(k, _)| k.as_str());
@@ -194,22 +212,31 @@ impl FsmB {
                         }
 
                         // Decode state value
-                        let state_val: u32 = state_bits.iter()
-                            .filter_map(|(name, val)| {
+                        let state_val: u32 = state_bits
+                            .iter()
+                            .map(|(name, val)| {
                                 // Extract bit index from name like "state[0]" or "__reg_cur_state[0]"
-                                let bit_idx = name.rfind('[')
-                                    .and_then(|start| name.rfind(']')
-                                        .map(|end| &name[start+1..end]))
+                                let bit_idx = name
+                                    .rfind('[')
+                                    .and_then(|start| {
+                                        name.rfind(']').map(|end| &name[start + 1..end])
+                                    })
                                     .and_then(|s| s.parse::<u32>().ok())
                                     .unwrap_or(0);
-                                if **val { Some(1u32 << bit_idx) } else { Some(0) }
+                                if **val {
+                                    1u32 << bit_idx
+                                } else {
+                                    0
+                                }
                             })
                             .sum();
                         println!("  => state = {}", state_val);
                     }
 
                     // Show relevant inputs
-                    let relevant_inputs: Vec<_> = ce.inputs.iter()
+                    let relevant_inputs: Vec<_> = ce
+                        .inputs
+                        .iter()
                         .filter(|(k, _)| !k.starts_with("__"))
                         .collect();
                     if !relevant_inputs.is_empty() {
@@ -232,5 +259,7 @@ impl FsmB {
     println!("\n=== Summary ===");
     println!("1. Simulation-based BMC: CANNOT find bug (state 2 unreachable in bounded cycles)");
     println!("2. SAT-based symbolic check: CAN find bug (reasons about ALL states, even unreachable ones)");
-    println!("\nThis is critical for protocols like PCIe where link training takes millions of cycles.");
+    println!(
+        "\nThis is critical for protocols like PCIe where link training takes millions of cycles."
+    );
 }

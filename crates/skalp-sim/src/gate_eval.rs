@@ -205,9 +205,13 @@ pub fn evaluate_primitive(ptype: &PrimitiveType, inputs: &[bool]) -> Vec<bool> {
             // Clock is associated with the sequential block
             let d = inputs.first().copied().unwrap_or(false);
             let en = inputs.get(1).copied().unwrap_or(true); // default enable to true
-            // Note: enable logic is often handled at the block level, but if enabled=false,
-            // the DFF should retain its current value (not modeled here as we don't have state)
-            if en { vec![d] } else { vec![false] } // Simplified: returns d if enabled
+                                                             // Note: enable logic is often handled at the block level, but if enabled=false,
+                                                             // the DFF should retain its current value (not modeled here as we don't have state)
+            if en {
+                vec![d]
+            } else {
+                vec![false]
+            } // Simplified: returns d if enabled
         }
 
         PrimitiveType::DffScan => {

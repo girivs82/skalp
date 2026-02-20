@@ -162,9 +162,7 @@ impl<'a> TechMapper<'a> {
         let undriven_but_used: Vec<_> = word_lir
             .signals
             .iter()
-            .filter(|s| {
-                s.driver.is_none() && !s.is_input && used_signals.contains(&s.id)
-            })
+            .filter(|s| s.driver.is_none() && !s.is_input && used_signals.contains(&s.id))
             .collect();
         // Phase 1: Create nets for all signals
         for signal in &word_lir.signals {
@@ -1405,6 +1403,7 @@ impl<'a> TechMapper<'a> {
     /// 3. Conditionally negate b to get |b|
     /// 4. Unsigned multiply: unsigned_product = |a| * |b|
     /// 5. Conditionally negate result if result_sign is set
+    #[allow(clippy::needless_range_loop)]
     fn map_signed_multiplier(
         &mut self,
         width: u32,
@@ -1414,8 +1413,10 @@ impl<'a> TechMapper<'a> {
         path: &str,
     ) {
         if inputs.len() < 2 {
-            self.warnings
-                .push(format!("Signed multiplier needs 2 inputs, got {}", inputs.len()));
+            self.warnings.push(format!(
+                "Signed multiplier needs 2 inputs, got {}",
+                inputs.len()
+            ));
             return;
         }
 
@@ -1520,8 +1521,10 @@ impl<'a> TechMapper<'a> {
             self.stats.nets_created += 1;
 
             let carry_out = self.alloc_net_id();
-            self.netlist
-                .add_net(GateNet::new(carry_out, format!("{}.a_neg_carry_{}", path, i)));
+            self.netlist.add_net(GateNet::new(
+                carry_out,
+                format!("{}.a_neg_carry_{}", path, i),
+            ));
             self.stats.nets_created += 1;
 
             // Half adder: a_inv[i] + carry
@@ -1601,8 +1604,10 @@ impl<'a> TechMapper<'a> {
             self.stats.nets_created += 1;
 
             let carry_out = self.alloc_net_id();
-            self.netlist
-                .add_net(GateNet::new(carry_out, format!("{}.b_neg_carry_{}", path, i)));
+            self.netlist.add_net(GateNet::new(
+                carry_out,
+                format!("{}.b_neg_carry_{}", path, i),
+            ));
             self.stats.nets_created += 1;
 
             let mut ha_cell = Cell::new_comb(
@@ -1702,8 +1707,10 @@ impl<'a> TechMapper<'a> {
             self.stats.nets_created += 1;
 
             let carry_out = self.alloc_net_id();
-            self.netlist
-                .add_net(GateNet::new(carry_out, format!("{}.prod_neg_carry_{}", path, i)));
+            self.netlist.add_net(GateNet::new(
+                carry_out,
+                format!("{}.prod_neg_carry_{}", path, i),
+            ));
             self.stats.nets_created += 1;
 
             let mut ha_cell = Cell::new_comb(
@@ -2723,8 +2730,16 @@ impl<'a> TechMapper<'a> {
         // Create modified inputs with flipped MSB
         // If input is narrower than width, use its actual MSB (sign bit) for sign extension
         let msb_idx = width as usize - 1;
-        let a_msb = a.get(msb_idx).or_else(|| a.last()).copied().unwrap_or(GateNetId(0));
-        let b_msb = b.get(msb_idx).or_else(|| b.last()).copied().unwrap_or(GateNetId(0));
+        let a_msb = a
+            .get(msb_idx)
+            .or_else(|| a.last())
+            .copied()
+            .unwrap_or(GateNetId(0));
+        let b_msb = b
+            .get(msb_idx)
+            .or_else(|| b.last())
+            .copied()
+            .unwrap_or(GateNetId(0));
 
         // Flip a's MSB
         let a_msb_flipped = self
@@ -2885,6 +2900,7 @@ impl<'a> TechMapper<'a> {
     }
 
     /// Map a register
+    #[allow(clippy::too_many_arguments)]
     fn map_register(
         &mut self,
         width: u32,
@@ -2920,7 +2936,9 @@ impl<'a> TechMapper<'a> {
                 if reset_bit_val {
                     // Reset-to-1: invert D before DFF, use DffR (clears to 0), invert Q output
                     // At reset: stored=0, output=INV(0)=1. During operation: stored=~D, output=INV(~D)=D.
-                    let inv_d_net = self.netlist.add_net_with_name(format!("{}.inv_d_bit{}", path, bit));
+                    let inv_d_net = self
+                        .netlist
+                        .add_net_with_name(format!("{}.inv_d_bit{}", path, bit));
                     let inv_info = self.get_cell_info(&CellFunction::Inv);
                     let mut inv_d_cell = Cell::new_comb(
                         CellId(0),
@@ -2935,7 +2953,9 @@ impl<'a> TechMapper<'a> {
                     inv_info.apply_to_cell(&mut inv_d_cell);
                     self.add_cell(inv_d_cell);
 
-                    let dff_q_net = self.netlist.add_net_with_name(format!("{}.dff_q_bit{}", path, bit));
+                    let dff_q_net = self
+                        .netlist
+                        .add_net_with_name(format!("{}.dff_q_bit{}", path, bit));
                     let mut cell = Cell::new_seq(
                         CellId(0),
                         dff_info.name.clone(),
@@ -2995,7 +3015,9 @@ impl<'a> TechMapper<'a> {
                 let d = if use_mux_for_reset {
                     let reset_bit_val = (reset_val >> bit) & 1 != 0;
 
-                    let reset_bit_net = self.netlist.add_net_with_name(format!("{}.rst_val_bit{}", path, bit));
+                    let reset_bit_net = self
+                        .netlist
+                        .add_net_with_name(format!("{}.rst_val_bit{}", path, bit));
                     let tie_cell_name = if reset_bit_val { "TIE_HIGH" } else { "TIE_LOW" };
                     let mut tie_cell = Cell::new_comb(
                         CellId(0),
@@ -3009,7 +3031,9 @@ impl<'a> TechMapper<'a> {
                     tie_cell.source_op = Some("ResetValue".to_string());
                     self.add_cell(tie_cell);
 
-                    let mux_out = self.netlist.add_net_with_name(format!("{}.rst_mux_bit{}", path, bit));
+                    let mux_out = self
+                        .netlist
+                        .add_net_with_name(format!("{}.rst_mux_bit{}", path, bit));
                     let mux_info = self.get_cell_info(&CellFunction::Mux2);
                     let mut mux_cell = Cell::new_comb(
                         CellId(0),
@@ -5647,25 +5671,21 @@ pub fn map_hierarchical_to_gates(
         let tech_result = if let Some(ref compiled_ip_path) = inst_lir.lir_result.compiled_ip_path {
             // Load the pre-compiled netlist directly
             match CompiledIp::read_from_file(std::path::Path::new(compiled_ip_path), None) {
-                Ok(compiled_ip) => {
-                    TechMapResult {
-                        netlist: compiled_ip.netlist.clone(),
-                        stats: TechMapStats {
-                            nodes_processed: 0,
-                            cells_created: compiled_ip.netlist.cells.len(),
-                            nets_created: compiled_ip.netlist.nets.len(),
-                            direct_mappings: 0,
-                            decomposed_mappings: 0,
-                        },
-                        warnings: vec![format!(
-                            "Loaded pre-compiled netlist from '{}'",
-                            compiled_ip_path
-                        )],
-                    }
-                }
-                Err(_e) => {
-                    map_lir_to_gates_optimized(&inst_lir.lir_result.lir, library)
-                }
+                Ok(compiled_ip) => TechMapResult {
+                    netlist: compiled_ip.netlist.clone(),
+                    stats: TechMapStats {
+                        nodes_processed: 0,
+                        cells_created: compiled_ip.netlist.cells.len(),
+                        nets_created: compiled_ip.netlist.nets.len(),
+                        direct_mappings: 0,
+                        decomposed_mappings: 0,
+                    },
+                    warnings: vec![format!(
+                        "Loaded pre-compiled netlist from '{}'",
+                        compiled_ip_path
+                    )],
+                },
+                Err(_e) => map_lir_to_gates_optimized(&inst_lir.lir_result.lir, library),
             }
         } else if let Some(ref blackbox_info) = inst_lir.lir_result.blackbox_info {
             // This is a blackbox/vendor IP - create a netlist with a single blackbox cell
@@ -5913,6 +5933,7 @@ mod tests {
         lib.add_cell(LibraryCell::new_comb("FA_X1", CellFunction::FullAdder, 0.3));
         lib.add_cell(LibraryCell::new_comb("DFF_X1", CellFunction::Dff, 0.2));
         lib.add_cell(LibraryCell::new_comb("DFFR_X1", CellFunction::DffR, 0.25));
+        lib.add_cell(LibraryCell::new_comb("TIEL_X1", CellFunction::TieLow, 0.01));
         lib
     }
 
@@ -5934,8 +5955,8 @@ mod tests {
 
         let result = map_word_lir_to_gates(&word_lir, &lib);
 
-        // Should create 8 AND gates (one per bit)
-        assert_eq!(result.stats.cells_created, 8);
+        // Should create 8 AND gates (one per bit) + 1 TieLow cell
+        assert_eq!(result.stats.cells_created, 9);
         assert!(result.warnings.is_empty());
     }
 
@@ -5960,8 +5981,8 @@ mod tests {
 
         let result = map_word_lir_to_gates(&word_lir, &lib);
 
-        // Should create 1 half adder + 3 full adders
-        assert_eq!(result.stats.cells_created, 4);
+        // Should create 1 half adder + 3 full adders + 1 TieLow cell
+        assert_eq!(result.stats.cells_created, 5);
     }
 
     #[test]
@@ -5983,8 +6004,8 @@ mod tests {
 
         let result = map_word_lir_to_gates(&word_lir, &lib);
 
-        // Should create 16 MUX2 cells
-        assert_eq!(result.stats.cells_created, 16);
+        // Should create 16 MUX2 cells + 1 TieLow cell
+        assert_eq!(result.stats.cells_created, 17);
     }
 
     #[test]
@@ -6014,10 +6035,10 @@ mod tests {
 
         let result = map_word_lir_to_gates(&word_lir, &lib);
 
-        // Should create 8 DFF cells
-        assert_eq!(result.stats.cells_created, 8);
+        // Should create 8 DFF cells + 1 TieLow cell
+        assert_eq!(result.stats.cells_created, 9);
 
-        // All should be sequential
+        // 8 should be sequential (TieLow is combinational)
         let seq_count = result
             .netlist
             .cells
@@ -6039,8 +6060,8 @@ mod tests {
 
         let result = map_word_lir_to_gates(&word_lir, &lib);
 
-        // 4 inverters at 0.05 FIT each = 0.2 total
-        assert!((result.netlist.total_fit() - 0.2).abs() < 0.001);
+        // 4 inverters at 0.05 FIT each + 1 TieLow at 0.01 FIT = 0.21 total
+        assert!((result.netlist.total_fit() - 0.21).abs() < 0.001);
     }
 
     #[test]
@@ -6057,6 +6078,7 @@ mod tests {
             LibraryFailureMode::new("transient", 0.015, FaultType::Transient),
         ];
         lib.add_cell(and_cell);
+        lib.add_cell(LibraryCell::new_comb("TIEL_FM", CellFunction::TieLow, 0.01));
 
         // Map an AND gate
         let mut word_lir = Lir::new("test".to_string());
@@ -6072,9 +6094,15 @@ mod tests {
 
         let result = map_word_lir_to_gates(&word_lir, &lib);
 
-        // Verify cell was created
-        assert_eq!(result.netlist.cells.len(), 1);
-        let cell = &result.netlist.cells[0];
+        // Verify cells were created (1 AND + 1 TieLow)
+        assert_eq!(result.netlist.cells.len(), 2);
+        // Find the AND cell (not the TieLow)
+        let cell = result
+            .netlist
+            .cells
+            .iter()
+            .find(|c| c.cell_type == "AND2_FM")
+            .expect("Should have an AND2_FM cell");
 
         // Verify failure modes were copied
         assert_eq!(cell.failure_modes.len(), 3);
@@ -6156,11 +6184,11 @@ mod tests {
             .collect();
         assert_eq!(and_cells.len(), 1, "Should have 1 AND cell for first bit");
 
-        // Total cells = 1 XOR + 1 AND (bit 0) + 3 * (2 XOR + 1 Carry) (bits 1-3)
-        // = 2 + 9 = 11 cells
+        // Total cells = 1 TieLow + 1 XOR + 1 AND (bit 0) + 3 * (2 XOR + 1 Carry) (bits 1-3)
+        // = 1 + 2 + 9 = 12 cells
         assert_eq!(
-            result.stats.cells_created, 11,
-            "Should have 11 cells total for 4-bit ice40 adder"
+            result.stats.cells_created, 12,
+            "Should have 12 cells total for 4-bit ice40 adder"
         );
     }
 }

@@ -39,6 +39,40 @@ fn compile_to_sir(source: &str) -> SirModule {
     convert_mir_to_sir(&mir.modules[0])
 }
 
+/// Resolve a user-facing hierarchical path to its internal name via the NameRegistry.
+/// The SIR stores all signals, ports, and state elements under internal names (_s0, _s1, etc.)
+/// while users reference them by hierarchical paths (e.g., "a", "q_reg", "bms.connected").
+fn resolve_name(sir: &SirModule, path: &str) -> String {
+    sir.name_registry
+        .resolve(path)
+        .unwrap_or_else(|| panic!("Name '{}' not found in registry", path))
+        .to_string()
+}
+
+/// Find a SIR signal by its user-facing hierarchical path.
+/// Resolves the path through the NameRegistry first, then looks up the signal by internal name.
+fn find_signal_by_path<'a>(sir: &'a SirModule, path: &str) -> Option<&'a SirSignal> {
+    let internal_name = sir.name_registry.resolve(path)?;
+    sir.signals.iter().find(|s| s.name == internal_name)
+}
+
+/// Check if a state element exists for a given user-facing path.
+/// State elements are keyed by internal names in SIR.
+fn has_state_element(sir: &SirModule, path: &str) -> bool {
+    if let Some(internal_name) = sir.name_registry.resolve(path) {
+        sir.state_elements.contains_key(internal_name)
+    } else {
+        false
+    }
+}
+
+/// Get a state element by its user-facing path.
+/// Resolves through the NameRegistry to find the internal name used as the key.
+fn get_state_element<'a>(sir: &'a SirModule, path: &str) -> Option<&'a StateElement> {
+    let internal_name = sir.name_registry.resolve(path)?;
+    sir.state_elements.get(internal_name)
+}
+
 // ============================================================================
 // Port Conversion Tests
 // ============================================================================
@@ -60,8 +94,12 @@ impl Wire {
     assert_eq!(sir.name, "Wire");
     assert_eq!(sir.inputs.len(), 1);
     assert_eq!(sir.outputs.len(), 1);
-    assert_eq!(sir.inputs[0].name, "a");
-    assert_eq!(sir.outputs[0].name, "b");
+    // Port names in SIR use internal names (_s0, _s1, etc.) from the NameRegistry.
+    // Verify the registry maps the user-facing names to the port internal names.
+    let a_internal = resolve_name(&sir, "a");
+    let b_internal = resolve_name(&sir, "b");
+    assert_eq!(sir.inputs[0].name, a_internal);
+    assert_eq!(sir.outputs[0].name, b_internal);
 }
 
 #[test]
@@ -130,8 +168,12 @@ impl Test {
     assert!(sir.signals.len() >= 3);
 
     // temp should not be a state element (combinational)
-    let temp_signal = sir.signals.iter().find(|s| s.name == "temp");
-    assert!(temp_signal.is_some());
+    // Use the name registry to find the signal by its user-facing name
+    let temp_signal = find_signal_by_path(&sir, "temp");
+    assert!(
+        temp_signal.is_some(),
+        "Signal 'temp' should exist in SIR (resolved via NameRegistry)"
+    );
 }
 
 #[test]
@@ -155,11 +197,14 @@ impl Register {
 "#;
     let sir = compile_to_sir(source);
 
-    // q_reg should be a state element
-    assert!(sir.state_elements.contains_key("q_reg"));
+    // q_reg should be a state element (resolve through NameRegistry)
+    assert!(
+        has_state_element(&sir, "q_reg"),
+        "q_reg should be a state element"
+    );
 
-    let q_reg_signal = sir.signals.iter().find(|s| s.name == "q_reg");
-    assert!(q_reg_signal.is_some());
+    let q_reg_signal = find_signal_by_path(&sir, "q_reg");
+    assert!(q_reg_signal.is_some(), "q_reg signal should exist");
     assert!(q_reg_signal.unwrap().is_state);
 }
 
@@ -214,10 +259,15 @@ impl DFF {
     let sir = compile_to_sir(source);
 
     assert!(!sir.state_elements.is_empty());
-    assert!(sir.state_elements.contains_key("q_reg"));
+    assert!(
+        has_state_element(&sir, "q_reg"),
+        "q_reg should be a state element"
+    );
 
-    let state = &sir.state_elements["q_reg"];
-    assert_eq!(state.name, "q_reg");
+    let state = get_state_element(&sir, "q_reg").expect("q_reg state element should exist");
+    // State element name is the internal name from the registry
+    let q_reg_internal = resolve_name(&sir, "q_reg");
+    assert_eq!(state.name, q_reg_internal);
     assert_eq!(state.width, 1);
 }
 
@@ -242,9 +292,12 @@ impl Counter {
 "#;
     let sir = compile_to_sir(source);
 
-    assert!(sir.state_elements.contains_key("count_reg"));
+    assert!(
+        has_state_element(&sir, "count_reg"),
+        "count_reg should be a state element"
+    );
 
-    let state = &sir.state_elements["count_reg"];
+    let state = get_state_element(&sir, "count_reg").expect("count_reg state element should exist");
     assert_eq!(state.width, 8);
 }
 
@@ -279,7 +332,10 @@ impl FSM {
 "#;
     let sir = compile_to_sir(source);
 
-    assert!(sir.state_elements.contains_key("state"));
+    assert!(
+        has_state_element(&sir, "state"),
+        "'state' should be a state element"
+    );
 }
 
 // ============================================================================
@@ -495,7 +551,10 @@ impl StateMachine {
 "#;
     let sir = compile_to_sir(source);
 
-    assert!(sir.state_elements.contains_key("state"));
+    assert!(
+        has_state_element(&sir, "state"),
+        "'state' should be a state element"
+    );
     assert!(!sir.combinational_nodes.is_empty() || !sir.sequential_nodes.is_empty());
 }
 
@@ -528,7 +587,10 @@ impl Counter {
     let sir = compile_to_sir(source);
 
     assert_eq!(sir.name, "Counter");
-    assert!(sir.state_elements.contains_key("count_reg"));
+    assert!(
+        has_state_element(&sir, "count_reg"),
+        "count_reg should be a state element"
+    );
 }
 
 // ============================================================================
@@ -584,8 +646,14 @@ impl MultiState {
     let sir = compile_to_sir(source);
 
     assert_eq!(sir.state_elements.len(), 2);
-    assert!(sir.state_elements.contains_key("reg1"));
-    assert!(sir.state_elements.contains_key("reg2"));
+    assert!(
+        has_state_element(&sir, "reg1"),
+        "reg1 should be a state element"
+    );
+    assert!(
+        has_state_element(&sir, "reg2"),
+        "reg2 should be a state element"
+    );
 }
 
 #[test]
@@ -615,10 +683,16 @@ impl Mixed {
 
     // temp is combinational, reg is sequential
     assert_eq!(sir.state_elements.len(), 1);
-    assert!(sir.state_elements.contains_key("reg"));
+    assert!(
+        has_state_element(&sir, "reg"),
+        "'reg' should be a state element"
+    );
 
-    let temp_signal = sir.signals.iter().find(|s| s.name == "temp");
-    assert!(temp_signal.is_some());
+    let temp_signal = find_signal_by_path(&sir, "temp");
+    assert!(
+        temp_signal.is_some(),
+        "Signal 'temp' should exist (resolved via NameRegistry)"
+    );
     assert!(!temp_signal.unwrap().is_state);
 }
 

@@ -810,7 +810,6 @@ kernel void eval_sequential(
             return;
         };
 
-
         // Detect clock edges before we start modifying signals
         let clock_mask = self.detect_clock_edges_gpu();
 
@@ -882,7 +881,6 @@ kernel void eval_sequential(
 
         // Evaluate sequential logic on clock edges
         if clock_mask != 0 {
-
             // Get current buffer (after combinational convergence)
             let current_buf = if self.current_buffer_is_a {
                 buf_a
@@ -1090,7 +1088,6 @@ kernel void eval_sequential(
                         }
                     }
                 }
-
             }
         }
     }

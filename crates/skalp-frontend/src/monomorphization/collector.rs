@@ -236,15 +236,18 @@ impl<'hir> InstantiationCollector<'hir> {
             // Instantiations created from struct literals within generic entities may have
             // empty const_args (when using pass-through generic params like `Foo<PERIOD>`).
             // We should still create a default instantiation in that case.
-            let has_concrete_instantiation = self.instantiations.iter().any(|inst| {
-                inst.entity_id == entity.id && !inst.const_args.is_empty()
-            });
+            let has_concrete_instantiation = self
+                .instantiations
+                .iter()
+                .any(|inst| inst.entity_id == entity.id && !inst.const_args.is_empty());
             if has_concrete_instantiation {
                 continue;
             }
 
             // Check if all const generics have default values
-            let const_generics: Vec<_> = entity.generics.iter()
+            let const_generics: Vec<_> = entity
+                .generics
+                .iter()
                 .filter(|g| matches!(g.param_type, HirGenericType::Const(_)))
                 .collect();
 
@@ -483,41 +486,57 @@ impl<'hir> InstantiationCollector<'hir> {
         let type_name = &struct_lit.type_name;
 
         // Find the entity by name, or resolve entity alias
-        let (entity, resolved_generic_args) = match self.hir.entities.iter().find(|e| e.name == *type_name) {
-            Some(e) => (e.clone(), struct_lit.generic_args.clone()),
-            None => {
-                // Check if it's an entity alias
-                if let Some(alias) = self.hir.entity_aliases.iter().find(|a| a.name == *type_name) {
-                    // Extract target entity name from alias
-                    let target_name = match &alias.target_type {
-                        crate::hir::HirType::Custom(name) => name.clone(),
-                        _ => {
-                            trace!("[COLLECTOR] Entity alias '{}' has non-Custom target type", type_name);
-                            return;
+        let (entity, resolved_generic_args) =
+            match self.hir.entities.iter().find(|e| e.name == *type_name) {
+                Some(e) => (e.clone(), struct_lit.generic_args.clone()),
+                None => {
+                    // Check if it's an entity alias
+                    if let Some(alias) = self
+                        .hir
+                        .entity_aliases
+                        .iter()
+                        .find(|a| a.name == *type_name)
+                    {
+                        // Extract target entity name from alias
+                        let target_name = match &alias.target_type {
+                            crate::hir::HirType::Custom(name) => name.clone(),
+                            _ => {
+                                trace!(
+                                    "[COLLECTOR] Entity alias '{}' has non-Custom target type",
+                                    type_name
+                                );
+                                return;
+                            }
+                        };
+                        // Find the target entity
+                        match self.hir.entities.iter().find(|e| e.name == target_name) {
+                            Some(e) => {
+                                // Use alias's generic_args if present, otherwise struct_lit's
+                                let args = if !alias.generic_args.is_empty() {
+                                    alias.generic_args.clone()
+                                } else {
+                                    struct_lit.generic_args.clone()
+                                };
+                                (e.clone(), args)
+                            }
+                            None => {
+                                trace!(
+                                    "[COLLECTOR] Entity alias '{}' target '{}' NOT FOUND",
+                                    type_name,
+                                    target_name
+                                );
+                                return;
+                            }
                         }
-                    };
-                    // Find the target entity
-                    match self.hir.entities.iter().find(|e| e.name == target_name) {
-                        Some(e) => {
-                            // Use alias's generic_args if present, otherwise struct_lit's
-                            let args = if !alias.generic_args.is_empty() {
-                                alias.generic_args.clone()
-                            } else {
-                                struct_lit.generic_args.clone()
-                            };
-                            (e.clone(), args)
-                        }
-                        None => {
-                            trace!("[COLLECTOR] Entity alias '{}' target '{}' NOT FOUND", type_name, target_name);
-                            return;
-                        }
+                    } else {
+                        trace!(
+                            "[COLLECTOR] Entity '{}' NOT FOUND and not an alias",
+                            type_name
+                        );
+                        return;
                     }
-                } else {
-                    trace!("[COLLECTOR] Entity '{}' NOT FOUND and not an alias", type_name);
-                    return;
                 }
-            }
-        };
+            };
 
         // If entity has no generics, nothing to collect
         if entity.generics.is_empty() {

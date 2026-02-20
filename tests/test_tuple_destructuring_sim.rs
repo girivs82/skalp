@@ -29,8 +29,7 @@ mod tuple_destructuring_sim_tests {
             ..Default::default()
         };
 
-        let mut simulator = UnifiedSimulator::new(config)
-            .expect("Failed to create simulator");
+        let mut simulator = UnifiedSimulator::new(config).expect("Failed to create simulator");
 
         simulator
             .load_behavioral(&sir)
@@ -91,11 +90,7 @@ mod tuple_destructuring_sim_tests {
         // Check valid output (should be 1)
         let valid = sim.get_output("valid").await.unwrap_or(0);
         println!("valid = {}", valid);
-        assert_eq!(
-            valid, 1,
-            "valid should be true (1), got {}",
-            valid
-        );
+        assert_eq!(valid, 1, "valid should be true (1), got {}", valid);
 
         // Check x1 output (should be -5.0)
         let x1_bits = sim.get_output("x1").await.unwrap_or(0) as u32;

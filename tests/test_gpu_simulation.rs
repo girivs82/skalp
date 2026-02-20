@@ -41,8 +41,7 @@ mod gpu_simulation_tests {
         };
 
         // Create simulator
-        let mut simulator = UnifiedSimulator::new(config)
-            .expect("Failed to create GPU simulator");
+        let mut simulator = UnifiedSimulator::new(config).expect("Failed to create GPU simulator");
 
         // Load the module
         simulator
@@ -86,13 +85,19 @@ mod gpu_simulation_tests {
         // Get the waveforms
         let result = simulator.run(0).await;
         let states = &result.waveforms;
-        assert!(!states.is_empty() || !result.outputs.is_empty(), "Should have captured simulation states or outputs");
+        assert!(
+            !states.is_empty() || !result.outputs.is_empty(),
+            "Should have captured simulation states or outputs"
+        );
 
-        println!("Captured {} snapshot states, {} outputs", states.len(), result.outputs.len());
+        println!(
+            "Captured {} snapshot states, {} outputs",
+            states.len(),
+            result.outputs.len()
+        );
 
         println!("GPU Simulation Test Complete!");
     }
-
 }
 
 #[cfg(test)]

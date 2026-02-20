@@ -1,6 +1,5 @@
 //! Simple FP32 multiply test via Metal simulator
 
-
 use skalp_testing::Testbench;
 
 fn setup_stdlib_path() {

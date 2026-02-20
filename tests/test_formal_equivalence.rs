@@ -19,7 +19,12 @@ fn create_and_gate_lir() -> Lir {
     let out = lir.add_output("out".to_string(), 1);
 
     // Create AND node
-    lir.add_node(LirOp::And { width: 1 }, vec![a, b], out, "and_gate".to_string());
+    lir.add_node(
+        LirOp::And { width: 1 },
+        vec![a, b],
+        out,
+        "and_gate".to_string(),
+    );
 
     lir
 }
@@ -36,7 +41,12 @@ fn create_or_gate_lir() -> Lir {
     let out = lir.add_output("out".to_string(), 1);
 
     // Create OR node
-    lir.add_node(LirOp::Or { width: 1 }, vec![a, b], out, "or_gate".to_string());
+    lir.add_node(
+        LirOp::Or { width: 1 },
+        vec![a, b],
+        out,
+        "or_gate".to_string(),
+    );
 
     lir
 }
@@ -53,7 +63,12 @@ fn create_xor_gate_lir() -> Lir {
     let out = lir.add_output("out".to_string(), 1);
 
     // Create XOR node
-    lir.add_node(LirOp::Xor { width: 1 }, vec![a, b], out, "xor_gate".to_string());
+    lir.add_node(
+        LirOp::Xor { width: 1 },
+        vec![a, b],
+        out,
+        "xor_gate".to_string(),
+    );
 
     lir
 }
@@ -287,8 +302,18 @@ fn test_demorgan_nand() {
     let not_b = lir_equiv.add_signal("not_b".to_string(), 1);
     let out2 = lir_equiv.add_output("out".to_string(), 1);
 
-    lir_equiv.add_node(LirOp::Not { width: 1 }, vec![a2], not_a, "not_a".to_string());
-    lir_equiv.add_node(LirOp::Not { width: 1 }, vec![b2], not_b, "not_b".to_string());
+    lir_equiv.add_node(
+        LirOp::Not { width: 1 },
+        vec![a2],
+        not_a,
+        "not_a".to_string(),
+    );
+    lir_equiv.add_node(
+        LirOp::Not { width: 1 },
+        vec![b2],
+        not_b,
+        "not_b".to_string(),
+    );
     lir_equiv.add_node(
         LirOp::Or { width: 1 },
         vec![not_a, not_b],
@@ -297,7 +322,9 @@ fn test_demorgan_nand() {
     );
 
     let checker = EquivalenceChecker::new();
-    let result = checker.check_lir_equivalence(&lir_nand, &lir_equiv).unwrap();
+    let result = checker
+        .check_lir_equivalence(&lir_nand, &lir_equiv)
+        .unwrap();
 
     assert!(
         result.equivalent,
@@ -321,7 +348,12 @@ fn test_equivalence_comparison() {
     let a2 = lir2.add_input("a".to_string(), 4);
     let b2 = lir2.add_input("b".to_string(), 4);
     let out2 = lir2.add_output("out".to_string(), 1);
-    lir2.add_node(LirOp::Eq { width: 4 }, vec![a2, b2], out2, "eq2".to_string());
+    lir2.add_node(
+        LirOp::Eq { width: 4 },
+        vec![a2, b2],
+        out2,
+        "eq2".to_string(),
+    );
 
     let checker = EquivalenceChecker::new();
     let result = checker.check_lir_equivalence(&lir1, &lir2).unwrap();

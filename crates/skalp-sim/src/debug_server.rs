@@ -40,13 +40,9 @@ pub enum Command {
         max_cycles: Option<u64>,
     },
     #[serde(rename = "step")]
-    Step {
-        granularity: Option<String>,
-    },
+    Step { granularity: Option<String> },
     #[serde(rename = "continue")]
-    Continue {
-        max_cycles: Option<u64>,
-    },
+    Continue { max_cycles: Option<u64> },
     #[serde(rename = "pause")]
     Pause,
     #[serde(rename = "set_breakpoint")]
@@ -143,6 +139,12 @@ pub struct DebugServer {
     last_emitted_waveform_time: u64,
     /// Line of the top-level entity declaration (for stack frame highlight)
     entity_line: usize,
+}
+
+impl Default for DebugServer {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl DebugServer {
@@ -248,10 +250,7 @@ impl DebugServer {
                 let mut changes = Vec::new();
                 for (time, value) in &signal.values {
                     if *time > from_time && *time <= self.waveform_time {
-                        changes.push(serde_json::json!([
-                            *time,
-                            Self::format_hex_raw(value)
-                        ]));
+                        changes.push(serde_json::json!([*time, Self::format_hex_raw(value)]));
                     }
                 }
                 if !changes.is_empty() {
@@ -272,7 +271,8 @@ impl DebugServer {
         if !hits.is_empty() {
             // Primary hit (first) for backwards compatibility
             let hit = &hits[0];
-            let display_signal = self.sanitized_to_display
+            let display_signal = self
+                .sanitized_to_display
                 .get(&hit.signal_name)
                 .cloned()
                 .unwrap_or_else(|| hit.signal_name.clone());
@@ -287,7 +287,8 @@ impl DebugServer {
             let all_hits: Vec<serde_json::Value> = hits
                 .iter()
                 .map(|h| {
-                    let sig = self.sanitized_to_display
+                    let sig = self
+                        .sanitized_to_display
                         .get(&h.signal_name)
                         .cloned()
                         .unwrap_or_else(|| h.signal_name.clone());
@@ -340,7 +341,10 @@ impl DebugServer {
 
     fn state_to_json(
         state: &SimulationState,
-    ) -> (serde_json::Map<String, Value>, serde_json::Map<String, Value>) {
+    ) -> (
+        serde_json::Map<String, Value>,
+        serde_json::Map<String, Value>,
+    ) {
         let mut signals = serde_json::Map::new();
         for (name, value) in &state.signals {
             signals.insert(name.clone(), Value::String(Self::format_value(value)));
@@ -551,8 +555,7 @@ impl DebugServer {
         // Record initial values (all zeros) at waveform time 0
         for (name, &width) in &self.signal_widths {
             let num_bytes = (width + 7) / 8;
-            self.waveform
-                .add_value(name, 0, vec![0u8; num_bytes]);
+            self.waveform.add_value(name, 0, vec![0u8; num_bytes]);
         }
 
         // Build source map from MIR: line → signal name
@@ -573,11 +576,8 @@ impl DebugServer {
             .iter()
             .map(|(name, &width)| (name.clone(), Value::Number(serde_json::Number::from(width))))
             .collect();
-        let source_map_entries: Vec<&SourceMapping> = self
-            .source_map
-            .values()
-            .flat_map(|v| v.iter())
-            .collect();
+        let source_map_entries: Vec<&SourceMapping> =
+            self.source_map.values().flat_map(|v| v.iter()).collect();
         self.emit(&serde_json::json!({
             "event": "initialized",
             "signals": all_signals,
@@ -612,8 +612,7 @@ impl DebugServer {
         let file_key = source_path.to_string_lossy().to_string();
 
         // Phase 1: collect known signal/port names
-        let mut known_names: std::collections::BTreeSet<String> =
-            std::collections::BTreeSet::new();
+        let mut known_names: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
         for sig in &module.signals {
             known_names.insert(sig.name.clone());
         }
@@ -700,8 +699,7 @@ impl DebugServer {
                             || !line_bytes[start - 1].is_ascii_alphanumeric()
                                 && line_bytes[start - 1] != b'_';
                         let after_ok = end >= line_bytes.len()
-                            || !line_bytes[end].is_ascii_alphanumeric()
-                                && line_bytes[end] != b'_';
+                            || !line_bytes[end].is_ascii_alphanumeric() && line_bytes[end] != b'_';
                         if before_ok && after_ok {
                             found_on_line.insert(name.clone());
                             break;
@@ -714,7 +712,10 @@ impl DebugServer {
             }
             for name in found_on_line {
                 // Avoid duplicate (line, signal) pairs
-                if !mappings.iter().any(|m| m.line == line_num && m.signal == name) {
+                if !mappings
+                    .iter()
+                    .any(|m| m.line == line_num && m.signal == name)
+                {
                     mappings.push(SourceMapping {
                         line: line_num,
                         signal: name,
@@ -738,10 +739,10 @@ impl DebugServer {
 
     /// Extract port name from `in <name>:` or `out <name>:` patterns.
     fn extract_port_decl(line: &str) -> Option<String> {
-        let rest = if line.starts_with("in ") {
-            &line[3..]
-        } else if line.starts_with("out ") {
-            &line[4..]
+        let rest = if let Some(stripped) = line.strip_prefix("in ") {
+            stripped
+        } else if let Some(stripped) = line.strip_prefix("out ") {
+            stripped
         } else {
             return None;
         };
@@ -1045,7 +1046,8 @@ impl DebugServer {
             }
             // Only seed the signal we're watching
             if let Some(val) = all_values.get(&sanitized) {
-                self.breakpoint_mgr.seed_previous_value(&sanitized, val.clone());
+                self.breakpoint_mgr
+                    .seed_previous_value(&sanitized, val.clone());
             }
         }
 
@@ -1147,16 +1149,19 @@ impl DebugServer {
             };
             let value = &value_owned;
 
-            let width = self.signal_widths.get(expr).copied().unwrap_or(value.len() * 8);
+            let width = self
+                .signal_widths
+                .get(expr)
+                .copied()
+                .unwrap_or(value.len() * 8);
             let hex = Self::format_value(value);
             let decimal = crate::breakpoint::bytes_to_u64(value);
             let binary = format!("{:0>width$b}", decimal, width = width);
-            let prev = self.breakpoint_mgr.get_previous_value(expr)
-                .or_else(|| {
-                    // Also check sanitized name
-                    let sanitized = self.display_to_sanitized.get(expr)?;
-                    self.breakpoint_mgr.get_previous_value(sanitized)
-                });
+            let prev = self.breakpoint_mgr.get_previous_value(expr).or_else(|| {
+                // Also check sanitized name
+                let sanitized = self.display_to_sanitized.get(expr)?;
+                self.breakpoint_mgr.get_previous_value(sanitized)
+            });
             let changed = prev.map(|p| p != value).unwrap_or(false);
 
             let mut result = serde_json::json!({
@@ -1213,12 +1218,11 @@ impl DebugServer {
         mappings
             .iter()
             .filter_map(|m| {
-                let value_bytes = all_values.get(&m.signal)
-                    .or_else(|| {
-                        // Try sanitized name as key
-                        let sanitized = self.resolve_display_name(&m.signal);
-                        all_values.get(&sanitized)
-                    })?;
+                let value_bytes = all_values.get(&m.signal).or_else(|| {
+                    // Try sanitized name as key
+                    let sanitized = self.resolve_display_name(&m.signal);
+                    all_values.get(&sanitized)
+                })?;
                 let formatted = Self::format_value(value_bytes);
 
                 // Check if changed from previous cycle
@@ -1421,13 +1425,8 @@ impl DebugServer {
                     top_module,
                     max_cycles,
                 } => {
-                    self.handle_launch(
-                        &file,
-                        level.as_deref(),
-                        top_module.as_deref(),
-                        max_cycles,
-                    )
-                    .await;
+                    self.handle_launch(&file, level.as_deref(), top_module.as_deref(), max_cycles)
+                        .await;
                 }
 
                 Command::Step { granularity } => {
@@ -1449,8 +1448,7 @@ impl DebugServer {
                     condition,
                     value,
                 } => {
-                    let id =
-                        self.handle_set_breakpoint(&signal, condition.as_deref(), value);
+                    let id = self.handle_set_breakpoint(&signal, condition.as_deref(), value);
                     self.emit(&serde_json::json!({
                         "event": "breakpoint_set",
                         "id": id,

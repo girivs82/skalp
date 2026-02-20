@@ -43,8 +43,7 @@ mod tuple_destructuring_tests {
             ..Default::default()
         };
 
-        let mut simulator = UnifiedSimulator::new(config)
-            .expect("Failed to create simulator");
+        let mut simulator = UnifiedSimulator::new(config).expect("Failed to create simulator");
 
         simulator
             .load_behavioral(&sir)
@@ -102,8 +101,7 @@ mod tuple_destructuring_tests {
             ..Default::default()
         };
 
-        let mut simulator = UnifiedSimulator::new(config)
-            .expect("Failed to create simulator");
+        let mut simulator = UnifiedSimulator::new(config).expect("Failed to create simulator");
 
         simulator
             .load_behavioral(&sir)

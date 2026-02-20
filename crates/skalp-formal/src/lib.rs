@@ -23,21 +23,45 @@ pub mod temporal;
 
 // Re-export equivalence checking types
 pub use equivalence::{
-    Aig, AigLit, AigNode, AigNodeId, EquivalenceChecker, EquivalenceResult, GateNetlistToAig,
-    LirToAig, MirEquivalenceChecker, MirSignalRef, MirToAig, NormalizedPort, RegisterInfo,
-    RegisterMatchResult, SequentialEquivalenceChecker, SequentialEquivalenceResult,
-    build_miter_with_port_matching, normalize_port_name,
+    build_miter_with_port_matching,
+    build_sequential_miter,
+    check_non_equivalence_fast,
+    check_sequential_equivalence_sat,
+    extract_aig_cone,
+    inject_random_bugs,
+    normalize_port_name,
+    Aig,
+    AigCone,
+    AigLit,
+    AigNode,
+    AigNodeId,
+    BmcCounterexample,
+    BmcEquivalenceResult,
     // BMC (Bounded Model Checking) types
-    BoundedModelChecker, BmcEquivalenceResult, BmcCounterexample,
+    BoundedModelChecker,
+    EquivalenceChecker,
+    EquivalenceResult,
+    GateNetlistToAig,
     // Hierarchical equivalence checking types
-    HierarchicalEquivalenceChecker, HierarchicalEquivalenceResult, MismatchDetails, SemanticFingerprint,
+    HierarchicalEquivalenceChecker,
+    HierarchicalEquivalenceResult,
+    LirToAig,
+    MirEquivalenceChecker,
+    MirSignalRef,
+    MirToAig,
+    MismatchDetails,
+    NormalizedPort,
+    RegisterInfo,
+    RegisterMatchResult,
+    SemanticFingerprint,
+    SequentialEquivalenceChecker,
+    SequentialEquivalenceResult,
     // Simulation-based equivalence checking types
-    SimBasedEquivalenceChecker, SimEquivalenceResult,
+    SimBasedEquivalenceChecker,
+    SimEquivalenceResult,
+    SymbolicCounterexample,
     // SAT-based symbolic equivalence checking types
-    SymbolicEquivalenceResult, SymbolicCounterexample,
-    check_sequential_equivalence_sat, build_sequential_miter,
-    extract_aig_cone, AigCone,
-    inject_random_bugs, check_non_equivalence_fast,
+    SymbolicEquivalenceResult,
 };
 pub use skalp_sim::CoverageReport;
 
@@ -71,6 +95,12 @@ pub struct FormalEngine {
     properties: Vec<property::Property>,
     /// Verification timeout in seconds
     timeout: u64,
+}
+
+impl Default for FormalEngine {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl FormalEngine {
@@ -116,7 +146,7 @@ impl FormalEngine {
     pub fn generate_assertions(&self) -> Vec<assertions::Assertion> {
         self.properties
             .iter()
-            .map(|p| assertions::Assertion::from_property(p))
+            .map(assertions::Assertion::from_property)
             .collect()
     }
 }
@@ -169,6 +199,12 @@ pub struct TraceStep {
     pub step: usize,
     /// Variable assignments
     pub assignments: std::collections::HashMap<String, String>,
+}
+
+impl Default for VerificationResults {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl VerificationResults {

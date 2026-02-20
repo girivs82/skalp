@@ -491,7 +491,6 @@ fn analyze_detection_coverage(netlist: &GateNetlist) -> DetectionCoverageInfo {
                 .unwrap_or(DetectionMode::Continuous);
 
             info.net_detection_modes.insert(net.id.0, mode);
-
         }
     }
 

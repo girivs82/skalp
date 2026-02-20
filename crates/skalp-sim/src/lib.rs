@@ -15,11 +15,11 @@
 
 pub mod breakpoint;
 pub mod clock_manager;
-pub mod debug_server;
 pub mod compiled_cpu_runtime;
 pub mod coverage_report;
 pub mod coverage_vecgen;
 pub mod cpp_compiler;
+pub mod debug_server;
 pub mod gate_eval;
 pub mod gate_netlist_to_sir;
 pub mod gate_runtime;
@@ -45,7 +45,10 @@ pub use breakpoint::{
 };
 pub use clock_manager::{ClockEdge, ClockInfo, ClockManager};
 pub use compiled_cpu_runtime::CompiledCpuRuntime;
-pub use cpp_compiler::{compile_cpp_kernel, clear_cache as clear_cpp_cache, cache_stats as cpp_cache_stats, CacheStats, CompileError};
+pub use cpp_compiler::{
+    cache_stats as cpp_cache_stats, clear_cache as clear_cpp_cache, compile_cpp_kernel, CacheStats,
+    CompileError,
+};
 pub use gate_eval::{
     bits_to_value, evaluate_primitive, evaluate_primitive_with_fault, value_to_bits,
 };

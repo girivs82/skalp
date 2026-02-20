@@ -159,9 +159,10 @@ impl<'hir> MonomorphizationEngine<'hir> {
                     // (like `Foo::<PERIOD>` where PERIOD is the outer entity's generic param).
                     // They have empty const_args because the value isn't known yet.
                     // They'll be properly instantiated when the outer generic is specialized.
-                    let has_const_generics = entity.generics.iter().any(|g| {
-                        matches!(g.param_type, crate::hir::HirGenericType::Const(_))
-                    });
+                    let has_const_generics = entity
+                        .generics
+                        .iter()
+                        .any(|g| matches!(g.param_type, crate::hir::HirGenericType::Const(_)));
                     if has_const_generics && instantiation.const_args.is_empty() {
                         continue;
                     }
@@ -512,9 +513,9 @@ impl<'hir> MonomorphizationEngine<'hir> {
             ports: specialized_ports,
             generics: vec![], // No generics in specialized version
             clock_domains: entity.clock_domains.clone(),
-            signals: specialized_signals, // Use remapped signals
+            signals: specialized_signals,         // Use remapped signals
             assignments: specialized_assignments, // Use remapped assignments
-            span: entity.span.clone(), // Preserve source span from original entity
+            span: entity.span.clone(),            // Preserve source span from original entity
             pipeline_config: entity.pipeline_config.clone(), // Preserve pipeline config
             vendor_ip_config: entity.vendor_ip_config.clone(), // Preserve vendor IP config
             power_domains: entity.power_domains.clone(), // Preserve power domains
@@ -1908,14 +1909,17 @@ impl<'hir> MonomorphizationEngine<'hir> {
                     .iter()
                     .map(|arm| crate::hir::HirMatchArmExpr {
                         pattern: arm.pattern.clone(),
-                        guard: arm.guard.as_ref().map(|g| self.remap_expr_ports(g, port_id_map)),
+                        guard: arm
+                            .guard
+                            .as_ref()
+                            .map(|g| self.remap_expr_ports(g, port_id_map)),
                         expr: self.remap_expr_ports(&arm.expr, port_id_map),
                     })
                     .collect();
                 HirExpression::Match(crate::hir::HirMatchExpr {
                     expr: Box::new(new_scrutinee),
                     arms: new_arms,
-                    mux_style: match_expr.mux_style.clone(),
+                    mux_style: match_expr.mux_style,
                 })
             }
             // BUG #223 FIX: Handle StructLiteral expressions
@@ -2166,8 +2170,11 @@ impl<'hir> MonomorphizationEngine<'hir> {
         match stmt {
             HirStatement::Let(let_stmt) => {
                 let mut new_let = let_stmt.clone();
-                new_let.value =
-                    self.update_struct_literals_in_expression(&let_stmt.value, update_map, entity_map);
+                new_let.value = self.update_struct_literals_in_expression(
+                    &let_stmt.value,
+                    update_map,
+                    entity_map,
+                );
                 HirStatement::Let(new_let)
             }
             HirStatement::Assignment(assign) => {
@@ -2178,8 +2185,11 @@ impl<'hir> MonomorphizationEngine<'hir> {
             }
             HirStatement::If(if_stmt) => {
                 let mut new_if = if_stmt.clone();
-                new_if.condition =
-                    self.update_struct_literals_in_expression(&if_stmt.condition, update_map, entity_map);
+                new_if.condition = self.update_struct_literals_in_expression(
+                    &if_stmt.condition,
+                    update_map,
+                    entity_map,
+                );
                 new_if.then_statements = if_stmt
                     .then_statements
                     .iter()
@@ -2188,15 +2198,20 @@ impl<'hir> MonomorphizationEngine<'hir> {
                 new_if.else_statements = if_stmt.else_statements.as_ref().map(|stmts| {
                     stmts
                         .iter()
-                        .map(|s| self.update_struct_literals_in_statement(s, update_map, entity_map))
+                        .map(|s| {
+                            self.update_struct_literals_in_statement(s, update_map, entity_map)
+                        })
                         .collect()
                 });
                 HirStatement::If(new_if)
             }
             HirStatement::Match(match_stmt) => {
                 let mut new_match = match_stmt.clone();
-                new_match.expr =
-                    self.update_struct_literals_in_expression(&match_stmt.expr, update_map, entity_map);
+                new_match.expr = self.update_struct_literals_in_expression(
+                    &match_stmt.expr,
+                    update_map,
+                    entity_map,
+                );
                 new_match.arms = match_stmt
                     .arms
                     .iter()
@@ -2205,7 +2220,9 @@ impl<'hir> MonomorphizationEngine<'hir> {
                         new_arm.statements = arm
                             .statements
                             .iter()
-                            .map(|s| self.update_struct_literals_in_statement(s, update_map, entity_map))
+                            .map(|s| {
+                                self.update_struct_literals_in_statement(s, update_map, entity_map)
+                            })
                             .collect();
                         new_arm
                     })
@@ -2286,11 +2303,10 @@ impl<'hir> MonomorphizationEngine<'hir> {
                                     .iter()
                                     .map(|f| {
                                         let mut new_field = f.clone();
-                                        new_field.value = self.update_struct_literals_in_expression(
-                                            &f.value,
-                                            update_map,
-                                            entity_map,
-                                        );
+                                        new_field.value = self
+                                            .update_struct_literals_in_expression(
+                                                &f.value, update_map, entity_map,
+                                            );
                                         new_field
                                     })
                                     .collect(),
@@ -2309,9 +2325,7 @@ impl<'hir> MonomorphizationEngine<'hir> {
                         .map(|f| {
                             let mut new_field = f.clone();
                             new_field.value = self.update_struct_literals_in_expression(
-                                &f.value,
-                                update_map,
-                                entity_map,
+                                &f.value, update_map, entity_map,
                             );
                             new_field
                         })
@@ -2320,16 +2334,25 @@ impl<'hir> MonomorphizationEngine<'hir> {
             }
             HirExpression::Binary(binary) => {
                 let mut new_binary = binary.clone();
-                new_binary.left =
-                    Box::new(self.update_struct_literals_in_expression(&binary.left, update_map, entity_map));
-                new_binary.right =
-                    Box::new(self.update_struct_literals_in_expression(&binary.right, update_map, entity_map));
+                new_binary.left = Box::new(self.update_struct_literals_in_expression(
+                    &binary.left,
+                    update_map,
+                    entity_map,
+                ));
+                new_binary.right = Box::new(self.update_struct_literals_in_expression(
+                    &binary.right,
+                    update_map,
+                    entity_map,
+                ));
                 HirExpression::Binary(new_binary)
             }
             HirExpression::Unary(unary) => {
                 let mut new_unary = unary.clone();
-                new_unary.operand =
-                    Box::new(self.update_struct_literals_in_expression(&unary.operand, update_map, entity_map));
+                new_unary.operand = Box::new(self.update_struct_literals_in_expression(
+                    &unary.operand,
+                    update_map,
+                    entity_map,
+                ));
                 HirExpression::Unary(new_unary)
             }
             HirExpression::Ternary {
@@ -2337,21 +2360,15 @@ impl<'hir> MonomorphizationEngine<'hir> {
                 true_expr,
                 false_expr,
             } => HirExpression::Ternary {
-                condition: Box::new(self.update_struct_literals_in_expression(
-                    condition,
-                    update_map,
-                    entity_map,
-                )),
-                true_expr: Box::new(self.update_struct_literals_in_expression(
-                    true_expr,
-                    update_map,
-                    entity_map,
-                )),
-                false_expr: Box::new(self.update_struct_literals_in_expression(
-                    false_expr,
-                    update_map,
-                    entity_map,
-                )),
+                condition: Box::new(
+                    self.update_struct_literals_in_expression(condition, update_map, entity_map),
+                ),
+                true_expr: Box::new(
+                    self.update_struct_literals_in_expression(true_expr, update_map, entity_map),
+                ),
+                false_expr: Box::new(
+                    self.update_struct_literals_in_expression(false_expr, update_map, entity_map),
+                ),
             },
             HirExpression::Index(base, idx) => HirExpression::Index(
                 Box::new(self.update_struct_literals_in_expression(base, update_map, entity_map)),
@@ -2368,34 +2385,29 @@ impl<'hir> MonomorphizationEngine<'hir> {
             }
             HirExpression::Cast(cast) => {
                 let mut new_cast = cast.clone();
-                new_cast.expr =
-                    Box::new(self.update_struct_literals_in_expression(&cast.expr, update_map, entity_map));
+                new_cast.expr = Box::new(
+                    self.update_struct_literals_in_expression(&cast.expr, update_map, entity_map),
+                );
                 HirExpression::Cast(new_cast)
             }
-            HirExpression::Concat(elements) => {
-                HirExpression::Concat(
-                    elements
-                        .iter()
-                        .map(|e| self.update_struct_literals_in_expression(e, update_map, entity_map))
-                        .collect(),
-                )
-            }
-            HirExpression::ArrayLiteral(elements) => {
-                HirExpression::ArrayLiteral(
-                    elements
-                        .iter()
-                        .map(|e| self.update_struct_literals_in_expression(e, update_map, entity_map))
-                        .collect(),
-                )
-            }
-            HirExpression::TupleLiteral(elements) => {
-                HirExpression::TupleLiteral(
-                    elements
-                        .iter()
-                        .map(|e| self.update_struct_literals_in_expression(e, update_map, entity_map))
-                        .collect(),
-                )
-            }
+            HirExpression::Concat(elements) => HirExpression::Concat(
+                elements
+                    .iter()
+                    .map(|e| self.update_struct_literals_in_expression(e, update_map, entity_map))
+                    .collect(),
+            ),
+            HirExpression::ArrayLiteral(elements) => HirExpression::ArrayLiteral(
+                elements
+                    .iter()
+                    .map(|e| self.update_struct_literals_in_expression(e, update_map, entity_map))
+                    .collect(),
+            ),
+            HirExpression::TupleLiteral(elements) => HirExpression::TupleLiteral(
+                elements
+                    .iter()
+                    .map(|e| self.update_struct_literals_in_expression(e, update_map, entity_map))
+                    .collect(),
+            ),
             // Other expression types pass through unchanged
             _ => expr.clone(),
         }

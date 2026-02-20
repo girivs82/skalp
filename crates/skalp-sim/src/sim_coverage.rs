@@ -520,11 +520,13 @@ impl SimCoverageDb {
                 }
                 SirNodeKind::BinaryOp(op) if is_comparison_op(op) => {
                     // For comparisons, check if any input or output is user-visible
-                    let any_visible = node.inputs.iter().any(|r| {
-                        module.name_registry.reverse_resolve(&r.signal_id).is_some()
-                    }) || node.outputs.iter().any(|r| {
-                        module.name_registry.reverse_resolve(&r.signal_id).is_some()
-                    });
+                    let any_visible =
+                        node.inputs
+                            .iter()
+                            .any(|r| module.name_registry.reverse_resolve(&r.signal_id).is_some())
+                            || node.outputs.iter().any(|r| {
+                                module.name_registry.reverse_resolve(&r.signal_id).is_some()
+                            });
                     if any_visible {
                         comparison.add_comparison(&node_name, op_name(op));
                     }
@@ -544,8 +546,7 @@ impl SimCoverageDb {
     /// Build coverage database for gate-level (toggle only).
     /// Gate-level SIR doesn't have high-level Mux/Comparison nodes,
     /// so we only track toggle coverage on nets.
-    pub fn from_gate_netlist(
-        signal_names: &[(String, usize)], // (name, width_bits)
+    pub fn from_gate_netlist(signal_names: &[(String, usize)], // (name, width_bits)
     ) -> Self {
         let mut toggle = ToggleCoverage::new();
         for (name, width) in signal_names {

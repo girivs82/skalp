@@ -71,7 +71,11 @@ fn hash_source(source: &str) -> String {
 fn find_cpp_compiler() -> CompileResult<PathBuf> {
     // Try common compiler paths
     let candidates = if cfg!(target_os = "macos") {
-        vec!["clang++", "/usr/bin/clang++", "/Library/Developer/CommandLineTools/usr/bin/clang++"]
+        vec![
+            "clang++",
+            "/usr/bin/clang++",
+            "/Library/Developer/CommandLineTools/usr/bin/clang++",
+        ]
     } else if cfg!(target_os = "windows") {
         vec!["cl.exe", "clang++.exe", "g++.exe"]
     } else {
@@ -259,8 +263,7 @@ mod tests {
     fn test_find_compiler() {
         // This test may fail if no compiler is installed
         let result = find_cpp_compiler();
-        if result.is_ok() {
-            let compiler = result.unwrap();
+        if let Ok(compiler) = result {
             assert!(compiler.exists());
         }
     }

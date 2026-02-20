@@ -1801,7 +1801,13 @@ fn compile_to_ip(
     if !parse_errors.is_empty() {
         for err in &parse_errors {
             let (line, col) = byte_offset_to_line_col(&source_code, err.position);
-            eprintln!("{}:{}:{}: error: {}", source.display(), line, col, err.message);
+            eprintln!(
+                "{}:{}:{}: error: {}",
+                source.display(),
+                line,
+                col,
+                err.message
+            );
         }
         anyhow::bail!("Parsing failed with {} errors", parse_errors.len());
     }
@@ -2008,7 +2014,12 @@ fn simulate_design(
 }
 
 /// Behavioral simulation: HIR → MIR → SIR
-fn simulate_behavioral(source_file: &PathBuf, cycles: u64, use_gpu: bool, waveform_path: &Path) -> Result<()> {
+fn simulate_behavioral(
+    source_file: &PathBuf,
+    cycles: u64,
+    use_gpu: bool,
+    waveform_path: &Path,
+) -> Result<()> {
     use skalp_frontend::parse_and_build_hir_from_file;
     use skalp_mir::MirCompiler;
     use skalp_sir::convert_mir_to_sir_with_hierarchy;
@@ -2233,7 +2244,12 @@ fn simulate_gate_level(
     }
 
     // Export waveforms
-    export_waveform_from_snapshots(&result.waveforms, &result.signal_widths, waveform_path, source_file)?;
+    export_waveform_from_snapshots(
+        &result.waveforms,
+        &result.signal_widths,
+        waveform_path,
+        source_file,
+    )?;
 
     println!("\n✅ Gate-level simulation complete!");
 
@@ -2364,7 +2380,12 @@ fn simulate_ncl(
 }
 
 /// Run behavioral SIR simulation
-fn simulate_sir_behavioral(sir: &skalp_sir::SirModule, cycles: u64, use_gpu: bool, waveform_path: &Path) -> Result<()> {
+fn simulate_sir_behavioral(
+    sir: &skalp_sir::SirModule,
+    cycles: u64,
+    use_gpu: bool,
+    waveform_path: &Path,
+) -> Result<()> {
     use skalp_sim::{HwAccel, SimLevel, UnifiedSimConfig, UnifiedSimulator};
     use tokio::runtime::Runtime;
 
@@ -2386,7 +2407,9 @@ fn simulate_sir_behavioral(sir: &skalp_sir::SirModule, cycles: u64, use_gpu: boo
         // Create and initialize simulator
         let mut simulator = UnifiedSimulator::new(config)
             .map_err(|e| anyhow::anyhow!("Failed to create simulator: {}", e))?;
-        simulator.load_behavioral(sir).await
+        simulator
+            .load_behavioral(sir)
+            .await
             .map_err(|e| anyhow::anyhow!("Failed to load module: {}", e))?;
 
         println!("   Device: {}", simulator.device_info());
@@ -2400,7 +2423,12 @@ fn simulate_sir_behavioral(sir: &skalp_sir::SirModule, cycles: u64, use_gpu: boo
     })?;
 
     // Export waveforms
-    export_waveform_from_snapshots(&result.waveforms, &result.signal_widths, waveform_path, &PathBuf::from("design"))?;
+    export_waveform_from_snapshots(
+        &result.waveforms,
+        &result.signal_widths,
+        waveform_path,
+        &PathBuf::from("design"),
+    )?;
 
     println!("\n✅ Behavioral simulation complete!");
 
@@ -2487,11 +2515,18 @@ fn find_top_level_module(mir: &skalp_mir::mir::Mir) -> Option<&skalp_mir::mir::M
     mir.modules
         .iter()
         .filter(|m| !instantiated.contains(&m.id))
-        .max_by_key(|m| m.instances.len() + m.processes.len() + m.signals.len() + m.assignments.len() + m.ports.len())
+        .max_by_key(|m| {
+            m.instances.len()
+                + m.processes.len()
+                + m.signals.len()
+                + m.assignments.len()
+                + m.ports.len()
+        })
         .or_else(|| mir.modules.last())
 }
 
 /// Equivalence checking between RTL (LIR) and gate-level netlist
+#[allow(clippy::too_many_arguments)]
 fn run_equivalence_check(
     source: &Path,
     netlist_path: Option<&PathBuf>,
@@ -2506,9 +2541,14 @@ fn run_equivalence_check(
     coverage: bool,
     thorough: bool,
 ) -> Result<()> {
-    use skalp_formal::equivalence::{MirToAig, GateNetlistToAig, check_sequential_equivalence_sat, inject_random_bugs, check_non_equivalence_fast};
+    use skalp_formal::equivalence::{
+        check_non_equivalence_fast, check_sequential_equivalence_sat, inject_random_bugs,
+        GateNetlistToAig, MirToAig,
+    };
     use skalp_frontend::parse_and_build_compilation_context;
-    use skalp_lir::{get_stdlib_library, lower_mir_hierarchical_with_top, map_hierarchical_to_gates};
+    use skalp_lir::{
+        get_stdlib_library, lower_mir_hierarchical_with_top, map_hierarchical_to_gates,
+    };
     use std::time::Instant;
 
     let start_time = Instant::now();
@@ -2536,14 +2576,14 @@ fn run_equivalence_check(
 
     // Step 1: Parse and compile to MIR
     println!("📖 Parsing source...");
-    let context = parse_and_build_compilation_context(source)
-        .context("Failed to parse source file")?;
+    let context =
+        parse_and_build_compilation_context(source).context("Failed to parse source file")?;
     let hir = context.main_hir;
     let module_hirs = context.module_hirs;
 
     println!("📐 Lowering to MIR...");
-    let compiler = skalp_mir::MirCompiler::new()
-        .with_optimization_level(skalp_mir::OptimizationLevel::None);
+    let compiler =
+        skalp_mir::MirCompiler::new().with_optimization_level(skalp_mir::OptimizationLevel::None);
     let mir = compiler
         .compile_to_mir_with_modules(&hir, &module_hirs)
         .map_err(|e| anyhow::anyhow!("Failed to compile to MIR: {}", e))?;
@@ -2577,14 +2617,17 @@ fn run_equivalence_check(
                 .ok_or_else(|| anyhow::anyhow!("Entity '{}' not found in design", name))?
         }
     } else {
-        find_top_level_module(&mir)
-            .ok_or_else(|| anyhow::anyhow!("No modules found in design"))?
+        find_top_level_module(&mir).ok_or_else(|| anyhow::anyhow!("No modules found in design"))?
     };
 
-    let input_count = target_entity.ports.iter()
+    let input_count = target_entity
+        .ports
+        .iter()
         .filter(|p| matches!(p.direction, skalp_mir::mir::PortDirection::Input))
         .count();
-    let output_count = target_entity.ports.iter()
+    let output_count = target_entity
+        .ports
+        .iter()
         .filter(|p| matches!(p.direction, skalp_mir::mir::PortDirection::Output))
         .count();
     println!("   Entity: {}", target_entity.name);
@@ -2604,15 +2647,14 @@ fn run_equivalence_check(
     let gate_netlist = if let Some(path) = netlist_path {
         println!();
         println!("📂 Loading gate-level netlist from {:?}...", path);
-        let json = fs::read_to_string(path)
-            .context("Failed to read netlist file")?;
+        let json = fs::read_to_string(path).context("Failed to read netlist file")?;
         serde_json::from_str::<skalp_lir::GateNetlist>(&json)
             .context("Failed to parse gate-level netlist JSON")?
     } else {
         println!();
         println!("🔧 Synthesizing gate-level netlist (hierarchical)...");
-        let library = get_stdlib_library("generic_asic")
-            .context("Failed to load technology library")?;
+        let library =
+            get_stdlib_library("generic_asic").context("Failed to load technology library")?;
         let hier_netlist = map_hierarchical_to_gates(&hier_lir, &library);
         let netlist = hier_netlist.flatten();
         println!("   Cells: {}", netlist.cells.len());
@@ -2640,15 +2682,21 @@ fn run_equivalence_check(
             .with_reset("rst", reset_cycles)
             .with_coverage(false);
 
-        let rt = tokio::runtime::Runtime::new()
-            .context("Failed to create tokio runtime")?;
+        let rt = tokio::runtime::Runtime::new().context("Failed to create tokio runtime")?;
 
-        let sim_result = rt.block_on(async {
-            checker.check_mir_vs_gate(&mir, target_entity, &gate_netlist).await
-        }).map_err(|e| anyhow::anyhow!("Smoke test failed: {:?}", e))?;
+        let sim_result = rt
+            .block_on(async {
+                checker
+                    .check_mir_vs_gate(&mir, target_entity, &gate_netlist)
+                    .await
+            })
+            .map_err(|e| anyhow::anyhow!("Smoke test failed: {:?}", e))?;
 
         if sim_result.equivalent {
-            println!("   ✓ Smoke test PASS: No mismatch in {} cycles", sim_result.cycles_verified);
+            println!(
+                "   ✓ Smoke test PASS: No mismatch in {} cycles",
+                sim_result.cycles_verified
+            );
         } else {
             println!("   ✗ Smoke test FAIL: Mismatch detected!");
             if let Some(cycle) = sim_result.mismatch_cycle {
@@ -2669,7 +2717,10 @@ fn run_equivalence_check(
             println!();
             println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
             if overall_pass {
-                println!("✅ PASS: Designs equivalent for {} cycles (simulation only)", bound);
+                println!(
+                    "✅ PASS: Designs equivalent for {} cycles (simulation only)",
+                    bound
+                );
                 println!("   Note: Use --symbolic for exhaustive proof");
             } else {
                 println!("❌ FAIL: Mismatch detected by simulation");
@@ -2700,8 +2751,16 @@ fn run_equivalence_check(
         let mir_aig = MirToAig::new_with_mir(&mir, target_entity).convert_sequential_hierarchical();
         let gate_aig = GateNetlistToAig::new().convert_sequential(&gate_netlist);
 
-        println!("   MIR AIG:  {} nodes, {} latches", mir_aig.nodes.len(), mir_aig.latches.len());
-        println!("   Gate AIG: {} nodes, {} latches", gate_aig.nodes.len(), gate_aig.latches.len());
+        println!(
+            "   MIR AIG:  {} nodes, {} latches",
+            mir_aig.nodes.len(),
+            mir_aig.latches.len()
+        );
+        println!(
+            "   Gate AIG: {} nodes, {} latches",
+            gate_aig.nodes.len(),
+            gate_aig.latches.len()
+        );
 
         // Phase 2b: Per-gate SAT (returns unresolved gates instead of running CPU sim)
         match check_sequential_equivalence_sat(&mir_aig, &gate_aig, thorough) {
@@ -2718,7 +2777,10 @@ fn run_equivalence_check(
 
                         if !ce.inputs.is_empty() {
                             println!();
-                            println!("   📥 INPUTS that trigger the bug ({} total):", ce.inputs.len());
+                            println!(
+                                "   📥 INPUTS that trigger the bug ({} total):",
+                                ce.inputs.len()
+                            );
                             let mut sorted_inputs: Vec<_> = ce.inputs.iter().collect();
                             sorted_inputs.sort_by_key(|(k, _)| *k);
                             for (name, val) in sorted_inputs.iter().take(300) {
@@ -2731,14 +2793,20 @@ fn run_equivalence_check(
 
                         if !ce.state.is_empty() {
                             println!();
-                            println!("   📊 STATE (latch values) where difference occurs ({} total):", ce.state.len());
+                            println!(
+                                "   📊 STATE (latch values) where difference occurs ({} total):",
+                                ce.state.len()
+                            );
                             let mut sorted_state: Vec<_> = ce.state.iter().collect();
                             sorted_state.sort_by_key(|(k, _)| *k);
                             for (name, val) in sorted_state.iter().take(300) {
                                 println!("       {} = {}", name, if **val { "1" } else { "0" });
                             }
                             if ce.state.len() > 300 {
-                                println!("       ... and {} more state variables", ce.state.len() - 300);
+                                println!(
+                                    "       ... and {} more state variables",
+                                    ce.state.len() - 300
+                                );
                             }
                         }
 
@@ -2751,37 +2819,56 @@ fn run_equivalence_check(
                 } else if sat_result.unresolved_gates.is_empty() {
                     // All gates proven UNSAT — full proof!
                     println!("   ✓ SAT PASS: Transition functions equivalent for ALL states (full proof)");
-                    println!("     {} gates proven, {}ms", sat_result.proven_gates.len(), sat_result.time_ms);
+                    println!(
+                        "     {} gates proven, {}ms",
+                        sat_result.proven_gates.len(),
+                        sat_result.time_ms
+                    );
                     sat_passed = true;
                 } else {
                     // Some gates unresolved (SAT-hard, typically multiplier/accumulator cones)
-                    let total_gates = sat_result.proven_gates.len() + sat_result.unresolved_gates.len();
-                    println!("   SAT: {}/{} gates proven, {} unresolved ({}ms)",
+                    let total_gates =
+                        sat_result.proven_gates.len() + sat_result.unresolved_gates.len();
+                    println!(
+                        "   SAT: {}/{} gates proven, {} unresolved ({}ms)",
                         sat_result.proven_gates.len(),
                         total_gates,
                         sat_result.unresolved_gates.len(),
-                        sat_result.time_ms);
+                        sat_result.time_ms
+                    );
 
                     // Classify unresolved gates
-                    let unresolved_outputs: Vec<_> = sat_result.unresolved_gates.iter()
-                        .filter(|(_, n)| n.starts_with("diff_output[")).collect();
-                    let unresolved_latches: Vec<_> = sat_result.unresolved_gates.iter()
-                        .filter(|(_, n)| n.starts_with("diff_next_state[")).collect();
+                    let unresolved_outputs: Vec<_> = sat_result
+                        .unresolved_gates
+                        .iter()
+                        .filter(|(_, n)| n.starts_with("diff_output["))
+                        .collect();
+                    let unresolved_latches: Vec<_> = sat_result
+                        .unresolved_gates
+                        .iter()
+                        .filter(|(_, n)| n.starts_with("diff_next_state["))
+                        .collect();
 
                     if unresolved_outputs.is_empty() {
                         // All output diff gates proven — SAT passed for combinational equivalence
                         // Unresolved latch gates are SAT-hard (multiplier cones), covered by Phase 1 sim
                         sat_passed = true;
-                        println!("   ✓ All {} output gates proven equivalent",
-                            total_gates - unresolved_latches.len());
+                        println!(
+                            "   ✓ All {} output gates proven equivalent",
+                            total_gates - unresolved_latches.len()
+                        );
                         if !unresolved_latches.is_empty() {
-                            println!("   ⚠ {} latch gates unresolved (SAT-hard, covered by Phase 1 sim)",
-                                unresolved_latches.len());
+                            println!(
+                                "   ⚠ {} latch gates unresolved (SAT-hard, covered by Phase 1 sim)",
+                                unresolved_latches.len()
+                            );
                         }
                     } else {
                         // Unresolved output gates — cannot pass
-                        println!("   ✗ {} output gates unresolved — EC inconclusive",
-                            unresolved_outputs.len());
+                        println!(
+                            "   ✗ {} output gates unresolved — EC inconclusive",
+                            unresolved_outputs.len()
+                        );
                         for (_, name) in &unresolved_outputs {
                             println!("     ✗ {}", name);
                         }
@@ -2818,16 +2905,30 @@ fn run_equivalence_check(
             if check_non_equivalence_fast(mir_aig, mutant_aig) {
                 detected += 1;
             } else {
-                println!("   ⚠ Bug {} undetected (may be in SAT-hard logic): {}", i + 1, desc);
+                println!(
+                    "   ⚠ Bug {} undetected (may be in SAT-hard logic): {}",
+                    i + 1,
+                    desc
+                );
             }
         }
 
         let phase3_ms = phase3_start.elapsed().as_millis();
-        let min_detected = (mutants.len() * 8 + 9) / 10; // 80% threshold (ceil)
+        let min_detected = (mutants.len() * 8).div_ceil(10); // 80% threshold
         if detected >= min_detected {
-            println!("   ✓ Bug injection: {}/{} detected ({}ms)", detected, mutants.len(), phase3_ms);
+            println!(
+                "   ✓ Bug injection: {}/{} detected ({}ms)",
+                detected,
+                mutants.len(),
+                phase3_ms
+            );
         } else {
-            println!("   ✗ Bug injection: {}/{} detected (need {}) — EC pipeline may be unsound!", detected, mutants.len(), min_detected);
+            println!(
+                "   ✗ Bug injection: {}/{} detected (need {}) — EC pipeline may be unsound!",
+                detected,
+                mutants.len(),
+                min_detected
+            );
             overall_pass = false;
         }
     }
@@ -2843,11 +2944,12 @@ fn run_equivalence_check(
             .with_reset("rst", reset_cycles)
             .with_coverage(true);
 
-        let rt = tokio::runtime::Runtime::new()
-            .context("Failed to create tokio runtime")?;
+        let rt = tokio::runtime::Runtime::new().context("Failed to create tokio runtime")?;
 
         let cov_result = rt.block_on(async {
-            cov_checker.check_mir_vs_gate_coverage(&mir, target_entity, &gate_netlist).await
+            cov_checker
+                .check_mir_vs_gate_coverage(&mir, target_entity, &gate_netlist)
+                .await
         });
 
         match cov_result {
@@ -2888,7 +2990,15 @@ fn run_equivalence_check(
             time_ms: total_time.as_millis() as u64,
             sat_calls: 1,
         };
-        generate_ec_report(&summary_result, &target_entity.name, output_dir, format, verbose, total_time, sim_result_for_report.as_ref())?;
+        generate_ec_report(
+            &summary_result,
+            &target_entity.name,
+            output_dir,
+            format,
+            verbose,
+            total_time,
+            sim_result_for_report.as_ref(),
+        )?;
     }
 
     // Print final summary
@@ -2933,7 +3043,8 @@ fn generate_ec_report(
     for fmt in formats {
         match fmt.trim() {
             "text" => {
-                let report = generate_ec_text_report(result, entity_name, verbose, total_time, sim_result);
+                let report =
+                    generate_ec_text_report(result, entity_name, verbose, total_time, sim_result);
                 let path = output_dir.join("ec_report.txt");
                 fs::write(&path, report)?;
                 println!("📄 Text report: {:?}", path);
@@ -2945,7 +3056,8 @@ fn generate_ec_report(
                 println!("📄 JSON report: {:?}", path);
             }
             "html" => {
-                let report = generate_ec_html_report(result, entity_name, verbose, total_time, sim_result);
+                let report =
+                    generate_ec_html_report(result, entity_name, verbose, total_time, sim_result);
                 let path = output_dir.join("ec_report.html");
                 fs::write(&path, report)?;
                 println!("📄 HTML report: {:?}", path);
@@ -2969,21 +3081,36 @@ fn generate_ec_text_report(
 ) -> String {
     let mut report = String::new();
 
-    report.push_str("================================================================================\n");
+    report.push_str(
+        "================================================================================\n",
+    );
     report.push_str("                     EQUIVALENCE CHECKING REPORT\n");
-    report.push_str("================================================================================\n\n");
+    report.push_str(
+        "================================================================================\n\n",
+    );
 
     report.push_str(&format!("Entity:      {}\n", entity_name));
-    report.push_str(&format!("Result:      {}\n", if result.equivalent { "EQUIVALENT" } else { "NOT EQUIVALENT" }));
+    report.push_str(&format!(
+        "Result:      {}\n",
+        if result.equivalent {
+            "EQUIVALENT"
+        } else {
+            "NOT EQUIVALENT"
+        }
+    ));
     report.push_str(&format!("Bound:       {} cycles\n", result.bound));
     report.push_str(&format!("Total Time:  {:.3}s\n", total_time.as_secs_f64()));
     report.push_str(&format!("SAT Calls:   {}\n", result.sat_calls));
-    report.push_str("\n");
+    report.push('\n');
 
     if !result.equivalent {
-        report.push_str("--------------------------------------------------------------------------------\n");
+        report.push_str(
+            "--------------------------------------------------------------------------------\n",
+        );
         report.push_str("FAILURE DETAILS\n");
-        report.push_str("--------------------------------------------------------------------------------\n\n");
+        report.push_str(
+            "--------------------------------------------------------------------------------\n\n",
+        );
 
         // Include simulation mismatch details if available
         if let Some(sim) = sim_result {
@@ -3025,7 +3152,10 @@ fn generate_ec_text_report(
                         if hier_path.is_empty() || hier_path == internal_name {
                             report.push_str(&format!("  {} = {}\n", internal_name, val));
                         } else {
-                            report.push_str(&format!("  {} ({}) = {}\n", hier_path, internal_name, val));
+                            report.push_str(&format!(
+                                "  {} ({}) = {}\n",
+                                hier_path, internal_name, val
+                            ));
                         }
                     }
                 }
@@ -3065,14 +3195,18 @@ fn generate_ec_text_report(
                         } else {
                             format!("[{} bits]", gate_names.len())
                         };
-                        report.push_str(&format!("    {} ({}) → {}\n", user_name, mir_name, gate_str));
+                        report.push_str(&format!(
+                            "    {} ({}) → {}\n",
+                            user_name, mir_name, gate_str
+                        ));
                     }
                 }
 
                 if !diag.input_matching.unmatched_mir.is_empty() {
                     report.push_str("\n  ⚠ Unmatched MIR Inputs:\n");
                     for (user_name, mir_name, reason) in &diag.input_matching.unmatched_mir {
-                        report.push_str(&format!("    {} ({}) - {}\n", user_name, mir_name, reason));
+                        report
+                            .push_str(&format!("    {} ({}) - {}\n", user_name, mir_name, reason));
                     }
                 }
 
@@ -3091,7 +3225,10 @@ fn generate_ec_text_report(
                 // Cycle trace (per-cycle signal history)
                 if !diag.cycle_trace.is_empty() {
                     report.push_str("\n--------------------------------------------------------------------------------\n");
-                    report.push_str(&format!("CYCLE-BY-CYCLE TRACE (last {} cycles before mismatch)\n", diag.cycle_trace.len()));
+                    report.push_str(&format!(
+                        "CYCLE-BY-CYCLE TRACE (last {} cycles before mismatch)\n",
+                        diag.cycle_trace.len()
+                    ));
                     report.push_str("--------------------------------------------------------------------------------\n\n");
 
                     // Find the mismatching signal to highlight
@@ -3110,23 +3247,32 @@ fn generate_ec_text_report(
 
                         // Show signals with mismatches highlighted
                         report.push_str("    Outputs:\n");
-                        for (user_name, internal_name, mir_val, gate_val, matches) in &entry.signals {
+                        for (user_name, internal_name, mir_val, gate_val, matches) in &entry.signals
+                        {
                             let mir_str = mir_val.map(|v| v.to_string()).unwrap_or("?".to_string());
-                            let gate_str = gate_val.map(|v| v.to_string()).unwrap_or("?".to_string());
+                            let gate_str =
+                                gate_val.map(|v| v.to_string()).unwrap_or("?".to_string());
 
-                            let is_failing = mismatch_signal.map(|s| s == user_name).unwrap_or(false);
+                            let is_failing =
+                                mismatch_signal.map(|s| s == user_name).unwrap_or(false);
                             let marker = if !matches {
-                                if is_failing { ">>> " } else { "!!! " }
+                                if is_failing {
+                                    ">>> "
+                                } else {
+                                    "!!! "
+                                }
                             } else {
                                 "    "
                             };
 
                             if !matches || is_failing {
-                                report.push_str(&format!("{}  {} ({}): MIR={}, Gate={}\n",
-                                    marker, user_name, internal_name, mir_str, gate_str));
+                                report.push_str(&format!(
+                                    "{}  {} ({}): MIR={}, Gate={}\n",
+                                    marker, user_name, internal_name, mir_str, gate_str
+                                ));
                             }
                         }
-                        report.push_str("\n");
+                        report.push('\n');
                     }
                 }
             }
@@ -3150,22 +3296,33 @@ fn generate_ec_text_report(
                 let mut sorted_inputs: Vec<_> = inputs.iter().collect();
                 sorted_inputs.sort_by_key(|(k, _)| *k);
                 for (name, value) in sorted_inputs.iter().take(20) {
-                    report.push_str(&format!("      {} = {}\n", name, if **value { "1" } else { "0" }));
+                    report.push_str(&format!(
+                        "      {} = {}\n",
+                        name,
+                        if **value { "1" } else { "0" }
+                    ));
                 }
                 if sorted_inputs.len() > 20 {
-                    report.push_str(&format!("      ... and {} more inputs\n", sorted_inputs.len() - 20));
+                    report.push_str(&format!(
+                        "      ... and {} more inputs\n",
+                        sorted_inputs.len() - 20
+                    ));
                 }
                 // Show output differences if available
                 if let (Some(out1), Some(out2)) = (
                     cex.outputs1_per_cycle.get(cycle),
-                    cex.outputs2_per_cycle.get(cycle)
+                    cex.outputs2_per_cycle.get(cycle),
                 ) {
                     report.push_str("    Output Differences:\n");
                     for (name, val1) in out1 {
                         if let Some(val2) = out2.get(name) {
                             if val1 != val2 {
-                                report.push_str(&format!("      {}: RTL={} Gate={}\n",
-                                    name, if *val1 { "1" } else { "0" }, if *val2 { "1" } else { "0" }));
+                                report.push_str(&format!(
+                                    "      {}: RTL={} Gate={}\n",
+                                    name,
+                                    if *val1 { "1" } else { "0" },
+                                    if *val2 { "1" } else { "0" }
+                                ));
                             }
                         }
                     }
@@ -3175,13 +3332,19 @@ fn generate_ec_text_report(
     }
 
     if verbose {
-        report.push_str("\n--------------------------------------------------------------------------------\n");
+        report.push_str(
+            "\n--------------------------------------------------------------------------------\n",
+        );
         report.push_str("VERBOSE DETAILS\n");
-        report.push_str("--------------------------------------------------------------------------------\n\n");
+        report.push_str(
+            "--------------------------------------------------------------------------------\n\n",
+        );
         report.push_str(&format!("BMC Internal Time: {}ms\n", result.time_ms));
     }
 
-    report.push_str("\n================================================================================\n");
+    report.push_str(
+        "\n================================================================================\n",
+    );
 
     report
 }
@@ -3265,10 +3428,15 @@ fn generate_ec_html_report(
     sim_result: Option<&skalp_formal::SimEquivalenceResult>,
 ) -> String {
     let status_class = if result.equivalent { "pass" } else { "fail" };
-    let status_text = if result.equivalent { "EQUIVALENT" } else { "NOT EQUIVALENT" };
+    let status_text = if result.equivalent {
+        "EQUIVALENT"
+    } else {
+        "NOT EQUIVALENT"
+    };
     let status_icon = if result.equivalent { "✅" } else { "❌" };
 
-    let mut html = format!(r#"<!DOCTYPE html>
+    let mut html = format!(
+        r#"<!DOCTYPE html>
 <html>
 <head>
     <title>Equivalence Check Report - {}</title>
@@ -3314,29 +3482,58 @@ fn generate_ec_html_report(
                 <tr><th>SAT Calls</th><td>{}</td></tr>
             </table>
         </div>
-"#, entity_name, status_class, status_icon, status_text, entity_name,
-    entity_name, result.bound, total_time.as_secs_f64(), result.sat_calls);
+"#,
+        entity_name,
+        status_class,
+        status_icon,
+        status_text,
+        entity_name,
+        entity_name,
+        result.bound,
+        total_time.as_secs_f64(),
+        result.sat_calls
+    );
 
     if !result.equivalent {
         // Include simulation mismatch details if available
         if let Some(sim) = sim_result {
-            html.push_str(r#"
+            html.push_str(
+                r#"
         <div class="section">
             <h2>Simulation Mismatch Details</h2>
             <table>
-"#);
+"#,
+            );
             if let Some(cycle) = sim.mismatch_cycle {
-                html.push_str(&format!("                <tr><th>Mismatch Cycle</th><td>{}</td></tr>\n", cycle));
+                html.push_str(&format!(
+                    "                <tr><th>Mismatch Cycle</th><td>{}</td></tr>\n",
+                    cycle
+                ));
             }
             if let Some(ref output) = sim.mismatch_output {
-                html.push_str(&format!("                <tr><th>Failing Output</th><td><code>{}</code></td></tr>\n", output));
+                html.push_str(&format!(
+                    "                <tr><th>Failing Output</th><td><code>{}</code></td></tr>\n",
+                    output
+                ));
             }
             if let (Some(v1), Some(v2)) = (sim.value_1, sim.value_2) {
-                html.push_str(&format!("                <tr><th>MIR Value</th><td>{}</td></tr>\n", v1));
-                html.push_str(&format!("                <tr><th>Gate Value</th><td>{}</td></tr>\n", v2));
+                html.push_str(&format!(
+                    "                <tr><th>MIR Value</th><td>{}</td></tr>\n",
+                    v1
+                ));
+                html.push_str(&format!(
+                    "                <tr><th>Gate Value</th><td>{}</td></tr>\n",
+                    v2
+                ));
             }
-            html.push_str(&format!("                <tr><th>Cycles Verified</th><td>{}</td></tr>\n", sim.cycles_verified));
-            html.push_str(&format!("                <tr><th>Outputs Compared</th><td>{}</td></tr>\n", sim.outputs_compared));
+            html.push_str(&format!(
+                "                <tr><th>Cycles Verified</th><td>{}</td></tr>\n",
+                sim.cycles_verified
+            ));
+            html.push_str(&format!(
+                "                <tr><th>Outputs Compared</th><td>{}</td></tr>\n",
+                sim.outputs_compared
+            ));
             html.push_str("            </table>\n        </div>\n");
 
             // Include detailed diagnostics if available
@@ -3353,7 +3550,10 @@ fn generate_ec_html_report(
                     let mut sorted: Vec<_> = diag.input_values.iter().collect();
                     sorted.sort_by(|a, b| a.0.cmp(&b.0));
                     for (name, val) in &sorted {
-                        html.push_str(&format!("                <tr><td>{}</td><td>{}</td></tr>\n", name, val));
+                        html.push_str(&format!(
+                            "                <tr><td>{}</td><td>{}</td></tr>\n",
+                            name, val
+                        ));
                     }
                     html.push_str("            </table>\n            </div>\n        </div>\n");
                 }
@@ -3371,8 +3571,10 @@ fn generate_ec_html_report(
                     sorted.sort_by(|a, b| a.0.cmp(&b.0));
                     for (hier, internal, val) in &sorted {
                         let hier_display = if hier.is_empty() { "-" } else { hier.as_str() };
-                        html.push_str(&format!("                <tr><td>{}</td><td>{}</td><td>{}</td></tr>\n",
-                            hier_display, internal, val));
+                        html.push_str(&format!(
+                            "                <tr><td>{}</td><td>{}</td><td>{}</td></tr>\n",
+                            hier_display, internal, val
+                        ));
                     }
                     html.push_str("            </table>\n            </div>\n        </div>\n");
                 }
@@ -3389,7 +3591,10 @@ fn generate_ec_html_report(
                     let mut sorted: Vec<_> = diag.gate_signals.iter().collect();
                     sorted.sort_by(|a, b| a.0.cmp(&b.0));
                     for (name, val) in &sorted {
-                        html.push_str(&format!("                <tr><td>{}</td><td>{}</td></tr>\n", name, val));
+                        html.push_str(&format!(
+                            "                <tr><td>{}</td><td>{}</td></tr>\n",
+                            name, val
+                        ));
                     }
                     html.push_str("            </table>\n            </div>\n        </div>\n");
                 }
@@ -3410,41 +3615,58 @@ fn generate_ec_html_report(
             }
         } else {
             // Fallback to BmcEquivalenceResult fields
-            html.push_str(r#"
+            html.push_str(
+                r#"
         <div class="section">
             <h2>Failure Details</h2>
             <table>
-"#);
+"#,
+            );
             if let Some(cycle) = result.mismatch_cycle {
-                html.push_str(&format!("                <tr><th>Mismatch Cycle</th><td>{}</td></tr>\n", cycle));
+                html.push_str(&format!(
+                    "                <tr><th>Mismatch Cycle</th><td>{}</td></tr>\n",
+                    cycle
+                ));
             }
             if let Some(ref output) = result.mismatch_output {
-                html.push_str(&format!("                <tr><th>Failing Output</th><td>{}</td></tr>\n", output));
+                html.push_str(&format!(
+                    "                <tr><th>Failing Output</th><td>{}</td></tr>\n",
+                    output
+                ));
             }
             html.push_str("            </table>\n        </div>\n");
         }
 
         if let Some(ref cex) = result.counterexample {
-            html.push_str(r#"
+            html.push_str(
+                r#"
         <div class="section">
             <h2>SAT Counterexample Trace</h2>
             <div class="trace">
-"#);
+"#,
+            );
             for (cycle, inputs) in cex.inputs_per_cycle.iter().enumerate() {
                 html.push_str(&format!("<strong>Cycle {}:</strong><br>\n", cycle));
                 html.push_str("<em>Inputs:</em><br>\n");
                 let mut sorted_inputs: Vec<_> = inputs.iter().collect();
                 sorted_inputs.sort_by_key(|(k, _)| *k);
                 for (name, value) in sorted_inputs.iter().take(20) {
-                    html.push_str(&format!("&nbsp;&nbsp;{} = {}<br>\n", name, if **value { "1" } else { "0" }));
+                    html.push_str(&format!(
+                        "&nbsp;&nbsp;{} = {}<br>\n",
+                        name,
+                        if **value { "1" } else { "0" }
+                    ));
                 }
                 if sorted_inputs.len() > 20 {
-                    html.push_str(&format!("&nbsp;&nbsp;... and {} more inputs<br>\n", sorted_inputs.len() - 20));
+                    html.push_str(&format!(
+                        "&nbsp;&nbsp;... and {} more inputs<br>\n",
+                        sorted_inputs.len() - 20
+                    ));
                 }
                 // Show output differences
                 if let (Some(out1), Some(out2)) = (
                     cex.outputs1_per_cycle.get(cycle),
-                    cex.outputs2_per_cycle.get(cycle)
+                    cex.outputs2_per_cycle.get(cycle),
                 ) {
                     html.push_str("<em>Output Differences:</em><br>\n");
                     for (name, val1) in out1 {
@@ -3462,7 +3684,8 @@ fn generate_ec_html_report(
         }
     }
 
-    html.push_str(&format!(r#"
+    html.push_str(&format!(
+        r#"
         <div class="footer">
             Generated by SKALP Equivalence Checker<br>
             Report generated at: {}
@@ -3470,7 +3693,9 @@ fn generate_ec_html_report(
     </div>
 </body>
 </html>
-"#, chrono::Local::now().format("%Y-%m-%d %H:%M:%S")));
+"#,
+        chrono::Local::now().format("%Y-%m-%d %H:%M:%S")
+    ));
 
     html
 }
@@ -3526,8 +3751,8 @@ fn synthesize_design(
         .map_err(|e| anyhow::anyhow!("MIR compilation failed: {}", e))?;
 
     // Get top module
-    let top_module = find_top_level_module(&mir)
-        .ok_or_else(|| anyhow::anyhow!("No modules found in design"))?;
+    let top_module =
+        find_top_level_module(&mir).ok_or_else(|| anyhow::anyhow!("No modules found in design"))?;
     println!("Module: {}", top_module.name);
 
     // Lower to LIR
@@ -4671,8 +4896,8 @@ fn run_fi_driven_safety(
         .map_err(|e| anyhow::anyhow!("MIR compilation failed: {}", e))?;
 
     // Find the top module (the one not instantiated by any other module)
-    let top_module = find_top_level_module(&mir)
-        .ok_or_else(|| anyhow::anyhow!("No modules found in design"))?;
+    let top_module =
+        find_top_level_module(&mir).ok_or_else(|| anyhow::anyhow!("No modules found in design"))?;
 
     // Lower to Lir and tech-map to GateNetlist
     println!("🔩 Converting to gate-level netlist...");
@@ -6308,8 +6533,10 @@ fn run_signal_trace(
     netlist_path: Option<&PathBuf>,
 ) -> Result<()> {
     use skalp_frontend::parse_and_build_compilation_context;
-    use skalp_lir::{get_stdlib_library, lower_mir_hierarchical_with_top, map_hierarchical_to_gates};
     use skalp_lir::signal_trace::{SignalTracer, TraceDirection};
+    use skalp_lir::{
+        get_stdlib_library, lower_mir_hierarchical_with_top, map_hierarchical_to_gates,
+    };
 
     println!("🔍 Signal Trace");
     println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
@@ -6324,15 +6551,14 @@ fn run_signal_trace(
     // Step 1: Get or load gate-level netlist
     let gate_netlist = if let Some(path) = netlist_path {
         println!("📂 Loading gate-level netlist from {:?}...", path);
-        let json = fs::read_to_string(path)
-            .context("Failed to read netlist file")?;
+        let json = fs::read_to_string(path).context("Failed to read netlist file")?;
         serde_json::from_str::<skalp_lir::GateNetlist>(&json)
             .context("Failed to parse gate-level netlist JSON")?
     } else {
         // Compile design to gate-level
         println!("📖 Parsing source...");
-        let context = parse_and_build_compilation_context(source)
-            .context("Failed to parse source file")?;
+        let context =
+            parse_and_build_compilation_context(source).context("Failed to parse source file")?;
         let hir = context.main_hir;
         let module_hirs = context.module_hirs;
 
@@ -6373,8 +6599,8 @@ fn run_signal_trace(
         let hier_lir = lower_mir_hierarchical_with_top(&mir, Some(&target_entity.name));
 
         println!("🔧 Synthesizing gate-level netlist...");
-        let library = get_stdlib_library("generic_asic")
-            .context("Failed to load technology library")?;
+        let library =
+            get_stdlib_library("generic_asic").context("Failed to load technology library")?;
         let hier_netlist = map_hierarchical_to_gates(&hier_lir, &library);
         let netlist = hier_netlist.flatten();
         println!("   Cells: {}", netlist.cells.len());
