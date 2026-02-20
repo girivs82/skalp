@@ -15,7 +15,8 @@ fn compile_wide_ncl() -> GateNetlist {
     let source_path = fixture_path("wide_ncl.sk");
 
     // Use --no-synth-opt to preserve NCL gate structure for simulation
-    let output = Command::new("./target/release/skalp")
+    let skalp_bin = env!("CARGO_BIN_EXE_skalp");
+    let output = Command::new(skalp_bin)
         .env("SKALP_STDLIB_PATH", "./crates/skalp-stdlib")
         .args([
             "build",

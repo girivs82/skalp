@@ -52,7 +52,8 @@ fn compile_fixture_with_library(fixture_name: &str, library_path: Option<&str>) 
         args.push(lib.to_string());
     }
 
-    let output = Command::new("./target/release/skalp")
+    let skalp_bin = env!("CARGO_BIN_EXE_skalp");
+    let output = Command::new(skalp_bin)
         .env("SKALP_STDLIB_PATH", "./crates/skalp-stdlib")
         .args(&args)
         .output()

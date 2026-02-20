@@ -23,7 +23,8 @@ fn compile_fixture_to_ncl_gates(fixture_name: &str) -> GateNetlist {
     let source_path = fixture_path(fixture_name);
     let output_dir = format!("/tmp/async_sta_out_{}", unique_id);
 
-    let output = Command::new("./target/release/skalp")
+    let skalp_bin = env!("CARGO_BIN_EXE_skalp");
+    let output = Command::new(skalp_bin)
         .env("SKALP_STDLIB_PATH", "./crates/skalp-stdlib")
         .args([
             "build",

@@ -27,7 +27,8 @@ fn compile_fixture_to_ncl_gates(fixture_name: &str) -> GateNetlist {
     let output_dir = format!("/tmp/sta_fix_out_{}", unique_id);
 
     // Use --no-synth-opt to preserve NCL gate structure for simulation
-    let output = Command::new("./target/release/skalp")
+    let skalp_bin = env!("CARGO_BIN_EXE_skalp");
+    let output = Command::new(skalp_bin)
         .env("SKALP_STDLIB_PATH", "./crates/skalp-stdlib")
         .args([
             "build",
