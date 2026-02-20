@@ -1,6 +1,7 @@
 //! Integration tests for Async STA Fix (buffer insertion)
 //!
 //! Tests the full flow: compile → simulate → STA → fix → verify
+#![cfg(target_os = "macos")]
 
 use skalp_lir::gate_netlist::GateNetlist;
 use skalp_lir::{

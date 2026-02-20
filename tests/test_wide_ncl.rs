@@ -1,5 +1,6 @@
 //! Test for wide (256-bit) NCL operations
 //! This helps diagnose oscillation issues in large designs
+#![cfg(target_os = "macos")]
 
 use skalp_lir::gate_netlist::GateNetlist;
 use skalp_sim::GpuNclRuntime;

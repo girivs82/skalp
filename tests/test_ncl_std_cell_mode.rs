@@ -6,6 +6,7 @@
 //!
 //! The C-element macro implements: Y = (A & B) | (Y & (A | B))
 //! which requires feedback loop handling in the simulator.
+#![cfg(target_os = "macos")]
 
 use skalp_lir::gate_netlist::GateNetlist;
 use skalp_sim::GpuNclRuntime;
