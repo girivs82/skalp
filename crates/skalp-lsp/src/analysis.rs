@@ -570,7 +570,7 @@ impl AnalysisContext {
                     for line in toml_content.lines() {
                         let trimmed = line.trim();
                         if trimmed.starts_with("src_dirs") {
-                            // Parse src_dirs = ["lib", "battery_dcdc", ...]
+                            // Parse src_dirs = ["lib", "core", ...]
                             if let Some(arr_start) = trimmed.find('[') {
                                 if let Some(arr_end) = trimmed.find(']') {
                                     let arr = &trimmed[arr_start + 1..arr_end];

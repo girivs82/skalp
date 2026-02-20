@@ -1706,39 +1706,4 @@ impl Foo {
             .any(|i| i.name == "1000" && i.is_constant));
     }
 
-    #[test]
-    fn test_real_file_battery_dcdc() {
-        // Test against an actual file from the sangam codebase
-        let path = "/Users/girivs/src/design/sangam/src/battery_dcdc/main.sk";
-        let source = match std::fs::read_to_string(path) {
-            Ok(s) => s,
-            Err(_) => return, // Skip if file not available
-        };
-        // Find a line with an assignment
-        for (line_num, line) in source.lines().enumerate() {
-            let trimmed = line.trim();
-            if trimmed.contains(" = ")
-                && !trimmed.starts_with("//")
-                && !trimmed.starts_with("const")
-            {
-                let result = get_expression_circuit(&source, line_num as u32, 10);
-                if let Some(data) = result {
-                    assert!(
-                        !data.target_name.is_empty(),
-                        "Target name should not be empty on line {}",
-                        line_num
-                    );
-                    // At minimum we should get either nodes or inputs
-                    assert!(
-                        !data.nodes.is_empty() || !data.inputs.is_empty(),
-                        "Expected some circuit elements on line {}: {}",
-                        line_num,
-                        trimmed
-                    );
-                    return; // One success is enough
-                }
-            }
-        }
-        // If we get here, we didn't find any parseable assignment — that's OK for this test
-    }
 }
