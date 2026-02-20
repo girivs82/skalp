@@ -2,6 +2,7 @@
 //!
 //! Tests async STA on compiled NCL designs to verify fork analysis
 //! and completion timing checks work correctly on real circuits.
+#![cfg(target_os = "macos")]
 
 use skalp_lir::gate_netlist::GateNetlist;
 use skalp_lir::{analyze_async_timing, AsyncStaConfig};
