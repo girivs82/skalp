@@ -100,6 +100,7 @@ async fn test_ncl_cpu(
 }
 
 /// Test NCL simulation with unified runtime (supports both CPU and GPU)
+#[cfg(target_os = "macos")]
 async fn test_ncl_unified(
     netlist: skalp_lir::gate_netlist::GateNetlist,
     inputs: &[(&str, u64, usize)],
