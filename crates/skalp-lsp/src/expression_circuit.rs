@@ -1705,5 +1705,4 @@ impl Foo {
             .iter()
             .any(|i| i.name == "1000" && i.is_constant));
     }
-
 }
