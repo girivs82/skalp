@@ -11,9 +11,9 @@
 use skalp_frontend::parse_and_build_hir;
 use skalp_lir::{get_stdlib_library, lower_mir_module_to_lir, map_lir_to_gates};
 use skalp_mir::MirCompiler;
-use skalp_sim::{
-    CircuitMode, HwAccel, NclSimConfig, NclSimulator, UnifiedSimConfig, UnifiedSimulator,
-};
+#[cfg(target_os = "macos")]
+use skalp_sim::{CircuitMode, HwAccel, UnifiedSimConfig, UnifiedSimulator};
+use skalp_sim::{NclSimConfig, NclSimulator};
 
 /// Helper to compile async Skalp source to GateNetlist
 fn compile_async_to_netlist(source: &str) -> skalp_lir::gate_netlist::GateNetlist {
