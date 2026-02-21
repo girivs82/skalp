@@ -220,8 +220,10 @@ impl CompiledCpuRuntime {
             }
         }
 
-        // Fallback for simple designs with no explicit clock domains
-        if clock_names.is_empty() {
+        // Fallback for simple designs with no explicit clock domains.
+        // Only apply if there are sequential elements — purely combinational circuits
+        // should keep clock_names empty so eval_sequential always runs.
+        if clock_names.is_empty() && !module.sequential_nodes.is_empty() {
             // Try name_registry lookup for inputs containing clk/clock
             if let Some(clk) = module.inputs.iter().find(|input| {
                 if let Some(entry) = module.name_registry.get_entry_by_internal(&input.name) {
