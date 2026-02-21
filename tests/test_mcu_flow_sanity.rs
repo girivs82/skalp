@@ -12,7 +12,10 @@ use std::fs;
 
 #[test]
 fn test_mcu_v11_full_flow() {
-    let source_path = "/Users/girivs/src/hw/hls/examples/safety/mcu/mcu_v11.sk";
+    let source_path = &format!(
+        "{}/examples/safety/mcu/mcu_v11.sk",
+        env!("CARGO_MANIFEST_DIR")
+    );
     let source = fs::read_to_string(source_path).expect("Failed to read MCU source");
 
     println!("\n=== MCU v11 Safety Flow Sanity Check ===\n");

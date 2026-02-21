@@ -451,7 +451,7 @@ impl AndOr {
 // Helper to write test files to a location where stdlib can be found
 fn write_test_file(filename: &str, content: &str) -> String {
     // Write to the examples directory so stdlib can be found
-    let path = format!("/Users/girivs/src/hw/hls/examples/{}", filename);
+    let path = format!("{}/examples/{}", env!("CARGO_MANIFEST_DIR"), filename);
     std::fs::write(&path, content).expect("Failed to write test file");
     path
 }

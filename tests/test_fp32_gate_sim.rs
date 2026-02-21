@@ -15,10 +15,8 @@ use std::path::Path;
 
 /// Compile an FP32 test file to gate netlist (async entity → NCL)
 fn compile_fp32_test(source_path: &Path) -> skalp_lir::GateNetlist {
-    std::env::set_var(
-        "SKALP_STDLIB_PATH",
-        "/Users/girivs/src/hw/hls/crates/skalp-stdlib",
-    );
+    let stdlib_path = format!("{}/crates/skalp-stdlib", env!("CARGO_MANIFEST_DIR"));
+    std::env::set_var("SKALP_STDLIB_PATH", &stdlib_path);
 
     let context =
         parse_and_build_compilation_context(source_path).expect("Failed to parse FP32 test");
@@ -44,10 +42,8 @@ fn compile_fp32_test(source_path: &Path) -> skalp_lir::GateNetlist {
 
 /// Compile a synchronous FP32 test file to gate netlist (no NCL)
 fn compile_fp32_sync_test(source_path: &Path) -> skalp_lir::GateNetlist {
-    std::env::set_var(
-        "SKALP_STDLIB_PATH",
-        "/Users/girivs/src/hw/hls/crates/skalp-stdlib",
-    );
+    let stdlib_path = format!("{}/crates/skalp-stdlib", env!("CARGO_MANIFEST_DIR"));
+    std::env::set_var("SKALP_STDLIB_PATH", &stdlib_path);
 
     let context =
         parse_and_build_compilation_context(source_path).expect("Failed to parse FP32 sync test");

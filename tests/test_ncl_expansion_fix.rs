@@ -8,10 +8,8 @@ use std::path::Path;
 
 #[test]
 fn test_fp32_ncl_no_undriven_signals() {
-    std::env::set_var(
-        "SKALP_STDLIB_PATH",
-        "/Users/girivs/src/hw/hls/crates/skalp-stdlib",
-    );
+    let stdlib_path = format!("{}/crates/skalp-stdlib", env!("CARGO_MANIFEST_DIR"));
+    std::env::set_var("SKALP_STDLIB_PATH", &stdlib_path);
 
     let source_path =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/test_fpadd_sim.sk");
