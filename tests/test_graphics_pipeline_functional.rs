@@ -179,10 +179,6 @@ impl GeometryProcessor4 {
     // This provides correct FIFO semantics where outputs reflect the post-clock state.
     // Verified: AsyncFifo correctly reads sequential values (0x12345678, 0xABCDEF00, 0xDEADBEEF).
     #[tokio::test]
-    #[cfg_attr(
-        not(target_os = "macos"),
-        ignore = "CDC simulation timing differs on Linux due to compiled CPU runtime backend"
-    )]
     async fn test_async_fifo_clock_domain_crossing() {
         println!("🎨 Testing AsyncFIFO Clock Domain Crossing");
 
@@ -356,10 +352,6 @@ impl FifoTest {
     }
 
     #[tokio::test]
-    #[cfg_attr(
-        not(target_os = "macos"),
-        ignore = "CDC simulation timing differs on Linux due to compiled CPU runtime backend"
-    )]
     async fn test_graphics_pipeline_multi_clock_domains() {
         println!("🎨 Testing Graphics Pipeline End-to-End");
         println!("   Testing full data flow: sys_clk → geom_clk → pixel_clk");
