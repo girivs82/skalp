@@ -30,6 +30,7 @@
 
 use crate::cache::{collect_dependencies, CompilationCache};
 use anyhow::Result;
+use indexmap::IndexMap;
 use skalp_lir::gate_netlist::GateNetlist;
 use skalp_mir::MirCompiler;
 use skalp_sim::{
@@ -37,7 +38,6 @@ use skalp_sim::{
     HwAccel, SimCoverageDb, SimLevel, UnifiedSimConfig, UnifiedSimResult, UnifiedSimulator,
 };
 use skalp_sir::{convert_mir_to_sir_with_hierarchy, SirModule};
-use std::collections::HashMap;
 use std::path::Path;
 
 /// Simulation mode for the testbench
@@ -57,7 +57,7 @@ pub enum TestbenchMode {
 pub struct Testbench {
     sim: UnifiedSimulator,
     mode: TestbenchMode,
-    pending_inputs: HashMap<String, u64>,
+    pending_inputs: IndexMap<String, u64>,
     cycle_count: u64,
     /// Available input port names
     input_names: Vec<String>,
@@ -268,7 +268,7 @@ impl Testbench {
         Ok(Self {
             sim,
             mode: TestbenchMode::Ncl,
-            pending_inputs: HashMap::new(),
+            pending_inputs: IndexMap::new(),
             cycle_count: 0,
             input_names: vec![],
             output_names: vec![],
@@ -413,7 +413,7 @@ impl Testbench {
         Ok(Self {
             sim,
             mode: TestbenchMode::Behavioral,
-            pending_inputs: HashMap::new(),
+            pending_inputs: IndexMap::new(),
             cycle_count: 0,
             input_names,
             output_names,
@@ -524,7 +524,7 @@ impl Testbench {
         Ok(Self {
             sim,
             mode: TestbenchMode::GateLevel,
-            pending_inputs: HashMap::new(),
+            pending_inputs: IndexMap::new(),
             cycle_count: 0,
             input_names,
             output_names,
@@ -584,7 +584,7 @@ impl Testbench {
         Ok(Self {
             sim,
             mode: TestbenchMode::Behavioral,
-            pending_inputs: HashMap::new(),
+            pending_inputs: IndexMap::new(),
             cycle_count: 0,
             input_names,
             output_names,
@@ -680,7 +680,7 @@ impl Testbench {
         Ok(Self {
             sim,
             mode: TestbenchMode::GateLevel,
-            pending_inputs: HashMap::new(),
+            pending_inputs: IndexMap::new(),
             cycle_count: 0,
             input_names,
             output_names,
@@ -739,7 +739,7 @@ impl Testbench {
         Ok(Self {
             sim,
             mode: TestbenchMode::Ncl,
-            pending_inputs: HashMap::new(),
+            pending_inputs: IndexMap::new(),
             cycle_count: 0,
             input_names: vec![],
             output_names: vec![],
@@ -906,7 +906,7 @@ impl Testbench {
     /// Apply pending inputs and run for N cycles on a specific clock signal
     pub async fn clock_signal(&mut self, clock_name: &str, cycles: usize) -> &mut Self {
         // Apply all pending inputs
-        for (signal, value) in self.pending_inputs.drain() {
+        for (signal, value) in self.pending_inputs.drain(..) {
             self.sim.set_input(&signal, value).await;
         }
 
@@ -986,7 +986,7 @@ impl Testbench {
     /// ```
     pub async fn clock_multi(&mut self, clocks: &[(&str, usize)]) -> &mut Self {
         // Apply all pending inputs
-        for (signal, value) in self.pending_inputs.drain() {
+        for (signal, value) in self.pending_inputs.drain(..) {
             self.sim.set_input(&signal, value).await;
         }
 
@@ -1029,7 +1029,7 @@ impl Testbench {
 
     /// Apply pending inputs and step the simulation once
     pub async fn step(&mut self) -> &mut Self {
-        for (signal, value) in self.pending_inputs.drain() {
+        for (signal, value) in self.pending_inputs.drain(..) {
             self.sim.set_input(&signal, value).await;
         }
         if self.coverage_enabled {
