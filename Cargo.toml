@@ -5,7 +5,7 @@ edition = "2021"
 authors = ["SKALP Contributors"]
 description = "Intent-driven hardware synthesis language and compiler"
 license = "MIT"
-repository = "https://github.com/skalp-lang/skalp"
+repository = "https://github.com/girivs82/skalp"
 keywords = ["hardware", "synthesis", "fpga", "hdl", "hls"]
 categories = ["development-tools", "hardware-support"]
 
