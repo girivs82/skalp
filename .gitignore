@@ -3,6 +3,10 @@
 # Build outputs
 /build/
 
+# Test and simulation outputs
+*.vcd
+benchmark_results_*.txt
+
 # Karythra project files (belong in separate repo)
 examples/karythra*.sk
 examples/KARYTHRA*.md

@@ -1,5 +1,0 @@
-Gate-Level Analysis Summary
-Source: "/Users/girivs/src/hw/karythra/rtl/skalp/cle/src/main.sk"
-Total Modules: 7
-Total Primitives: 12361
-Total FIT: 1282.10
