@@ -19,6 +19,7 @@ use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
 use thiserror::Error;
 
 /// Errors that can occur during C++ compilation
@@ -141,12 +142,28 @@ fn compiler_args(compiler: &Path, output: &Path, source: &Path) -> Vec<String> {
     }
 }
 
+/// Minimum valid size for a compiled dynamic library (bytes).
+/// Any file smaller than this is likely corrupted or truncated.
+const MIN_LIBRARY_SIZE: u64 = 1024;
+
+/// Check if a cached library file is valid (exists and has reasonable size)
+fn is_valid_cached_library(path: &Path) -> bool {
+    match fs::metadata(path) {
+        Ok(meta) => meta.len() >= MIN_LIBRARY_SIZE,
+        Err(_) => false,
+    }
+}
+
 /// Compile C++ source code to a dynamic library
 ///
 /// This function:
 /// 1. Computes a SHA-256 hash of the source
-/// 2. Checks if a cached library exists
-/// 3. If not cached, compiles the source and caches the result
+/// 2. Checks if a valid cached library exists
+/// 3. If not cached, compiles to a temp file and atomically renames
+///
+/// Uses atomic writes to prevent race conditions when multiple tests
+/// compile the same source in parallel (the compiler writes to a
+/// PID-namespaced temp file, then renames to the final path).
 ///
 /// # Arguments
 ///
@@ -164,10 +181,19 @@ pub fn compile_cpp_kernel(source: &str) -> CompileResult<PathBuf> {
 
     let lib_path = cache.join(format!("{}.{}", hash, dylib_ext()));
 
-    // Check cache
-    if lib_path.exists() {
+    // Check cache - validate the file is not truncated/corrupted
+    if is_valid_cached_library(&lib_path) {
         tracing::debug!("Using cached library: {}", lib_path.display());
         return Ok(lib_path);
+    }
+
+    // Remove corrupted cache entry if it exists
+    if lib_path.exists() {
+        tracing::warn!(
+            "Removing corrupted cached library (too small): {}",
+            lib_path.display()
+        );
+        let _ = fs::remove_file(&lib_path);
     }
 
     // Write source to temporary file
@@ -178,8 +204,15 @@ pub fn compile_cpp_kernel(source: &str) -> CompileResult<PathBuf> {
     let compiler = find_cpp_compiler()?;
     tracing::debug!("Using compiler: {}", compiler.display());
 
-    // Compile
-    let args = compiler_args(&compiler, &lib_path, &src_path);
+    // Compile to a temp file first, then atomically rename.
+    // This prevents other threads/processes from reading a partially-written library.
+    // Use PID + atomic counter for guaranteed uniqueness across threads.
+    static COMPILE_COUNTER: AtomicU64 = AtomicU64::new(0);
+    let pid = std::process::id();
+    let seq = COMPILE_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let tmp_lib_path = cache.join(format!("{}.{}.tmp.{}.{}", hash, dylib_ext(), pid, seq));
+
+    let args = compiler_args(&compiler, &tmp_lib_path, &src_path);
     tracing::debug!("Compiling with args: {:?}", args);
 
     let output = Command::new(&compiler)
@@ -188,6 +221,8 @@ pub fn compile_cpp_kernel(source: &str) -> CompileResult<PathBuf> {
         .map_err(|e| CompileError::CompilationFailed(e.to_string()))?;
 
     if !output.status.success() {
+        // Clean up temp file on failure
+        let _ = fs::remove_file(&tmp_lib_path);
         let stderr = String::from_utf8_lossy(&output.stderr);
         let stdout = String::from_utf8_lossy(&output.stdout);
         return Err(CompileError::CompilationFailed(format!(
@@ -196,8 +231,39 @@ pub fn compile_cpp_kernel(source: &str) -> CompileResult<PathBuf> {
         )));
     }
 
-    // Keep source file for debugging
-    // let _ = fs::remove_file(&src_path);
+    // Another thread may have cached the library while we were compiling.
+    // If so, just use that and discard our copy.
+    if is_valid_cached_library(&lib_path) {
+        let _ = fs::remove_file(&tmp_lib_path);
+        tracing::debug!(
+            "Another thread cached library while we compiled: {}",
+            lib_path.display()
+        );
+        return Ok(lib_path);
+    }
+
+    // Validate the compiled library before caching
+    if !is_valid_cached_library(&tmp_lib_path) {
+        let _ = fs::remove_file(&tmp_lib_path);
+        return Err(CompileError::CompilationFailed(
+            "Compiled library is too small, likely corrupted".to_string(),
+        ));
+    }
+
+    // Atomically move temp file to final cache path.
+    // fs::rename is atomic on the same filesystem (POSIX guarantee).
+    if let Err(e) = fs::rename(&tmp_lib_path, &lib_path) {
+        // Rename can fail cross-device; fall back to copy + delete
+        tracing::warn!("Atomic rename failed, falling back to copy: {}", e);
+        if let Err(copy_err) = fs::copy(&tmp_lib_path, &lib_path) {
+            let _ = fs::remove_file(&tmp_lib_path);
+            return Err(CompileError::CompilationFailed(format!(
+                "Failed to cache compiled library: {}",
+                copy_err
+            )));
+        }
+        let _ = fs::remove_file(&tmp_lib_path);
+    }
 
     tracing::info!("Compiled C++ kernel: {}", lib_path.display());
     Ok(lib_path)
