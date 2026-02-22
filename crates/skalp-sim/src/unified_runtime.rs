@@ -630,9 +630,9 @@ impl UnifiedSimulator {
             }
             SimulatorBackend::GateLevelCpu(sim) => {
                 // Gate-level netlists use user-facing names, not internal _s names
-                // Convert u64 to bool vector
-                let bits: Vec<bool> = (0..64).map(|i| (value >> i) & 1 == 1).collect();
-                sim.set_input(name, &bits);
+                // Use set_input_u64 which handles bit-indexed signals (e.g., "a[0]", "a[1]")
+                // that arise from tech mapping multi-bit ports to bit-level primitives
+                sim.set_input_u64(name, value);
             }
             #[cfg(target_os = "macos")]
             SimulatorBackend::GateLevelGpu(runtime) => {
@@ -950,13 +950,9 @@ impl UnifiedSimulator {
             }
             SimulatorBackend::GateLevelCpu(sim) => {
                 // Gate-level netlists use user-facing names, not internal _s names
-                sim.get_output(name).map(|bits| {
-                    bits.iter()
-                        .enumerate()
-                        .filter(|(_, &b)| b)
-                        .map(|(i, _)| 1u64 << i)
-                        .sum()
-                })
+                // Use get_output_u64 which handles bit-indexed signals (e.g., "y[0]", "y[1]")
+                // that arise from tech mapping multi-bit ports to bit-level primitives
+                sim.get_output_u64(name)
             }
             #[cfg(target_os = "macos")]
             SimulatorBackend::GateLevelGpu(runtime) => {
