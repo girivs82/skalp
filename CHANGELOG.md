@@ -5,6 +5,15 @@ All notable changes to SKALP will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.1] - 2026-02-23
+
+### Changed
+
+- Rewrote README with accurate project structure, CLI command reference, and correct URLs
+- Added CONTRIBUTING.md with build, test, and submission guidelines
+- Added GitHub issue templates for bug reports and feature requests
+- Set repository topics, homepage, and enabled Discussions
+
 ## [0.1.0] - 2026-02-22
 
 Initial release of the SKALP intent-driven hardware synthesis language and compiler.
@@ -25,7 +34,7 @@ Initial release of the SKALP intent-driven hardware synthesis language and compi
 - Code generation targeting SystemVerilog, Verilog, and VHDL
 - Hierarchical gate-level synthesis with per-instance optimization
 - NCL asynchronous circuit support for clockless, delay-insensitive designs
-- ML-guided logic synthesis with AIG-based optimization and learned pass ordering
+- AIG-based logic optimization with configurable pass sequences
 - iCE40 FPGA backend with place-and-route and programmer support
 - Clock domain crossing analysis with automatic synchronizer generation
 
@@ -63,4 +72,5 @@ Initial release of the SKALP intent-driven hardware synthesis language and compi
 - macOS (x86_64 and ARM64)
 - Windows (x86_64)
 
+[0.1.1]: https://github.com/girivs82/skalp/releases/tag/v0.1.1
 [0.1.0]: https://github.com/girivs82/skalp/releases/tag/v0.1.0

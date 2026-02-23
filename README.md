@@ -1,152 +1,173 @@
-# SKALP - Intent-Driven Hardware Synthesis
+# SKALP
 
-> **संकल्पना** *(Sankalpana)* - Where conception becomes circuit
+**Intent-driven hardware synthesis language and compiler.**
 
-SKALP is a modern hardware description language that preserves design intent through progressive refinement, from algorithm to gates.
+[![CI](https://github.com/girivs82/skalp/actions/workflows/ci.yml/badge.svg)](https://github.com/girivs82/skalp/actions/workflows/ci.yml)
 
-## Why SKALP?
+## What is SKALP?
 
-The name SKALP comes from Sanskrit 'Sankalpana' (संकल्पना), meaning "conception with purpose" or "intent-driven creation". Just as Sankalpana represents the mental conception before physical manifestation, SKALP captures your design intent and transforms it into efficient hardware.
+SKALP is a hardware description language that preserves design intent through progressive refinement, from algorithm to gates. It combines a modern type system (traits, generics, pattern matching) with compile-time clock domain safety, an integrated synthesis and simulation toolchain, and formal verification — all in a single binary.
+
+The name comes from Sanskrit *Sankalpana* (संकल्पना), meaning "conception with purpose."
 
 ## Key Features
 
-- **Intent-First Design**: Express what you want to achieve, not just how
-- **Clock Domain Safety**: Clock domains as lifetimes - CDC bugs caught at compile time
-- **Progressive Abstraction**: From high-level dataflow to cycle-accurate RTL
-- **Modern Type System**: Traits, generics, const generics, pattern matching from Rust
-- **Trait-Based Polymorphism**: Real code reuse across hardware types (NEW!)
-- **Built-in Verification**: Assertions and formal properties as first-class citizens
-- **Hardware-Aware Linter**: Catch common mistakes and design anti-patterns (NEW!)
-- **GPU-Accelerated Simulation**: Metal backend for instant testing on macOS (UNIQUE!)
-- **Comprehensive Standard Library**: Bitops, math, vectors, fixed-point, and more
-- **Protocol Abstractions**: Define protocols once, implement anywhere
+- **Clock domain safety** — clock domains as compile-time lifetimes; CDC bugs caught before simulation
+- **Four-stage IR pipeline** — HIR → MIR → LIR → SIR with optimization at every level
+- **Integrated toolchain** — compiler, simulator, synthesizer, formatter, linter, package manager, and LSP in one binary
+- **GPU-accelerated fault simulation** — Metal backend for parallel fault injection on macOS
+- **iCE40 FPGA backend** — synthesis, place-and-route, and programmer support for iCE40 devices
+- **Formal verification** — equivalence checking (simulation + SAT), SVA generation, bounded model checking
+- **ISO 26262 safety analysis** — fault injection-driven FMEA/FMEDA with measured diagnostic coverage
+- **NCL async circuits** — Null Convention Logic support for clockless, delay-insensitive designs
+- **ML-guided synthesis** — train and apply ML models for optimization pass ordering
 
 ## Quick Example
 
-```rust
-// Design with intent in SKALP
-entity Accelerator {
-    in data: stream<'clk>[32]    // Clock domain in type system
-    out result: stream<'clk>[32]
-} with intent {
-    throughput: 100M_samples_per_sec,
-    architecture: systolic_array,
-    optimization: balanced(speed: 0.7, area: 0.3)
+```
+// examples/counter.sk — an 8-bit counter
+
+entity Counter {
+    in clk: clock
+    in rst: reset
+    out count: nat[8]
 }
 
-impl Accelerator {
-    flow {
-        result = data
-            |> map(transform)
-            |> filter(threshold)
-            |> reduce(accumulate)
+impl Counter {
+    signal counter: nat[8] = 0
+
+    on(clk.rise) {
+        if (rst) {
+            counter = 0
+        } else {
+            counter = counter + 1
+        }
     }
+
+    count = counter
 }
 ```
-
-## Documentation
-
-- [Vision & Overview](docs/VISION.md) - Why SKALP exists and what it solves
-- [Language Specification](docs/LANGUAGE_SPECIFICATION.md) - Complete language reference
-- [Formal Grammar](docs/GRAMMAR.ebnf) - EBNF grammar specification
-- [Compiler Architecture](docs/COMPILER_ARCHITECTURE.md) - Multi-layer IR design and synthesis flow
-- [Full Flow Architecture](docs/FULL_FLOW_ARCHITECTURE.md) - End-to-end compilation for open FPGAs
-- [Simulation Architecture](docs/SIMULATION_ARCHITECTURE.md) - GPU-accelerated simulation
 
 ## Installation
 
+### Pre-built binaries
+
+Download the latest release for your platform from [GitHub Releases](https://github.com/girivs82/skalp/releases).
+
+Binaries are available for Linux (x86_64), macOS (x86_64 and ARM64), and Windows (x86_64).
+
+### Build from source
+
 ```bash
-# Build from source
-git clone https://github.com/skalp-lang/skalp
+git clone https://github.com/girivs82/skalp.git
 cd skalp
 cargo build --release
-
-# Create a new project
-./target/release/skalp new my_design
-cd my_design
-
-# The project comes with an example counter design
-cat src/main.sk
-
-# Build to SystemVerilog (default)
-../target/release/skalp build
-
-# Build to VHDL
-../target/release/skalp build --target vhdl
-
-# Simulate the design
-../target/release/skalp sim build/design.lir --duration 1000
-
-# Synthesize for iCE40 FPGA
-../target/release/skalp synth src/main.sk --device ice40-hx8k
 ```
 
-## File Extensions
+The binary is at `target/release/skalp`.
 
-- `.sk` - SKALP source files
-- `.skalp` - Alternative extension
+Requires Rust 1.70+ (stable). GPU simulation requires macOS with Metal support.
 
-## Tool Ecosystem
+## Getting Started
 
-**Production-Ready Tools:**
-- ✅ `skalp` - Main compiler and build tool
-- ✅ `skalp fmt` - Code formatter
-- ✅ `skalp-lsp` - Language Server Protocol for IDE support
-- ✅ `skalp lint` - Static analyzer and linter (NEW!)
-- ✅ `skalp sim` - GPU-accelerated simulator
-- ✅ Package manager - add/remove/update/search dependencies
+```bash
+# Create a new project
+skalp new my_design
+cd my_design
 
-**Planned Tools:**
-- `skalpdoc` - Documentation generator
-- `skalptest` - Enhanced test framework
+# Build to SystemVerilog (default)
+skalp build
 
-## Design Philosophy
+# Simulate the design
+skalp sim build/design.lir --duration 1000
 
-SKALP embodies the Sanskrit concept of Sankalpana - the power of conception and intention. In hardware design, the intent behind a circuit is often lost in implementation details. SKALP preserves this intent throughout the design flow:
+# Synthesize for iCE40 FPGA
+skalp synth src/main.sk --device ice40-hx8k
+```
 
-1. **Conceive** - Express your algorithm and intent
-2. **Refine** - Progressively add architectural details
-3. **Synthesize** - Generate optimized RTL guided by intent
-4. **Verify** - Ensure implementation matches conception
+See the [tutorial](https://mikaana.com/projects/skalp/) for a walkthrough.
 
-## Comparison with Other HDLs
+## CLI Commands
 
-| Feature | SKALP | SystemVerilog | VHDL | Chisel |
-|---------|-------|---------------|------|--------|
-| Type Safety | ✅ Strong | ❌ Weak | ✅ Strong | ✅ Strong |
-| Clock Domain Safety | ✅ Compile-time | ❌ None | ❌ None | ❌ None |
-| Intent Preservation | ✅ First-class | ❌ None | ❌ None | ❌ None |
-| Modern Abstractions | ✅ Traits, Generics | ⚠️ Limited | ❌ None | ✅ Scala |
-| Progressive Refinement | ✅ Built-in | ❌ None | ❌ None | ⚠️ Limited |
-| Verification | ✅ Built-in | ⚠️ SVA | ⚠️ PSL | ❌ External |
+| Command | Description |
+|---------|-------------|
+| `skalp new <name>` | Create a new project from a starter template |
+| `skalp build` | Compile SKALP source to HDL or gate-level netlists |
+| `skalp sim <file>` | Run behavioral or gate-level simulation (CPU or GPU) |
+| `skalp synth <file>` | Synthesize for iCE40 FPGA with optional place-and-route |
+| `skalp pnr <netlist>` | Place and route an existing gate-level netlist |
+| `skalp program <bitstream>` | Program an iCE40 FPGA board |
+| `skalp fmt [files]` | Format SKALP source files |
+| `skalp test [filter]` | Run tests |
+| `skalp analyze <file>` | Gate-level analysis and fault simulation |
+| `skalp ec <file>` | Equivalence checking between RTL and gate-level |
+| `skalp safety` | ISO 26262 fault injection safety analysis |
+| `skalp compile <file>` | Compile to pre-compiled IP format (.skb) |
+| `skalp trace <file> <signal>` | Trace a signal through the gate-level netlist |
+| `skalp train` | Train ML pass ordering model from collected data |
+| `skalp add <pkg>` | Add a dependency |
+| `skalp remove <pkg>` | Remove a dependency |
+| `skalp update [pkg]` | Update dependencies |
+| `skalp search <query>` | Search the package registry |
+| `skalp cache` | Manage the package cache |
 
-## Current Status
+Run `skalp <command> --help` for detailed options.
 
-SKALP has reached its first major milestone with a working compiler implementation:
+## Documentation
 
-- ✅ Language design and specification (complete)
-- ✅ Compiler architecture design (complete)
-- ✅ Full flow architecture for open FPGAs (complete)
-- ✅ Formal grammar specification (complete)
-- ✅ Rust project structure setup (complete)
-- ✅ CLI binary implementation (complete)
-- ✅ Basic compilation pipeline (complete)
-- ✅ Multi-target code generation (SystemVerilog, VHDL, Verilog)
-- ✅ Project scaffolding and examples (complete)
-- 🚧 GPU simulation engine (placeholder implementation)
-- 🚧 FPGA/ASIC synthesis backends (placeholder implementation)
-- 📋 Standard library development (planned)
-- 📋 Full synthesis backend integration (planned)
-- 📋 Property-based testing framework (planned)
+- [Tutorial](https://mikaana.com/projects/skalp/) — guided introduction
+- [Language Specification](docs/LANGUAGE_SPECIFICATION.md) — complete language reference
+- [Formal Grammar](docs/GRAMMAR.ebnf) — EBNF grammar
+- [Compiler Architecture](docs/COMPILER_ARCHITECTURE.md) — multi-layer IR design
+- [Simulation Architecture](docs/SIMULATION_ARCHITECTURE.md) — CPU and GPU simulation
+- [Full Flow Architecture](docs/FULL_FLOW_ARCHITECTURE.md) — end-to-end FPGA compilation
 
 ## Project Structure
 
-```\nskalp/\n├── src/                    # Main CLI binary\n├── crates/                 # Workspace crates\n│   ├── skalp-frontend/     # Lexer, parser, HIR\n│   ├── skalp-mir/          # Mid-level IR and optimization\n│   ├── skalp-lir/          # Low-level IR and netlist\n│   ├── skalp-codegen/      # Code generation (SV/VHDL/Verilog)\n│   ├── skalp-sim/          # GPU simulation engine\n│   └── skalp-place-route/  # Place & route for open FPGAs\n├── docs/                   # Documentation\n├── examples/               # Example SKALP designs\n└── skalp.toml             # Project configuration\n```\n\n## Contributing\n\nWe welcome contributions! SKALP is being built by the community, for the community.
+```
+skalp/
+├── src/                          # CLI binary
+├── crates/
+│   ├── skalp-frontend/           # Lexer, parser, HIR
+│   ├── skalp-mir/                # Mid-level IR and optimization
+│   ├── skalp-lir/                # Low-level IR and netlist
+│   ├── skalp-sir/                # Simulation IR
+│   ├── skalp-codegen/            # Code generation (SystemVerilog, VHDL, Verilog)
+│   ├── skalp-backends/           # Backend trait and target definitions
+│   ├── skalp-sim/                # Simulation engine (CPU + GPU)
+│   ├── skalp-place-route/        # iCE40 place-and-route and programmer
+│   ├── skalp-verify/             # Formal verification (SVA, equivalence checking)
+│   ├── skalp-formal/             # SAT-based formal methods
+│   ├── skalp-safety/             # ISO 26262 safety analysis
+│   ├── skalp-lint/               # Hardware-aware linter
+│   ├── skalp-lsp/                # Language Server Protocol
+│   ├── skalp-stdlib/             # Standard library (bitops, math, vectors, fixed-point)
+│   ├── skalp-testing/            # Test infrastructure and testbench API
+│   ├── skalp-parallel/           # Parallel compilation
+│   ├── skalp-incremental/        # Incremental compilation
+│   ├── skalp-asic/               # ASIC backend
+│   ├── skalp-ml/                 # ML-guided synthesis optimization
+│   ├── skalp-resolve/            # Dependency resolution
+│   ├── skalp-manifest/           # Project manifest (skalp.toml)
+│   └── skalp-package/            # Package manager
+├── docs/                         # Specifications and architecture docs
+├── examples/                     # Example SKALP designs
+└── scripts/                      # CI and development scripts
+```
+
+## Platform Support
+
+| Platform | Arch | Simulation | GPU Accel |
+|----------|------|------------|-----------|
+| Linux | x86_64 | CPU | — |
+| macOS | x86_64 | CPU + GPU | Metal |
+| macOS | ARM64 | CPU + GPU | Metal |
+| Windows | x86_64 | CPU | — |
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for build instructions, testing, and how to submit changes.
 
 ## License
 
-MIT
-
----
-
-*संकल्पना - Sankalpana - From conception to silicon*
+[MIT](LICENSE)
