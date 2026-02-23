@@ -14,8 +14,10 @@ pub mod properties;
 pub mod requirements;
 pub mod testbench;
 
-#[cfg(all(feature = "formal", not(tarpaulin)))]
-pub mod formal;
+// NOTE: formal.rs is temporarily disabled — it has stale skalp-mir API
+// references that cause compilation errors. Needs updating to current MIR API.
+// #[cfg(all(feature = "formal", not(tarpaulin)))]
+// pub mod formal;
 
 pub use assertions::{Assertion, AssertionKind, ConcurrentAssertion, ImmediateAssertion};
 pub use coverage::{Coverage, CoverageMetrics, CoverageReport};
