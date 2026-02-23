@@ -6490,7 +6490,25 @@ impl<'hir> HirToMir<'hir> {
                     let left = result_stack.pop().flatten();
                     if let (Some(left), Some(right)) = (left, right) {
                         let mir_op = self.convert_binary_op(&op, left_expr);
-                        let ty = left.ty.clone(); // Inherit type from left operand
+                        // For widening add, result is 1 bit wider than the wider operand
+                        let ty = if matches!(op, hir::HirBinaryOp::WidenAdd) {
+                            use skalp_frontend::types::{Type as FrontendType, Width};
+                            let get_width = |ty: &FrontendType| -> u32 {
+                                match ty {
+                                    FrontendType::Bit(Width::Fixed(w))
+                                    | FrontendType::Logic(Width::Fixed(w))
+                                    | FrontendType::Int(Width::Fixed(w))
+                                    | FrontendType::Nat(Width::Fixed(w)) => *w,
+                                    _ => 1,
+                                }
+                            };
+                            let left_width = get_width(&left.ty);
+                            let right_width = get_width(&right.ty);
+                            let wider_width = left_width.max(right_width);
+                            FrontendType::Bit(Width::Fixed(wider_width + 1))
+                        } else {
+                            left.ty.clone() // Inherit type from left operand
+                        };
                         result_stack.push(Some(Expression::new(
                             ExpressionKind::Binary {
                                 op: mir_op,
@@ -16930,6 +16948,7 @@ impl<'hir> HirToMir<'hir> {
     fn operator_to_trait_name(op: &hir::HirBinaryOp) -> &'static str {
         match op {
             hir::HirBinaryOp::Add => "Add",
+            hir::HirBinaryOp::WidenAdd => "Add", // Widening add uses Add trait
             hir::HirBinaryOp::Sub => "Sub",
             hir::HirBinaryOp::Mul => "Mul",
             hir::HirBinaryOp::Div => "Div",
@@ -16959,6 +16978,7 @@ impl<'hir> HirToMir<'hir> {
     fn operator_to_method_name(op: &hir::HirBinaryOp) -> &'static str {
         match op {
             hir::HirBinaryOp::Add => "add",
+            hir::HirBinaryOp::WidenAdd => "add", // Widening add uses add method
             hir::HirBinaryOp::Sub => "sub",
             hir::HirBinaryOp::Mul => "mul",
             hir::HirBinaryOp::Div => "div",
@@ -17214,6 +17234,7 @@ impl<'hir> HirToMir<'hir> {
         // This function only handles integer/bitwise operations.
         match op {
             hir::HirBinaryOp::Add => BinaryOp::Add,
+            hir::HirBinaryOp::WidenAdd => BinaryOp::WidenAdd,
             hir::HirBinaryOp::Sub => BinaryOp::Sub,
             hir::HirBinaryOp::Mul => BinaryOp::Mul,
             hir::HirBinaryOp::Div => BinaryOp::Div,
@@ -17725,7 +17746,7 @@ impl<'hir> HirToMir<'hir> {
                 let right = self.try_eval_const_expr(&bin_expr.right)?;
 
                 match &bin_expr.op {
-                    hir::HirBinaryOp::Add => Some(left + right),
+                    hir::HirBinaryOp::Add | hir::HirBinaryOp::WidenAdd => Some(left + right),
                     hir::HirBinaryOp::Sub => Some(left.saturating_sub(right)),
                     hir::HirBinaryOp::Mul => Some(left * right),
                     hir::HirBinaryOp::Div if right != 0 => Some(left / right),

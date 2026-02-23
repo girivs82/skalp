@@ -1650,6 +1650,7 @@ pub struct HirBinaryExpr {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum HirBinaryOp {
     Add,
+    WidenAdd,
     Sub,
     Mul,
     Div,
@@ -1675,6 +1676,7 @@ impl HirBinaryOp {
     pub fn to_trait_name(&self) -> Option<&'static str> {
         match self {
             HirBinaryOp::Add => Some("Add"),
+            HirBinaryOp::WidenAdd => None, // Hardware-specific, no trait resolution
             HirBinaryOp::Sub => Some("Sub"),
             HirBinaryOp::Mul => Some("Mul"),
             HirBinaryOp::Div => Some("Div"),

@@ -396,6 +396,9 @@ pub enum Token {
     #[token(">=")]
     GreaterEqual,
 
+    #[token("+:")]
+    WidenAdd,
+
     #[token("+")]
     Plus,
 

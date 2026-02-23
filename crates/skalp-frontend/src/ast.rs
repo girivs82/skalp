@@ -437,6 +437,7 @@ pub struct BinaryExpr {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum BinaryOp {
     Add,
+    WidenAdd,
     Sub,
     Mul,
     Div,

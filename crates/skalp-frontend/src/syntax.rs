@@ -209,6 +209,7 @@ pub enum SyntaxKind {
     Le,               // <=
     Ge,               // >=
     Plus,             // +
+    WidenAdd,         // +:
     Minus,            // -
     Star,             // *
     Slash,            // /
@@ -608,6 +609,7 @@ impl SyntaxKind {
                 | Le
                 | Ge
                 | Plus
+                | WidenAdd
                 | Minus
                 | Star
                 | Slash
@@ -1036,6 +1038,7 @@ impl From<crate::lexer::Token> for SyntaxKind {
             Token::LessEqual => Le,
             Token::GreaterEqual => Ge,
             Token::Plus => Plus,
+            Token::WidenAdd => WidenAdd,
             Token::Minus => Minus,
             Token::Star => Star,
             Token::Slash => Slash,

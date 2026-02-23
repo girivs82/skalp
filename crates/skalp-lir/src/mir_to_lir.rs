@@ -2640,7 +2640,7 @@ impl MirToLirTransform {
 
         let (left_signal, right_signal, word_op, result_width) = match op {
             // Arithmetic - use expected_width for operands
-            BinaryOp::Add => {
+            BinaryOp::Add | BinaryOp::WidenAdd => {
                 let left_sig = self.transform_expression(left, arithmetic_operand_width);
                 let right_sig = self.transform_expression(right, arithmetic_operand_width);
                 (

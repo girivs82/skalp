@@ -8202,7 +8202,7 @@ impl<'a> MirToAig<'a> {
                 let eq = self.build_equality(&left, &right);
                 vec![self.aig.add_or(gt, eq)]
             }
-            BinaryOp::Add => self.build_adder(&left, &right),
+            BinaryOp::Add | BinaryOp::WidenAdd => self.build_adder(&left, &right),
             BinaryOp::Sub => {
                 // a - b = a + (~b + 1)
                 let not_right: Vec<_> = right.iter().map(|l| l.invert()).collect();

@@ -1519,6 +1519,7 @@ fn format_value(value: &skalp_mir::Value) -> String {
 fn format_binary_op(op: &skalp_mir::BinaryOp) -> &'static str {
     match op {
         skalp_mir::BinaryOp::Add => "+",
+        skalp_mir::BinaryOp::WidenAdd => "+", // Width extension handled by type declarations
         skalp_mir::BinaryOp::Sub => "-",
         skalp_mir::BinaryOp::Mul => "*",
         skalp_mir::BinaryOp::Div => "/",
