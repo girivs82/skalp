@@ -4049,6 +4049,12 @@ impl<'a> ParseState<'a> {
                 self.finish_node();
             }
         }
+        // Lifetime parameter (e.g., 'src, 'dst in Synchronizer<'src, 'dst>)
+        else if self.at(SyntaxKind::Lifetime) {
+            self.start_node(SyntaxKind::IdentExpr);
+            self.bump();
+            self.finish_node();
+        }
         // Otherwise parse as type
         else {
             self.parse_type();
@@ -4418,6 +4424,12 @@ impl<'a> ParseState<'a> {
                 self.bump(); // '('
                 self.parse_type_arg_expr();
                 self.expect(SyntaxKind::RParen);
+                self.finish_node();
+            }
+            Some(SyntaxKind::Lifetime) => {
+                // Lifetime in type argument context (e.g., clock<'dst>, bit<'src>)
+                self.start_node(SyntaxKind::IdentExpr);
+                self.bump(); // consume lifetime token
                 self.finish_node();
             }
             _ => {
