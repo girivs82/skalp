@@ -1234,7 +1234,8 @@ impl HirBuilderContext {
                             .add_to_scope(&iname, SymbolId::Variable(var_id));
                         trace!(
                             "[BUG #85 FIX] Pre-registered instance '{}' as Variable({:?})",
-                            iname, var_id
+                            iname,
+                            var_id
                         );
                     }
                 }

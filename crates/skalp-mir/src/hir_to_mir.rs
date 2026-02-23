@@ -1404,10 +1404,8 @@ impl<'hir> HirToMir<'hir> {
                             if let Some(var_id) = hir_instance.variable_id {
                                 self.entity_instance_outputs.insert(var_id, output_ports);
                                 if let Some(module_id) = self.entity_map.get(&hir_instance.entity) {
-                                    self.entity_instance_info.insert(
-                                        var_id,
-                                        (hir_instance.name.clone(), *module_id),
-                                    );
+                                    self.entity_instance_info
+                                        .insert(var_id, (hir_instance.name.clone(), *module_id));
                                 }
                                 trace!(
                                     "[BUG #85 FIX] Stored entity instance '{}' (var {:?}) in entity_instance_outputs",
