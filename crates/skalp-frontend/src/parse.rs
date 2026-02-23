@@ -4736,7 +4736,10 @@ impl<'a> ParseState<'a> {
         let mut checkpoint = self.builder.checkpoint();
         self.parse_multiplicative_expr();
 
-        while self.at(SyntaxKind::Plus) || self.at(SyntaxKind::WidenAdd) || self.at(SyntaxKind::Minus) {
+        while self.at(SyntaxKind::Plus)
+            || self.at(SyntaxKind::WidenAdd)
+            || self.at(SyntaxKind::Minus)
+        {
             self.builder
                 .start_node_at(checkpoint, rowan::SyntaxKind(SyntaxKind::BinaryExpr as u16));
             self.bump(); // consume + or -
