@@ -283,6 +283,9 @@ pub struct HirInstance {
     /// When present, indicates this instance implements a safety mechanism from a safety_goal.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub safety_config: Option<SafetyConfig>,
+    /// Variable ID for symbol table registration (allows field access like `instance.port`)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub variable_id: Option<VariableId>,
 }
 
 /// Named generic argument (for clearer code)

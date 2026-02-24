@@ -1214,6 +1214,34 @@ impl HirBuilderContext {
             entity_name,
             children_count
         );
+
+        // BUG #85 FIX: Pre-register ALL InstanceDecl names in the symbol table
+        // BEFORE processing any other statements. This ensures that expressions
+        // like `uart_tx.busy` in assignments can resolve the instance name,
+        // even when the entity isn't in scope (external entities).
+        for child in node.children() {
+            if child.kind() == SyntaxKind::InstanceDecl {
+                if let Some(iname) = child
+                    .children_with_tokens()
+                    .filter_map(|elem| elem.into_token())
+                    .find(|t| t.kind() == SyntaxKind::Ident)
+                    .map(|t| t.text().to_string())
+                {
+                    if !self.symbols.variables.contains_key(&iname) {
+                        let var_id = self.next_variable_id();
+                        self.symbols.variables.insert(iname.clone(), var_id);
+                        self.symbols
+                            .add_to_scope(&iname, SymbolId::Variable(var_id));
+                        trace!(
+                            "[BUG #85 FIX] Pre-registered instance '{}' as Variable({:?})",
+                            iname,
+                            var_id
+                        );
+                    }
+                }
+            }
+        }
+
         for child in node.children() {
             trace!("[HIR_IMPL_DEBUG]   child kind: {:?}", child.kind());
             match child.kind() {
@@ -1382,7 +1410,16 @@ impl HirBuilderContext {
                     self.process_attribute(&child);
                 }
                 SyntaxKind::InstanceDecl => {
-                    if let Some(instance) = self.build_instance(&child) {
+                    // BUG #85 FIX: Retrieve pre-registered variable_id from symbol table
+                    let inst_var_id = child
+                        .children_with_tokens()
+                        .filter_map(|elem| elem.into_token())
+                        .find(|t| t.kind() == SyntaxKind::Ident)
+                        .map(|t| t.text().to_string())
+                        .and_then(|iname| self.symbols.variables.get(&iname).copied());
+
+                    if let Some(mut instance) = self.build_instance(&child) {
+                        instance.variable_id = inst_var_id;
                         instances.push(instance);
                     }
                 }
@@ -1654,6 +1691,7 @@ impl HirBuilderContext {
                 named_generic_args: info.named_generic_args.clone(),
                 connections,
                 safety_config: None,
+                variable_id: None,
             });
         }
     }
@@ -2045,6 +2083,7 @@ impl HirBuilderContext {
             named_generic_args,
             connections,
             safety_config,
+            variable_id: None,
         })
     }
 
