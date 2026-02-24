@@ -542,9 +542,12 @@ pub enum Token {
     SizedLiteral(u64),
 
     // Lifetime token - 'identifier for clock domain lifetimes
-    // This pattern now only matches when the char after ' is alphabetic (not bhd followed by digits)
+    // First regex: lifetimes NOT starting with b/h/d (e.g., 'src, 'a, 'clk)
     #[regex(r"'[a-zA-Z_&&[^bhd]][a-zA-Z0-9_]*", |lex| lex.slice()[1..].to_owned())]
-    #[regex(r"'[bhd][a-zA-Z_][a-zA-Z0-9_]*", |lex| lex.slice()[1..].to_owned())]
+    // Second regex: lifetimes starting with b/h/d (e.g., 'dst, 'd, 'bus)
+    // These need special handling to avoid conflict with sized literals (8'hFF, 4'd15).
+    // Sized literals always start with digits before the ', so standalone 'b/'h/'d are safe.
+    #[regex(r"'[bhd][a-zA-Z0-9_]*", |lex| lex.slice()[1..].to_owned())]
     Lifetime(String),
 
     // Whitespace and comments (skipped but tracked for position)
