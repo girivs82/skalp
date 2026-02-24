@@ -289,6 +289,12 @@ enum EvalState {
     Vacuous,
 }
 
+impl Default for PropertyEvaluator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl PropertyEvaluator {
     /// Create a new evaluator
     pub fn new() -> Self {

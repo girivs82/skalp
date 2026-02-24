@@ -31,7 +31,7 @@ pub enum AssertionKind {
     Immediate(ImmediateAssertion),
 
     /// Concurrent assertion (evaluated over time)
-    Concurrent(ConcurrentAssertion),
+    Concurrent(Box<ConcurrentAssertion>),
 
     /// Assumption (constrains formal analysis)
     Assume(Expression),
@@ -258,6 +258,12 @@ pub struct AssertionFailure {
     pub message: String,
 }
 
+impl Default for AssertionChecker {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl AssertionChecker {
     /// Create a new assertion checker
     pub fn new() -> Self {
@@ -311,7 +317,7 @@ impl AssertionChecker {
 
         AssertionReport {
             total_assertions: total,
-            passed: passed,
+            passed,
             failed: self.failures.len(),
             failures: self.failures.clone(),
             coverage_summary: self.get_coverage_summary(),

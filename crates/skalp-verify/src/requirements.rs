@@ -199,6 +199,12 @@ struct TraceabilityMatrix {
     refines: HashMap<String, HashSet<String>>,
 }
 
+impl Default for RequirementTracker {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl RequirementTracker {
     /// Create a new requirement tracker
     pub fn new() -> Self {

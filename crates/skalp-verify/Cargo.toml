@@ -19,5 +19,8 @@ ouroboros = { version = "0.18", optional = true }
 default = []
 formal = ["z3", "ouroboros"]
 
+[lints.rust]
+unexpected_cfgs = { level = "allow", check-cfg = ['cfg(tarpaulin)'] }
+
 [dev-dependencies]
 tempfile = "3.0"

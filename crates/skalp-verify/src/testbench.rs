@@ -489,6 +489,12 @@ pub struct TransactionDriver<T: Transaction> {
     queue: VecDeque<T>,
 }
 
+impl<T: Transaction> Default for TransactionDriver<T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<T: Transaction> TransactionDriver<T> {
     /// Create a new driver
     pub fn new() -> Self {
@@ -513,6 +519,12 @@ impl<T: Transaction> TransactionDriver<T> {
 pub struct TransactionMonitor<T: Transaction> {
     /// Observed transactions
     observed: Vec<T>,
+}
+
+impl<T: Transaction> Default for TransactionMonitor<T> {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl<T: Transaction> TransactionMonitor<T> {
@@ -541,6 +553,12 @@ pub struct Scoreboard<T: Transaction> {
 
     /// Actual transactions
     actual: Vec<T>,
+}
+
+impl<T: Transaction> Default for Scoreboard<T> {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl<T: Transaction> Scoreboard<T> {
