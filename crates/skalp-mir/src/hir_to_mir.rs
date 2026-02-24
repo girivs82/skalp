@@ -1180,6 +1180,10 @@ impl<'hir> HirToMir<'hir> {
                     // BUG FIX #13-16, #21-23: Pre-process instances BEFORE assignments
                     // This creates signals for instance output ports so FieldAccess can resolve them
                     self.instance_outputs_by_name.clear();
+                    // BUG #85 FIX: Clear entity_instance_outputs per entity to prevent
+                    // VariableId collisions across entities (VariableIds are per-entity scoped)
+                    self.entity_instance_outputs.clear();
+                    self.entity_instance_info.clear();
                     trace!(
                         "🔍 [INSTANCE_PRE] impl_block for module '{}' has {} instances",
                         module.name,
@@ -1398,19 +1402,12 @@ impl<'hir> HirToMir<'hir> {
                             self.instance_outputs_by_name
                                 .insert(hir_instance.name.clone(), output_ports.clone());
 
-                            // BUG #85 FIX: If this HirInstance has a variable_id (from InstanceDecl
-                            // with `let name = Entity { ... }`), also populate entity_instance_outputs
-                            // so that field access via Variable(var_id) path works correctly.
                             if let Some(var_id) = hir_instance.variable_id {
                                 self.entity_instance_outputs.insert(var_id, output_ports);
                                 if let Some(module_id) = self.entity_map.get(&hir_instance.entity) {
                                     self.entity_instance_info
                                         .insert(var_id, (hir_instance.name.clone(), *module_id));
                                 }
-                                trace!(
-                                    "[BUG #85 FIX] Stored entity instance '{}' (var {:?}) in entity_instance_outputs",
-                                    hir_instance.name, var_id
-                                );
                             }
                         }
                     }
