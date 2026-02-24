@@ -582,7 +582,7 @@ impl ConstEvaluator {
         let right = self.eval(&bin.right)?;
 
         match bin.op {
-            HirBinaryOp::Add => match (left, right) {
+            HirBinaryOp::Add | HirBinaryOp::WidenAdd => match (left, right) {
                 (ConstValue::Nat(a), ConstValue::Nat(b)) => a
                     .checked_add(b)
                     .map(ConstValue::Nat)

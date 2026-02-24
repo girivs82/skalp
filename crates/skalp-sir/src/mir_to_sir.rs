@@ -5267,6 +5267,7 @@ impl<'a> MirToSirConverter<'a> {
         use skalp_mir::BinaryOp::*;
         match op {
             Add => BinaryOperation::Add,
+            WidenAdd => BinaryOperation::Add, // Widening add: width extension handled by type system
             Sub => BinaryOperation::Sub,
             // BUG FIX #247: Use signed arithmetic when operands are signed
             Mul => {

@@ -5127,7 +5127,7 @@ impl HirBuilderContext {
                 let left = Self::eval_const_expr_impl(&bin.left)?;
                 let right = Self::eval_const_expr_impl(&bin.right)?;
                 match bin.op {
-                    HirBinaryOp::Add => Some(left + right),
+                    HirBinaryOp::Add | HirBinaryOp::WidenAdd => Some(left + right),
                     HirBinaryOp::Sub => Some(left - right),
                     HirBinaryOp::Mul => Some(left * right),
                     HirBinaryOp::Div => {
@@ -8012,6 +8012,7 @@ impl HirBuilderContext {
                                 matches!(
                                     t.kind(),
                                     SyntaxKind::Plus
+                                        | SyntaxKind::WidenAdd
                                         | SyntaxKind::Minus
                                         | SyntaxKind::Star
                                         | SyntaxKind::Slash
@@ -13462,6 +13463,7 @@ impl HirBuilderContext {
     fn token_to_binary_op(&self, kind: SyntaxKind) -> Option<HirBinaryOp> {
         match kind {
             SyntaxKind::Plus => Some(HirBinaryOp::Add),
+            SyntaxKind::WidenAdd => Some(HirBinaryOp::WidenAdd),
             SyntaxKind::Minus => Some(HirBinaryOp::Sub),
             SyntaxKind::Star => Some(HirBinaryOp::Mul),
             SyntaxKind::Slash => Some(HirBinaryOp::Div),
@@ -14775,6 +14777,17 @@ impl HirBuilderContext {
 
             // Shifts preserve left operand type
             HirBinaryOp::LeftShift | HirBinaryOp::RightShift => left.clone(),
+
+            // Widening add: result is 1 bit wider than the wider operand
+            HirBinaryOp::WidenAdd => {
+                let wider = self.wider_type(left, right);
+                match wider {
+                    HirType::Bit(w) => HirType::Bit(w + 1),
+                    HirType::Int(w) => HirType::Int(w + 1),
+                    HirType::Nat(w) => HirType::Nat(w + 1),
+                    other => other,
+                }
+            }
 
             // Arithmetic and bitwise operations: use wider type
             HirBinaryOp::Add

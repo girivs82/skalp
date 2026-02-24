@@ -385,6 +385,7 @@ impl MirToSir {
     fn convert_binary_op(&self, op: &MirBinaryOp) -> BinaryOp {
         match op {
             MirBinaryOp::Add => BinaryOp::Add,
+            MirBinaryOp::WidenAdd => BinaryOp::Add, // Widening add maps to regular add in simulation
             MirBinaryOp::Sub => BinaryOp::Sub,
             MirBinaryOp::Mul => BinaryOp::Mul,
             MirBinaryOp::Div => BinaryOp::Div,

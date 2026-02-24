@@ -799,6 +799,7 @@ impl Value {
 pub enum BinaryOp {
     // Arithmetic
     Add,
+    WidenAdd,
     Sub,
     Mul,
     Div,
