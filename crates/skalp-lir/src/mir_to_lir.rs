@@ -2640,7 +2640,7 @@ impl MirToLirTransform {
 
         let (left_signal, right_signal, word_op, result_width) = match op {
             // Arithmetic - use expected_width for operands
-            BinaryOp::Add | BinaryOp::WidenAdd => {
+            BinaryOp::Add => {
                 let left_sig = self.transform_expression(left, arithmetic_operand_width);
                 let right_sig = self.transform_expression(right, arithmetic_operand_width);
                 (
@@ -2648,9 +2648,26 @@ impl MirToLirTransform {
                     right_sig,
                     LirOp::Add {
                         width: arithmetic_operand_width,
-                        has_carry: false, // No extra carry needed, width already accounts for it
+                        has_carry: false,
                     },
                     expected_width,
+                )
+            }
+            BinaryOp::WidenAdd => {
+                // BUG #10.1 FIX: Widening add extends result width by 1 bit to prevent overflow
+                // Use operand_width + 1 as the minimum result width, but never exceed expected_width
+                // (which may already account for the widening via explicit type annotation)
+                let widen_width = (operand_width + 1).max(expected_width);
+                let left_sig = self.transform_expression(left, widen_width);
+                let right_sig = self.transform_expression(right, widen_width);
+                (
+                    left_sig,
+                    right_sig,
+                    LirOp::Add {
+                        width: widen_width,
+                        has_carry: false,
+                    },
+                    widen_width,
                 )
             }
             BinaryOp::Sub => {

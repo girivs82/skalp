@@ -3976,6 +3976,10 @@ impl<'a> MirToSirConverter<'a> {
             } else {
                 SirType::Bits(width)
             }
+        } else if matches!(op, skalp_mir::BinaryOp::WidenAdd) {
+            // BUG #10.1 FIX: Widening add extends result by 1 bit to prevent overflow
+            let width = left_type.width().max(right_type.width()) + 1;
+            SirType::Bits(width)
         } else {
             // Other arithmetic/logic operations use max width
             let width = left_type.width().max(right_type.width());

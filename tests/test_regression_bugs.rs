@@ -4,6 +4,7 @@
 //! Test names follow the pattern: test_bug<number>_<short_description>
 
 use skalp_frontend::hir_builder::build_hir;
+use skalp_frontend::monomorphization::MonomorphizationEngine;
 use skalp_frontend::parse::parse;
 
 /// Helper to parse SKALP code and build HIR
@@ -17,6 +18,9 @@ fn parse_skalp_code(code: &str) -> Result<(), String> {
 fn compile_to_sv(source: &str) -> Result<String, String> {
     let tree = parse(source);
     let hir = build_hir(&tree).map_err(|e| format!("HIR building failed: {:?}", e))?;
+    // Apply monomorphization to specialize generic entities
+    let mut engine = MonomorphizationEngine::new();
+    let hir = engine.monomorphize(&hir);
     let mir = skalp_mir::lower_to_mir(&hir).map_err(|e| format!("MIR lowering failed: {}", e))?;
     skalp_codegen::generate_systemverilog_from_mir(&mir).map_err(|e| e.to_string())
 }
@@ -1124,4 +1128,187 @@ impl TestMixedLogical {
     let sv6 = compile_to_sv(code6).expect("Mixed && and || should compile");
     assert!(sv6.contains("&&"), "Output should contain && operator");
     assert!(sv6.contains("||"), "Output should contain || operator");
+}
+
+// =============================================================================
+// ISSUE #10: CODEGEN BUGS (4 bugs)
+// =============================================================================
+
+#[test]
+fn test_issue10_widening_add_extends_result_width() {
+    let source = r#"
+entity WidenAddTest {
+    in clk: clock
+    in a: bit[8]
+    in b: bit[8]
+    out result: bit[9]
+}
+
+impl WidenAddTest {
+    result = a +: b
+}
+"#;
+    let sv = compile_to_sv(source).expect("Should compile widening add");
+
+    // Result must be 9 bits wide, not 8
+    assert!(sv.contains("[8:0] result"), "Issue #10 Bug 1: result should be 9-bit [8:0], got:\n{}", sv);
+    // The addition should zero-extend operands, not truncate
+    assert!(!sv.contains("[7:0] result"), "Issue #10 Bug 1: result should NOT be 8-bit");
+}
+
+#[test]
+fn test_issue10_cdc_entity_generates_always_ff() {
+    let source = r#"
+entity Sync<'src, 'dst> {
+    in  clk_dst: clock<'dst>
+    in  rst:     reset
+    in  data_in: bit<'src>
+    out data_out: bit
+}
+
+impl Sync {
+    signal ff1: bit
+    signal ff2: bit
+
+    on(clk_dst.rise) {
+        if rst {
+            ff1 = 0
+            ff2 = 0
+        } else {
+            ff1 = data_in
+            ff2 = ff1
+        }
+    }
+
+    data_out = ff2
+}
+"#;
+    let sv = compile_to_sv(source).expect("Should compile CDC entity");
+
+    // Must generate an always_ff block — empty module body is the bug
+    assert!(sv.contains("always_ff"), "Issue #10 Bug 2: CDC entity should generate always_ff block, got:\n{}", sv);
+    assert!(sv.contains("posedge clk_dst"), "Issue #10 Bug 2: should have posedge clk_dst sensitivity");
+    assert!(sv.contains("ff1"), "Issue #10 Bug 2: ff1 signal should appear in generated SV");
+    assert!(sv.contains("ff2"), "Issue #10 Bug 2: ff2 signal should appear in generated SV");
+}
+
+#[test]
+fn test_issue10_combinational_signal_not_literal_zero() {
+    let source = r#"
+entity BaudTickTest {
+    in  clk: clock
+    in  rst: reset
+    out tx_done: bit
+}
+
+impl BaudTickTest {
+    signal state: nat[2]
+    signal baud_counter: nat[9]
+
+    baud_tick = (baud_counter == 0)
+
+    on(clk.rise) {
+        if rst {
+            state = 0
+            baud_counter = 0
+        } else {
+            if baud_tick {
+                state = 1
+            } else {
+                baud_counter = baud_counter - 1
+            }
+        }
+    }
+
+    tx_done = (state == 1) & baud_tick
+}
+"#;
+    let sv = compile_to_sv(source).expect("Should compile combinational signal");
+
+    // baud_tick references should NOT be literal 0
+    assert!(!sv.contains("if (0)"), "Issue #10 Bug 3: baud_tick inlined as literal 0");
+    assert!(!sv.contains("& 0)"), "Issue #10 Bug 3: baud_tick inlined as literal 0 in expression");
+    // Should contain a wire or assign for baud_tick
+    assert!(
+        sv.contains("baud_tick") || sv.contains("baud_counter == 0"),
+        "Issue #10 Bug 3: baud_tick or its expansion should appear in SV, got:\n{}", sv
+    );
+}
+
+#[test]
+fn test_issue10_match_constant_signals_generates_case_arms() {
+    let source = r#"
+entity MatchConstTest {
+    in  clk: clock
+    in  rst: reset
+    out value: bit[8]
+}
+
+impl MatchConstTest {
+    signal IDLE:  nat[2] = 0
+    signal RUN:   nat[2] = 1
+    signal DONE:  nat[2] = 2
+
+    signal state: nat[2]
+
+    on(clk.rise) {
+        if rst {
+            state = IDLE
+            value = 0
+        } else {
+            match state {
+                IDLE => {
+                    value = 10
+                    state = RUN
+                }
+                RUN => {
+                    value = 20
+                    state = DONE
+                }
+                DONE => {
+                    value = 30
+                    state = IDLE
+                }
+            }
+        }
+    }
+}
+"#;
+    let sv = compile_to_sv(source).expect("Should compile match on constants");
+
+    // Must generate specific case values, not just default
+    assert!(sv.contains("case"), "Issue #10 Bug 4: should generate case statement");
+    // Should have at least one non-default case arm (0, 1, or 2)
+    let has_case_value = sv.contains("0:") || sv.contains("1:") || sv.contains("2:");
+    assert!(has_case_value, "Issue #10 Bug 4: case statement should have specific value arms, not just default, got:\n{}", sv);
+}
+
+#[test]
+fn test_issue10_generic_widening_add_variable_width() {
+    // Regression test for adder.sk: generic entity with let result: bit[WIDTH + 1]
+    // The variable width must survive monomorphization and codegen without being
+    // shrunk by the infer_variable_widths override (Bug Fix #8 interaction).
+    let source = r#"
+entity Adder<const WIDTH: nat = 8> {
+    in clk: clock
+    in a: bit[WIDTH]
+    in b: bit[WIDTH]
+    in carry_in: bit
+    out sum: bit[WIDTH]
+    out carry_out: bit
+}
+
+impl Adder {
+    let result: bit[WIDTH + 1] = a +: b + carry_in
+    sum = result[WIDTH - 1 : 0]
+    carry_out = result[WIDTH]
+}
+"#;
+    let sv = compile_to_sv(source).expect("Should compile generic widening add");
+
+    // result must be 9-bit (WIDTH=8, WIDTH+1=9), declared as logic [8:0]
+    assert!(sv.contains("[8:0] result"), "Issue #10: generic result should be 9-bit [8:0], got:\n{}", sv);
+    assert!(!sv.contains("[7:0] result"), "Issue #10: result should NOT be 8-bit [7:0]");
+    // carry_out accesses result[8] which must be valid
+    assert!(sv.contains("result[8]"), "Issue #10: carry_out should access result[8]");
 }
