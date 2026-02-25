@@ -1300,7 +1300,8 @@ impl HirBuilderContext {
                     // BUG #10.3 FIX: Auto-create implicit signals for bare combinational
                     // assignments to undeclared names at impl level (e.g., `baud_tick = (expr)`)
                     // Check if LHS is a simple identifier not in the symbol table
-                    let lhs_exprs: Vec<_> = child.children()
+                    let lhs_exprs: Vec<_> = child
+                        .children()
                         .filter(|n| matches!(n.kind(), SyntaxKind::IdentExpr))
                         .collect();
                     if let Some(lhs_node) = lhs_exprs.first() {

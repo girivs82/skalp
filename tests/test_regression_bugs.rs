@@ -1151,9 +1151,16 @@ impl WidenAddTest {
     let sv = compile_to_sv(source).expect("Should compile widening add");
 
     // Result must be 9 bits wide, not 8
-    assert!(sv.contains("[8:0] result"), "Issue #10 Bug 1: result should be 9-bit [8:0], got:\n{}", sv);
+    assert!(
+        sv.contains("[8:0] result"),
+        "Issue #10 Bug 1: result should be 9-bit [8:0], got:\n{}",
+        sv
+    );
     // The addition should zero-extend operands, not truncate
-    assert!(!sv.contains("[7:0] result"), "Issue #10 Bug 1: result should NOT be 8-bit");
+    assert!(
+        !sv.contains("[7:0] result"),
+        "Issue #10 Bug 1: result should NOT be 8-bit"
+    );
 }
 
 #[test]
@@ -1186,10 +1193,23 @@ impl Sync {
     let sv = compile_to_sv(source).expect("Should compile CDC entity");
 
     // Must generate an always_ff block — empty module body is the bug
-    assert!(sv.contains("always_ff"), "Issue #10 Bug 2: CDC entity should generate always_ff block, got:\n{}", sv);
-    assert!(sv.contains("posedge clk_dst"), "Issue #10 Bug 2: should have posedge clk_dst sensitivity");
-    assert!(sv.contains("ff1"), "Issue #10 Bug 2: ff1 signal should appear in generated SV");
-    assert!(sv.contains("ff2"), "Issue #10 Bug 2: ff2 signal should appear in generated SV");
+    assert!(
+        sv.contains("always_ff"),
+        "Issue #10 Bug 2: CDC entity should generate always_ff block, got:\n{}",
+        sv
+    );
+    assert!(
+        sv.contains("posedge clk_dst"),
+        "Issue #10 Bug 2: should have posedge clk_dst sensitivity"
+    );
+    assert!(
+        sv.contains("ff1"),
+        "Issue #10 Bug 2: ff1 signal should appear in generated SV"
+    );
+    assert!(
+        sv.contains("ff2"),
+        "Issue #10 Bug 2: ff2 signal should appear in generated SV"
+    );
 }
 
 #[test]
@@ -1226,12 +1246,19 @@ impl BaudTickTest {
     let sv = compile_to_sv(source).expect("Should compile combinational signal");
 
     // baud_tick references should NOT be literal 0
-    assert!(!sv.contains("if (0)"), "Issue #10 Bug 3: baud_tick inlined as literal 0");
-    assert!(!sv.contains("& 0)"), "Issue #10 Bug 3: baud_tick inlined as literal 0 in expression");
+    assert!(
+        !sv.contains("if (0)"),
+        "Issue #10 Bug 3: baud_tick inlined as literal 0"
+    );
+    assert!(
+        !sv.contains("& 0)"),
+        "Issue #10 Bug 3: baud_tick inlined as literal 0 in expression"
+    );
     // Should contain a wire or assign for baud_tick
     assert!(
         sv.contains("baud_tick") || sv.contains("baud_counter == 0"),
-        "Issue #10 Bug 3: baud_tick or its expansion should appear in SV, got:\n{}", sv
+        "Issue #10 Bug 3: baud_tick or its expansion should appear in SV, got:\n{}",
+        sv
     );
 }
 
@@ -1277,7 +1304,10 @@ impl MatchConstTest {
     let sv = compile_to_sv(source).expect("Should compile match on constants");
 
     // Must generate specific case values, not just default
-    assert!(sv.contains("case"), "Issue #10 Bug 4: should generate case statement");
+    assert!(
+        sv.contains("case"),
+        "Issue #10 Bug 4: should generate case statement"
+    );
     // Should have at least one non-default case arm (0, 1, or 2)
     let has_case_value = sv.contains("0:") || sv.contains("1:") || sv.contains("2:");
     assert!(has_case_value, "Issue #10 Bug 4: case statement should have specific value arms, not just default, got:\n{}", sv);
@@ -1307,8 +1337,18 @@ impl Adder {
     let sv = compile_to_sv(source).expect("Should compile generic widening add");
 
     // result must be 9-bit (WIDTH=8, WIDTH+1=9), declared as logic [8:0]
-    assert!(sv.contains("[8:0] result"), "Issue #10: generic result should be 9-bit [8:0], got:\n{}", sv);
-    assert!(!sv.contains("[7:0] result"), "Issue #10: result should NOT be 8-bit [7:0]");
+    assert!(
+        sv.contains("[8:0] result"),
+        "Issue #10: generic result should be 9-bit [8:0], got:\n{}",
+        sv
+    );
+    assert!(
+        !sv.contains("[7:0] result"),
+        "Issue #10: result should NOT be 8-bit [7:0]"
+    );
     // carry_out accesses result[8] which must be valid
-    assert!(sv.contains("result[8]"), "Issue #10: carry_out should access result[8]");
+    assert!(
+        sv.contains("result[8]"),
+        "Issue #10: carry_out should access result[8]"
+    );
 }
