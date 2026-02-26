@@ -1297,6 +1297,42 @@ impl HirBuilderContext {
                     }
                 }
                 SyntaxKind::AssignmentStmt => {
+                    // BUG #10.3 FIX: Auto-create implicit signals for bare combinational
+                    // assignments to undeclared names at impl level (e.g., `baud_tick = (expr)`)
+                    // Check if LHS is a simple identifier not in the symbol table
+                    let lhs_exprs: Vec<_> = child
+                        .children()
+                        .filter(|n| matches!(n.kind(), SyntaxKind::IdentExpr))
+                        .collect();
+                    if let Some(lhs_node) = lhs_exprs.first() {
+                        let lhs_name = lhs_node
+                            .first_token_of_kind(SyntaxKind::Ident)
+                            .map(|t| t.text().to_string());
+                        if let Some(ref name) = lhs_name {
+                            if self.symbols.lookup(name).is_none() {
+                                // Create an implicit signal for this undeclared name
+                                let sig_id = self.next_signal_id();
+                                let implicit_signal = HirSignal {
+                                    id: sig_id,
+                                    name: name.clone(),
+                                    signal_type: HirType::Bit(1), // Default to 1-bit; MIR will infer actual width
+                                    initial_value: None,
+                                    clock_domain: None,
+                                    span: self.make_span(&child),
+                                    memory_config: None,
+                                    trace_config: None,
+                                    cdc_config: None,
+                                    breakpoint_config: None,
+                                    power_config: None,
+                                    safety_config: None,
+                                    power_domain: self.current_default_power_domain.clone(),
+                                };
+                                signals.push(implicit_signal);
+                                // Register in symbol table so both LHS and RHS references resolve
+                                self.symbols.add_to_scope(name, SymbolId::Signal(sig_id));
+                            }
+                        }
+                    }
                     if let Some(assignment) =
                         self.build_assignment(&child, HirAssignmentType::Combinational)
                     {

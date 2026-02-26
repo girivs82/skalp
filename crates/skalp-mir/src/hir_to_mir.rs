@@ -437,6 +437,10 @@ impl<'hir> HirToMir<'hir> {
             }
             let entity_start = Instant::now();
 
+            // BUG #10.2 FIX: Clear entity-scoped maps before processing each entity
+            // to prevent port/signal IDs from previous entities bleeding through
+            self.clear_entity_scope_maps();
+
             let module_id = self.next_module_id();
             self.entity_map.insert(entity.id, module_id);
             if entity.name.contains("FpAdd")
@@ -756,6 +760,10 @@ impl<'hir> HirToMir<'hir> {
             );
 
             mir.add_module(module);
+
+            // BUG #10.2 FIX: Save entity scope (port/signal maps) to cache
+            // so the second pass can restore them when processing impl blocks
+            self.save_entity_scope_to_cache(entity.id);
         }
 
         // Second pass: add implementations
@@ -781,14 +789,23 @@ impl<'hir> HirToMir<'hir> {
                 // Set current entity for generic parameter resolution
                 self.current_entity_id = Some(impl_block.entity);
 
+                // BUG #10.2 FIX: Restore entity scope (port/signal maps) from first-pass cache
+                // Without this, CDC entities with lifetime parameters have empty port_map
+                // in the second pass, causing analyze_event_block to skip all triggers
+                self.restore_entity_scope_from_cache(impl_block.entity);
+
                 // Skip implementations for entities that are not used (0 instances) and are not the first entity
                 if let Some(entity) = hir.entities.iter().find(|e| e.id == impl_block.entity) {
                     // Check if this is a generic entity (has generics, including those with defaults)
+                    // BUG #10.2 FIX: Exclude lifetime parameters (ClockDomain, PowerDomain)
                     let has_generics = !entity.generics.is_empty()
-                        && entity
-                            .generics
-                            .iter()
-                            .any(|g| !matches!(g.param_type, hir::HirGenericType::ClockDomain));
+                        && entity.generics.iter().any(|g| {
+                            !matches!(
+                                g.param_type,
+                                hir::HirGenericType::ClockDomain
+                                    | hir::HirGenericType::PowerDomain { .. }
+                            )
+                        });
 
                     // BUG #231 FIX: If this entity has generics, check if a monomorphized version exists.
                     // A monomorphized version is another entity with:
@@ -812,9 +829,15 @@ impl<'hir> HirToMir<'hir> {
                     }
 
                     // Check if this is a generic entity (has unresolved generics)
+                    // BUG #10.2 FIX: Exclude PowerDomain lifetime parameters along with ClockDomain
+                    // Lifetime parameters (clock domains, power domains) don't need monomorphization
                     let has_unresolved_generics = entity.generics.iter().any(|g| {
                         g.default_value.is_none()
-                            && !matches!(g.param_type, hir::HirGenericType::ClockDomain)
+                            && !matches!(
+                                g.param_type,
+                                hir::HirGenericType::ClockDomain
+                                    | hir::HirGenericType::PowerDomain { .. }
+                            )
                     });
 
                     // Skip if: has unresolved generics AND no instances
@@ -6127,10 +6150,12 @@ impl<'hir> HirToMir<'hir> {
                 // instead of the broken hash-based fallback that was causing state machine bugs
                 self.resolve_enum_variant_value(enum_name, variant_name)
             }
-            hir::HirPattern::Variable(_) => {
-                // Variable patterns can't be converted to case values directly
-                // They should be handled differently (as binding patterns)
-                None
+            hir::HirPattern::Variable(name) => {
+                // BUG #10.4 FIX: Try to resolve as a constant signal or constant value
+                // In skalp, `signal IDLE: nat[2] = 0` creates a constant pattern
+                // that should resolve to its initial value for case arms
+                self.resolve_constant_signal_value(name)
+                    .or_else(|| self.resolve_constant_value(name))
             }
             hir::HirPattern::Wildcard => {
                 // Wildcard patterns become the default case
@@ -19396,6 +19421,48 @@ impl<'hir> HirToMir<'hir> {
         // Also check global functions for constants (they might be defined at module level)
         // Note: Global constants would be in hir.constants if that field existed
         // For now, we'll just return None if not found in implementations
+        None
+    }
+
+    /// BUG #10.4 FIX: Resolve a signal name to its constant initial value
+    /// Used for match patterns where constant signals like `signal IDLE: nat[2] = 0`
+    /// are used as pattern values (e.g., `match state { IDLE => ... }`)
+    fn resolve_constant_signal_value(&self, signal_name: &str) -> Option<Expression> {
+        let hir = self.hir?;
+
+        // Search impl_block signals for a signal with this name and a literal initial value
+        for impl_block in &hir.implementations {
+            // Only look in the current entity's impl block if we know the entity
+            if let Some(entity_id) = self.current_entity_id {
+                if impl_block.entity != entity_id {
+                    continue;
+                }
+            }
+            for signal in &impl_block.signals {
+                if signal.name == signal_name {
+                    if let Some(ref init) = signal.initial_value {
+                        return self.convert_expression_for_constant(init);
+                    }
+                }
+            }
+        }
+
+        // Also check entity-level signals
+        for entity in &hir.entities {
+            if let Some(entity_id) = self.current_entity_id {
+                if entity.id != entity_id {
+                    continue;
+                }
+            }
+            for signal in &entity.signals {
+                if signal.name == signal_name {
+                    if let Some(ref init) = signal.initial_value {
+                        return self.convert_expression_for_constant(init);
+                    }
+                }
+            }
+        }
+
         None
     }
 

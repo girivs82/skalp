@@ -239,11 +239,17 @@ fn compute_expression_width(expr: &skalp_mir::Expression, mir_module: &Module) -
             }
             Some(total_width)
         }
-        skalp_mir::ExpressionKind::Binary { left, right, .. } => {
+        skalp_mir::ExpressionKind::Binary { op, left, right } => {
             // For binary ops, use the wider of the two operands
             let left_width = compute_expression_width(left, mir_module)?;
             let right_width = compute_expression_width(right, mir_module)?;
-            Some(left_width.max(right_width))
+            let base_width = left_width.max(right_width);
+            // WidenAdd produces a result one bit wider than the widest operand
+            if matches!(op, skalp_mir::BinaryOp::WidenAdd) {
+                Some(base_width + 1)
+            } else {
+                Some(base_width)
+            }
         }
         skalp_mir::ExpressionKind::Conditional {
             then_expr,
@@ -330,8 +336,10 @@ fn infer_variable_widths(mir_module: &Module) -> HashMap<skalp_mir::VariableId, 
                 // Get the variable's declared type width
                 if let Some(var) = mir_module.variables.iter().find(|v| v.id == *var_id) {
                     let type_w = safe_get_type_width(&var.var_type);
-                    // If the expression width differs from type width, record the actual width
-                    if width != type_w {
+                    // Only override when the expression is WIDER than the declared type.
+                    // Never shrink a variable's declared type — the explicit type annotation
+                    // (e.g., bit[WIDTH + 1]) is authoritative.
+                    if width > type_w {
                         width_map.insert(*var_id, width);
                     }
                 }
@@ -360,7 +368,8 @@ fn scan_statements_for_variable_widths(
                     if let Some(width) = compute_expression_width(&assign.rhs, mir_module) {
                         if let Some(var) = mir_module.variables.iter().find(|v| v.id == *var_id) {
                             let type_w = safe_get_type_width(&var.var_type);
-                            if width != type_w {
+                            // Only override when expression is WIDER than declared type
+                            if width > type_w {
                                 width_map.insert(*var_id, width);
                             }
                         }
