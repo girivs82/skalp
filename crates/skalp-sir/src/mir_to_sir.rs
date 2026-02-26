@@ -237,6 +237,9 @@ impl<'a> MirToSirConverter<'a> {
     }
 
     fn convert_signals(&mut self) {
+        // Collect initial value info for constant-driver generation after the loop
+        let mut constant_drivers: Vec<(String, u64, usize)> = Vec::new();
+
         for signal in &self.mir.signals {
             let sir_type = self.convert_type(&signal.signal_type);
             let width = sir_type.width();
@@ -265,6 +268,13 @@ impl<'a> MirToSirConverter<'a> {
             self.mir_to_internal_name
                 .insert(signal.name.clone(), internal_name.clone());
 
+            // Extract initial value as u64 (for integer/bitvector literals)
+            let initial_u64 = signal.initial.as_ref().and_then(|v| match v {
+                Value::Integer(i) => Some(*i as u64),
+                Value::BitVector { value, .. } => Some(*value),
+                _ => None,
+            });
+
             self.sir.signals.push(SirSignal {
                 name: internal_name.clone(), // Use internal name in SIR
                 width,
@@ -282,13 +292,45 @@ impl<'a> MirToSirConverter<'a> {
                         name: internal_name.clone(), // Use internal name
                         width,
                         sir_type: Some(sir_type.clone()),
-                        reset_value: None,
+                        reset_value: initial_u64,
                         clock: String::new(),
                         reset: None,
                         span: signal.span.clone(),
                     },
                 );
+            } else if let Some(val) = initial_u64 {
+                // BUG FIX (GitHub #12): Non-register signals with initial values need
+                // a combinational constant driver. Without this, signals like
+                // `signal CYCLES_PER_BIT: nat[9] = 434` would read as 0 at runtime
+                // because no node drives them.
+                constant_drivers.push((internal_name.clone(), val, width));
             }
+        }
+
+        // Create constant driver nodes for non-register signals with initial values
+        for (signal_name, value, width) in constant_drivers {
+            let node_id = self.next_node_id();
+            let output_ref = SignalRef {
+                signal_id: signal_name.clone(),
+                bit_range: None,
+            };
+
+            let node = SirNode {
+                id: node_id,
+                kind: SirNodeKind::Constant { value, width },
+                inputs: vec![],
+                outputs: vec![output_ref],
+                clock_domain: None,
+                impl_style_hint: ImplStyleHint::default(),
+                span: None,
+            };
+
+            // Set the driver_node on the signal
+            if let Some(sig) = self.sir.signals.iter_mut().find(|s| s.name == signal_name) {
+                sig.driver_node = Some(node_id);
+            }
+
+            self.sir.combinational_nodes.push(node);
         }
     }
 
@@ -4500,7 +4542,16 @@ impl<'a> MirToSirConverter<'a> {
     }
 
     fn node_to_signal_ref(&mut self, node_id: usize) -> SignalRef {
-        // Create a temporary signal for this node's output
+        // BUG FIX (GitHub #12): If the node already has a defined output (e.g., constant
+        // driver nodes output to the actual signal name like `_s1`), return that output
+        // instead of creating a phantom `node_{id}_out` signal that would never be written.
+        if let Some(node) = self.sir.combinational_nodes.iter().find(|n| n.id == node_id) {
+            if let Some(output) = node.outputs.first() {
+                return output.clone();
+            }
+        }
+
+        // Fallback: create a temporary signal for this node's output
         let signal_name = format!("node_{}_out", node_id);
 
         // Add signal if it doesn't exist
