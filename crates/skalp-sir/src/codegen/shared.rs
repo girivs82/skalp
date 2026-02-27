@@ -131,7 +131,12 @@ impl<'a> SharedCodegen<'a> {
                     BinaryOperation::Sar | BinaryOperation::SDiv | BinaryOperation::SMod => {
                         left_width
                     }
-                    BinaryOperation::Shl | BinaryOperation::Shr => left_width,
+                    // Left shift can produce a result wider than the left operand.
+                    // E.g., `1-bit << 7` = 0x80 (8-bit). Use full 32-bit width
+                    // to avoid premature truncation; downstream nodes/registers
+                    // apply the correct final mask.
+                    BinaryOperation::Shl => 32,
+                    BinaryOperation::Shr => left_width,
                     BinaryOperation::Div | BinaryOperation::Mod => left_width,
                     BinaryOperation::Add | BinaryOperation::Sub => {
                         std::cmp::max(left_width, right_width)

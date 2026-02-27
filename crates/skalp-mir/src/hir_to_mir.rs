@@ -1218,6 +1218,7 @@ impl<'hir> HirToMir<'hir> {
                             hir_instance.name,
                             hir_instance.entity
                         );
+
                         // Find the entity to get its output ports
                         if let Some(entity) = self
                             .hir
@@ -4615,89 +4616,17 @@ impl<'hir> HirToMir<'hir> {
                     format!("variable_{}", id.0)
                 }
                 hir::HirLValue::Range(base, ..) => {
-                    format!("range[base={:?}]", std::mem::discriminant(&**base))
+                    format!("range[base={}]", Self::describe_hir_lvalue(base))
                 }
                 hir::HirLValue::FieldAccess { base, field } => {
-                    format!(
-                        "field_access[base={:?}.{}]",
-                        std::mem::discriminant(&**base),
-                        field
-                    )
+                    format!("{}.{}", Self::describe_hir_lvalue(base), field)
                 }
                 hir::HirLValue::Index(base, ..) => {
-                    format!("index[base={:?}]", std::mem::discriminant(&**base))
+                    format!("index[base={}]", Self::describe_hir_lvalue(base))
                 }
             };
 
-            let rhs_desc = match &assign.rhs {
-                hir::HirExpression::Call(call) => {
-                    format!(
-                        "function call to '{}' with {} arguments",
-                        call.function,
-                        call.args.len()
-                    )
-                }
-                hir::HirExpression::Cast(cast) => {
-                    format!(
-                        "Cast(inner={:?}, target={:?})",
-                        std::mem::discriminant(&*cast.expr),
-                        cast.target_type
-                    )
-                }
-                hir::HirExpression::Match(match_expr) => {
-                    // BUG #234 DEBUG: Show match expression details
-                    let arm_descs: Vec<String> = match_expr
-                        .arms
-                        .iter()
-                        .enumerate()
-                        .map(|(i, arm)| {
-                            format!(
-                                "  arm[{}]: pattern={:?}, expr_type={:?}",
-                                i,
-                                arm.pattern,
-                                std::mem::discriminant(&arm.expr)
-                            )
-                        })
-                        .collect();
-                    format!(
-                        "Match expression with {} arms, scrutinee={:?}:\n{}",
-                        match_expr.arms.len(),
-                        std::mem::discriminant(&*match_expr.expr),
-                        arm_descs.join("\n")
-                    )
-                }
-                hir::HirExpression::Binary(bin) => {
-                    // BUG #237 DEBUG: Show binary expression details
-                    let left_desc = match &*bin.left {
-                        hir::HirExpression::Cast(c) => format!(
-                            "Cast(inner={:?}, target={:?})",
-                            std::mem::discriminant(&*c.expr),
-                            c.target_type
-                        ),
-                        hir::HirExpression::Signal(id) => format!("Signal({:?})", id),
-                        hir::HirExpression::Port(id) => format!("Port({:?})", id),
-                        other => format!("{:?}", std::mem::discriminant(other)),
-                    };
-                    let right_desc = match &*bin.right {
-                        hir::HirExpression::Cast(c) => format!(
-                            "Cast(inner={:?}, target={:?})",
-                            std::mem::discriminant(&*c.expr),
-                            c.target_type
-                        ),
-                        hir::HirExpression::Signal(id) => format!("Signal({:?})", id),
-                        hir::HirExpression::Port(id) => format!("Port({:?})", id),
-                        other => format!("{:?}", std::mem::discriminant(other)),
-                    };
-                    format!(
-                        "Binary(op={:?}, left={}, right={})",
-                        bin.op, left_desc, right_desc
-                    )
-                }
-                _ => format!(
-                    "expression of type {:?}",
-                    std::mem::discriminant(&assign.rhs)
-                ),
-            };
+            let rhs_desc = Self::describe_hir_expr(&assign.rhs);
 
             panic!(
                 "\n\n❌❌❌ COMPILATION ERROR: Assignment conversion failed! ❌❌❌\n\
@@ -4709,11 +4638,15 @@ impl<'hir> HirToMir<'hir> {
                  1. Function inlining failed due to excessive complexity or recursion depth\n\
                  2. Match expression with too many nested function calls\n\
                  3. Expression type not supported in continuous assignments\n\
+                 4. Field access on a sub-entity whose module is not imported\n\
                  \n\
                  For function calls, try:\n\
                  - Breaking the function into smaller pieces\n\
                  - Reducing match expression nesting depth\n\
                  - Using intermediate variables for complex sub-expressions\n\
+                 \n\
+                 If this involves a field access on a sub-entity (e.g., instance.port),\n\
+                 check that the entity is imported with a `use module::EntityName;` statement.\n\
                  \n\
                  This is Bug #85: Assignments must never be silently dropped!\n\
                  ❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌❌\n",
@@ -18076,6 +18009,70 @@ impl<'hir> HirToMir<'hir> {
         }
     }
 
+    /// Produce a human-readable description of an HIR expression for error messages.
+    fn describe_hir_expr(expr: &hir::HirExpression) -> String {
+        match expr {
+            hir::HirExpression::Signal(id) => format!("Signal({:?})", id),
+            hir::HirExpression::Port(id) => format!("Port({:?})", id),
+            hir::HirExpression::Variable(id) => format!("Variable({:?})", id),
+            hir::HirExpression::Literal(lit) => format!("Literal({:?})", lit),
+            hir::HirExpression::Binary(bin) => format!(
+                "Binary(op={:?}, left={}, right={})",
+                bin.op,
+                Self::describe_hir_expr(&bin.left),
+                Self::describe_hir_expr(&bin.right)
+            ),
+            hir::HirExpression::Unary(un) => format!(
+                "Unary(op={:?}, operand={})",
+                un.op,
+                Self::describe_hir_expr(&un.operand)
+            ),
+            hir::HirExpression::FieldAccess { base, field } => {
+                format!("FieldAccess({}.{})", Self::describe_hir_expr(base), field)
+            }
+            hir::HirExpression::Cast(cast) => format!(
+                "Cast(inner={}, target={:?})",
+                Self::describe_hir_expr(&cast.expr),
+                cast.target_type
+            ),
+            hir::HirExpression::Call(call) => {
+                format!("Call('{}', {} args)", call.function, call.args.len())
+            }
+            hir::HirExpression::Match(m) => format!(
+                "Match({} arms, scrutinee={})",
+                m.arms.len(),
+                Self::describe_hir_expr(&m.expr)
+            ),
+            hir::HirExpression::Index(base, idx) => format!(
+                "Index({}[{}])",
+                Self::describe_hir_expr(base),
+                Self::describe_hir_expr(idx)
+            ),
+            hir::HirExpression::Ternary { condition, .. } => {
+                format!("Ternary(cond={})", Self::describe_hir_expr(condition))
+            }
+            other => format!("{:?}", std::mem::discriminant(other)),
+        }
+    }
+
+    /// Produce a human-readable description of an HIR lvalue for error messages.
+    fn describe_hir_lvalue(lval: &hir::HirLValue) -> String {
+        match lval {
+            hir::HirLValue::Signal(id) => format!("signal_{}", id.0),
+            hir::HirLValue::Port(id) => format!("port_{}", id.0),
+            hir::HirLValue::Variable(id) => format!("variable_{}", id.0),
+            hir::HirLValue::Range(base, ..) => {
+                format!("{}[range]", Self::describe_hir_lvalue(base))
+            }
+            hir::HirLValue::FieldAccess { base, field } => {
+                format!("{}.{}", Self::describe_hir_lvalue(base), field)
+            }
+            hir::HirLValue::Index(base, ..) => {
+                format!("{}[index]", Self::describe_hir_lvalue(base))
+            }
+        }
+    }
+
     /// Convert struct/vector field access to bit slice
     fn convert_field_access(
         &mut self,
@@ -18205,6 +18202,7 @@ impl<'hir> HirToMir<'hir> {
                         "[FIELD_ACCESS] Checking if var {:?} is entity instance. entity_instance_outputs has {} entries",
                         var_id, self.entity_instance_outputs.len()
                     );
+
                     if let Some(output_ports) = self.entity_instance_outputs.get(var_id) {
                         // This variable is an entity instance - look up the output port
                         if let Some(&signal_id) = output_ports.get(&normalized_field_name) {

@@ -3702,6 +3702,7 @@ impl HirBuilderContext {
                 expr.kind()
             );
         }
+
         let rhs = if rhs_start_idx >= exprs.len() {
             return None;
         } else if rhs_start_idx == exprs.len() - 1 {
@@ -8547,7 +8548,7 @@ impl HirBuilderContext {
             })
             .collect();
 
-        // If we have both IdentExpr and IndexExpr, use the IndexExpr (it's the complete expression)
+        // If we have both IdentExpr and IndexExpr/FieldExpr, use the last one (it's the complete expression)
         let operand_node = if expr_children.len() > 1 {
             // Check if last is IndexExpr and previous is IdentExpr/FieldExpr/PathExpr
             if expr_children
@@ -8559,6 +8560,21 @@ impl HirBuilderContext {
                     SyntaxKind::IdentExpr | SyntaxKind::FieldExpr | SyntaxKind::PathExpr
                 )
             {
+                expr_children.last()?
+            } else if expr_children
+                .last()
+                .is_some_and(|n| n.kind() == SyntaxKind::FieldExpr)
+                && expr_children.len() >= 2
+                && matches!(
+                    expr_children[expr_children.len() - 2].kind(),
+                    SyntaxKind::IdentExpr | SyntaxKind::PathExpr | SyntaxKind::FieldExpr
+                )
+            {
+                // BUG #85 FIX: Handle field access on entity instances inside unary expressions.
+                // For `!tx_fifo.empty`, the parser creates UnaryExpr with children:
+                //   [IdentExpr(tx_fifo), FieldExpr(.empty)]
+                // Use the FieldExpr — build_field_expr will look up the preceding sibling
+                // IdentExpr to construct the proper FieldAccess expression.
                 expr_children.last()?
             } else {
                 expr_children.first()?
