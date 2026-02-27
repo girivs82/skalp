@@ -2465,23 +2465,29 @@ impl<'a> MirToSirConverter<'a> {
                     }
                 }
                 Statement::If(nested_if) => {
-                    // Handle nested if/else-if chains
-                    // BUG #222 FIX: Pass current_default to use as the "keep" value
-                    let nested_result = self.synthesize_conditional_assignment_with_default(
-                        nested_if,
-                        target,
-                        current_default,
-                    );
-                    conditional_results.push(nested_result);
+                    // Only process if-statements that actually assign to our target.
+                    // Without this guard, unrelated if-statements (e.g., `if (bit_counter == 7) { state = 3 }`)
+                    // produce keep-value mux nodes that get pushed to conditional_results,
+                    // which then override later direct assignments to the target
+                    // (e.g., `baud_counter = 434` after the unrelated if).
+                    if self.if_assigns_to_target(nested_if, target) {
+                        // BUG #222 FIX: Pass current_default to use as the "keep" value
+                        let nested_result = self.synthesize_conditional_assignment_with_default(
+                            nested_if,
+                            target,
+                            current_default,
+                        );
+                        conditional_results.push(nested_result);
 
-                    // BUG #235 FIX: Update current_default for subsequent if statements
-                    // When there are multiple independent if statements for the same target,
-                    // each subsequent if should use the previous if's result as its default.
-                    // This ensures proper "last-write-wins" semantics:
-                    //   if cond1 { target = val1 }  // produces result1
-                    //   if cond2 { target = val2 }  // should use result1 as default, not original target
-                    // Final value: cond2 ? val2 : (cond1 ? val1 : original_target)
-                    current_default = Some(nested_result);
+                        // BUG #235 FIX: Update current_default for subsequent if statements
+                        // When there are multiple independent if statements for the same target,
+                        // each subsequent if should use the previous if's result as its default.
+                        // This ensures proper "last-write-wins" semantics:
+                        //   if cond1 { target = val1 }  // produces result1
+                        //   if cond2 { target = val2 }  // should use result1 as default, not original target
+                        // Final value: cond2 ? val2 : (cond1 ? val1 : original_target)
+                        current_default = Some(nested_result);
+                    }
                 }
                 Statement::Block(block) => {
                     // CRITICAL FIX: Recurse into nested blocks (same bug as Bug #19)
@@ -7555,8 +7561,12 @@ impl<'a> MirToSirConverter<'a> {
                                                 parent_module_for_signals,
                                                 parent_prefix,
                                             );
-                                        let const_idx =
-                                            self.create_constant_node(element_idx as u64, 32);
+                                        // Use the index expression's width instead of hardcoded 32
+                                        let index_width = self.get_node_output_width(index_node);
+                                        let index_width =
+                                            if index_width == 0 { 32 } else { index_width };
+                                        let const_idx = self
+                                            .create_constant_node(element_idx as u64, index_width);
                                         let cond_node = self.create_binary_op_node(
                                             &BinaryOp::Equal,
                                             index_node,
@@ -7613,7 +7623,7 @@ impl<'a> MirToSirConverter<'a> {
                 }
                 Statement::If(if_stmt) => {
                     // Build conditional MUX, passing current result as default
-                    let if_result = self.synthesize_conditional_for_instance_with_default(
+                    if let Some(if_result) = self.synthesize_conditional_for_instance_with_default(
                         if_stmt,
                         inst_prefix,
                         port_mapping,
@@ -7622,8 +7632,9 @@ impl<'a> MirToSirConverter<'a> {
                         parent_module_for_signals,
                         parent_prefix,
                         result,
-                    );
-                    result = Some(if_result);
+                    ) {
+                        result = Some(if_result);
+                    }
                 }
                 Statement::Case(case_stmt) => {
                     // BUG #237 FIX: Handle top-level Case statements too
@@ -7659,7 +7670,7 @@ impl<'a> MirToSirConverter<'a> {
                     };
                     if let Some(lhs_name) = lhs {
                         if lhs_name == target {
-                            let resolved_result = self
+                            if let Some(resolved_result) = self
                                 .synthesize_conditional_for_instance_with_default(
                                     &resolved.original,
                                     inst_prefix,
@@ -7669,8 +7680,10 @@ impl<'a> MirToSirConverter<'a> {
                                     parent_module_for_signals,
                                     parent_prefix,
                                     result,
-                                );
-                            result = Some(resolved_result);
+                                )
+                            {
+                                result = Some(resolved_result);
+                            }
                         }
                     }
                 }
@@ -7704,8 +7717,12 @@ impl<'a> MirToSirConverter<'a> {
         parent_module_for_signals: Option<&Module>,
         parent_prefix: &str,
         default_result: Option<usize>,
-    ) -> usize {
-        // Get values from then and else branches, passing current result as default
+    ) -> Option<usize> {
+        // Get values from then and else branches, passing current result as default.
+        // Pass the outer default to then-branch so that inner conditionals
+        // (e.g., `if (baud_counter == 0) { baud_counter = 434 }`) use the correct
+        // fallback value (e.g., the decrement result) instead of creating a raw
+        // SignalRef to the register's current value.
         let then_value = self.find_assignment_in_branch_for_instance_with_default(
             &if_stmt.then_block.statements,
             inst_prefix,
@@ -7714,7 +7731,7 @@ impl<'a> MirToSirConverter<'a> {
             target,
             parent_module_for_signals,
             parent_prefix,
-            None, // Then branch doesn't inherit default
+            default_result, // Pass outer default so inner conditionals use correct fallback
         );
 
         let else_value = if let Some(else_block) = &if_stmt.else_block {
@@ -7732,7 +7749,13 @@ impl<'a> MirToSirConverter<'a> {
             None
         };
 
-        // Get the default node to use when this if doesn't assign
+        // If neither branch assigns to the target, return None to indicate
+        // that this if-statement doesn't affect this signal at all.
+        if then_value.is_none() && else_value.is_none() {
+            return None;
+        }
+
+        // Get the default node to use when one branch doesn't assign
         // BUG #117r FIX: Use instance-aware SignalRef for output port resolution
         let default_node = default_result.unwrap_or_else(|| {
             self.create_signal_ref_for_instance(
@@ -7745,46 +7768,30 @@ impl<'a> MirToSirConverter<'a> {
         });
 
         // Build MUX based on what was found
+        let condition = self.create_expression_node_for_instance_with_context(
+            &if_stmt.condition,
+            inst_prefix,
+            port_mapping,
+            child_module,
+            parent_module_for_signals,
+            parent_prefix,
+        );
         match (then_value, else_value) {
             (Some(then_val), Some(else_val)) => {
                 // Both branches assign: mux(cond, then, else)
-                let condition = self.create_expression_node_for_instance_with_context(
-                    &if_stmt.condition,
-                    inst_prefix,
-                    port_mapping,
-                    child_module,
-                    parent_module_for_signals,
-                    parent_prefix,
-                );
-                self.create_mux_node(condition, then_val, else_val)
+                Some(self.create_mux_node(condition, then_val, else_val))
             }
             (Some(then_val), None) => {
                 // Only then assigns: mux(cond, then, default)
-                let condition = self.create_expression_node_for_instance_with_context(
-                    &if_stmt.condition,
-                    inst_prefix,
-                    port_mapping,
-                    child_module,
-                    parent_module_for_signals,
-                    parent_prefix,
-                );
-                self.create_mux_node(condition, then_val, default_node)
+                Some(self.create_mux_node(condition, then_val, default_node))
             }
             (None, Some(else_val)) => {
                 // Only else assigns: mux(cond, default, else)
-                let condition = self.create_expression_node_for_instance_with_context(
-                    &if_stmt.condition,
-                    inst_prefix,
-                    port_mapping,
-                    child_module,
-                    parent_module_for_signals,
-                    parent_prefix,
-                );
-                self.create_mux_node(condition, default_node, else_val)
+                Some(self.create_mux_node(condition, default_node, else_val))
             }
             (None, None) => {
-                // Neither assigns: return the default (previous result in chain)
-                default_node
+                // Already handled above — this branch is unreachable
+                unreachable!()
             }
         }
     }
@@ -7847,7 +7854,7 @@ impl<'a> MirToSirConverter<'a> {
                     }
                 }
                 Statement::If(nested_if) => {
-                    let if_result = self.synthesize_conditional_for_instance_with_default(
+                    if let Some(if_result) = self.synthesize_conditional_for_instance_with_default(
                         nested_if,
                         inst_prefix,
                         port_mapping,
@@ -7856,8 +7863,9 @@ impl<'a> MirToSirConverter<'a> {
                         parent_module_for_signals,
                         parent_prefix,
                         result,
-                    );
-                    result = Some(if_result);
+                    ) {
+                        result = Some(if_result);
+                    }
                 }
                 Statement::Block(block) => {
                     if let Some(block_result) = self
@@ -7936,7 +7944,7 @@ impl<'a> MirToSirConverter<'a> {
                 target,
                 parent_module_for_signals,
                 parent_prefix,
-                None, // Case arms don't inherit the default
+                default_result, // Pass outer default so conditionals inside arms use it correctly
             );
             if arm_value.is_some() {
                 found_target = true;
@@ -8250,7 +8258,122 @@ impl<'a> MirToSirConverter<'a> {
                         self.create_range_select_node_on_base(base_node, high_val, low_val)
                     }
                     LValue::BitSelect { base, index } => {
-                        // First, get the base signal node
+                        // BUG FIX: Handle dynamic array reads for flattened arrays in hierarchical instances.
+                        // When a FIFO has `rd_data = memory[rd_ptr]`, the `memory` array is flattened
+                        // to individual signals (memory_0, memory_1, ...). We need to build a MUX tree
+                        // to select from them based on the dynamic index, rather than using bit-select
+                        // on a non-existent aggregate signal.
+
+                        // Check if base is a flattened array
+                        let base_name =
+                            self.extract_base_signal_for_instance(base, inst_prefix, child_module);
+
+                        if let Some(ref base_name) = base_name {
+                            let elements = self.expand_flattened_target(base_name);
+
+                            if elements.len() > 1 {
+                                // Flattened array — check if index is constant or dynamic
+                                if let Some(idx_val) = self.evaluate_constant_expression(index) {
+                                    // Static index — select the specific element directly
+                                    let idx_val = idx_val as usize;
+                                    for elem in &elements {
+                                        if let Some(elem_idx) = self.extract_element_index(elem) {
+                                            if elem_idx == idx_val {
+                                                return self.create_signal_ref_for_instance(
+                                                    elem,
+                                                    inst_prefix,
+                                                    port_mapping,
+                                                    parent_module_for_signals,
+                                                    parent_prefix,
+                                                );
+                                            }
+                                        }
+                                    }
+                                    // Index not found — fall through to first element as fallback
+                                    return self.create_signal_ref_for_instance(
+                                        &elements[0],
+                                        inst_prefix,
+                                        port_mapping,
+                                        parent_module_for_signals,
+                                        parent_prefix,
+                                    );
+                                } else {
+                                    // Dynamic index — build MUX tree to select from all elements
+                                    let index_node = self
+                                        .create_expression_node_for_instance_with_context(
+                                            index,
+                                            inst_prefix,
+                                            port_mapping,
+                                            child_module,
+                                            parent_module_for_signals,
+                                            parent_prefix,
+                                        );
+
+                                    // Collect elements with their indices, sorted by index
+                                    let mut indexed_elements: Vec<(usize, String)> = elements
+                                        .iter()
+                                        .filter_map(|elem| {
+                                            self.extract_element_index(elem)
+                                                .map(|idx| (idx, elem.clone()))
+                                        })
+                                        .collect();
+                                    indexed_elements.sort_by_key(|(idx, _)| *idx);
+
+                                    if indexed_elements.is_empty() {
+                                        // Shouldn't happen, but fallback to first element
+                                        return self.create_signal_ref_for_instance(
+                                            &elements[0],
+                                            inst_prefix,
+                                            port_mapping,
+                                            parent_module_for_signals,
+                                            parent_prefix,
+                                        );
+                                    }
+
+                                    // Determine index width from the index expression node
+                                    let index_width = self.get_node_output_width(index_node);
+                                    let index_width =
+                                        if index_width == 0 { 4 } else { index_width };
+
+                                    // Start with the last element as the default value
+                                    let (_, ref last_elem) =
+                                        indexed_elements[indexed_elements.len() - 1];
+                                    let mut result = self.create_signal_ref_for_instance(
+                                        last_elem,
+                                        inst_prefix,
+                                        port_mapping,
+                                        parent_module_for_signals,
+                                        parent_prefix,
+                                    );
+
+                                    // Build MUX chain from second-to-last down to first:
+                                    // mux(idx==0, elem_0, mux(idx==1, elem_1, ... elem_last))
+                                    for (elem_idx, ref elem_name) in
+                                        indexed_elements[..indexed_elements.len() - 1].iter().rev()
+                                    {
+                                        let const_idx = self
+                                            .create_constant_node(*elem_idx as u64, index_width);
+                                        let cond = self.create_binary_op_node(
+                                            &BinaryOp::Equal,
+                                            index_node,
+                                            const_idx,
+                                        );
+                                        let elem_ref = self.create_signal_ref_for_instance(
+                                            elem_name,
+                                            inst_prefix,
+                                            port_mapping,
+                                            parent_module_for_signals,
+                                            parent_prefix,
+                                        );
+                                        result = self.create_mux_node(cond, elem_ref, result);
+                                    }
+
+                                    return result;
+                                }
+                            }
+                        }
+
+                        // Fallback: not a flattened array — use existing bit-select logic
                         let base_expr =
                             Expression::with_unknown_type(ExpressionKind::Ref((**base).clone()));
                         let base_node = self.create_expression_node_for_instance_with_context(
@@ -8261,7 +8384,6 @@ impl<'a> MirToSirConverter<'a> {
                             parent_module_for_signals,
                             parent_prefix,
                         );
-                        // Now create a bit select node on top
                         let index_val = self.evaluate_const_expr(index);
                         self.create_bit_select_node_on_base(base_node, index_val)
                     }

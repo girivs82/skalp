@@ -94,8 +94,8 @@ impl Testbench {
     /// constructs without gate-level detail.
     pub async fn behavioral(source_path: &str) -> Result<Self> {
         let use_gpu = std::env::var("SKALP_SIM_MODE")
-            .map(|v| v.to_lowercase() != "cpu")
-            .unwrap_or(true);
+            .map(|v| v.to_lowercase() == "gpu")
+            .unwrap_or(false);
 
         let config = UnifiedSimConfig {
             level: SimLevel::Behavioral,
@@ -127,8 +127,8 @@ impl Testbench {
     /// ```
     pub async fn gate_level_with_library(source_path: &str, library_name: &str) -> Result<Self> {
         let use_gpu = std::env::var("SKALP_SIM_MODE")
-            .map(|v| v.to_lowercase() != "cpu")
-            .unwrap_or(true);
+            .map(|v| v.to_lowercase() == "gpu")
+            .unwrap_or(false);
 
         let config = UnifiedSimConfig {
             level: SimLevel::GateLevel,
@@ -156,8 +156,8 @@ impl Testbench {
         library_name: &str,
     ) -> Result<Self> {
         let use_gpu = std::env::var("SKALP_SIM_MODE")
-            .map(|v| v.to_lowercase() != "cpu")
-            .unwrap_or(true);
+            .map(|v| v.to_lowercase() == "gpu")
+            .unwrap_or(false);
 
         let config = UnifiedSimConfig {
             level: SimLevel::GateLevel,
@@ -183,8 +183,8 @@ impl Testbench {
     /// instead of clocks.
     pub async fn ncl(source_path: &str) -> Result<Self> {
         let use_gpu = std::env::var("SKALP_SIM_MODE")
-            .map(|v| v.to_lowercase() != "cpu")
-            .unwrap_or(true);
+            .map(|v| v.to_lowercase() == "gpu")
+            .unwrap_or(false);
 
         let config = UnifiedSimConfig {
             level: SimLevel::GateLevel,
@@ -203,8 +203,8 @@ impl Testbench {
     /// Same as `ncl()` but allows specifying which module to use as top.
     pub async fn ncl_with_top_module(source_path: &str, top_module: &str) -> Result<Self> {
         let use_gpu = std::env::var("SKALP_SIM_MODE")
-            .map(|v| v.to_lowercase() != "cpu")
-            .unwrap_or(true);
+            .map(|v| v.to_lowercase() == "gpu")
+            .unwrap_or(false);
 
         let config = UnifiedSimConfig {
             level: SimLevel::GateLevel,
@@ -239,8 +239,8 @@ impl Testbench {
     /// ```
     pub fn from_netlist_ncl(netlist: GateNetlist) -> Result<Self> {
         let use_gpu = std::env::var("SKALP_SIM_MODE")
-            .map(|v| v.to_lowercase() != "cpu")
-            .unwrap_or(true);
+            .map(|v| v.to_lowercase() == "gpu")
+            .unwrap_or(false);
 
         let config = UnifiedSimConfig {
             level: SimLevel::GateLevel,
@@ -288,8 +288,8 @@ impl Testbench {
     /// Create a behavioral testbench with explicit top module
     pub async fn behavioral_with_top(source_path: &str, top_module: &str) -> Result<Self> {
         let use_gpu = std::env::var("SKALP_SIM_MODE")
-            .map(|v| v.to_lowercase() != "cpu")
-            .unwrap_or(true);
+            .map(|v| v.to_lowercase() == "gpu")
+            .unwrap_or(false);
 
         let config = UnifiedSimConfig {
             level: SimLevel::Behavioral,
@@ -317,8 +317,8 @@ impl Testbench {
     /// individually to capture signal snapshots).
     pub async fn behavioral_with_coverage(source_path: &str) -> Result<Self> {
         let use_gpu = std::env::var("SKALP_SIM_MODE")
-            .map(|v| v.to_lowercase() != "cpu")
-            .unwrap_or(true);
+            .map(|v| v.to_lowercase() == "gpu")
+            .unwrap_or(false);
 
         let config = UnifiedSimConfig {
             level: SimLevel::Behavioral,
@@ -346,8 +346,8 @@ impl Testbench {
         library_name: &str,
     ) -> Result<Self> {
         let use_gpu = std::env::var("SKALP_SIM_MODE")
-            .map(|v| v.to_lowercase() != "cpu")
-            .unwrap_or(true);
+            .map(|v| v.to_lowercase() == "gpu")
+            .unwrap_or(false);
 
         let config = UnifiedSimConfig {
             level: SimLevel::GateLevel,
