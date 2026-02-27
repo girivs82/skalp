@@ -18,7 +18,7 @@
 use skalp_frontend::hir_builder::build_hir;
 use skalp_frontend::parse::parse;
 use skalp_mir::hir_to_mir::HirToMir;
-use skalp_sir::mir_to_sir::convert_mir_to_sir;
+use skalp_sir::mir_to_sir::{convert_mir_to_sir, convert_mir_to_sir_with_hierarchy};
 use skalp_sir::sir::*;
 
 // ============================================================================
@@ -854,4 +854,135 @@ impl SingleStage {
     let config = sir.pipeline_config.as_ref().unwrap();
     assert_eq!(config.stages, 1);
     // No pipeline registers should be inserted for single stage
+}
+
+// ============================================================================
+// Hierarchical Elaboration Tests
+// ============================================================================
+
+/// Compile multi-module SKALP source to SIR with hierarchical elaboration.
+/// Returns the SIR for the top module (last entity in the source).
+fn compile_hierarchy_to_sir(source: &str) -> SirModule {
+    let tree = parse(source);
+    let hir = build_hir(&tree).expect("HIR building should succeed");
+    let mut transformer = HirToMir::new();
+    let mir = transformer.transform(&hir);
+
+    assert!(
+        !mir.modules.is_empty(),
+        "MIR should have at least one module"
+    );
+    let top_module = mir.modules.last().expect("Should have a top module");
+    convert_mir_to_sir_with_hierarchy(&mir, top_module)
+}
+
+/// Regression test: unconditional default followed by conditional override in
+/// a child module's sequential block must produce a mux chain, not a constant.
+///
+/// Pattern (child module):
+///   on(clk.rise) {
+///     out_valid = 0            // unconditional default
+///     if rst { ... }
+///     else { if cond { out_valid = 1 } }  // conditional override
+///   }
+///
+/// Before the fix, `synthesize_sequential_logic_for_instance` returned on the
+/// first unconditional assignment (`out_valid = 0`), producing a constant-0
+/// node and dropping the entire conditional mux chain. This meant `out_valid`
+/// could never go high in hierarchical designs, even though it worked in
+/// standalone compilation.
+#[test]
+fn test_hierarchical_sequential_default_override() {
+    let source = r#"
+entity PulseGen {
+    in clk: clock
+    in rst: bit
+    in trigger: bit
+    out pulse: bit
+
+    signal count: nat[4] = 0
+    signal pulse_out: bit = 0
+}
+
+impl PulseGen {
+    on(clk.rise) {
+        pulse_out = 0
+        if rst {
+            count = 0
+            pulse_out = 0
+        } else {
+            if trigger {
+                count = count + 1
+            }
+            if count == 5 {
+                pulse_out = 1
+                count = 0
+            }
+        }
+    }
+
+    pulse = pulse_out
+}
+
+entity TopWrapper {
+    in clk: clock
+    in rst: bit
+    in trig: bit
+    out out_pulse: bit
+}
+
+impl TopWrapper {
+    use pulse_gen::PulseGen
+
+    let gen = PulseGen {
+        clk: clk,
+        rst: rst,
+        trigger: trig,
+        pulse: out_pulse,
+    }
+}
+"#;
+    let sir = compile_hierarchy_to_sir(source);
+
+    // pulse_out should be a state element in the elaborated design
+    assert!(
+        has_state_element(&sir, "gen.pulse_out"),
+        "gen.pulse_out should be a state element"
+    );
+
+    // Find the FlipFlop node that drives gen.pulse_out
+    let pulse_out_internal = resolve_name(&sir, "gen.pulse_out");
+    let ff_node = sir
+        .sequential_nodes
+        .iter()
+        .find(|n| n.outputs.iter().any(|o| o.signal_id == pulse_out_internal))
+        .expect("Should have a FlipFlop for gen.pulse_out");
+
+    // The FlipFlop's data input should come from a node (format: "node_N_out")
+    let data_input = &ff_node.inputs[1]; // inputs[0] is clock, inputs[1] is data
+    let data_node_name = &data_input.signal_id;
+
+    // Find the combinational node that drives the FlipFlop data input
+    let data_node_id: usize = data_node_name
+        .strip_prefix("node_")
+        .and_then(|s| s.strip_suffix("_out"))
+        .and_then(|s| s.parse().ok())
+        .expect("Data input should be a node reference (node_N_out)");
+
+    let data_node = sir
+        .combinational_nodes
+        .iter()
+        .find(|n| n.id == data_node_id)
+        .expect("Should find the data node driving pulse_out");
+
+    // CRITICAL CHECK: The data node must be a Mux (conditional logic), NOT a Constant.
+    // Before the fix, this was SirNodeKind::Constant { value: 0, .. } because
+    // the unconditional `pulse_out = 0` short-circuited the entire mux chain.
+    assert!(
+        matches!(data_node.kind, SirNodeKind::Mux),
+        "pulse_out's next-state should be driven by a Mux (conditional logic), \
+         not {:?}. The unconditional default 'pulse_out = 0' must not suppress \
+         the conditional override 'pulse_out = 1'.",
+        data_node.kind
+    );
 }

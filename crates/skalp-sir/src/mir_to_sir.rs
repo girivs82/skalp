@@ -237,6 +237,9 @@ impl<'a> MirToSirConverter<'a> {
     }
 
     fn convert_signals(&mut self) {
+        // Collect initial value info for constant-driver generation after the loop
+        let mut constant_drivers: Vec<(String, u64, usize)> = Vec::new();
+
         for signal in &self.mir.signals {
             let sir_type = self.convert_type(&signal.signal_type);
             let width = sir_type.width();
@@ -265,6 +268,13 @@ impl<'a> MirToSirConverter<'a> {
             self.mir_to_internal_name
                 .insert(signal.name.clone(), internal_name.clone());
 
+            // Extract initial value as u64 (for integer/bitvector literals)
+            let initial_u64 = signal.initial.as_ref().and_then(|v| match v {
+                Value::Integer(i) => Some(*i as u64),
+                Value::BitVector { value, .. } => Some(*value),
+                _ => None,
+            });
+
             self.sir.signals.push(SirSignal {
                 name: internal_name.clone(), // Use internal name in SIR
                 width,
@@ -282,13 +292,45 @@ impl<'a> MirToSirConverter<'a> {
                         name: internal_name.clone(), // Use internal name
                         width,
                         sir_type: Some(sir_type.clone()),
-                        reset_value: None,
+                        reset_value: initial_u64,
                         clock: String::new(),
                         reset: None,
                         span: signal.span.clone(),
                     },
                 );
+            } else if let Some(val) = initial_u64 {
+                // BUG FIX (GitHub #12): Non-register signals with initial values need
+                // a combinational constant driver. Without this, signals like
+                // `signal CYCLES_PER_BIT: nat[9] = 434` would read as 0 at runtime
+                // because no node drives them.
+                constant_drivers.push((internal_name.clone(), val, width));
             }
+        }
+
+        // Create constant driver nodes for non-register signals with initial values
+        for (signal_name, value, width) in constant_drivers {
+            let node_id = self.next_node_id();
+            let output_ref = SignalRef {
+                signal_id: signal_name.clone(),
+                bit_range: None,
+            };
+
+            let node = SirNode {
+                id: node_id,
+                kind: SirNodeKind::Constant { value, width },
+                inputs: vec![],
+                outputs: vec![output_ref],
+                clock_domain: None,
+                impl_style_hint: ImplStyleHint::default(),
+                span: None,
+            };
+
+            // Set the driver_node on the signal
+            if let Some(sig) = self.sir.signals.iter_mut().find(|s| s.name == signal_name) {
+                sig.driver_node = Some(node_id);
+            }
+
+            self.sir.combinational_nodes.push(node);
         }
     }
 
@@ -4500,7 +4542,21 @@ impl<'a> MirToSirConverter<'a> {
     }
 
     fn node_to_signal_ref(&mut self, node_id: usize) -> SignalRef {
-        // Create a temporary signal for this node's output
+        // BUG FIX (GitHub #12): If the node already has a defined output (e.g., constant
+        // driver nodes output to the actual signal name like `_s1`), return that output
+        // instead of creating a phantom `node_{id}_out` signal that would never be written.
+        if let Some(node) = self
+            .sir
+            .combinational_nodes
+            .iter()
+            .find(|n| n.id == node_id)
+        {
+            if let Some(output) = node.outputs.first() {
+                return output.clone();
+            }
+        }
+
+        // Fallback: create a temporary signal for this node's output
         let signal_name = format!("node_{}_out", node_id);
 
         // Add signal if it doesn't exist
@@ -4795,10 +4851,24 @@ impl<'a> MirToSirConverter<'a> {
                 // BUG FIX #117r: Allow flip-flops to overwrite continuous assignment drivers for state elements
                 // This happens when a signal has an initialization value (continuous assign) but is also
                 // assigned in sequential logic (needs flip-flop). The flip-flop should be the driver.
+                //
+                // BUG FIX: Also allow overwriting constant drivers (from initial values) with
+                // combinational drivers. This happens when a parent signal like `stage1_out = 0`
+                // gets a constant driver from convert_signals(), but is then driven by a child
+                // instance's output port (e.g., Register's `data_out = reg`). The instance
+                // output should take priority over the default constant.
+                let existing_is_constant = self.sir.combinational_nodes.iter().any(|n| {
+                    n.id == existing_driver && matches!(n.kind, SirNodeKind::Constant { .. })
+                });
+
                 if new_node_is_flipflop && signal.is_state {
                     // Remember to remove the signal from the old driver's outputs
                     old_driver_to_update = Some(existing_driver);
                     // Continue to set the flip-flop as driver
+                } else if existing_is_constant {
+                    // Constant drivers are default values that can be overwritten
+                    old_driver_to_update = Some(existing_driver);
+                    // Continue to set the new driver
                 } else {
                     // Don't overwrite - keep the first driver
                     return;
@@ -5503,7 +5573,6 @@ impl<'a> MirToSirConverter<'a> {
     fn flatten_instances(&mut self, instance_prefix: &str) {
         // Clone the instances list to avoid borrow checker issues
         let instances = self.mir.instances.clone();
-
         for instance in &instances {
             // Find the module being instantiated
             let child_module = self
@@ -6179,6 +6248,13 @@ impl<'a> MirToSirConverter<'a> {
                     span: None,
                 });
 
+                // Extract initial value from the flattened signal
+                let initial_u64 = flat_signal.initial.as_ref().and_then(|v| match v {
+                    Value::Integer(i) => Some(*i as u64),
+                    Value::BitVector { value, .. } => Some(*value),
+                    _ => None,
+                });
+
                 if is_register {
                     self.sir.state_elements.insert(
                         internal_name.clone(),
@@ -6192,6 +6268,38 @@ impl<'a> MirToSirConverter<'a> {
                             span: None,
                         },
                     );
+                } else if let Some(val) = initial_u64 {
+                    // BUG FIX: Non-register signals with initial values in child
+                    // modules need constant driver nodes, just like top-level signals
+                    // (see convert_signals GitHub #12 fix). Without this, constants
+                    // like `signal CYCLES_PER_BIT: nat[9] = 434` would be 0 at
+                    // runtime because no node drives them.
+                    let node_id = self.next_node_id();
+                    let output_ref = SignalRef {
+                        signal_id: internal_name.clone(),
+                        bit_range: None,
+                    };
+
+                    let node = SirNode {
+                        id: node_id,
+                        kind: SirNodeKind::Constant { value: val, width },
+                        inputs: vec![],
+                        outputs: vec![output_ref],
+                        clock_domain: None,
+                        impl_style_hint: ImplStyleHint::default(),
+                        span: None,
+                    };
+
+                    if let Some(sig) = self
+                        .sir
+                        .signals
+                        .iter_mut()
+                        .find(|s| s.name == internal_name)
+                    {
+                        sig.driver_node = Some(node_id);
+                    }
+
+                    self.sir.combinational_nodes.push(node);
                 }
             }
         }
@@ -6315,7 +6423,21 @@ impl<'a> MirToSirConverter<'a> {
                 let width = sir_type.width();
 
                 // Check if already registered (avoid duplicates)
-                if self.mir_to_internal_name.contains_key(&hierarchical_path) {
+                // BUG #85 FIX: Check both dot notation (ctr.count) and underscore notation
+                // (ctr_count) because the MIR converter names instance output port signals
+                // with underscores while hierarchical elaboration uses dots.
+                let underscore_path = format!("{}_{}", inst_prefix, port.name);
+                if self.mir_to_internal_name.contains_key(&hierarchical_path)
+                    || self.mir_to_internal_name.contains_key(&underscore_path)
+                {
+                    // Ensure the dot-notation path also maps to the same internal name
+                    // so that child logic resolving Port("count") → "ctr.count" finds the
+                    // same signal that the parent module's "ctr_count" references.
+                    if let Some(internal) = self.mir_to_internal_name.get(&underscore_path).cloned()
+                    {
+                        self.mir_to_internal_name
+                            .insert(hierarchical_path.clone(), internal);
+                    }
                     continue;
                 }
 
@@ -7383,7 +7505,13 @@ impl<'a> MirToSirConverter<'a> {
         parent_module_for_signals: Option<&Module>,
         parent_prefix: &str,
     ) -> usize {
-        // Process all statements to find assignments to target
+        // BUG FIX: Use "last write wins" semantics instead of returning on first match.
+        // In sequential blocks, an unconditional default (e.g., `valid_out = 0`) at the
+        // top of the block should NOT short-circuit conditional overrides deeper in the
+        // block (e.g., `if ... { valid_out = 1 }`). Process ALL statements and chain
+        // results together, matching the behavior of find_assignment_in_branch_for_instance.
+        let mut result: Option<usize> = None;
+
         for statement in statements {
             match statement {
                 Statement::Assignment(assign) => {
@@ -7457,11 +7585,12 @@ impl<'a> MirToSirConverter<'a> {
                                         );
 
                                         // Create MUX: cond ? value : current
-                                        return self.create_mux_node(
+                                        result = Some(self.create_mux_node(
                                             cond_node,
                                             value_node,
                                             current_node,
-                                        );
+                                        ));
+                                        continue;
                                     }
                                 }
                             }
@@ -7471,20 +7600,20 @@ impl<'a> MirToSirConverter<'a> {
                     };
 
                     if lhs == target {
-                        // Direct assignment to target - create node for RHS
-                        return self.create_expression_node_for_instance_with_context(
+                        // Save as current result (may be overridden by later conditionals)
+                        result = Some(self.create_expression_node_for_instance_with_context(
                             &assign.rhs,
                             inst_prefix,
                             port_mapping,
                             child_module,
                             parent_module_for_signals,
                             parent_prefix,
-                        );
+                        ));
                     }
                 }
                 Statement::If(if_stmt) => {
-                    // Build conditional MUX
-                    return self.synthesize_conditional_for_instance(
+                    // Build conditional MUX, passing current result as default
+                    let if_result = self.synthesize_conditional_for_instance_with_default(
                         if_stmt,
                         inst_prefix,
                         port_mapping,
@@ -7492,11 +7621,13 @@ impl<'a> MirToSirConverter<'a> {
                         target,
                         parent_module_for_signals,
                         parent_prefix,
+                        result,
                     );
+                    result = Some(if_result);
                 }
                 Statement::Case(case_stmt) => {
                     // BUG #237 FIX: Handle top-level Case statements too
-                    if let Some(val) = self.synthesize_case_for_target_for_instance(
+                    if let Some(val) = self.synthesize_case_for_target_for_instance_with_default(
                         case_stmt,
                         inst_prefix,
                         port_mapping,
@@ -7504,8 +7635,9 @@ impl<'a> MirToSirConverter<'a> {
                         target,
                         parent_module_for_signals,
                         parent_prefix,
+                        result,
                     ) {
-                        return val;
+                        result = Some(val);
                     }
                 }
                 Statement::ResolvedConditional(resolved) => {
@@ -7527,15 +7659,18 @@ impl<'a> MirToSirConverter<'a> {
                     };
                     if let Some(lhs_name) = lhs {
                         if lhs_name == target {
-                            return self.synthesize_conditional_for_instance(
-                                &resolved.original,
-                                inst_prefix,
-                                port_mapping,
-                                child_module,
-                                target,
-                                parent_module_for_signals,
-                                parent_prefix,
-                            );
+                            let resolved_result = self
+                                .synthesize_conditional_for_instance_with_default(
+                                    &resolved.original,
+                                    inst_prefix,
+                                    port_mapping,
+                                    child_module,
+                                    target,
+                                    parent_module_for_signals,
+                                    parent_prefix,
+                                    result,
+                                );
+                            result = Some(resolved_result);
                         }
                     }
                 }
@@ -7543,123 +7678,20 @@ impl<'a> MirToSirConverter<'a> {
             }
         }
 
-        // No assignment found - use signal ref (keep current value)
-        // BUG #117r FIX: Use instance-aware SignalRef for output port resolution
-        self.create_signal_ref_for_instance(
-            target,
-            inst_prefix,
-            port_mapping,
-            parent_module_for_signals,
-            parent_prefix,
-        )
-    }
-
-    /// Synthesize conditional assignment for instance (creates MUX nodes)
-    #[allow(clippy::too_many_arguments)]
-    fn synthesize_conditional_for_instance(
-        &mut self,
-        if_stmt: &IfStatement,
-        inst_prefix: &str,
-        port_mapping: &HashMap<String, Expression>,
-        child_module: &Module,
-        target: &str,
-        parent_module_for_signals: Option<&Module>,
-        parent_prefix: &str,
-    ) -> usize {
-        // Get values from then and else branches
-        let then_value = self.find_assignment_in_branch_for_instance(
-            &if_stmt.then_block.statements,
-            inst_prefix,
-            port_mapping,
-            child_module,
-            target,
-            parent_module_for_signals,
-            parent_prefix,
-        );
-
-        let else_value = if let Some(else_block) = &if_stmt.else_block {
-            self.find_assignment_in_branch_for_instance(
-                &else_block.statements,
+        // Return accumulated result, or keep current value if no assignment found
+        result.unwrap_or_else(|| {
+            // BUG #117r FIX: Use instance-aware SignalRef for output port resolution
+            self.create_signal_ref_for_instance(
+                target,
                 inst_prefix,
                 port_mapping,
-                child_module,
-                target,
                 parent_module_for_signals,
                 parent_prefix,
             )
-        } else {
-            None
-        };
-
-        // Build MUX based on what was found
-        match (then_value, else_value) {
-            (Some(then_val), Some(else_val)) => {
-                // Both branches assign: mux(cond, then, else)
-                let condition = self.create_expression_node_for_instance_with_context(
-                    &if_stmt.condition,
-                    inst_prefix,
-                    port_mapping,
-                    child_module,
-                    parent_module_for_signals,
-                    parent_prefix,
-                );
-                self.create_mux_node(condition, then_val, else_val)
-            }
-            (Some(then_val), None) => {
-                // Only then assigns: mux(cond, then, keep)
-                let condition = self.create_expression_node_for_instance_with_context(
-                    &if_stmt.condition,
-                    inst_prefix,
-                    port_mapping,
-                    child_module,
-                    parent_module_for_signals,
-                    parent_prefix,
-                );
-                // BUG #117r FIX: Use instance-aware SignalRef for output port resolution
-                let keep_val = self.create_signal_ref_for_instance(
-                    target,
-                    inst_prefix,
-                    port_mapping,
-                    parent_module_for_signals,
-                    parent_prefix,
-                );
-                self.create_mux_node(condition, then_val, keep_val)
-            }
-            (None, Some(else_val)) => {
-                // Only else assigns: mux(cond, keep, else)
-                let condition = self.create_expression_node_for_instance_with_context(
-                    &if_stmt.condition,
-                    inst_prefix,
-                    port_mapping,
-                    child_module,
-                    parent_module_for_signals,
-                    parent_prefix,
-                );
-                // BUG #117r FIX: Use instance-aware SignalRef for output port resolution
-                let keep_val = self.create_signal_ref_for_instance(
-                    target,
-                    inst_prefix,
-                    port_mapping,
-                    parent_module_for_signals,
-                    parent_prefix,
-                );
-                self.create_mux_node(condition, keep_val, else_val)
-            }
-            (None, None) => {
-                // Neither assigns: keep current value
-                // BUG #117r FIX: Use instance-aware SignalRef for output port resolution
-                self.create_signal_ref_for_instance(
-                    target,
-                    inst_prefix,
-                    port_mapping,
-                    parent_module_for_signals,
-                    parent_prefix,
-                )
-            }
-        }
+        })
     }
 
-    /// BUG #238 FIX: Synthesize conditional with explicit default value
+    /// Synthesize conditional with explicit default value
     /// This allows chaining multiple If statements where later ones wrap earlier results
     #[allow(clippy::too_many_arguments)]
     fn synthesize_conditional_for_instance_with_default(
@@ -7757,137 +7789,7 @@ impl<'a> MirToSirConverter<'a> {
         }
     }
 
-    /// Find assignment to target in a branch
-    /// BUG #238 FIX: Process ALL statements and chain them together.
-    /// In RTL, later assignments in a clocked block take priority over earlier ones.
-    /// So `if A { x = 1 } if B { x = 0 }` should give: mux(B, 0, mux(A, 1, current_x))
-    #[allow(clippy::too_many_arguments)]
-    fn find_assignment_in_branch_for_instance(
-        &mut self,
-        statements: &[Statement],
-        inst_prefix: &str,
-        port_mapping: &HashMap<String, Expression>,
-        child_module: &Module,
-        target: &str,
-        parent_module_for_signals: Option<&Module>,
-        parent_prefix: &str,
-    ) -> Option<usize> {
-        // BUG #238 FIX: Collect all statement results, then chain them together
-        // Later statements have higher priority (override earlier ones)
-        let mut result: Option<usize> = None;
-
-        for stmt in statements {
-            match stmt {
-                Statement::Assignment(assign) => {
-                    // BUG #34 FIX: After HIR→MIR expansion, each flattened element (mem_0_x, mem_1_x, etc.)
-                    // has its own assignment with a unique RHS expression (containing the correct index literal).
-                    // We must match the EXACT signal name, not the stripped base, otherwise all targets
-                    // will match the first assignment and use the wrong constant!
-
-                    let lhs_signal = match &assign.lhs {
-                        LValue::Signal(sig_id) => {
-                            // Signal assignment - use EXACT name, don't strip!
-                            // Each flattened element has its own assignment in MIR
-                            child_module
-                                .signals
-                                .iter()
-                                .find(|s| s.id == *sig_id)
-                                .map(|signal| format!("{}.{}", inst_prefix, signal.name))
-                        }
-                        LValue::BitSelect { base, .. } => {
-                            // Array index like mem[wr_ptr] - strip to match flattened targets
-                            // This case shouldn't happen after HIR→MIR expansion, but keep for safety
-                            let extracted = self.extract_base_signal_for_instance(
-                                base,
-                                inst_prefix,
-                                child_module,
-                            );
-                            extracted
-                                .as_ref()
-                                .map(|base_name| self.strip_flattened_index_suffix(base_name))
-                        }
-                        _ => None,
-                    };
-
-                    if let Some(lhs) = lhs_signal {
-                        // For Signal assignments: exact match (fifo.mem_0_x == fifo.mem_0_x)
-                        // For BitSelect assignments: compare stripped names
-                        let matches = if matches!(assign.lhs, LValue::Signal(_)) {
-                            lhs == target
-                        } else {
-                            let target_stripped = self.strip_flattened_index_suffix(target);
-                            lhs == target_stripped
-                        };
-                        if matches {
-                            // Found assignment for this target - this overrides any previous result
-                            result = Some(self.create_expression_node_for_instance_with_context(
-                                &assign.rhs,
-                                inst_prefix,
-                                port_mapping,
-                                child_module,
-                                parent_module_for_signals,
-                                parent_prefix,
-                            ));
-                        }
-                    }
-                }
-                Statement::If(nested_if) => {
-                    // BUG #238 FIX: Don't return immediately! Chain conditionals together.
-                    // Each If statement should wrap the previous result as the else case.
-                    let if_result = self.synthesize_conditional_for_instance_with_default(
-                        nested_if,
-                        inst_prefix,
-                        port_mapping,
-                        child_module,
-                        target,
-                        parent_module_for_signals,
-                        parent_prefix,
-                        result, // Pass current result as default (else case)
-                    );
-                    result = Some(if_result);
-                }
-                Statement::Block(block) => {
-                    // Recursively search within the block, passing current result as base
-                    if let Some(block_result) = self
-                        .find_assignment_in_branch_for_instance_with_default(
-                            &block.statements,
-                            inst_prefix,
-                            port_mapping,
-                            child_module,
-                            target,
-                            parent_module_for_signals,
-                            parent_prefix,
-                            result,
-                        )
-                    {
-                        result = Some(block_result);
-                    }
-                }
-                Statement::Case(case_stmt) => {
-                    // BUG #237 FIX: Handle Case/match statements in instance branches
-                    // This is critical for state machines that use match statements
-                    // BUG #244 FIX: Pass current result so unconditional assignments before
-                    // the case statement are used as the default when no case arm matches
-                    if let Some(val) = self.synthesize_case_for_target_for_instance_with_default(
-                        case_stmt,
-                        inst_prefix,
-                        port_mapping,
-                        child_module,
-                        target,
-                        parent_module_for_signals,
-                        parent_prefix,
-                        result, // BUG #244: Pass current result as default
-                    ) {
-                        result = Some(val);
-                    }
-                }
-                _ => {}
-            }
-        }
-        result
-    }
-
-    /// Helper for find_assignment_in_branch_for_instance that carries a default value
+    /// Find assignment to target in a branch, carrying a default value
     #[allow(clippy::too_many_arguments)]
     fn find_assignment_in_branch_for_instance_with_default(
         &mut self,
@@ -7995,152 +7897,7 @@ impl<'a> MirToSirConverter<'a> {
         result
     }
 
-    /// BUG #237 FIX: Synthesize case statement for a specific target in instance context
-    /// This is the instance-aware version of synthesize_case_for_target_with_default
-    #[allow(clippy::too_many_arguments)]
-    fn synthesize_case_for_target_for_instance(
-        &mut self,
-        case_stmt: &skalp_mir::CaseStatement,
-        inst_prefix: &str,
-        port_mapping: &HashMap<String, Expression>,
-        child_module: &Module,
-        target: &str,
-        parent_module_for_signals: Option<&Module>,
-        parent_prefix: &str,
-    ) -> Option<usize> {
-        // Create expression node for the case expression (e.g., state_reg)
-        let case_expr_node = self.create_expression_node_for_instance_with_context(
-            &case_stmt.expr,
-            inst_prefix,
-            port_mapping,
-            child_module,
-            parent_module_for_signals,
-            parent_prefix,
-        );
-
-        // Collect values and expressions for this target from all case arms
-        let mut case_arms: Vec<(Vec<&Expression>, Option<usize>)> = Vec::new();
-        let mut found_target = false;
-
-        for item in case_stmt.items.iter() {
-            // Recursively find assignment in this arm's block
-            let arm_value = self.find_assignment_in_branch_for_instance(
-                &item.block.statements,
-                inst_prefix,
-                port_mapping,
-                child_module,
-                target,
-                parent_module_for_signals,
-                parent_prefix,
-            );
-            if arm_value.is_some() {
-                found_target = true;
-            }
-            case_arms.push((item.values.iter().collect(), arm_value));
-        }
-
-        // Get default block value
-        let default_block_value = if let Some(default_block) = &case_stmt.default {
-            let val = self.find_assignment_in_branch_for_instance(
-                &default_block.statements,
-                inst_prefix,
-                port_mapping,
-                child_module,
-                target,
-                parent_module_for_signals,
-                parent_prefix,
-            );
-            if val.is_some() {
-                found_target = true;
-            }
-            val
-        } else {
-            None
-        };
-
-        // If no arm assigns to this target, return None
-        if !found_target {
-            return None;
-        }
-
-        // Use default block value, or signal ref (keep current value)
-        // BUG #117r FIX: Use instance-aware SignalRef for output port resolution
-        let mut current_mux = match default_block_value {
-            Some(block_val) => block_val, // Default block has assignment
-            None => self.create_signal_ref_for_instance(
-                target,
-                inst_prefix,
-                port_mapping,
-                parent_module_for_signals,
-                parent_prefix,
-            ), // Keep current value
-        };
-
-        // Build mux chain from last case to first (so first has priority)
-        for (values, arm_value) in case_arms.iter().rev() {
-            let value_node = match arm_value {
-                Some(val) => *val,
-                None => current_mux,
-            };
-
-            if values.is_empty() {
-                continue;
-            }
-
-            let condition_node = if values.len() == 1 {
-                let val_node = self.create_expression_node_for_instance_with_context(
-                    values[0],
-                    inst_prefix,
-                    port_mapping,
-                    child_module,
-                    parent_module_for_signals,
-                    parent_prefix,
-                );
-                self.create_binary_op_node(&skalp_mir::BinaryOp::Equal, case_expr_node, val_node)
-            } else {
-                let mut or_node = {
-                    let val_node = self.create_expression_node_for_instance_with_context(
-                        values[0],
-                        inst_prefix,
-                        port_mapping,
-                        child_module,
-                        parent_module_for_signals,
-                        parent_prefix,
-                    );
-                    self.create_binary_op_node(
-                        &skalp_mir::BinaryOp::Equal,
-                        case_expr_node,
-                        val_node,
-                    )
-                };
-                for value in &values[1..] {
-                    let val_node = self.create_expression_node_for_instance_with_context(
-                        value,
-                        inst_prefix,
-                        port_mapping,
-                        child_module,
-                        parent_module_for_signals,
-                        parent_prefix,
-                    );
-                    let eq_node = self.create_binary_op_node(
-                        &skalp_mir::BinaryOp::Equal,
-                        case_expr_node,
-                        val_node,
-                    );
-                    or_node =
-                        self.create_binary_op_node(&skalp_mir::BinaryOp::Or, or_node, eq_node);
-                }
-                or_node
-            };
-
-            let old_mux = current_mux;
-            current_mux = self.create_mux_node(condition_node, value_node, old_mux);
-        }
-
-        Some(current_mux)
-    }
-
-    /// BUG #244 FIX: Synthesize case statement with an explicit default value
+    /// Synthesize case statement with an explicit default value
     /// When an unconditional assignment precedes the case statement, pass it as default
     /// so that if no case arm matches, we use the unconditional value instead of "keep current"
     #[allow(clippy::too_many_arguments)]
