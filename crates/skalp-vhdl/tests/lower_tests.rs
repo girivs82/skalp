@@ -306,3 +306,379 @@ end entity types;
     assert!(matches!(ports[3].port_type, HirType::Int(8)));     // signed(7 downto 0)
     assert!(matches!(ports[4].port_type, HirType::Bool));       // boolean
 }
+
+// ========================================================================
+// Step 1: Type conversions
+// ========================================================================
+
+#[test]
+fn test_lower_type_conversion() {
+    let source = r#"
+library ieee;
+use ieee.std_logic_1164.all;
+use ieee.numeric_std.all;
+
+entity conv is
+    port (
+        a : in  unsigned(7 downto 0);
+        b : out std_logic_vector(7 downto 0)
+    );
+end entity conv;
+
+architecture rtl of conv is
+begin
+    b <= std_logic_vector(a);
+end architecture rtl;
+"#;
+    let hir = parse_vhdl_source(source, None).unwrap();
+    let imp = &hir.implementations[0];
+
+    // The concurrent assignment b <= std_logic_vector(a) should NOT produce Literal(0)
+    assert!(!imp.assignments.is_empty(), "expected at least 1 assignment");
+    use skalp_frontend::hir::{HirExpression, HirLiteral};
+    let rhs = &imp.assignments[0].rhs;
+    assert!(
+        !matches!(rhs, HirExpression::Literal(HirLiteral::Integer(0))),
+        "type conversion should not produce Literal(0), got {:?}",
+        rhs
+    );
+}
+
+// ========================================================================
+// Step 2: Subtype declarations
+// ========================================================================
+
+#[test]
+fn test_lower_subtype_decl() {
+    let source = r#"
+library ieee;
+use ieee.std_logic_1164.all;
+use ieee.numeric_std.all;
+
+entity sub is
+    port (
+        clk : in std_logic
+    );
+end entity sub;
+
+architecture rtl of sub is
+    subtype byte_t is unsigned(7 downto 0);
+    signal data : byte_t;
+begin
+    process(clk)
+    begin
+        data <= (others => '0');
+    end process;
+end architecture rtl;
+"#;
+    let hir = parse_vhdl_source(source, None).unwrap();
+    let imp = &hir.implementations[0];
+
+    // data signal should exist and be Nat(8) (unsigned 8-bit)
+    assert!(!imp.signals.is_empty(), "expected at least 1 signal");
+    use skalp_frontend::hir::HirType;
+    assert!(
+        matches!(imp.signals[0].signal_type, HirType::Nat(8)),
+        "subtype byte_t should resolve to Nat(8), got {:?}",
+        imp.signals[0].signal_type
+    );
+}
+
+// ========================================================================
+// Step 3: Alias declarations
+// ========================================================================
+
+#[test]
+fn test_lower_alias() {
+    let source = r#"
+library ieee;
+use ieee.std_logic_1164.all;
+
+entity alias_test is
+    port (
+        data_in  : in  std_logic_vector(7 downto 0);
+        data_out : out std_logic_vector(7 downto 0)
+    );
+end entity alias_test;
+
+architecture rtl of alias_test is
+    alias din is data_in;
+begin
+    data_out <= din;
+end architecture rtl;
+"#;
+    let hir = parse_vhdl_source(source, None).unwrap();
+    let imp = &hir.implementations[0];
+
+    // Concurrent assignment data_out <= din should resolve din to data_in's port
+    assert!(!imp.assignments.is_empty(), "expected at least 1 assignment");
+    use skalp_frontend::hir::HirExpression;
+    let rhs = &imp.assignments[0].rhs;
+    assert!(
+        matches!(rhs, HirExpression::Port(_)),
+        "alias 'din' should resolve to a Port, got {:?}",
+        rhs
+    );
+}
+
+// ========================================================================
+// Step 5: Function lowering
+// ========================================================================
+
+#[test]
+fn test_lower_function_in_architecture() {
+    let source = r#"
+library ieee;
+use ieee.std_logic_1164.all;
+use ieee.numeric_std.all;
+
+entity func_test is
+    port (
+        a : in  unsigned(7 downto 0);
+        b : in  unsigned(7 downto 0);
+        y : out unsigned(7 downto 0)
+    );
+end entity func_test;
+
+architecture rtl of func_test is
+    function max_val(x : unsigned(7 downto 0); y : unsigned(7 downto 0)) return unsigned is
+    begin
+        if x > y then
+            return x;
+        else
+            return y;
+        end if;
+    end function max_val;
+begin
+    y <= max_val(a, b);
+end architecture rtl;
+"#;
+    let hir = parse_vhdl_source(source, None).unwrap();
+    let imp = &hir.implementations[0];
+
+    assert_eq!(imp.functions.len(), 1, "expected 1 function, got {}", imp.functions.len());
+    assert_eq!(imp.functions[0].name, "max_val");
+    assert_eq!(imp.functions[0].params.len(), 2, "expected 2 params");
+    assert!(imp.functions[0].return_type.is_some(), "expected return type");
+    assert!(!imp.functions[0].body.is_empty(), "expected function body");
+}
+
+// ========================================================================
+// Step 6: Package lowering
+// ========================================================================
+
+#[test]
+fn test_lower_package_with_types() {
+    let source = r#"
+library ieee;
+use ieee.std_logic_1164.all;
+use ieee.numeric_std.all;
+
+package my_pkg is
+    type state_t is (idle, run, done);
+    constant MAX_COUNT : integer := 255;
+end package my_pkg;
+
+entity pkg_user is
+    port (
+        clk : in std_logic
+    );
+end entity pkg_user;
+
+architecture rtl of pkg_user is
+    signal state : state_t;
+begin
+    process(clk)
+    begin
+        null;
+    end process;
+end architecture rtl;
+"#;
+    let hir = parse_vhdl_source(source, None).unwrap();
+    assert_eq!(hir.entities.len(), 1);
+    assert_eq!(hir.entities[0].name, "PkgUser");
+}
+
+// ========================================================================
+// Step 7: Generate statement lowering
+// ========================================================================
+
+#[test]
+fn test_lower_for_generate() {
+    let source = r#"
+library ieee;
+use ieee.std_logic_1164.all;
+
+entity gen_test is
+    port (
+        a : in  std_logic_vector(3 downto 0);
+        b : out std_logic_vector(3 downto 0)
+    );
+end entity gen_test;
+
+architecture rtl of gen_test is
+begin
+    gen_inv: for i in 0 to 3 generate
+        b(i) <= not a(i);
+    end generate gen_inv;
+end architecture rtl;
+"#;
+    let hir = parse_vhdl_source(source, None).unwrap();
+    let imp = &hir.implementations[0];
+
+    use skalp_frontend::hir::HirStatement;
+    assert!(
+        !imp.statements.is_empty(),
+        "expected generate statements, got empty"
+    );
+    assert!(
+        matches!(imp.statements[0], HirStatement::GenerateFor(_)),
+        "expected GenerateFor, got {:?}",
+        imp.statements[0]
+    );
+}
+
+#[test]
+fn test_lower_if_generate() {
+    let source = r#"
+library ieee;
+use ieee.std_logic_1164.all;
+
+entity ig_test is
+    generic (
+        USE_REG : boolean := true
+    );
+    port (
+        a : in  std_logic;
+        b : out std_logic
+    );
+end entity ig_test;
+
+architecture rtl of ig_test is
+begin
+    gen_if: if USE_REG generate
+        b <= a;
+    end generate gen_if;
+end architecture rtl;
+"#;
+    let hir = parse_vhdl_source(source, None).unwrap();
+    let imp = &hir.implementations[0];
+
+    use skalp_frontend::hir::HirStatement;
+    assert!(
+        !imp.statements.is_empty(),
+        "expected generate statements, got empty"
+    );
+    assert!(
+        matches!(imp.statements[0], HirStatement::GenerateIf(_)),
+        "expected GenerateIf, got {:?}",
+        imp.statements[0]
+    );
+}
+
+// ========================================================================
+// Step 8: While loop lowering
+// ========================================================================
+
+#[test]
+fn test_lower_while_loop() {
+    let source = r#"
+library ieee;
+use ieee.std_logic_1164.all;
+use ieee.numeric_std.all;
+
+entity wl is
+    port (
+        clk : in  std_logic;
+        val : out unsigned(7 downto 0)
+    );
+end entity wl;
+
+architecture rtl of wl is
+    signal count : unsigned(7 downto 0);
+begin
+    process(clk)
+        variable i : integer := 0;
+    begin
+        if rising_edge(clk) then
+            while i < 10 loop
+                i := i + 1;
+            end loop;
+        end if;
+    end process;
+end architecture rtl;
+"#;
+    let hir = parse_vhdl_source(source, None).unwrap();
+    let imp = &hir.implementations[0];
+
+    // Should have at least one event block with statements
+    assert!(!imp.event_blocks.is_empty());
+    // The while loop is lowered as a bounded for loop with a guard
+    use skalp_frontend::hir::HirStatement;
+    fn find_for_stmt(stmts: &[HirStatement]) -> bool {
+        for s in stmts {
+            match s {
+                HirStatement::For(_) => return true,
+                HirStatement::If(ref ifs) => {
+                    if find_for_stmt(&ifs.then_statements) {
+                        return true;
+                    }
+                    if let Some(ref else_s) = ifs.else_statements {
+                        if find_for_stmt(else_s) {
+                            return true;
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        false
+    }
+    assert!(
+        find_for_stmt(&imp.event_blocks[0].statements),
+        "while loop should be lowered as a for loop"
+    );
+}
+
+// ========================================================================
+// Step 9: Block statement lowering
+// ========================================================================
+
+#[test]
+fn test_lower_block_statement() {
+    let source = r#"
+library ieee;
+use ieee.std_logic_1164.all;
+
+entity blk_test is
+    port (
+        a : in  std_logic;
+        b : out std_logic
+    );
+end entity blk_test;
+
+architecture rtl of blk_test is
+begin
+    my_block: block is
+        signal internal : std_logic;
+    begin
+        internal <= a;
+        b <= internal;
+    end block my_block;
+end architecture rtl;
+"#;
+    let hir = parse_vhdl_source(source, None).unwrap();
+    let imp = &hir.implementations[0];
+
+    // Block signals should be flattened into the architecture
+    assert!(
+        !imp.signals.is_empty(),
+        "block signal 'internal' should be in architecture signals"
+    );
+    // Block assignments should be flattened too
+    assert!(
+        imp.assignments.len() >= 2,
+        "expected at least 2 assignments from block, got {}",
+        imp.assignments.len()
+    );
+}

@@ -227,7 +227,12 @@ pub enum SyntaxKind {
     TypeDecl,
     SubtypeDecl,
     AliasDecl,
+    AttributeDecl,
+    AttributeSpec,
     ComponentDecl,
+
+    // Concurrent statements (extra)
+    BlockStmt,
 
     // Type definitions
     EnumTypeDef,
@@ -311,7 +316,7 @@ pub enum SyntaxKind {
 }
 
 /// Number of SyntaxKind variants (update when adding new variants)
-const SYNTAX_KIND_MAX: usize = 256;
+const SYNTAX_KIND_MAX: usize = 260;
 
 impl From<SyntaxKind> for rowan::SyntaxKind {
     fn from(kind: SyntaxKind) -> Self {

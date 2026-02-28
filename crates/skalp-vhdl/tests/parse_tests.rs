@@ -300,3 +300,64 @@ fn test_parse_full_axi_peripheral() {
     let result = parse_vhdl(&source);
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 }
+
+// ========================================================================
+// Step 4: Attribute declarations and specifications
+// ========================================================================
+
+#[test]
+fn test_parse_attribute_declaration() {
+    let source = r#"
+library ieee;
+use ieee.std_logic_1164.all;
+
+entity attr_test is
+    port (
+        clk : in std_logic
+    );
+end entity attr_test;
+
+architecture rtl of attr_test is
+    attribute syn_encoding : string;
+    attribute syn_encoding of state : signal is "one-hot";
+begin
+    process(clk)
+    begin
+        null;
+    end process;
+end architecture rtl;
+"#;
+    let result = parse_vhdl(source);
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+}
+
+// ========================================================================
+// Step 9: Block statements
+// ========================================================================
+
+#[test]
+fn test_parse_block_statement() {
+    let source = r#"
+library ieee;
+use ieee.std_logic_1164.all;
+
+entity blk is
+    port (
+        a : in  std_logic;
+        b : out std_logic
+    );
+end entity blk;
+
+architecture rtl of blk is
+begin
+    my_block: block is
+        signal tmp : std_logic;
+    begin
+        tmp <= a;
+        b <= tmp;
+    end block my_block;
+end architecture rtl;
+"#;
+    let result = parse_vhdl(source);
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+}

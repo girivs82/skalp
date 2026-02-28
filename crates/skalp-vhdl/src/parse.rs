@@ -966,12 +966,18 @@ impl<'a> ParseState<'a> {
         // Both start with 'attribute ident'
         // Declaration: attribute name : type ;
         // Specification: attribute name of target : class is expression ;
-        self.start_node(SyntaxKind::AliasDecl); // reuse node kind; could be more specific
+        let is_decl = self.peek_kind(2) == Some(SyntaxKind::Colon);
+        let node_kind = if is_decl {
+            SyntaxKind::AttributeDecl
+        } else {
+            SyntaxKind::AttributeSpec
+        };
+        self.start_node(node_kind);
         self.expect(SyntaxKind::AttributeKw);
         self.skip_trivia();
         self.bump(); // attribute name
         self.skip_trivia();
-        // Skip to semicolon for MVP
+        // Skip to semicolon — attributes are synthesis tool metadata
         while !self.is_at_end() && !self.at(SyntaxKind::Semicolon) {
             self.bump();
             self.skip_trivia();
@@ -1194,6 +1200,10 @@ impl<'a> ParseState<'a> {
                     }
                     Some(SyntaxKind::IfKw) => {
                         self.parse_if_generate();
+                        return;
+                    }
+                    Some(SyntaxKind::BlockKw) => {
+                        self.parse_block_stmt();
                         return;
                     }
                     Some(SyntaxKind::EntityKw) => {
@@ -1874,6 +1884,54 @@ impl<'a> ParseState<'a> {
         self.skip_trivia();
         self.expect(SyntaxKind::GenerateKw);
         self.skip_trivia();
+        if self.at(SyntaxKind::Ident) {
+            self.bump();
+            self.skip_trivia();
+        }
+        self.expect(SyntaxKind::Semicolon);
+        self.finish_node();
+    }
+
+    fn parse_block_stmt(&mut self) {
+        self.start_node(SyntaxKind::BlockStmt);
+        self.expect(SyntaxKind::BlockKw);
+        self.skip_trivia();
+
+        // Optional guard expression in parens — skip past it
+        if self.at(SyntaxKind::LParen) {
+            let mut depth = 0;
+            loop {
+                if self.is_at_end() { break; }
+                if self.at(SyntaxKind::LParen) { depth += 1; }
+                if self.at(SyntaxKind::RParen) {
+                    depth -= 1;
+                    self.bump();
+                    if depth == 0 { break; }
+                    continue;
+                }
+                self.bump();
+            }
+            self.skip_trivia();
+        }
+
+        // Optional 'is'
+        self.eat(SyntaxKind::IsKw);
+        self.skip_trivia();
+
+        // Declarations (same as architecture declarative region)
+        self.parse_architecture_declarations();
+
+        self.expect(SyntaxKind::BeginKw);
+        self.skip_trivia();
+
+        // Concurrent statements
+        self.parse_concurrent_statements();
+
+        self.expect(SyntaxKind::EndKw);
+        self.skip_trivia();
+        self.eat(SyntaxKind::BlockKw);
+        self.skip_trivia();
+        // Optional label
         if self.at(SyntaxKind::Ident) {
             self.bump();
             self.skip_trivia();

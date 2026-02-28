@@ -17,8 +17,10 @@ pub struct VhdlHirBuilder {
     next_assignment_id: u32,
     next_instance_id: u32,
     next_for_loop_id: u32,
+    next_function_id: u32,
 
     builtin_scope: BuiltinScope,
+    function_map: IndexMap<String, FunctionId>,
     user_types: IndexMap<String, HirType>,
     /// Maps view_name -> (interface_name, field_name -> direction)
     view_defs: IndexMap<String, (String, IndexMap<String, HirPortDirection>)>,
@@ -120,7 +122,9 @@ impl VhdlHirBuilder {
             next_assignment_id: 0,
             next_instance_id: 0,
             next_for_loop_id: 0,
+            next_function_id: 0,
             builtin_scope: BuiltinScope::new(),
+            function_map: IndexMap::new(),
             user_types: IndexMap::new(),
             view_defs: IndexMap::new(),
             entity_map: IndexMap::new(),
@@ -179,6 +183,11 @@ impl VhdlHirBuilder {
         self.next_for_loop_id += 1;
         id
     }
+    fn alloc_function_id(&mut self) -> FunctionId {
+        let id = FunctionId(self.next_function_id);
+        self.next_function_id += 1;
+        id
+    }
 
     // ====================================================================
     // Top-level lowering
@@ -231,6 +240,9 @@ impl VhdlHirBuilder {
                 }
                 SyntaxKind::ViewDecl => {
                     self.lower_view_decl(&child);
+                }
+                SyntaxKind::PackageDecl | SyntaxKind::PackageBody => {
+                    self.lower_package(&child, &mut hir);
                 }
                 _ => {}
             }
@@ -477,9 +489,11 @@ impl VhdlHirBuilder {
         let mut signals = Vec::new();
         let mut variables = Vec::new();
         let mut constants = Vec::new();
+        let mut functions = Vec::new();
         let mut event_blocks = Vec::new();
         let mut assignments = Vec::new();
         let mut instances = Vec::new();
+        let mut generate_stmts = Vec::new();
 
         // Process declarations
         for child in node.children() {
@@ -499,6 +513,31 @@ impl VhdlHirBuilder {
                 }
                 SyntaxKind::TypeDecl => {
                     self.lower_type_decl(&child);
+                }
+                SyntaxKind::SubtypeDecl => {
+                    self.lower_subtype_decl(&child);
+                }
+                SyntaxKind::AliasDecl => {
+                    self.lower_alias_decl(&child);
+                }
+                SyntaxKind::FunctionBody => {
+                    if let Some(f) = self.lower_function(&child) {
+                        functions.push(f);
+                    }
+                }
+                SyntaxKind::ProcedureBody => {
+                    if let Some(f) = self.lower_procedure(&child) {
+                        functions.push(f);
+                    }
+                }
+                SyntaxKind::FunctionDecl | SyntaxKind::ProcedureDecl => {
+                    // Forward declarations — ignore
+                }
+                SyntaxKind::AttributeDecl | SyntaxKind::AttributeSpec => {
+                    // Synthesis tool metadata — ignore
+                }
+                SyntaxKind::ComponentDecl => {
+                    // Component declarations — handled at instantiation
                 }
                 _ => {}
             }
@@ -524,6 +563,28 @@ impl VhdlHirBuilder {
                         instances.push(inst);
                     }
                 }
+                SyntaxKind::ForGenerate => {
+                    if let Some(g) = self.lower_for_generate(&child) {
+                        generate_stmts.push(HirStatement::GenerateFor(g));
+                    }
+                }
+                SyntaxKind::IfGenerate => {
+                    if let Some(g) = self.lower_if_generate(&child) {
+                        generate_stmts.push(HirStatement::GenerateIf(g));
+                    }
+                }
+                SyntaxKind::BlockStmt => {
+                    // Flatten block statement into parent scope
+                    self.lower_block_stmt_into(
+                        &child,
+                        &mut signals,
+                        &mut variables,
+                        &mut constants,
+                        &mut event_blocks,
+                        &mut assignments,
+                        &mut instances,
+                    );
+                }
                 _ => {}
             }
         }
@@ -533,13 +594,13 @@ impl VhdlHirBuilder {
             signals,
             variables,
             constants,
-            functions: Vec::new(),
+            functions,
             event_blocks,
             assignments,
             instances,
             covergroups: Vec::new(),
             formal_blocks: Vec::new(),
-            statements: Vec::new(),
+            statements: generate_stmts,
         })
     }
 
@@ -659,6 +720,172 @@ impl VhdlHirBuilder {
                 .unwrap_or(1);
             let ty = make_array_type(elem_type, size);
             self.user_types.insert(name, ty);
+        }
+    }
+
+    // ====================================================================
+    // Function/Procedure lowering
+    // ====================================================================
+
+    fn lower_function(&mut self, node: &SyntaxNode) -> Option<HirFunction> {
+        let name = first_ident(node)?;
+        let id = self.alloc_function_id();
+        self.function_map.insert(name.clone(), id);
+
+        let is_pure = !has_token(node, SyntaxKind::ImpureKw);
+        let params = self.lower_param_list(node);
+        let return_type = self.extract_return_type(node);
+
+        // Lower body statements
+        let body = self.lower_sequential_statements(node);
+
+        Some(HirFunction {
+            id,
+            is_const: is_pure,
+            name,
+            generics: Vec::new(),
+            params,
+            return_type: Some(return_type),
+            body,
+            span: None,
+            pipeline_config: None,
+        })
+    }
+
+    fn lower_procedure(&mut self, node: &SyntaxNode) -> Option<HirFunction> {
+        let name = first_ident(node)?;
+        let id = self.alloc_function_id();
+        self.function_map.insert(name.clone(), id);
+
+        let params = self.lower_param_list(node);
+        let body = self.lower_sequential_statements(node);
+
+        Some(HirFunction {
+            id,
+            is_const: false,
+            name,
+            generics: Vec::new(),
+            params,
+            return_type: None,
+            body,
+            span: None,
+            pipeline_config: None,
+        })
+    }
+
+    fn lower_param_list(&mut self, node: &SyntaxNode) -> Vec<HirParameter> {
+        let mut params = Vec::new();
+        if let Some(pl) = first_child_of_kind(node, SyntaxKind::ParamList) {
+            for pd in all_children_of_kind(&pl, SyntaxKind::ParamDecl) {
+                params.extend(self.lower_param_decl(&pd));
+            }
+        }
+        params
+    }
+
+    fn lower_param_decl(&mut self, node: &SyntaxNode) -> Vec<HirParameter> {
+        let idents = ident_texts(node);
+        let param_type = first_child_of_kind(node, SyntaxKind::SubtypeIndication)
+            .map(|st| self.lower_subtype_indication(&st))
+            .unwrap_or(HirType::Logic(1));
+        let default_value = self.extract_default_value(node);
+
+        idents
+            .into_iter()
+            .map(|name| HirParameter {
+                name,
+                param_type: param_type.clone(),
+                default_value: default_value.clone(),
+            })
+            .collect()
+    }
+
+    fn extract_return_type(&mut self, node: &SyntaxNode) -> HirType {
+        // Find SubtypeIndication that is a direct child of the function body
+        // (not inside ParamList). The return type SubtypeIndication comes after ReturnKw.
+        let mut found_return = false;
+        for child in node.children_with_tokens() {
+            match child.kind() {
+                SyntaxKind::ReturnKw => {
+                    found_return = true;
+                }
+                SyntaxKind::IsKw | SyntaxKind::Semicolon => {
+                    break;
+                }
+                _ if found_return => {
+                    if let SyntaxElement::Node(ref n) = child {
+                        if n.kind() == SyntaxKind::SubtypeIndication {
+                            return self.lower_subtype_indication(n);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        HirType::Logic(1)
+    }
+
+    // ====================================================================
+    // Subtype/Alias lowering
+    // ====================================================================
+
+    fn lower_subtype_decl(&mut self, node: &SyntaxNode) {
+        let name = match first_ident(node) {
+            Some(n) => n,
+            None => return,
+        };
+        if let Some(st) = first_child_of_kind(node, SyntaxKind::SubtypeIndication) {
+            let ty = self.lower_subtype_indication(&st);
+            self.user_types.insert(name, ty);
+        }
+    }
+
+    fn lower_alias_decl(&mut self, node: &SyntaxNode) {
+        let alias_name = match first_ident(node) {
+            Some(n) => n,
+            None => return,
+        };
+
+        // The target is after IsKw — it may be an expression node (Name) or direct ident.
+        // Collect all idents that appear after the IsKw token.
+        let mut after_is = false;
+        let mut target_name = None;
+        for el in node.children_with_tokens() {
+            match el.kind() {
+                SyntaxKind::IsKw => {
+                    after_is = true;
+                }
+                SyntaxKind::Ident if after_is && target_name.is_none() => {
+                    if let SyntaxElement::Token(ref t) = el {
+                        target_name = Some(t.text().to_ascii_lowercase());
+                    }
+                }
+                SyntaxKind::Name if after_is && target_name.is_none() => {
+                    // Target is inside a Name node
+                    if let SyntaxElement::Node(ref n) = el {
+                        target_name = first_ident(n).map(|s| s.to_ascii_lowercase());
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        let target_name = match target_name {
+            Some(n) => n,
+            None => return,
+        };
+
+        // Copy mapping from target to alias
+        if let Some(id) = self.port_map.get(&target_name).copied() {
+            self.port_map.insert(alias_name, id);
+        } else if let Some(id) = self.signal_map.get(&target_name).copied() {
+            self.signal_map.insert(alias_name, id);
+        } else if let Some(id) = self.variable_map.get(&target_name).copied() {
+            self.variable_map.insert(alias_name, id);
+        } else if let Some(id) = self.constant_map.get(&target_name).copied() {
+            self.constant_map.insert(alias_name, id);
+        } else if let Some(ty) = self.user_types.get(&target_name).cloned() {
+            self.user_types.insert(alias_name, ty);
         }
     }
 
@@ -800,13 +1027,94 @@ impl VhdlHirBuilder {
                         stmts.push(HirStatement::Assignment(a));
                     }
                 }
+                SyntaxKind::WhileLoopStmt => {
+                    if let Some(s) = self.lower_while_loop(&child) {
+                        stmts.push(s);
+                    }
+                }
+                SyntaxKind::ReturnStmt => {
+                    stmts.push(self.lower_return_stmt(&child));
+                }
                 SyntaxKind::NullStmt => {
                     // null statement — no-op
+                }
+                SyntaxKind::AssertStmt | SyntaxKind::NextStmt | SyntaxKind::ExitStmt => {
+                    // assert/next/exit — skip for synthesis
                 }
                 _ => {}
             }
         }
         stmts
+    }
+
+    fn lower_return_stmt(&mut self, node: &SyntaxNode) -> HirStatement {
+        let elements: Vec<SyntaxElement> = node
+            .children_with_tokens()
+            .filter(|el| {
+                el.kind() != SyntaxKind::Whitespace
+                    && el.kind() != SyntaxKind::Comment
+                    && el.kind() != SyntaxKind::ReturnKw
+                    && el.kind() != SyntaxKind::Semicolon
+            })
+            .collect();
+        if elements.is_empty() {
+            HirStatement::Return(None)
+        } else {
+            HirStatement::Return(Some(self.lower_expr_from_elements(&elements)))
+        }
+    }
+
+    fn lower_while_loop(&mut self, node: &SyntaxNode) -> Option<HirStatement> {
+        // While loops must be bounded for synthesis.
+        // Lower as: for i in 0 to 255 loop if condition then body end if; end loop;
+        let elements: Vec<SyntaxElement> = node.children_with_tokens().collect();
+
+        // Extract condition: tokens between WhileKw and LoopKw
+        let mut condition_elements = Vec::new();
+        let mut in_condition = false;
+        for el in &elements {
+            match el.kind() {
+                SyntaxKind::WhileKw => {
+                    in_condition = true;
+                }
+                SyntaxKind::LoopKw if in_condition => {
+                    break;
+                }
+                SyntaxKind::Whitespace | SyntaxKind::Comment => {}
+                _ if in_condition => {
+                    condition_elements.push(el.clone());
+                }
+                _ => {}
+            }
+        }
+
+        let condition = self.lower_expr_from_elements(&condition_elements);
+        let body = self.lower_sequential_statements(node);
+
+        let loop_id = self.alloc_for_loop_id();
+        let iter_var_id = self.alloc_variable_id();
+        let iterator = format!("__while_iter_{}", loop_id.0);
+
+        let guarded_body = vec![HirStatement::If(HirIfStatement {
+            condition,
+            then_statements: body,
+            else_statements: None,
+            mux_style: MuxStyle::default(),
+        })];
+
+        Some(HirStatement::For(HirForStatement {
+            id: loop_id,
+            iterator,
+            iterator_var_id: iter_var_id,
+            range: HirRange {
+                start: HirExpression::Literal(HirLiteral::Integer(0)),
+                end: HirExpression::Literal(HirLiteral::Integer(255)),
+                inclusive: true,
+                step: None,
+            },
+            body: guarded_body,
+            unroll: None,
+        }))
     }
 
     fn lower_if_stmt(&mut self, node: &SyntaxNode) -> Option<HirStatement> {
@@ -1461,6 +1769,303 @@ impl VhdlHirBuilder {
     }
 
     // ====================================================================
+    // Package lowering
+    // ====================================================================
+
+    fn lower_package(&mut self, node: &SyntaxNode, hir: &mut Hir) {
+        for child in node.children() {
+            match child.kind() {
+                SyntaxKind::UseClause => self.lower_use_clause(&child),
+                SyntaxKind::TypeDecl => self.lower_type_decl(&child),
+                SyntaxKind::SubtypeDecl => self.lower_subtype_decl(&child),
+                SyntaxKind::ConstantDecl => {
+                    // Package-level constants — register in constant_map
+                    if let Some(_c) = self.lower_constant_decl(&child) {
+                        // Package constants are available but not emitted to a specific impl
+                    }
+                }
+                SyntaxKind::AliasDecl => self.lower_alias_decl(&child),
+                SyntaxKind::FunctionBody => {
+                    if let Some(f) = self.lower_function(&child) {
+                        hir.functions.push(f);
+                    }
+                }
+                SyntaxKind::ProcedureBody => {
+                    if let Some(f) = self.lower_procedure(&child) {
+                        hir.functions.push(f);
+                    }
+                }
+                SyntaxKind::FunctionDecl | SyntaxKind::ProcedureDecl => {
+                    // Forward declarations — ignore
+                }
+                SyntaxKind::AttributeDecl | SyntaxKind::AttributeSpec => {
+                    // Ignore metadata
+                }
+                SyntaxKind::SignalDecl | SyntaxKind::VariableDecl | SyntaxKind::ComponentDecl => {
+                    // Package-level declarations — register types but skip hardware
+                }
+                _ => {}
+            }
+        }
+    }
+
+    // ====================================================================
+    // Generate statement lowering
+    // ====================================================================
+
+    fn lower_for_generate(&mut self, node: &SyntaxNode) -> Option<HirGenerateFor> {
+        let idents = ident_texts(node);
+        let iterator = idents.first()?.clone();
+        let iter_var_id = self.alloc_variable_id();
+        self.variable_map.insert(iterator.clone(), iter_var_id);
+
+        let range = first_child_of_kind(node, SyntaxKind::DiscreteRange)
+            .and_then(|dr| self.lower_discrete_range(&dr))
+            .unwrap_or(HirRange {
+                start: HirExpression::Literal(HirLiteral::Integer(0)),
+                end: HirExpression::Literal(HirLiteral::Integer(0)),
+                inclusive: true,
+                step: None,
+            });
+
+        let body = self.lower_generate_body(node);
+
+        Some(HirGenerateFor {
+            iterator,
+            iterator_var_id: iter_var_id,
+            range,
+            body,
+            mode: GenerateMode::Elaborate,
+        })
+    }
+
+    fn lower_if_generate(&mut self, node: &SyntaxNode) -> Option<HirGenerateIf> {
+        let elements: Vec<SyntaxElement> = node.children_with_tokens().collect();
+
+        // Extract sections: if condition generate body [else generate body] end generate
+        let mut sections: Vec<GenerateSection> = Vec::new();
+        let mut current = GenerateSection {
+            kind: GenerateSectionKind::If,
+            condition_elements: Vec::new(),
+            body_nodes: Vec::new(),
+        };
+        let mut in_condition = true;
+
+        for el in &elements {
+            let kind = el.kind();
+            match kind {
+                SyntaxKind::Whitespace | SyntaxKind::Comment => continue,
+                SyntaxKind::IfKw => {
+                    if !current.condition_elements.is_empty() || !current.body_nodes.is_empty() {
+                        // "end ... if" — finalize
+                        sections.push(current);
+                        break;
+                    }
+                    in_condition = true;
+                }
+                SyntaxKind::GenerateKw => {
+                    in_condition = false;
+                }
+                SyntaxKind::ElseKw => {
+                    sections.push(current);
+                    current = GenerateSection {
+                        kind: GenerateSectionKind::Else,
+                        condition_elements: Vec::new(),
+                        body_nodes: Vec::new(),
+                    };
+                    in_condition = false;
+                }
+                SyntaxKind::ElsifKw => {
+                    sections.push(current);
+                    current = GenerateSection {
+                        kind: GenerateSectionKind::Elsif,
+                        condition_elements: Vec::new(),
+                        body_nodes: Vec::new(),
+                    };
+                    in_condition = true;
+                }
+                SyntaxKind::EndKw => {
+                    sections.push(current);
+                    break;
+                }
+                _ => {
+                    if in_condition {
+                        current.condition_elements.push(el.clone());
+                    } else {
+                        current.body_nodes.push(el.clone());
+                    }
+                }
+            }
+        }
+
+        if sections.is_empty() {
+            return None;
+        }
+
+        let condition = self.lower_expr_from_elements(&sections[0].condition_elements);
+        let then_body = self.lower_generate_body_from_elements(&sections[0].body_nodes);
+
+        let else_body = if sections.len() > 1 {
+            match sections[1].kind {
+                GenerateSectionKind::Else => {
+                    Some(self.lower_generate_body_from_elements(&sections[1].body_nodes))
+                }
+                _ => None,
+            }
+        } else {
+            None
+        };
+
+        Some(HirGenerateIf {
+            condition,
+            then_body,
+            else_body,
+            mode: GenerateMode::Elaborate,
+        })
+    }
+
+    fn lower_generate_body(&mut self, node: &SyntaxNode) -> HirGenerateBody {
+        let mut body = HirGenerateBody::default();
+
+        for child in node.children() {
+            match child.kind() {
+                SyntaxKind::SignalDecl => {
+                    body.signals.extend(self.lower_signal_decl(&child));
+                }
+                SyntaxKind::ConstantDecl => {
+                    if let Some(c) = self.lower_constant_decl(&child) {
+                        body.constants.push(c);
+                    }
+                }
+                SyntaxKind::ProcessStmt => {
+                    let (eb, _vars) = self.lower_process(&child);
+                    if let Some(eb) = eb {
+                        body.event_blocks.push(eb);
+                    }
+                }
+                SyntaxKind::ConcurrentSignalAssign => {
+                    if let Some(a) = self.lower_concurrent_assign(&child) {
+                        body.assignments.push(a);
+                    }
+                }
+                SyntaxKind::ComponentInst => {
+                    if let Some(inst) = self.lower_component_inst(&child) {
+                        body.instances.push(inst);
+                    }
+                }
+                SyntaxKind::ForGenerate => {
+                    if let Some(g) = self.lower_for_generate(&child) {
+                        body.generate_stmts.push(HirStatement::GenerateFor(g));
+                    }
+                }
+                SyntaxKind::IfGenerate => {
+                    if let Some(g) = self.lower_if_generate(&child) {
+                        body.generate_stmts.push(HirStatement::GenerateIf(g));
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        body
+    }
+
+    fn lower_generate_body_from_elements(&mut self, elements: &[SyntaxElement]) -> HirGenerateBody {
+        let mut body = HirGenerateBody::default();
+
+        for el in elements {
+            if let SyntaxElement::Node(ref n) = el {
+                match n.kind() {
+                    SyntaxKind::SignalDecl => {
+                        body.signals.extend(self.lower_signal_decl(n));
+                    }
+                    SyntaxKind::ConstantDecl => {
+                        if let Some(c) = self.lower_constant_decl(n) {
+                            body.constants.push(c);
+                        }
+                    }
+                    SyntaxKind::ProcessStmt => {
+                        let (eb, _vars) = self.lower_process(n);
+                        if let Some(eb) = eb {
+                            body.event_blocks.push(eb);
+                        }
+                    }
+                    SyntaxKind::ConcurrentSignalAssign => {
+                        if let Some(a) = self.lower_concurrent_assign(n) {
+                            body.assignments.push(a);
+                        }
+                    }
+                    SyntaxKind::ComponentInst => {
+                        if let Some(inst) = self.lower_component_inst(n) {
+                            body.instances.push(inst);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        body
+    }
+
+    // ====================================================================
+    // Block statement lowering
+    // ====================================================================
+
+    fn lower_block_stmt_into(
+        &mut self,
+        node: &SyntaxNode,
+        signals: &mut Vec<HirSignal>,
+        variables: &mut Vec<HirVariable>,
+        constants: &mut Vec<HirConstant>,
+        event_blocks: &mut Vec<HirEventBlock>,
+        assignments: &mut Vec<HirAssignment>,
+        instances: &mut Vec<HirInstance>,
+    ) {
+        for child in node.children() {
+            match child.kind() {
+                SyntaxKind::SignalDecl => {
+                    signals.extend(self.lower_signal_decl(&child));
+                }
+                SyntaxKind::ConstantDecl => {
+                    if let Some(c) = self.lower_constant_decl(&child) {
+                        constants.push(c);
+                    }
+                }
+                SyntaxKind::VariableDecl => {
+                    if let Some(v) = self.lower_variable_decl(&child) {
+                        variables.push(v);
+                    }
+                }
+                SyntaxKind::TypeDecl => {
+                    self.lower_type_decl(&child);
+                }
+                SyntaxKind::SubtypeDecl => {
+                    self.lower_subtype_decl(&child);
+                }
+                SyntaxKind::ProcessStmt => {
+                    let (eb, proc_vars) = self.lower_process(&child);
+                    if let Some(eb) = eb {
+                        event_blocks.push(eb);
+                    }
+                    variables.extend(proc_vars);
+                }
+                SyntaxKind::ConcurrentSignalAssign => {
+                    if let Some(a) = self.lower_concurrent_assign(&child) {
+                        assignments.push(a);
+                    }
+                }
+                SyntaxKind::ComponentInst => {
+                    if let Some(inst) = self.lower_component_inst(&child) {
+                        instances.push(inst);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    // ====================================================================
     // Expression lowering from syntax elements
     // ====================================================================
 
@@ -1925,8 +2530,51 @@ impl VhdlHirBuilder {
         }
     }
 
-    fn lower_type_conversion(&mut self, _node: &SyntaxNode) -> HirExpression {
-        HirExpression::Literal(HirLiteral::Integer(0))
+    fn lower_type_conversion(&mut self, node: &SyntaxNode) -> HirExpression {
+        // Type conversion: unsigned(x), std_logic_vector(y)
+        // Extract the argument expression between LParen/RParen.
+        // If the parens contain to/downto, it's a range declaration, not a conversion.
+        let mut inside = false;
+        let mut depth = 0i32;
+        let mut arg_elements: Vec<SyntaxElement> = Vec::new();
+        let mut has_range_dir = false;
+
+        for el in node.children_with_tokens() {
+            let kind = el.kind();
+            match kind {
+                SyntaxKind::LParen if !inside => {
+                    inside = true;
+                    depth = 1;
+                }
+                SyntaxKind::LParen => {
+                    depth += 1;
+                    arg_elements.push(el);
+                }
+                SyntaxKind::RParen if inside => {
+                    depth -= 1;
+                    if depth == 0 {
+                        break;
+                    }
+                    arg_elements.push(el);
+                }
+                SyntaxKind::ToKw | SyntaxKind::DowntoKw if inside && depth == 1 => {
+                    has_range_dir = true;
+                    arg_elements.push(el);
+                }
+                SyntaxKind::Whitespace | SyntaxKind::Comment => {}
+                _ if inside => {
+                    arg_elements.push(el);
+                }
+                _ => {}
+            }
+        }
+
+        if has_range_dir || arg_elements.is_empty() {
+            // It's a type range declaration (e.g. unsigned(7 downto 0)), not a conversion
+            return HirExpression::Literal(HirLiteral::Integer(0));
+        }
+
+        self.lower_expr_from_elements(&arg_elements)
     }
 
     // ====================================================================
@@ -2282,12 +2930,21 @@ impl VhdlHirBuilder {
                             stmts.push(s);
                         }
                     }
+                    SyntaxKind::WhileLoopStmt => {
+                        if let Some(s) = self.lower_while_loop(n) {
+                            stmts.push(s);
+                        }
+                    }
+                    SyntaxKind::ReturnStmt => {
+                        stmts.push(self.lower_return_stmt(n));
+                    }
                     SyntaxKind::SequentialSignalAssign | SyntaxKind::VariableAssignStmt => {
                         if let Some(a) = self.lower_sequential_assign(n) {
                             stmts.push(HirStatement::Assignment(a));
                         }
                     }
-                    SyntaxKind::NullStmt => {}
+                    SyntaxKind::NullStmt | SyntaxKind::AssertStmt
+                    | SyntaxKind::NextStmt | SyntaxKind::ExitStmt => {}
                     _ => {
                         // Try recursive
                         let sub = self.lower_sequential_statements(n);
@@ -2323,4 +2980,18 @@ impl IfSection {
             body_elements: Vec::new(),
         }
     }
+}
+
+#[derive(Clone)]
+struct GenerateSection {
+    kind: GenerateSectionKind,
+    condition_elements: Vec<SyntaxElement>,
+    body_nodes: Vec<SyntaxElement>,
+}
+
+#[derive(Clone, Copy)]
+enum GenerateSectionKind {
+    If,
+    Elsif,
+    Else,
 }
