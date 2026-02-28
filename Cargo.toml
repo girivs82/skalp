@@ -61,6 +61,7 @@ skalp-testing = { path = "crates/skalp-testing" }
 skalp-safety = { path = "crates/skalp-safety" }
 skalp-formal = { path = "crates/skalp-formal" }
 skalp-place-route = { path = "crates/skalp-place-route", features = ["programmer"] }
+skalp-vhdl = { path = "crates/skalp-vhdl" }
 
 # Library system
 skalp-resolve = { path = "crates/skalp-resolve" }
@@ -133,4 +134,5 @@ members = [
     "crates/skalp-parallel",
     "crates/skalp-incremental", "crates/skalp-asic", "crates/skalp-resolve", "crates/skalp-manifest", "crates/skalp-package",
     "crates/skalp-ml",
+    "crates/skalp-vhdl",
 ]
