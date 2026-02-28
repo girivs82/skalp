@@ -683,4 +683,151 @@ impl SimpleRegFile {
 
         println!("GPU register file simulation test passed!");
     }
+
+    #[tokio::test]
+    async fn test_hierarchical_fifo_ordering() {
+        // Regression test for BUG: dynamic array reads in hierarchical (flattened) instances.
+        // When a FIFO is instantiated inside a parent module, the memory array is flattened
+        // to individual signals (memory_0, memory_1, ...). The read path `rd_data = memory[rd_ptr]`
+        // must build a MUX tree to select from these elements based on the dynamic rd_ptr,
+        // rather than always returning element 0.
+        let source = r#"
+entity SimpleFifo {
+    in  clk:     clock
+    in  rst:     reset
+    in  wr_en:   bit
+    in  wr_data: bit[8]
+    in  rd_en:   bit
+    out rd_data: bit[8]
+    out empty:   bit
+}
+
+impl SimpleFifo {
+    signal memory: [bit[8]; 16]
+    signal wr_ptr: nat[4]
+    signal rd_ptr: nat[4]
+    signal elem_count: nat[5]
+
+    on(clk.rise) {
+        if rst {
+            wr_ptr     = 0
+            rd_ptr     = 0
+            elem_count = 0
+        } else {
+            if wr_en && elem_count < 16 {
+                memory[wr_ptr] = wr_data
+                if wr_ptr == 15 {
+                    wr_ptr = 0
+                } else {
+                    wr_ptr = wr_ptr + 1
+                }
+                elem_count = elem_count + 1
+            } else if rd_en && elem_count > 0 {
+                if rd_ptr == 15 {
+                    rd_ptr = 0
+                } else {
+                    rd_ptr = rd_ptr + 1
+                }
+                elem_count = elem_count - 1
+            }
+        }
+    }
+
+    signal empty_flag: bit
+    empty_flag = elem_count == 0
+    empty   = empty_flag
+    rd_data = memory[rd_ptr]
+}
+
+use SimpleFifo;
+
+entity FifoWrapper {
+    in  clk:     clock
+    in  rst:     reset
+    in  wr_en:   bit
+    in  wr_data: bit[8]
+    in  rd_en:   bit
+    out rd_data: bit[8]
+    out empty:   bit
+}
+
+impl FifoWrapper {
+    let fifo = SimpleFifo {
+        clk:     clk,
+        rst:     rst,
+        wr_en:   wr_en,
+        wr_data: wr_data,
+        rd_en:   rd_en
+    }
+
+    rd_data = fifo.rd_data
+    empty   = fifo.empty
+}
+"#;
+
+        let mut sim = setup_simulator(source, false).await;
+
+        // Reset
+        sim.set_input("rst", 1).await;
+        sim.set_input("wr_en", 0).await;
+        sim.set_input("rd_en", 0).await;
+        sim.set_input("wr_data", 0).await;
+        sim.set_input("clk", 0).await;
+
+        for i in 0..4 {
+            sim.set_input("clk", (i % 2) as u64).await;
+            sim.step().await;
+        }
+
+        // Release reset
+        sim.set_input("rst", 0).await;
+
+        // Write 4 bytes: 0xAA, 0xBB, 0xCC, 0xDD
+        let test_values: [u64; 4] = [0xAA, 0xBB, 0xCC, 0xDD];
+        for &value in &test_values {
+            sim.set_input("wr_en", 1).await;
+            sim.set_input("rd_en", 0).await;
+            sim.set_input("wr_data", value).await;
+
+            sim.set_input("clk", 0).await;
+            sim.step().await;
+            sim.set_input("clk", 1).await;
+            sim.step().await;
+        }
+
+        // Stop writing
+        sim.set_input("wr_en", 0).await;
+
+        // Read back and verify FIFO ordering (first-in, first-out)
+        for (i, &expected) in test_values.iter().enumerate() {
+            // rd_data should already reflect memory[rd_ptr] combinationally
+            sim.set_input("rd_en", 0).await;
+            sim.set_input("clk", 0).await;
+            sim.step().await;
+
+            let rd_data = sim.get_output("rd_data").await.unwrap_or(0);
+            assert_eq!(
+                rd_data, expected,
+                "FIFO read {}: expected 0x{:02X}, got 0x{:02X} (FIFO ordering bug)",
+                i, expected, rd_data
+            );
+
+            // Now pulse rd_en to advance the read pointer
+            sim.set_input("rd_en", 1).await;
+            sim.set_input("clk", 0).await;
+            sim.step().await;
+            sim.set_input("clk", 1).await;
+            sim.step().await;
+        }
+
+        // Verify FIFO is empty
+        sim.set_input("rd_en", 0).await;
+        sim.set_input("clk", 0).await;
+        sim.step().await;
+
+        let empty = sim.get_output("empty").await.unwrap_or(0);
+        assert_eq!(empty, 1, "FIFO should be empty after reading all elements");
+
+        println!("Hierarchical FIFO ordering test passed!");
+    }
 }
