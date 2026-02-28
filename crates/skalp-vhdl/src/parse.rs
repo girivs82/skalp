@@ -276,6 +276,7 @@ impl<'a> ParseState<'a> {
                 kind: crate::diagnostics::VhdlErrorKind::ParseError,
                 message: format!("expected {:?}, found {}", kind, found),
                 position: pos,
+                severity: crate::diagnostics::VhdlSeverity::Error,
             });
             false
         }
@@ -297,6 +298,7 @@ impl<'a> ParseState<'a> {
             kind: crate::diagnostics::VhdlErrorKind::ParseError,
             message: message.to_string(),
             position: pos,
+            severity: crate::diagnostics::VhdlSeverity::Error,
         });
     }
 
@@ -331,6 +333,7 @@ impl<'a> ParseState<'a> {
                     kind: crate::diagnostics::VhdlErrorKind::Unsynthesizable("wait statement".to_string()),
                     message: "wait statements are not synthesizable".to_string(),
                     position: self.current_offset(),
+                    severity: crate::diagnostics::VhdlSeverity::Error,
                 });
                 true
             }
@@ -339,6 +342,7 @@ impl<'a> ParseState<'a> {
                     kind: crate::diagnostics::VhdlErrorKind::Unsynthesizable("after clause".to_string()),
                     message: "after clauses are not synthesizable".to_string(),
                     position: self.current_offset(),
+                    severity: crate::diagnostics::VhdlSeverity::Error,
                 });
                 true
             }
@@ -347,6 +351,7 @@ impl<'a> ParseState<'a> {
                     kind: crate::diagnostics::VhdlErrorKind::Unsynthesizable("transport/reject delay".to_string()),
                     message: "transport/reject delay models are not synthesizable".to_string(),
                     position: self.current_offset(),
+                    severity: crate::diagnostics::VhdlSeverity::Error,
                 });
                 true
             }
@@ -355,6 +360,7 @@ impl<'a> ParseState<'a> {
                     kind: crate::diagnostics::VhdlErrorKind::Unsynthesizable("file declaration".to_string()),
                     message: "file declarations are not synthesizable".to_string(),
                     position: self.current_offset(),
+                    severity: crate::diagnostics::VhdlSeverity::Error,
                 });
                 true
             }
@@ -363,6 +369,7 @@ impl<'a> ParseState<'a> {
                     kind: crate::diagnostics::VhdlErrorKind::Unsynthesizable("access type".to_string()),
                     message: "access types are not synthesizable".to_string(),
                     position: self.current_offset(),
+                    severity: crate::diagnostics::VhdlSeverity::Error,
                 });
                 true
             }

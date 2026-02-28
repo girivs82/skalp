@@ -28,8 +28,17 @@ pub fn parse_vhdl(file_path: &Path) -> Result<CompilationContext> {
 
 /// Parse VHDL source text and produce HIR
 pub fn parse_vhdl_source(source: &str, file_path: Option<&Path>) -> Result<Hir> {
+    let (hir, _diagnostics) = parse_vhdl_source_with_diagnostics(source, file_path)?;
+    Ok(hir)
+}
+
+/// Parse VHDL source text and produce HIR along with lowering diagnostics
+pub fn parse_vhdl_source_with_diagnostics(
+    source: &str,
+    file_path: Option<&Path>,
+) -> Result<(Hir, Vec<diagnostics::VhdlError>)> {
     // Lex
-    let tokens = lexer::tokenize(source);
+    let _tokens = lexer::tokenize(source);
 
     // Parse to syntax tree
     let parse_result = parse::parse_vhdl(source);
@@ -50,6 +59,7 @@ pub fn parse_vhdl_source(source: &str, file_path: Option<&Path>) -> Result<Hir> 
     // Lower to HIR
     let mut lowerer = hir_lower::VhdlHirBuilder::new(file_path);
     let hir = lowerer.lower(&parse_result.root)?;
+    let diags = lowerer.diagnostics().to_vec();
 
-    Ok(hir)
+    Ok((hir, diags))
 }

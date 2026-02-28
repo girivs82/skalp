@@ -5,6 +5,7 @@ use skalp_frontend::safety_attributes::ModuleSafetyDefinitions;
 use std::collections::HashSet;
 
 use crate::builtins::BuiltinScope;
+use crate::diagnostics::{VhdlError, VhdlErrorKind, VhdlSeverity};
 use crate::syntax::{SyntaxElement, SyntaxKind, SyntaxNode};
 use crate::vhdl_types::*;
 
@@ -49,7 +50,7 @@ pub struct VhdlHirBuilder {
 
     inside_event_block: bool,
 
-    errors: Vec<crate::diagnostics::VhdlError>,
+    errors: Vec<VhdlError>,
     file_path: Option<std::path::PathBuf>,
 }
 
@@ -156,6 +157,30 @@ impl VhdlHirBuilder {
             errors: Vec::new(),
             file_path: file_path.map(|p| p.to_path_buf()),
         }
+    }
+
+    pub fn diagnostics(&self) -> &[VhdlError] {
+        &self.errors
+    }
+
+    fn emit_warning(&mut self, msg: impl Into<String>) {
+        let message = msg.into();
+        self.errors.push(VhdlError {
+            kind: VhdlErrorKind::LoweringError(message.clone()),
+            message,
+            position: 0,
+            severity: VhdlSeverity::Warning,
+        });
+    }
+
+    fn emit_error(&mut self, msg: impl Into<String>) {
+        let message = msg.into();
+        self.errors.push(VhdlError {
+            kind: VhdlErrorKind::LoweringError(message.clone()),
+            message,
+            position: 0,
+            severity: VhdlSeverity::Error,
+        });
     }
 
     fn alloc_entity_id(&mut self) -> EntityId {
@@ -425,6 +450,8 @@ impl VhdlHirBuilder {
         let port_type = if let Some(st) = first_child_of_kind(node, SyntaxKind::SubtypeIndication) {
             self.lower_subtype_indication(&st)
         } else {
+            let name_hint = idents.first().map(|s| s.as_str()).unwrap_or("?");
+            self.emit_warning(format!("missing type for port '{}', defaulting to std_logic", name_hint));
             HirType::Logic(1)
         };
 
@@ -479,7 +506,10 @@ impl VhdlHirBuilder {
             let direction = direction_map
                 .get(&field.name)
                 .cloned()
-                .unwrap_or(HirPortDirection::Input);
+                .unwrap_or_else(|| {
+                    self.emit_warning(format!("no direction for view field '{}', defaulting to in", field.name));
+                    HirPortDirection::Input
+                });
 
             let id = self.alloc_port_id();
             self.port_map.insert(flat_name.clone(), id);
@@ -508,12 +538,18 @@ impl VhdlHirBuilder {
         let entity_name = idents.get(1).cloned().unwrap_or_default();
         let pascal_entity = to_pascal_case(&entity_name);
 
-        let entity_id = self
+        let entity_id = match self
             .entity_map
             .get(&entity_name)
             .or_else(|| self.entity_map.get(&pascal_entity))
             .copied()
-            .unwrap_or(EntityId(0));
+        {
+            Some(id) => id,
+            None => {
+                self.emit_error(format!("architecture references unknown entity: '{}'", entity_name));
+                EntityId(0)
+            }
+        };
 
         // Clear signal/variable maps for this architecture
         self.signal_map.clear();
@@ -644,9 +680,13 @@ impl VhdlHirBuilder {
 
     fn lower_signal_decl(&mut self, node: &SyntaxNode) -> Vec<HirSignal> {
         let idents = ident_texts(node);
-        let signal_type = first_child_of_kind(node, SyntaxKind::SubtypeIndication)
-            .map(|st| self.lower_subtype_indication(&st))
-            .unwrap_or(HirType::Logic(1));
+        let signal_type = if let Some(st) = first_child_of_kind(node, SyntaxKind::SubtypeIndication) {
+            self.lower_subtype_indication(&st)
+        } else {
+            let name_hint = idents.first().map(|s| s.as_str()).unwrap_or("?");
+            self.emit_warning(format!("missing type for signal '{}', defaulting to std_logic", name_hint));
+            HirType::Logic(1)
+        };
 
         let init = self.extract_default_value(node);
 
@@ -675,9 +715,12 @@ impl VhdlHirBuilder {
 
     fn lower_variable_decl(&mut self, node: &SyntaxNode) -> Option<HirVariable> {
         let name = first_ident(node)?;
-        let var_type = first_child_of_kind(node, SyntaxKind::SubtypeIndication)
-            .map(|st| self.lower_subtype_indication(&st))
-            .unwrap_or(HirType::Logic(1));
+        let var_type = if let Some(st) = first_child_of_kind(node, SyntaxKind::SubtypeIndication) {
+            self.lower_subtype_indication(&st)
+        } else {
+            self.emit_warning(format!("missing type for variable '{}', defaulting to std_logic", name));
+            HirType::Logic(1)
+        };
         let init = self.extract_default_value(node);
         let id = self.alloc_variable_id();
         self.variable_map.insert(name.clone(), id);
@@ -692,12 +735,18 @@ impl VhdlHirBuilder {
 
     fn lower_constant_decl(&mut self, node: &SyntaxNode) -> Option<HirConstant> {
         let name = first_ident(node)?;
-        let const_type = first_child_of_kind(node, SyntaxKind::SubtypeIndication)
-            .map(|st| self.lower_subtype_indication(&st))
-            .unwrap_or(HirType::Nat(32));
+        let const_type = if let Some(st) = first_child_of_kind(node, SyntaxKind::SubtypeIndication) {
+            self.lower_subtype_indication(&st)
+        } else {
+            self.emit_warning(format!("no type for constant '{}', defaulting to natural(32)", name));
+            HirType::Nat(32)
+        };
         let value = self
             .extract_default_value(node)
-            .unwrap_or(HirExpression::Literal(HirLiteral::Integer(0)));
+            .unwrap_or_else(|| {
+                self.emit_warning(format!("no default value for constant '{}', using 0", name));
+                HirExpression::Literal(HirLiteral::Integer(0))
+            });
         let id = self.alloc_constant_id();
         self.constant_map.insert(name.clone(), id);
         Some(HirConstant {
@@ -729,10 +778,13 @@ impl VhdlHirBuilder {
             let mut fields = Vec::new();
             for field_node in all_children_of_kind(&rec_def, SyntaxKind::RecordField) {
                 let field_names = ident_texts(&field_node);
-                let field_type =
-                    first_child_of_kind(&field_node, SyntaxKind::SubtypeIndication)
-                        .map(|st| self.lower_subtype_indication(&st))
-                        .unwrap_or(HirType::Logic(1));
+                let field_type = if let Some(st) = first_child_of_kind(&field_node, SyntaxKind::SubtypeIndication) {
+                    self.lower_subtype_indication(&st)
+                } else {
+                    let fn_hint = field_names.first().map(|s| s.as_str()).unwrap_or("?");
+                    self.emit_warning(format!("missing type for record field '{}', defaulting to std_logic", fn_hint));
+                    HirType::Logic(1)
+                };
                 for fn_name in &field_names {
                     fields.push((fn_name.clone(), field_type.clone()));
                 }
@@ -744,10 +796,12 @@ impl VhdlHirBuilder {
 
         // Array type
         if let Some(arr_def) = first_child_of_kind(node, SyntaxKind::ArrayTypeDef) {
-            let elem_type =
-                first_child_of_kind(&arr_def, SyntaxKind::SubtypeIndication)
-                    .map(|st| self.lower_subtype_indication(&st))
-                    .unwrap_or(HirType::Logic(1));
+            let elem_type = if let Some(st) = first_child_of_kind(&arr_def, SyntaxKind::SubtypeIndication) {
+                self.lower_subtype_indication(&st)
+            } else {
+                self.emit_warning(format!("missing element type for array type '{}', defaulting to std_logic", name));
+                HirType::Logic(1)
+            };
             // Try to extract size from discrete range
             let size = first_child_of_kind(&arr_def, SyntaxKind::DiscreteRange)
                 .and_then(|dr| self.extract_range_size(&dr))
@@ -819,9 +873,13 @@ impl VhdlHirBuilder {
 
     fn lower_param_decl(&mut self, node: &SyntaxNode) -> Vec<HirParameter> {
         let idents = ident_texts(node);
-        let param_type = first_child_of_kind(node, SyntaxKind::SubtypeIndication)
-            .map(|st| self.lower_subtype_indication(&st))
-            .unwrap_or(HirType::Logic(1));
+        let param_type = if let Some(st) = first_child_of_kind(node, SyntaxKind::SubtypeIndication) {
+            self.lower_subtype_indication(&st)
+        } else {
+            let name_hint = idents.first().map(|s| s.as_str()).unwrap_or("?");
+            self.emit_warning(format!("missing type for parameter '{}', defaulting to std_logic", name_hint));
+            HirType::Logic(1)
+        };
         let default_value = self.extract_default_value(node);
 
         idents
@@ -856,6 +914,7 @@ impl VhdlHirBuilder {
                 _ => {}
             }
         }
+        self.emit_warning("could not resolve function return type, defaulting to std_logic");
         HirType::Logic(1)
     }
 
@@ -962,7 +1021,7 @@ impl VhdlHirBuilder {
 
         // Sequential statements
         self.inside_event_block = !is_combinational;
-        let statements = self.lower_sequential_statements(node);
+        let mut statements = self.lower_sequential_statements(node);
         self.inside_event_block = false;
 
         // Determine triggers
@@ -971,6 +1030,10 @@ impl VhdlHirBuilder {
         } else {
             self.detect_triggers(&sens_names, &statements)
         };
+
+        // Post-process: strip rising_edge/falling_edge Call wrappers from if-conditions
+        // so downstream MIR sees the signal reference directly
+        Self::strip_edge_calls(&mut statements);
 
         let event_block = HirEventBlock {
             id: block_id,
@@ -982,25 +1045,27 @@ impl VhdlHirBuilder {
     }
 
     fn detect_triggers(
-        &self,
+        &mut self,
         sens_names: &[String],
-        _statements: &[HirStatement],
+        statements: &[HirStatement],
     ) -> Vec<HirEventTrigger> {
-        // For MVP: look for clock signal in sensitivity list
-        // Common patterns: "clk", "clock", anything containing "clk"
+        // 1. Try to detect edge from process body (rising_edge/falling_edge calls)
+        if let Some(edge_triggers) = self.extract_edge_from_body(statements) {
+            return edge_triggers;
+        }
+
+        // 2. Fallback: name-based heuristic
         let mut triggers = Vec::new();
 
         for name in sens_names {
             let lower = name.to_ascii_lowercase();
             if lower.contains("clk") || lower.contains("clock") {
-                // Clock signal — rising edge
                 let signal = self.resolve_signal_ref(name);
                 triggers.push(HirEventTrigger {
                     signal,
                     edge: HirEdgeType::Rising,
                 });
             } else if lower.contains("rst") || lower.contains("reset") {
-                // Reset signal — active high
                 let signal = self.resolve_signal_ref(name);
                 triggers.push(HirEventTrigger {
                     signal,
@@ -1010,7 +1075,6 @@ impl VhdlHirBuilder {
         }
 
         if triggers.is_empty() && !sens_names.is_empty() {
-            // Fallback: first signal is clock (rising edge)
             let signal = self.resolve_signal_ref(&sens_names[0]);
             triggers.push(HirEventTrigger {
                 signal,
@@ -1021,14 +1085,76 @@ impl VhdlHirBuilder {
         triggers
     }
 
-    fn resolve_signal_ref(&self, name: &str) -> HirEventSignal {
+    fn strip_edge_calls(statements: &mut [HirStatement]) {
+        for stmt in statements.iter_mut() {
+            if let HirStatement::If(ref mut ifs) = stmt {
+                if let HirExpression::Call(ref call) = ifs.condition {
+                    let func = call.function.to_ascii_lowercase();
+                    if func == "rising_edge" || func == "falling_edge" {
+                        if let Some(arg) = call.args.first() {
+                            ifs.condition = arg.clone();
+                        }
+                    }
+                }
+                Self::strip_edge_calls(&mut ifs.then_statements);
+                if let Some(ref mut else_stmts) = ifs.else_statements {
+                    Self::strip_edge_calls(else_stmts);
+                }
+            }
+        }
+    }
+
+    fn extract_edge_from_body(&self, statements: &[HirStatement]) -> Option<Vec<HirEventTrigger>> {
+        // Look for the outermost if-statement whose condition is a rising_edge/falling_edge call
+        let first_if = statements.iter().find_map(|s| {
+            if let HirStatement::If(ifs) = s { Some(ifs) } else { None }
+        })?;
+
+        self.extract_edge_from_condition(&first_if.condition)
+    }
+
+    fn extract_edge_from_condition(&self, expr: &HirExpression) -> Option<Vec<HirEventTrigger>> {
+        match expr {
+            HirExpression::Call(call) => {
+                let func = call.function.to_ascii_lowercase();
+                if func == "rising_edge" || func.starts_with("rising_edge_") {
+                    let signal = self.expr_to_event_signal(call.args.first()?)?;
+                    return Some(vec![HirEventTrigger { signal, edge: HirEdgeType::Rising }]);
+                }
+                if func == "falling_edge" || func.starts_with("falling_edge_") {
+                    let signal = self.expr_to_event_signal(call.args.first()?)?;
+                    return Some(vec![HirEventTrigger { signal, edge: HirEdgeType::Falling }]);
+                }
+                None
+            }
+            // rising_edge might have been lowered to just the port ref (pre-fix)
+            // For backwards compatibility, if condition is a port, treat as rising edge
+            HirExpression::Port(pid) => {
+                Some(vec![HirEventTrigger {
+                    signal: HirEventSignal::Port(*pid),
+                    edge: HirEdgeType::Rising,
+                }])
+            }
+            _ => None,
+        }
+    }
+
+    fn expr_to_event_signal(&self, expr: &HirExpression) -> Option<HirEventSignal> {
+        match expr {
+            HirExpression::Port(pid) => Some(HirEventSignal::Port(*pid)),
+            HirExpression::Signal(sid) => Some(HirEventSignal::Signal(*sid)),
+            _ => None,
+        }
+    }
+
+    fn resolve_signal_ref(&mut self, name: &str) -> HirEventSignal {
         let lower = name.to_ascii_lowercase();
         if let Some(port_id) = self.port_map.get(&lower) {
             HirEventSignal::Port(*port_id)
         } else if let Some(sig_id) = self.signal_map.get(&lower) {
             HirEventSignal::Signal(*sig_id)
         } else {
-            // Assume port 0 as fallback
+            self.emit_error(format!("unresolved sensitivity signal: '{}'", name));
             HirEventSignal::Port(PortId(0))
         }
     }
@@ -1072,8 +1198,14 @@ impl VhdlHirBuilder {
                 SyntaxKind::NullStmt => {
                     // null statement — no-op
                 }
-                SyntaxKind::AssertStmt | SyntaxKind::NextStmt | SyntaxKind::ExitStmt => {
-                    // assert/next/exit — skip for synthesis
+                SyntaxKind::AssertStmt => {
+                    // assert is legitimately non-synthesizable — silent skip
+                }
+                SyntaxKind::NextStmt => {
+                    self.emit_warning("'next' statement not supported for synthesis — skipped");
+                }
+                SyntaxKind::ExitStmt => {
+                    self.emit_warning("'exit' statement not supported for synthesis — skipped");
                 }
                 _ => {}
             }
@@ -1281,13 +1413,11 @@ impl VhdlHirBuilder {
 
         let expr = self.lower_expr_from_elements(&selector_elements);
 
-        // Process case alternatives
+        // Process case alternatives — expand multiple choices into separate arms
         let mut arms = Vec::new();
         for child in node.children() {
             if child.kind() == SyntaxKind::CaseAlternative {
-                if let Some(arm) = self.lower_case_alternative(&child) {
-                    arms.push(arm);
-                }
+                arms.extend(self.lower_case_alternative_arms(&child));
             }
         }
 
@@ -1298,34 +1428,35 @@ impl VhdlHirBuilder {
         }))
     }
 
-    fn lower_case_alternative(&mut self, node: &SyntaxNode) -> Option<HirMatchArm> {
-        // when choices => statements
+    fn lower_case_alternative_arms(&mut self, node: &SyntaxNode) -> Vec<HirMatchArm> {
+        // when choice1 | choice2 => statements
+        // Emit one arm per choice, each with the same body
         let choice_list = first_child_of_kind(node, SyntaxKind::ChoiceList);
-        let pattern = if let Some(cl) = choice_list {
-            self.lower_choice_list_to_pattern(&cl)
-        } else {
-            HirPattern::Wildcard
-        };
+        let body = self.lower_sequential_statements(node);
 
-        let statements = self.lower_sequential_statements(node);
+        let choices = choice_list
+            .map(|cl| all_children_of_kind(&cl, SyntaxKind::Choice))
+            .unwrap_or_default();
 
-        Some(HirMatchArm {
-            pattern,
-            guard: None,
-            statements,
-        })
-    }
-
-    fn lower_choice_list_to_pattern(&mut self, node: &SyntaxNode) -> HirPattern {
-        let choices = all_children_of_kind(node, SyntaxKind::Choice);
-        if choices.len() == 1 {
-            self.lower_choice_to_pattern(&choices[0])
-        } else if choices.is_empty() {
-            HirPattern::Wildcard
-        } else {
-            // Multiple choices — for MVP just use the first one
-            self.lower_choice_to_pattern(&choices[0])
+        if choices.is_empty() {
+            return vec![HirMatchArm {
+                pattern: HirPattern::Wildcard,
+                guard: None,
+                statements: body,
+            }];
         }
+
+        choices
+            .iter()
+            .map(|choice| {
+                let pattern = self.lower_choice_to_pattern(choice);
+                HirMatchArm {
+                    pattern,
+                    guard: None,
+                    statements: body.clone(),
+                }
+            })
+            .collect()
     }
 
     fn lower_choice_to_pattern(&mut self, node: &SyntaxNode) -> HirPattern {
@@ -1399,11 +1530,14 @@ impl VhdlHirBuilder {
 
         let range = first_child_of_kind(node, SyntaxKind::DiscreteRange)
             .and_then(|dr| self.lower_discrete_range(&dr))
-            .unwrap_or(HirRange {
-                start: HirExpression::Literal(HirLiteral::Integer(0)),
-                end: HirExpression::Literal(HirLiteral::Integer(0)),
-                inclusive: true,
-                step: None,
+            .unwrap_or_else(|| {
+                self.emit_error("could not resolve for-loop range, defaulting to 0..0");
+                HirRange {
+                    start: HirExpression::Literal(HirLiteral::Integer(0)),
+                    end: HirExpression::Literal(HirLiteral::Integer(0)),
+                    inclusive: true,
+                    step: None,
+                }
             });
 
         let body = self.lower_sequential_statements(node);
@@ -1646,12 +1780,18 @@ impl VhdlHirBuilder {
         let comp_name = idents.first()?.clone();
         let pascal_name = to_pascal_case(&comp_name);
 
-        let entity_id = self
+        let entity_id = match self
             .entity_map
             .get(&comp_name)
             .or_else(|| self.entity_map.get(&pascal_name))
             .copied()
-            .unwrap_or(EntityId(u32::MAX));
+        {
+            Some(id) => id,
+            None => {
+                self.emit_error(format!("unresolved component: '{}'", comp_name));
+                EntityId(u32::MAX)
+            }
+        };
 
         let instance_name = format!("u_{}", comp_name);
 
@@ -1790,9 +1930,13 @@ impl VhdlHirBuilder {
         let mut fields = Vec::new();
         for sig_decl in all_children_of_kind(node, SyntaxKind::SignalDecl) {
             let sig_names = ident_texts(&sig_decl);
-            let sig_type = first_child_of_kind(&sig_decl, SyntaxKind::SubtypeIndication)
-                .map(|st| self.lower_subtype_indication(&st))
-                .unwrap_or(HirType::Logic(1));
+            let sig_type = if let Some(st) = first_child_of_kind(&sig_decl, SyntaxKind::SubtypeIndication) {
+                self.lower_subtype_indication(&st)
+            } else {
+                let sn_hint = sig_names.first().map(|s| s.as_str()).unwrap_or("?");
+                self.emit_warning(format!("missing type for interface signal '{}', defaulting to std_logic", sn_hint));
+                HirType::Logic(1)
+            };
             for sn in &sig_names {
                 fields.push((sn.clone(), sig_type.clone()));
             }
@@ -1833,6 +1977,7 @@ impl VhdlHirBuilder {
         let constants_before_keys: Vec<String> = self.constant_map.keys().cloned().collect();
 
         let mut pkg_functions = Vec::new();
+        let mut pending_pkg_constants = Vec::new();
 
         for child in node.children() {
             match child.kind() {
@@ -1840,9 +1985,8 @@ impl VhdlHirBuilder {
                 SyntaxKind::TypeDecl => self.lower_type_decl(&child),
                 SyntaxKind::SubtypeDecl => self.lower_subtype_decl(&child),
                 SyntaxKind::ConstantDecl => {
-                    // Package-level constants — register in constant_map
-                    if let Some(_c) = self.lower_constant_decl(&child) {
-                        // Package constants are available but not emitted to a specific impl
+                    if let Some(c) = self.lower_constant_decl(&child) {
+                        pending_pkg_constants.push(c);
                     }
                 }
                 SyntaxKind::AliasDecl => self.lower_alias_decl(&child),
@@ -1879,25 +2023,10 @@ impl VhdlHirBuilder {
                 pkg_types.insert(k.clone(), v.clone());
             }
 
-            // Collect constants added during this package
-            let mut pkg_constants = Vec::new();
-            for (k, id) in &self.constant_map {
-                if !constants_before_keys.contains(k) {
-                    // We need to reconstruct the constant — find it by name
-                    // For now, store a placeholder constant with the type info
-                    pkg_constants.push(HirConstant {
-                        id: *id,
-                        name: k.clone(),
-                        const_type: HirType::Custom(k.clone()), // Will be resolved during instantiation
-                        value: HirExpression::Literal(HirLiteral::Integer(0)),
-                    });
-                }
-            }
-
             self.package_scopes.insert(pkg_name, PackageScope {
                 generic_type_params: generic_type_param_names,
                 types: pkg_types,
-                constants: pkg_constants,
+                constants: pending_pkg_constants,
                 functions: pkg_functions,
             });
         }
@@ -2398,9 +2527,24 @@ impl VhdlHirBuilder {
             SyntaxKind::AndKw => HirBinaryOp::And,
             SyntaxKind::OrKw => HirBinaryOp::Or,
             SyntaxKind::XorKw => HirBinaryOp::Xor,
-            SyntaxKind::NandKw => HirBinaryOp::And, // nand = not(and) — simplified for MVP
-            SyntaxKind::NorKw => HirBinaryOp::Or,   // nor = not(or) — simplified
-            SyntaxKind::XnorKw => HirBinaryOp::Xor, // xnor = not(xor) — simplified
+            SyntaxKind::NandKw | SyntaxKind::NorKw | SyntaxKind::XnorKw => {
+                let inner_op = match elements[pos].kind() {
+                    SyntaxKind::NandKw => HirBinaryOp::And,
+                    SyntaxKind::NorKw => HirBinaryOp::Or,
+                    _ => HirBinaryOp::Xor,
+                };
+                let left = self.lower_expr_from_elements(lhs_elements);
+                let right = self.lower_expr_from_elements(rhs_elements);
+                return Some(HirExpression::Unary(HirUnaryExpr {
+                    op: HirUnaryOp::Not,
+                    operand: Box::new(HirExpression::Binary(HirBinaryExpr {
+                        left: Box::new(left),
+                        op: inner_op,
+                        right: Box::new(right),
+                        is_trait_op: false,
+                    })),
+                }));
+            }
             SyntaxKind::Equal => HirBinaryOp::Equal,
             SyntaxKind::NotEqual => HirBinaryOp::NotEqual,
             SyntaxKind::LessThan => HirBinaryOp::Less,
@@ -2514,13 +2658,19 @@ impl VhdlHirBuilder {
         // Check for builtin function calls
         match first_kind {
             SyntaxKind::RisingEdgeKw | SyntaxKind::FallingEdgeKw => {
-                // rising_edge(clk) -> just return the argument as expression
-                // The clock detection is handled at process level
+                let func_name = if *first_kind == SyntaxKind::RisingEdgeKw {
+                    "rising_edge"
+                } else {
+                    "falling_edge"
+                };
                 let args = self.extract_call_args(node);
-                if let Some(arg) = args.into_iter().next() {
-                    return arg;
-                }
-                return HirExpression::Literal(HirLiteral::Boolean(true));
+                return HirExpression::Call(HirCallExpr {
+                    function: func_name.to_string(),
+                    type_args: Vec::new(),
+                    named_type_args: IndexMap::new(),
+                    args,
+                    impl_style: ImplStyle::Auto,
+                });
             }
             SyntaxKind::ToUnsignedKw | SyntaxKind::ToSignedKw => {
                 let args = self.extract_call_args(node);
@@ -2542,17 +2692,31 @@ impl VhdlHirBuilder {
                 let args = self.extract_call_args(node);
                 let mut it = args.into_iter();
                 let signal = it.next().unwrap_or(HirExpression::Literal(HirLiteral::Integer(0)));
-                return signal; // resize(sig, width) -> sig (width handled by type system)
+                let width_expr = it.next();
+                let target_type = match &width_expr {
+                    Some(HirExpression::Literal(HirLiteral::Integer(w))) => HirType::Nat(*w as u32),
+                    _ => HirType::Nat(32),
+                };
+                return HirExpression::Cast(HirCastExpr {
+                    expr: Box::new(signal),
+                    target_type,
+                });
             }
             SyntaxKind::UnsignedKw | SyntaxKind::SignedKw | SyntaxKind::StdLogicVectorKw
             | SyntaxKind::StdUlogicVectorKw => {
-                // Type conversion: unsigned(x) -> cast
+                let first_kw = *first_kind;
                 let args = self.extract_call_args(node);
-                return if let Some(first_arg) = args.into_iter().next() {
-                    first_arg
-                } else {
-                    HirExpression::Literal(HirLiteral::Integer(0))
+                let first_arg = args.into_iter().next()
+                    .unwrap_or(HirExpression::Literal(HirLiteral::Integer(0)));
+                let target_type = match first_kw {
+                    SyntaxKind::UnsignedKw => HirType::Nat(0),
+                    SyntaxKind::SignedKw => HirType::Int(0),
+                    _ => HirType::Logic(0),
                 };
+                return HirExpression::Cast(HirCastExpr {
+                    expr: Box::new(first_arg),
+                    target_type,
+                });
             }
             _ => {}
         }
@@ -2634,8 +2798,9 @@ impl VhdlHirBuilder {
                 let lower_attr = attr_name.to_ascii_lowercase();
                 let base = self.resolve_name(&name);
                 match lower_attr.as_str() {
-                    "event" => return base, // 'event used in sensitivity; ignore in expr
-                    "range" | "length" | "high" | "low" | "left" | "right" => {
+                    "event" => return base,
+                    "range" | "length" | "high" | "low" | "left" | "right"
+                    | "ascending" | "reverse_range" | "image" | "value" => {
                         return HirExpression::Call(HirCallExpr {
                             function: format!("{}_{}", name, lower_attr),
                             type_args: Vec::new(),
@@ -2644,7 +2809,10 @@ impl VhdlHirBuilder {
                             impl_style: ImplStyle::Auto,
                         });
                     }
-                    _ => return base,
+                    _ => {
+                        self.emit_warning(format!("unsupported attribute '{}' on '{}'", lower_attr, name));
+                        return base;
+                    }
                 }
             }
         }
@@ -2843,6 +3011,7 @@ impl VhdlHirBuilder {
 
     fn lower_lvalue_from_elements(&mut self, elements: &[SyntaxElement]) -> HirLValue {
         if elements.is_empty() {
+            self.emit_error("empty lvalue expression");
             return HirLValue::Signal(SignalId(0));
         }
 
@@ -2867,12 +3036,14 @@ impl VhdlHirBuilder {
             return self.resolve_lvalue_name(&name);
         }
 
+        self.emit_error("could not resolve lvalue expression");
         HirLValue::Signal(SignalId(0))
     }
 
     fn lower_name_lvalue(&mut self, node: &SyntaxNode) -> HirLValue {
         let tokens: Vec<(SyntaxKind, String)> = all_token_texts(node);
         if tokens.is_empty() {
+            self.emit_error("empty name in lvalue");
             return HirLValue::Signal(SignalId(0));
         }
 
@@ -2920,7 +3091,7 @@ impl VhdlHirBuilder {
         }
     }
 
-    fn resolve_lvalue_name(&self, name: &str) -> HirLValue {
+    fn resolve_lvalue_name(&mut self, name: &str) -> HirLValue {
         let lower = name.to_ascii_lowercase();
         if let Some(port_id) = self.port_map.get(&lower) {
             HirLValue::Port(*port_id)
@@ -2929,7 +3100,7 @@ impl VhdlHirBuilder {
         } else if let Some(var_id) = self.variable_map.get(&lower) {
             HirLValue::Variable(*var_id)
         } else {
-            // Assume signal — may be forward reference
+            self.emit_error(format!("unresolved signal target: '{}'", name));
             HirLValue::Signal(SignalId(0))
         }
     }
@@ -2949,7 +3120,10 @@ impl VhdlHirBuilder {
         let range = self.subtype_indication_range(node);
 
         resolve_vhdl_type(&type_name, range.as_ref(), &self.builtin_scope, &self.user_types)
-            .unwrap_or(HirType::Logic(1))
+            .unwrap_or_else(|| {
+                self.emit_warning(format!("could not resolve type '{}', defaulting to std_logic", type_name));
+                HirType::Logic(1)
+            })
     }
 
     fn subtype_indication_type_name(&self, node: &SyntaxNode) -> String {
@@ -3055,7 +3229,7 @@ impl VhdlHirBuilder {
         Some(RangeInfo {
             left,
             right,
-            direction: direction.unwrap_or(RangeDirection::Downto),
+            direction: direction.unwrap_or(RangeDirection::To),
         })
     }
 
@@ -3209,8 +3383,13 @@ impl VhdlHirBuilder {
                             stmts.push(HirStatement::Assignment(a));
                         }
                     }
-                    SyntaxKind::NullStmt | SyntaxKind::AssertStmt
-                    | SyntaxKind::NextStmt | SyntaxKind::ExitStmt => {}
+                    SyntaxKind::NullStmt | SyntaxKind::AssertStmt => {}
+                    SyntaxKind::NextStmt => {
+                        self.emit_warning("'next' statement not supported for synthesis — skipped");
+                    }
+                    SyntaxKind::ExitStmt => {
+                        self.emit_warning("'exit' statement not supported for synthesis — skipped");
+                    }
                     _ => {
                         // Try recursive
                         let sub = self.lower_sequential_statements(n);

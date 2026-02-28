@@ -1,10 +1,17 @@
 use thiserror::Error;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VhdlSeverity {
+    Error,
+    Warning,
+}
+
 #[derive(Debug, Clone)]
 pub struct VhdlError {
     pub kind: VhdlErrorKind,
     pub message: String,
     pub position: usize,
+    pub severity: VhdlSeverity,
 }
 
 #[derive(Debug, Clone, Error)]
