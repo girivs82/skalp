@@ -968,43 +968,155 @@ end architecture;
 These map directly to `HirSignal.trace_config` and
 `HirFormalBlock.breakpoint_conditions` in HIR.
 
-#### Clock domains
+#### Clock domains — type-based enforcement (no pragmas)
 
-Clock domains are **inferred** from process sensitivity lists — no
-pragma needed for the common case:
+VHDL's nominal type system can enforce CDC safety at compile time —
+the VHDL compiler itself rejects cross-domain assignments, before
+skalp even sees the code. This is the VHDL equivalent of skalp's
+clock lifetime parameters.
+
+**The mechanism:** two array (or enumeration) type declarations with
+the same structure are *incompatible types* in VHDL. Define a distinct
+type per clock domain. Assignments between domains require explicit
+type conversion — and that conversion lives inside the synchronizer.
+
+skalp provides a generic package that makes this ergonomic:
 
 ```vhdl
--- No annotation needed: skalp infers domains from process structure
+-- Provided by skalp as a standard library package
+package skalp_clock_domain is
+  generic (DOMAIN : string);
+
+  -- Distinct enumeration — NOT a subtype of std_logic.
+  -- Subtypes are assignment-compatible with their parent;
+  -- a new enumeration type is not.
+  type domain_bit is ('0', '1');
+
+  -- Arrays of domain_bit — also distinct per instantiation
+  type domain_vec is array (natural range <>) of domain_bit;
+  type domain_unsigned is array (natural range <>) of domain_bit;
+  type domain_signed is array (natural range <>) of domain_bit;
+
+  -- Conversion functions at domain boundaries
+  function to_std_logic(b : domain_bit) return std_logic;
+  function from_std_logic(s : std_logic) return domain_bit;
+  function to_slv(v : domain_vec) return std_logic_vector;
+  function from_slv(s : std_logic_vector) return domain_vec;
+end package;
+```
+
+Users instantiate the package once per clock domain:
+
+```vhdl
+package sys is new skalp_clock_domain generic map (DOMAIN => "sys");
+package uart is new skalp_clock_domain generic map (DOMAIN => "uart");
+```
+
+All signals declare their domain through their type:
+
+```vhdl
+use work.sys;
+use work.uart;
+
+architecture rtl of UartTop is
+  signal sys_count  : sys.domain_unsigned(7 downto 0);
+  signal sys_valid  : sys.domain_bit;
+  signal uart_data  : uart.domain_vec(7 downto 0);
+  signal uart_ready : uart.domain_bit;
+begin
+  -- These are COMPILE ERRORS — VHDL type system rejects them:
+  uart_data  <= sys_count;   -- ERROR: sys.domain_unsigned vs uart.domain_vec
+  uart_ready <= sys_valid;   -- ERROR: sys.domain_bit vs uart.domain_bit
+end architecture;
+```
+
+Both vectors and single bits are enforced. The only way to cross
+domains is through explicit conversion, which lives in two places:
+
+**1. Top-level ports** — where external `std_logic` pins enter a domain:
+
+```vhdl
+entity UartTop is
+  port (
+    rx : in std_logic   -- external pin, no domain yet
+  );
+end entity;
+
+architecture rtl of UartTop is
+  signal rx_internal : uart.domain_bit;
+begin
+  rx_internal <= uart.from_std_logic(rx);  -- enters uart domain here
+end architecture;
+```
+
+**2. Synchronizers** — the one legal crossing point:
+
+```vhdl
+entity BitSync is
+  port (
+    src     : in  sys.domain_bit;
+    dst     : out uart.domain_bit;
+    dst_clk : in  std_logic
+  );
+end entity;
+
+architecture rtl of BitSync is
+  signal ff0, ff1 : std_logic;  -- internal, untyped
+begin
+  process(dst_clk)
+  begin
+    if rising_edge(dst_clk) then
+      ff0 <= sys.to_std_logic(src);  -- leave sys domain
+      ff1 <= ff0;
+    end if;
+  end process;
+  dst <= uart.from_std_logic(ff1);   -- enter uart domain
+end architecture;
+```
+
+**Frontend handling:** the skalp VHDL frontend recognizes
+`skalp_clock_domain` package instantiations and maps them to HIR:
+
+- Each package instantiation → `HirClockDomain` (name from the
+  `DOMAIN` generic string)
+- `domain_bit` → `HirType::Bit(1)` tagged with clock domain ID
+- `domain_vec` → `HirType::Bit(N)` tagged with clock domain ID
+- `domain_unsigned` → `HirType::Nat(N)` tagged with clock domain ID
+- `domain_signed` → `HirType::Int(N)` tagged with clock domain ID
+- Conversion functions → zero-cost identity operations in synthesis
+  (a `domain_bit('0', '1')` is a single wire, same as `std_logic`
+  restricted to the synthesizable subset)
+
+skalp's existing CDC analysis then *verifies* what the types already
+guarantee — a belt-and-suspenders approach where the VHDL compiler is
+the first line of defense and skalp's analysis catches anything the
+types missed (e.g., signals that bypass the domain type convention).
+
+**Fallback for untyped designs:** not all VHDL code will use the
+domain type convention. For legacy code that uses plain `std_logic`
+everywhere, skalp falls back to inference from process sensitivity
+lists:
+
+```vhdl
+-- No domain types: skalp infers domains from process structure
 process(sys_clk)                   -- inferred: clock domain 'sys_clk'
 begin
-  if rising_edge(sys_clk) then
-    ...
-  end if;
+  if rising_edge(sys_clk) then ... end if;
 end process;
 
 process(uart_clk)                  -- inferred: clock domain 'uart_clk'
 begin
-  if rising_edge(uart_clk) then
-    ...
-  end if;
+  if rising_edge(uart_clk) then ... end if;
 end process;
 ```
 
-Pragmas are only needed for explicit CDC crossing points and for
-naming domains (when the inferred name from the port isn't what you
-want):
+And pragmas remain available for explicit CDC crossing annotations on
+legacy code:
 
 ```vhdl
--- skalp: clock_domain(name = "sys")
--- clk : in std_logic;
-
--- skalp: cdc(from = "sys", to = "uart")
+-- skalp: cdc(from = "sys_clk", to = "uart_clk")
 signal sync_reg : std_logic_vector(1 downto 0);
 ```
-
-This gives VHDL users the same compile-time CDC checking that skalp's
-clock lifetimes provide, without requiring lifetime annotations in the
-port declarations.
 
 #### Retention (power domains)
 
@@ -1072,14 +1184,15 @@ project/
 
 | Feature | Mechanism | Example |
 |---|---|---|
+| Clock domains | **VHDL types** | `sys.domain_vec`, `uart.domain_bit` via `skalp_clock_domain` generic package |
+| CDC enforcement | **VHDL type system** | Cross-domain assignment is a VHDL compile error; synchronizers use explicit conversion |
+| CDC (legacy code) | Auto-inferred + pragma | Inferred from `process(clk)`, pragma `-- skalp: cdc(from, to)` for crossings |
 | Safety annotations | Inline pragma | `-- skalp: safety_mechanism(tmr)` |
 | Detection signals | Inline pragma | `-- skalp: detection_signal` |
 | Intents (simple) | Inline pragma | `-- skalp: intent "count never overflows"` |
 | Intents (complex) | Reference file | `-- skalp: intent_file("intents.sk")` |
 | Trace groups | Inline pragma | `-- skalp: trace(group = "datapath")` |
 | Breakpoints | Inline pragma | `-- skalp: breakpoint(count = xFF)` |
-| Clock domains | Auto-inferred | From `process(clk)` + `rising_edge(clk)` |
-| CDC crossings | Inline pragma | `-- skalp: cdc(from = "sys", to = "uart")` |
 | Retention | Inline pragma | `-- skalp: retention` |
 | Requirements (simple) | Inline pragma | `-- skalp: requirement(REQ_001, "...")` |
 | Requirements (full) | Reference file | `-- skalp: requirements_file("reqs.sk")` |
