@@ -406,6 +406,8 @@ impl<'a> ParseState<'a> {
                 break;
             }
 
+            let pos_before = self.current;
+
             match self.current_kind() {
                 Some(SyntaxKind::LibraryKw) => self.parse_library_clause(),
                 Some(SyntaxKind::UseKw) => self.parse_use_clause(),
@@ -417,6 +419,11 @@ impl<'a> ParseState<'a> {
                 _ => {
                     self.error_recover("unexpected token at top level");
                 }
+            }
+
+            // Safety: if no progress was made, force advance to avoid infinite loop
+            if self.current == pos_before && !self.is_at_end() {
+                self.bump();
             }
         }
 
@@ -721,6 +728,7 @@ impl<'a> ParseState<'a> {
             if self.is_at_end() || self.at(SyntaxKind::BeginKw) {
                 break;
             }
+            let pos_before = self.current;
             match self.current_kind() {
                 Some(SyntaxKind::SignalKw) => self.parse_signal_decl(),
                 Some(SyntaxKind::ConstantKw) => self.parse_constant_decl(),
@@ -741,6 +749,10 @@ impl<'a> ParseState<'a> {
                     self.error_recover("unsynthesizable declaration");
                 }
                 _ => break,
+            }
+            // Safety: if no progress was made, force advance to avoid infinite loop
+            if self.current == pos_before && !self.is_at_end() {
+                self.bump();
             }
         }
     }
@@ -1177,8 +1189,13 @@ impl<'a> ParseState<'a> {
                 break;
             }
 
+            let pos_before = self.current;
+
             if self.check_unsynthesizable() {
                 self.error_recover("unsynthesizable construct");
+                if self.current == pos_before {
+                    self.bump(); // force progress to avoid infinite loop
+                }
                 continue;
             }
 
@@ -1187,6 +1204,11 @@ impl<'a> ParseState<'a> {
                 Some(SyntaxKind::WithKw) => self.parse_selected_assign(),
                 Some(SyntaxKind::ForKw) => self.parse_for_generate(),
                 Some(SyntaxKind::IfKw) => self.parse_if_generate(),
+                Some(SyntaxKind::AssertKw) => {
+                    // Concurrent assert — parse properly but silently ignore
+                    // (simulation-only construct, ubiquitous in real VHDL)
+                    self.parse_assert_stmt();
+                }
                 Some(SyntaxKind::ComponentKw) => {
                     // Component declaration in architecture (should be in declarative region
                     // but some designs put them here)
@@ -1208,14 +1230,23 @@ impl<'a> ParseState<'a> {
                     self.error_recover("unexpected token in concurrent region");
                 }
             }
+
+            // Safety: if no progress was made, force advance to avoid infinite loop
+            if self.current == pos_before && !self.is_at_end() {
+                self.bump();
+            }
         }
     }
 
     fn is_name_start(&self) -> bool {
         matches!(self.current_kind(),
             Some(SyntaxKind::Ident) | Some(SyntaxKind::StdLogicKw)
-            | Some(SyntaxKind::StdLogicVectorKw) | Some(SyntaxKind::UnsignedKw)
-            | Some(SyntaxKind::SignedKw))
+            | Some(SyntaxKind::StdLogicVectorKw) | Some(SyntaxKind::StdUlogicVectorKw)
+            | Some(SyntaxKind::UnsignedKw) | Some(SyntaxKind::SignedKw)
+            | Some(SyntaxKind::StdUlogicKw) | Some(SyntaxKind::BooleanKw)
+            | Some(SyntaxKind::IntegerKw) | Some(SyntaxKind::NaturalKw)
+            | Some(SyntaxKind::PositiveKw) | Some(SyntaxKind::RealKw)
+            | Some(SyntaxKind::BitKw) | Some(SyntaxKind::BitVectorKw))
     }
 
     fn parse_concurrent_statement_starting_with_ident(&mut self) {
@@ -1446,7 +1477,12 @@ impl<'a> ParseState<'a> {
                 break;
             }
 
+            let pos_before = self.current;
             self.parse_sequential_statement();
+            // Safety: if no progress was made, force advance to avoid infinite loop
+            if self.current == pos_before && !self.is_at_end() {
+                self.bump();
+            }
         }
     }
 
@@ -2137,6 +2173,7 @@ impl<'a> ParseState<'a> {
             if self.is_at_end() || self.at(SyntaxKind::EndKw) {
                 break;
             }
+            let pos_before = self.current;
             match self.current_kind() {
                 Some(SyntaxKind::TypeKw) => self.parse_type_decl(),
                 Some(SyntaxKind::SubtypeKw) => self.parse_subtype_decl(),
@@ -2159,6 +2196,10 @@ impl<'a> ParseState<'a> {
                 _ => {
                     self.error_recover("unexpected declaration in package");
                 }
+            }
+            // Safety: if no progress was made, force advance to avoid infinite loop
+            if self.current == pos_before && !self.is_at_end() {
+                self.bump();
             }
         }
     }
@@ -2392,6 +2433,7 @@ impl<'a> ParseState<'a> {
             | Some(SyntaxKind::UnsignedKw) | Some(SyntaxKind::SignedKw)
             | Some(SyntaxKind::BooleanKw) | Some(SyntaxKind::IntegerKw)
             | Some(SyntaxKind::NaturalKw) | Some(SyntaxKind::PositiveKw)
+            | Some(SyntaxKind::RealKw) | Some(SyntaxKind::StringKw)
             | Some(SyntaxKind::RisingEdgeKw) | Some(SyntaxKind::FallingEdgeKw)
             | Some(SyntaxKind::ToUnsignedKw) | Some(SyntaxKind::ToSignedKw)
             | Some(SyntaxKind::ToIntegerKw) | Some(SyntaxKind::ResizeKw)

@@ -1039,11 +1039,19 @@ fn build_design(
     info!("Building design from {:?} to {}", source, target);
 
     // Parse, build HIR with module resolution
-    info!("Parsing SKALP source and building HIR with module resolution...");
-    let context =
-        parse_and_build_compilation_context(source).context("Failed to parse and build HIR")?;
-    let hir = context.main_hir;
-    let module_hirs = context.module_hirs;
+    info!("Parsing source and building HIR...");
+    let is_vhdl = matches!(
+        source.extension().and_then(|s| s.to_str()),
+        Some("vhd") | Some("vhdl")
+    );
+    let (hir, module_hirs) = if is_vhdl {
+        let ctx = skalp_vhdl::parse_vhdl(source).context("Failed to parse VHDL")?;
+        (ctx.main_hir, indexmap::IndexMap::new())
+    } else {
+        let context =
+            parse_and_build_compilation_context(source).context("Failed to parse and build HIR")?;
+        (context.main_hir, context.module_hirs)
+    };
 
     // Run safety analysis if enabled
     if let Some(ref safety_opts) = safety_options {
