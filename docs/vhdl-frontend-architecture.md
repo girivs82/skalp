@@ -883,7 +883,232 @@ let mir = skalp_mir::lower_to_mir(&context.main_hir)?;
 
 ---
 
-## 8. Implementation Order
+## 8. Skalp-Specific Features in VHDL
+
+Skalp has features with no VHDL equivalent: intents, protocols,
+requirements, safety annotations, trace/breakpoint debugging, clock
+domain lifetimes, and NCL. These need a way to be expressed in VHDL
+source without breaking portability to other tools.
+
+### Approach: `-- skalp:` comment pragmas
+
+Structured comment pragmas are the primary mechanism. They sit on the
+line immediately above (or beside) the construct they annotate. The
+VHDL remains valid and portable — other tools ignore comments. The
+skalp VHDL parser strips the `-- skalp:` prefix and parses the rest
+using the same grammar as skalp's `#[...]` attribute syntax.
+
+This follows established VHDL practice: `-- synthesis translate_off`,
+`-- pragma translate_off`, `-- synopsys parallel_case` are all
+comment-based tool directives that VHDL engineers already understand.
+
+### Feature-by-feature mapping
+
+#### Safety annotations
+
+```vhdl
+-- skalp: safety_mechanism(tmr)
+entity TmrCounter is
+  port (
+    clk    : in  std_logic;
+    enable : in  std_logic;
+    count  : out unsigned(7 downto 0);
+    error  : out std_logic  -- skalp: detection_signal
+  );
+end entity;
+```
+
+Lowers to:
+```
+HirEntity {
+    safety_config: Some(SafetyConfig { mechanism: Tmr }),
+    ports: [
+        ...,
+        HirPort { name: "error", detection_config: Some(DetectionConfig { ... }) }
+    ]
+}
+```
+
+#### Intents (formal property generation)
+
+```vhdl
+-- skalp: intent "the FIFO count never exceeds DEPTH"
+-- skalp: intent "after reset, all pointers are zero"
+entity FIFO is
+  ...
+end entity;
+```
+
+Single-line intents work as pragmas. For multi-line intents with
+explicit formal properties, reference a skalp file:
+
+```vhdl
+-- skalp: intent_file("fifo_intents.sk")
+```
+
+#### Trace and breakpoint debugging
+
+```vhdl
+architecture rtl of UartRx is
+  signal shift_reg : std_logic_vector(7 downto 0);  -- skalp: trace(group = "datapath")
+  signal bit_index : unsigned(2 downto 0);           -- skalp: trace(group = "datapath")
+  signal baud_cnt  : unsigned(8 downto 0);           -- skalp: trace(group = "timing")
+begin
+
+  -- skalp: breakpoint(shift_reg = x"FF")
+  -- skalp: breakpoint(baud_cnt > 434)
+  process(clk)
+  begin
+    ...
+  end process;
+
+end architecture;
+```
+
+These map directly to `HirSignal.trace_config` and
+`HirFormalBlock.breakpoint_conditions` in HIR.
+
+#### Clock domains
+
+Clock domains are **inferred** from process sensitivity lists — no
+pragma needed for the common case:
+
+```vhdl
+-- No annotation needed: skalp infers domains from process structure
+process(sys_clk)                   -- inferred: clock domain 'sys_clk'
+begin
+  if rising_edge(sys_clk) then
+    ...
+  end if;
+end process;
+
+process(uart_clk)                  -- inferred: clock domain 'uart_clk'
+begin
+  if rising_edge(uart_clk) then
+    ...
+  end if;
+end process;
+```
+
+Pragmas are only needed for explicit CDC crossing points and for
+naming domains (when the inferred name from the port isn't what you
+want):
+
+```vhdl
+-- skalp: clock_domain(name = "sys")
+-- clk : in std_logic;
+
+-- skalp: cdc(from = "sys", to = "uart")
+signal sync_reg : std_logic_vector(1 downto 0);
+```
+
+This gives VHDL users the same compile-time CDC checking that skalp's
+clock lifetimes provide, without requiring lifetime annotations in the
+port declarations.
+
+#### Retention (power domains)
+
+```vhdl
+signal cal_value : unsigned(15 downto 0);  -- skalp: retention
+signal config    : config_t;               -- skalp: retention(domain = "always_on")
+```
+
+#### Requirements traceability (DO-254, ISO 26262)
+
+```vhdl
+-- skalp: requirement(REQ_UART_001, "Baud rate error shall not exceed 2%")
+-- skalp: requirement(REQ_UART_002, "Receiver shall detect framing errors")
+entity UartRx is
+  ...
+end entity;
+```
+
+For full requirement specifications with verification links, reference
+a skalp file:
+
+```vhdl
+-- skalp: requirements_file("uart_requirements.sk")
+```
+
+#### Protocols
+
+Protocol specifications are inherently multi-signal, multi-cycle
+timing contracts. These are too complex for comment pragmas. Use a
+skalp protocol file and reference it:
+
+```vhdl
+-- skalp: protocol("spi_protocol.sk", SpiMaster)
+entity SpiController is
+  port (
+    sclk : out std_logic;
+    mosi : out std_logic;
+    miso : in  std_logic;
+    cs_n : out std_logic
+  );
+end entity;
+```
+
+The protocol file is written in skalp's protocol syntax and defines
+the timing relationships between the ports. The VHDL frontend resolves
+the reference and attaches the protocol to the `HirEntity`.
+
+#### NCL (Null Convention Logic)
+
+NCL is a fundamentally different circuit paradigm — dual-rail encoding,
+completion detection, no global clock. There is no sensible way to
+express this in VHDL comments. VHDL engineers targeting NCL should
+write those modules in skalp directly. The two languages coexist in
+the same project:
+
+```
+project/
+  src/
+    datapath.vhd          -- conventional clocked VHDL
+    ncl_pipeline.sk        -- NCL module in skalp
+    top.vhd               -- instantiates both
+```
+
+### Summary: what goes where
+
+| Feature | Mechanism | Example |
+|---|---|---|
+| Safety annotations | Inline pragma | `-- skalp: safety_mechanism(tmr)` |
+| Detection signals | Inline pragma | `-- skalp: detection_signal` |
+| Intents (simple) | Inline pragma | `-- skalp: intent "count never overflows"` |
+| Intents (complex) | Reference file | `-- skalp: intent_file("intents.sk")` |
+| Trace groups | Inline pragma | `-- skalp: trace(group = "datapath")` |
+| Breakpoints | Inline pragma | `-- skalp: breakpoint(count = xFF)` |
+| Clock domains | Auto-inferred | From `process(clk)` + `rising_edge(clk)` |
+| CDC crossings | Inline pragma | `-- skalp: cdc(from = "sys", to = "uart")` |
+| Retention | Inline pragma | `-- skalp: retention` |
+| Requirements (simple) | Inline pragma | `-- skalp: requirement(REQ_001, "...")` |
+| Requirements (full) | Reference file | `-- skalp: requirements_file("reqs.sk")` |
+| Protocols | Reference file | `-- skalp: protocol("proto.sk", SpiMaster)` |
+| NCL | Write in skalp | Not supported in VHDL — use `.sk` files |
+
+### Parser implementation
+
+The pragma parser is a small addition to the lexer/parser:
+
+```rust
+/// Extract skalp pragmas from VHDL comments.
+/// Called during lexing — when a comment starting with "-- skalp:" is
+/// encountered, it is tokenized as a SkalPragma instead of skipped.
+fn try_parse_pragma(comment: &str) -> Option<Pragma> {
+    let body = comment.strip_prefix("-- skalp:")?.trim();
+    // Reuse skalp-frontend's attribute parser for the body.
+    // "safety_mechanism(tmr)" parses the same way as #[safety_mechanism(tmr)]
+    skalp_frontend::parse_attribute(body).ok()
+}
+```
+
+This reuses the existing skalp attribute parser — the pragma body after
+`-- skalp:` uses identical syntax to skalp's `#[...]` attributes. No
+new grammar to design or maintain.
+
+---
+
+## 9. Implementation Order
 
 ### Phase 1: Core (MVP)
 Parse and lower the synthesizable subset that covers 80% of real RTL:
@@ -945,7 +1170,7 @@ routes to the appropriate frontend for parsing, but all downstream features
 
 ---
 
-## 9. Example: VHDL FIFO → skalp simulation
+## 10. Example: VHDL FIFO → skalp simulation
 
 ```vhdl
 -- fifo.vhd
