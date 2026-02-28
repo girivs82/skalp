@@ -591,17 +591,21 @@ impl<'a> ParseState<'a> {
         self.expect(SyntaxKind::Colon);
         self.skip_trivia();
 
-        // Direction: in, out, inout, buffer, or 'view'
+        // View port: `name : view view_name` — no PortDirection or SubtypeIndication
+        if self.at(SyntaxKind::ViewKw) {
+            self.bump(); // 'view'
+            self.skip_trivia();
+            self.bump(); // view name
+            self.finish_node();
+            return;
+        }
+
+        // Direction: in, out, inout, buffer
         self.start_node(SyntaxKind::PortDirection);
         match self.current_kind() {
             Some(SyntaxKind::InKw) | Some(SyntaxKind::OutKw)
             | Some(SyntaxKind::InoutKw) | Some(SyntaxKind::BufferKw) => {
                 self.bump();
-            }
-            Some(SyntaxKind::ViewKw) => {
-                self.bump(); // 'view'
-                self.skip_trivia();
-                self.bump(); // view name
             }
             _ => {
                 self.error("expected port direction (in, out, inout, buffer, or view)");

@@ -189,6 +189,97 @@ END ENTITY MyDesign;
 }
 
 #[test]
+fn test_lower_interface_to_struct() {
+    let source = r#"
+library ieee;
+use ieee.std_logic_1164.all;
+
+interface axi_lite is
+    signal awaddr  : std_logic_vector(31 downto 0);
+    signal awvalid : std_logic;
+    signal awready : std_logic;
+end interface axi_lite;
+
+entity dummy is
+    port (clk : in std_logic);
+end entity dummy;
+"#;
+    let hir = parse_vhdl_source(source, None).unwrap();
+    // Interface declaration should not produce extra entities or ports —
+    // it only registers a struct in user_types. The entity should parse fine.
+    assert_eq!(hir.entities.len(), 1);
+    assert_eq!(hir.entities[0].name, "Dummy");
+}
+
+#[test]
+fn test_lower_view_port_directions() {
+    let source = r#"
+library ieee;
+use ieee.std_logic_1164.all;
+
+interface axi_lite is
+    signal awaddr  : std_logic_vector(31 downto 0);
+    signal awvalid : std_logic;
+    signal awready : std_logic;
+    signal wdata   : std_logic_vector(31 downto 0);
+    signal wvalid  : std_logic;
+    signal wready  : std_logic;
+end interface axi_lite;
+
+view axi_master of axi_lite is
+    awaddr  : out;
+    awvalid : out;
+    awready : in;
+    wdata   : out;
+    wvalid  : out;
+    wready  : in;
+end view axi_master;
+
+entity axi_reg is
+    port (
+        clk : in std_logic;
+        rst : in std_logic;
+        bus : view axi_master
+    );
+end entity axi_reg;
+"#;
+    let hir = parse_vhdl_source(source, None).unwrap();
+    assert_eq!(hir.entities.len(), 1);
+    let entity = &hir.entities[0];
+    assert_eq!(entity.name, "AxiReg");
+
+    // clk + rst + 6 flattened bus ports = 8 total
+    assert_eq!(entity.ports.len(), 8, "ports: {:?}", entity.ports.iter().map(|p| &p.name).collect::<Vec<_>>());
+
+    // Check flattened port names
+    let names: Vec<&str> = entity.ports.iter().map(|p| p.name.as_str()).collect();
+    assert_eq!(names[0], "clk");
+    assert_eq!(names[1], "rst");
+    assert!(names[2..].contains(&"bus_awaddr"));
+    assert!(names[2..].contains(&"bus_awvalid"));
+    assert!(names[2..].contains(&"bus_awready"));
+    assert!(names[2..].contains(&"bus_wdata"));
+    assert!(names[2..].contains(&"bus_wvalid"));
+    assert!(names[2..].contains(&"bus_wready"));
+
+    // Check directions from the view
+    use skalp_frontend::hir::HirPortDirection;
+    let find_port = |name: &str| entity.ports.iter().find(|p| p.name == name).unwrap();
+    assert!(matches!(find_port("bus_awaddr").direction, HirPortDirection::Output));
+    assert!(matches!(find_port("bus_awvalid").direction, HirPortDirection::Output));
+    assert!(matches!(find_port("bus_awready").direction, HirPortDirection::Input));
+    assert!(matches!(find_port("bus_wdata").direction, HirPortDirection::Output));
+    assert!(matches!(find_port("bus_wvalid").direction, HirPortDirection::Output));
+    assert!(matches!(find_port("bus_wready").direction, HirPortDirection::Input));
+
+    // Check types
+    use skalp_frontend::hir::HirType;
+    assert!(matches!(find_port("bus_awaddr").port_type, HirType::Logic(32)));
+    assert!(matches!(find_port("bus_awvalid").port_type, HirType::Logic(1)));
+    assert!(matches!(find_port("bus_wdata").port_type, HirType::Logic(32)));
+}
+
+#[test]
 fn test_lower_signal_types() {
     let source = r#"
 library ieee;

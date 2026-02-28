@@ -223,3 +223,80 @@ fn test_parse_full_mux4() {
     let result = parse_vhdl(&source);
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 }
+
+#[test]
+fn test_parse_interface_decl() {
+    let source = r#"
+library ieee;
+use ieee.std_logic_1164.all;
+
+interface axi_lite is
+    signal awaddr  : std_logic_vector(31 downto 0);
+    signal awvalid : std_logic;
+    signal awready : std_logic;
+end interface axi_lite;
+"#;
+    let result = parse_vhdl(source);
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+}
+
+#[test]
+fn test_parse_view_decl() {
+    let source = r#"
+library ieee;
+use ieee.std_logic_1164.all;
+
+interface axi_lite is
+    signal awaddr  : std_logic_vector(31 downto 0);
+    signal awvalid : std_logic;
+    signal awready : std_logic;
+end interface axi_lite;
+
+view axi_master of axi_lite is
+    awaddr  : out;
+    awvalid : out;
+    awready : in;
+end view axi_master;
+"#;
+    let result = parse_vhdl(source);
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+}
+
+#[test]
+fn test_parse_view_port() {
+    let source = r#"
+library ieee;
+use ieee.std_logic_1164.all;
+
+interface axi_lite is
+    signal awaddr  : std_logic_vector(31 downto 0);
+    signal awvalid : std_logic;
+end interface axi_lite;
+
+view axi_master of axi_lite is
+    awaddr  : out;
+    awvalid : out;
+end view axi_master;
+
+entity dut is
+    port (
+        clk : in std_logic;
+        bus : view axi_master
+    );
+end entity dut;
+"#;
+    let result = parse_vhdl(source);
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+}
+
+#[test]
+fn test_parse_full_axi_peripheral() {
+    let source = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent().unwrap()
+            .parent().unwrap()
+            .join("examples/vhdl/axi_peripheral.vhd")
+    ).unwrap();
+    let result = parse_vhdl(&source);
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+}

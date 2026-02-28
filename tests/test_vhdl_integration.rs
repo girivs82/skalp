@@ -144,6 +144,61 @@ async fn test_vhdl_counter_reset_clears() {
         .ok();
 }
 
+#[test]
+fn test_vhdl_axi_interface_e2e() {
+    let source = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("examples/vhdl/axi_peripheral.vhd"),
+    )
+    .unwrap();
+
+    let hir = skalp_vhdl::parse_vhdl_source(&source, None).unwrap();
+
+    // Entity with flattened interface ports
+    assert_eq!(hir.entities.len(), 1);
+    let entity = &hir.entities[0];
+    assert_eq!(entity.name, "AxiReg");
+
+    // clk + rst + 6 flattened bus ports = 8
+    assert_eq!(
+        entity.ports.len(),
+        8,
+        "expected 8 ports (clk, rst, 6 AXI), got {}: {:?}",
+        entity.ports.len(),
+        entity.ports.iter().map(|p| &p.name).collect::<Vec<_>>()
+    );
+
+    // Verify flattened port names exist
+    let names: Vec<&str> = entity.ports.iter().map(|p| p.name.as_str()).collect();
+    assert!(names.contains(&"bus_awaddr"), "missing bus_awaddr in {:?}", names);
+    assert!(names.contains(&"bus_wdata"), "missing bus_wdata in {:?}", names);
+    assert!(names.contains(&"bus_awready"), "missing bus_awready in {:?}", names);
+    assert!(names.contains(&"bus_wready"), "missing bus_wready in {:?}", names);
+
+    // Verify architecture lowered correctly
+    assert_eq!(hir.implementations.len(), 1);
+    let imp = &hir.implementations[0];
+
+    // reg_data signal
+    assert!(
+        imp.signals.len() >= 1,
+        "expected at least 1 signal (reg_data)"
+    );
+
+    // Concurrent assignments: bus_awready <= '1' and bus_wready <= '1'
+    assert!(
+        imp.assignments.len() >= 2,
+        "expected at least 2 concurrent assignments, got {}",
+        imp.assignments.len()
+    );
+
+    // Clocked process
+    assert!(
+        imp.event_blocks.len() >= 1,
+        "expected at least 1 event block"
+    );
+}
+
 #[tokio::test]
 async fn test_vhdl_mux4_selects_correctly() {
     let mut tb = Testbench::new("examples/vhdl/mux4.vhd")

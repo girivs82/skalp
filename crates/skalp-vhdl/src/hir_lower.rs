@@ -20,6 +20,8 @@ pub struct VhdlHirBuilder {
 
     builtin_scope: BuiltinScope,
     user_types: IndexMap<String, HirType>,
+    /// Maps view_name -> (interface_name, field_name -> direction)
+    view_defs: IndexMap<String, (String, IndexMap<String, HirPortDirection>)>,
     entity_map: IndexMap<String, EntityId>,
     port_map: IndexMap<String, PortId>,
     signal_map: IndexMap<String, SignalId>,
@@ -120,6 +122,7 @@ impl VhdlHirBuilder {
             next_for_loop_id: 0,
             builtin_scope: BuiltinScope::new(),
             user_types: IndexMap::new(),
+            view_defs: IndexMap::new(),
             entity_map: IndexMap::new(),
             port_map: IndexMap::new(),
             signal_map: IndexMap::new(),
@@ -227,7 +230,7 @@ impl VhdlHirBuilder {
                     self.lower_interface_decl(&child);
                 }
                 SyntaxKind::ViewDecl => {
-                    // Views are processed as metadata; stored in user_types
+                    self.lower_view_decl(&child);
                 }
                 _ => {}
             }
@@ -352,6 +355,11 @@ impl VhdlHirBuilder {
             return Vec::new();
         }
 
+        // Check for view port: PortDecl contains ViewKw token (no PortDirection child)
+        if has_token(node, SyntaxKind::ViewKw) {
+            return self.lower_view_port_decl(node, &idents);
+        }
+
         // Extract direction from PortDirection child
         let direction = if let Some(dir_node) = first_child_of_kind(node, SyntaxKind::PortDirection) {
             if has_token(&dir_node, SyntaxKind::InKw) {
@@ -383,6 +391,57 @@ impl VhdlHirBuilder {
                 name: name.clone(),
                 direction: direction.clone(),
                 port_type: port_type.clone(),
+                physical_constraints: None,
+                detection_config: None,
+                power_domain_config: None,
+                isolation_config: None,
+                retention_config: None,
+            });
+        }
+        ports
+    }
+
+    /// Lower a view port declaration by flattening interface fields into individual ports.
+    /// `idents` contains: [port_name, view_name] (both extracted as Ident tokens)
+    fn lower_view_port_decl(&mut self, _node: &SyntaxNode, idents: &[String]) -> Vec<HirPort> {
+        // idents[0] = port name (e.g., "bus"), idents[1] = view name (e.g., "axi_master")
+        let port_name = match idents.first() {
+            Some(n) => n.clone(),
+            None => return Vec::new(),
+        };
+        let view_name = match idents.get(1) {
+            Some(n) => n.clone(),
+            None => return Vec::new(),
+        };
+
+        // Look up view definition
+        let (interface_name, direction_map) = match self.view_defs.get(&view_name) {
+            Some(v) => v.clone(),
+            None => return Vec::new(),
+        };
+
+        // Look up interface struct type to get field names and types
+        let fields = match self.user_types.get(&interface_name) {
+            Some(HirType::Struct(st)) => st.fields.clone(),
+            _ => return Vec::new(),
+        };
+
+        // Flatten: create one HirPort per interface field
+        let mut ports = Vec::new();
+        for field in &fields {
+            let flat_name = format!("{}_{}", port_name, field.name);
+            let direction = direction_map
+                .get(&field.name)
+                .cloned()
+                .unwrap_or(HirPortDirection::Input);
+
+            let id = self.alloc_port_id();
+            self.port_map.insert(flat_name.clone(), id);
+            ports.push(HirPort {
+                id,
+                name: flat_name,
+                direction,
+                port_type: field.field_type.clone(),
                 physical_constraints: None,
                 detection_config: None,
                 power_domain_config: None,
@@ -1345,6 +1404,40 @@ impl VhdlHirBuilder {
     // ====================================================================
     // VHDL-2019 Interface
     // ====================================================================
+
+    fn lower_view_decl(&mut self, node: &SyntaxNode) {
+        let idents = ident_texts(node);
+        // First ident = view name, second ident = interface name
+        let view_name = match idents.first() {
+            Some(n) => n.clone(),
+            None => return,
+        };
+        let interface_name = match idents.get(1) {
+            Some(n) => n.clone(),
+            None => return,
+        };
+
+        let mut direction_map = IndexMap::new();
+        for field_dir in all_children_of_kind(node, SyntaxKind::ViewFieldDirection) {
+            let field_name = match first_ident(&field_dir) {
+                Some(n) => n,
+                None => continue,
+            };
+            let dir = if has_token(&field_dir, SyntaxKind::InKw) {
+                HirPortDirection::Input
+            } else if has_token(&field_dir, SyntaxKind::OutKw) {
+                HirPortDirection::Output
+            } else if has_token(&field_dir, SyntaxKind::InoutKw) {
+                HirPortDirection::Bidirectional
+            } else {
+                HirPortDirection::Input
+            };
+            direction_map.insert(field_name, dir);
+        }
+
+        self.view_defs
+            .insert(view_name, (interface_name, direction_map));
+    }
 
     fn lower_interface_decl(&mut self, node: &SyntaxNode) {
         let name = match first_ident(node) {
