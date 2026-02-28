@@ -883,12 +883,292 @@ let mir = skalp_mir::lower_to_mir(&context.main_hir)?;
 
 ---
 
-## 8. Skalp-Specific Features in VHDL
+## 8. VHDL Features That Map to Skalp Natively
+
+VHDL is closer to skalp than most people realize. Many of skalp's
+"unique" features have direct VHDL equivalents — especially with
+2008 and 2019 additions that commercial tools barely support. The
+VHDL frontend should recognize and leverage all of these.
+
+### Exhaustive case checking
+
+VHDL requires all enumeration variants to be covered in `case`
+statements, or an explicit `when others`. This is skalp's exhaustive
+`match`. The VHDL compiler is the first line of defense — skalp's
+analysis becomes verification of what VHDL already enforces.
+
+```vhdl
+type state_t is (Idle, Start, Data, Stop);
+
+case state is
+  when Idle  => next_state <= Start;
+  when Start => next_state <= Data;
+  when Data  => next_state <= Stop;
+  -- Missing Stop → VHDL compile error
+end case;
+```
+
+Maps to `HirStatement::Case` with exhaustiveness already guaranteed
+by the VHDL compiler. The frontend marks the case as exhaustive in
+HIR, and skalp's downstream analysis skips redundant checking.
+
+### `std_ulogic` — compile-time multi-driver detection
+
+`std_ulogic` is the *unresolved* version of `std_logic`. If two
+processes drive the same `std_ulogic` signal, the VHDL compiler
+catches it at elaboration — no simulation needed. This maps directly
+to skalp's single-driver enforcement.
+
+```vhdl
+-- std_logic:  silently resolves multi-driver conflicts (dangerous)
+-- std_ulogic: compile error if two processes drive it (safe)
+signal data : std_ulogic_vector(7 downto 0);  -- single-driver enforced
+```
+
+Most VHDL engineers use `std_logic` out of habit, but `std_ulogic`
+is strictly better for synthesis. VHDL-2008 made `std_ulogic` the
+base type of `numeric_std`'s `unsigned`/`signed`, so modern code
+already benefits.
+
+The frontend maps `std_ulogic` to `HirType::Bit(N)` (2-state,
+single-driver) and `std_logic` to `HirType::Logic(N)` (4-state,
+multi-driver allowed). skalp's single-driver analysis then catches
+any remaining violations that the VHDL compiler might miss on
+resolved types.
+
+### `process(all)` — automatic combinational sensitivity (VHDL-2008)
+
+Equivalent to skalp's combinational blocks where you don't list
+signals. The compiler infers the complete sensitivity list — no
+risk of incomplete sensitivity causing simulation/synthesis
+mismatch.
+
+```vhdl
+process(all)  -- VHDL-2008: infer all read signals
+begin
+  case sel is
+    when "00"   => y <= a;
+    when "01"   => y <= b;
+    when others => y <= c;
+  end case;
+end process;
+```
+
+Maps to `HirEventBlock` with empty triggers (combinational). The
+frontend treats `process(all)` identically to a skalp combinational
+block.
+
+### `case?` — matching case with don't-cares (VHDL-2008)
+
+Handles don't-care bits natively in case choices. Essential for
+instruction decoders and address maps.
+
+```vhdl
+case? opcode is
+  when "1-------" => ...  -- any instruction starting with 1
+  when "01------" => ...  -- two-bit prefix
+  when "001-----" => ...  -- three-bit prefix
+  when others     => ...
+end case?;
+```
+
+The frontend lowers `case?` to a priority-encoded if/elsif chain in
+HIR, with don't-care bits expanded to match conditions. This is a
+feature skalp itself should adopt — it's genuinely useful for
+hardware and VHDL has had it since 2008.
+
+### Configurations — architecture swapping without source changes
+
+VHDL configurations bind different architectures to the same entity
+at elaboration time. This enables swapping behavioral/structural
+implementations or test stubs without modifying source.
+
+```vhdl
+-- Two architectures for the same entity
+architecture behavioral of ALU is ...  -- for simulation
+architecture structural of ALU is ...  -- for synthesis
+
+-- Configuration selects which one
+configuration sim_config of Top is
+  for rtl
+    for u_alu : ALU
+      use entity work.ALU(behavioral);
+    end for;
+  end for;
+end configuration;
+```
+
+Maps to `HirImplementation` selection at HIR build time. The
+frontend resolves the configuration and picks the specified
+architecture. This could also feed skalp's test infrastructure —
+swap in a behavioral model during simulation, use the structural
+version for synthesis.
+
+### Aliases — named slices and signal groups
+
+Creates readable names for bit slices without creating new signals.
+Like `let` bindings for complex expressions.
+
+```vhdl
+signal instruction : std_logic_vector(31 downto 0);
+
+alias opcode : std_logic_vector(6 downto 0) is instruction(31 downto 25);
+alias rd     : std_logic_vector(4 downto 0) is instruction(11 downto 7);
+alias funct3 : std_logic_vector(2 downto 0) is instruction(14 downto 12);
+alias rs1    : std_logic_vector(4 downto 0) is instruction(19 downto 15);
+alias rs2    : std_logic_vector(4 downto 0) is instruction(24 downto 20);
+```
+
+The frontend resolves aliases to `HirExpression::Range` or
+`HirExpression::Index` references to the underlying signal. No
+new signals are created in HIR — the alias is purely a naming
+convenience that the frontend expands.
+
+### Generic packages — type-parameterized containers (VHDL-2008)
+
+Not just width-parameterized, but *type*-parameterized. A FIFO that
+works with any data type — records, enums, not just vectors.
+
+```vhdl
+package generic_fifo_pkg is
+  generic (
+    type element_type;        -- ANY type
+    DEPTH : positive := 16
+  );
+  component FIFO is
+    port (
+      clk     : in  std_logic;
+      wr_en   : in  std_logic;
+      wr_data : in  element_type;
+      rd_en   : in  std_logic;
+      rd_data : out element_type;
+      full    : out std_logic;
+      empty   : out std_logic
+    );
+  end component;
+end package;
+
+-- Instantiate with a record type — not just a vector
+type uart_cmd_t is record
+  opcode : std_logic_vector(3 downto 0);
+  data   : std_logic_vector(7 downto 0);
+end record;
+
+package cmd_fifo is new generic_fifo_pkg
+  generic map (element_type => uart_cmd_t, DEPTH => 8);
+```
+
+This is closer to skalp's generics than most people realize. The
+frontend monomorphizes these the same way skalp handles generic
+entities — the `Monomorphizer` already exists in the pipeline.
+
+### Generic types on entities (VHDL-2019)
+
+Entities can be parameterized by types, not just constants. This
+enables true generic hardware — a sorter parameterized by comparison
+type, a pipeline parameterized by stage type.
+
+```vhdl
+entity GenericPipeline is
+  generic (
+    type stage_type;
+    STAGES : positive := 4
+  );
+  port (
+    clk   : in  std_logic;
+    d_in  : in  stage_type;
+    d_out : out stage_type
+  );
+end entity;
+```
+
+Maps to `HirGeneric` with a type parameter (not just a const
+parameter). skalp's HIR already supports this — `HirType` has
+parameterized variants (`BitParam`, `NatParam`, etc.) and the
+monomorphizer handles type substitution.
+
+### `assert` in RTL — synthesizable formal properties
+
+VHDL `assert` statements in process bodies map to skalp's formal
+assertions. With skalp's formal backend, these become mathematically
+proven properties — not just simulation messages.
+
+```vhdl
+process(clk)
+begin
+  if rising_edge(clk) then
+    assert count <= DEPTH
+      report "FIFO count exceeds depth" severity failure;
+
+    assert wr_ptr /= rd_ptr or count = 0 or count = DEPTH
+      report "pointer collision without full/empty" severity failure;
+  end if;
+end process;
+```
+
+Maps to `HirFormalBlock` with `Assertion` entries. The `report`
+string becomes the assertion label in formal output. `severity`
+maps to assertion priority:
+
+| VHDL severity | skalp formal | Behavior |
+|---|---|---|
+| `failure` | `assert` | Must hold — formal proves it or reports counterexample |
+| `error` | `assert` | Same as failure for formal |
+| `warning` | `assume` | Treated as assumption (constrains input space) |
+| `note` | `cover` | Cover property — formal finds a witness trace |
+
+### Records — struct equivalent
+
+VHDL records map directly to skalp's structs. Field access, nested
+records, arrays of records — all work.
+
+```vhdl
+type pixel_t is record
+  r : unsigned(7 downto 0);
+  g : unsigned(7 downto 0);
+  b : unsigned(7 downto 0);
+  a : unsigned(7 downto 0);
+end record;
+
+signal pixel : pixel_t;
+pixel.r <= x"FF";
+```
+
+Maps to `HirStructType` with fields, `HirExpression::FieldAccess`
+for member access. The MIR flattener already handles struct
+flattening to individual signals.
+
+### Summary: what VHDL gives us for free
+
+| skalp feature | VHDL equivalent | Notes |
+|---|---|---|
+| Exhaustive `match` | `case` on enums | VHDL compiler enforces completeness |
+| Single-driver enforcement | `std_ulogic` | Compile-time multi-driver detection |
+| Combinational blocks | `process(all)` | Automatic sensitivity (VHDL-2008) |
+| Don't-care matching | `case?` | Native bit masking (VHDL-2008) |
+| Struct types | `record` | Direct mapping |
+| Enum types | Enumeration types | With exhaustive case |
+| Distinct types | Nominal type system | Types are incompatible by name, not structure |
+| Clock domain safety | Domain-typed signals | Via `skalp_clock_domain` generic package |
+| Generic width | `generic (WIDTH : natural)` | Direct mapping |
+| Generic types | Generic packages / VHDL-2019 entity generics | Type-parameterized containers |
+| Architecture swap | `configuration` | Bind different impl at elaboration |
+| Named slices | `alias` | Zero-cost naming for bit fields |
+| Formal assertions | `assert` in process | Maps to formal `assert`/`assume`/`cover` |
+| Entity/impl separation | `entity`/`architecture` | VHDL invented this pattern |
+
+The remaining gaps — intents, protocols, requirements, safety
+annotations, trace/breakpoint, and NCL — are covered by pragmas and
+skalp files (section 9 below).
+
+---
+
+## 9. Skalp-Specific Features in VHDL (Pragma-Based)
 
 Skalp has features with no VHDL equivalent: intents, protocols,
-requirements, safety annotations, trace/breakpoint debugging, clock
-domain lifetimes, and NCL. These need a way to be expressed in VHDL
-source without breaking portability to other tools.
+requirements, safety annotations, trace/breakpoint debugging, and
+NCL. These need a way to be expressed in VHDL source without breaking
+portability to other tools.
 
 ### Approach: `-- skalp:` comment pragmas
 
@@ -1221,7 +1501,7 @@ new grammar to design or maintain.
 
 ---
 
-## 9. Implementation Order
+## 10. Implementation Order
 
 ### Phase 1: Core (MVP)
 Parse and lower the synthesizable subset that covers 80% of real RTL:
@@ -1283,7 +1563,7 @@ routes to the appropriate frontend for parsing, but all downstream features
 
 ---
 
-## 10. Example: VHDL FIFO → skalp simulation
+## 11. Example: VHDL FIFO → skalp simulation
 
 ```vhdl
 -- fifo.vhd
