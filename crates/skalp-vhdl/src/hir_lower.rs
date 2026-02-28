@@ -2,10 +2,20 @@ use anyhow::Result;
 use indexmap::IndexMap;
 use skalp_frontend::hir::*;
 use skalp_frontend::safety_attributes::ModuleSafetyDefinitions;
+use std::collections::HashSet;
 
 use crate::builtins::BuiltinScope;
 use crate::syntax::{SyntaxElement, SyntaxKind, SyntaxNode};
 use crate::vhdl_types::*;
+
+/// Snapshot of a generic package's declarations for instantiation
+#[derive(Debug, Clone)]
+struct PackageScope {
+    generic_type_params: Vec<String>,
+    types: IndexMap<String, HirType>,
+    constants: Vec<HirConstant>,
+    functions: Vec<HirFunction>,
+}
 
 pub struct VhdlHirBuilder {
     next_entity_id: u32,
@@ -29,6 +39,13 @@ pub struct VhdlHirBuilder {
     signal_map: IndexMap<String, SignalId>,
     variable_map: IndexMap<String, VariableId>,
     constant_map: IndexMap<String, ConstantId>,
+
+    /// Known package names (for qualified name resolution like pkg.constant)
+    package_names: HashSet<String>,
+    /// Current generic type parameter names (for HirType::Custom resolution)
+    generic_type_params: HashSet<String>,
+    /// Saved generic package scopes for instantiation
+    package_scopes: IndexMap<String, PackageScope>,
 
     inside_event_block: bool,
 
@@ -132,6 +149,9 @@ impl VhdlHirBuilder {
             signal_map: IndexMap::new(),
             variable_map: IndexMap::new(),
             constant_map: IndexMap::new(),
+            package_names: HashSet::new(),
+            generic_type_params: HashSet::new(),
+            package_scopes: IndexMap::new(),
             inside_event_block: false,
             errors: Vec::new(),
             file_path: file_path.map(|p| p.to_path_buf()),
@@ -244,6 +264,9 @@ impl VhdlHirBuilder {
                 SyntaxKind::PackageDecl | SyntaxKind::PackageBody => {
                     self.lower_package(&child, &mut hir);
                 }
+                SyntaxKind::PackageInstantiation => {
+                    self.lower_package_instantiation(&child, &mut hir);
+                }
                 _ => {}
             }
         }
@@ -335,6 +358,17 @@ impl VhdlHirBuilder {
     }
 
     fn lower_generic_decl(&mut self, node: &SyntaxNode) -> Option<HirGeneric> {
+        // Check for generic type parameter: GenericDecl with TypeKw as child
+        if has_token(node, SyntaxKind::TypeKw) {
+            let name = first_ident(node)?;
+            self.generic_type_params.insert(name.clone());
+            return Some(HirGeneric {
+                name,
+                param_type: HirGenericType::Type,
+                default_value: None,
+            });
+        }
+
         let idents = ident_texts(node);
         let name = idents.first()?.clone();
 
@@ -1773,6 +1807,33 @@ impl VhdlHirBuilder {
     // ====================================================================
 
     fn lower_package(&mut self, node: &SyntaxNode, hir: &mut Hir) {
+        // Extract package name and register it
+        let pkg_name = first_ident(node).unwrap_or_default();
+        if !pkg_name.is_empty() {
+            self.package_names.insert(pkg_name.clone());
+        }
+
+        // Check for generic clause with type parameters
+        let generic_clause = first_child_of_kind(node, SyntaxKind::GenericClause);
+        let mut generic_type_param_names = Vec::new();
+
+        if let Some(ref gc) = generic_clause {
+            for gd in all_children_of_kind(gc, SyntaxKind::GenericDecl) {
+                if has_token(&gd, SyntaxKind::TypeKw) {
+                    if let Some(name) = first_ident(&gd) {
+                        self.generic_type_params.insert(name.clone());
+                        generic_type_param_names.push(name);
+                    }
+                }
+            }
+        }
+
+        // Record types/constants before processing so we can snapshot
+        let types_before = self.user_types.len();
+        let constants_before_keys: Vec<String> = self.constant_map.keys().cloned().collect();
+
+        let mut pkg_functions = Vec::new();
+
         for child in node.children() {
             match child.kind() {
                 SyntaxKind::UseClause => self.lower_use_clause(&child),
@@ -1787,11 +1848,13 @@ impl VhdlHirBuilder {
                 SyntaxKind::AliasDecl => self.lower_alias_decl(&child),
                 SyntaxKind::FunctionBody => {
                     if let Some(f) = self.lower_function(&child) {
+                        pkg_functions.push(f.clone());
                         hir.functions.push(f);
                     }
                 }
                 SyntaxKind::ProcedureBody => {
                     if let Some(f) = self.lower_procedure(&child) {
+                        pkg_functions.push(f.clone());
                         hir.functions.push(f);
                     }
                 }
@@ -1807,6 +1870,170 @@ impl VhdlHirBuilder {
                 _ => {}
             }
         }
+
+        // If this package has generic type parameters, save a PackageScope
+        if !generic_type_param_names.is_empty() && !pkg_name.is_empty() {
+            // Collect types added during this package
+            let mut pkg_types = IndexMap::new();
+            for (k, v) in self.user_types.iter().skip(types_before) {
+                pkg_types.insert(k.clone(), v.clone());
+            }
+
+            // Collect constants added during this package
+            let mut pkg_constants = Vec::new();
+            for (k, id) in &self.constant_map {
+                if !constants_before_keys.contains(k) {
+                    // We need to reconstruct the constant — find it by name
+                    // For now, store a placeholder constant with the type info
+                    pkg_constants.push(HirConstant {
+                        id: *id,
+                        name: k.clone(),
+                        const_type: HirType::Custom(k.clone()), // Will be resolved during instantiation
+                        value: HirExpression::Literal(HirLiteral::Integer(0)),
+                    });
+                }
+            }
+
+            self.package_scopes.insert(pkg_name, PackageScope {
+                generic_type_params: generic_type_param_names,
+                types: pkg_types,
+                constants: pkg_constants,
+                functions: pkg_functions,
+            });
+        }
+
+        // Clear generic type params after processing the package
+        self.generic_type_params.clear();
+    }
+
+    // ====================================================================
+    // Package instantiation lowering
+    // ====================================================================
+
+    fn lower_package_instantiation(&mut self, node: &SyntaxNode, hir: &mut Hir) {
+        let idents = ident_texts(node);
+        let instance_name = match idents.first() {
+            Some(n) => n.clone(),
+            None => return,
+        };
+
+        // Source package name: from SelectedName child
+        let source_pkg = if let Some(sel) = first_child_of_kind(node, SyntaxKind::SelectedName) {
+            let parts: Vec<String> = sel.children_with_tokens()
+                .filter_map(|el| match el {
+                    SyntaxElement::Token(t)
+                        if t.kind() != SyntaxKind::Whitespace
+                            && t.kind() != SyntaxKind::Comment
+                            && t.kind() != SyntaxKind::Dot =>
+                    {
+                        Some(t.text().to_ascii_lowercase())
+                    }
+                    _ => None,
+                })
+                .collect();
+            // If "work.pkg", use last part; otherwise use first
+            parts.last().cloned().unwrap_or_default()
+        } else {
+            idents.get(1).cloned().unwrap_or_default()
+        };
+
+        // Look up source PackageScope
+        let scope = match self.package_scopes.get(&source_pkg) {
+            Some(s) => s.clone(),
+            None => return,
+        };
+
+        // Parse generic map associations to build type substitution map
+        let mut type_subs: IndexMap<String, HirType> = IndexMap::new();
+        if let Some(gm) = first_child_of_kind(node, SyntaxKind::GenericMap) {
+            if let Some(al) = first_child_of_kind(&gm, SyntaxKind::AssociationList) {
+                let assoc_elements = all_children_of_kind(&al, SyntaxKind::AssociationElement);
+                for (i, ae) in assoc_elements.iter().enumerate() {
+                    let tokens_vec = all_token_texts(ae);
+                    let arrow_pos = tokens_vec.iter().position(|(k, _)| *k == SyntaxKind::Arrow);
+
+                    let (param_name, type_elements) = if let Some(pos) = arrow_pos {
+                        // Named: T => unsigned(7 downto 0)
+                        let formal = tokens_vec.get(0).map(|(_, t)| t.to_ascii_lowercase()).unwrap_or_default();
+                        let actual_elements: Vec<SyntaxElement> = ae.children_with_tokens()
+                            .filter(|el| el.kind() != SyntaxKind::Whitespace && el.kind() != SyntaxKind::Comment)
+                            .skip_while(|el| el.kind() != SyntaxKind::Arrow)
+                            .skip(1)
+                            .collect();
+                        (formal, actual_elements)
+                    } else {
+                        // Positional: match by order
+                        let formal = scope.generic_type_params.get(i).cloned().unwrap_or_default();
+                        let actual_elements: Vec<SyntaxElement> = ae.children_with_tokens()
+                            .filter(|el| el.kind() != SyntaxKind::Whitespace && el.kind() != SyntaxKind::Comment)
+                            .collect();
+                        (formal, actual_elements)
+                    };
+
+                    if param_name.is_empty() {
+                        continue;
+                    }
+
+                    // Try to resolve the RHS as a type (SubtypeIndication child)
+                    let resolved_type = if let Some(st) = first_child_of_kind(ae, SyntaxKind::SubtypeIndication) {
+                        self.lower_subtype_indication(&st)
+                    } else {
+                        // Try interpreting the token elements as a type name
+                        let type_name = type_elements.iter()
+                            .find_map(|el| match el {
+                                SyntaxElement::Token(t) if t.kind() != SyntaxKind::Arrow => {
+                                    Some(t.text().to_ascii_lowercase())
+                                }
+                                SyntaxElement::Node(n) => {
+                                    if n.kind() == SyntaxKind::SubtypeIndication {
+                                        return None; // handled above
+                                    }
+                                    first_ident(n)
+                                }
+                                _ => None,
+                            })
+                            .unwrap_or_default();
+
+                        if !type_name.is_empty() {
+                            resolve_vhdl_type(&type_name, None, &self.builtin_scope, &self.user_types)
+                                .unwrap_or(HirType::Custom(type_name))
+                        } else {
+                            continue;
+                        }
+                    };
+
+                    type_subs.insert(param_name, resolved_type);
+                }
+            }
+        }
+
+        // Clone and substitute all declarations from the source scope
+        for (type_name, ty) in &scope.types {
+            let subst = substitute_type(ty, &type_subs);
+            self.user_types.insert(type_name.clone(), subst);
+        }
+
+        for constant in &scope.constants {
+            let subst_type = substitute_type(&constant.const_type, &type_subs);
+            let id = self.alloc_constant_id();
+            self.constant_map.insert(constant.name.clone(), id);
+        }
+
+        for func in &scope.functions {
+            let mut subst_func = func.clone();
+            subst_func.id = self.alloc_function_id();
+            if let Some(ref rt) = subst_func.return_type {
+                subst_func.return_type = Some(substitute_type(rt, &type_subs));
+            }
+            for param in &mut subst_func.params {
+                param.param_type = substitute_type(&param.param_type, &type_subs);
+            }
+            self.function_map.insert(subst_func.name.clone(), subst_func.id);
+            hir.functions.push(subst_func);
+        }
+
+        // Register instance name as a known package
+        self.package_names.insert(instance_name);
     }
 
     // ====================================================================
@@ -2356,13 +2583,46 @@ impl VhdlHirBuilder {
             });
         }
 
-        // Check for field access: name.field
+        // Check for field access or qualified name: name.field or pkg.constant
         if let Some(dot_pos) = tokens.iter().position(|(k, _)| *k == SyntaxKind::Dot) {
-            let base = self.resolve_name(&name);
-            if let Some((_, field_name)) = tokens.get(dot_pos + 1) {
+            if let Some((_, suffix)) = tokens.get(dot_pos + 1) {
+                let suffix_lower = suffix.to_ascii_lowercase();
+
+                // Strip "work." prefix: work.pkg.name -> resolve pkg.name
+                let (prefix, resolved_suffix) = if name == "work" {
+                    if let Some(dot2_pos) = tokens.iter().skip(dot_pos + 2).position(|(k, _)| *k == SyntaxKind::Dot) {
+                        let real_prefix = suffix_lower.clone();
+                        let real_suffix = tokens.get(dot_pos + 2 + dot2_pos + 1)
+                            .map(|(_, t)| t.to_ascii_lowercase())
+                            .unwrap_or_default();
+                        (real_prefix, real_suffix)
+                    } else {
+                        // work.name — treat as simple name
+                        return self.resolve_name(&suffix_lower);
+                    }
+                } else {
+                    (name.clone(), suffix_lower)
+                };
+
+                // Qualified name resolution: pkg.constant_name
+                if self.package_names.contains(&prefix) {
+                    // Look up suffix in our maps
+                    if let Some(const_id) = self.constant_map.get(&resolved_suffix) {
+                        return HirExpression::Constant(*const_id);
+                    }
+                    if self.function_map.contains_key(&resolved_suffix) {
+                        return HirExpression::GenericParam(resolved_suffix);
+                    }
+                    if self.user_types.contains_key(&resolved_suffix) {
+                        return HirExpression::GenericParam(resolved_suffix);
+                    }
+                }
+
+                // Regular field access
+                let base = self.resolve_name(&name);
                 return HirExpression::FieldAccess {
                     base: Box::new(base),
-                    field: field_name.clone(),
+                    field: suffix.clone(),
                 };
             }
         }
@@ -2680,6 +2940,12 @@ impl VhdlHirBuilder {
 
     fn lower_subtype_indication(&mut self, node: &SyntaxNode) -> HirType {
         let type_name = self.subtype_indication_type_name(node);
+
+        // If the type name is a generic type parameter, return Custom
+        if self.generic_type_params.contains(&type_name) {
+            return HirType::Custom(type_name);
+        }
+
         let range = self.subtype_indication_range(node);
 
         resolve_vhdl_type(&type_name, range.as_ref(), &self.builtin_scope, &self.user_types)
@@ -2956,6 +3222,57 @@ impl VhdlHirBuilder {
         stmts
     }
 
+}
+
+/// Recursively substitute generic type parameters in an HirType
+fn substitute_type(ty: &HirType, subs: &IndexMap<String, HirType>) -> HirType {
+    match ty {
+        HirType::Custom(name) => {
+            if let Some(replacement) = subs.get(name) {
+                replacement.clone()
+            } else {
+                ty.clone()
+            }
+        }
+        HirType::Array(elem, size) => {
+            HirType::Array(Box::new(substitute_type(elem, subs)), *size)
+        }
+        HirType::Struct(st) => {
+            let fields = st.fields.iter().map(|f| {
+                HirStructField {
+                    name: f.name.clone(),
+                    field_type: substitute_type(&f.field_type, subs),
+                }
+            }).collect();
+            HirType::Struct(HirStructType {
+                name: st.name.clone(),
+                fields,
+                packed: st.packed,
+            })
+        }
+        HirType::Enum(et) => {
+            let base = substitute_type(&et.base_type, subs);
+            let variants = et.variants.iter().map(|v| {
+                HirEnumVariant {
+                    name: v.name.clone(),
+                    value: v.value.clone(),
+                    associated_data: v.associated_data.as_ref().map(|d| {
+                        d.iter().map(|t| substitute_type(t, subs)).collect()
+                    }),
+                }
+            }).collect();
+            HirType::Enum(Box::new(HirEnumType {
+                name: et.name.clone(),
+                variants,
+                base_type: Box::new(base),
+            }))
+        }
+        HirType::Tuple(types) => {
+            HirType::Tuple(types.iter().map(|t| substitute_type(t, subs)).collect())
+        }
+        // All primitive types pass through unchanged
+        _ => ty.clone(),
+    }
 }
 
 #[derive(Clone)]

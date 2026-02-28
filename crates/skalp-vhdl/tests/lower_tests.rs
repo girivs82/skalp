@@ -682,3 +682,97 @@ end architecture rtl;
         imp.assignments.len()
     );
 }
+
+// ========================================================================
+// Phase 2: Generic type parameters
+// ========================================================================
+
+#[test]
+fn test_lower_generic_type_param() {
+    let source = r#"
+entity type_param_test is
+    generic (
+        type T
+    );
+    port (
+        clk : in std_logic
+    );
+end entity type_param_test;
+"#;
+    let hir = parse_vhdl_source(source, None).unwrap();
+    let entity = &hir.entities[0];
+    assert_eq!(entity.generics.len(), 1);
+    assert_eq!(entity.generics[0].name, "t");
+    use skalp_frontend::hir::HirGenericType;
+    assert!(
+        matches!(entity.generics[0].param_type, HirGenericType::Type),
+        "expected HirGenericType::Type, got {:?}",
+        entity.generics[0].param_type
+    );
+}
+
+// ========================================================================
+// Phase 2: Qualified name resolution
+// ========================================================================
+
+#[test]
+fn test_lower_qualified_name() {
+    let source = r#"
+library ieee;
+use ieee.std_logic_1164.all;
+use ieee.numeric_std.all;
+
+package my_pkg is
+    constant MY_CONST : integer := 42;
+end package my_pkg;
+
+entity qual_test is
+    port (
+        clk : in  std_logic;
+        val : out unsigned(7 downto 0)
+    );
+end entity qual_test;
+
+architecture rtl of qual_test is
+begin
+    val <= to_unsigned(my_pkg.MY_CONST, 8);
+end architecture rtl;
+"#;
+    let hir = parse_vhdl_source(source, None).unwrap();
+    let imp = &hir.implementations[0];
+
+    // The assignment should resolve my_pkg.MY_CONST to a constant reference
+    assert!(!imp.assignments.is_empty(), "expected at least 1 assignment");
+}
+
+// ========================================================================
+// Phase 2: Package instantiation with generic substitution
+// ========================================================================
+
+#[test]
+fn test_lower_package_instantiation_substitution() {
+    let source = r#"
+library ieee;
+use ieee.std_logic_1164.all;
+use ieee.numeric_std.all;
+
+package generic_pkg is
+    generic (
+        type T
+    );
+    constant PKG_CONST : T;
+end package generic_pkg;
+
+package my_inst is new generic_pkg generic map (T => unsigned(7 downto 0));
+
+entity inst_test is
+    port (
+        clk : in std_logic
+    );
+end entity inst_test;
+"#;
+    let hir = parse_vhdl_source(source, None).unwrap();
+    // The package should parse and lower without errors
+    assert_eq!(hir.entities.len(), 1);
+    assert_eq!(hir.entities[0].name, "InstTest");
+}

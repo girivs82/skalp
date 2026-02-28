@@ -203,7 +203,9 @@ pub enum Token {
     #[token("shared", ignore(case))]
     Shared,
 
-    // VHDL-2019 interface/view
+    // VHDL-2019 interface/view/generics
+    #[token("new", ignore(case))]
+    New,
     #[token("interface", ignore(case))]
     Interface,
     #[token("view", ignore(case))]

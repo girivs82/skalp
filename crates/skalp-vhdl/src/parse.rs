@@ -102,6 +102,7 @@ fn token_to_syntax_kind(token: &Token) -> SyntaxKind {
         Token::File => SyntaxKind::FileKw,
         Token::Access => SyntaxKind::AccessKw,
         Token::Shared => SyntaxKind::SharedKw,
+        Token::New => SyntaxKind::NewKw,
         Token::Interface => SyntaxKind::InterfaceKw,
         Token::View => SyntaxKind::ViewKw,
         Token::Private => SyntaxKind::PrivateKw,
@@ -533,7 +534,48 @@ impl<'a> ParseState<'a> {
     fn parse_generic_decl(&mut self) {
         self.start_node(SyntaxKind::GenericDecl);
         self.skip_trivia();
-        // name [, name]* : type [:= default]
+
+        // Check for generic type parameter: type T [is (<>) [range <>]]
+        if self.at(SyntaxKind::TypeKw) {
+            self.bump(); // type keyword
+            self.skip_trivia();
+            self.bump(); // type parameter name (ident)
+            self.skip_trivia();
+            // Optional constraint: is (<>) or is (<>) range <>
+            if self.at(SyntaxKind::IsKw) {
+                self.bump(); // is
+                self.skip_trivia();
+                // Parse parenthesized constraint like (<>) or (<>) range <>
+                if self.at(SyntaxKind::LParen) {
+                    let mut depth = 0;
+                    loop {
+                        if self.is_at_end() { break; }
+                        if self.at(SyntaxKind::LParen) { depth += 1; }
+                        if self.at(SyntaxKind::RParen) {
+                            depth -= 1;
+                            self.bump();
+                            if depth == 0 { break; }
+                            continue;
+                        }
+                        self.bump();
+                        self.skip_trivia();
+                    }
+                    self.skip_trivia();
+                    // Optional "range <>"
+                    if self.at(SyntaxKind::RangeKw) {
+                        self.bump(); // range
+                        self.skip_trivia();
+                        if self.at(SyntaxKind::BoxOp) {
+                            self.bump(); // <>
+                        }
+                    }
+                }
+            }
+            self.finish_node();
+            return;
+        }
+
+        // Regular value generic: name [, name]* : type [:= default]
         self.bump(); // first name
         while self.eat(SyntaxKind::Comma) {
             self.skip_trivia();
@@ -1954,6 +1996,49 @@ impl<'a> ParseState<'a> {
     }
 
     fn parse_package_decl(&mut self) {
+        // Peek ahead to detect package instantiation: package X is new Y ...
+        // We need to check: package IDENT is new
+        let saved = self.current;
+        let mut lookahead = self.current;
+        // Skip: package
+        lookahead += 1;
+        while lookahead < self.tokens.len() {
+            let k = token_to_syntax_kind(&self.tokens[lookahead].token);
+            if k == SyntaxKind::Whitespace || k == SyntaxKind::Comment {
+                lookahead += 1;
+            } else {
+                break;
+            }
+        }
+        // Skip: IDENT
+        lookahead += 1;
+        while lookahead < self.tokens.len() {
+            let k = token_to_syntax_kind(&self.tokens[lookahead].token);
+            if k == SyntaxKind::Whitespace || k == SyntaxKind::Comment {
+                lookahead += 1;
+            } else {
+                break;
+            }
+        }
+        // Skip: is
+        lookahead += 1;
+        while lookahead < self.tokens.len() {
+            let k = token_to_syntax_kind(&self.tokens[lookahead].token);
+            if k == SyntaxKind::Whitespace || k == SyntaxKind::Comment {
+                lookahead += 1;
+            } else {
+                break;
+            }
+        }
+        // Check: new
+        let is_instantiation = lookahead < self.tokens.len()
+            && token_to_syntax_kind(&self.tokens[lookahead].token) == SyntaxKind::NewKw;
+
+        if is_instantiation {
+            self.parse_package_instantiation();
+            return;
+        }
+
         self.start_node(SyntaxKind::PackageDecl);
         self.expect(SyntaxKind::PackageKw);
         self.skip_trivia();
@@ -1961,6 +2046,12 @@ impl<'a> ParseState<'a> {
         self.skip_trivia();
         self.expect(SyntaxKind::IsKw);
         self.skip_trivia();
+
+        // Optional generic clause
+        if self.at(SyntaxKind::GenericKw) {
+            self.parse_generic_clause();
+            self.skip_trivia();
+        }
 
         // Declarations until end
         self.parse_package_declarations();
@@ -1971,6 +2062,35 @@ impl<'a> ParseState<'a> {
         self.skip_trivia();
         if !self.at(SyntaxKind::Semicolon) {
             self.bump();
+            self.skip_trivia();
+        }
+        self.expect(SyntaxKind::Semicolon);
+        self.finish_node();
+    }
+
+    fn parse_package_instantiation(&mut self) {
+        // package X is new Y generic map (...);
+        self.start_node(SyntaxKind::PackageInstantiation);
+        self.expect(SyntaxKind::PackageKw);
+        self.skip_trivia();
+        self.bump(); // instance name (X)
+        self.skip_trivia();
+        self.expect(SyntaxKind::IsKw);
+        self.skip_trivia();
+        self.expect(SyntaxKind::NewKw);
+        self.skip_trivia();
+        // Source package name — may be selected name (work.pkg)
+        self.parse_selected_name();
+        self.skip_trivia();
+        // Optional generic map
+        if self.at(SyntaxKind::GenericKw) {
+            self.start_node(SyntaxKind::GenericMap);
+            self.bump(); // generic
+            self.skip_trivia();
+            self.expect(SyntaxKind::MapKw);
+            self.skip_trivia();
+            self.parse_association_list();
+            self.finish_node();
             self.skip_trivia();
         }
         self.expect(SyntaxKind::Semicolon);
@@ -2025,6 +2145,10 @@ impl<'a> ParseState<'a> {
                 Some(SyntaxKind::AliasKw) => self.parse_alias_decl(),
                 Some(SyntaxKind::AttributeKw) => self.parse_attribute_decl_or_spec(),
                 Some(SyntaxKind::UseKw) => self.parse_use_clause(),
+                Some(SyntaxKind::GenericKw) => {
+                    // generic clause inside package (already parsed at package level, skip if duplicate)
+                    self.parse_generic_clause();
+                }
                 _ => {
                     self.error_recover("unexpected declaration in package");
                 }

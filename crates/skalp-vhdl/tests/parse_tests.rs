@@ -361,3 +361,66 @@ end architecture rtl;
     let result = parse_vhdl(source);
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 }
+
+#[test]
+fn test_parse_generic_type_param() {
+    let source = r#"
+entity generic_type_test is
+    generic (
+        type T
+    );
+    port (
+        clk : in std_logic
+    );
+end entity generic_type_test;
+"#;
+    let result = parse_vhdl(source);
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+}
+
+#[test]
+fn test_parse_generic_type_param_constrained() {
+    let source = r#"
+entity constrained_type_test is
+    generic (
+        type T is (<>)
+    );
+    port (
+        clk : in std_logic
+    );
+end entity constrained_type_test;
+"#;
+    let result = parse_vhdl(source);
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+}
+
+#[test]
+fn test_parse_package_with_generics() {
+    let source = r#"
+package generic_pkg is
+    generic (
+        type T;
+        SIZE : integer := 8
+    );
+    constant DEFAULT_VAL : T;
+end package generic_pkg;
+"#;
+    let result = parse_vhdl(source);
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+}
+
+#[test]
+fn test_parse_package_instantiation() {
+    let source = r#"
+package generic_pkg is
+    generic (
+        type T
+    );
+    constant MY_CONST : T;
+end package generic_pkg;
+
+package my_inst is new generic_pkg generic map (T => integer);
+"#;
+    let result = parse_vhdl(source);
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+}

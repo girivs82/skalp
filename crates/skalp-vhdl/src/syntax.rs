@@ -116,6 +116,7 @@ pub enum SyntaxKind {
     SharedKw,
 
     // VHDL-2019
+    NewKw,
     InterfaceKw,
     ViewKw,
     PrivateKw,
@@ -310,13 +311,16 @@ pub enum SyntaxKind {
     ViewDecl,
     ViewFieldDirection,
 
+    // Package instantiation
+    PackageInstantiation,
+
     // Names
     SelectedName,
     Name,
 }
 
 /// Number of SyntaxKind variants (update when adding new variants)
-const SYNTAX_KIND_MAX: usize = 260;
+const SYNTAX_KIND_MAX: usize = 265;
 
 impl From<SyntaxKind> for rowan::SyntaxKind {
     fn from(kind: SyntaxKind) -> Self {
