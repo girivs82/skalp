@@ -36,10 +36,15 @@ pub struct VhdlHirBuilder {
     /// Maps view_name -> (interface_name, field_name -> direction)
     view_defs: IndexMap<String, (String, IndexMap<String, HirPortDirection>)>,
     entity_map: IndexMap<String, EntityId>,
+    /// Maps entity_id -> generics from the entity declaration
+    entity_generics: IndexMap<EntityId, Vec<HirGeneric>>,
     port_map: IndexMap<String, PortId>,
     signal_map: IndexMap<String, SignalId>,
     variable_map: IndexMap<String, VariableId>,
     constant_map: IndexMap<String, ConstantId>,
+
+    /// Maps signal/port/variable names to their types for attribute resolution ('high, 'low, etc.)
+    name_type_map: IndexMap<String, HirType>,
 
     /// Known package names (for qualified name resolution like pkg.constant)
     package_names: HashSet<String>,
@@ -146,10 +151,12 @@ impl VhdlHirBuilder {
             user_types: IndexMap::new(),
             view_defs: IndexMap::new(),
             entity_map: IndexMap::new(),
+            entity_generics: IndexMap::new(),
             port_map: IndexMap::new(),
             signal_map: IndexMap::new(),
             variable_map: IndexMap::new(),
             constant_map: IndexMap::new(),
+            name_type_map: IndexMap::new(),
             package_names: HashSet::new(),
             generic_type_params: HashSet::new(),
             package_scopes: IndexMap::new(),
@@ -333,7 +340,8 @@ impl VhdlHirBuilder {
     // ====================================================================
 
     fn lower_entity_decl(&mut self, node: &SyntaxNode) -> Option<HirEntity> {
-        let name = first_ident(node)?;
+        // VHDL is case-insensitive: normalize entity name to lowercase
+        let name = first_ident(node)?.to_ascii_lowercase();
         let pascal_name = to_pascal_case(&name);
         let id = self.alloc_entity_id();
         self.entity_map.insert(name.clone(), id);
@@ -353,6 +361,9 @@ impl VhdlHirBuilder {
                 }
             }
         }
+
+        // Store generics for injection into architectures
+        self.entity_generics.insert(id, generics.clone());
 
         // Process port clause
         if let Some(pc) = first_child_of_kind(node, SyntaxKind::PortClause) {
@@ -421,7 +432,8 @@ impl VhdlHirBuilder {
     }
 
     fn lower_port_decl(&mut self, node: &SyntaxNode) -> Vec<HirPort> {
-        let idents = ident_texts(node);
+        // VHDL is case-insensitive: normalize all identifiers to lowercase
+        let idents: Vec<String> = ident_texts(node).into_iter().map(|s| s.to_ascii_lowercase()).collect();
         if idents.is_empty() {
             return Vec::new();
         }
@@ -459,6 +471,7 @@ impl VhdlHirBuilder {
         for name in &idents {
             let id = self.alloc_port_id();
             self.port_map.insert(name.clone(), id);
+            self.name_type_map.insert(name.clone(), port_type.clone());
             ports.push(HirPort {
                 id,
                 name: name.clone(),
@@ -513,6 +526,7 @@ impl VhdlHirBuilder {
 
             let id = self.alloc_port_id();
             self.port_map.insert(flat_name.clone(), id);
+            self.name_type_map.insert(flat_name.clone(), field.field_type.clone());
             ports.push(HirPort {
                 id,
                 name: flat_name,
@@ -564,6 +578,27 @@ impl VhdlHirBuilder {
         let mut assignments = Vec::new();
         let mut instances = Vec::new();
         let mut generate_stmts = Vec::new();
+
+        // Inject entity generics as constants so they're resolvable via resolve_name()
+        if let Some(generics) = self.entity_generics.get(&entity_id).cloned() {
+            for generic in &generics {
+                if let HirGenericType::Const(ref const_type) = generic.param_type {
+                    let id = self.alloc_constant_id();
+                    self.constant_map
+                        .insert(generic.name.to_ascii_lowercase(), id);
+                    let default = generic
+                        .default_value
+                        .clone()
+                        .unwrap_or(HirExpression::Literal(HirLiteral::Integer(0)));
+                    constants.push(HirConstant {
+                        id,
+                        name: generic.name.to_ascii_lowercase(),
+                        const_type: const_type.clone(),
+                        value: default,
+                    });
+                }
+            }
+        }
 
         // Process declarations
         for child in node.children() {
@@ -679,7 +714,8 @@ impl VhdlHirBuilder {
     // ====================================================================
 
     fn lower_signal_decl(&mut self, node: &SyntaxNode) -> Vec<HirSignal> {
-        let idents = ident_texts(node);
+        // VHDL is case-insensitive: normalize signal names to lowercase
+        let idents: Vec<String> = ident_texts(node).into_iter().map(|s| s.to_ascii_lowercase()).collect();
         let signal_type = if let Some(st) = first_child_of_kind(node, SyntaxKind::SubtypeIndication) {
             self.lower_subtype_indication(&st)
         } else {
@@ -694,6 +730,7 @@ impl VhdlHirBuilder {
         for name in &idents {
             let id = self.alloc_signal_id();
             self.signal_map.insert(name.clone(), id);
+            self.name_type_map.insert(name.clone(), signal_type.clone());
             signals.push(HirSignal {
                 id,
                 name: name.clone(),
@@ -724,6 +761,7 @@ impl VhdlHirBuilder {
         let init = self.extract_default_value(node);
         let id = self.alloc_variable_id();
         self.variable_map.insert(name.clone(), id);
+        self.name_type_map.insert(name.clone(), var_type.clone());
         Some(HirVariable {
             id,
             name,
@@ -1054,35 +1092,11 @@ impl VhdlHirBuilder {
             return edge_triggers;
         }
 
-        // 2. Fallback: name-based heuristic
-        let mut triggers = Vec::new();
-
-        for name in sens_names {
-            let lower = name.to_ascii_lowercase();
-            if lower.contains("clk") || lower.contains("clock") {
-                let signal = self.resolve_signal_ref(name);
-                triggers.push(HirEventTrigger {
-                    signal,
-                    edge: HirEdgeType::Rising,
-                });
-            } else if lower.contains("rst") || lower.contains("reset") {
-                let signal = self.resolve_signal_ref(name);
-                triggers.push(HirEventTrigger {
-                    signal,
-                    edge: HirEdgeType::Both,
-                });
-            }
-        }
-
-        if triggers.is_empty() && !sens_names.is_empty() {
-            let signal = self.resolve_signal_ref(&sens_names[0]);
-            triggers.push(HirEventTrigger {
-                signal,
-                edge: HirEdgeType::Rising,
-            });
-        }
-
-        triggers
+        // 2. If no edge calls found in body, this is a combinational process.
+        // Don't use name-based heuristics — names like "sys_clk_cnt_max" contain
+        // "clk" but are counter signals, not clocks. Only rising_edge()/falling_edge()
+        // calls in the process body reliably indicate sequential logic.
+        Vec::new()
     }
 
     fn strip_edge_calls(statements: &mut [HirStatement]) {
@@ -1496,7 +1510,16 @@ impl VhdlHirBuilder {
         }
 
         // Try identifier (enum variant or variable binding)
-        if let Some(name) = first_ident(node) {
+        // Look for Ident both as direct child and inside child Name nodes
+        let name = first_ident(node).or_else(|| {
+            // VHDL parser wraps choice identifiers in a Name node:
+            //   Choice -> Name -> Ident
+            // So look inside child Name nodes for the identifier
+            node.children()
+                .find(|c| c.kind() == SyntaxKind::Name)
+                .and_then(|name_node| first_ident(&name_node))
+        });
+        if let Some(name) = name {
             // Check if it's a known enum variant
             for (_type_name, hir_type) in &self.user_types {
                 if let HirType::Enum(ref et) = hir_type {
@@ -2486,9 +2509,97 @@ impl VhdlHirBuilder {
             }
         }
 
+        // VHDL type conversion keywords followed by parenthesized arguments:
+        // integer(x), real(x), natural(x), positive(x)
+        // Lower these as function calls to the corresponding builtins.
+        if elements.len() >= 3 {
+            let first_kind = elements[0].kind();
+            let fn_name = match first_kind {
+                SyntaxKind::IntegerKw => Some("integer"),
+                SyntaxKind::RealKw => Some("real"),
+                SyntaxKind::NaturalKw => Some("natural"),
+                SyntaxKind::PositiveKw => Some("natural"),
+                _ => None,
+            };
+            if let Some(fn_name) = fn_name {
+                if elements[1].kind() == SyntaxKind::LParen {
+                    // Extract the argument between parentheses
+                    let mut arg_elems = Vec::new();
+                    let mut depth = 0i32;
+                    for el in &elements[2..] {
+                        match el.kind() {
+                            SyntaxKind::LParen => {
+                                depth += 1;
+                                arg_elems.push(el.clone());
+                            }
+                            SyntaxKind::RParen if depth == 0 => break,
+                            SyntaxKind::RParen => {
+                                depth -= 1;
+                                arg_elems.push(el.clone());
+                            }
+                            SyntaxKind::Whitespace | SyntaxKind::Comment => {}
+                            _ => arg_elems.push(el.clone()),
+                        }
+                    }
+                    let arg = self.lower_expr_from_elements(&arg_elems);
+                    return HirExpression::Call(HirCallExpr {
+                        function: fn_name.to_string(),
+                        type_args: Vec::new(),
+                        named_type_args: IndexMap::new(),
+                        args: vec![arg],
+                        impl_style: ImplStyle::Auto,
+                    });
+                }
+            }
+        }
+
         // If first element is a node, try to lower it
         if let SyntaxElement::Node(ref n) = elements[0] {
             return self.lower_syntax_node_expr(n);
+        }
+
+        // Ident followed by LParen: function call or indexing
+        if elements.len() >= 3 {
+            if let SyntaxElement::Token(ref t) = elements[0] {
+                if t.kind() == SyntaxKind::Ident && elements[1].kind() == SyntaxKind::LParen {
+                    let name = t.text().to_ascii_lowercase();
+                    let mut arg_elems = Vec::new();
+                    let mut depth = 0i32;
+                    for el in &elements[2..] {
+                        match el.kind() {
+                            SyntaxKind::LParen => {
+                                depth += 1;
+                                arg_elems.push(el.clone());
+                            }
+                            SyntaxKind::RParen if depth == 0 => break,
+                            SyntaxKind::RParen => {
+                                depth -= 1;
+                                arg_elems.push(el.clone());
+                            }
+                            SyntaxKind::Whitespace | SyntaxKind::Comment => {}
+                            _ => arg_elems.push(el.clone()),
+                        }
+                    }
+                    let arg = self.lower_expr_from_elements(&arg_elems);
+
+                    // If it's a known signal/port, treat as indexing
+                    if self.port_map.contains_key(&name)
+                        || self.signal_map.contains_key(&name)
+                    {
+                        let base = self.resolve_name(&name);
+                        return HirExpression::Index(Box::new(base), Box::new(arg));
+                    }
+
+                    // Otherwise, function call
+                    return HirExpression::Call(HirCallExpr {
+                        function: name,
+                        type_args: Vec::new(),
+                        named_type_args: IndexMap::new(),
+                        args: vec![arg],
+                        impl_style: ImplStyle::Auto,
+                    });
+                }
+            }
         }
 
         // Fallback: try to interpret as a single token
@@ -2585,7 +2696,12 @@ impl VhdlHirBuilder {
     fn lower_token_expr(&mut self, kind: SyntaxKind, text: &str) -> HirExpression {
         match kind {
             SyntaxKind::IntLiteral => {
-                let val = text.replace('_', "").parse::<u64>().unwrap_or(0);
+                let cleaned = text.replace('_', "");
+                // VHDL integer literals can use scientific notation (e.g., 50e6 = 50_000_000)
+                // Rust's u64::parse doesn't support this, so fall back to f64 parsing
+                let val = cleaned.parse::<u64>().unwrap_or_else(|_| {
+                    cleaned.parse::<f64>().map(|f| f as u64).unwrap_or(0)
+                });
                 HirExpression::Literal(HirLiteral::Integer(val))
             }
             SyntaxKind::CharLiteral => {
@@ -2726,6 +2842,20 @@ impl VhdlHirBuilder {
 
         // Check for function call pattern: name(args)
         if tokens.len() > 1 && tokens.get(1).map(|(k, _)| *k) == Some(SyntaxKind::LParen) {
+            // Check for slice: name(expr downto expr) or name(expr to expr)
+            let has_downto = tokens.iter().any(|(k, _)| *k == SyntaxKind::DowntoKw);
+            let has_to_range = !has_downto && tokens.iter().skip(2).any(|(k, _)| *k == SyntaxKind::ToKw);
+            if has_downto || has_to_range {
+                let base = self.resolve_name(&name);
+                if let Some((high_expr, low_expr)) = self.extract_paren_range(node) {
+                    return HirExpression::Range(
+                        Box::new(base),
+                        Box::new(high_expr),
+                        Box::new(low_expr),
+                    );
+                }
+            }
+
             // Could be function call or indexing
             let args = self.extract_call_args(node);
             let base = self.resolve_name(&name);
@@ -2799,8 +2929,30 @@ impl VhdlHirBuilder {
                 let base = self.resolve_name(&name);
                 match lower_attr.as_str() {
                     "event" => return base,
-                    "range" | "length" | "high" | "low" | "left" | "right"
-                    | "ascending" | "reverse_range" | "image" | "value" => {
+                    "high" | "low" | "length" | "left" | "right" => {
+                        // Resolve to concrete value from the signal/port/variable type
+                        if let Some(ty) = self.name_type_map.get(&name.to_ascii_lowercase()).cloned() {
+                            let width = Self::type_width(&ty);
+                            if width > 0 {
+                                let val = match lower_attr.as_str() {
+                                    "high" | "left" => width - 1,  // downto convention
+                                    "low" | "right" => 0,
+                                    "length" => width,
+                                    _ => 0,
+                                };
+                                return HirExpression::Literal(HirLiteral::Integer(val as u64));
+                            }
+                        }
+                        // Fallback to Call if type not found
+                        return HirExpression::Call(HirCallExpr {
+                            function: format!("{}_{}", name, lower_attr),
+                            type_args: Vec::new(),
+                            named_type_args: IndexMap::new(),
+                            args: vec![base],
+                            impl_style: ImplStyle::Auto,
+                        });
+                    }
+                    "range" | "ascending" | "reverse_range" | "image" | "value" => {
                         return HirExpression::Call(HirCallExpr {
                             function: format!("{}_{}", name, lower_attr),
                             type_args: Vec::new(),
@@ -2903,6 +3055,16 @@ impl VhdlHirBuilder {
                             && el.kind() != SyntaxKind::Arrow
                     })
                     .collect();
+                // BUG FIX: (others => '1') must produce all-ones, not literal 1.
+                // Use u64::MAX; codegen's width mask truncates to the correct width.
+                if val_elements.len() == 1 {
+                    if let Some(tok) = val_elements[0].as_token() {
+                        let text = tok.text().to_string();
+                        if text == "'1'" {
+                            return HirExpression::Literal(HirLiteral::Integer(u64::MAX));
+                        }
+                    }
+                }
                 return self.lower_expr_from_elements(&val_elements);
             }
         }
@@ -2951,6 +3113,10 @@ impl VhdlHirBuilder {
                 generic_args: Vec::new(),
                 fields: field_inits,
             })
+        } else if positional.len() == 1 {
+            // Single positional element without arrows = parenthesized expression,
+            // not a single-element aggregate. Unwrap it.
+            positional.into_iter().next().unwrap()
         } else if !positional.is_empty() {
             HirExpression::ArrayLiteral(positional)
         } else {
@@ -3050,8 +3216,20 @@ impl VhdlHirBuilder {
         let name = tokens[0].1.to_ascii_lowercase();
         let base = self.resolve_lvalue_name(&name);
 
-        // Check for indexing: name(expr)
+        // Check for indexing or slicing: name(expr) or name(expr downto expr)
         if tokens.len() > 1 && tokens.get(1).map(|(k, _)| *k) == Some(SyntaxKind::LParen) {
+            // Check if this is a range (downto/to) or a single index
+            let has_downto = tokens.iter().any(|(k, _)| *k == SyntaxKind::DowntoKw);
+            let has_to = tokens.iter().any(|(k, _)| *k == SyntaxKind::ToKw);
+
+            if has_downto || has_to {
+                // Slice: name(high downto low) or name(low to high)
+                let range = self.extract_paren_range(node);
+                if let Some((high_expr, low_expr)) = range {
+                    return HirLValue::Range(Box::new(base), high_expr, low_expr);
+                }
+            }
+
             let args = self.extract_call_args(node);
             if let Some(idx) = args.into_iter().next() {
                 return HirLValue::Index(Box::new(base), idx);
@@ -3071,9 +3249,71 @@ impl VhdlHirBuilder {
         base
     }
 
+    /// Extract a range (high_expr downto low_expr) from parenthesized content in a Name node.
+    /// Returns (high_expr, low_expr) for downto, or (low_expr, high_expr) adjusted for to.
+    fn extract_paren_range(&mut self, node: &SyntaxNode) -> Option<(HirExpression, HirExpression)> {
+        let elements: Vec<SyntaxElement> = node.children_with_tokens().collect();
+
+        // Collect content between outer ( and )
+        let mut inside = false;
+        let mut depth = 0;
+        let mut content: Vec<SyntaxElement> = Vec::new();
+        for el in &elements {
+            let kind = el.kind();
+            match kind {
+                SyntaxKind::LParen if !inside => { inside = true; depth = 1; }
+                SyntaxKind::LParen if inside => { depth += 1; content.push(el.clone()); }
+                SyntaxKind::RParen if inside => {
+                    depth -= 1;
+                    if depth == 0 { break; }
+                    content.push(el.clone());
+                }
+                _ if inside => { content.push(el.clone()); }
+                _ => {}
+            }
+        }
+
+        // Split on DowntoKw or ToKw
+        let split_pos = content.iter().position(|el| {
+            el.kind() == SyntaxKind::DowntoKw || el.kind() == SyntaxKind::ToKw
+        })?;
+
+        let left_els: Vec<_> = content[..split_pos].iter()
+            .filter(|e| e.kind() != SyntaxKind::Whitespace && e.kind() != SyntaxKind::Comment)
+            .cloned().collect();
+        let right_els: Vec<_> = content[split_pos + 1..].iter()
+            .filter(|e| e.kind() != SyntaxKind::Whitespace && e.kind() != SyntaxKind::Comment)
+            .cloned().collect();
+
+        if left_els.is_empty() || right_els.is_empty() {
+            return None;
+        }
+
+        let left_expr = self.lower_expr_from_elements(&left_els);
+        let right_expr = self.lower_expr_from_elements(&right_els);
+
+        // For both downto and to, Range(base, high, low): high is left for downto
+        Some((left_expr, right_expr))
+    }
+
     // ====================================================================
     // Name resolution
     // ====================================================================
+
+    /// Get the bit width of an HIR type (for attribute resolution).
+    fn type_width(ty: &HirType) -> usize {
+        match ty {
+            HirType::Logic(w) | HirType::Nat(w) | HirType::Int(w) => *w as usize,
+            HirType::Bool => 1,
+            HirType::Struct(st) => st.fields.iter().map(|f| Self::type_width(&f.field_type)).sum(),
+            HirType::Array(inner, size) => (*size as usize) * Self::type_width(inner),
+            HirType::Enum(et) => {
+                let n = et.variants.len();
+                if n <= 1 { 1 } else { (usize::BITS - (n - 1).leading_zeros()) as usize }
+            }
+            _ => 0, // NatExpr, Custom, etc. - can't resolve statically
+        }
+    }
 
     fn resolve_name(&self, name: &str) -> HirExpression {
         let lower = name.to_ascii_lowercase();
@@ -3085,10 +3325,32 @@ impl VhdlHirBuilder {
             HirExpression::Variable(*var_id)
         } else if let Some(const_id) = self.constant_map.get(&lower) {
             HirExpression::Constant(*const_id)
+        } else if let Some(variant_val) = self.resolve_enum_variant(&lower) {
+            variant_val
         } else {
             // Could be a generic parameter or unresolved name
             HirExpression::GenericParam(lower)
         }
+    }
+
+    /// Check if `name` is an enum variant in any user-defined enum type.
+    /// Returns the variant's integer value as a literal expression.
+    fn resolve_enum_variant(&self, name: &str) -> Option<HirExpression> {
+        for (_type_name, hir_type) in &self.user_types {
+            if let HirType::Enum(enum_def) = hir_type {
+                for (index, variant) in enum_def.variants.iter().enumerate() {
+                    if variant.name.to_ascii_lowercase() == name {
+                        let value = if let Some(ref value_expr) = variant.value {
+                            value_expr.clone()
+                        } else {
+                            HirExpression::Literal(HirLiteral::Integer(index as u64))
+                        };
+                        return Some(value);
+                    }
+                }
+            }
+        }
+        None
     }
 
     fn resolve_lvalue_name(&mut self, name: &str) -> HirLValue {
@@ -3226,10 +3488,34 @@ impl VhdlHirBuilder {
         let left = self.eval_const_expr(&before);
         let right = self.eval_const_expr(&after);
 
+        // Also lower the bound expressions as HIR for generic-dependent widths.
+        // If either bound evaluated to 0 AND the elements contain non-literal tokens,
+        // the width likely depends on generics and needs expression-based resolution.
+        let has_non_literal = |elems: &[SyntaxElement]| -> bool {
+            elems.iter().any(|el| matches!(el.kind(), SyntaxKind::Ident) || matches!(el, SyntaxElement::Node(_)))
+        };
+        let (left_expr, right_expr) = if has_non_literal(&before) || has_non_literal(&after) {
+            let le = if !before.is_empty() {
+                Some(self.lower_expr_from_elements(&before))
+            } else {
+                None
+            };
+            let re = if !after.is_empty() {
+                Some(self.lower_expr_from_elements(&after))
+            } else {
+                None
+            };
+            (le, re)
+        } else {
+            (None, None)
+        };
+
         Some(RangeInfo {
             left,
             right,
             direction: direction.unwrap_or(RangeDirection::To),
+            left_expr,
+            right_expr,
         })
     }
 
@@ -3240,7 +3526,10 @@ impl VhdlHirBuilder {
         if elements.len() == 1 {
             if let SyntaxElement::Token(t) = &elements[0] {
                 if t.kind() == SyntaxKind::IntLiteral {
-                    return t.text().replace('_', "").parse::<i64>().unwrap_or(0);
+                    let cleaned = t.text().replace('_', "");
+                    return cleaned.parse::<i64>().unwrap_or_else(|_| {
+                        cleaned.parse::<f64>().map(|f| f as i64).unwrap_or(0)
+                    });
                 }
             }
         }

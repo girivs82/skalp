@@ -879,8 +879,12 @@ impl<'hir> HirToMir<'hir> {
                     self.variable_map.clear();
                     self.context_variable_map.clear();
 
+                    // Elaborate generate blocks: evaluate conditions and collect body items
+                    let (gen_signals, gen_event_blocks, gen_assignments) =
+                        self.elaborate_generate_blocks_in_impl(impl_block);
+
                     // Add signals - flatten structs/vectors into individual signals
-                    for hir_signal in &impl_block.signals {
+                    for hir_signal in impl_block.signals.iter().chain(gen_signals.iter()) {
                         let signal_type = self.convert_type(&hir_signal.signal_type);
                         let initial = hir_signal
                             .initial_value
@@ -1139,7 +1143,7 @@ impl<'hir> HirToMir<'hir> {
                     }
 
                     // Convert event blocks to processes
-                    for event_block in &impl_block.event_blocks {
+                    for event_block in impl_block.event_blocks.iter().chain(gen_event_blocks.iter()) {
                         let process = self.convert_event_block(event_block);
                         module.processes.push(process);
                     }
@@ -1445,7 +1449,8 @@ impl<'hir> HirToMir<'hir> {
                         "🔴🔴🔴 BUG #127 DEBUG: impl_block has {} assignments 🔴🔴🔴",
                         impl_block.assignments.len()
                     );
-                    for (i, a) in impl_block.assignments.iter().enumerate() {
+                    let all_assignments: Vec<_> = impl_block.assignments.iter().chain(gen_assignments.iter()).collect();
+                    for (i, a) in all_assignments.iter().enumerate() {
                         trace!(
                             "🔴🔴🔴 BUG #127 DEBUG: Assignment {}: LHS={:?}, RHS={:?} 🔴🔴🔴",
                             i,
@@ -1453,17 +1458,19 @@ impl<'hir> HirToMir<'hir> {
                             std::mem::discriminant(&a.rhs)
                         );
                     }
-                    for (idx, hir_assign) in impl_block.assignments.iter().enumerate() {
+                    let all_assignments_for_processing: Vec<_> = impl_block.assignments.iter().chain(gen_assignments.iter()).collect();
+                    let total_assignments = all_assignments_for_processing.len();
+                    for (idx, hir_assign) in all_assignments_for_processing.into_iter().enumerate() {
                         let assignment_start = Instant::now();
                         trace!(
                             "🟢🟢🟢 FOR_LOOP_ENTRY: Processing assignment {}/{} 🟢🟢🟢",
                             idx + 1,
-                            impl_block.assignments.len()
+                            total_assignments
                         );
                         trace!(
                             "⏱️  [PERF]       Starting assignment {}/{}: LHS={:?}, RHS={:?}",
                             idx + 1,
-                            impl_block.assignments.len(),
+                            total_assignments,
                             std::mem::discriminant(&hir_assign.lhs),
                             std::mem::discriminant(&hir_assign.rhs)
                         );
@@ -17678,6 +17685,104 @@ impl<'hir> HirToMir<'hir> {
         }
     }
 
+    /// Elaborate generate blocks in an implementation block.
+    /// Evaluates if-generate conditions and for-generate ranges at compile time,
+    /// returning the body items (signals, event_blocks, assignments) from the
+    /// selected branches to be processed alongside the parent implementation's items.
+    fn elaborate_generate_blocks_in_impl(
+        &mut self,
+        impl_block: &hir::HirImplementation,
+    ) -> (Vec<hir::HirSignal>, Vec<hir::HirEventBlock>, Vec<hir::HirAssignment>) {
+        let mut signals = Vec::new();
+        let mut event_blocks = Vec::new();
+        let mut assignments = Vec::new();
+
+        for stmt in &impl_block.statements {
+            self.collect_elaborated_generate_items(
+                stmt,
+                &mut signals,
+                &mut event_blocks,
+                &mut assignments,
+            );
+        }
+
+        (signals, event_blocks, assignments)
+    }
+
+    /// Recursively collect items from an elaborated generate block.
+    fn collect_elaborated_generate_items(
+        &mut self,
+        stmt: &hir::HirStatement,
+        signals: &mut Vec<hir::HirSignal>,
+        event_blocks: &mut Vec<hir::HirEventBlock>,
+        assignments: &mut Vec<hir::HirAssignment>,
+    ) {
+        match stmt {
+            hir::HirStatement::GenerateIf(gen_if) => {
+                // Evaluate condition using the ConstEvaluator (which has all constants registered)
+                let cond_val = self.const_evaluator.eval(&gen_if.condition)
+                    .ok()
+                    .and_then(|v| v.as_bool())
+                    .or_else(|| {
+                        // Fallback: try evaluating as integer (non-zero = true)
+                        self.try_eval_const_expr(&gen_if.condition).map(|v| v != 0)
+                    });
+
+                if let Some(cond) = cond_val {
+                    let body = if cond {
+                        Some(&gen_if.then_body)
+                    } else {
+                        gen_if.else_body.as_ref()
+                    };
+                    if let Some(body) = body {
+                        self.collect_generate_body_items(body, signals, event_blocks, assignments);
+                    }
+                } else {
+                    trace!("[WARNING] Could not evaluate generate-if condition at compile time, skipping");
+                }
+            }
+            hir::HirStatement::GenerateFor(gen_for) => {
+                // Evaluate range and unroll
+                let start_val = self.try_eval_const_expr(&gen_for.range.start);
+                let end_val = self.try_eval_const_expr(&gen_for.range.end);
+                if let (Some(start), Some(end)) = (start_val, end_val) {
+                    let end_exclusive = if gen_for.range.inclusive { end + 1 } else { end };
+                    for _i in start..end_exclusive {
+                        // For-generate body items are in the body field
+                        self.collect_generate_body_items(
+                            &gen_for.body,
+                            signals,
+                            event_blocks,
+                            assignments,
+                        );
+                    }
+                } else {
+                    trace!("[WARNING] Could not evaluate generate-for range at compile time, skipping");
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Collect signals, event_blocks, and assignments from a generate body,
+    /// recursively processing any nested generate blocks.
+    fn collect_generate_body_items(
+        &mut self,
+        body: &hir::HirGenerateBody,
+        signals: &mut Vec<hir::HirSignal>,
+        event_blocks: &mut Vec<hir::HirEventBlock>,
+        assignments: &mut Vec<hir::HirAssignment>,
+    ) {
+        signals.extend(body.signals.clone());
+        event_blocks.extend(body.event_blocks.clone());
+        assignments.extend(body.assignments.clone());
+
+        // Recursively elaborate nested generate blocks
+        for stmt in &body.generate_stmts {
+            self.collect_elaborated_generate_items(stmt, signals, event_blocks, assignments);
+        }
+    }
+
     /// Try to evaluate a const expression at compile time
     /// Returns Some(value) if the expression can be evaluated, None otherwise
     ///
@@ -23377,7 +23482,6 @@ impl<'hir> HirToMir<'hir> {
         if !self.is_complex_if_else_if_chain(if_stmt) {
             return None;
         }
-
         // Check if this is a conditional assignment pattern suitable for synthesis resolution
         if let Some((target, kind)) = self.extract_conditional_assignment_target(if_stmt) {
             // This is a conditional assignment - resolve it using synthesis approach

@@ -2,7 +2,8 @@ use crate::builtins::{clog2, BuiltinScope};
 use crate::syntax::{SyntaxKind, SyntaxNode};
 use indexmap::IndexMap;
 use skalp_frontend::hir::{
-    HirEnumType, HirEnumVariant, HirStructField, HirStructType, HirType,
+    HirBinaryExpr, HirBinaryOp, HirEnumType, HirEnumVariant, HirExpression, HirLiteral,
+    HirStructField, HirStructType, HirType,
 };
 
 /// Range direction and bounds
@@ -11,6 +12,10 @@ pub struct RangeInfo {
     pub left: i64,
     pub right: i64,
     pub direction: RangeDirection,
+    /// HIR expression for the left bound (for generic-dependent ranges)
+    pub left_expr: Option<HirExpression>,
+    /// HIR expression for the right bound (for generic-dependent ranges)
+    pub right_expr: Option<HirExpression>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -26,6 +31,45 @@ impl RangeInfo {
             RangeDirection::To => (self.right - self.left + 1).unsigned_abs() as u32,
         };
         if size == 0 { 1 } else { size }
+    }
+
+    /// Compute a width expression for generic-dependent ranges.
+    /// For "left_expr downto right_expr": width = left_expr - right_expr + 1
+    /// For "left_expr to right_expr": width = right_expr - left_expr + 1
+    /// Returns None if no expression-based bounds are available.
+    pub fn width_expr(&self) -> Option<HirExpression> {
+        let (high_expr, low_expr) = match self.direction {
+            RangeDirection::Downto => (self.left_expr.as_ref()?, self.right_expr.as_ref()),
+            RangeDirection::To => (self.right_expr.as_ref()?, self.left_expr.as_ref()),
+        };
+
+        // For the common pattern "X - 1 downto 0", simplify to just X
+        if self.direction == RangeDirection::Downto {
+            if let Some(HirExpression::Literal(HirLiteral::Integer(0))) = self.right_expr.as_ref()
+            {
+                // width = left + 1
+                return Some(HirExpression::Binary(HirBinaryExpr {
+                    op: HirBinaryOp::Add,
+                    left: Box::new(high_expr.clone()),
+                    right: Box::new(HirExpression::Literal(HirLiteral::Integer(1))),
+                    is_trait_op: false,
+                }));
+            }
+        }
+
+        // General case: width = high - low + 1
+        let low = low_expr.cloned().unwrap_or(HirExpression::Literal(HirLiteral::Integer(0)));
+        Some(HirExpression::Binary(HirBinaryExpr {
+            op: HirBinaryOp::Add,
+            left: Box::new(HirExpression::Binary(HirBinaryExpr {
+                op: HirBinaryOp::Sub,
+                left: Box::new(high_expr.clone()),
+                right: Box::new(low),
+                is_trait_op: false,
+            })),
+            right: Box::new(HirExpression::Literal(HirLiteral::Integer(1))),
+            is_trait_op: false,
+        }))
     }
 }
 
@@ -46,14 +90,35 @@ pub fn resolve_vhdl_type(
     match lower.as_str() {
         "std_logic" | "std_ulogic" => Some(HirType::Logic(1)),
         "std_logic_vector" | "std_ulogic_vector" => {
+            if let Some(width_expr) = range.and_then(|r| r.width_expr()) {
+                let width = range.map(|r| r.width()).unwrap_or(1);
+                if width <= 1 {
+                    // Width couldn't be statically resolved — use expression
+                    return Some(HirType::LogicExpr(Box::new(width_expr)));
+                }
+            }
             let width = range.map(|r| r.width()).unwrap_or(1);
             Some(HirType::Logic(width))
         }
         "unsigned" => {
+            if let Some(width_expr) = range.and_then(|r| r.width_expr()) {
+                let width = range.map(|r| r.width()).unwrap_or(1);
+                if width <= 1 {
+                    // Width couldn't be statically resolved — use expression
+                    return Some(HirType::NatExpr(Box::new(width_expr)));
+                }
+            }
             let width = range.map(|r| r.width()).unwrap_or(1);
             Some(HirType::Nat(width))
         }
         "signed" => {
+            if let Some(width_expr) = range.and_then(|r| r.width_expr()) {
+                let width = range.map(|r| r.width()).unwrap_or(1);
+                if width <= 1 {
+                    // Width couldn't be statically resolved — use expression
+                    return Some(HirType::IntExpr(Box::new(width_expr)));
+                }
+            }
             let width = range.map(|r| r.width()).unwrap_or(1);
             Some(HirType::Int(width))
         }
@@ -76,6 +141,12 @@ pub fn resolve_vhdl_type(
         "positive" => Some(HirType::Nat(32)),
         "bit" => Some(HirType::Logic(1)),
         "bit_vector" => {
+            if let Some(width_expr) = range.and_then(|r| r.width_expr()) {
+                let width = range.map(|r| r.width()).unwrap_or(1);
+                if width <= 1 {
+                    return Some(HirType::LogicExpr(Box::new(width_expr)));
+                }
+            }
             let width = range.map(|r| r.width()).unwrap_or(1);
             Some(HirType::Logic(width))
         }

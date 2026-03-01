@@ -189,6 +189,13 @@ impl ConstEvaluator {
         builtin_fns.insert("gcd".to_string(), builtin_gcd as BuiltinConstFn);
         builtin_fns.insert("lcm".to_string(), builtin_lcm as BuiltinConstFn);
 
+        // VHDL math functions (IEEE.MATH_REAL compatible)
+        builtin_fns.insert("log2".to_string(), builtin_log2 as BuiltinConstFn);
+        builtin_fns.insert("ceil".to_string(), builtin_ceil as BuiltinConstFn);
+        builtin_fns.insert("floor".to_string(), builtin_floor as BuiltinConstFn);
+        builtin_fns.insert("real".to_string(), builtin_real as BuiltinConstFn);
+        builtin_fns.insert("integer".to_string(), builtin_integer as BuiltinConstFn);
+
         // Gray Code
         builtin_fns.insert(
             "gray_encode".to_string(),
@@ -580,6 +587,29 @@ impl ConstEvaluator {
     fn eval_binary(&mut self, bin: &crate::hir::HirBinaryExpr) -> Result<ConstValue, EvalError> {
         let left = self.eval(&bin.left)?;
         let right = self.eval(&bin.right)?;
+
+        // Coerce mixed Int/Nat operands to a common type (promotes to Int)
+        let (left, right) = match (&left, &right) {
+            (ConstValue::Int(_), ConstValue::Nat(n)) => {
+                (left, ConstValue::Int(*n as i64))
+            }
+            (ConstValue::Nat(n), ConstValue::Int(_)) => {
+                (ConstValue::Int(*n as i64), right)
+            }
+            (ConstValue::Float(_), ConstValue::Nat(n)) => {
+                (left, ConstValue::Float(*n as f64))
+            }
+            (ConstValue::Nat(n), ConstValue::Float(_)) => {
+                (ConstValue::Float(*n as f64), right)
+            }
+            (ConstValue::Float(_), ConstValue::Int(n)) => {
+                (left, ConstValue::Float(*n as f64))
+            }
+            (ConstValue::Int(n), ConstValue::Float(_)) => {
+                (ConstValue::Float(*n as f64), right)
+            }
+            _ => (left, right),
+        };
 
         match bin.op {
             HirBinaryOp::Add | HirBinaryOp::WidenAdd => match (left, right) {
@@ -1257,6 +1287,115 @@ fn builtin_gray_decode(args: &[ConstValue]) -> Result<ConstValue, EvalError> {
     Ok(ConstValue::Nat(binary))
 }
 
+// ============================================================================
+// VHDL Math Built-in Functions (IEEE.MATH_REAL compatible)
+// ============================================================================
+
+/// Log base 2: Nat/Int/Float → Float
+fn builtin_log2(args: &[ConstValue]) -> Result<ConstValue, EvalError> {
+    if args.len() != 1 {
+        return Err(EvalError::InvalidArgCount {
+            expected: 1,
+            got: args.len(),
+        });
+    }
+
+    let x = match &args[0] {
+        ConstValue::Nat(n) => *n as f64,
+        ConstValue::Int(n) => *n as f64,
+        ConstValue::Float(f) => *f,
+        _ => {
+            return Err(EvalError::TypeMismatch(
+                "log2 requires numeric argument".to_string(),
+            ))
+        }
+    };
+
+    if x <= 0.0 {
+        return Err(EvalError::TypeMismatch(
+            "log2 argument must be positive".to_string(),
+        ));
+    }
+
+    Ok(ConstValue::Float(x.log2()))
+}
+
+/// Ceiling: Float → Nat
+fn builtin_ceil(args: &[ConstValue]) -> Result<ConstValue, EvalError> {
+    if args.len() != 1 {
+        return Err(EvalError::InvalidArgCount {
+            expected: 1,
+            got: args.len(),
+        });
+    }
+
+    match &args[0] {
+        ConstValue::Float(f) => Ok(ConstValue::Nat(f.ceil() as usize)),
+        ConstValue::Nat(n) => Ok(ConstValue::Nat(*n)),
+        ConstValue::Int(n) => Ok(ConstValue::Nat(*n as usize)),
+        _ => Err(EvalError::TypeMismatch(
+            "ceil requires numeric argument".to_string(),
+        )),
+    }
+}
+
+/// Floor: Float → Nat
+fn builtin_floor(args: &[ConstValue]) -> Result<ConstValue, EvalError> {
+    if args.len() != 1 {
+        return Err(EvalError::InvalidArgCount {
+            expected: 1,
+            got: args.len(),
+        });
+    }
+
+    match &args[0] {
+        ConstValue::Float(f) => Ok(ConstValue::Nat(f.floor() as usize)),
+        ConstValue::Nat(n) => Ok(ConstValue::Nat(*n)),
+        ConstValue::Int(n) => Ok(ConstValue::Nat(*n as usize)),
+        _ => Err(EvalError::TypeMismatch(
+            "floor requires numeric argument".to_string(),
+        )),
+    }
+}
+
+/// Real: Nat/Int → Float (VHDL type conversion)
+fn builtin_real(args: &[ConstValue]) -> Result<ConstValue, EvalError> {
+    if args.len() != 1 {
+        return Err(EvalError::InvalidArgCount {
+            expected: 1,
+            got: args.len(),
+        });
+    }
+
+    match &args[0] {
+        ConstValue::Nat(n) => Ok(ConstValue::Float(*n as f64)),
+        ConstValue::Int(n) => Ok(ConstValue::Float(*n as f64)),
+        ConstValue::Float(f) => Ok(ConstValue::Float(*f)),
+        _ => Err(EvalError::TypeMismatch(
+            "real requires numeric argument".to_string(),
+        )),
+    }
+}
+
+/// Integer: Float → Int (truncate toward zero, VHDL semantics)
+fn builtin_integer(args: &[ConstValue]) -> Result<ConstValue, EvalError> {
+    if args.len() != 1 {
+        return Err(EvalError::InvalidArgCount {
+            expected: 1,
+            got: args.len(),
+        });
+    }
+
+    match &args[0] {
+        ConstValue::Float(f) => Ok(ConstValue::Int(*f as i64)),
+        ConstValue::Nat(n) => Ok(ConstValue::Int(*n as i64)),
+        ConstValue::Int(n) => Ok(ConstValue::Int(*n)),
+        _ => Err(EvalError::TypeMismatch(
+            "integer requires numeric argument".to_string(),
+        )),
+    }
+}
+
 impl Default for ConstEvaluator {
     fn default() -> Self {
         Self::new()
@@ -1458,5 +1597,165 @@ mod tests {
         // BITS should resolve to 32
         let expr = HirExpression::GenericParam("BITS".to_string());
         assert_eq!(eval.eval(&expr).unwrap(), ConstValue::Nat(32));
+    }
+
+    #[test]
+    fn test_vhdl_log2() {
+        let mut eval = ConstEvaluator::new();
+
+        // log2(16) = 4.0
+        let expr = HirExpression::Call(crate::hir::HirCallExpr {
+            function: "log2".to_string(),
+            type_args: vec![],
+            named_type_args: IndexMap::new(),
+            args: vec![HirExpression::Literal(HirLiteral::Integer(16))],
+            impl_style: crate::hir::ImplStyle::default(),
+        });
+        assert_eq!(eval.eval(&expr).unwrap(), ConstValue::Float(4.0));
+    }
+
+    #[test]
+    fn test_vhdl_ceil() {
+        let mut eval = ConstEvaluator::new();
+
+        // ceil(3.2) = 4
+        let expr = HirExpression::Call(crate::hir::HirCallExpr {
+            function: "ceil".to_string(),
+            type_args: vec![],
+            named_type_args: IndexMap::new(),
+            args: vec![HirExpression::Literal(HirLiteral::Float(3.2))],
+            impl_style: crate::hir::ImplStyle::default(),
+        });
+        assert_eq!(eval.eval(&expr).unwrap(), ConstValue::Nat(4));
+    }
+
+    #[test]
+    fn test_vhdl_real_conversion() {
+        let mut eval = ConstEvaluator::new();
+
+        // real(42) = 42.0
+        let expr = HirExpression::Call(crate::hir::HirCallExpr {
+            function: "real".to_string(),
+            type_args: vec![],
+            named_type_args: IndexMap::new(),
+            args: vec![HirExpression::Literal(HirLiteral::Integer(42))],
+            impl_style: crate::hir::ImplStyle::default(),
+        });
+        assert_eq!(eval.eval(&expr).unwrap(), ConstValue::Float(42.0));
+    }
+
+    #[test]
+    fn test_vhdl_integer_conversion() {
+        let mut eval = ConstEvaluator::new();
+
+        // integer(3.7) = 3 (truncate toward zero)
+        let expr = HirExpression::Call(crate::hir::HirCallExpr {
+            function: "integer".to_string(),
+            type_args: vec![],
+            named_type_args: IndexMap::new(),
+            args: vec![HirExpression::Literal(HirLiteral::Float(3.7))],
+            impl_style: crate::hir::ImplStyle::default(),
+        });
+        assert_eq!(eval.eval(&expr).unwrap(), ConstValue::Int(3));
+    }
+
+    #[test]
+    fn test_vhdl_integer_log2_real_chain() {
+        // integer(log2(real(16))) = 4 — common VHDL pattern
+        let mut eval = ConstEvaluator::new();
+
+        let real_call = HirExpression::Call(crate::hir::HirCallExpr {
+            function: "real".to_string(),
+            type_args: vec![],
+            named_type_args: IndexMap::new(),
+            args: vec![HirExpression::Literal(HirLiteral::Integer(16))],
+            impl_style: crate::hir::ImplStyle::default(),
+        });
+        let log2_call = HirExpression::Call(crate::hir::HirCallExpr {
+            function: "log2".to_string(),
+            type_args: vec![],
+            named_type_args: IndexMap::new(),
+            args: vec![real_call],
+            impl_style: crate::hir::ImplStyle::default(),
+        });
+        let integer_call = HirExpression::Call(crate::hir::HirCallExpr {
+            function: "integer".to_string(),
+            type_args: vec![],
+            named_type_args: IndexMap::new(),
+            args: vec![log2_call],
+            impl_style: crate::hir::ImplStyle::default(),
+        });
+
+        assert_eq!(eval.eval(&integer_call).unwrap(), ConstValue::Int(4));
+    }
+
+    #[test]
+    fn test_vhdl_ceil_log2_real_chain() {
+        // natural(ceil(log2(real(SLAVE_COUNT)))) — SPI master pattern
+        let mut eval = ConstEvaluator::new();
+        eval.bind("SLAVE_COUNT".to_string(), ConstValue::Nat(4));
+
+        let real_call = HirExpression::Call(crate::hir::HirCallExpr {
+            function: "real".to_string(),
+            type_args: vec![],
+            named_type_args: IndexMap::new(),
+            args: vec![HirExpression::GenericParam("SLAVE_COUNT".to_string())],
+            impl_style: crate::hir::ImplStyle::default(),
+        });
+        let log2_call = HirExpression::Call(crate::hir::HirCallExpr {
+            function: "log2".to_string(),
+            type_args: vec![],
+            named_type_args: IndexMap::new(),
+            args: vec![real_call],
+            impl_style: crate::hir::ImplStyle::default(),
+        });
+        let ceil_call = HirExpression::Call(crate::hir::HirCallExpr {
+            function: "ceil".to_string(),
+            type_args: vec![],
+            named_type_args: IndexMap::new(),
+            args: vec![log2_call],
+            impl_style: crate::hir::ImplStyle::default(),
+        });
+
+        assert_eq!(eval.eval(&ceil_call).unwrap(), ConstValue::Nat(2));
+    }
+
+    #[test]
+    fn test_vhdl_integer_log2_real_plus_one() {
+        // integer(log2(real(16))) + 1 = 5 — UART c_tx_div_width pattern
+        // Tests mixed Int/Nat arithmetic (integer() returns Int, literal is Nat)
+        let mut eval = ConstEvaluator::new();
+
+        let real_call = HirExpression::Call(crate::hir::HirCallExpr {
+            function: "real".to_string(),
+            type_args: vec![],
+            named_type_args: IndexMap::new(),
+            args: vec![HirExpression::Literal(HirLiteral::Integer(16))],
+            impl_style: crate::hir::ImplStyle::default(),
+        });
+        let log2_call = HirExpression::Call(crate::hir::HirCallExpr {
+            function: "log2".to_string(),
+            type_args: vec![],
+            named_type_args: IndexMap::new(),
+            args: vec![real_call],
+            impl_style: crate::hir::ImplStyle::default(),
+        });
+        let integer_call = HirExpression::Call(crate::hir::HirCallExpr {
+            function: "integer".to_string(),
+            type_args: vec![],
+            named_type_args: IndexMap::new(),
+            args: vec![log2_call],
+            impl_style: crate::hir::ImplStyle::default(),
+        });
+
+        // integer(log2(real(16))) + 1 — Int(4) + Nat(1) needs coercion
+        let plus_one = HirExpression::Binary(HirBinaryExpr {
+            op: HirBinaryOp::Add,
+            left: Box::new(integer_call),
+            right: Box::new(HirExpression::Literal(HirLiteral::Integer(1))),
+            is_trait_op: false,
+        });
+
+        assert_eq!(eval.eval(&plus_one).unwrap(), ConstValue::Int(5));
     }
 }
