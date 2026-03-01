@@ -2,8 +2,8 @@ use crate::builtins::{clog2, BuiltinScope};
 use crate::syntax::{SyntaxKind, SyntaxNode};
 use indexmap::IndexMap;
 use skalp_frontend::hir::{
-    HirBinaryExpr, HirBinaryOp, HirEnumType, HirEnumVariant, HirExpression, HirLiteral,
-    HirStructField, HirStructType, HirType,
+    HirBinaryExpr, HirBinaryOp, HirCallExpr, HirEnumType, HirEnumVariant, HirExpression,
+    HirLiteral, HirStructField, HirStructType, HirType, ImplStyle,
 };
 
 /// Range direction and bounds
@@ -90,34 +90,23 @@ pub fn resolve_vhdl_type(
     match lower.as_str() {
         "std_logic" | "std_ulogic" => Some(HirType::Logic(1)),
         "std_logic_vector" | "std_ulogic_vector" => {
+            // If expression-based bounds exist, always defer width resolution to the pipeline
             if let Some(width_expr) = range.and_then(|r| r.width_expr()) {
-                let width = range.map(|r| r.width()).unwrap_or(1);
-                if width <= 1 {
-                    // Width couldn't be statically resolved — use expression
-                    return Some(HirType::LogicExpr(Box::new(width_expr)));
-                }
+                return Some(HirType::LogicExpr(Box::new(width_expr)));
             }
             let width = range.map(|r| r.width()).unwrap_or(1);
             Some(HirType::Logic(width))
         }
         "unsigned" => {
             if let Some(width_expr) = range.and_then(|r| r.width_expr()) {
-                let width = range.map(|r| r.width()).unwrap_or(1);
-                if width <= 1 {
-                    // Width couldn't be statically resolved — use expression
-                    return Some(HirType::NatExpr(Box::new(width_expr)));
-                }
+                return Some(HirType::NatExpr(Box::new(width_expr)));
             }
             let width = range.map(|r| r.width()).unwrap_or(1);
             Some(HirType::Nat(width))
         }
         "signed" => {
             if let Some(width_expr) = range.and_then(|r| r.width_expr()) {
-                let width = range.map(|r| r.width()).unwrap_or(1);
-                if width <= 1 {
-                    // Width couldn't be statically resolved — use expression
-                    return Some(HirType::IntExpr(Box::new(width_expr)));
-                }
+                return Some(HirType::IntExpr(Box::new(width_expr)));
             }
             let width = range.map(|r| r.width()).unwrap_or(1);
             Some(HirType::Int(width))
@@ -125,7 +114,30 @@ pub fn resolve_vhdl_type(
         "boolean" => Some(HirType::Bool),
         "integer" => {
             if let Some(r) = range {
-                // integer range 0 to M -> Nat(clog2(M+1))
+                // If bounds contain expressions, defer to the pipeline
+                if r.left_expr.is_some() || r.right_expr.is_some() {
+                    // Build clog2(max_bound + 1) as an expression for the pipeline to evaluate
+                    let high_expr = match r.direction {
+                        RangeDirection::To => r.right_expr.clone(),
+                        RangeDirection::Downto => r.left_expr.clone(),
+                    };
+                    if let Some(expr) = high_expr {
+                        let width_expr = HirExpression::Call(HirCallExpr {
+                            function: "clog2".to_string(),
+                            type_args: Vec::new(),
+                            named_type_args: IndexMap::new(),
+                            args: vec![HirExpression::Binary(HirBinaryExpr {
+                                op: HirBinaryOp::Add,
+                                left: Box::new(expr),
+                                right: Box::new(HirExpression::Literal(HirLiteral::Integer(1))),
+                                is_trait_op: false,
+                            })],
+                            impl_style: ImplStyle::Auto,
+                        });
+                        return Some(HirType::NatExpr(Box::new(width_expr)));
+                    }
+                }
+                // Pure literal bounds — safe to compute statically
                 if r.left >= 0 {
                     let max_val = std::cmp::max(r.left, r.right) as u64;
                     Some(HirType::Nat(clog2(max_val + 1)))
@@ -142,10 +154,7 @@ pub fn resolve_vhdl_type(
         "bit" => Some(HirType::Logic(1)),
         "bit_vector" => {
             if let Some(width_expr) = range.and_then(|r| r.width_expr()) {
-                let width = range.map(|r| r.width()).unwrap_or(1);
-                if width <= 1 {
-                    return Some(HirType::LogicExpr(Box::new(width_expr)));
-                }
+                return Some(HirType::LogicExpr(Box::new(width_expr)));
             }
             let width = range.map(|r| r.width()).unwrap_or(1);
             Some(HirType::Logic(width))

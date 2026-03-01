@@ -2930,12 +2930,31 @@ impl VhdlHirBuilder {
                 match lower_attr.as_str() {
                     "event" => return base,
                     "high" | "low" | "length" | "left" | "right" => {
-                        // Resolve to concrete value from the signal/port/variable type
                         if let Some(ty) = self.name_type_map.get(&name.to_ascii_lowercase()).cloned() {
+                            // For expression-based types, derive attribute from the width expression
+                            // and let the pipeline's const evaluator resolve it
+                            if let Some(width_expr) = Self::type_width_expr(&ty) {
+                                let attr_expr = match lower_attr.as_str() {
+                                    // high/left = width - 1 (downto convention)
+                                    "high" | "left" => HirExpression::Binary(HirBinaryExpr {
+                                        op: HirBinaryOp::Sub,
+                                        left: Box::new(width_expr),
+                                        right: Box::new(HirExpression::Literal(HirLiteral::Integer(1))),
+                                        is_trait_op: false,
+                                    }),
+                                    // low/right = 0
+                                    "low" | "right" => HirExpression::Literal(HirLiteral::Integer(0)),
+                                    // length = width
+                                    "length" => width_expr,
+                                    _ => HirExpression::Literal(HirLiteral::Integer(0)),
+                                };
+                                return attr_expr;
+                            }
+                            // Concrete type — safe to resolve statically
                             let width = Self::type_width(&ty);
                             if width > 0 {
                                 let val = match lower_attr.as_str() {
-                                    "high" | "left" => width - 1,  // downto convention
+                                    "high" | "left" => width - 1,
                                     "low" | "right" => 0,
                                     "length" => width,
                                     _ => 0,
@@ -2943,14 +2962,8 @@ impl VhdlHirBuilder {
                                 return HirExpression::Literal(HirLiteral::Integer(val as u64));
                             }
                         }
-                        // Fallback to Call if type not found
-                        return HirExpression::Call(HirCallExpr {
-                            function: format!("{}_{}", name, lower_attr),
-                            type_args: Vec::new(),
-                            named_type_args: IndexMap::new(),
-                            args: vec![base],
-                            impl_style: ImplStyle::Auto,
-                        });
+                        // Type not found — produce a generic param reference as best-effort
+                        return HirExpression::GenericParam(format!("{}_{}", name, lower_attr));
                     }
                     "range" | "ascending" | "reverse_range" | "image" | "value" => {
                         return HirExpression::Call(HirCallExpr {
@@ -3300,7 +3313,8 @@ impl VhdlHirBuilder {
     // Name resolution
     // ====================================================================
 
-    /// Get the bit width of an HIR type (for attribute resolution).
+    /// Get the bit width of an HIR type with concrete bounds (for attribute resolution).
+    /// Returns 0 for expression-based types — use `type_width_expr` for those.
     fn type_width(ty: &HirType) -> usize {
         match ty {
             HirType::Logic(w) | HirType::Nat(w) | HirType::Int(w) => *w as usize,
@@ -3311,7 +3325,17 @@ impl VhdlHirBuilder {
                 let n = et.variants.len();
                 if n <= 1 { 1 } else { (usize::BITS - (n - 1).leading_zeros()) as usize }
             }
-            _ => 0, // NatExpr, Custom, etc. - can't resolve statically
+            _ => 0,
+        }
+    }
+
+    /// Extract the width expression from expression-based HIR types.
+    /// Returns None for concrete types (use `type_width` for those).
+    fn type_width_expr(ty: &HirType) -> Option<HirExpression> {
+        match ty {
+            HirType::LogicExpr(expr) | HirType::NatExpr(expr) | HirType::IntExpr(expr)
+            | HirType::BitExpr(expr) => Some(*expr.clone()),
+            _ => None,
         }
     }
 
@@ -3519,6 +3543,10 @@ impl VhdlHirBuilder {
         })
     }
 
+    /// Best-effort extraction of integer values from syntax elements for range bounds.
+    /// Only handles pure literal expressions (e.g., "7", "15 - 1"). Returns 0 for
+    /// anything involving identifiers or complex expressions — those are handled by
+    /// `lower_expr_from_elements()` which produces HIR expressions for the pipeline.
     fn eval_const_expr(&mut self, elements: &[SyntaxElement]) -> i64 {
         if elements.is_empty() {
             return 0;
