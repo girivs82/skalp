@@ -3048,6 +3048,7 @@ dependencies = [
  "skalp-sim",
  "skalp-sir",
  "skalp-testing",
+ "skalp-vhdl",
  "tempfile",
  "thiserror 1.0.69",
  "tokio",
@@ -3362,6 +3363,7 @@ dependencies = [
  "futures",
  "hex",
  "indexmap",
+ "libc",
  "libloading",
  "metal",
  "objc",
@@ -3417,6 +3419,7 @@ dependencies = [
  "skalp-mir",
  "skalp-sim",
  "skalp-sir",
+ "skalp-vhdl",
  "thiserror 1.0.69",
  "tokio",
  "tokio-test",
@@ -3435,6 +3438,18 @@ dependencies = [
  "tempfile",
  "thiserror 1.0.69",
  "z3",
+]
+
+[[package]]
+name = "skalp-vhdl"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "indexmap",
+ "logos",
+ "rowan",
+ "skalp-frontend",
+ "thiserror 1.0.69",
 ]
 
 [[package]]

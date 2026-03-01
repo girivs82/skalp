@@ -852,44 +852,20 @@ impl<'a> MirToSirConverter<'a> {
         }
     }
 
-    #[allow(dead_code)]
     fn collect_targets_from_if(
         &self,
         if_stmt: &IfStatement,
         targets: &mut std::collections::HashSet<String>,
     ) {
-        // Collect from then branch
-        for stmt in &if_stmt.then_block.statements {
-            match stmt {
-                Statement::Assignment(assign) => {
-                    let target = self.lvalue_to_string(&assign.lhs);
-                    targets.insert(target);
-                }
-                // BUG #270 FIX: Also collect from ResolvedConditional
-                Statement::ResolvedConditional(resolved) => {
-                    let target = self.lvalue_to_string(&resolved.target);
-                    targets.insert(target);
-                }
-                _ => {}
-            }
-        }
-
-        // Collect from else branch
+        // Recursively collect all assignment targets from both branches.
+        // This must recurse into nested If/Case/Block statements so that
+        // targets assigned deep inside conditionals are discovered. Without
+        // recursion, convert_sequential_block fails to store unconditional
+        // defaults for those targets, producing incorrect "hold current"
+        // feedback instead of the intended default value.
+        self.collect_all_targets_from_statements(&if_stmt.then_block.statements, targets);
         if let Some(else_block) = &if_stmt.else_block {
-            for stmt in &else_block.statements {
-                match stmt {
-                    Statement::Assignment(assign) => {
-                        let target = self.lvalue_to_string(&assign.lhs);
-                        targets.insert(target);
-                    }
-                    // BUG #270 FIX: Also collect from ResolvedConditional
-                    Statement::ResolvedConditional(resolved) => {
-                        let target = self.lvalue_to_string(&resolved.target);
-                        targets.insert(target);
-                    }
-                    _ => {}
-                }
-            }
+            self.collect_all_targets_from_statements(&else_block.statements, targets);
         }
     }
 
@@ -1543,8 +1519,43 @@ impl<'a> MirToSirConverter<'a> {
                 Statement::Assignment(assign) => {
                     let assign_target = self.lvalue_to_string(&assign.lhs);
                     if assign_target == target {
-                        // Direct assignment to our target
-                        current_value = self.create_expression_node(&assign.rhs);
+                        // BUG FIX: Handle BitSelect (individual bit assignment)
+                        // When the LHS is a BitSelect with a constant index, reconstruct
+                        // the full vector with the bit inserted at the correct position.
+                        if let LValue::BitSelect { index, .. } = &assign.lhs {
+                            if let Some(bit_idx) = self.evaluate_constant_expression(index) {
+                                let rhs_value = self.create_expression_node(&assign.rhs);
+                                let signal_width = self.get_signal_width(target);
+                                current_value = self.create_bit_insert_node(
+                                    current_value,
+                                    bit_idx,
+                                    rhs_value,
+                                    signal_width,
+                                );
+                            } else {
+                                current_value = self.create_expression_node(&assign.rhs);
+                            }
+                        } else if let LValue::RangeSelect { high, low, .. } = &assign.lhs {
+                            // Handle RangeSelect (partial range assignment)
+                            let high_val = self.evaluate_constant_expression(high);
+                            let low_val = self.evaluate_constant_expression(low);
+                            if let (Some(h), Some(l)) = (high_val, low_val) {
+                                let rhs_value = self.create_expression_node(&assign.rhs);
+                                let signal_width = self.get_signal_width(target);
+                                current_value = self.create_range_insert_node(
+                                    current_value,
+                                    h,
+                                    l,
+                                    rhs_value,
+                                    signal_width,
+                                );
+                            } else {
+                                current_value = self.create_expression_node(&assign.rhs);
+                            }
+                        } else {
+                            // Direct whole-signal assignment
+                            current_value = self.create_expression_node(&assign.rhs);
+                        }
                     }
                 }
                 Statement::If(if_stmt) => {
@@ -2459,9 +2470,60 @@ impl<'a> MirToSirConverter<'a> {
                     // BUG #222 FIX: Direct assignment sets the default, but DON'T return early!
                     // Later conditionals can still override this.
                     if assign_target == target {
-                        let value = self.create_expression_node(&assign.rhs);
-                        current_default = Some(value);
-                        has_direct_assignment = true; // BUG FIX #117c
+                        // BUG FIX: Handle BitSelect (individual bit assignment)
+                        // When the LHS is a BitSelect with a constant index, we need to
+                        // reconstruct the full vector instead of replacing it entirely.
+                        // e.g., uart_rx_data_sr(0) <= rx should insert rx into bit 0
+                        // of the current vector value, not replace the whole vector.
+                        if let LValue::BitSelect { index, .. } = &assign.lhs {
+                            if let Some(bit_idx) = self.evaluate_constant_expression(index) {
+                                let rhs_value = self.create_expression_node(&assign.rhs);
+                                let base_value = current_default
+                                    .unwrap_or_else(|| self.create_signal_ref(target));
+                                let signal_width = self.get_signal_width(target);
+                                let inserted = self.create_bit_insert_node(
+                                    base_value,
+                                    bit_idx,
+                                    rhs_value,
+                                    signal_width,
+                                );
+                                current_default = Some(inserted);
+                                has_direct_assignment = true;
+                            } else {
+                                // Dynamic bit index - treat as whole-signal assignment
+                                let value = self.create_expression_node(&assign.rhs);
+                                current_default = Some(value);
+                                has_direct_assignment = true;
+                            }
+                        } else if let LValue::RangeSelect { high, low, .. } = &assign.lhs {
+                            // Handle RangeSelect (partial range assignment)
+                            // e.g., uart_rx_data_vec(6 downto 0) <= uart_rx_data_vec(7 downto 1)
+                            let high_val = self.evaluate_constant_expression(high);
+                            let low_val = self.evaluate_constant_expression(low);
+                            if let (Some(h), Some(l)) = (high_val, low_val) {
+                                let rhs_value = self.create_expression_node(&assign.rhs);
+                                let base_value = current_default
+                                    .unwrap_or_else(|| self.create_signal_ref(target));
+                                let signal_width = self.get_signal_width(target);
+                                let inserted = self.create_range_insert_node(
+                                    base_value,
+                                    h,
+                                    l,
+                                    rhs_value,
+                                    signal_width,
+                                );
+                                current_default = Some(inserted);
+                                has_direct_assignment = true;
+                            } else {
+                                let value = self.create_expression_node(&assign.rhs);
+                                current_default = Some(value);
+                                has_direct_assignment = true;
+                            }
+                        } else {
+                            let value = self.create_expression_node(&assign.rhs);
+                            current_default = Some(value);
+                            has_direct_assignment = true; // BUG FIX #117c
+                        }
                     }
                 }
                 Statement::If(nested_if) => {
@@ -3464,6 +3526,11 @@ impl<'a> MirToSirConverter<'a> {
                 // since we want the natural width of the source expression)
                 let inner_node = self.create_expression_node_with_width(inner_expr, None);
 
+                // If target width is 0 (unresolved type), just pass through the inner node
+                if cast_target_width == 0 {
+                    return inner_node;
+                }
+
                 // Get actual width from the created node, not from type annotation (which can be Unknown)
                 let source_width = self.get_node_output_width(inner_node);
 
@@ -4121,6 +4188,108 @@ impl<'a> MirToSirConverter<'a> {
         node_id
     }
 
+    /// Create a bit-insert operation: replaces a single bit in `current_value` at position
+    /// `bit_index` with `new_bit_value`. Produces:
+    ///   (current_value & ~(1 << bit_index)) | ((new_bit_value & 1) << bit_index)
+    fn create_bit_insert_node(
+        &mut self,
+        current_value: usize,
+        bit_index: u64,
+        new_bit_value: usize,
+        signal_width: usize,
+    ) -> usize {
+        // mask = 1 << bit_index
+        let one = self.create_constant_node(1, signal_width);
+        let bit_idx_node = self.create_constant_node(bit_index, signal_width);
+        let mask = self.create_binary_op_node(&skalp_mir::BinaryOp::LeftShift, one, bit_idx_node);
+
+        // inverted_mask = ~mask
+        let inverted_mask = self.create_unary_op_node(&skalp_mir::UnaryOp::BitwiseNot, mask);
+
+        // cleared = current_value & inverted_mask (clear the target bit)
+        let cleared = self.create_binary_op_node(
+            &skalp_mir::BinaryOp::BitwiseAnd,
+            current_value,
+            inverted_mask,
+        );
+
+        // masked_bit = new_bit_value & 1 (ensure single bit)
+        let one_1bit = self.create_constant_node(1, signal_width);
+        let masked_bit =
+            self.create_binary_op_node(&skalp_mir::BinaryOp::BitwiseAnd, new_bit_value, one_1bit);
+
+        // shifted_bit = masked_bit << bit_index
+        let bit_idx_node2 = self.create_constant_node(bit_index, signal_width);
+        let shifted_bit =
+            self.create_binary_op_node(&skalp_mir::BinaryOp::LeftShift, masked_bit, bit_idx_node2);
+
+        // result = cleared | shifted_bit
+        self.create_binary_op_node(&skalp_mir::BinaryOp::BitwiseOr, cleared, shifted_bit)
+    }
+
+    /// Create a range-insert operation: replaces bits [high:low] in `current_value` with
+    /// `new_range_value`. Produces:
+    ///   (current_value & ~mask) | ((new_range_value << low) & mask)
+    /// where mask = ((1 << (high - low + 1)) - 1) << low
+    fn create_range_insert_node(
+        &mut self,
+        current_value: usize,
+        high: u64,
+        low: u64,
+        new_range_value: usize,
+        signal_width: usize,
+    ) -> usize {
+        let range_width = high - low + 1;
+
+        // range_mask_unshifted = (1 << range_width) - 1
+        let one = self.create_constant_node(1, signal_width);
+        let width_node = self.create_constant_node(range_width, signal_width);
+        let shifted_one =
+            self.create_binary_op_node(&skalp_mir::BinaryOp::LeftShift, one, width_node);
+        let one2 = self.create_constant_node(1, signal_width);
+        let range_mask_unshifted =
+            self.create_binary_op_node(&skalp_mir::BinaryOp::Sub, shifted_one, one2);
+
+        // mask = range_mask_unshifted << low
+        let low_node = self.create_constant_node(low, signal_width);
+        let mask = self.create_binary_op_node(
+            &skalp_mir::BinaryOp::LeftShift,
+            range_mask_unshifted,
+            low_node,
+        );
+
+        // inverted_mask = ~mask
+        let inverted_mask = self.create_unary_op_node(&skalp_mir::UnaryOp::BitwiseNot, mask);
+
+        // cleared = current_value & inverted_mask
+        let cleared = self.create_binary_op_node(
+            &skalp_mir::BinaryOp::BitwiseAnd,
+            current_value,
+            inverted_mask,
+        );
+
+        // shifted_value = (new_range_value & range_mask_unshifted) << low
+        let range_mask2 = {
+            let one = self.create_constant_node(1, signal_width);
+            let width_node = self.create_constant_node(range_width, signal_width);
+            let shifted =
+                self.create_binary_op_node(&skalp_mir::BinaryOp::LeftShift, one, width_node);
+            let one2 = self.create_constant_node(1, signal_width);
+            self.create_binary_op_node(&skalp_mir::BinaryOp::Sub, shifted, one2)
+        };
+        let masked_value = self.create_binary_op_node(
+            &skalp_mir::BinaryOp::BitwiseAnd,
+            new_range_value,
+            range_mask2,
+        );
+        let low_node2 = self.create_constant_node(low, signal_width);
+        let shifted_value =
+            self.create_binary_op_node(&skalp_mir::BinaryOp::LeftShift, masked_value, low_node2);
+
+        // result = cleared | shifted_value
+        self.create_binary_op_node(&skalp_mir::BinaryOp::BitwiseOr, cleared, shifted_value)
+    }
+
     fn create_mux_node(&mut self, sel: usize, true_val: usize, false_val: usize) -> usize {
         let node_id = self.next_node_id();
 
@@ -4685,53 +4854,214 @@ impl<'a> MirToSirConverter<'a> {
         }
     }
 
+    /// Process all statements in a case arm (or any block), returning a map of
+    /// signal_name → node_id for each signal assigned. Handles nested If/Case
+    /// statements by converting them to mux nodes.
+    fn process_case_arm_statements(&mut self, statements: &[Statement]) -> HashMap<String, usize> {
+        let mut result: HashMap<String, usize> = HashMap::new();
+
+        for stmt in statements {
+            match stmt {
+                Statement::Assignment(assign) => {
+                    let target = self.lvalue_to_string(&assign.lhs);
+                    let node_id = self.create_expression_node(&assign.rhs);
+                    result.insert(target, node_id);
+                }
+                Statement::Block(block) => {
+                    let inner = self.process_case_arm_statements(&block.statements);
+                    result.extend(inner);
+                }
+                Statement::If(if_stmt) => {
+                    let if_nodes = self.convert_if_to_mux_nodes(if_stmt);
+                    result.extend(if_nodes);
+                }
+                Statement::Case(nested_case) => {
+                    let case_nodes = self.convert_case_to_mux_tree_nodes(nested_case);
+                    result.extend(case_nodes);
+                }
+                _ => {}
+            }
+        }
+
+        result
+    }
+
+    /// Convert an if-statement into mux nodes without connecting to signals.
+    /// Returns a map of signal_name → mux_node_id for each signal assigned
+    /// in the if/else branches.
+    fn convert_if_to_mux_nodes(
+        &mut self,
+        if_stmt: &skalp_mir::IfStatement,
+    ) -> HashMap<String, usize> {
+        let cond_node = self.create_expression_node(&if_stmt.condition);
+
+        let then_nodes = self.process_case_arm_statements(&if_stmt.then_block.statements);
+
+        let else_nodes = if let Some(else_block) = &if_stmt.else_block {
+            // Check for else-if pattern
+            if else_block.statements.len() == 1 {
+                if let Statement::If(nested_if) = &else_block.statements[0] {
+                    self.convert_if_to_mux_nodes(nested_if)
+                } else {
+                    self.process_case_arm_statements(&else_block.statements)
+                }
+            } else {
+                self.process_case_arm_statements(&else_block.statements)
+            }
+        } else {
+            HashMap::new()
+        };
+
+        let mut result = HashMap::new();
+        let mut all_signals = std::collections::HashSet::new();
+        all_signals.extend(then_nodes.keys().cloned());
+        all_signals.extend(else_nodes.keys().cloned());
+
+        for signal_name in all_signals {
+            let then_value = if let Some(&node_id) = then_nodes.get(&signal_name) {
+                node_id
+            } else {
+                self.get_or_create_signal_driver(&signal_name)
+            };
+
+            let else_value = if let Some(&node_id) = else_nodes.get(&signal_name) {
+                node_id
+            } else {
+                self.get_or_create_signal_driver(&signal_name)
+            };
+
+            let mux_node = self.create_mux_node(cond_node, then_value, else_value);
+            result.insert(signal_name, mux_node);
+        }
+
+        result
+    }
+
+    /// Convert a case statement into mux tree nodes without connecting to signals.
+    /// Returns a map of signal_name → mux_node_id. Used for nested case statements
+    /// inside case arms.
+    fn convert_case_to_mux_tree_nodes(
+        &mut self,
+        case_stmt: &skalp_mir::CaseStatement,
+    ) -> HashMap<String, usize> {
+        let case_expr_node = self.create_expression_node(&case_stmt.expr);
+
+        let mut all_assignments: HashMap<String, Vec<(Vec<&Expression>, usize)>> = HashMap::new();
+        let mut default_nodes: HashMap<String, usize> = HashMap::new();
+
+        for item in &case_stmt.items {
+            let item_nodes = self.process_case_arm_statements(&item.block.statements);
+            for (signal_name, node_id) in item_nodes {
+                all_assignments
+                    .entry(signal_name)
+                    .or_default()
+                    .push((item.values.iter().collect(), node_id));
+            }
+        }
+
+        if let Some(default_block) = &case_stmt.default {
+            default_nodes = self.process_case_arm_statements(&default_block.statements);
+        }
+
+        let mut result = HashMap::new();
+
+        for (signal_name, case_arms) in &all_assignments {
+            let mut current_mux = if let Some(&default_node) = default_nodes.get(signal_name) {
+                default_node
+            } else {
+                self.get_or_create_signal_driver(signal_name)
+            };
+
+            for (values, value_node) in case_arms.iter().rev() {
+                let condition_node = if values.is_empty() {
+                    continue;
+                } else if values.len() == 1 {
+                    let val_node = self.create_expression_node(values[0]);
+                    self.create_binary_op_node(
+                        &skalp_mir::BinaryOp::Equal,
+                        case_expr_node,
+                        val_node,
+                    )
+                } else {
+                    let mut or_node = {
+                        let val_node = self.create_expression_node(values[0]);
+                        self.create_binary_op_node(
+                            &skalp_mir::BinaryOp::Equal,
+                            case_expr_node,
+                            val_node,
+                        )
+                    };
+                    for value in &values[1..] {
+                        let val_node = self.create_expression_node(value);
+                        let eq_node = self.create_binary_op_node(
+                            &skalp_mir::BinaryOp::Equal,
+                            case_expr_node,
+                            val_node,
+                        );
+                        or_node =
+                            self.create_binary_op_node(&skalp_mir::BinaryOp::Or, or_node, eq_node);
+                    }
+                    or_node
+                };
+
+                current_mux = self.create_mux_node(condition_node, *value_node, current_mux);
+            }
+
+            result.insert(signal_name.clone(), current_mux);
+        }
+
+        // Signals only in default
+        for (signal_name, default_node) in &default_nodes {
+            if !all_assignments.contains_key(signal_name) {
+                result.insert(signal_name.clone(), *default_node);
+            }
+        }
+
+        result
+    }
+
     fn convert_case_to_mux_tree(&mut self, case_stmt: &skalp_mir::CaseStatement) {
         // BUG #117r FIX: Implement case/match statement to mux tree conversion
         // This enables state machines with match statements to generate proper transitions
+        // FIX #13: Use process_case_arm_statements to handle nested If/Case inside case arms
 
         // Create expression node for the case expression (e.g., state_reg)
         let case_expr_node = self.create_expression_node(&case_stmt.expr);
 
-        // Collect all signals assigned in any case arm or default
-        let mut all_assignments: HashMap<String, Vec<(Vec<&Expression>, &Expression)>> =
-            HashMap::new();
-        let mut default_assignments: HashMap<String, &Expression> = HashMap::new();
+        // Collect all signal → node_id mappings from each case arm
+        // process_case_arm_statements handles nested If/Case by converting them to mux nodes
+        let mut all_assignments: HashMap<String, Vec<(Vec<&Expression>, usize)>> = HashMap::new();
+        let mut default_nodes: HashMap<String, usize> = HashMap::new();
 
-        // Extract assignments from each case item
+        // Process each case item — handles Assignment, If, Case, Block recursively
         for item in &case_stmt.items {
-            let mut item_assignments = HashMap::new();
-            self.extract_assignments_from_block_ref(&item.block.statements, &mut item_assignments);
+            let item_nodes = self.process_case_arm_statements(&item.block.statements);
 
-            for (signal_name, expr) in item_assignments {
+            for (signal_name, node_id) in item_nodes {
                 all_assignments
                     .entry(signal_name)
                     .or_default()
-                    .push((item.values.iter().collect(), expr));
+                    .push((item.values.iter().collect(), node_id));
             }
         }
 
-        // Extract default assignments
+        // Process default block
         if let Some(default_block) = &case_stmt.default {
-            self.extract_assignments_from_block_ref(
-                &default_block.statements,
-                &mut default_assignments,
-            );
+            default_nodes = self.process_case_arm_statements(&default_block.statements);
         }
 
         // For each signal, build a mux tree
         for (signal_name, case_arms) in &all_assignments {
             // Start with default value
-            let mut current_mux = if let Some(default_expr) = default_assignments.get(signal_name) {
-                self.create_expression_node(default_expr)
+            let mut current_mux = if let Some(&default_node) = default_nodes.get(signal_name) {
+                default_node
             } else {
                 // No default - use current signal value (for state holding)
                 self.get_or_create_signal_driver(signal_name)
             };
 
             // Build mux chain from last case to first (so first has priority)
-            for (values, value_expr) in case_arms.iter().rev() {
-                let value_node = self.create_expression_node(value_expr);
-
+            for (values, value_node) in case_arms.iter().rev() {
                 // Create condition: case_expr == value (for each value in values list)
                 // For multiple values (e.g., State::A | State::B), we need to OR them
                 let condition_node = if values.is_empty() {
@@ -4769,7 +5099,7 @@ impl<'a> MirToSirConverter<'a> {
                 };
 
                 // Create mux: condition ? value_node : current_mux
-                current_mux = self.create_mux_node(condition_node, value_node, current_mux);
+                current_mux = self.create_mux_node(condition_node, *value_node, current_mux);
             }
 
             // Connect final mux to signal
@@ -4777,32 +5107,9 @@ impl<'a> MirToSirConverter<'a> {
         }
 
         // Handle signals that only appear in default (not in any case arm)
-        for (signal_name, default_expr) in &default_assignments {
+        for (signal_name, default_node) in &default_nodes {
             if !all_assignments.contains_key(signal_name) {
-                let value_node = self.create_expression_node(default_expr);
-                self.connect_node_to_signal(value_node, signal_name);
-            }
-        }
-    }
-
-    /// Extract assignments from a block, returning references to expressions
-    fn extract_assignments_from_block_ref<'b>(
-        &self,
-        statements: &'b [Statement],
-        assignments: &mut HashMap<String, &'b Expression>,
-    ) {
-        for stmt in statements {
-            match stmt {
-                Statement::Assignment(assign) => {
-                    let target = self.lvalue_to_string(&assign.lhs);
-                    assignments.insert(target, &assign.rhs);
-                }
-                Statement::Block(block) => {
-                    self.extract_assignments_from_block_ref(&block.statements, assignments);
-                }
-                _ => {
-                    // Skip nested if/case statements - they should be handled separately
-                }
+                self.connect_node_to_signal(*default_node, signal_name);
             }
         }
     }
@@ -7185,12 +7492,27 @@ impl<'a> MirToSirConverter<'a> {
                             let signal_exists_in_state =
                                 self.sir.state_elements.contains_key(&internal_target);
 
-                            if !signal_exists_in_signals && !signal_exists_in_state {
-                                // Get signal width from the target
-                                let width = self.get_signal_width(&actual_target);
+                            if signal_exists_in_signals {
+                                // Mark the signal as having this driver (use internal name)
+                                if let Some(sig) = self
+                                    .sir
+                                    .signals
+                                    .iter_mut()
+                                    .find(|s| s.name == internal_target)
+                                {
+                                    sig.driver_node = Some(node_id);
+                                    sig.is_state = true;
+                                }
+                            }
+
+                            if !signal_exists_in_state {
+                                // Ensure state element exists for FlipFlop output.
+                                // This is critical for hierarchical designs where a parent
+                                // port signal is driven by a child instance's flip-flop:
+                                // the signal may already exist but not be registered as state.
+                                let width = self.get_signal_width(&internal_target);
                                 let sir_type = SirType::Bits(width);
 
-                                // Add to state_elements (FlipFlop outputs are state)
                                 self.sir.state_elements.insert(
                                     internal_target.clone(),
                                     StateElement {
@@ -7203,16 +7525,6 @@ impl<'a> MirToSirConverter<'a> {
                                         span: None,
                                     },
                                 );
-                            } else if signal_exists_in_signals {
-                                // Mark the signal as having this driver (use internal name)
-                                if let Some(sig) = self
-                                    .sir
-                                    .signals
-                                    .iter_mut()
-                                    .find(|s| s.name == internal_target)
-                                {
-                                    sig.driver_node = Some(node_id);
-                                }
                             }
                         }
                     }
@@ -7532,6 +7844,14 @@ impl<'a> MirToSirConverter<'a> {
                                 continue;
                             }
                         }
+                        LValue::Port(port_id) => {
+                            if let Some(port) = child_module.ports.iter().find(|p| p.id == *port_id)
+                            {
+                                format!("{}.{}", inst_prefix, port.name)
+                            } else {
+                                continue;
+                            }
+                        }
                         LValue::BitSelect { base, index } => {
                             // Array assignment: mem[index_expr] <= value_expr
                             // For flattened target like "input_fifo.mem_3_x", we need to create:
@@ -7820,6 +8140,11 @@ impl<'a> MirToSirConverter<'a> {
                             .iter()
                             .find(|s| s.id == *sig_id)
                             .map(|signal| format!("{}.{}", inst_prefix, signal.name)),
+                        LValue::Port(port_id) => child_module
+                            .ports
+                            .iter()
+                            .find(|p| p.id == *port_id)
+                            .map(|port| format!("{}.{}", inst_prefix, port.name)),
                         LValue::BitSelect { base, .. } => {
                             let extracted = self.extract_base_signal_for_instance(
                                 base,
@@ -7834,7 +8159,7 @@ impl<'a> MirToSirConverter<'a> {
                     };
 
                     if let Some(lhs) = lhs_signal {
-                        let matches = if matches!(assign.lhs, LValue::Signal(_)) {
+                        let matches = if matches!(assign.lhs, LValue::Signal(_) | LValue::Port(_)) {
                             lhs == target
                         } else {
                             let target_stripped = self.strip_flattened_index_suffix(target);
@@ -9752,7 +10077,19 @@ impl<'a> MirToSirConverter<'a> {
                 Value::BitVector { value, .. } => Some(*value),
                 _ => None,
             },
-            _ => None, // Only literals can be evaluated as constants for now
+            ExpressionKind::Binary { op, left, right } => {
+                let l = self.evaluate_constant_expression(left)?;
+                let r = self.evaluate_constant_expression(right)?;
+                match op {
+                    skalp_mir::BinaryOp::Add => Some(l.wrapping_add(r)),
+                    skalp_mir::BinaryOp::Sub => Some(l.wrapping_sub(r)),
+                    skalp_mir::BinaryOp::Mul => Some(l.wrapping_mul(r)),
+                    skalp_mir::BinaryOp::Div if r != 0 => Some(l / r),
+                    _ => None,
+                }
+            }
+            ExpressionKind::Cast { expr: inner, .. } => self.evaluate_constant_expression(inner),
+            _ => None,
         }
     }
 }

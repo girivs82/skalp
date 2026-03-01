@@ -702,7 +702,10 @@ impl Testbench {
         let path = Path::new(source_path);
 
         // Parse with compilation context (supports module resolution)
-        let context = skalp_frontend::parse_and_build_compilation_context(path)?;
+        let context = match path.extension().and_then(|s| s.to_str()) {
+            Some("vhd") | Some("vhdl") => skalp_vhdl::parse_vhdl(path)?,
+            _ => skalp_frontend::parse_and_build_compilation_context(path)?,
+        };
 
         // Compile to MIR with modules
         let compiler = MirCompiler::new();
@@ -758,7 +761,10 @@ impl Testbench {
         cache_key: Option<&String>,
         explicit_top: Option<&str>,
     ) -> Result<skalp_sir::SirModule> {
-        let context = skalp_frontend::parse_and_build_compilation_context(path)?;
+        let context = match path.extension().and_then(|s| s.to_str()) {
+            Some("vhd") | Some("vhdl") => skalp_vhdl::parse_vhdl(path)?,
+            _ => skalp_frontend::parse_and_build_compilation_context(path)?,
+        };
 
         let compiler = MirCompiler::new();
         let mir = compiler

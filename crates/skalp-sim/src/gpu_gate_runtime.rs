@@ -411,6 +411,10 @@ impl GpuGateRuntime {
 
     /// Compile Metal shaders
     fn compile_shaders(&mut self) -> Result<(), String> {
+        // Serialize shader compilations to prevent memory spikes
+        static GATE_SHADER_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _guard = GATE_SHADER_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
         let shader_source = self.generate_shader();
 
         // Write shader to temp file for debugging

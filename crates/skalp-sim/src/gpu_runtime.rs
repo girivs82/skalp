@@ -1,4 +1,5 @@
 use crate::clock_manager::ClockManager;
+use crate::cpp_compiler;
 use crate::simulator::{SimulationError, SimulationResult, SimulationRuntime, SimulationState};
 use async_trait::async_trait;
 use indexmap::IndexMap;
@@ -72,6 +73,14 @@ impl GpuRuntime {
         shader_source: &str,
         function_name: &str,
     ) -> Result<ComputePipelineState, SimulationError> {
+        // Serialize shader compilations across processes to prevent memory spikes.
+        // Uses the same cross-process file lock as C++ compilation.
+        let cache = cpp_compiler::cache_dir();
+        let _ = std::fs::create_dir_all(&cache);
+        let _shader_guard = cpp_compiler::acquire_compile_lock(&cache).map_err(|e| {
+            SimulationError::GpuError(format!("Failed to acquire shader compile lock: {}", e))
+        })?;
+
         let library = self
             .device
             .device

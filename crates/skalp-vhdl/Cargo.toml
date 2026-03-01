@@ -1,0 +1,13 @@
+[package]
+name = "skalp-vhdl"
+version = "0.1.0"
+edition = "2021"
+description = "VHDL frontend for skalp HLS compiler"
+
+[dependencies]
+skalp-frontend = { path = "../skalp-frontend" }
+logos = "0.14"
+rowan = "0.15"
+indexmap = "2"
+anyhow = "1.0"
+thiserror = "1.0"

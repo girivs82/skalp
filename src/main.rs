@@ -1039,11 +1039,19 @@ fn build_design(
     info!("Building design from {:?} to {}", source, target);
 
     // Parse, build HIR with module resolution
-    info!("Parsing SKALP source and building HIR with module resolution...");
-    let context =
-        parse_and_build_compilation_context(source).context("Failed to parse and build HIR")?;
-    let hir = context.main_hir;
-    let module_hirs = context.module_hirs;
+    info!("Parsing source and building HIR...");
+    let is_vhdl = matches!(
+        source.extension().and_then(|s| s.to_str()),
+        Some("vhd") | Some("vhdl")
+    );
+    let (hir, module_hirs) = if is_vhdl {
+        let ctx = skalp_vhdl::parse_vhdl(source).context("Failed to parse VHDL")?;
+        (ctx.main_hir, indexmap::IndexMap::new())
+    } else {
+        let context =
+            parse_and_build_compilation_context(source).context("Failed to parse and build HIR")?;
+        (context.main_hir, context.module_hirs)
+    };
 
     // Run safety analysis if enabled
     if let Some(ref safety_opts) = safety_options {
@@ -1976,7 +1984,7 @@ fn simulate_design(
     let extension = design_file.extension().and_then(|s| s.to_str());
 
     match extension {
-        Some("sk") | Some("skalp") => {
+        Some("sk") | Some("skalp") | Some("vhd") | Some("vhdl") => {
             // Source file - compile it
             if ncl_mode {
                 simulate_ncl(design_file, cycles, use_gpu, gate_opt_level)
@@ -2008,7 +2016,7 @@ fn simulate_design(
             anyhow::bail!("Legacy LIR format is no longer supported. Use .sk files with behavioral or gate-level simulation.");
         }
         _ => {
-            anyhow::bail!("Unsupported file format. Use .sk, .mir, or .lir files");
+            anyhow::bail!("Unsupported file format. Use .sk, .vhd, .vhdl, .mir, or .lir files");
         }
     }
 }
@@ -2032,9 +2040,14 @@ fn simulate_behavioral(
     println!();
 
     // Parse and build HIR
-    info!("Parsing SKALP source...");
-    let hir =
-        parse_and_build_hir_from_file(source_file).context("Failed to parse and build HIR")?;
+    info!("Parsing source...");
+    let hir = match source_file.extension().and_then(|s| s.to_str()) {
+        Some("vhd") | Some("vhdl") => {
+            let ctx = skalp_vhdl::parse_vhdl(source_file).context("Failed to parse VHDL")?;
+            ctx.main_hir
+        }
+        _ => parse_and_build_hir_from_file(source_file).context("Failed to parse and build HIR")?,
+    };
 
     // Lower to MIR
     info!("Compiling to MIR...");

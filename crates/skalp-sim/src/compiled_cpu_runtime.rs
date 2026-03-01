@@ -170,6 +170,14 @@ impl CompiledCpuRuntime {
         // Generate C++ source code
         let source = CppBackend::generate(module);
 
+        // Debug: dump C++ if env var set
+        if std::env::var("SKALP_DUMP_CPP").is_ok() {
+            let dump_path = std::env::var("SKALP_DUMP_CPP")
+                .unwrap_or_else(|_| "/tmp/skalp_generated.cpp".to_string());
+            std::fs::write(&dump_path, &source).ok();
+            eprintln!("[SKALP] Dumped C++ to {}", dump_path);
+        }
+
         // Compile to dynamic library
         let lib_path = compile_cpp_kernel(&source)?;
 

@@ -12,6 +12,7 @@ skalp-lir = { path = "../skalp-lir" }
 skalp-mir = { path = "../skalp-mir" }
 skalp-sir = { path = "../skalp-sir" }
 skalp-sim = { path = "../skalp-sim" }
+skalp-vhdl = { path = "../skalp-vhdl" }
 thiserror = "1.0"
 anyhow = "1.0"
 indexmap = "2.0"

@@ -287,6 +287,20 @@ impl UnifiedSimulator {
     /// # Returns
     /// The internal signal name to use for actual lookups
     fn resolve_path(&self, path: &str) -> String {
+        // Debug: dump name registry on first resolve (controlled by env var)
+        static DUMPED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        if std::env::var("SKALP_DEBUG_NAMES").is_ok()
+            && !DUMPED.swap(true, std::sync::atomic::Ordering::Relaxed)
+        {
+            eprintln!("[NAME_REGISTRY] {} entries:", self.name_registry.len());
+            for entry in self.name_registry.all_entries() {
+                eprintln!(
+                    "  {} -> {} ({})",
+                    entry.hierarchical_path, entry.internal_name, entry.source_name
+                );
+            }
+        }
+
         // Try exact match first
         if let Some(internal) = self.name_registry.resolve(path) {
             return internal.to_string();
