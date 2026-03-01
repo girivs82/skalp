@@ -852,44 +852,20 @@ impl<'a> MirToSirConverter<'a> {
         }
     }
 
-    #[allow(dead_code)]
     fn collect_targets_from_if(
         &self,
         if_stmt: &IfStatement,
         targets: &mut std::collections::HashSet<String>,
     ) {
-        // Collect from then branch
-        for stmt in &if_stmt.then_block.statements {
-            match stmt {
-                Statement::Assignment(assign) => {
-                    let target = self.lvalue_to_string(&assign.lhs);
-                    targets.insert(target);
-                }
-                // BUG #270 FIX: Also collect from ResolvedConditional
-                Statement::ResolvedConditional(resolved) => {
-                    let target = self.lvalue_to_string(&resolved.target);
-                    targets.insert(target);
-                }
-                _ => {}
-            }
-        }
-
-        // Collect from else branch
+        // Recursively collect all assignment targets from both branches.
+        // This must recurse into nested If/Case/Block statements so that
+        // targets assigned deep inside conditionals are discovered. Without
+        // recursion, convert_sequential_block fails to store unconditional
+        // defaults for those targets, producing incorrect "hold current"
+        // feedback instead of the intended default value.
+        self.collect_all_targets_from_statements(&if_stmt.then_block.statements, targets);
         if let Some(else_block) = &if_stmt.else_block {
-            for stmt in &else_block.statements {
-                match stmt {
-                    Statement::Assignment(assign) => {
-                        let target = self.lvalue_to_string(&assign.lhs);
-                        targets.insert(target);
-                    }
-                    // BUG #270 FIX: Also collect from ResolvedConditional
-                    Statement::ResolvedConditional(resolved) => {
-                        let target = self.lvalue_to_string(&resolved.target);
-                        targets.insert(target);
-                    }
-                    _ => {}
-                }
-            }
+            self.collect_all_targets_from_statements(&else_block.statements, targets);
         }
     }
 

@@ -1108,6 +1108,29 @@ impl VhdlHirBuilder {
         // so downstream MIR sees the signal reference directly
         Self::strip_edge_calls(&mut statements);
 
+        // Unwrap the outer if-wrapper left behind by strip_edge_calls.
+        // After stripping, a process like:
+        //   process(clk) begin if rising_edge(clk) then <body> end if; end process;
+        // has statements = [If { condition: Port(clk), then: <body>, else: None }]
+        // The If is redundant because the trigger already captures the edge.
+        if !triggers.is_empty() {
+            if let [HirStatement::If(ref ifs)] = statements.as_slice() {
+                let cond_matches_trigger =
+                    triggers.iter().any(|t| match (&t.signal, &ifs.condition) {
+                        (HirEventSignal::Port(pid), HirExpression::Port(cond_pid)) => {
+                            pid == cond_pid
+                        }
+                        (HirEventSignal::Signal(sid), HirExpression::Signal(cond_sid)) => {
+                            sid == cond_sid
+                        }
+                        _ => false,
+                    });
+                if cond_matches_trigger && ifs.else_statements.is_none() {
+                    statements = ifs.then_statements.clone();
+                }
+            }
+        }
+
         let event_block = HirEventBlock {
             id: block_id,
             triggers,
