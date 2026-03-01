@@ -5667,11 +5667,25 @@ impl<'a> ParseState<'a> {
         self.current >= self.tokens.len()
     }
 
-    /// Peek at a token without consuming it
+    /// Peek at a token without consuming it, skipping trivia tokens.
+    /// offset=1 returns the next non-trivia token after current.
     fn peek_kind(&self, offset: usize) -> Option<SyntaxKind> {
-        let index = self.current + offset;
-        if index < self.tokens.len() {
-            Some(SyntaxKind::from(self.tokens[index].token.clone()))
+        let mut pos = self.current;
+        let mut skipped = 0;
+
+        while skipped < offset {
+            pos += 1;
+            if pos >= self.tokens.len() {
+                return None;
+            }
+            let kind = SyntaxKind::from(self.tokens[pos].token.clone());
+            if !kind.is_trivia() {
+                skipped += 1;
+            }
+        }
+
+        if pos < self.tokens.len() {
+            Some(SyntaxKind::from(self.tokens[pos].token.clone()))
         } else {
             None
         }
@@ -5809,14 +5823,21 @@ impl<'a> ParseState<'a> {
         self.current_kind().filter(|k| k.is_operator())
     }
 
-    /// Consume current token
-    fn bump(&mut self) {
+    /// Internal: consume current token without skipping trivia afterward.
+    /// Used by `skip_trivia()` to avoid infinite recursion.
+    fn bump_raw(&mut self) {
         if let Some(token) = self.current_token() {
             let kind = SyntaxKind::from(token.token.clone());
             let text = &self.source[token.span.clone()];
             self.builder.token(rowan::SyntaxKind(kind as u16), text);
             self.current += 1;
         }
+    }
+
+    /// Consume current token and skip any following trivia (comments, whitespace).
+    fn bump(&mut self) {
+        self.bump_raw();
+        self.eat_trivia();
     }
 
     /// Consume current token as an identifier, even if it's a keyword
@@ -5829,6 +5850,7 @@ impl<'a> ParseState<'a> {
                 .token(rowan::SyntaxKind(SyntaxKind::Ident as u16), text);
             self.current += 1;
         }
+        self.eat_trivia();
     }
 
     /// Check if current token can be used as an identifier
@@ -5858,15 +5880,21 @@ impl<'a> ParseState<'a> {
         }
     }
 
-    /// Skip whitespace and comments
-    fn skip_trivia(&mut self) {
+    /// Internal: consume trivia tokens (comments, whitespace) at current position.
+    /// Does NOT use `bump()` to avoid double-skipping.
+    fn eat_trivia(&mut self) {
         while let Some(kind) = self.current_kind() {
             if kind.is_trivia() {
-                self.bump();
+                self.bump_raw();
             } else {
                 break;
             }
         }
+    }
+
+    /// Skip whitespace and comments (public entry point, same as eat_trivia)
+    fn skip_trivia(&mut self) {
+        self.eat_trivia();
     }
 
     /// Check if we're at a closing angle bracket, treating >> as two >

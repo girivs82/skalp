@@ -1504,6 +1504,7 @@ mod tests {
             name: "WIDTH".to_string(),
             const_type: HirType::Nat(0),
             value: HirExpression::Literal(HirLiteral::Integer(32)),
+            comments: vec![],
         };
 
         eval.register_constants(&[width_const]);
@@ -1525,6 +1526,7 @@ mod tests {
             name: "DEPTH".to_string(),
             const_type: HirType::Nat(0),
             value: HirExpression::Literal(HirLiteral::Integer(16)),
+            comments: vec![],
         };
 
         eval.register_constants(&[depth_const]);
@@ -1551,6 +1553,7 @@ mod tests {
             name: "WIDTH".to_string(),
             const_type: HirType::Nat(0),
             value: HirExpression::Literal(HirLiteral::Integer(32)),
+            comments: vec![],
         };
         eval.register_constants(&[width_const]);
 
@@ -1572,6 +1575,7 @@ mod tests {
             id: crate::hir::ConstantId(4),
             name: "BITS".to_string(),
             const_type: HirType::Nat(0),
+            comments: vec![],
             value: HirExpression::Binary(HirBinaryExpr {
                 op: HirBinaryOp::Mul,
                 left: Box::new(HirExpression::Literal(HirLiteral::Integer(8))),

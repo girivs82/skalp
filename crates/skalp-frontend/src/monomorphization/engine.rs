@@ -101,6 +101,7 @@ impl<'hir> MonomorphizationEngine<'hir> {
 
             let current_hir = Hir {
                 name: hir.name.clone(),
+                comments: hir.comments.clone(),
                 entities: current_entities.clone(),
                 entity_aliases: hir.entity_aliases.clone(),
                 implementations: current_implementations.clone(),
@@ -419,6 +420,7 @@ impl<'hir> MonomorphizationEngine<'hir> {
 
         Hir {
             name: hir.name.clone(),
+            comments: hir.comments.clone(),
             entities: new_entities,
             entity_aliases: hir.entity_aliases.clone(),
             implementations: new_implementations,
@@ -468,6 +470,7 @@ impl<'hir> MonomorphizationEngine<'hir> {
                 crate::hir::HirPort {
                     id: new_id,
                     name: port.name.clone(),
+                    comments: port.comments.clone(),
                     direction: port.direction.clone(),
                     port_type: self.substitute_type(&port.port_type, instantiation),
                     physical_constraints: port.physical_constraints.clone(),
@@ -508,6 +511,7 @@ impl<'hir> MonomorphizationEngine<'hir> {
         let specialized_entity = HirEntity {
             id: specialized_id,
             name: instantiation.mangled_name(),
+            comments: entity.comments.clone(),
             is_async: entity.is_async, // Preserve async status for NCL entities
             visibility: entity.visibility,
             ports: specialized_ports,
@@ -581,6 +585,7 @@ impl<'hir> MonomorphizationEngine<'hir> {
                         let new_const = HirConstant {
                             id: constant.id,
                             name: constant.name.clone(),
+                            comments: constant.comments.clone(),
                             const_type: constant.const_type.clone(),
                             value: specialized_expr,
                         };

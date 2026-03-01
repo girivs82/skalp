@@ -109,6 +109,7 @@ mod tests {
             body: vec![],
             pipeline_config: None,
             span: None,
+            comments: vec![],
         };
 
         lint.check_function(&func, &mut ctx);

@@ -3036,6 +3036,7 @@ dependencies = [
  "skalp-codegen",
  "skalp-formal",
  "skalp-frontend",
+ "skalp-hir-codegen",
  "skalp-lint",
  "skalp-lir",
  "skalp-manifest",
@@ -3149,6 +3150,14 @@ dependencies = [
  "thiserror 1.0.69",
  "toml",
  "tracing",
+]
+
+[[package]]
+name = "skalp-hir-codegen"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "skalp-frontend",
 ]
 
 [[package]]

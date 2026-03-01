@@ -142,6 +142,29 @@ fn extract_instance_label(node: &SyntaxNode) -> Option<String> {
     })
 }
 
+/// Collect leading comments from preceding siblings of a CST node.
+/// Returns comment text with the `--` prefix stripped.
+fn collect_leading_comments(node: &SyntaxNode) -> Vec<String> {
+    let mut comments = Vec::new();
+    let mut prev = node.prev_sibling_or_token();
+    while let Some(ref element) = prev {
+        match element {
+            SyntaxElement::Token(tok) if tok.kind() == SyntaxKind::Whitespace => {
+                prev = element.prev_sibling_or_token();
+            }
+            SyntaxElement::Token(tok) if tok.kind() == SyntaxKind::Comment => {
+                let text = tok.text().to_string();
+                let stripped = text.strip_prefix("--").unwrap_or(&text).trim().to_string();
+                comments.push(stripped);
+                prev = element.prev_sibling_or_token();
+            }
+            _ => break,
+        }
+    }
+    comments.reverse();
+    comments
+}
+
 /// Collect all non-trivia token texts
 fn all_token_texts(node: &SyntaxNode) -> Vec<(SyntaxKind, String)> {
     node.children_with_tokens()
@@ -410,6 +433,7 @@ impl VhdlHirBuilder {
         Some(HirEntity {
             id,
             name: pascal_name,
+            comments: collect_leading_comments(node),
             is_async: false,
             visibility: HirVisibility::Public,
             ports,
@@ -519,6 +543,7 @@ impl VhdlHirBuilder {
             ports.push(HirPort {
                 id,
                 name: name.clone(),
+                comments: collect_leading_comments(node),
                 direction: direction.clone(),
                 port_type: port_type.clone(),
                 physical_constraints: None,
@@ -575,6 +600,7 @@ impl VhdlHirBuilder {
             ports.push(HirPort {
                 id,
                 name: flat_name,
+                comments: vec![],
                 direction,
                 port_type: field.field_type.clone(),
                 physical_constraints: None,
@@ -641,6 +667,7 @@ impl VhdlHirBuilder {
                     constants.push(HirConstant {
                         id,
                         name: generic.name.to_ascii_lowercase(),
+                        comments: vec![],
                         const_type: const_type.clone(),
                         value: default,
                     });
@@ -789,6 +816,7 @@ impl VhdlHirBuilder {
             signals.push(HirSignal {
                 id,
                 name: name.clone(),
+                comments: collect_leading_comments(node),
                 signal_type: signal_type.clone(),
                 initial_value: init.clone(),
                 clock_domain: None,
@@ -826,6 +854,7 @@ impl VhdlHirBuilder {
             var_type,
             initial_value: init,
             span: None,
+            comments: collect_leading_comments(node),
         })
     }
 
@@ -850,6 +879,7 @@ impl VhdlHirBuilder {
         Some(HirConstant {
             id,
             name,
+            comments: collect_leading_comments(node),
             const_type,
             value,
         })
@@ -944,6 +974,7 @@ impl VhdlHirBuilder {
             body,
             span: None,
             pipeline_config: None,
+            comments: collect_leading_comments(node),
         })
     }
 
@@ -965,6 +996,7 @@ impl VhdlHirBuilder {
             body,
             span: None,
             pipeline_config: None,
+            comments: collect_leading_comments(node),
         })
     }
 
@@ -1170,6 +1202,7 @@ impl VhdlHirBuilder {
             id: block_id,
             triggers,
             statements,
+            comments: collect_leading_comments(node),
         };
 
         (Some(event_block), proc_vars)
@@ -1781,6 +1814,7 @@ impl VhdlHirBuilder {
             lhs,
             assignment_type,
             rhs,
+            comments: collect_leading_comments(node),
         })
     }
 
@@ -1836,6 +1870,7 @@ impl VhdlHirBuilder {
             lhs,
             assignment_type: HirAssignmentType::Combinational,
             rhs,
+            comments: collect_leading_comments(node),
         })
     }
 
@@ -1982,6 +2017,7 @@ impl VhdlHirBuilder {
             connections,
             safety_config: None,
             variable_id: None,
+            comments: collect_leading_comments(node),
         })
     }
 

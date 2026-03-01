@@ -109,6 +109,9 @@ pub struct AssumedMechanismConfig {
 pub struct Hir {
     /// Module name
     pub name: String,
+    /// File-level header comments (license, module doc)
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub comments: Vec<String>,
     /// Entities in this HIR
     pub entities: Vec<HirEntity>,
     /// Implementations
@@ -153,6 +156,9 @@ pub struct HirEntity {
     pub id: EntityId,
     /// Entity name
     pub name: String,
+    /// Documentation comments
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub comments: Vec<String>,
     /// Whether this is an async (NCL) entity
     pub is_async: bool,
     /// Visibility
@@ -269,6 +275,9 @@ pub struct HirInstance {
     pub id: InstanceId,
     /// Instance name
     pub name: String,
+    /// Documentation comments
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub comments: Vec<String>,
     /// Entity to instantiate
     pub entity: EntityId,
     /// Positional generic arguments (for monomorphization)
@@ -313,6 +322,9 @@ pub struct HirPort {
     pub id: PortId,
     /// Port name
     pub name: String,
+    /// Documentation comments
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub comments: Vec<String>,
     /// Port direction
     pub direction: HirPortDirection,
     /// Port type
@@ -368,6 +380,9 @@ pub struct HirSignal {
     pub id: SignalId,
     /// Signal name
     pub name: String,
+    /// Documentation comments
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub comments: Vec<String>,
     /// Signal type
     pub signal_type: HirType,
     /// Initial value
@@ -414,6 +429,9 @@ pub struct HirVariable {
     pub id: VariableId,
     /// Variable name
     pub name: String,
+    /// Documentation comments
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub comments: Vec<String>,
     /// Variable type
     pub var_type: HirType,
     /// Initial value
@@ -430,6 +448,9 @@ pub struct HirConstant {
     pub id: ConstantId,
     /// Constant name
     pub name: String,
+    /// Documentation comments
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub comments: Vec<String>,
     /// Constant type
     pub const_type: HirType,
     /// Constant value
@@ -454,6 +475,9 @@ pub struct HirFunction {
     pub is_const: bool,
     /// Function name
     pub name: String,
+    /// Documentation comments
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub comments: Vec<String>,
     /// Generic parameters (Phase 1: type and const parameters)
     pub generics: Vec<HirGeneric>,
     /// Function parameters
@@ -474,6 +498,9 @@ pub struct HirFunction {
 pub struct HirEventBlock {
     /// Block identifier
     pub id: BlockId,
+    /// Documentation comments
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub comments: Vec<String>,
     /// Event triggers
     pub triggers: Vec<HirEventTrigger>,
     /// Statements
@@ -520,6 +547,9 @@ pub enum HirResetPolarity {
 pub struct HirAssignment {
     /// Assignment identifier
     pub id: AssignmentId,
+    /// Documentation comments
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub comments: Vec<String>,
     /// Left-hand side
     pub lhs: HirLValue,
     /// Assignment type
@@ -2242,6 +2272,7 @@ impl HirBuilder {
         // Stub implementation - will be expanded in Week 4
         Hir {
             name: "main".to_string(),
+            comments: vec![],
             entities: Vec::new(),
             entity_aliases: Vec::new(),
             implementations: Vec::new(),
@@ -2336,6 +2367,7 @@ impl Hir {
     pub fn new(name: String) -> Self {
         Self {
             name,
+            comments: vec![],
             entities: Vec::new(),
             entity_aliases: Vec::new(),
             implementations: Vec::new(),

@@ -2375,6 +2375,7 @@ pub fn build_hir(_ast: &ast::SourceFile) -> Result<Hir> {
     // Return empty HIR - actual work happens in parse_and_build_hir
     Ok(Hir {
         name: "design".to_string(),
+        comments: vec![],
         entities: Vec::new(),
         entity_aliases: Vec::new(),
         implementations: Vec::new(),

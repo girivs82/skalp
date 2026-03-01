@@ -874,6 +874,7 @@ impl Monomorphizer {
                 .collect(),
             span: generic_func.span.clone(), // Preserve source span from generic function
             pipeline_config: generic_func.pipeline_config.clone(), // Preserve pipeline config
+            comments: vec![],
         };
 
         self.specialized_functions.push(specialized_func);
@@ -1088,6 +1089,7 @@ impl Monomorphizer {
             body: method_info.body.clone(), // TODO: May need to substitute Self in body too
             span: None,                     // Specialized functions don't have source spans
             pipeline_config: None,          // Trait methods don't have pipeline config
+            comments: vec![],
         };
 
         // Record that we've generated this specialization
@@ -1211,6 +1213,7 @@ impl Monomorphizer {
                     lhs: assign.lhs.clone(),
                     assignment_type: assign.assignment_type.clone(),
                     rhs: self.replace_calls_in_expression(&assign.rhs, ctx),
+                    comments: assign.comments.clone(),
                 })
             }
             hir::HirStatement::Expression(expr) => {

@@ -1159,6 +1159,9 @@ impl From<crate::lexer::Token> for SyntaxKind {
             Token::None => NoneKw,
             Token::Keeper => KeeperKw,
 
+            Token::LineComment(_) => Comment,
+            Token::BlockComment(_) => Comment,
+
             Token::Error => Error,
         }
     }
