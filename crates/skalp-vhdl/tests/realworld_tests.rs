@@ -12,8 +12,12 @@ fn test_parse_uart_pabennett() {
     // Full UART design from github.com/pabennett/uart (~312 lines)
     // Exercises: positive generics, math_real functions, enum FSMs,
     // named processes, 'high attribute, multi-line slice assignments
-    let source = include_str!("/tmp/uart_pabennett.vhd");
-    let result = skalp_vhdl::parse::parse_vhdl(source);
+    let path = "/tmp/uart_pabennett.vhd";
+    let Ok(source) = std::fs::read_to_string(path) else {
+        eprintln!("Skipping test_parse_uart_pabennett: {path} not found");
+        return;
+    };
+    let result = skalp_vhdl::parse::parse_vhdl(&source);
     println!("Parse errors: {}", result.errors.len());
     for e in &result.errors {
         println!("  {} at pos {}", e.message, e.position);
@@ -26,8 +30,12 @@ fn test_parse_spi_master_jakubcabal() {
     // Full SPI master from github.com/jakubcabal/spi-fpga (~341 lines)
     // Exercises: natural generics with 50e6 defaults, ceil/log2/real,
     // assert statements, generate statements, 5-state FSM
-    let source = include_str!("/tmp/spi_master.vhd");
-    let result = skalp_vhdl::parse::parse_vhdl(source);
+    let path = "/tmp/spi_master.vhd";
+    let Ok(source) = std::fs::read_to_string(path) else {
+        eprintln!("Skipping test_parse_spi_master_jakubcabal: {path} not found");
+        return;
+    };
+    let result = skalp_vhdl::parse::parse_vhdl(&source);
     println!("Parse errors: {}", result.errors.len());
     for e in &result.errors {
         println!("  {} at pos {}", e.message, e.position);
