@@ -911,3 +911,81 @@ async fn test_vhdl_bus_system_data_transfer() {
 
     tb.export_waveform("build/test_vhdl_bus_system.skw.gz").ok();
 }
+
+// ========================================================================
+// VHDL → SystemVerilog transpilation tests
+// ========================================================================
+
+/// Helper: transpile a VHDL file to SystemVerilog via the MIR pipeline
+fn vhdl_to_systemverilog(vhdl_path: &str) -> String {
+    use skalp_mir::MirCompiler;
+
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(vhdl_path);
+    let context = skalp_vhdl::parse_vhdl(&path)
+        .unwrap_or_else(|e| panic!("Failed to parse {}: {}", vhdl_path, e));
+
+    let compiler = MirCompiler::new();
+    let mir = compiler
+        .compile_to_mir_with_modules(&context.main_hir, &context.module_hirs)
+        .unwrap_or_else(|e| panic!("Failed to compile {} to MIR: {}", vhdl_path, e));
+
+    skalp_codegen::generate_systemverilog_from_mir(&mir)
+        .unwrap_or_else(|e| panic!("Failed to generate SV from {}: {}", vhdl_path, e))
+}
+
+#[test]
+fn test_vhdl_to_sv_counter() {
+    let sv = vhdl_to_systemverilog("examples/vhdl/counter.vhd");
+    assert!(sv.contains("module"), "Expected a module declaration in SV output");
+    // Counter should have clk, rst, count ports
+    assert!(sv.contains("clk"), "Expected clk port");
+    assert!(sv.contains("rst"), "Expected rst port");
+    assert!(sv.contains("count"), "Expected count port");
+    assert!(sv.contains("always_ff"), "Expected sequential logic (always_ff)");
+    std::fs::write("build/counter_from_vhdl.sv", &sv).ok();
+    println!("--- counter.vhd → SystemVerilog ---\n{}", sv);
+}
+
+#[test]
+fn test_vhdl_to_sv_mux4() {
+    let sv = vhdl_to_systemverilog("examples/vhdl/mux4.vhd");
+    assert!(sv.contains("module"), "Expected a module declaration");
+    assert!(sv.contains("sel"), "Expected sel port");
+    std::fs::write("build/mux4_from_vhdl.sv", &sv).ok();
+    println!("--- mux4.vhd → SystemVerilog ---\n{}", sv);
+}
+
+#[test]
+fn test_vhdl_to_sv_bus_system() {
+    let sv = vhdl_to_systemverilog("examples/vhdl/bus_system.vhd");
+    // Should generate all 3 modules
+    let module_count = sv.matches("module ").count();
+    assert!(module_count >= 3, "Expected 3 modules (Sender, Receiver, BusSystem), got {}", module_count);
+    assert!(sv.contains("clk"), "Expected clk port");
+    std::fs::write("build/bus_system_from_vhdl.sv", &sv).ok();
+    println!("--- bus_system.vhd → SystemVerilog ---\n{}", sv);
+}
+
+#[test]
+fn test_vhdl_to_sv_uart() {
+    let sv = vhdl_to_systemverilog("examples/vhdl/uart.vhd");
+    assert!(sv.contains("module"), "Expected a module declaration");
+    assert!(sv.contains("tx"), "Expected tx-related port");
+    std::fs::write("build/uart_from_vhdl.sv", &sv).ok();
+    println!("--- uart.vhd → SystemVerilog ---\n{}", sv);
+}
+
+#[test]
+fn test_vhdl_to_sv_spi_master() {
+    // SPI master has VHDL generics with computed constant widths (ceil(log2(...)))
+    // that create unresolved types in the MIR. The SV codegen skips modules with
+    // unresolved generic-dependent types. This test verifies the pipeline doesn't
+    // panic — the empty output is a known limitation for complex generics.
+    let sv = vhdl_to_systemverilog("examples/vhdl/spi_master.vhd");
+    std::fs::write("build/spi_master_from_vhdl.sv", &sv).ok();
+    // The SV codegen currently produces only a header for this design
+    // because generic-dependent port widths can't be resolved to concrete values.
+    // When generic evaluation is improved, this test should be updated to check
+    // for module output.
+    assert!(!sv.is_empty(), "Expected at least a header comment");
+}
