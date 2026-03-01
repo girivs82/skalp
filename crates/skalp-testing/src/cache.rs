@@ -1,20 +1,47 @@
 //! Compilation cache for SKALP testbench
 //!
 //! This module provides content-based caching for the SIR compilation pipeline.
-//! It hashes source files (main + dependencies) to create a cache key and stores
-//! the compiled SIR, avoiding expensive recompilation when only testbench code changes.
+//! It hashes source files (main + dependencies) AND a compiler fingerprint to
+//! create a cache key, storing the compiled SIR to avoid expensive recompilation.
 //!
 //! # Cache Strategy
-//! - Cache key: Blake3 hash of (main source + sorted dependencies content)
+//! - Cache key: Blake3 hash of (compiler fingerprint + main source + sorted deps)
 //! - Cache location: {source_dir}/build/.skalp-cache/{hash}/sir.bin
 //! - On cache hit: Skip HIR→MIR→SIR, load SIR directly
-//! - Invalidation: Automatic via content hashing
+//! - Invalidation: Automatic — any source change OR compiler rebuild invalidates
 
 use anyhow::{Context, Result};
 use skalp_sir::SirModule;
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
+use std::time::UNIX_EPOCH;
+
+/// Compute a fingerprint of the current compiler binary (size + mtime).
+/// This changes whenever `cargo build`/`cargo test` recompiles the binary,
+/// which happens when ANY compiler crate source code changes.
+/// Computed once per process via OnceLock for efficiency.
+fn compiler_fingerprint() -> &'static str {
+    static FINGERPRINT: OnceLock<String> = OnceLock::new();
+    FINGERPRINT.get_or_init(|| {
+        let exe = std::env::current_exe().ok();
+        if let Some(path) = exe {
+            if let Ok(meta) = std::fs::metadata(&path) {
+                let size = meta.len();
+                let mtime = meta
+                    .modified()
+                    .ok()
+                    .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                    .map(|d| d.as_nanos())
+                    .unwrap_or(0);
+                return format!("skalp-v1:{}:{}", size, mtime);
+            }
+        }
+        // Fallback: use a random value so cache always misses (safe default)
+        format!("skalp-v1:unknown:{}", std::process::id())
+    })
+}
 
 /// Cache subdirectory name (placed in build/ next to source)
 const CACHE_SUBDIR: &str = ".skalp-cache";
@@ -100,6 +127,9 @@ impl CompilationCache {
         dependencies: &[PathBuf],
     ) -> Result<String> {
         let mut hasher = blake3::Hasher::new();
+
+        // Hash the compiler fingerprint so cache invalidates on recompilation
+        hasher.update(compiler_fingerprint().as_bytes());
 
         // Hash the main source file
         let main_content = fs::read(source_path)
