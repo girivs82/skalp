@@ -41,6 +41,9 @@ sha2 = "0.10"
 hex = "0.4"
 dirs = "5.0"
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 # Metal GPU support (macOS only)
 [target.'cfg(target_os = "macos")'.dependencies]
 metal = "0.27"

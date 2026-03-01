@@ -20,15 +20,50 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
 use thiserror::Error;
 
-/// Global lock to serialize C++ compiler invocations.
-/// Without this, parallel tests each spawn a clang++/g++ process (~300-500MB each),
+/// Acquire a cross-process file lock to serialize C++ compiler invocations.
+///
+/// Without serialization, parallel test binaries (cargo test runs each test file
+/// as a separate OS process) each spawn a clang++/g++ process (~300-500MB each),
 /// causing OOM/SIGKILL when many tests run simultaneously.
-/// Cached compilations (cache hit at line 184) return before acquiring this lock,
-/// so there is zero overhead on subsequent runs.
-static COMPILE_LOCK: Mutex<()> = Mutex::new(());
+///
+/// A previous in-process `Mutex` only serialized within one binary — this file lock
+/// serializes across all processes. Cached compilations (cache hit) return before
+/// acquiring this lock, so there is zero overhead on subsequent runs.
+///
+/// Returns a `File` guard; the lock is released when the file is dropped.
+#[cfg(unix)]
+pub fn acquire_compile_lock(cache: &Path) -> std::io::Result<fs::File> {
+    use std::os::unix::io::AsRawFd;
+
+    let lock_path = cache.join(".compile.lock");
+    let file = fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(&lock_path)?;
+
+    // LOCK_EX: exclusive lock, blocks until available.
+    // Automatically released on close (including process crash/SIGKILL).
+    let ret = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
+    if ret != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(file)
+}
+
+#[cfg(not(unix))]
+pub fn acquire_compile_lock(_cache: &Path) -> std::io::Result<fs::File> {
+    // On non-Unix, fall back to no cross-process lock.
+    // The in-file atomic rename still prevents corruption.
+    let lock_path = _cache.join(".compile.lock");
+    fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(&lock_path)
+}
 
 /// Errors that can occur during C++ compilation
 #[derive(Error, Debug)]
@@ -50,7 +85,7 @@ pub enum CompileError {
 pub type CompileResult<T> = Result<T, CompileError>;
 
 /// Get the cache directory for compiled libraries
-fn cache_dir() -> PathBuf {
+pub fn cache_dir() -> PathBuf {
     let base = dirs::cache_dir()
         .or_else(dirs::home_dir)
         .unwrap_or_else(|| PathBuf::from("/tmp"));
@@ -196,10 +231,11 @@ pub fn compile_cpp_kernel(source: &str) -> CompileResult<PathBuf> {
         return Ok(lib_path);
     }
 
-    // Acquire compilation lock to serialize compiler process spawning.
-    // This prevents N parallel tests from each spawning a clang++/g++ process
+    // Acquire cross-process file lock to serialize compiler process spawning.
+    // This prevents N parallel test binaries from each spawning a clang++/g++ process
     // simultaneously, which would consume N × 300-500MB and cause OOM/SIGKILL.
-    let _compile_guard = COMPILE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _compile_guard = acquire_compile_lock(&cache)
+        .map_err(|e| CompileError::CacheError(format!("Failed to acquire compile lock: {}", e)))?;
 
     // Double-checked locking: another thread may have compiled while we waited.
     if is_valid_cached_library(&lib_path) {
