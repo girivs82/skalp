@@ -20,7 +20,15 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
 use thiserror::Error;
+
+/// Global lock to serialize C++ compiler invocations.
+/// Without this, parallel tests each spawn a clang++/g++ process (~300-500MB each),
+/// causing OOM/SIGKILL when many tests run simultaneously.
+/// Cached compilations (cache hit at line 184) return before acquiring this lock,
+/// so there is zero overhead on subsequent runs.
+static COMPILE_LOCK: Mutex<()> = Mutex::new(());
 
 /// Errors that can occur during C++ compilation
 #[derive(Error, Debug)]
@@ -181,9 +189,21 @@ pub fn compile_cpp_kernel(source: &str) -> CompileResult<PathBuf> {
 
     let lib_path = cache.join(format!("{}.{}", hash, dylib_ext()));
 
-    // Check cache - validate the file is not truncated/corrupted
+    // Fast path: check cache without holding the compilation lock.
+    // This is zero-cost on subsequent runs (cache hits return immediately).
     if is_valid_cached_library(&lib_path) {
         tracing::debug!("Using cached library: {}", lib_path.display());
+        return Ok(lib_path);
+    }
+
+    // Acquire compilation lock to serialize compiler process spawning.
+    // This prevents N parallel tests from each spawning a clang++/g++ process
+    // simultaneously, which would consume N × 300-500MB and cause OOM/SIGKILL.
+    let _compile_guard = COMPILE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+    // Double-checked locking: another thread may have compiled while we waited.
+    if is_valid_cached_library(&lib_path) {
+        tracing::debug!("Using cached library (compiled by another thread): {}", lib_path.display());
         return Ok(lib_path);
     }
 

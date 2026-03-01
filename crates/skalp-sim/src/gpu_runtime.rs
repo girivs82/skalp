@@ -4,6 +4,12 @@ use async_trait::async_trait;
 use indexmap::IndexMap;
 use metal::{Buffer, CommandQueue, ComputePipelineState, Device, MTLResourceOptions};
 use skalp_sir::{MetalBackend, SirModule};
+use std::sync::Mutex;
+
+/// Global lock to serialize Metal shader compilations.
+/// Without this, parallel tests each compile Metal shaders concurrently (~100-300MB each),
+/// causing memory spikes and potential SIGKILL.
+static SHADER_COMPILE_LOCK: Mutex<()> = Mutex::new(());
 
 pub struct GpuDevice {
     device: Device,
@@ -72,6 +78,9 @@ impl GpuRuntime {
         shader_source: &str,
         function_name: &str,
     ) -> Result<ComputePipelineState, SimulationError> {
+        // Serialize shader compilations to prevent memory spikes from concurrent Metal compiles
+        let _shader_guard = SHADER_COMPILE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
         let library = self
             .device
             .device
