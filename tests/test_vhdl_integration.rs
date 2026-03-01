@@ -810,3 +810,104 @@ async fn test_vhdl_spi_loopback() {
     tb.export_waveform("build/test_vhdl_spi_loopback.skw.gz")
         .ok();
 }
+
+// ========================================================================
+// Hierarchical VHDL-2019 tests (interfaces, views, entity instantiation)
+// ========================================================================
+
+#[test]
+fn test_vhdl_bus_system_parse_only() {
+    let source = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("examples/vhdl/bus_system.vhd"),
+    )
+    .unwrap();
+
+    let hir = skalp_vhdl::parse_vhdl_source(&source, None).unwrap();
+
+    // 3 entities: Sender, Receiver, BusSystem
+    assert_eq!(
+        hir.entities.len(),
+        3,
+        "expected 3 entities, got {}: {:?}",
+        hir.entities.len(),
+        hir.entities.iter().map(|e| &e.name).collect::<Vec<_>>()
+    );
+
+    // Verify entity names (VHDL lowercases then PascalCases)
+    let names: Vec<&str> = hir.entities.iter().map(|e| e.name.as_str()).collect();
+    assert!(names.contains(&"Sender"), "missing Sender entity in {:?}", names);
+    assert!(names.contains(&"Receiver"), "missing Receiver entity in {:?}", names);
+    assert!(names.contains(&"BusSystem"), "missing BusSystem entity in {:?}", names);
+
+    // BusSystem should have 2 instances
+    let bus_system_impl = hir
+        .implementations
+        .iter()
+        .find(|imp| {
+            hir.entities
+                .iter()
+                .any(|e| e.id == imp.entity && e.name == "BusSystem")
+        })
+        .expect("missing BusSystem implementation");
+
+    assert_eq!(
+        bus_system_impl.instances.len(),
+        2,
+        "BusSystem should have 2 instances (sender, receiver), got {}",
+        bus_system_impl.instances.len()
+    );
+
+    // Verify instance labels were captured
+    let inst_names: Vec<&str> = bus_system_impl
+        .instances
+        .iter()
+        .map(|i| i.name.as_str())
+        .collect();
+    assert!(
+        inst_names.contains(&"u_sender"),
+        "missing u_sender instance in {:?}",
+        inst_names
+    );
+    assert!(
+        inst_names.contains(&"u_receiver"),
+        "missing u_receiver instance in {:?}",
+        inst_names
+    );
+}
+
+#[tokio::test]
+async fn test_vhdl_bus_system_data_transfer() {
+    let mut tb = Testbench::new("examples/vhdl/bus_system.vhd")
+        .await
+        .unwrap();
+
+    // Reset
+    tb.set("rst", 1u8)
+        .set("trigger", 0u8)
+        .set("tx_data", 0u8);
+    tb.clock(2).await;
+
+    // Release reset
+    tb.set("rst", 0u8);
+    tb.clock(1).await;
+
+    // Transfer 0xA5: set data and trigger
+    tb.set("tx_data", 0xA5u32).set("trigger", 1u8);
+    tb.clock(1).await;
+    tb.expect("rx_data", 0xA5u32).await;
+    tb.expect("rx_valid", 1u32).await;
+
+    // Deassert trigger — rx_valid should drop
+    tb.set("trigger", 0u8);
+    tb.clock(1).await;
+    tb.expect("rx_valid", 0u32).await;
+
+    // Transfer 0x3C
+    tb.set("tx_data", 0x3Cu32).set("trigger", 1u8);
+    tb.clock(1).await;
+    tb.expect("rx_data", 0x3Cu32).await;
+    tb.expect("rx_valid", 1u32).await;
+
+    tb.export_waveform("build/test_vhdl_bus_system.skw.gz").ok();
+}

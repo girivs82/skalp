@@ -7526,12 +7526,27 @@ impl<'a> MirToSirConverter<'a> {
                             let signal_exists_in_state =
                                 self.sir.state_elements.contains_key(&internal_target);
 
-                            if !signal_exists_in_signals && !signal_exists_in_state {
-                                // Get signal width from the target
-                                let width = self.get_signal_width(&actual_target);
+                            if signal_exists_in_signals {
+                                // Mark the signal as having this driver (use internal name)
+                                if let Some(sig) = self
+                                    .sir
+                                    .signals
+                                    .iter_mut()
+                                    .find(|s| s.name == internal_target)
+                                {
+                                    sig.driver_node = Some(node_id);
+                                    sig.is_state = true;
+                                }
+                            }
+
+                            if !signal_exists_in_state {
+                                // Ensure state element exists for FlipFlop output.
+                                // This is critical for hierarchical designs where a parent
+                                // port signal is driven by a child instance's flip-flop:
+                                // the signal may already exist but not be registered as state.
+                                let width = self.get_signal_width(&internal_target);
                                 let sir_type = SirType::Bits(width);
 
-                                // Add to state_elements (FlipFlop outputs are state)
                                 self.sir.state_elements.insert(
                                     internal_target.clone(),
                                     StateElement {
@@ -7544,16 +7559,6 @@ impl<'a> MirToSirConverter<'a> {
                                         span: None,
                                     },
                                 );
-                            } else if signal_exists_in_signals {
-                                // Mark the signal as having this driver (use internal name)
-                                if let Some(sig) = self
-                                    .sir
-                                    .signals
-                                    .iter_mut()
-                                    .find(|s| s.name == internal_target)
-                                {
-                                    sig.driver_node = Some(node_id);
-                                }
                             }
                         }
                     }
@@ -7873,6 +7878,15 @@ impl<'a> MirToSirConverter<'a> {
                                 continue;
                             }
                         }
+                        LValue::Port(port_id) => {
+                            if let Some(port) =
+                                child_module.ports.iter().find(|p| p.id == *port_id)
+                            {
+                                format!("{}.{}", inst_prefix, port.name)
+                            } else {
+                                continue;
+                            }
+                        }
                         LValue::BitSelect { base, index } => {
                             // Array assignment: mem[index_expr] <= value_expr
                             // For flattened target like "input_fifo.mem_3_x", we need to create:
@@ -8161,6 +8175,11 @@ impl<'a> MirToSirConverter<'a> {
                             .iter()
                             .find(|s| s.id == *sig_id)
                             .map(|signal| format!("{}.{}", inst_prefix, signal.name)),
+                        LValue::Port(port_id) => child_module
+                            .ports
+                            .iter()
+                            .find(|p| p.id == *port_id)
+                            .map(|port| format!("{}.{}", inst_prefix, port.name)),
                         LValue::BitSelect { base, .. } => {
                             let extracted = self.extract_base_signal_for_instance(
                                 base,
@@ -8175,7 +8194,7 @@ impl<'a> MirToSirConverter<'a> {
                     };
 
                     if let Some(lhs) = lhs_signal {
-                        let matches = if matches!(assign.lhs, LValue::Signal(_)) {
+                        let matches = if matches!(assign.lhs, LValue::Signal(_) | LValue::Port(_)) {
                             lhs == target
                         } else {
                             let target_stripped = self.strip_flattened_index_suffix(target);

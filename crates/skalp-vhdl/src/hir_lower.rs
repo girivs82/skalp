@@ -107,6 +107,41 @@ fn has_token(node: &SyntaxNode, kind: SyntaxKind) -> bool {
         .any(|el| matches!(el, SyntaxElement::Token(ref t) if t.kind() == kind))
 }
 
+/// Extract the instance label from preceding siblings of a ComponentInst node.
+/// In VHDL: `u_sender: entity work.sender port map(...)`, the label "u_sender"
+/// and colon are siblings before the ComponentInst node in the parent's children.
+fn extract_instance_label(node: &SyntaxNode) -> Option<String> {
+    // Walk backward through preceding siblings to find Ident:Colon pattern
+    let mut prev = node.prev_sibling_or_token();
+    // Skip whitespace/trivia
+    while let Some(ref p) = prev {
+        if p.kind() != SyntaxKind::Whitespace && p.kind() != SyntaxKind::Comment {
+            break;
+        }
+        prev = p.prev_sibling_or_token();
+    }
+    // Expect Colon
+    if prev.as_ref().map(|p| p.kind()) != Some(SyntaxKind::Colon) {
+        return None;
+    }
+    prev = prev.unwrap().prev_sibling_or_token();
+    // Skip whitespace again
+    while let Some(ref p) = prev {
+        if p.kind() != SyntaxKind::Whitespace && p.kind() != SyntaxKind::Comment {
+            break;
+        }
+        prev = p.prev_sibling_or_token();
+    }
+    // Expect Ident (the label)
+    prev.and_then(|p| {
+        if p.kind() == SyntaxKind::Ident {
+            p.into_token().map(|t| t.text().to_string())
+        } else {
+            None
+        }
+    })
+}
+
 /// Collect all non-trivia token texts
 fn all_token_texts(node: &SyntaxNode) -> Vec<(SyntaxKind, String)> {
     node.children_with_tokens()
@@ -1798,9 +1833,19 @@ impl VhdlHirBuilder {
     // ====================================================================
 
     fn lower_component_inst(&mut self, node: &SyntaxNode) -> Option<HirInstance> {
-        let idents = ident_texts(node);
-        // Component name could be after "entity", "component", or directly
-        let comp_name = idents.first()?.clone();
+        let comp_name = {
+            // Try direct idents first (component-style instantiation)
+            let idents = ident_texts(node);
+            if let Some(name) = idents.first() {
+                name.clone()
+            } else if let Some(sel_name) = first_child_of_kind(node, SyntaxKind::SelectedName) {
+                // entity work.Name style — extract last ident (entity name)
+                let sel_idents = ident_texts(&sel_name);
+                sel_idents.last().cloned().unwrap_or_default()
+            } else {
+                return None;
+            }
+        };
         let pascal_name = to_pascal_case(&comp_name);
 
         let entity_id = match self
@@ -1816,7 +1861,9 @@ impl VhdlHirBuilder {
             }
         };
 
-        let instance_name = format!("u_{}", comp_name);
+        // Use the label from the parent scope if available, otherwise generate one
+        let instance_name = extract_instance_label(node)
+            .unwrap_or_else(|| format!("u_{}", comp_name));
 
         // Port map connections
         let mut connections = Vec::new();
