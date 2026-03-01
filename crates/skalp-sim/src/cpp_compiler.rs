@@ -239,7 +239,10 @@ pub fn compile_cpp_kernel(source: &str) -> CompileResult<PathBuf> {
 
     // Double-checked locking: another thread may have compiled while we waited.
     if is_valid_cached_library(&lib_path) {
-        tracing::debug!("Using cached library (compiled by another thread): {}", lib_path.display());
+        tracing::debug!(
+            "Using cached library (compiled by another thread): {}",
+            lib_path.display()
+        );
         return Ok(lib_path);
     }
 

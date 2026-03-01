@@ -301,15 +301,14 @@ pub enum Token {
     // ========================================================================
     // Operators and delimiters
     // ========================================================================
-
     #[token("<=")]
-    SignalAssign,   // or LessEqual in expression context
+    SignalAssign, // or LessEqual in expression context
     #[token(":=")]
     VarAssign,
     #[token("=>")]
     Arrow,
     #[token("<>")]
-    Box,            // unconstrained range
+    Box, // unconstrained range
     #[token("**")]
     DoubleStar,
     #[token("/=")]
@@ -317,9 +316,9 @@ pub enum Token {
     #[token(">=")]
     GreaterEqual,
     #[token("<<")]
-    DoubleLess,     // external names
+    DoubleLess, // external names
     #[token(">>")]
-    DoubleGreater,  // external names
+    DoubleGreater, // external names
 
     #[token("(")]
     LParen,
@@ -338,11 +337,11 @@ pub enum Token {
     #[token(".")]
     Dot,
     #[token("'")]
-    Tick,           // attribute access
+    Tick, // attribute access
     #[token("&")]
-    Ampersand,      // concatenation
+    Ampersand, // concatenation
     #[token("|")]
-    Bar,            // choice separator
+    Bar, // choice separator
     #[token("+")]
     Plus,
     #[token("-")]
@@ -363,7 +362,6 @@ pub enum Token {
     // ========================================================================
     // Comments (captured for lossless tree)
     // ========================================================================
-
     #[regex(r"--[^\n]*")]
     Comment,
 }
@@ -414,9 +412,17 @@ pub fn tokenize(source: &str) -> Vec<TokenWithPos> {
 
 /// Check if a token is a VHDL keyword (as opposed to identifier)
 pub fn is_keyword(token: &Token) -> bool {
-    !matches!(token, Token::Ident(_) | Token::IntLiteral | Token::RealLiteral
-        | Token::StringLiteral | Token::CharLiteral | Token::BitStringLiteral
-        | Token::BasedLiteral | Token::Comment)
+    !matches!(
+        token,
+        Token::Ident(_)
+            | Token::IntLiteral
+            | Token::RealLiteral
+            | Token::StringLiteral
+            | Token::CharLiteral
+            | Token::BitStringLiteral
+            | Token::BasedLiteral
+            | Token::Comment
+    )
 }
 
 #[cfg(test)]
@@ -447,7 +453,7 @@ mod tests {
     #[test]
     fn test_vhdl_operators() {
         let tokens = tokenize("<= := => /= >= ** <>");
-        let expected = vec![
+        let expected = [
             Token::SignalAssign,
             Token::VarAssign,
             Token::Arrow,
@@ -492,7 +498,10 @@ mod tests {
     #[test]
     fn test_comment_preservation() {
         let tokens = tokenize("signal clk : std_logic; -- clock signal");
-        let comments: Vec<_> = tokens.iter().filter(|t| matches!(t.token, Token::Comment)).collect();
+        let comments: Vec<_> = tokens
+            .iter()
+            .filter(|t| matches!(t.token, Token::Comment))
+            .collect();
         assert_eq!(comments.len(), 1);
         assert!(comments[0].text.contains("clock signal"));
     }
@@ -508,9 +517,14 @@ mod tests {
     #[test]
     fn test_logical_operators() {
         let tokens = tokenize("and or xor nand nor xnor not");
-        let expected = vec![
-            Token::And, Token::Or, Token::Xor,
-            Token::Nand, Token::Nor, Token::Xnor, Token::Not,
+        let expected = [
+            Token::And,
+            Token::Or,
+            Token::Xor,
+            Token::Nand,
+            Token::Nor,
+            Token::Xnor,
+            Token::Not,
         ];
         assert_eq!(tokens.len(), expected.len());
         for (t, e) in tokens.iter().zip(expected.iter()) {
@@ -521,9 +535,13 @@ mod tests {
     #[test]
     fn test_shift_operators() {
         let tokens = tokenize("sll srl sla sra rol ror");
-        let expected = vec![
-            Token::Sll, Token::Srl, Token::Sla,
-            Token::Sra, Token::Rol, Token::Ror,
+        let expected = [
+            Token::Sll,
+            Token::Srl,
+            Token::Sla,
+            Token::Sra,
+            Token::Rol,
+            Token::Ror,
         ];
         assert_eq!(tokens.len(), expected.len());
         for (t, e) in tokens.iter().zip(expected.iter()) {
@@ -573,9 +591,13 @@ end entity Counter;
     #[test]
     fn test_builtin_functions() {
         let tokens = tokenize("rising_edge falling_edge to_unsigned to_signed to_integer resize");
-        let expected = vec![
-            Token::RisingEdge, Token::FallingEdge, Token::ToUnsigned,
-            Token::ToSigned, Token::ToInteger, Token::Resize,
+        let expected = [
+            Token::RisingEdge,
+            Token::FallingEdge,
+            Token::ToUnsigned,
+            Token::ToSigned,
+            Token::ToInteger,
+            Token::Resize,
         ];
         assert_eq!(tokens.len(), expected.len());
         for (t, e) in tokens.iter().zip(expected.iter()) {
@@ -585,11 +607,17 @@ end entity Counter;
 
     #[test]
     fn test_ieee_type_keywords() {
-        let tokens = tokenize("std_logic std_logic_vector unsigned signed boolean integer natural positive");
-        let expected = vec![
-            Token::StdLogic, Token::StdLogicVector, Token::Unsigned,
-            Token::Signed, Token::Boolean, Token::Integer,
-            Token::Natural, Token::Positive,
+        let tokens =
+            tokenize("std_logic std_logic_vector unsigned signed boolean integer natural positive");
+        let expected = [
+            Token::StdLogic,
+            Token::StdLogicVector,
+            Token::Unsigned,
+            Token::Signed,
+            Token::Boolean,
+            Token::Integer,
+            Token::Natural,
+            Token::Positive,
         ];
         assert_eq!(tokens.len(), expected.len());
         for (t, e) in tokens.iter().zip(expected.iter()) {

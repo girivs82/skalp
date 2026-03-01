@@ -2,15 +2,14 @@ use skalp_frontend::hir::HirType;
 use std::collections::HashSet;
 
 /// Tracks which IEEE library packages have been imported via `use` clauses
+#[derive(Default)]
 pub struct BuiltinScope {
     imported_packages: HashSet<String>,
 }
 
 impl BuiltinScope {
     pub fn new() -> Self {
-        Self {
-            imported_packages: HashSet::new(),
-        }
+        Self::default()
     }
 
     /// Register a use clause: e.g. "ieee.std_logic_1164.all"

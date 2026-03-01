@@ -294,7 +294,10 @@ impl UnifiedSimulator {
         {
             eprintln!("[NAME_REGISTRY] {} entries:", self.name_registry.len());
             for entry in self.name_registry.all_entries() {
-                eprintln!("  {} -> {} ({})", entry.hierarchical_path, entry.internal_name, entry.source_name);
+                eprintln!(
+                    "  {} -> {} ({})",
+                    entry.hierarchical_path, entry.internal_name, entry.source_name
+                );
             }
         }
 

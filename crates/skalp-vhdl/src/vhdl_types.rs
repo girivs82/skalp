@@ -30,7 +30,11 @@ impl RangeInfo {
             RangeDirection::Downto => (self.left - self.right + 1).unsigned_abs() as u32,
             RangeDirection::To => (self.right - self.left + 1).unsigned_abs() as u32,
         };
-        if size == 0 { 1 } else { size }
+        if size == 0 {
+            1
+        } else {
+            size
+        }
     }
 
     /// Compute a width expression for generic-dependent ranges.
@@ -45,8 +49,7 @@ impl RangeInfo {
 
         // For the common pattern "X - 1 downto 0", simplify to just X
         if self.direction == RangeDirection::Downto {
-            if let Some(HirExpression::Literal(HirLiteral::Integer(0))) = self.right_expr.as_ref()
-            {
+            if let Some(HirExpression::Literal(HirLiteral::Integer(0))) = self.right_expr.as_ref() {
                 // width = left + 1
                 return Some(HirExpression::Binary(HirBinaryExpr {
                     op: HirBinaryOp::Add,
@@ -58,7 +61,9 @@ impl RangeInfo {
         }
 
         // General case: width = high - low + 1
-        let low = low_expr.cloned().unwrap_or(HirExpression::Literal(HirLiteral::Integer(0)));
+        let low = low_expr
+            .cloned()
+            .unwrap_or(HirExpression::Literal(HirLiteral::Integer(0)));
         Some(HirExpression::Binary(HirBinaryExpr {
             op: HirBinaryOp::Add,
             left: Box::new(HirExpression::Binary(HirBinaryExpr {

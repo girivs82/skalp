@@ -10,8 +10,7 @@
 #[test]
 fn test_vhdl_counter_parse_only() {
     let source = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("examples/vhdl/counter.vhd"),
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/vhdl/counter.vhd"),
     )
     .unwrap();
 
@@ -28,21 +27,21 @@ fn test_vhdl_counter_parse_only() {
 
     // At least one signal (count_reg)
     assert!(
-        imp.signals.len() >= 1,
+        !imp.signals.is_empty(),
         "expected at least 1 signal, got {}",
         imp.signals.len()
     );
 
     // At least one event block (the clocked process)
     assert!(
-        imp.event_blocks.len() >= 1,
+        !imp.event_blocks.is_empty(),
         "expected event blocks, got {}",
         imp.event_blocks.len()
     );
 
     // At least one concurrent assignment (count <= count_reg)
     assert!(
-        imp.assignments.len() >= 1,
+        !imp.assignments.is_empty(),
         "expected assignments, got {}",
         imp.assignments.len()
     );
@@ -51,8 +50,7 @@ fn test_vhdl_counter_parse_only() {
 #[test]
 fn test_vhdl_mux4_parse_only() {
     let source = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("examples/vhdl/mux4.vhd"),
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/vhdl/mux4.vhd"),
     )
     .unwrap();
 
@@ -66,7 +64,7 @@ fn test_vhdl_mux4_parse_only() {
     let imp = &hir.implementations[0];
 
     // Combinational process -> event block with empty triggers
-    assert!(imp.event_blocks.len() >= 1);
+    assert!(!imp.event_blocks.is_empty());
     let eb = &imp.event_blocks[0];
     assert!(
         eb.triggers.is_empty(),
@@ -100,9 +98,7 @@ use skalp_testing::testbench::*;
 
 #[tokio::test]
 async fn test_vhdl_counter_counts_up() {
-    let mut tb = Testbench::new("examples/vhdl/counter.vhd")
-        .await
-        .unwrap();
+    let mut tb = Testbench::new("examples/vhdl/counter.vhd").await.unwrap();
 
     // Reset
     tb.set("rst", 1u8).set("en", 0u8);
@@ -122,9 +118,7 @@ async fn test_vhdl_counter_counts_up() {
 
 #[tokio::test]
 async fn test_vhdl_counter_reset_clears() {
-    let mut tb = Testbench::new("examples/vhdl/counter.vhd")
-        .await
-        .unwrap();
+    let mut tb = Testbench::new("examples/vhdl/counter.vhd").await.unwrap();
 
     // Count up to 10
     tb.set("rst", 0u8).set("en", 1u8);
@@ -148,8 +142,7 @@ async fn test_vhdl_counter_reset_clears() {
 #[test]
 fn test_vhdl_axi_interface_e2e() {
     let source = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("examples/vhdl/axi_peripheral.vhd"),
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/vhdl/axi_peripheral.vhd"),
     )
     .unwrap();
 
@@ -171,10 +164,26 @@ fn test_vhdl_axi_interface_e2e() {
 
     // Verify flattened port names exist
     let names: Vec<&str> = entity.ports.iter().map(|p| p.name.as_str()).collect();
-    assert!(names.contains(&"bus_awaddr"), "missing bus_awaddr in {:?}", names);
-    assert!(names.contains(&"bus_wdata"), "missing bus_wdata in {:?}", names);
-    assert!(names.contains(&"bus_awready"), "missing bus_awready in {:?}", names);
-    assert!(names.contains(&"bus_wready"), "missing bus_wready in {:?}", names);
+    assert!(
+        names.contains(&"bus_awaddr"),
+        "missing bus_awaddr in {:?}",
+        names
+    );
+    assert!(
+        names.contains(&"bus_wdata"),
+        "missing bus_wdata in {:?}",
+        names
+    );
+    assert!(
+        names.contains(&"bus_awready"),
+        "missing bus_awready in {:?}",
+        names
+    );
+    assert!(
+        names.contains(&"bus_wready"),
+        "missing bus_wready in {:?}",
+        names
+    );
 
     // Verify architecture lowered correctly
     assert_eq!(hir.implementations.len(), 1);
@@ -182,7 +191,7 @@ fn test_vhdl_axi_interface_e2e() {
 
     // reg_data signal
     assert!(
-        imp.signals.len() >= 1,
+        !imp.signals.is_empty(),
         "expected at least 1 signal (reg_data)"
     );
 
@@ -195,16 +204,14 @@ fn test_vhdl_axi_interface_e2e() {
 
     // Clocked process
     assert!(
-        imp.event_blocks.len() >= 1,
+        !imp.event_blocks.is_empty(),
         "expected at least 1 event block"
     );
 }
 
 #[tokio::test]
 async fn test_vhdl_mux4_selects_correctly() {
-    let mut tb = Testbench::new("examples/vhdl/mux4.vhd")
-        .await
-        .unwrap();
+    let mut tb = Testbench::new("examples/vhdl/mux4.vhd").await.unwrap();
 
     // Set four input channels to distinct values
     tb.set("a", 0x11u8)
@@ -262,10 +269,16 @@ fn test_vhdl_uart_parse_generics() {
 
     // Verify generic types
     assert!(
-        matches!(entity.generics[0].param_type, HirGenericType::Const(HirType::Nat(32))),
+        matches!(
+            entity.generics[0].param_type,
+            HirGenericType::Const(HirType::Nat(32))
+        ),
         "baud generic should be Nat(32)"
     );
-    assert!(entity.generics[0].default_value.is_some(), "baud should have default value");
+    assert!(
+        entity.generics[0].default_value.is_some(),
+        "baud should have default value"
+    );
     assert!(
         entity.generics[1].default_value.is_some(),
         "clock_frequency should have default value"
@@ -416,29 +429,56 @@ fn test_vhdl_uart_sir_dump() {
     // HIR should have all 18 signals and 6 constants (2 generics + 4 derived)
     assert_eq!(imp.signals.len(), 18, "HIR should have 18 signals");
     assert_eq!(imp.constants.len(), 6, "HIR should have 6 constants");
-    assert_eq!(imp.event_blocks.len(), 7, "HIR should have 7 event blocks (processes)");
+    assert_eq!(
+        imp.event_blocks.len(),
+        7,
+        "HIR should have 7 event blocks (processes)"
+    );
 
     let compiler = MirCompiler::new();
-    let mir = compiler.compile_to_mir_with_modules(&context.main_hir, &context.module_hirs).unwrap();
+    let mir = compiler
+        .compile_to_mir_with_modules(&context.main_hir, &context.module_hirs)
+        .unwrap();
     let module = &mir.modules[0];
 
     // All 18 signals must survive MIR conversion + DCE
-    assert_eq!(module.signals.len(), 18, "MIR should preserve all 18 signals after DCE");
+    assert_eq!(
+        module.signals.len(),
+        18,
+        "MIR should preserve all 18 signals after DCE"
+    );
     assert_eq!(module.processes.len(), 7, "MIR should have 7 processes");
 
     // Verify concrete type widths for baud counters (tests const evaluation through generics)
-    let tx_baud = module.signals.iter().find(|s| s.name == "tx_baud_counter").unwrap();
-    assert!(matches!(tx_baud.signal_type, skalp_mir::mir::DataType::Nat(5)),
-        "tx_baud_counter should be Nat(5), got {:?}", tx_baud.signal_type);
-    let rx_baud = module.signals.iter().find(|s| s.name == "rx_baud_counter").unwrap();
-    assert!(matches!(rx_baud.signal_type, skalp_mir::mir::DataType::Nat(1)),
-        "rx_baud_counter should be Nat(1), got {:?}", rx_baud.signal_type);
+    let tx_baud = module
+        .signals
+        .iter()
+        .find(|s| s.name == "tx_baud_counter")
+        .unwrap();
+    assert!(
+        matches!(tx_baud.signal_type, skalp_mir::mir::DataType::Nat(5)),
+        "tx_baud_counter should be Nat(5), got {:?}",
+        tx_baud.signal_type
+    );
+    let rx_baud = module
+        .signals
+        .iter()
+        .find(|s| s.name == "rx_baud_counter")
+        .unwrap();
+    assert!(
+        matches!(rx_baud.signal_type, skalp_mir::mir::DataType::Nat(1)),
+        "rx_baud_counter should be Nat(1), got {:?}",
+        rx_baud.signal_type
+    );
 
     // Convert to SIR and verify basic structure
     let sir = skalp_sir::mir_to_sir::convert_mir_to_sir(module);
     assert!(sir.inputs.len() >= 4, "need at least 4 inputs");
     assert!(sir.outputs.len() >= 4, "need at least 4 outputs");
-    assert!(!sir.state_elements.is_empty(), "need state elements for UART registers");
+    assert!(
+        !sir.state_elements.is_empty(),
+        "need state elements for UART registers"
+    );
 }
 
 // ========================================================================
@@ -463,8 +503,12 @@ async fn test_vhdl_uart_internal_signals() {
 
     // Try reading internal signals (and a bogus one to test error behavior)
     let internal_names = [
-        "tx_baud_counter", "tx_baud_tick", "uart_tx_state",
-        "uart_tx_count", "uart_tx_data", "uart_rx_data_in_ack",
+        "tx_baud_counter",
+        "tx_baud_tick",
+        "uart_tx_state",
+        "uart_tx_count",
+        "uart_tx_data",
+        "uart_rx_data_in_ack",
         "BOGUS_SIGNAL_NAME_12345",
     ];
     for name in &internal_names {
@@ -473,7 +517,8 @@ async fn test_vhdl_uart_internal_signals() {
     }
 
     // Load byte and clock, probing each cycle
-    tb.set("data_stream_in", 0xA5u32).set("data_stream_in_stb", 1u8);
+    tb.set("data_stream_in", 0xA5u32)
+        .set("data_stream_in_stb", 1u8);
 
     diag.push_str("\nClocking with stb=1:\n");
     let mut ack_seen = false;
@@ -519,7 +564,8 @@ async fn test_vhdl_uart_compiles_and_simulates() {
 
     // Release reset and clock enough for baud tick (c_tx_div=16 cycles)
     tb.set("reset", 0u8);
-    tb.set("data_stream_in", 0xA5u32).set("data_stream_in_stb", 1u8);
+    tb.set("data_stream_in", 0xA5u32)
+        .set("data_stream_in_stb", 1u8);
     tb.clock_signal("clock", 50).await;
 
     // After 50 cycles post-reset with stb=1, the ack should have pulsed.
@@ -528,7 +574,8 @@ async fn test_vhdl_uart_compiles_and_simulates() {
     let tx = tb.get_u32("tx").await;
     assert!(tx <= 1, "tx should be a valid logic level");
 
-    tb.export_waveform("build/test_vhdl_uart_compile.skw.gz").ok();
+    tb.export_waveform("build/test_vhdl_uart_compile.skw.gz")
+        .ok();
 }
 
 #[tokio::test]
@@ -552,7 +599,8 @@ async fn test_vhdl_uart_tx_sends_byte() {
     tb.clock_signal("clock", 5).await;
 
     // Load byte 0xA5 = 10100101
-    tb.set("data_stream_in", 0xA5u32).set("data_stream_in_stb", 1u8);
+    tb.set("data_stream_in", 0xA5u32)
+        .set("data_stream_in_stb", 1u8);
 
     // Wait for ack (TX starts on baud tick)
     let mut ack_seen = false;
@@ -564,7 +612,10 @@ async fn test_vhdl_uart_tx_sends_byte() {
             break;
         }
     }
-    assert!(ack_seen, "data_stream_in_ack should pulse high within 30 cycles");
+    assert!(
+        ack_seen,
+        "data_stream_in_ack should pulse high within 30 cycles"
+    );
 
     // Deassert strobe after ack
     tb.set("data_stream_in_stb", 0u8);
@@ -579,22 +630,37 @@ async fn test_vhdl_uart_tx_sends_byte() {
     }
 
     // Verify TX activity happened (saw at least one 0 and one 1 transition)
-    let has_zeros = tx_samples.iter().any(|&v| v == 0);
-    let has_ones = tx_samples.iter().any(|&v| v == 1);
+    let has_zeros = tx_samples.contains(&0);
+    let has_ones = tx_samples.contains(&1);
     if !(has_zeros && has_ones) {
         // Write diagnostic
         let unique_vals: std::collections::HashSet<u32> = tx_samples.iter().copied().collect();
-        let sample_str: String = tx_samples.iter().take(50).map(|v| format!("{}", v)).collect::<Vec<_>>().join(",");
-        std::fs::write("/tmp/uart_tx_diag.txt", format!(
-            "ack_seen={}\nunique_vals={:?}\nfirst_50_samples={}\ntotal_samples={}\n",
-            ack_seen, unique_vals, sample_str, tx_samples.len()
-        )).ok();
+        let sample_str: String = tx_samples
+            .iter()
+            .take(50)
+            .map(|v| format!("{}", v))
+            .collect::<Vec<_>>()
+            .join(",");
+        std::fs::write(
+            "/tmp/uart_tx_diag.txt",
+            format!(
+                "ack_seen={}\nunique_vals={:?}\nfirst_50_samples={}\ntotal_samples={}\n",
+                ack_seen,
+                unique_vals,
+                sample_str,
+                tx_samples.len()
+            ),
+        )
+        .ok();
         panic!("TX should have both 0s and 1s. See /tmp/uart_tx_diag.txt");
     }
 
     // Verify TX returned to idle high at the end
     let last_tx = *tx_samples.last().unwrap();
-    assert_eq!(last_tx, 1, "TX should return to idle high after transmission");
+    assert_eq!(
+        last_tx, 1,
+        "TX should return to idle high after transmission"
+    );
 
     tb.export_waveform("build/test_vhdl_uart_tx.skw.gz").ok();
 }
@@ -645,9 +711,11 @@ async fn test_vhdl_uart_loopback() {
     let rx_vec = tb.get_u32("uart_rx_data_vec").await;
     let rx_bit = tb.get_u32("uart_rx_bit").await;
 
-    assert_eq!(rx_data, byte_val as u32,
+    assert_eq!(
+        rx_data, byte_val as u32,
         "RX data mismatch: expected 0x{:02X}, got 0x{:02X} (state={} vec=0x{:02X} rx_bit={})",
-        byte_val, rx_data, rx_state, rx_vec, rx_bit);
+        byte_val, rx_data, rx_state, rx_vec, rx_bit
+    );
 }
 
 // ========================================================================
@@ -707,11 +775,11 @@ async fn test_vhdl_spi_master_tx() {
     let mut prev_sclk = 0u32;
     let mut dout_vld_seen = false;
 
-    for cycle in 0..200 {
+    for _cycle in 0..200 {
         tb.clock(1).await;
         let sclk = tb.get_u32("sclk").await;
         let cs_n = tb.get_u32("cs_n").await;
-        let state = tb.get_u32("present_state").await;
+        let _state = tb.get_u32("present_state").await;
 
         // Sample MOSI on SCLK rising edge while CS_N is low
         if sclk == 1 && prev_sclk == 0 && cs_n == 0 {
@@ -800,7 +868,10 @@ async fn test_vhdl_spi_loopback() {
         }
     }
 
-    assert!(dout_vld_seen, "DOUT_VLD should fire after loopback transfer");
+    assert!(
+        dout_vld_seen,
+        "DOUT_VLD should fire after loopback transfer"
+    );
     assert_eq!(
         dout_val, 0xA5,
         "loopback DOUT should match DIN 0xA5, got 0x{:02X}",
@@ -818,8 +889,7 @@ async fn test_vhdl_spi_loopback() {
 #[test]
 fn test_vhdl_bus_system_parse_only() {
     let source = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("examples/vhdl/bus_system.vhd"),
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/vhdl/bus_system.vhd"),
     )
     .unwrap();
 
@@ -836,9 +906,21 @@ fn test_vhdl_bus_system_parse_only() {
 
     // Verify entity names (VHDL lowercases then PascalCases)
     let names: Vec<&str> = hir.entities.iter().map(|e| e.name.as_str()).collect();
-    assert!(names.contains(&"Sender"), "missing Sender entity in {:?}", names);
-    assert!(names.contains(&"Receiver"), "missing Receiver entity in {:?}", names);
-    assert!(names.contains(&"BusSystem"), "missing BusSystem entity in {:?}", names);
+    assert!(
+        names.contains(&"Sender"),
+        "missing Sender entity in {:?}",
+        names
+    );
+    assert!(
+        names.contains(&"Receiver"),
+        "missing Receiver entity in {:?}",
+        names
+    );
+    assert!(
+        names.contains(&"BusSystem"),
+        "missing BusSystem entity in {:?}",
+        names
+    );
 
     // BusSystem should have 2 instances
     let bus_system_impl = hir
@@ -883,9 +965,7 @@ async fn test_vhdl_bus_system_data_transfer() {
         .unwrap();
 
     // Reset
-    tb.set("rst", 1u8)
-        .set("trigger", 0u8)
-        .set("tx_data", 0u8);
+    tb.set("rst", 1u8).set("trigger", 0u8).set("tx_data", 0u8);
     tb.clock(2).await;
 
     // Release reset
@@ -936,12 +1016,18 @@ fn vhdl_to_systemverilog(vhdl_path: &str) -> String {
 #[test]
 fn test_vhdl_to_sv_counter() {
     let sv = vhdl_to_systemverilog("examples/vhdl/counter.vhd");
-    assert!(sv.contains("module"), "Expected a module declaration in SV output");
+    assert!(
+        sv.contains("module"),
+        "Expected a module declaration in SV output"
+    );
     // Counter should have clk, rst, count ports
     assert!(sv.contains("clk"), "Expected clk port");
     assert!(sv.contains("rst"), "Expected rst port");
     assert!(sv.contains("count"), "Expected count port");
-    assert!(sv.contains("always_ff"), "Expected sequential logic (always_ff)");
+    assert!(
+        sv.contains("always_ff"),
+        "Expected sequential logic (always_ff)"
+    );
     std::fs::write("build/counter_from_vhdl.sv", &sv).ok();
     println!("--- counter.vhd → SystemVerilog ---\n{}", sv);
 }
@@ -960,7 +1046,11 @@ fn test_vhdl_to_sv_bus_system() {
     let sv = vhdl_to_systemverilog("examples/vhdl/bus_system.vhd");
     // Should generate all 3 modules
     let module_count = sv.matches("module ").count();
-    assert!(module_count >= 3, "Expected 3 modules (Sender, Receiver, BusSystem), got {}", module_count);
+    assert!(
+        module_count >= 3,
+        "Expected 3 modules (Sender, Receiver, BusSystem), got {}",
+        module_count
+    );
     assert!(sv.contains("clk"), "Expected clk port");
     std::fs::write("build/bus_system_from_vhdl.sv", &sv).ok();
     println!("--- bus_system.vhd → SystemVerilog ---\n{}", sv);

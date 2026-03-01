@@ -590,24 +590,12 @@ impl ConstEvaluator {
 
         // Coerce mixed Int/Nat operands to a common type (promotes to Int)
         let (left, right) = match (&left, &right) {
-            (ConstValue::Int(_), ConstValue::Nat(n)) => {
-                (left, ConstValue::Int(*n as i64))
-            }
-            (ConstValue::Nat(n), ConstValue::Int(_)) => {
-                (ConstValue::Int(*n as i64), right)
-            }
-            (ConstValue::Float(_), ConstValue::Nat(n)) => {
-                (left, ConstValue::Float(*n as f64))
-            }
-            (ConstValue::Nat(n), ConstValue::Float(_)) => {
-                (ConstValue::Float(*n as f64), right)
-            }
-            (ConstValue::Float(_), ConstValue::Int(n)) => {
-                (left, ConstValue::Float(*n as f64))
-            }
-            (ConstValue::Int(n), ConstValue::Float(_)) => {
-                (ConstValue::Float(*n as f64), right)
-            }
+            (ConstValue::Int(_), ConstValue::Nat(n)) => (left, ConstValue::Int(*n as i64)),
+            (ConstValue::Nat(n), ConstValue::Int(_)) => (ConstValue::Int(*n as i64), right),
+            (ConstValue::Float(_), ConstValue::Nat(n)) => (left, ConstValue::Float(*n as f64)),
+            (ConstValue::Nat(n), ConstValue::Float(_)) => (ConstValue::Float(*n as f64), right),
+            (ConstValue::Float(_), ConstValue::Int(n)) => (left, ConstValue::Float(*n as f64)),
+            (ConstValue::Int(n), ConstValue::Float(_)) => (ConstValue::Float(*n as f64), right),
             _ => (left, right),
         };
 

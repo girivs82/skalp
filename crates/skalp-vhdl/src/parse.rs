@@ -202,12 +202,13 @@ impl<'a> ParseState<'a> {
     }
 
     fn current_kind(&self) -> Option<SyntaxKind> {
-        self.current_token()
-            .map(|t| token_to_syntax_kind(&t.token))
+        self.current_token().map(|t| token_to_syntax_kind(&t.token))
     }
 
     fn current_offset(&self) -> usize {
-        self.current_token().map(|t| t.offset).unwrap_or(self.source.len())
+        self.current_token()
+            .map(|t| t.offset)
+            .unwrap_or(self.source.len())
     }
 
     fn current_text(&self) -> &str {
@@ -235,7 +236,9 @@ impl<'a> ParseState<'a> {
     }
 
     fn peek_raw(&self, offset: usize) -> Option<SyntaxKind> {
-        self.tokens.get(self.current + offset).map(|t| token_to_syntax_kind(&t.token))
+        self.tokens
+            .get(self.current + offset)
+            .map(|t| token_to_syntax_kind(&t.token))
     }
 
     fn bump(&mut self) {
@@ -261,7 +264,9 @@ impl<'a> ParseState<'a> {
     }
 
     fn at_token(&self, token: &Token) -> bool {
-        self.current_token().map(|t| &t.token == token).unwrap_or(false)
+        self.current_token()
+            .map(|t| &t.token == token)
+            .unwrap_or(false)
     }
 
     fn expect(&mut self, kind: SyntaxKind) -> bool {
@@ -271,7 +276,10 @@ impl<'a> ParseState<'a> {
             true
         } else {
             let pos = self.current_offset();
-            let found = self.current_kind().map(|k| format!("{:?}", k)).unwrap_or_else(|| "EOF".to_string());
+            let found = self
+                .current_kind()
+                .map(|k| format!("{:?}", k))
+                .unwrap_or_else(|| "EOF".to_string());
             self.errors.push(VhdlError {
                 kind: crate::diagnostics::VhdlErrorKind::ParseError,
                 message: format!("expected {:?}, found {}", kind, found),
@@ -312,11 +320,17 @@ impl<'a> ParseState<'a> {
                 break;
             }
             let kind = self.current_kind();
-            if matches!(kind, Some(SyntaxKind::EndKw) | Some(SyntaxKind::BeginKw)
-                | Some(SyntaxKind::EntityKw) | Some(SyntaxKind::ArchitectureKw)
-                | Some(SyntaxKind::ProcessKw) | Some(SyntaxKind::IfKw)
-                | Some(SyntaxKind::CaseKw) | Some(SyntaxKind::ForKw))
-            {
+            if matches!(
+                kind,
+                Some(SyntaxKind::EndKw)
+                    | Some(SyntaxKind::BeginKw)
+                    | Some(SyntaxKind::EntityKw)
+                    | Some(SyntaxKind::ArchitectureKw)
+                    | Some(SyntaxKind::ProcessKw)
+                    | Some(SyntaxKind::IfKw)
+                    | Some(SyntaxKind::CaseKw)
+                    | Some(SyntaxKind::ForKw)
+            ) {
                 break;
             }
             self.bump();
@@ -330,7 +344,9 @@ impl<'a> ParseState<'a> {
         match kind {
             Some(SyntaxKind::WaitKw) => {
                 self.errors.push(VhdlError {
-                    kind: crate::diagnostics::VhdlErrorKind::Unsynthesizable("wait statement".to_string()),
+                    kind: crate::diagnostics::VhdlErrorKind::Unsynthesizable(
+                        "wait statement".to_string(),
+                    ),
                     message: "wait statements are not synthesizable".to_string(),
                     position: self.current_offset(),
                     severity: crate::diagnostics::VhdlSeverity::Error,
@@ -339,7 +355,9 @@ impl<'a> ParseState<'a> {
             }
             Some(SyntaxKind::AfterKw) => {
                 self.errors.push(VhdlError {
-                    kind: crate::diagnostics::VhdlErrorKind::Unsynthesizable("after clause".to_string()),
+                    kind: crate::diagnostics::VhdlErrorKind::Unsynthesizable(
+                        "after clause".to_string(),
+                    ),
                     message: "after clauses are not synthesizable".to_string(),
                     position: self.current_offset(),
                     severity: crate::diagnostics::VhdlSeverity::Error,
@@ -348,7 +366,9 @@ impl<'a> ParseState<'a> {
             }
             Some(SyntaxKind::TransportKw) | Some(SyntaxKind::RejectKw) => {
                 self.errors.push(VhdlError {
-                    kind: crate::diagnostics::VhdlErrorKind::Unsynthesizable("transport/reject delay".to_string()),
+                    kind: crate::diagnostics::VhdlErrorKind::Unsynthesizable(
+                        "transport/reject delay".to_string(),
+                    ),
                     message: "transport/reject delay models are not synthesizable".to_string(),
                     position: self.current_offset(),
                     severity: crate::diagnostics::VhdlSeverity::Error,
@@ -357,7 +377,9 @@ impl<'a> ParseState<'a> {
             }
             Some(SyntaxKind::FileKw) => {
                 self.errors.push(VhdlError {
-                    kind: crate::diagnostics::VhdlErrorKind::Unsynthesizable("file declaration".to_string()),
+                    kind: crate::diagnostics::VhdlErrorKind::Unsynthesizable(
+                        "file declaration".to_string(),
+                    ),
                     message: "file declarations are not synthesizable".to_string(),
                     position: self.current_offset(),
                     severity: crate::diagnostics::VhdlSeverity::Error,
@@ -366,7 +388,9 @@ impl<'a> ParseState<'a> {
             }
             Some(SyntaxKind::AccessKw) => {
                 self.errors.push(VhdlError {
-                    kind: crate::diagnostics::VhdlErrorKind::Unsynthesizable("access type".to_string()),
+                    kind: crate::diagnostics::VhdlErrorKind::Unsynthesizable(
+                        "access type".to_string(),
+                    ),
                     message: "access types are not synthesizable".to_string(),
                     position: self.current_offset(),
                     severity: crate::diagnostics::VhdlSeverity::Error,
@@ -388,7 +412,10 @@ impl<'a> ParseState<'a> {
     /// Get the current identifier text
     fn current_ident_text(&self) -> Option<&str> {
         match self.current_token() {
-            Some(TokenWithPos { token: Token::Ident(s), .. }) => Some(s.as_str()),
+            Some(TokenWithPos {
+                token: Token::Ident(s),
+                ..
+            }) => Some(s.as_str()),
             _ => None,
         }
     }
@@ -563,12 +590,18 @@ impl<'a> ParseState<'a> {
                 if self.at(SyntaxKind::LParen) {
                     let mut depth = 0;
                     loop {
-                        if self.is_at_end() { break; }
-                        if self.at(SyntaxKind::LParen) { depth += 1; }
+                        if self.is_at_end() {
+                            break;
+                        }
+                        if self.at(SyntaxKind::LParen) {
+                            depth += 1;
+                        }
                         if self.at(SyntaxKind::RParen) {
                             depth -= 1;
                             self.bump();
-                            if depth == 0 { break; }
+                            if depth == 0 {
+                                break;
+                            }
                             continue;
                         }
                         self.bump();
@@ -659,8 +692,10 @@ impl<'a> ParseState<'a> {
         // Direction: in, out, inout, buffer
         self.start_node(SyntaxKind::PortDirection);
         match self.current_kind() {
-            Some(SyntaxKind::InKw) | Some(SyntaxKind::OutKw)
-            | Some(SyntaxKind::InoutKw) | Some(SyntaxKind::BufferKw) => {
+            Some(SyntaxKind::InKw)
+            | Some(SyntaxKind::OutKw)
+            | Some(SyntaxKind::InoutKw)
+            | Some(SyntaxKind::BufferKw) => {
                 self.bump();
             }
             _ => {
@@ -736,7 +771,9 @@ impl<'a> ParseState<'a> {
                 Some(SyntaxKind::TypeKw) => self.parse_type_decl(),
                 Some(SyntaxKind::SubtypeKw) => self.parse_subtype_decl(),
                 Some(SyntaxKind::ComponentKw) => self.parse_component_decl(),
-                Some(SyntaxKind::FunctionKw) | Some(SyntaxKind::PureKw) | Some(SyntaxKind::ImpureKw) => {
+                Some(SyntaxKind::FunctionKw)
+                | Some(SyntaxKind::PureKw)
+                | Some(SyntaxKind::ImpureKw) => {
                     self.parse_function_decl_or_body();
                 }
                 Some(SyntaxKind::ProcedureKw) => {
@@ -1147,10 +1184,13 @@ impl<'a> ParseState<'a> {
         self.start_node(SyntaxKind::ParamDecl);
         self.skip_trivia();
         // Optional: signal|variable|constant|file
-        if matches!(self.current_kind(),
-            Some(SyntaxKind::SignalKw) | Some(SyntaxKind::VariableKw)
-            | Some(SyntaxKind::ConstantKw) | Some(SyntaxKind::FileKw))
-        {
+        if matches!(
+            self.current_kind(),
+            Some(SyntaxKind::SignalKw)
+                | Some(SyntaxKind::VariableKw)
+                | Some(SyntaxKind::ConstantKw)
+                | Some(SyntaxKind::FileKw)
+        ) {
             self.bump();
             self.skip_trivia();
         }
@@ -1164,7 +1204,10 @@ impl<'a> ParseState<'a> {
         self.expect(SyntaxKind::Colon);
         self.skip_trivia();
         // Optional direction
-        if matches!(self.current_kind(), Some(SyntaxKind::InKw) | Some(SyntaxKind::OutKw) | Some(SyntaxKind::InoutKw)) {
+        if matches!(
+            self.current_kind(),
+            Some(SyntaxKind::InKw) | Some(SyntaxKind::OutKw) | Some(SyntaxKind::InoutKw)
+        ) {
             self.bump();
             self.skip_trivia();
         }
@@ -1239,14 +1282,23 @@ impl<'a> ParseState<'a> {
     }
 
     fn is_name_start(&self) -> bool {
-        matches!(self.current_kind(),
-            Some(SyntaxKind::Ident) | Some(SyntaxKind::StdLogicKw)
-            | Some(SyntaxKind::StdLogicVectorKw) | Some(SyntaxKind::StdUlogicVectorKw)
-            | Some(SyntaxKind::UnsignedKw) | Some(SyntaxKind::SignedKw)
-            | Some(SyntaxKind::StdUlogicKw) | Some(SyntaxKind::BooleanKw)
-            | Some(SyntaxKind::IntegerKw) | Some(SyntaxKind::NaturalKw)
-            | Some(SyntaxKind::PositiveKw) | Some(SyntaxKind::RealKw)
-            | Some(SyntaxKind::BitKw) | Some(SyntaxKind::BitVectorKw))
+        matches!(
+            self.current_kind(),
+            Some(SyntaxKind::Ident)
+                | Some(SyntaxKind::StdLogicKw)
+                | Some(SyntaxKind::StdLogicVectorKw)
+                | Some(SyntaxKind::StdUlogicVectorKw)
+                | Some(SyntaxKind::UnsignedKw)
+                | Some(SyntaxKind::SignedKw)
+                | Some(SyntaxKind::StdUlogicKw)
+                | Some(SyntaxKind::BooleanKw)
+                | Some(SyntaxKind::IntegerKw)
+                | Some(SyntaxKind::NaturalKw)
+                | Some(SyntaxKind::PositiveKw)
+                | Some(SyntaxKind::RealKw)
+                | Some(SyntaxKind::BitKw)
+                | Some(SyntaxKind::BitVectorKw)
+        )
     }
 
     fn parse_concurrent_statement_starting_with_ident(&mut self) {
@@ -1259,47 +1311,45 @@ impl<'a> ParseState<'a> {
         let saved_pos = self.current;
 
         // Check if it's a label (ident followed by colon NOT followed by =)
-        if self.at(SyntaxKind::Ident) {
-            if self.peek_kind(1) == Some(SyntaxKind::Colon) {
-                // It's a label
-                let label_start = self.current;
-                self.bump(); // label ident
-                self.skip_trivia();
-                self.bump(); // colon
-                self.skip_trivia();
+        if self.at(SyntaxKind::Ident) && self.peek_kind(1) == Some(SyntaxKind::Colon) {
+            // It's a label
+            let label_start = self.current;
+            self.bump(); // label ident
+            self.skip_trivia();
+            self.bump(); // colon
+            self.skip_trivia();
 
-                // What follows the label?
-                match self.current_kind() {
-                    Some(SyntaxKind::ProcessKw) => {
-                        self.parse_process_stmt(Some(label_start));
-                        return;
-                    }
-                    Some(SyntaxKind::ForKw) => {
-                        self.parse_for_generate();
-                        return;
-                    }
-                    Some(SyntaxKind::IfKw) => {
-                        self.parse_if_generate();
-                        return;
-                    }
-                    Some(SyntaxKind::BlockKw) => {
-                        self.parse_block_stmt();
-                        return;
-                    }
-                    Some(SyntaxKind::EntityKw) => {
-                        // Direct entity instantiation: label: entity work.Foo port map (...)
-                        self.parse_component_inst_entity();
-                        return;
-                    }
-                    Some(SyntaxKind::Ident) | Some(SyntaxKind::ComponentKw) => {
-                        // Component instantiation: label: CompName [generic map (...)] port map (...)
-                        self.parse_component_inst_component();
-                        return;
-                    }
-                    _ => {
-                        self.error_recover("unexpected token after label");
-                        return;
-                    }
+            // What follows the label?
+            match self.current_kind() {
+                Some(SyntaxKind::ProcessKw) => {
+                    self.parse_process_stmt(Some(label_start));
+                    return;
+                }
+                Some(SyntaxKind::ForKw) => {
+                    self.parse_for_generate();
+                    return;
+                }
+                Some(SyntaxKind::IfKw) => {
+                    self.parse_if_generate();
+                    return;
+                }
+                Some(SyntaxKind::BlockKw) => {
+                    self.parse_block_stmt();
+                    return;
+                }
+                Some(SyntaxKind::EntityKw) => {
+                    // Direct entity instantiation: label: entity work.Foo port map (...)
+                    self.parse_component_inst_entity();
+                    return;
+                }
+                Some(SyntaxKind::Ident) | Some(SyntaxKind::ComponentKw) => {
+                    // Component instantiation: label: CompName [generic map (...)] port map (...)
+                    self.parse_component_inst_component();
+                    return;
+                }
+                _ => {
+                    self.error_recover("unexpected token after label");
+                    return;
                 }
             }
         }
@@ -1449,7 +1499,9 @@ impl<'a> ParseState<'a> {
                 Some(SyntaxKind::ConstantKw) => self.parse_constant_decl(),
                 Some(SyntaxKind::TypeKw) => self.parse_type_decl(),
                 Some(SyntaxKind::SubtypeKw) => self.parse_subtype_decl(),
-                Some(SyntaxKind::FunctionKw) | Some(SyntaxKind::PureKw) | Some(SyntaxKind::ImpureKw) => {
+                Some(SyntaxKind::FunctionKw)
+                | Some(SyntaxKind::PureKw)
+                | Some(SyntaxKind::ImpureKw) => {
                     self.parse_function_decl_or_body();
                 }
                 Some(SyntaxKind::ProcedureKw) => {
@@ -1986,12 +2038,18 @@ impl<'a> ParseState<'a> {
         if self.at(SyntaxKind::LParen) {
             let mut depth = 0;
             loop {
-                if self.is_at_end() { break; }
-                if self.at(SyntaxKind::LParen) { depth += 1; }
+                if self.is_at_end() {
+                    break;
+                }
+                if self.at(SyntaxKind::LParen) {
+                    depth += 1;
+                }
                 if self.at(SyntaxKind::RParen) {
                     depth -= 1;
                     self.bump();
-                    if depth == 0 { break; }
+                    if depth == 0 {
+                        break;
+                    }
                     continue;
                 }
                 self.bump();
@@ -2180,7 +2238,9 @@ impl<'a> ParseState<'a> {
                 Some(SyntaxKind::ConstantKw) => self.parse_constant_decl(),
                 Some(SyntaxKind::SignalKw) => self.parse_signal_decl(),
                 Some(SyntaxKind::ComponentKw) => self.parse_component_decl(),
-                Some(SyntaxKind::FunctionKw) | Some(SyntaxKind::PureKw) | Some(SyntaxKind::ImpureKw) => {
+                Some(SyntaxKind::FunctionKw)
+                | Some(SyntaxKind::PureKw)
+                | Some(SyntaxKind::ImpureKw) => {
                     self.parse_function_decl_or_body();
                 }
                 Some(SyntaxKind::ProcedureKw) => {
@@ -2296,10 +2356,15 @@ impl<'a> ParseState<'a> {
     fn parse_logical_expr(&mut self) {
         self.parse_relational_expr();
         self.skip_trivia();
-        while matches!(self.current_kind(),
-            Some(SyntaxKind::AndKw) | Some(SyntaxKind::OrKw) | Some(SyntaxKind::XorKw)
-            | Some(SyntaxKind::NandKw) | Some(SyntaxKind::NorKw) | Some(SyntaxKind::XnorKw))
-        {
+        while matches!(
+            self.current_kind(),
+            Some(SyntaxKind::AndKw)
+                | Some(SyntaxKind::OrKw)
+                | Some(SyntaxKind::XorKw)
+                | Some(SyntaxKind::NandKw)
+                | Some(SyntaxKind::NorKw)
+                | Some(SyntaxKind::XnorKw)
+        ) {
             self.bump(); // operator
             self.skip_trivia();
             self.parse_relational_expr();
@@ -2314,8 +2379,10 @@ impl<'a> ParseState<'a> {
         // Relational: =, /=, <, <=, >, >=
         // Note: <= is SignalAssign token; in expression context, treat as LessEqual
         match self.current_kind() {
-            Some(SyntaxKind::Equal) | Some(SyntaxKind::NotEqual)
-            | Some(SyntaxKind::LessThan) | Some(SyntaxKind::GreaterThan)
+            Some(SyntaxKind::Equal)
+            | Some(SyntaxKind::NotEqual)
+            | Some(SyntaxKind::LessThan)
+            | Some(SyntaxKind::GreaterThan)
             | Some(SyntaxKind::GreaterEqual) => {
                 self.bump();
                 self.skip_trivia();
@@ -2334,10 +2401,15 @@ impl<'a> ParseState<'a> {
     fn parse_shift_expr(&mut self) {
         self.parse_additive_expr();
         self.skip_trivia();
-        if matches!(self.current_kind(),
-            Some(SyntaxKind::SllKw) | Some(SyntaxKind::SrlKw) | Some(SyntaxKind::SlaKw)
-            | Some(SyntaxKind::SraKw) | Some(SyntaxKind::RolKw) | Some(SyntaxKind::RorKw))
-        {
+        if matches!(
+            self.current_kind(),
+            Some(SyntaxKind::SllKw)
+                | Some(SyntaxKind::SrlKw)
+                | Some(SyntaxKind::SlaKw)
+                | Some(SyntaxKind::SraKw)
+                | Some(SyntaxKind::RolKw)
+                | Some(SyntaxKind::RorKw)
+        ) {
             self.bump();
             self.skip_trivia();
             self.parse_additive_expr();
@@ -2347,9 +2419,10 @@ impl<'a> ParseState<'a> {
     fn parse_additive_expr(&mut self) {
         self.parse_multiplicative_expr();
         self.skip_trivia();
-        while matches!(self.current_kind(),
-            Some(SyntaxKind::Plus) | Some(SyntaxKind::Minus) | Some(SyntaxKind::Ampersand))
-        {
+        while matches!(
+            self.current_kind(),
+            Some(SyntaxKind::Plus) | Some(SyntaxKind::Minus) | Some(SyntaxKind::Ampersand)
+        ) {
             self.bump();
             self.skip_trivia();
             self.parse_multiplicative_expr();
@@ -2360,9 +2433,13 @@ impl<'a> ParseState<'a> {
     fn parse_multiplicative_expr(&mut self) {
         self.parse_unary_expr();
         self.skip_trivia();
-        while matches!(self.current_kind(),
-            Some(SyntaxKind::Star) | Some(SyntaxKind::Slash) | Some(SyntaxKind::ModKw) | Some(SyntaxKind::RemKw))
-        {
+        while matches!(
+            self.current_kind(),
+            Some(SyntaxKind::Star)
+                | Some(SyntaxKind::Slash)
+                | Some(SyntaxKind::ModKw)
+                | Some(SyntaxKind::RemKw)
+        ) {
             self.bump();
             self.skip_trivia();
             self.parse_unary_expr();
@@ -2373,8 +2450,10 @@ impl<'a> ParseState<'a> {
     fn parse_unary_expr(&mut self) {
         self.skip_trivia();
         match self.current_kind() {
-            Some(SyntaxKind::NotKw) | Some(SyntaxKind::AbsKw)
-            | Some(SyntaxKind::Plus) | Some(SyntaxKind::Minus) => {
+            Some(SyntaxKind::NotKw)
+            | Some(SyntaxKind::AbsKw)
+            | Some(SyntaxKind::Plus)
+            | Some(SyntaxKind::Minus) => {
                 self.bump();
                 self.skip_trivia();
                 self.parse_unary_expr();
@@ -2395,7 +2474,8 @@ impl<'a> ParseState<'a> {
     fn parse_primary_expr(&mut self) {
         self.skip_trivia();
         match self.current_kind() {
-            Some(SyntaxKind::IntLiteral) | Some(SyntaxKind::RealLiteral)
+            Some(SyntaxKind::IntLiteral)
+            | Some(SyntaxKind::RealLiteral)
             | Some(SyntaxKind::BasedLiteral) => {
                 self.bump();
             }
@@ -2426,19 +2506,32 @@ impl<'a> ParseState<'a> {
     }
 
     fn is_name_or_builtin_start(&self) -> bool {
-        matches!(self.current_kind(),
+        matches!(
+            self.current_kind(),
             Some(SyntaxKind::Ident)
-            | Some(SyntaxKind::StdLogicKw) | Some(SyntaxKind::StdUlogicKw)
-            | Some(SyntaxKind::StdLogicVectorKw) | Some(SyntaxKind::StdUlogicVectorKw)
-            | Some(SyntaxKind::UnsignedKw) | Some(SyntaxKind::SignedKw)
-            | Some(SyntaxKind::BooleanKw) | Some(SyntaxKind::IntegerKw)
-            | Some(SyntaxKind::NaturalKw) | Some(SyntaxKind::PositiveKw)
-            | Some(SyntaxKind::RealKw) | Some(SyntaxKind::StringKw)
-            | Some(SyntaxKind::RisingEdgeKw) | Some(SyntaxKind::FallingEdgeKw)
-            | Some(SyntaxKind::ToUnsignedKw) | Some(SyntaxKind::ToSignedKw)
-            | Some(SyntaxKind::ToIntegerKw) | Some(SyntaxKind::ResizeKw)
-            | Some(SyntaxKind::ConvIntegerKw) | Some(SyntaxKind::ConvStdLogicVectorKw)
-            | Some(SyntaxKind::BitKw) | Some(SyntaxKind::BitVectorKw))
+                | Some(SyntaxKind::StdLogicKw)
+                | Some(SyntaxKind::StdUlogicKw)
+                | Some(SyntaxKind::StdLogicVectorKw)
+                | Some(SyntaxKind::StdUlogicVectorKw)
+                | Some(SyntaxKind::UnsignedKw)
+                | Some(SyntaxKind::SignedKw)
+                | Some(SyntaxKind::BooleanKw)
+                | Some(SyntaxKind::IntegerKw)
+                | Some(SyntaxKind::NaturalKw)
+                | Some(SyntaxKind::PositiveKw)
+                | Some(SyntaxKind::RealKw)
+                | Some(SyntaxKind::StringKw)
+                | Some(SyntaxKind::RisingEdgeKw)
+                | Some(SyntaxKind::FallingEdgeKw)
+                | Some(SyntaxKind::ToUnsignedKw)
+                | Some(SyntaxKind::ToSignedKw)
+                | Some(SyntaxKind::ToIntegerKw)
+                | Some(SyntaxKind::ResizeKw)
+                | Some(SyntaxKind::ConvIntegerKw)
+                | Some(SyntaxKind::ConvStdLogicVectorKw)
+                | Some(SyntaxKind::BitKw)
+                | Some(SyntaxKind::BitVectorKw)
+        )
     }
 
     fn parse_name_or_call(&mut self) {

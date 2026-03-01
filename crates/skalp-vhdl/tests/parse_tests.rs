@@ -204,10 +204,13 @@ END ENTITY MyDesign;
 fn test_parse_full_counter() {
     let source = std::fs::read_to_string(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent().unwrap()
-            .parent().unwrap()
-            .join("examples/vhdl/counter.vhd")
-    ).unwrap();
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("examples/vhdl/counter.vhd"),
+    )
+    .unwrap();
     let result = parse_vhdl(&source);
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 }
@@ -216,10 +219,13 @@ fn test_parse_full_counter() {
 fn test_parse_full_mux4() {
     let source = std::fs::read_to_string(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent().unwrap()
-            .parent().unwrap()
-            .join("examples/vhdl/mux4.vhd")
-    ).unwrap();
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("examples/vhdl/mux4.vhd"),
+    )
+    .unwrap();
     let result = parse_vhdl(&source);
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 }
@@ -293,10 +299,13 @@ end entity dut;
 fn test_parse_full_axi_peripheral() {
     let source = std::fs::read_to_string(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent().unwrap()
-            .parent().unwrap()
-            .join("examples/vhdl/axi_peripheral.vhd")
-    ).unwrap();
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("examples/vhdl/axi_peripheral.vhd"),
+    )
+    .unwrap();
     let result = parse_vhdl(&source);
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 }

@@ -36,7 +36,10 @@ end entity test_entity;
     use skalp_frontend::hir::HirPortDirection;
     assert!(matches!(entity.ports[0].direction, HirPortDirection::Input));
     assert!(matches!(entity.ports[1].direction, HirPortDirection::Input));
-    assert!(matches!(entity.ports[2].direction, HirPortDirection::Output));
+    assert!(matches!(
+        entity.ports[2].direction,
+        HirPortDirection::Output
+    ));
 
     // Check port types
     use skalp_frontend::hir::HirType;
@@ -109,13 +112,25 @@ end architecture rtl;
     let imp = &hir.implementations[0];
 
     // Should have count_reg signal
-    assert!(imp.signals.len() >= 1, "expected at least 1 signal, got {}", imp.signals.len());
+    assert!(
+        !imp.signals.is_empty(),
+        "expected at least 1 signal, got {}",
+        imp.signals.len()
+    );
 
     // Should have at least one event block (the clocked process)
-    assert!(imp.event_blocks.len() >= 1, "expected event blocks, got {}", imp.event_blocks.len());
+    assert!(
+        !imp.event_blocks.is_empty(),
+        "expected event blocks, got {}",
+        imp.event_blocks.len()
+    );
 
     // Should have a concurrent assignment (count <= count_reg)
-    assert!(imp.assignments.len() >= 1, "expected assignments, got {}", imp.assignments.len());
+    assert!(
+        !imp.assignments.is_empty(),
+        "expected assignments, got {}",
+        imp.assignments.len()
+    );
 }
 
 #[test]
@@ -162,9 +177,12 @@ end architecture rtl;
     let imp = &hir.implementations[0];
 
     // Combinational process -> event block with empty triggers
-    assert!(imp.event_blocks.len() >= 1);
+    assert!(!imp.event_blocks.is_empty());
     let eb = &imp.event_blocks[0];
-    assert!(eb.triggers.is_empty(), "combinational process should have empty triggers");
+    assert!(
+        eb.triggers.is_empty(),
+        "combinational process should have empty triggers"
+    );
 
     // Should have a case/match statement
     assert!(!eb.statements.is_empty());
@@ -249,7 +267,12 @@ end entity axi_reg;
     assert_eq!(entity.name, "AxiReg");
 
     // clk + rst + 6 flattened bus ports = 8 total
-    assert_eq!(entity.ports.len(), 8, "ports: {:?}", entity.ports.iter().map(|p| &p.name).collect::<Vec<_>>());
+    assert_eq!(
+        entity.ports.len(),
+        8,
+        "ports: {:?}",
+        entity.ports.iter().map(|p| &p.name).collect::<Vec<_>>()
+    );
 
     // Check flattened port names
     let names: Vec<&str> = entity.ports.iter().map(|p| p.name.as_str()).collect();
@@ -265,18 +288,45 @@ end entity axi_reg;
     // Check directions from the view
     use skalp_frontend::hir::HirPortDirection;
     let find_port = |name: &str| entity.ports.iter().find(|p| p.name == name).unwrap();
-    assert!(matches!(find_port("bus_awaddr").direction, HirPortDirection::Output));
-    assert!(matches!(find_port("bus_awvalid").direction, HirPortDirection::Output));
-    assert!(matches!(find_port("bus_awready").direction, HirPortDirection::Input));
-    assert!(matches!(find_port("bus_wdata").direction, HirPortDirection::Output));
-    assert!(matches!(find_port("bus_wvalid").direction, HirPortDirection::Output));
-    assert!(matches!(find_port("bus_wready").direction, HirPortDirection::Input));
+    assert!(matches!(
+        find_port("bus_awaddr").direction,
+        HirPortDirection::Output
+    ));
+    assert!(matches!(
+        find_port("bus_awvalid").direction,
+        HirPortDirection::Output
+    ));
+    assert!(matches!(
+        find_port("bus_awready").direction,
+        HirPortDirection::Input
+    ));
+    assert!(matches!(
+        find_port("bus_wdata").direction,
+        HirPortDirection::Output
+    ));
+    assert!(matches!(
+        find_port("bus_wvalid").direction,
+        HirPortDirection::Output
+    ));
+    assert!(matches!(
+        find_port("bus_wready").direction,
+        HirPortDirection::Input
+    ));
 
     // Check types
     use skalp_frontend::hir::HirType;
-    assert!(matches!(find_port("bus_awaddr").port_type, HirType::Logic(32)));
-    assert!(matches!(find_port("bus_awvalid").port_type, HirType::Logic(1)));
-    assert!(matches!(find_port("bus_wdata").port_type, HirType::Logic(32)));
+    assert!(matches!(
+        find_port("bus_awaddr").port_type,
+        HirType::Logic(32)
+    ));
+    assert!(matches!(
+        find_port("bus_awvalid").port_type,
+        HirType::Logic(1)
+    ));
+    assert!(matches!(
+        find_port("bus_wdata").port_type,
+        HirType::Logic(32)
+    ));
 }
 
 #[test]
@@ -300,11 +350,11 @@ end entity types;
     let ports = &hir.entities[0].ports;
 
     use skalp_frontend::hir::HirType;
-    assert!(matches!(ports[0].port_type, HirType::Logic(1)));   // std_logic
-    assert!(matches!(ports[1].port_type, HirType::Logic(16)));  // std_logic_vector(15 downto 0)
-    assert!(matches!(ports[2].port_type, HirType::Nat(8)));     // unsigned(7 downto 0)
-    assert!(matches!(ports[3].port_type, HirType::Int(8)));     // signed(7 downto 0)
-    assert!(matches!(ports[4].port_type, HirType::Bool));       // boolean
+    assert!(matches!(ports[0].port_type, HirType::Logic(1))); // std_logic
+    assert!(matches!(ports[1].port_type, HirType::Logic(16))); // std_logic_vector(15 downto 0)
+    assert!(matches!(ports[2].port_type, HirType::Nat(8))); // unsigned(7 downto 0)
+    assert!(matches!(ports[3].port_type, HirType::Int(8))); // signed(7 downto 0)
+    assert!(matches!(ports[4].port_type, HirType::Bool)); // boolean
 }
 
 // ========================================================================
@@ -334,7 +384,10 @@ end architecture rtl;
     let imp = &hir.implementations[0];
 
     // The concurrent assignment b <= std_logic_vector(a) should NOT produce Literal(0)
-    assert!(!imp.assignments.is_empty(), "expected at least 1 assignment");
+    assert!(
+        !imp.assignments.is_empty(),
+        "expected at least 1 assignment"
+    );
     use skalp_frontend::hir::{HirExpression, HirLiteral};
     let rhs = &imp.assignments[0].rhs;
     assert!(
@@ -411,7 +464,10 @@ end architecture rtl;
     let imp = &hir.implementations[0];
 
     // Concurrent assignment data_out <= din should resolve din to data_in's port
-    assert!(!imp.assignments.is_empty(), "expected at least 1 assignment");
+    assert!(
+        !imp.assignments.is_empty(),
+        "expected at least 1 assignment"
+    );
     use skalp_frontend::hir::HirExpression;
     let rhs = &imp.assignments[0].rhs;
     assert!(
@@ -456,10 +512,18 @@ end architecture rtl;
     let hir = parse_vhdl_source(source, None).unwrap();
     let imp = &hir.implementations[0];
 
-    assert_eq!(imp.functions.len(), 1, "expected 1 function, got {}", imp.functions.len());
+    assert_eq!(
+        imp.functions.len(),
+        1,
+        "expected 1 function, got {}",
+        imp.functions.len()
+    );
     assert_eq!(imp.functions[0].name, "max_val");
     assert_eq!(imp.functions[0].params.len(), 2, "expected 2 params");
-    assert!(imp.functions[0].return_type.is_some(), "expected return type");
+    assert!(
+        imp.functions[0].return_type.is_some(),
+        "expected return type"
+    );
     assert!(!imp.functions[0].body.is_empty(), "expected function body");
 }
 
@@ -742,7 +806,10 @@ end architecture rtl;
     let imp = &hir.implementations[0];
 
     // The assignment should resolve my_pkg.MY_CONST to a constant reference
-    assert!(!imp.assignments.is_empty(), "expected at least 1 assignment");
+    assert!(
+        !imp.assignments.is_empty(),
+        "expected at least 1 assignment"
+    );
 }
 
 // ========================================================================
@@ -802,7 +869,10 @@ end architecture rtl;
 "#;
     let hir = parse_vhdl_source(source, None).unwrap();
     let imp = &hir.implementations[0];
-    assert!(!imp.assignments.is_empty(), "expected at least 1 assignment");
+    assert!(
+        !imp.assignments.is_empty(),
+        "expected at least 1 assignment"
+    );
     let rhs = &imp.assignments[0].rhs;
 
     // NAND should produce Not(And(a, b))
@@ -811,13 +881,15 @@ end architecture rtl;
         HirExpression::Unary(u) => {
             assert!(
                 matches!(u.op, skalp_frontend::hir::HirUnaryOp::Not),
-                "outer op should be Not, got {:?}", u.op
+                "outer op should be Not, got {:?}",
+                u.op
             );
             match u.operand.as_ref() {
                 HirExpression::Binary(b) => {
                     assert!(
                         matches!(b.op, skalp_frontend::hir::HirBinaryOp::And),
-                        "inner op should be And, got {:?}", b.op
+                        "inner op should be And, got {:?}",
+                        b.op
                     );
                 }
                 other => panic!("expected Binary inside Not, got {:?}", other),
@@ -865,13 +937,21 @@ end architecture rtl;
 
     // Find the match statement
     use skalp_frontend::hir::HirStatement;
-    let match_stmt = stmts.iter().find_map(|s| {
-        if let HirStatement::Match(m) = s { Some(m) } else { None }
-    }).expect("expected a Match statement");
+    let match_stmt = stmts
+        .iter()
+        .find_map(|s| {
+            if let HirStatement::Match(m) = s {
+                Some(m)
+            } else {
+                None
+            }
+        })
+        .expect("expected a Match statement");
 
     // "00" | "01" should produce 2 arms + "others" = 3 total arms
     assert_eq!(
-        match_stmt.arms.len(), 3,
+        match_stmt.arms.len(),
+        3,
         "expected 3 arms (2 for choices + 1 for others), got {}",
         match_stmt.arms.len()
     );
@@ -1011,7 +1091,8 @@ end architecture rtl;
     let (_hir2, diags2) = parse_vhdl_source_with_diagnostics(source2, None).unwrap();
 
     use skalp_vhdl::diagnostics::VhdlSeverity;
-    let errors: Vec<_> = diags2.iter()
+    let errors: Vec<_> = diags2
+        .iter()
         .filter(|d| d.severity == VhdlSeverity::Error)
         .collect();
     assert!(
@@ -1020,7 +1101,9 @@ end architecture rtl;
         diags2
     );
     assert!(
-        errors.iter().any(|e| e.message.contains("unresolved signal target")),
+        errors
+            .iter()
+            .any(|e| e.message.contains("unresolved signal target")),
         "expected error about unresolved signal target, got: {:?}",
         errors.iter().map(|e| &e.message).collect::<Vec<_>>()
     );

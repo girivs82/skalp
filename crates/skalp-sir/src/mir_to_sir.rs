@@ -4201,8 +4201,7 @@ impl<'a> MirToSirConverter<'a> {
         // mask = 1 << bit_index
         let one = self.create_constant_node(1, signal_width);
         let bit_idx_node = self.create_constant_node(bit_index, signal_width);
-        let mask =
-            self.create_binary_op_node(&skalp_mir::BinaryOp::LeftShift, one, bit_idx_node);
+        let mask = self.create_binary_op_node(&skalp_mir::BinaryOp::LeftShift, one, bit_idx_node);
 
         // inverted_mask = ~mask
         let inverted_mask = self.create_unary_op_node(&skalp_mir::UnaryOp::BitwiseNot, mask);
@@ -4216,11 +4215,8 @@ impl<'a> MirToSirConverter<'a> {
 
         // masked_bit = new_bit_value & 1 (ensure single bit)
         let one_1bit = self.create_constant_node(1, signal_width);
-        let masked_bit = self.create_binary_op_node(
-            &skalp_mir::BinaryOp::BitwiseAnd,
-            new_bit_value,
-            one_1bit,
-        );
+        let masked_bit =
+            self.create_binary_op_node(&skalp_mir::BinaryOp::BitwiseAnd, new_bit_value, one_1bit);
 
         // shifted_bit = masked_bit << bit_index
         let bit_idx_node2 = self.create_constant_node(bit_index, signal_width);
@@ -4287,11 +4283,8 @@ impl<'a> MirToSirConverter<'a> {
             range_mask2,
         );
         let low_node2 = self.create_constant_node(low, signal_width);
-        let shifted_value = self.create_binary_op_node(
-            &skalp_mir::BinaryOp::LeftShift,
-            masked_value,
-            low_node2,
-        );
+        let shifted_value =
+            self.create_binary_op_node(&skalp_mir::BinaryOp::LeftShift, masked_value, low_node2);
 
         // result = cleared | shifted_value
         self.create_binary_op_node(&skalp_mir::BinaryOp::BitwiseOr, cleared, shifted_value)
@@ -4864,10 +4857,7 @@ impl<'a> MirToSirConverter<'a> {
     /// Process all statements in a case arm (or any block), returning a map of
     /// signal_name → node_id for each signal assigned. Handles nested If/Case
     /// statements by converting them to mux nodes.
-    fn process_case_arm_statements(
-        &mut self,
-        statements: &[Statement],
-    ) -> HashMap<String, usize> {
+    fn process_case_arm_statements(&mut self, statements: &[Statement]) -> HashMap<String, usize> {
         let mut result: HashMap<String, usize> = HashMap::new();
 
         for stmt in statements {
@@ -7855,8 +7845,7 @@ impl<'a> MirToSirConverter<'a> {
                             }
                         }
                         LValue::Port(port_id) => {
-                            if let Some(port) =
-                                child_module.ports.iter().find(|p| p.id == *port_id)
+                            if let Some(port) = child_module.ports.iter().find(|p| p.id == *port_id)
                             {
                                 format!("{}.{}", inst_prefix, port.name)
                             } else {
@@ -10099,9 +10088,7 @@ impl<'a> MirToSirConverter<'a> {
                     _ => None,
                 }
             }
-            ExpressionKind::Cast { expr: inner, .. } => {
-                self.evaluate_constant_expression(inner)
-            }
+            ExpressionKind::Cast { expr: inner, .. } => self.evaluate_constant_expression(inner),
             _ => None,
         }
     }

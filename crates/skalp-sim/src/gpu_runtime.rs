@@ -77,10 +77,9 @@ impl GpuRuntime {
         // Uses the same cross-process file lock as C++ compilation.
         let cache = cpp_compiler::cache_dir();
         let _ = std::fs::create_dir_all(&cache);
-        let _shader_guard = cpp_compiler::acquire_compile_lock(&cache)
-            .map_err(|e| SimulationError::GpuError(
-                format!("Failed to acquire shader compile lock: {}", e),
-            ))?;
+        let _shader_guard = cpp_compiler::acquire_compile_lock(&cache).map_err(|e| {
+            SimulationError::GpuError(format!("Failed to acquire shader compile lock: {}", e))
+        })?;
 
         let library = self
             .device

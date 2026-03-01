@@ -161,15 +161,15 @@ pub enum SyntaxKind {
     BasedLiteral,
 
     // Operators
-    SignalAssign,     // <=
-    VarAssign,        // :=
-    Arrow,            // =>
-    BoxOp,            // <>
-    DoubleStar,       // **
-    NotEqual,         // /=
-    GreaterEqual,     // >=
-    DoubleLess,       // <<
-    DoubleGreater,    // >>
+    SignalAssign,  // <=
+    VarAssign,     // :=
+    Arrow,         // =>
+    BoxOp,         // <>
+    DoubleStar,    // **
+    NotEqual,      // /=
+    GreaterEqual,  // >=
+    DoubleLess,    // <<
+    DoubleGreater, // >>
 
     // Delimiters
     LParen,
@@ -180,9 +180,9 @@ pub enum SyntaxKind {
     Semicolon,
     Colon,
     Dot,
-    Tick,             // '
-    Ampersand,        // &
-    Bar,              // |
+    Tick,      // '
+    Ampersand, // &
+    Bar,       // |
     Plus,
     Minus,
     Star,

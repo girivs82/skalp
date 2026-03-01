@@ -1143,7 +1143,11 @@ impl<'hir> HirToMir<'hir> {
                     }
 
                     // Convert event blocks to processes
-                    for event_block in impl_block.event_blocks.iter().chain(gen_event_blocks.iter()) {
+                    for event_block in impl_block
+                        .event_blocks
+                        .iter()
+                        .chain(gen_event_blocks.iter())
+                    {
                         let process = self.convert_event_block(event_block);
                         module.processes.push(process);
                     }
@@ -1449,7 +1453,11 @@ impl<'hir> HirToMir<'hir> {
                         "🔴🔴🔴 BUG #127 DEBUG: impl_block has {} assignments 🔴🔴🔴",
                         impl_block.assignments.len()
                     );
-                    let all_assignments: Vec<_> = impl_block.assignments.iter().chain(gen_assignments.iter()).collect();
+                    let all_assignments: Vec<_> = impl_block
+                        .assignments
+                        .iter()
+                        .chain(gen_assignments.iter())
+                        .collect();
                     for (i, a) in all_assignments.iter().enumerate() {
                         trace!(
                             "🔴🔴🔴 BUG #127 DEBUG: Assignment {}: LHS={:?}, RHS={:?} 🔴🔴🔴",
@@ -1458,9 +1466,14 @@ impl<'hir> HirToMir<'hir> {
                             std::mem::discriminant(&a.rhs)
                         );
                     }
-                    let all_assignments_for_processing: Vec<_> = impl_block.assignments.iter().chain(gen_assignments.iter()).collect();
+                    let all_assignments_for_processing: Vec<_> = impl_block
+                        .assignments
+                        .iter()
+                        .chain(gen_assignments.iter())
+                        .collect();
                     let total_assignments = all_assignments_for_processing.len();
-                    for (idx, hir_assign) in all_assignments_for_processing.into_iter().enumerate() {
+                    for (idx, hir_assign) in all_assignments_for_processing.into_iter().enumerate()
+                    {
                         let assignment_start = Instant::now();
                         trace!(
                             "🟢🟢🟢 FOR_LOOP_ENTRY: Processing assignment {}/{} 🟢🟢🟢",
@@ -17692,7 +17705,11 @@ impl<'hir> HirToMir<'hir> {
     fn elaborate_generate_blocks_in_impl(
         &mut self,
         impl_block: &hir::HirImplementation,
-    ) -> (Vec<hir::HirSignal>, Vec<hir::HirEventBlock>, Vec<hir::HirAssignment>) {
+    ) -> (
+        Vec<hir::HirSignal>,
+        Vec<hir::HirEventBlock>,
+        Vec<hir::HirAssignment>,
+    ) {
         let mut signals = Vec::new();
         let mut event_blocks = Vec::new();
         let mut assignments = Vec::new();
@@ -17720,7 +17737,9 @@ impl<'hir> HirToMir<'hir> {
         match stmt {
             hir::HirStatement::GenerateIf(gen_if) => {
                 // Evaluate condition using the ConstEvaluator (which has all constants registered)
-                let cond_val = self.const_evaluator.eval(&gen_if.condition)
+                let cond_val = self
+                    .const_evaluator
+                    .eval(&gen_if.condition)
                     .ok()
                     .and_then(|v| v.as_bool())
                     .or_else(|| {
@@ -17746,7 +17765,11 @@ impl<'hir> HirToMir<'hir> {
                 let start_val = self.try_eval_const_expr(&gen_for.range.start);
                 let end_val = self.try_eval_const_expr(&gen_for.range.end);
                 if let (Some(start), Some(end)) = (start_val, end_val) {
-                    let end_exclusive = if gen_for.range.inclusive { end + 1 } else { end };
+                    let end_exclusive = if gen_for.range.inclusive {
+                        end + 1
+                    } else {
+                        end
+                    };
                     for _i in start..end_exclusive {
                         // For-generate body items are in the body field
                         self.collect_generate_body_items(
@@ -17757,7 +17780,9 @@ impl<'hir> HirToMir<'hir> {
                         );
                     }
                 } else {
-                    trace!("[WARNING] Could not evaluate generate-for range at compile time, skipping");
+                    trace!(
+                        "[WARNING] Could not evaluate generate-for range at compile time, skipping"
+                    );
                 }
             }
             _ => {}

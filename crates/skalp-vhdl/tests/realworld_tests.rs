@@ -32,7 +32,11 @@ fn test_parse_spi_master_jakubcabal() {
     for e in &result.errors {
         println!("  {} at pos {}", e.message, e.position);
     }
-    assert_eq!(result.errors.len(), 0, "Expected 0 parse errors for SPI master");
+    assert_eq!(
+        result.errors.len(),
+        0,
+        "Expected 0 parse errors for SPI master"
+    );
 }
 
 // =========================================================================
@@ -52,7 +56,11 @@ begin
 end rtl;
 "#;
     let result = skalp_vhdl::parse::parse_vhdl(source);
-    assert_eq!(result.errors.len(), 0, "real() type conversion should parse");
+    assert_eq!(
+        result.errors.len(),
+        0,
+        "real() type conversion should parse"
+    );
 }
 
 #[test]
@@ -137,7 +145,11 @@ begin
 end rtl;
 "#;
     let result = skalp_vhdl::parse::parse_vhdl(source);
-    assert_eq!(result.errors.len(), 0, "concurrent assert should parse cleanly");
+    assert_eq!(
+        result.errors.len(),
+        0,
+        "concurrent assert should parse cleanly"
+    );
 }
 
 #[test]
@@ -154,5 +166,8 @@ end rtl;
 "#;
     let result = skalp_vhdl::parse::parse_vhdl(source);
     // Should produce errors but not hang
-    assert!(!result.errors.is_empty(), "invalid input should produce errors");
+    assert!(
+        !result.errors.is_empty(),
+        "invalid input should produce errors"
+    );
 }
