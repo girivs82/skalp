@@ -1046,6 +1046,19 @@ impl<'a> MirToSirConverter<'a> {
                         return true;
                     }
                 }
+                Statement::Case(case_stmt) => {
+                    // Check case arms and default block for target assignments
+                    for item in &case_stmt.items {
+                        if self.block_assigns_to_target(&item.block.statements, target) {
+                            return true;
+                        }
+                    }
+                    if let Some(default_block) = &case_stmt.default {
+                        if self.block_assigns_to_target(&default_block.statements, target) {
+                            return true;
+                        }
+                    }
+                }
                 Statement::ResolvedConditional(resolved) => {
                     let resolved_target = self.lvalue_to_string(&resolved.target);
                     if resolved_target == target {
@@ -2352,71 +2365,96 @@ impl<'a> MirToSirConverter<'a> {
         target: &str,
         default_value: Option<usize>,
     ) -> Option<usize> {
+        // BUG FIX: Use "last-write-wins" semantics instead of returning on first match.
+        // In VHDL sequential blocks, later assignments override earlier ones:
+        //   busy <= '0';                -- default
+        //   if start = '1' then
+        //       busy <= '1';            -- override
+        //   end if;
+        // The old code returned on the first `busy <= '0'`, ignoring the conditional override.
+        // Now we track current_value through all statements so later conditionals can override
+        // earlier direct assignments.
+        let mut current_value: Option<usize> = None;
+        let mut found_target = false;
+
         for stmt in statements.iter() {
             match stmt {
                 Statement::Assignment(assign) => {
                     let assign_target = self.lvalue_to_string(&assign.lhs);
                     if assign_target == target {
-                        return Some(self.create_expression_node(&assign.rhs));
+                        current_value = Some(self.create_expression_node(&assign.rhs));
+                        found_target = true;
+                        // DON'T return — later statements may override this
                     }
                 }
                 Statement::Block(block) => {
                     if let Some(val) = self.find_target_in_block_with_default(
                         &block.statements,
                         target,
-                        default_value,
+                        current_value.or(default_value),
                     ) {
-                        return Some(val);
+                        current_value = Some(val);
+                        found_target = true;
                     }
                 }
                 Statement::If(nested_if) => {
-                    // BUG #226 FIX: Pass the default value to nested conditionals
-                    let result = self.synthesize_conditional_assignment_with_default(
-                        nested_if,
-                        target,
-                        default_value,
-                    );
-                    // Check if the result is not just a keep-value SignalRef
-                    let is_keep_value = self.sir.combinational_nodes.iter().any(|n| {
-                        n.id == result
-                            && matches!(n.kind, SirNodeKind::SignalRef { ref signal } if signal == target)
-                    });
-                    if !is_keep_value {
-                        return Some(result);
+                    // Only process if this if actually assigns to target
+                    if self.if_assigns_to_target(nested_if, target) {
+                        // Use current_value (from prior direct assignment) as the default
+                        // so the mux uses it when the condition is false
+                        let result = self.synthesize_conditional_assignment_with_default(
+                            nested_if,
+                            target,
+                            current_value.or(default_value),
+                        );
+                        // Check if the result is not just a keep-value SignalRef
+                        let is_keep_value = self.sir.combinational_nodes.iter().any(|n| {
+                            n.id == result
+                                && matches!(n.kind, SirNodeKind::SignalRef { ref signal } if signal == target)
+                        });
+                        if !is_keep_value {
+                            current_value = Some(result);
+                            found_target = true;
+                        }
                     }
                 }
                 Statement::Case(nested_case) => {
-                    // BUG #226 FIX: Pass the default value to nested case statements
                     if let Some(val) = self.synthesize_case_for_target_with_default(
                         nested_case,
                         target,
-                        default_value,
+                        current_value.or(default_value),
                     ) {
-                        return Some(val);
+                        current_value = Some(val);
+                        found_target = true;
                     }
                 }
                 Statement::ResolvedConditional(resolved) => {
-                    // BUG #270 FIX: Handle ResolvedConditional with default
                     let resolved_target = self.lvalue_to_string(&resolved.target);
                     if resolved_target == target {
                         let result = self.synthesize_conditional_assignment_with_default(
                             &resolved.original,
                             target,
-                            default_value,
+                            current_value.or(default_value),
                         );
                         let is_keep_value = self.sir.combinational_nodes.iter().any(|n| {
                             n.id == result
                                 && matches!(n.kind, SirNodeKind::SignalRef { ref signal } if signal == target)
                         });
                         if !is_keep_value {
-                            return Some(result);
+                            current_value = Some(result);
+                            found_target = true;
                         }
                     }
                 }
                 _ => {}
             }
         }
-        None
+
+        if found_target {
+            current_value
+        } else {
+            None
+        }
     }
 
     fn process_branch_with_dependencies(

@@ -1079,3 +1079,407 @@ fn test_vhdl_to_sv_spi_master() {
     // for module output.
     assert!(!sv.is_empty(), "Expected at least a header comment");
 }
+
+// ========================================================================
+// Complex VHDL designs — inspired by NEORV32 and GRLIB patterns
+// These exercise the HIR lowerer robustness improvements:
+//   with...select, exit/next when, qualified expressions, FSMs
+// ========================================================================
+
+// --- GPIO Controller (NEORV32-style) ---
+
+#[test]
+fn test_vhdl_gpio_ctrl_parse() {
+    let source = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/vhdl/gpio_ctrl.vhd"),
+    )
+    .unwrap();
+
+    let (hir, diags) = skalp_vhdl::parse_vhdl_source_with_diagnostics(&source, None).unwrap();
+
+    assert_eq!(hir.entities.len(), 1);
+    let entity = &hir.entities[0];
+    assert_eq!(entity.name, "GpioCtrl");
+    assert!(entity.ports.len() >= 8, "expected >= 8 ports");
+
+    let imp = &hir.implementations[0];
+
+    // The with...select produces an assignment with a Match expression
+    let has_match_assign = imp
+        .assignments
+        .iter()
+        .any(|a| matches!(&a.rhs, skalp_frontend::hir::HirExpression::Match(_)));
+    assert!(
+        has_match_assign,
+        "expected at least one assignment with Match RHS (from with...select)"
+    );
+
+    // Should have event blocks (clocked processes)
+    assert!(
+        imp.event_blocks.len() >= 3,
+        "expected >= 3 event blocks (reg_write, sync, irq_gen), got {}",
+        imp.event_blocks.len()
+    );
+
+    // Check for no critical lowering errors
+    let errors: Vec<_> = diags
+        .iter()
+        .filter(|d| d.severity == skalp_vhdl::diagnostics::VhdlSeverity::Error)
+        .collect();
+    assert!(
+        errors.is_empty(),
+        "unexpected lowering errors: {:?}",
+        errors.iter().map(|d| &d.message).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn test_vhdl_gpio_ctrl_sir_pipeline() {
+    use skalp_mir::MirCompiler;
+
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/vhdl/gpio_ctrl.vhd");
+    let context = skalp_vhdl::parse_vhdl(&path).unwrap();
+
+    let compiler = MirCompiler::new();
+    let mir = compiler
+        .compile_to_mir_with_modules(&context.main_hir, &context.module_hirs)
+        .unwrap();
+    let module = &mir.modules[0];
+
+    // Signals should survive MIR
+    assert!(
+        !module.signals.is_empty(),
+        "MIR should have signals from GPIO ctrl"
+    );
+
+    // Convert to SIR
+    let sir = skalp_sir::mir_to_sir::convert_mir_to_sir(module);
+    assert!(!sir.inputs.is_empty(), "SIR should have inputs");
+    assert!(!sir.outputs.is_empty(), "SIR should have outputs");
+}
+
+#[tokio::test]
+async fn test_vhdl_gpio_ctrl_simulation() {
+    let mut tb = Testbench::new("examples/vhdl/gpio_ctrl.vhd").await.unwrap();
+
+    // Reset
+    tb.set("rst", 1u8)
+        .set("addr", 0u8)
+        .set("wdata", 0u8)
+        .set("we", 0u8)
+        .set("gpio_in", 0u8);
+    tb.clock(2).await;
+
+    // Release reset
+    tb.set("rst", 0u8);
+    tb.clock(1).await;
+
+    // Write 0xA5 to output register (addr=01)
+    tb.set("addr", 0b01u8).set("wdata", 0xA5u32).set("we", 1u8);
+    tb.clock(1).await;
+    tb.set("we", 0u8);
+    tb.clock(1).await;
+
+    // Verify output register was written correctly
+    tb.expect("gpio_out", 0xA5u32).await;
+
+    // Write 0x0F to direction register (addr=10)
+    tb.set("addr", 0b10u8).set("wdata", 0x0Fu32).set("we", 1u8);
+    tb.clock(1).await;
+    tb.set("we", 0u8);
+    tb.clock(1).await;
+
+    tb.expect("gpio_dir", 0x0Fu32).await;
+
+    // Read back via with...select mux — addr=01 should return out_reg
+    tb.set("addr", 0b01u8);
+    tb.clock(1).await;
+    tb.expect("rdata", 0xA5u32).await;
+
+    // Read direction register — addr=10
+    tb.set("addr", 0b10u8);
+    tb.clock(1).await;
+    tb.expect("rdata", 0x0Fu32).await;
+
+    tb.export_waveform("build/test_vhdl_gpio_ctrl.skw.gz").ok();
+}
+
+#[tokio::test]
+async fn test_vhdl_gpio_ctrl_irq() {
+    let mut tb = Testbench::new("examples/vhdl/gpio_ctrl.vhd").await.unwrap();
+
+    // Reset
+    tb.set("rst", 1u8)
+        .set("addr", 0u8)
+        .set("wdata", 0u8)
+        .set("we", 0u8)
+        .set("gpio_in", 0u8);
+    tb.clock(2).await;
+    tb.set("rst", 0u8);
+    tb.clock(1).await;
+
+    // Enable IRQ on pin 0 (addr=11, bit 0)
+    tb.set("addr", 0b11u8).set("wdata", 0x01u32).set("we", 1u8);
+    tb.clock(1).await;
+    tb.set("we", 0u8);
+    tb.clock(1).await;
+
+    // IRQ should be low before any edge
+    tb.expect("irq", 0u32).await;
+
+    // Rising edge on gpio_in[0]
+    tb.set("gpio_in", 0x01u32);
+    tb.clock(3).await; // in_sync latches, then in_prev gets old in_sync, edge detected
+
+    // IRQ should fire: irq_pend bit 0 set by edge detect
+    let irq = tb.get_u32("irq").await;
+    assert_eq!(irq, 1, "IRQ should fire after rising edge on enabled pin");
+
+    // IRQ should remain latched even after input goes low
+    tb.set("gpio_in", 0u8);
+    tb.clock(2).await;
+    tb.expect("irq", 1u32).await;
+
+    tb.export_waveform("build/test_vhdl_gpio_ctrl_irq.skw.gz")
+        .ok();
+}
+
+// --- Timer (NEORV32 GPTMR-style) ---
+
+#[test]
+fn test_vhdl_timer_parse() {
+    let source = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/vhdl/timer.vhd"),
+    )
+    .unwrap();
+
+    let (hir, diags) = skalp_vhdl::parse_vhdl_source_with_diagnostics(&source, None).unwrap();
+
+    assert_eq!(hir.entities.len(), 1);
+    assert_eq!(hir.entities[0].name, "Timer");
+
+    let imp = &hir.implementations[0];
+    assert!(
+        imp.event_blocks.len() >= 2,
+        "expected >= 2 event blocks (prescaler, counter)"
+    );
+
+    let errors: Vec<_> = diags
+        .iter()
+        .filter(|d| d.severity == skalp_vhdl::diagnostics::VhdlSeverity::Error)
+        .collect();
+    assert!(
+        errors.is_empty(),
+        "unexpected errors: {:?}",
+        errors.iter().map(|d| &d.message).collect::<Vec<_>>()
+    );
+}
+
+#[tokio::test]
+async fn test_vhdl_timer_counts() {
+    let mut tb = Testbench::new("examples/vhdl/timer.vhd").await.unwrap();
+
+    // Reset — set threshold high enough that counter doesn't match during test
+    tb.set("rst", 1u8)
+        .set("enable", 0u8)
+        .set("prescaler", 0u8)
+        .set("threshold", 0xFFu32);
+    tb.clock(2).await;
+    tb.expect("counter", 0u32).await;
+
+    // Release reset, enable counting with prescaler=0 (tick every cycle)
+    tb.set("rst", 0u8).set("enable", 1u8);
+
+    // Count up a few cycles (1-cycle delay: tick is registered, counter sees it next cycle)
+    tb.clock(1).await; // tick becomes '1' this cycle, counter sees old tick=0
+    for expected in 1u8..=5 {
+        tb.clock(1).await;
+        tb.expect("counter", expected).await;
+    }
+
+    tb.export_waveform("build/test_vhdl_timer_counts.skw.gz")
+        .ok();
+}
+
+#[tokio::test]
+async fn test_vhdl_timer_match() {
+    let mut tb = Testbench::new("examples/vhdl/timer.vhd").await.unwrap();
+
+    // Reset
+    tb.set("rst", 1u8)
+        .set("enable", 0u8)
+        .set("prescaler", 0u8)
+        .set("threshold", 5u32);
+    tb.clock(2).await;
+
+    // Enable counting, prescaler=0 (tick every cycle)
+    tb.set("rst", 0u8).set("enable", 1u8).set("prescaler", 0u8);
+
+    // Clock until we see match_out pulse
+    let mut match_seen = false;
+    for _ in 0..20 {
+        tb.clock(1).await;
+        let m = tb.get_u32("match_out").await;
+        if m == 1 {
+            match_seen = true;
+            break;
+        }
+    }
+    assert!(
+        match_seen,
+        "match_out should fire when counter hits threshold"
+    );
+
+    tb.export_waveform("build/test_vhdl_timer_match.skw.gz")
+        .ok();
+}
+
+// --- I2C FSM (GRLIB-style) ---
+
+#[test]
+fn test_vhdl_i2c_fsm_parse() {
+    let source = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/vhdl/i2c_fsm.vhd"),
+    )
+    .unwrap();
+
+    let (hir, diags) = skalp_vhdl::parse_vhdl_source_with_diagnostics(&source, None).unwrap();
+
+    assert_eq!(hir.entities.len(), 1);
+    assert_eq!(hir.entities[0].name, "I2cFsm");
+
+    let imp = &hir.implementations[0];
+
+    // Should have with...select for SCL output
+    let has_match = imp
+        .assignments
+        .iter()
+        .any(|a| matches!(&a.rhs, skalp_frontend::hir::HirExpression::Match(_)));
+    assert!(
+        has_match,
+        "expected Match expression from with...select for SCL"
+    );
+
+    // Should have event blocks for clk_gen and fsm processes
+    assert!(
+        imp.event_blocks.len() >= 2,
+        "expected >= 2 event blocks (clk_gen, fsm), got {}",
+        imp.event_blocks.len()
+    );
+
+    let errors: Vec<_> = diags
+        .iter()
+        .filter(|d| d.severity == skalp_vhdl::diagnostics::VhdlSeverity::Error)
+        .collect();
+    assert!(
+        errors.is_empty(),
+        "unexpected errors: {:?}",
+        errors.iter().map(|d| &d.message).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn test_vhdl_i2c_fsm_sir_pipeline() {
+    use skalp_mir::MirCompiler;
+
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/vhdl/i2c_fsm.vhd");
+    let context = skalp_vhdl::parse_vhdl(&path).unwrap();
+
+    let compiler = MirCompiler::new();
+    let mir = compiler
+        .compile_to_mir_with_modules(&context.main_hir, &context.module_hirs)
+        .unwrap();
+    let module = &mir.modules[0];
+
+    assert!(
+        !module.signals.is_empty(),
+        "MIR should have signals for I2C FSM"
+    );
+
+    let sir = skalp_sir::mir_to_sir::convert_mir_to_sir(module);
+    assert!(!sir.inputs.is_empty(), "SIR should have inputs");
+    assert!(!sir.outputs.is_empty(), "SIR should have outputs");
+    assert!(
+        !sir.state_elements.is_empty(),
+        "SIR should have state elements for FSM registers"
+    );
+}
+
+#[tokio::test]
+async fn test_vhdl_i2c_fsm_simulation() {
+    let mut tb = Testbench::new("examples/vhdl/i2c_fsm.vhd").await.unwrap();
+
+    // Reset
+    tb.set("rst", 1u8)
+        .set("start", 0u8)
+        .set("stop", 0u8)
+        .set("wr_data", 0u8)
+        .set("sda_in", 1u8);
+    tb.clock(3).await;
+
+    // Release reset
+    tb.set("rst", 0u8);
+    tb.clock(1).await;
+
+    // Should be idle — not busy, SCL idle high
+    tb.expect("busy", 0u32).await;
+    tb.expect("scl_out", 1u32).await;
+
+    // Initiate transfer of 0xA5
+    tb.set("wr_data", 0xA5u32).set("start", 1u8);
+    tb.clock(1).await;
+    tb.set("start", 0u8);
+
+    // busy should be high after start
+    tb.expect("busy", 1u32).await;
+
+    // Clock through the transfer
+    // Clock divider: clk_div is 4-bit (counts 0-15), phase is 2-bit (increments when clk_div=15)
+    // Data bit tick: phase="11" and clk_div="1111" → every 64 cycles
+    // 8 data bits + ACK = 9 ticks * 64 cycles = 576 cycles minimum
+    let mut done_seen = false;
+    for _ in 0..700 {
+        let sda = tb.get_u32("sda_out").await;
+        tb.set("sda_in", sda as u8);
+        tb.clock(1).await;
+
+        let done = tb.get_u32("done").await;
+        if done == 1 {
+            done_seen = true;
+            break;
+        }
+    }
+
+    assert!(done_seen, "FSM should complete transfer (done pulse)");
+
+    // After done, FSM returns to idle
+    tb.expect("busy", 0u32).await;
+
+    tb.export_waveform("build/test_vhdl_i2c_fsm.skw.gz").ok();
+}
+
+// --- SystemVerilog transpilation for new designs ---
+
+#[test]
+fn test_vhdl_to_sv_gpio_ctrl() {
+    let sv = vhdl_to_systemverilog("examples/vhdl/gpio_ctrl.vhd");
+    assert!(sv.contains("module"), "Expected module declaration");
+    assert!(sv.contains("gpio_out"), "Expected gpio_out port");
+    std::fs::write("build/gpio_ctrl_from_vhdl.sv", &sv).ok();
+}
+
+#[test]
+fn test_vhdl_to_sv_timer() {
+    let sv = vhdl_to_systemverilog("examples/vhdl/timer.vhd");
+    assert!(sv.contains("module"), "Expected module declaration");
+    assert!(sv.contains("counter"), "Expected counter port");
+    std::fs::write("build/timer_from_vhdl.sv", &sv).ok();
+}
+
+#[test]
+fn test_vhdl_to_sv_i2c_fsm() {
+    let sv = vhdl_to_systemverilog("examples/vhdl/i2c_fsm.vhd");
+    assert!(sv.contains("module"), "Expected module declaration");
+    assert!(sv.contains("scl_out"), "Expected scl_out port");
+    std::fs::write("build/i2c_fsm_from_vhdl.sv", &sv).ok();
+}

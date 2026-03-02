@@ -3459,6 +3459,7 @@ dependencies = [
  "rowan",
  "skalp-frontend",
  "thiserror 1.0.69",
+ "walkdir",
 ]
 
 [[package]]

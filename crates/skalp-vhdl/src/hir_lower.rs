@@ -101,6 +101,25 @@ fn first_ident(node: &SyntaxNode) -> Option<String> {
     first_token_text(node, SyntaxKind::Ident)
 }
 
+/// Get the first ident text, also looking inside child `Name` nodes.
+/// Needed because the parser wraps identifiers in `Name` nodes after
+/// `parse_selected_name()` / `parse_name()` calls.
+fn first_ident_recursive(node: &SyntaxNode) -> Option<String> {
+    // Check direct Ident tokens first
+    if let Some(id) = first_token_text(node, SyntaxKind::Ident) {
+        return Some(id);
+    }
+    // Fall back to Ident inside a child Name node
+    for child in node.children() {
+        if child.kind() == SyntaxKind::Name {
+            if let Some(id) = first_token_text(&child, SyntaxKind::Ident) {
+                return Some(id);
+            }
+        }
+    }
+    None
+}
+
 /// Check if a token of given kind exists as direct child
 fn has_token(node: &SyntaxNode, kind: SyntaxKind) -> bool {
     node.children_with_tokens()
@@ -743,6 +762,11 @@ impl VhdlHirBuilder {
                         instances.push(inst);
                     }
                 }
+                SyntaxKind::SelectedAssign => {
+                    if let Some(a) = self.lower_selected_assign(&child) {
+                        assignments.push(a);
+                    }
+                }
                 SyntaxKind::ForGenerate => {
                     if let Some(g) = self.lower_for_generate(&child) {
                         generate_stmts.push(HirStatement::GenerateFor(g));
@@ -1312,36 +1336,43 @@ impl VhdlHirBuilder {
     // ====================================================================
 
     fn lower_sequential_statements(&mut self, parent: &SyntaxNode) -> Vec<HirStatement> {
+        let children: Vec<SyntaxNode> = parent.children().collect();
+        self.lower_sequential_children(&children)
+    }
+
+    fn lower_sequential_children(&mut self, children: &[SyntaxNode]) -> Vec<HirStatement> {
         let mut stmts = Vec::new();
-        for child in parent.children() {
+        let mut i = 0;
+        while i < children.len() {
+            let child = &children[i];
             match child.kind() {
                 SyntaxKind::IfStmt => {
-                    if let Some(s) = self.lower_if_stmt(&child) {
+                    if let Some(s) = self.lower_if_stmt(child) {
                         stmts.push(s);
                     }
                 }
                 SyntaxKind::CaseStmt => {
-                    if let Some(s) = self.lower_case_stmt(&child) {
+                    if let Some(s) = self.lower_case_stmt(child) {
                         stmts.push(s);
                     }
                 }
                 SyntaxKind::ForLoopStmt => {
-                    if let Some(s) = self.lower_for_loop(&child) {
+                    if let Some(s) = self.lower_for_loop(child) {
                         stmts.push(s);
                     }
                 }
                 SyntaxKind::SequentialSignalAssign | SyntaxKind::VariableAssignStmt => {
-                    if let Some(a) = self.lower_sequential_assign(&child) {
+                    if let Some(a) = self.lower_sequential_assign(child) {
                         stmts.push(HirStatement::Assignment(a));
                     }
                 }
                 SyntaxKind::WhileLoopStmt => {
-                    if let Some(s) = self.lower_while_loop(&child) {
+                    if let Some(s) = self.lower_while_loop(child) {
                         stmts.push(s);
                     }
                 }
                 SyntaxKind::ReturnStmt => {
-                    stmts.push(self.lower_return_stmt(&child));
+                    stmts.push(self.lower_return_stmt(child));
                 }
                 SyntaxKind::NullStmt => {
                     // null statement — no-op
@@ -1349,16 +1380,88 @@ impl VhdlHirBuilder {
                 SyntaxKind::AssertStmt => {
                     // assert is legitimately non-synthesizable — silent skip
                 }
-                SyntaxKind::NextStmt => {
-                    self.emit_warning("'next' statement not supported for synthesis — skipped");
+                SyntaxKind::ExitStmt | SyntaxKind::NextStmt => {
+                    let is_exit = child.kind() == SyntaxKind::ExitStmt;
+                    if let Some(guard) = self.lower_loop_control(child, is_exit, &children[i + 1..])
+                    {
+                        stmts.push(guard);
+                    }
+                    // All remaining children are already wrapped in the guard
+                    break;
                 }
-                SyntaxKind::ExitStmt => {
-                    self.emit_warning("'exit' statement not supported for synthesis — skipped");
+                _ => {
+                    // Try recursive
+                    let sub = self.lower_sequential_statements(child);
+                    stmts.extend(sub);
+                }
+            }
+            i += 1;
+        }
+        stmts
+    }
+
+    /// Lower `exit [when cond]` or `next [when cond]` by wrapping remaining
+    /// loop body statements in a conditional guard.
+    ///
+    /// `exit when cond` → `if not cond then <remaining_stmts> end if;`
+    /// `next when cond` → `if not cond then <remaining_stmts> end if;`
+    /// `exit` (unconditional) → remaining stmts are dead code, omit them.
+    fn lower_loop_control(
+        &mut self,
+        node: &SyntaxNode,
+        _is_exit: bool,
+        remaining_siblings: &[SyntaxNode],
+    ) -> Option<HirStatement> {
+        // Extract condition: elements between WhenKw and Semicolon
+        let has_when = has_token(node, SyntaxKind::WhenKw);
+
+        if !has_when {
+            // Unconditional exit/next — remaining statements are unreachable
+            return None;
+        }
+
+        // Extract the condition expression (after WhenKw)
+        let elements: Vec<SyntaxElement> = node
+            .children_with_tokens()
+            .filter(|el| el.kind() != SyntaxKind::Whitespace && el.kind() != SyntaxKind::Comment)
+            .collect();
+
+        let mut cond_elements = Vec::new();
+        let mut after_when = false;
+        for el in &elements {
+            match el.kind() {
+                SyntaxKind::WhenKw => {
+                    after_when = true;
+                }
+                SyntaxKind::Semicolon => break,
+                _ if after_when => {
+                    cond_elements.push(el.clone());
                 }
                 _ => {}
             }
         }
-        stmts
+
+        if cond_elements.is_empty() {
+            return None;
+        }
+
+        let condition = self.lower_expr_from_elements(&cond_elements);
+
+        // Negate the condition: wrap remaining body in `if NOT condition`
+        let negated = HirExpression::Unary(HirUnaryExpr {
+            op: HirUnaryOp::Not,
+            operand: Box::new(condition),
+        });
+
+        // Lower remaining siblings as the guarded body
+        let guarded_body = self.lower_sequential_children(remaining_siblings);
+
+        Some(HirStatement::If(HirIfStatement {
+            condition: negated,
+            then_statements: guarded_body,
+            else_statements: None,
+            mux_style: MuxStyle::default(),
+        }))
     }
 
     fn lower_return_stmt(&mut self, node: &SyntaxNode) -> HirStatement {
@@ -1874,6 +1977,162 @@ impl VhdlHirBuilder {
         })
     }
 
+    /// Lower `with sel select target <= val1 when choices1, val2 when choices2, ...`
+    /// into an `HirAssignment` with a `Match` expression on the RHS.
+    fn lower_selected_assign(&mut self, node: &SyntaxNode) -> Option<HirAssignment> {
+        let elements: Vec<SyntaxElement> = node
+            .children_with_tokens()
+            .filter(|el| el.kind() != SyntaxKind::Whitespace && el.kind() != SyntaxKind::Comment)
+            .collect();
+
+        // Phase 1: Extract selector (between WithKw and SelectKw)
+        let mut selector_elements = Vec::new();
+        let mut target_elements = Vec::new();
+        let mut rhs_elements = Vec::new();
+        let mut phase = 0u8; // 0=before with, 1=selector, 2=target, 3=rhs
+
+        for el in &elements {
+            match (phase, el.kind()) {
+                (0, SyntaxKind::WithKw) => phase = 1,
+                (1, SyntaxKind::SelectKw) => phase = 2,
+                (2, SyntaxKind::SignalAssign) => phase = 3,
+                (1, _) => selector_elements.push(el.clone()),
+                (2, _) => target_elements.push(el.clone()),
+                (3, SyntaxKind::Semicolon) => {}
+                (3, _) => rhs_elements.push(el.clone()),
+                _ => {}
+            }
+        }
+
+        if selector_elements.is_empty() || target_elements.is_empty() {
+            return None;
+        }
+
+        let selector_expr = self.lower_expr_from_elements(&selector_elements);
+        let lhs = self.lower_lvalue_from_elements(&target_elements);
+
+        // Phase 2: Parse value-when-choices groups from rhs_elements.
+        // Structure: value1, WhenKw, choices1, Comma, value2, WhenKw, choices2, ...
+        // We split into groups separated by Comma at depth 0, then split each on WhenKw.
+        let mut arms: Vec<HirMatchArmExpr> = Vec::new();
+        let mut current_group: Vec<SyntaxElement> = Vec::new();
+        let mut paren_depth = 0i32;
+
+        let flush_group = |builder: &mut Self,
+                           group: &mut Vec<SyntaxElement>,
+                           arms: &mut Vec<HirMatchArmExpr>| {
+            if group.is_empty() {
+                return;
+            }
+            // Split on WhenKw at depth 0
+            let when_pos = group.iter().enumerate().find_map(|(i, el)| {
+                if el.kind() == SyntaxKind::WhenKw {
+                    Some(i)
+                } else {
+                    None
+                }
+            });
+            if let Some(pos) = when_pos {
+                let value_elements = &group[..pos];
+                let choice_elements = &group[pos + 1..];
+
+                let value_expr = builder.lower_expr_from_elements(value_elements);
+
+                // Check for "others" keyword
+                let is_others = choice_elements
+                    .iter()
+                    .any(|el| el.kind() == SyntaxKind::OthersKw);
+                if is_others {
+                    arms.push(HirMatchArmExpr {
+                        pattern: HirPattern::Wildcard,
+                        guard: None,
+                        expr: value_expr,
+                    });
+                } else {
+                    // Parse choices — may be inside a ChoiceList/Choice CST node
+                    let choice_nodes: Vec<&SyntaxNode> = choice_elements
+                        .iter()
+                        .filter_map(|el| {
+                            if let SyntaxElement::Node(n) = el {
+                                if n.kind() == SyntaxKind::ChoiceList
+                                    || n.kind() == SyntaxKind::Choice
+                                {
+                                    Some(n)
+                                } else {
+                                    None
+                                }
+                            } else {
+                                None
+                            }
+                        })
+                        .collect();
+
+                    if let Some(choice_list) = choice_nodes
+                        .iter()
+                        .find(|n| n.kind() == SyntaxKind::ChoiceList)
+                    {
+                        for choice in all_children_of_kind(choice_list, SyntaxKind::Choice) {
+                            let pattern = builder.lower_choice_to_pattern(&choice);
+                            arms.push(HirMatchArmExpr {
+                                pattern,
+                                guard: None,
+                                expr: value_expr.clone(),
+                            });
+                        }
+                    } else {
+                        // Fallback: lower the choice elements as a pattern expression
+                        let choice_expr = builder.lower_expr_from_elements(choice_elements);
+                        let pattern = match &choice_expr {
+                            HirExpression::Literal(lit) => HirPattern::Literal(lit.clone()),
+                            _ => HirPattern::Wildcard,
+                        };
+                        arms.push(HirMatchArmExpr {
+                            pattern,
+                            guard: None,
+                            expr: value_expr,
+                        });
+                    }
+                }
+            }
+            group.clear();
+        };
+
+        for el in &rhs_elements {
+            match el.kind() {
+                SyntaxKind::LParen => {
+                    paren_depth += 1;
+                    current_group.push(el.clone());
+                }
+                SyntaxKind::RParen => {
+                    paren_depth -= 1;
+                    current_group.push(el.clone());
+                }
+                SyntaxKind::Comma if paren_depth == 0 => {
+                    flush_group(self, &mut current_group, &mut arms);
+                }
+                _ => {
+                    current_group.push(el.clone());
+                }
+            }
+        }
+        flush_group(self, &mut current_group, &mut arms);
+
+        // Build the match expression as RHS
+        let match_expr = HirExpression::Match(HirMatchExpr {
+            expr: Box::new(selector_expr),
+            arms,
+            mux_style: MuxStyle::default(),
+        });
+
+        Some(HirAssignment {
+            id: self.alloc_assignment_id(),
+            lhs,
+            assignment_type: HirAssignmentType::Combinational,
+            rhs: match_expr,
+            comments: collect_leading_comments(node),
+        })
+    }
+
     fn lower_conditional_expr(&mut self, elements: &[SyntaxElement]) -> HirExpression {
         // value when condition else value when condition else default
         // Split on WhenKw and ElseKw tokens
@@ -1952,6 +2211,9 @@ impl VhdlHirBuilder {
                 // entity work.Name style — extract last ident (entity name)
                 let sel_idents = ident_texts(&sel_name);
                 sel_idents.last().cloned().unwrap_or_default()
+            } else if let Some(name) = first_ident_recursive(node) {
+                // Component name wrapped in a Name node (from parse_selected_name)
+                name
             } else {
                 return None;
             }
@@ -2022,14 +2284,16 @@ impl VhdlHirBuilder {
     }
 
     fn lower_association_element(&mut self, node: &SyntaxNode) -> Option<HirConnection> {
-        let elements: Vec<(SyntaxKind, String)> = all_token_texts(node);
+        // Check for named association: formal [=> actual]
+        // The formal may be a bare Ident token or wrapped in a Name node.
+        let has_arrow = node
+            .children_with_tokens()
+            .any(|el| el.kind() == SyntaxKind::Arrow);
 
-        // Check for named association: formal => actual
-        let arrow_pos = elements.iter().position(|(k, _)| *k == SyntaxKind::Arrow);
-
-        if let Some(pos) = arrow_pos {
+        if has_arrow {
             // Named: port_name => expression
-            let port_name = elements.first().map(|(_, t)| t.clone()).unwrap_or_default();
+            // Extract port name from the first Name child node or bare Ident token
+            let port_name = self.extract_formal_name(node);
 
             let actual_elements: Vec<SyntaxElement> = node
                 .children_with_tokens()
@@ -2059,6 +2323,35 @@ impl VhdlHirBuilder {
                 expr,
             })
         }
+    }
+
+    /// Extract the formal port name from an association element.
+    /// Handles both bare Ident tokens and Name nodes wrapping the formal.
+    fn extract_formal_name(&self, node: &SyntaxNode) -> String {
+        for el in node.children_with_tokens() {
+            if el.kind() == SyntaxKind::Arrow {
+                break; // stop before =>
+            }
+            match el {
+                SyntaxElement::Token(ref t)
+                    if t.kind() == SyntaxKind::Ident
+                        || t.kind() == SyntaxKind::StdLogicKw
+                        || t.kind() == SyntaxKind::StdLogicVectorKw
+                        || t.kind() == SyntaxKind::UnsignedKw
+                        || t.kind() == SyntaxKind::SignedKw =>
+                {
+                    return t.text().to_string();
+                }
+                SyntaxElement::Node(ref n) if n.kind() == SyntaxKind::Name => {
+                    // Extract the first ident from the Name node
+                    if let Some(name) = first_ident(n) {
+                        return name;
+                    }
+                }
+                _ => {}
+            }
+        }
+        String::new()
     }
 
     // ====================================================================
@@ -3002,6 +3295,18 @@ impl VhdlHirBuilder {
                     HirExpression::Literal(HirLiteral::Integer(0))
                 };
             }
+            SyntaxKind::ConvStdLogicVectorKw => {
+                // conv_std_logic_vector(value, width) — cast first arg to logic vector
+                let args = self.extract_call_args(node);
+                let first_arg = args
+                    .into_iter()
+                    .next()
+                    .unwrap_or(HirExpression::Literal(HirLiteral::Integer(0)));
+                return HirExpression::Cast(HirCastExpr {
+                    expr: Box::new(first_arg),
+                    target_type: HirType::Logic(0),
+                });
+            }
             SyntaxKind::ResizeKw => {
                 let args = self.extract_call_args(node);
                 let mut it = args.into_iter();
@@ -3134,8 +3439,37 @@ impl VhdlHirBuilder {
             }
         }
 
-        // Check for tick/attribute: name'attribute
+        // Check for tick/attribute or qualified expression: name'attribute or type'(expr)
         if let Some(tick_pos) = tokens.iter().position(|(k, _)| *k == SyntaxKind::Tick) {
+            // Qualified expression: type'(expr) — Tick followed by LParen
+            if tokens
+                .get(tick_pos + 1)
+                .map(|(k, _)| *k == SyntaxKind::LParen)
+                .unwrap_or(false)
+            {
+                // Extract content between the parens after tick
+                let inner_expr = self.extract_call_args(node);
+                let expr = inner_expr
+                    .into_iter()
+                    .next()
+                    .unwrap_or(HirExpression::Literal(HirLiteral::Integer(0)));
+                // Use the type prefix to generate a Cast
+                let target_type = match name.as_str() {
+                    "unsigned" => Some(HirType::Nat(0)),
+                    "signed" => Some(HirType::Int(0)),
+                    "std_logic_vector" | "std_ulogic_vector" => Some(HirType::Logic(0)),
+                    _ => None,
+                };
+                return if let Some(ty) = target_type {
+                    HirExpression::Cast(HirCastExpr {
+                        expr: Box::new(expr),
+                        target_type: ty,
+                    })
+                } else {
+                    // Unknown type qualifier — return the inner expression directly
+                    expr
+                };
+            }
             // For MVP: handle common attributes
             if let Some((_, attr_name)) = tokens.get(tick_pos + 1) {
                 let lower_attr = attr_name.to_ascii_lowercase();
@@ -3230,14 +3564,7 @@ impl VhdlHirBuilder {
                     depth -= 1;
                     if depth == 0 {
                         if !current_arg.is_empty() {
-                            let filtered: Vec<_> = current_arg
-                                .iter()
-                                .filter(|e| {
-                                    e.kind() != SyntaxKind::Whitespace
-                                        && e.kind() != SyntaxKind::Comment
-                                })
-                                .cloned()
-                                .collect();
+                            let filtered = Self::strip_named_assoc(&current_arg);
                             if !filtered.is_empty() {
                                 args.push(self.lower_expr_from_elements(&filtered));
                             }
@@ -3248,13 +3575,7 @@ impl VhdlHirBuilder {
                     }
                 }
                 SyntaxKind::Comma if inside_parens && depth == 1 => {
-                    let filtered: Vec<_> = current_arg
-                        .iter()
-                        .filter(|e| {
-                            e.kind() != SyntaxKind::Whitespace && e.kind() != SyntaxKind::Comment
-                        })
-                        .cloned()
-                        .collect();
+                    let filtered = Self::strip_named_assoc(&current_arg);
                     if !filtered.is_empty() {
                         args.push(self.lower_expr_from_elements(&filtered));
                     }
@@ -3271,6 +3592,35 @@ impl VhdlHirBuilder {
         }
 
         args
+    }
+
+    /// Strip named association syntax (`formal => actual`) from call argument elements.
+    /// If an Arrow token is found at depth 0, return only the elements after the Arrow.
+    /// Otherwise, return the filtered (no-trivia) elements as-is.
+    fn strip_named_assoc(elements: &[SyntaxElement]) -> Vec<SyntaxElement> {
+        let mut depth = 0i32;
+        let mut arrow_pos = None;
+        for (i, el) in elements.iter().enumerate() {
+            match el.kind() {
+                SyntaxKind::LParen => depth += 1,
+                SyntaxKind::RParen => depth -= 1,
+                SyntaxKind::Arrow if depth == 0 => {
+                    arrow_pos = Some(i);
+                    break;
+                }
+                _ => {}
+            }
+        }
+        let slice = if let Some(pos) = arrow_pos {
+            &elements[pos + 1..]
+        } else {
+            elements
+        };
+        slice
+            .iter()
+            .filter(|e| e.kind() != SyntaxKind::Whitespace && e.kind() != SyntaxKind::Comment)
+            .cloned()
+            .collect()
     }
 
     fn lower_aggregate_expr(&mut self, node: &SyntaxNode) -> HirExpression {
@@ -3646,15 +3996,18 @@ impl VhdlHirBuilder {
     fn lower_subtype_indication(&mut self, node: &SyntaxNode) -> HirType {
         let type_name = self.subtype_indication_type_name(node);
 
+        // Strip known package prefixes from dotted names: "pkg.my_type" -> "my_type"
+        let resolved_name = self.strip_package_prefix(&type_name);
+
         // If the type name is a generic type parameter, return Custom
-        if self.generic_type_params.contains(&type_name) {
-            return HirType::Custom(type_name);
+        if self.generic_type_params.contains(&resolved_name) {
+            return HirType::Custom(resolved_name);
         }
 
         let range = self.subtype_indication_range(node);
 
         resolve_vhdl_type(
-            &type_name,
+            &resolved_name,
             range.as_ref(),
             &self.builtin_scope,
             &self.user_types,
@@ -3662,41 +4015,108 @@ impl VhdlHirBuilder {
         .unwrap_or_else(|| {
             self.emit_warning(format!(
                 "could not resolve type '{}', defaulting to std_logic",
-                type_name
+                resolved_name
             ));
             HirType::Logic(1)
         })
     }
 
+    /// Strip known package prefixes from a dotted type name.
+    /// E.g., "work.my_pkg.byte_t" -> "byte_t", "my_pkg.byte_t" -> "byte_t"
+    fn strip_package_prefix(&self, name: &str) -> String {
+        if !name.contains('.') {
+            return name.to_string();
+        }
+        let parts: Vec<&str> = name.split('.').collect();
+        // Try the last component directly
+        let last = parts.last().copied().unwrap_or(name);
+        // Check if stripping "work." prefix leaves a known package prefix
+        let without_work: &[&str] = if parts.first() == Some(&"work") {
+            &parts[1..]
+        } else {
+            &parts
+        };
+        // If the prefix (all but last) is a known package, return the last part
+        if without_work.len() >= 2 {
+            let pkg = without_work[..without_work.len() - 1].join(".");
+            if self.package_names.contains(&pkg)
+                || without_work
+                    .iter()
+                    .take(without_work.len() - 1)
+                    .any(|p| self.package_names.contains(*p))
+            {
+                return last.to_string();
+            }
+        }
+        // Fallback: if the type with just the last component resolves, use it
+        if self.user_types.contains_key(last) || self.generic_type_params.contains(last) {
+            return last.to_string();
+        }
+        // Return as-is if no prefix matched
+        name.to_string()
+    }
+
     fn subtype_indication_type_name(&self, node: &SyntaxNode) -> String {
-        // First non-trivia token is the type name
-        for el in node.children_with_tokens() {
-            if let SyntaxElement::Token(t) = el {
+        // Collect type name tokens including dots (e.g., "my_pkg.byte_t")
+        let mut parts = Vec::new();
+        let mut iter = node.children_with_tokens().peekable();
+        while let Some(el) = iter.next() {
+            if let SyntaxElement::Token(t) = &el {
                 let kind = t.kind();
                 if kind == SyntaxKind::Whitespace || kind == SyntaxKind::Comment {
                     continue;
                 }
-                // Map keyword tokens to type names
-                return match kind {
-                    SyntaxKind::StdLogicKw => "std_logic".to_string(),
-                    SyntaxKind::StdUlogicKw => "std_ulogic".to_string(),
-                    SyntaxKind::StdLogicVectorKw => "std_logic_vector".to_string(),
-                    SyntaxKind::StdUlogicVectorKw => "std_ulogic_vector".to_string(),
-                    SyntaxKind::UnsignedKw => "unsigned".to_string(),
-                    SyntaxKind::SignedKw => "signed".to_string(),
-                    SyntaxKind::BooleanKw => "boolean".to_string(),
-                    SyntaxKind::IntegerKw => "integer".to_string(),
-                    SyntaxKind::NaturalKw => "natural".to_string(),
-                    SyntaxKind::PositiveKw => "positive".to_string(),
-                    SyntaxKind::RealKw => "real".to_string(),
-                    SyntaxKind::BitKw => "bit".to_string(),
-                    SyntaxKind::BitVectorKw => "bit_vector".to_string(),
+                // Map keyword tokens to type names — these are terminal (no dotted path)
+                let mapped = match kind {
+                    SyntaxKind::StdLogicKw => return "std_logic".to_string(),
+                    SyntaxKind::StdUlogicKw => return "std_ulogic".to_string(),
+                    SyntaxKind::StdLogicVectorKw => return "std_logic_vector".to_string(),
+                    SyntaxKind::StdUlogicVectorKw => return "std_ulogic_vector".to_string(),
+                    SyntaxKind::UnsignedKw => return "unsigned".to_string(),
+                    SyntaxKind::SignedKw => return "signed".to_string(),
+                    SyntaxKind::BooleanKw => return "boolean".to_string(),
+                    SyntaxKind::IntegerKw => return "integer".to_string(),
+                    SyntaxKind::NaturalKw => return "natural".to_string(),
+                    SyntaxKind::PositiveKw => return "positive".to_string(),
+                    SyntaxKind::RealKw => return "real".to_string(),
+                    SyntaxKind::BitKw => return "bit".to_string(),
+                    SyntaxKind::BitVectorKw => return "bit_vector".to_string(),
                     SyntaxKind::Ident => t.text().to_ascii_lowercase(),
-                    _ => t.text().to_ascii_lowercase(),
+                    SyntaxKind::Dot => {
+                        // Continue accumulating dotted path
+                        parts.push(".".to_string());
+                        continue;
+                    }
+                    SyntaxKind::LParen => break, // range starts — stop
+                    _ => break,
                 };
+                parts.push(mapped);
+                // Peek ahead for Dot to continue the dotted name
+                let mut peek = iter.clone();
+                let next_is_dot = loop {
+                    match peek.next() {
+                        Some(SyntaxElement::Token(pt))
+                            if pt.kind() == SyntaxKind::Whitespace
+                                || pt.kind() == SyntaxKind::Comment =>
+                        {
+                            continue;
+                        }
+                        Some(SyntaxElement::Token(pt)) if pt.kind() == SyntaxKind::Dot => {
+                            break true;
+                        }
+                        _ => break false,
+                    }
+                };
+                if !next_is_dot {
+                    break;
+                }
             }
         }
-        "std_logic".to_string()
+        if parts.is_empty() {
+            "std_logic".to_string()
+        } else {
+            parts.join("")
+        }
     }
 
     fn subtype_indication_range(&mut self, node: &SyntaxNode) -> Option<RangeInfo> {
@@ -3769,8 +4189,14 @@ impl VhdlHirBuilder {
         // If either bound evaluated to 0 AND the elements contain non-literal tokens,
         // the width likely depends on generics and needs expression-based resolution.
         let has_non_literal = |elems: &[SyntaxElement]| -> bool {
-            elems.iter().any(|el| {
-                matches!(el.kind(), SyntaxKind::Ident) || matches!(el, SyntaxElement::Node(_))
+            elems.iter().any(|el| match el {
+                SyntaxElement::Token(t) => t.kind() == SyntaxKind::Ident,
+                SyntaxElement::Node(n) => {
+                    // Check inside Name nodes for Ident tokens (generic references)
+                    n.kind() == SyntaxKind::Name
+                        || n.descendants_with_tokens()
+                            .any(|d| d.kind() == SyntaxKind::Ident)
+                }
             })
         };
         let (left_expr, right_expr) = if has_non_literal(&before) || has_non_literal(&after) {
@@ -3925,54 +4351,18 @@ impl VhdlHirBuilder {
     }
 
     fn lower_stmts_from_elements(&mut self, elements: &[SyntaxElement]) -> Vec<HirStatement> {
-        let mut stmts = Vec::new();
-        for el in elements {
-            if let SyntaxElement::Node(n) = el {
-                match n.kind() {
-                    SyntaxKind::IfStmt => {
-                        if let Some(s) = self.lower_if_stmt(n) {
-                            stmts.push(s);
-                        }
-                    }
-                    SyntaxKind::CaseStmt => {
-                        if let Some(s) = self.lower_case_stmt(n) {
-                            stmts.push(s);
-                        }
-                    }
-                    SyntaxKind::ForLoopStmt => {
-                        if let Some(s) = self.lower_for_loop(n) {
-                            stmts.push(s);
-                        }
-                    }
-                    SyntaxKind::WhileLoopStmt => {
-                        if let Some(s) = self.lower_while_loop(n) {
-                            stmts.push(s);
-                        }
-                    }
-                    SyntaxKind::ReturnStmt => {
-                        stmts.push(self.lower_return_stmt(n));
-                    }
-                    SyntaxKind::SequentialSignalAssign | SyntaxKind::VariableAssignStmt => {
-                        if let Some(a) = self.lower_sequential_assign(n) {
-                            stmts.push(HirStatement::Assignment(a));
-                        }
-                    }
-                    SyntaxKind::NullStmt | SyntaxKind::AssertStmt => {}
-                    SyntaxKind::NextStmt => {
-                        self.emit_warning("'next' statement not supported for synthesis — skipped");
-                    }
-                    SyntaxKind::ExitStmt => {
-                        self.emit_warning("'exit' statement not supported for synthesis — skipped");
-                    }
-                    _ => {
-                        // Try recursive
-                        let sub = self.lower_sequential_statements(n);
-                        stmts.extend(sub);
-                    }
+        // Collect just the Node elements for processing with exit/next awareness
+        let nodes: Vec<SyntaxNode> = elements
+            .iter()
+            .filter_map(|el| {
+                if let SyntaxElement::Node(n) = el {
+                    Some(n.clone())
+                } else {
+                    None
                 }
-            }
-        }
-        stmts
+            })
+            .collect();
+        self.lower_sequential_children(&nodes)
     }
 }
 
