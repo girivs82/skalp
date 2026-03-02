@@ -5,24 +5,30 @@ use anyhow::Result;
 use skalp_frontend::hir::*;
 use std::fmt::Write;
 
-pub(crate) fn emit_file(hir: &Hir, resolver: &NameResolver) -> Result<String> {
-    let mut out = String::new();
-
-    emit_comments(&mut out, &hir.comments, "//", "");
-
-    for entity in &hir.entities {
-        emit_entity(&mut out, entity, resolver);
-        writeln!(out)?;
-    }
-
-    for (i, imp) in hir.implementations.iter().enumerate() {
-        emit_impl(&mut out, imp, resolver);
-        if i + 1 < hir.implementations.len() {
-            writeln!(out)?;
-        }
-    }
-
-    Ok(out)
+pub(crate) fn emit_per_entity(
+    entities: &[&HirEntity],
+    hir: &Hir,
+    resolver: &NameResolver,
+) -> Result<Vec<crate::GeneratedFile>> {
+    entities
+        .iter()
+        .map(|entity| {
+            let mut out = String::new();
+            emit_entity(&mut out, entity, resolver);
+            if let Some(imp) = hir
+                .implementations
+                .iter()
+                .find(|imp| imp.entity == entity.id)
+            {
+                writeln!(out).unwrap();
+                emit_impl(&mut out, imp, resolver);
+            }
+            Ok(crate::GeneratedFile {
+                name: entity.name.clone(),
+                code: out,
+            })
+        })
+        .collect()
 }
 
 fn emit_entity(out: &mut String, entity: &HirEntity, resolver: &NameResolver) {
@@ -507,12 +513,12 @@ pub(crate) fn emit_expression_inline(expr: &HirExpression, resolver: &NameResolv
                 emit_expression_inline(idx, resolver)
             )
         }
-        HirExpression::Range(base, lo, hi) => {
+        HirExpression::Range(base, hi, lo) => {
             format!(
                 "{}[{}..{}]",
                 emit_expression_inline(base, resolver),
-                emit_expression_inline(lo, resolver),
-                emit_expression_inline(hi, resolver)
+                emit_expression_inline(hi, resolver),
+                emit_expression_inline(lo, resolver)
             )
         }
         HirExpression::FieldAccess { base, field } => {
@@ -753,12 +759,12 @@ fn emit_lvalue(lval: &HirLValue, resolver: &NameResolver) -> String {
                 emit_expression_inline(idx, resolver)
             )
         }
-        HirLValue::Range(base, lo, hi) => {
+        HirLValue::Range(base, hi, lo) => {
             format!(
                 "{}[{}..{}]",
                 emit_lvalue(base, resolver),
-                emit_expression_inline(lo, resolver),
-                emit_expression_inline(hi, resolver)
+                emit_expression_inline(hi, resolver),
+                emit_expression_inline(lo, resolver)
             )
         }
         HirLValue::FieldAccess { base, field } => {
