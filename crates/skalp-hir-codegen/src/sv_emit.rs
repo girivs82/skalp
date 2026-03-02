@@ -6,25 +6,27 @@ use anyhow::Result;
 use skalp_frontend::hir::*;
 use std::fmt::Write;
 
-pub(crate) fn emit_file(hir: &Hir, resolver: &NameResolver) -> Result<String> {
-    let mut out = String::new();
-
-    emit_comments(&mut out, &hir.comments, "//", "");
-
-    for (i, entity) in hir.entities.iter().enumerate() {
-        // Find matching implementation
-        let imp = hir
-            .implementations
-            .iter()
-            .find(|imp| imp.entity == entity.id);
-        emit_module(&mut out, entity, imp, resolver);
-
-        if i + 1 < hir.entities.len() {
-            writeln!(out).unwrap();
-        }
-    }
-
-    Ok(out)
+pub(crate) fn emit_per_entity(
+    entities: &[&HirEntity],
+    hir: &Hir,
+    resolver: &NameResolver,
+) -> Result<Vec<crate::GeneratedFile>> {
+    entities
+        .iter()
+        .map(|entity| {
+            let mut out = String::new();
+            emit_comments(&mut out, &entity.comments, "//", "");
+            let imp = hir
+                .implementations
+                .iter()
+                .find(|imp| imp.entity == entity.id);
+            emit_module(&mut out, entity, imp, resolver);
+            Ok(crate::GeneratedFile {
+                name: entity.name.clone(),
+                code: out,
+            })
+        })
+        .collect()
 }
 
 fn emit_module(
@@ -458,7 +460,7 @@ fn emit_expr(expr: &HirExpression, resolver: &NameResolver) -> String {
                 emit_expr(idx, resolver)
             )
         }
-        HirExpression::Range(base, lo, hi) => {
+        HirExpression::Range(base, hi, lo) => {
             format!(
                 "{}[{}:{}]",
                 emit_expr(base, resolver),
@@ -617,7 +619,7 @@ fn emit_lvalue(lval: &HirLValue, resolver: &NameResolver) -> String {
                 emit_expr(idx, resolver)
             )
         }
-        HirLValue::Range(base, lo, hi) => {
+        HirLValue::Range(base, hi, lo) => {
             format!(
                 "{}[{}:{}]",
                 emit_lvalue(base, resolver),

@@ -6,36 +6,36 @@ use anyhow::Result;
 use skalp_frontend::hir::*;
 use std::fmt::Write;
 
-pub(crate) fn emit_file(hir: &Hir, resolver: &NameResolver) -> Result<String> {
-    let mut out = String::new();
-
-    emit_comments(&mut out, &hir.comments, "--", "");
-
-    // IEEE library preamble
-    writeln!(out, "library ieee;")?;
-    writeln!(out, "use ieee.std_logic_1164.all;")?;
-    writeln!(out, "use ieee.numeric_std.all;")?;
-    writeln!(out)?;
-
-    for (i, entity) in hir.entities.iter().enumerate() {
-        emit_entity(&mut out, entity, resolver);
-
-        // Find matching implementation
-        if let Some(imp) = hir
-            .implementations
-            .iter()
-            .find(|imp| imp.entity == entity.id)
-        {
+pub(crate) fn emit_per_entity(
+    entities: &[&HirEntity],
+    hir: &Hir,
+    resolver: &NameResolver,
+) -> Result<Vec<crate::GeneratedFile>> {
+    entities
+        .iter()
+        .map(|entity| {
+            let mut out = String::new();
+            // IEEE library preamble
+            writeln!(out, "library ieee;").unwrap();
+            writeln!(out, "use ieee.std_logic_1164.all;").unwrap();
+            writeln!(out, "use ieee.numeric_std.all;").unwrap();
             writeln!(out).unwrap();
-            emit_architecture(&mut out, imp, entity, resolver);
-        }
-
-        if i + 1 < hir.entities.len() {
-            writeln!(out).unwrap();
-        }
-    }
-
-    Ok(out)
+            emit_comments(&mut out, &entity.comments, "--", "");
+            emit_entity(&mut out, entity, resolver);
+            if let Some(imp) = hir
+                .implementations
+                .iter()
+                .find(|imp| imp.entity == entity.id)
+            {
+                writeln!(out).unwrap();
+                emit_architecture(&mut out, imp, entity, resolver);
+            }
+            Ok(crate::GeneratedFile {
+                name: entity.name.clone(),
+                code: out,
+            })
+        })
+        .collect()
 }
 
 fn emit_entity(out: &mut String, entity: &HirEntity, resolver: &NameResolver) {
@@ -446,7 +446,7 @@ fn emit_expr(expr: &HirExpression, resolver: &NameResolver) -> String {
                 emit_expr(idx, resolver)
             )
         }
-        HirExpression::Range(base, lo, hi) => {
+        HirExpression::Range(base, hi, lo) => {
             format!(
                 "{}({} downto {})",
                 emit_expr(base, resolver),
@@ -605,7 +605,7 @@ fn emit_lvalue(lval: &HirLValue, resolver: &NameResolver) -> String {
                 emit_expr(idx, resolver)
             )
         }
-        HirLValue::Range(base, lo, hi) => {
+        HirLValue::Range(base, hi, lo) => {
             format!(
                 "{}({} downto {})",
                 emit_lvalue(base, resolver),

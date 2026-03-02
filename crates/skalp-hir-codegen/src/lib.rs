@@ -13,22 +13,89 @@ use skalp_frontend::hir::*;
 use std::collections::HashMap;
 use std::fmt::Write;
 
-/// Generate skalp source code from HIR
+/// A generated output file: entity name + source code
+pub struct GeneratedFile {
+    pub name: String,
+    pub code: String,
+}
+
+/// Generate skalp source code from HIR, one file per entity
+pub fn generate_skalp_files(hir: &Hir) -> Result<Vec<GeneratedFile>> {
+    let resolver = NameResolver::from_hir(hir);
+    let filtered = filter_entities(hir);
+    skalp_emit::emit_per_entity(&filtered, hir, &resolver)
+}
+
+/// Generate VHDL source code from HIR, one file per entity
+pub fn generate_vhdl_files(hir: &Hir) -> Result<Vec<GeneratedFile>> {
+    let resolver = NameResolver::from_hir(hir);
+    let filtered = filter_entities(hir);
+    vhdl_emit::emit_per_entity(&filtered, hir, &resolver)
+}
+
+/// Generate SystemVerilog source code from HIR, one file per entity
+pub fn generate_systemverilog_files(hir: &Hir) -> Result<Vec<GeneratedFile>> {
+    let resolver = NameResolver::from_hir(hir);
+    let filtered = filter_entities(hir);
+    sv_emit::emit_per_entity(&filtered, hir, &resolver)
+}
+
+/// Generate skalp source code from HIR (single string, for backward compat)
 pub fn generate_skalp_source(hir: &Hir) -> Result<String> {
-    let resolver = NameResolver::from_hir(hir);
-    skalp_emit::emit_file(hir, &resolver)
+    let files = generate_skalp_files(hir)?;
+    Ok(files
+        .into_iter()
+        .map(|f| f.code)
+        .collect::<Vec<_>>()
+        .join("\n"))
 }
 
-/// Generate VHDL source code from HIR
+/// Generate VHDL source code from HIR (single string, for backward compat)
 pub fn generate_vhdl(hir: &Hir) -> Result<String> {
-    let resolver = NameResolver::from_hir(hir);
-    vhdl_emit::emit_file(hir, &resolver)
+    let files = generate_vhdl_files(hir)?;
+    Ok(files
+        .into_iter()
+        .map(|f| f.code)
+        .collect::<Vec<_>>()
+        .join("\n"))
 }
 
-/// Generate SystemVerilog source code from HIR
+/// Generate SystemVerilog source code from HIR (single string, for backward compat)
 pub fn generate_systemverilog(hir: &Hir) -> Result<String> {
-    let resolver = NameResolver::from_hir(hir);
-    sv_emit::emit_file(hir, &resolver)
+    let files = generate_systemverilog_files(hir)?;
+    Ok(files
+        .into_iter()
+        .map(|f| f.code)
+        .collect::<Vec<_>>()
+        .join("\n"))
+}
+
+/// Filter entities: skip generic templates that have been monomorphized.
+/// An entity with non-empty generics is a template; if a concrete specialization
+/// (same name prefix + "_" suffix, empty generics) exists, skip the template.
+fn filter_entities(hir: &Hir) -> Vec<&HirEntity> {
+    let concrete_names: std::collections::HashSet<&str> = hir
+        .entities
+        .iter()
+        .filter(|e| e.generics.is_empty())
+        .map(|e| e.name.as_str())
+        .collect();
+
+    hir.entities
+        .iter()
+        .filter(|entity| {
+            if entity.generics.is_empty() {
+                // Concrete entity — always emit
+                true
+            } else {
+                // Generic template — skip if any monomorphized version exists
+                let has_specialization = concrete_names
+                    .iter()
+                    .any(|name| name.starts_with(&entity.name) && name.len() > entity.name.len());
+                !has_specialization
+            }
+        })
+        .collect()
 }
 
 /// Maps numeric IDs back to names and types for readable emission

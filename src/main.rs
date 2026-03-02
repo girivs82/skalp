@@ -1070,29 +1070,35 @@ fn build_design(
     match target {
         "sk" | "skalp" => {
             info!("Generating skalp source from HIR...");
-            let code = skalp_hir_codegen::generate_skalp_source(&hir)?;
+            let files = skalp_hir_codegen::generate_skalp_files(&hir)?;
             fs::create_dir_all(output_dir)?;
-            let path = output_dir.join("design.sk");
-            fs::write(&path, &code)?;
-            println!("📄 Output: {:?}", path);
+            for file in &files {
+                let path = output_dir.join(format!("{}.sk", file.name.to_lowercase()));
+                fs::write(&path, &file.code)?;
+                println!("📄 Output: {:?}", path);
+            }
             return Ok(());
         }
         "vhdl" => {
             info!("Generating VHDL from HIR...");
-            let code = skalp_hir_codegen::generate_vhdl(&hir)?;
+            let files = skalp_hir_codegen::generate_vhdl_files(&hir)?;
             fs::create_dir_all(output_dir)?;
-            let path = output_dir.join("design.vhd");
-            fs::write(&path, &code)?;
-            println!("📄 Output: {:?}", path);
+            for file in &files {
+                let path = output_dir.join(format!("{}.vhd", file.name.to_lowercase()));
+                fs::write(&path, &file.code)?;
+                println!("📄 Output: {:?}", path);
+            }
             return Ok(());
         }
         "sv-hir" => {
             info!("Generating SystemVerilog from HIR...");
-            let code = skalp_hir_codegen::generate_systemverilog(&hir)?;
+            let files = skalp_hir_codegen::generate_systemverilog_files(&hir)?;
             fs::create_dir_all(output_dir)?;
-            let path = output_dir.join("design.sv");
-            fs::write(&path, &code)?;
-            println!("📄 Output: {:?}", path);
+            for file in &files {
+                let path = output_dir.join(format!("{}.sv", file.name.to_lowercase()));
+                fs::write(&path, &file.code)?;
+                println!("📄 Output: {:?}", path);
+            }
             return Ok(());
         }
         _ => {} // fall through to MIR-based targets
