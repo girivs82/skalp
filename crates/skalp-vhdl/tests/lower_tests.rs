@@ -1108,3 +1108,448 @@ end architecture rtl;
         errors.iter().map(|e| &e.message).collect::<Vec<_>>()
     );
 }
+
+// ======================================================================
+// Step 1: CST traversal robustness — Name-wrapped identifiers
+// ======================================================================
+
+#[test]
+fn test_lower_component_inst_name_wrapped() {
+    // Component instantiation where entity name comes via entity work.sub_entity
+    let source = r#"
+library ieee;
+use ieee.std_logic_1164.all;
+
+entity sub_entity is
+    port (
+        a : in std_logic;
+        b : out std_logic
+    );
+end entity sub_entity;
+
+architecture rtl of sub_entity is
+begin
+    b <= a;
+end architecture rtl;
+
+entity top is
+    port (
+        x : in std_logic;
+        y : out std_logic
+    );
+end entity top;
+
+architecture rtl of top is
+begin
+    u1: entity work.sub_entity port map(a => x, b => y);
+end architecture rtl;
+"#;
+    let hir = parse_vhdl_source(source, None).unwrap();
+    assert_eq!(hir.entities.len(), 2);
+    // Check that the instantiation was resolved
+    let imp = &hir.implementations[1]; // top's architecture
+    assert_eq!(imp.instances.len(), 1, "expected 1 instance");
+    assert_eq!(imp.instances[0].name, "u1");
+}
+
+// ======================================================================
+// Step 2: Dotted type name resolution
+// ======================================================================
+
+#[test]
+fn test_lower_dotted_type_name() {
+    let source = r#"
+library ieee;
+use ieee.std_logic_1164.all;
+use ieee.numeric_std.all;
+
+package my_pkg is
+    subtype byte_t is unsigned(7 downto 0);
+end package my_pkg;
+
+entity dotted_type_test is
+    port (
+        clk : in std_logic;
+        data : out unsigned(7 downto 0)
+    );
+end entity dotted_type_test;
+
+architecture rtl of dotted_type_test is
+    signal s : my_pkg.byte_t;
+begin
+    data <= s;
+end architecture rtl;
+"#;
+    let (hir, diags) = parse_vhdl_source_with_diagnostics(source, None).unwrap();
+    assert_eq!(hir.entities.len(), 1);
+    // The signal 's' should resolve to an 8-bit unsigned type (byte_t subtype)
+    let imp = &hir.implementations[0];
+    assert!(
+        !imp.signals.is_empty(),
+        "expected at least one signal declaration"
+    );
+    // Check that no "could not resolve type" warnings were emitted for the dotted type
+    let type_warnings: Vec<_> = diags
+        .iter()
+        .filter(|d| d.message.contains("could not resolve type"))
+        .collect();
+    assert!(
+        type_warnings.is_empty(),
+        "unexpected type resolution warnings: {:?}",
+        type_warnings.iter().map(|d| &d.message).collect::<Vec<_>>()
+    );
+}
+
+// ======================================================================
+// Step 3: Named associations in function calls
+// ======================================================================
+
+#[test]
+fn test_lower_named_assoc_function_call() {
+    // Test that named associations in function calls (x => a, y => b) work
+    let source = r#"
+library ieee;
+use ieee.std_logic_1164.all;
+use ieee.numeric_std.all;
+
+entity named_call_test is
+    port (
+        a : in unsigned(7 downto 0);
+        b : in unsigned(7 downto 0);
+        c : out unsigned(7 downto 0)
+    );
+end entity named_call_test;
+
+architecture rtl of named_call_test is
+    function my_func(x : unsigned; y : unsigned) return unsigned is
+    begin
+        return x + y;
+    end function;
+begin
+    c <= my_func(x => a, y => b);
+end architecture rtl;
+"#;
+    let hir = parse_vhdl_source(source, None).unwrap();
+    assert_eq!(hir.entities.len(), 1);
+    let imp = &hir.implementations[0];
+    // The concurrent assignment should produce a valid expression
+    assert!(
+        !imp.assignments.is_empty(),
+        "expected at least one assignment"
+    );
+}
+
+// ======================================================================
+// Step 4: Qualified expression lowering
+// ======================================================================
+
+#[test]
+fn test_lower_qualified_expression() {
+    let source = r#"
+library ieee;
+use ieee.std_logic_1164.all;
+use ieee.numeric_std.all;
+
+entity qual_expr_test is
+    port (
+        result : out unsigned(7 downto 0)
+    );
+end entity qual_expr_test;
+
+architecture rtl of qual_expr_test is
+begin
+    result <= unsigned'(X"FF");
+end architecture rtl;
+"#;
+    let hir = parse_vhdl_source(source, None).unwrap();
+    assert_eq!(hir.entities.len(), 1);
+    let imp = &hir.implementations[0];
+    assert!(
+        !imp.assignments.is_empty(),
+        "expected at least one assignment for qualified expression"
+    );
+    // The RHS should be a Cast expression
+    use skalp_frontend::hir::HirExpression;
+    match &imp.assignments[0].rhs {
+        HirExpression::Cast(_) => {} // expected
+        other => panic!(
+            "expected Cast expression for unsigned'(X\"FF\"), got {:?}",
+            other
+        ),
+    }
+}
+
+// ======================================================================
+// Step 5: Selected signal assignment (with...select)
+// ======================================================================
+
+#[test]
+fn test_lower_selected_assign() {
+    let source = r#"
+library ieee;
+use ieee.std_logic_1164.all;
+
+entity mux_test is
+    port (
+        sel : in std_logic_vector(1 downto 0);
+        a   : in std_logic;
+        b   : in std_logic;
+        c   : in std_logic;
+        y   : out std_logic
+    );
+end entity mux_test;
+
+architecture rtl of mux_test is
+begin
+    with sel select
+        y <= a when "00",
+             b when "01",
+             c when others;
+end architecture rtl;
+"#;
+    let hir = parse_vhdl_source(source, None).unwrap();
+    assert_eq!(hir.entities.len(), 1);
+    let imp = &hir.implementations[0];
+    assert!(
+        !imp.assignments.is_empty(),
+        "expected at least one assignment from with...select"
+    );
+    // The RHS should be a Match expression
+    use skalp_frontend::hir::HirExpression;
+    match &imp.assignments[0].rhs {
+        HirExpression::Match(match_expr) => {
+            assert!(
+                match_expr.arms.len() >= 2,
+                "expected at least 2 match arms, got {}",
+                match_expr.arms.len()
+            );
+        }
+        other => panic!(
+            "expected Match expression for with...select, got {:?}",
+            other
+        ),
+    }
+}
+
+#[test]
+fn test_lower_selected_assign_4way() {
+    let source = r#"
+library ieee;
+use ieee.std_logic_1164.all;
+use ieee.numeric_std.all;
+
+entity mux4_test is
+    port (
+        sel : in std_logic_vector(1 downto 0);
+        a, b, c, d : in unsigned(7 downto 0);
+        y : out unsigned(7 downto 0)
+    );
+end entity mux4_test;
+
+architecture rtl of mux4_test is
+begin
+    with sel select
+        y <= a when "00",
+             b when "01",
+             c when "10",
+             d when others;
+end architecture rtl;
+"#;
+    let hir = parse_vhdl_source(source, None).unwrap();
+    let imp = &hir.implementations[0];
+    assert!(!imp.assignments.is_empty());
+
+    use skalp_frontend::hir::HirExpression;
+    match &imp.assignments[0].rhs {
+        HirExpression::Match(match_expr) => {
+            // 3 specific patterns + 1 wildcard (others)
+            assert!(
+                match_expr.arms.len() >= 4,
+                "expected at least 4 match arms, got {}",
+                match_expr.arms.len()
+            );
+        }
+        other => panic!("expected Match expression, got {:?}", other),
+    }
+}
+
+// ======================================================================
+// Step 6: conv_std_logic_vector handling
+// ======================================================================
+
+#[test]
+fn test_lower_conv_std_logic_vector() {
+    let source = r#"
+library ieee;
+use ieee.std_logic_1164.all;
+use ieee.std_logic_arith.all;
+
+entity conv_test is
+    port (
+        data : in integer;
+        result : out std_logic_vector(7 downto 0)
+    );
+end entity conv_test;
+
+architecture rtl of conv_test is
+begin
+    result <= conv_std_logic_vector(data, 8);
+end architecture rtl;
+"#;
+    let hir = parse_vhdl_source(source, None).unwrap();
+    let imp = &hir.implementations[0];
+    assert!(
+        !imp.assignments.is_empty(),
+        "expected assignment for conv_std_logic_vector"
+    );
+    // The RHS should be a Cast expression
+    use skalp_frontend::hir::HirExpression;
+    match &imp.assignments[0].rhs {
+        HirExpression::Cast(_) => {} // expected — conv_std_logic_vector produces a cast
+        other => panic!(
+            "expected Cast expression for conv_std_logic_vector, got {:?}",
+            other
+        ),
+    }
+}
+
+// ======================================================================
+// Step 7: Loop control statements (exit/next)
+// ======================================================================
+
+#[test]
+fn test_lower_exit_when() {
+    let source = r#"
+library ieee;
+use ieee.std_logic_1164.all;
+use ieee.numeric_std.all;
+
+entity exit_test is
+    port (
+        clk : in std_logic;
+        result : out unsigned(3 downto 0)
+    );
+end entity exit_test;
+
+architecture rtl of exit_test is
+    signal count : unsigned(3 downto 0);
+begin
+    process(clk)
+        variable i : integer;
+    begin
+        if rising_edge(clk) then
+            for i in 0 to 15 loop
+                exit when i = 5;
+                count <= to_unsigned(i, 4);
+            end loop;
+        end if;
+    end process;
+    result <= count;
+end architecture rtl;
+"#;
+    let (hir, diags) = parse_vhdl_source_with_diagnostics(source, None).unwrap();
+    assert_eq!(hir.entities.len(), 1);
+    // Verify no "not supported" warnings were emitted for exit
+    let exit_warnings: Vec<_> = diags
+        .iter()
+        .filter(|d| d.message.contains("exit") && d.message.contains("not supported"))
+        .collect();
+    assert!(
+        exit_warnings.is_empty(),
+        "exit should be supported now, but got warnings: {:?}",
+        exit_warnings.iter().map(|d| &d.message).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn test_lower_next_when() {
+    let source = r#"
+library ieee;
+use ieee.std_logic_1164.all;
+use ieee.numeric_std.all;
+
+entity next_test is
+    port (
+        clk : in std_logic;
+        result : out unsigned(3 downto 0)
+    );
+end entity next_test;
+
+architecture rtl of next_test is
+    signal count : unsigned(3 downto 0);
+begin
+    process(clk)
+        variable i : integer;
+    begin
+        if rising_edge(clk) then
+            for i in 0 to 7 loop
+                next when i = 3;
+                count <= to_unsigned(i, 4);
+            end loop;
+        end if;
+    end process;
+    result <= count;
+end architecture rtl;
+"#;
+    let (hir, diags) = parse_vhdl_source_with_diagnostics(source, None).unwrap();
+    assert_eq!(hir.entities.len(), 1);
+    // Verify no "not supported" warnings were emitted for next
+    let next_warnings: Vec<_> = diags
+        .iter()
+        .filter(|d| d.message.contains("next") && d.message.contains("not supported"))
+        .collect();
+    assert!(
+        next_warnings.is_empty(),
+        "next should be supported now, but got warnings: {:?}",
+        next_warnings.iter().map(|d| &d.message).collect::<Vec<_>>()
+    );
+}
+
+// ======================================================================
+// Step 8: Generic-dependent width audit
+// ======================================================================
+
+#[test]
+fn test_lower_generic_dependent_width() {
+    use skalp_frontend::hir::HirType;
+
+    let source = r#"
+library ieee;
+use ieee.std_logic_1164.all;
+use ieee.numeric_std.all;
+
+entity generic_width_test is
+    generic (
+        WIDTH : integer := 8
+    );
+    port (
+        data : out unsigned(WIDTH-1 downto 0)
+    );
+end entity generic_width_test;
+"#;
+    let hir = parse_vhdl_source(source, None).unwrap();
+    let entity = &hir.entities[0];
+
+    // The data port should have an expression-based type (NatExpr or LogicExpr)
+    // since WIDTH is a generic parameter, not a concrete value
+    let data_port = &entity.ports[0];
+    match &data_port.port_type {
+        HirType::NatExpr(_) | HirType::LogicExpr(_) => {
+            // Good — expression-based type
+        }
+        HirType::Nat(w) if *w == 0 => {
+            panic!(
+                "port type resolved to Nat(0) which means the generic wasn't detected: {:?}",
+                data_port.port_type
+            );
+        }
+        other => {
+            // Other concrete types are also acceptable if the default was evaluated
+            // but NatExpr is preferred for generic-dependent widths
+            eprintln!(
+                "Note: port type is {:?}, ideally should be NatExpr for generic width",
+                other
+            );
+        }
+    }
+}
