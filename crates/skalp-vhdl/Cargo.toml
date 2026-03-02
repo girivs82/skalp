@@ -11,3 +11,6 @@ rowan = "0.15"
 indexmap = "2"
 anyhow = "1.0"
 thiserror = "1.0"
+
+[dev-dependencies]
+walkdir = "2"

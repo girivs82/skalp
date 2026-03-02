@@ -2022,14 +2022,16 @@ impl VhdlHirBuilder {
     }
 
     fn lower_association_element(&mut self, node: &SyntaxNode) -> Option<HirConnection> {
-        let elements: Vec<(SyntaxKind, String)> = all_token_texts(node);
+        // Check for named association: formal [=> actual]
+        // The formal may be a bare Ident token or wrapped in a Name node.
+        let has_arrow = node
+            .children_with_tokens()
+            .any(|el| el.kind() == SyntaxKind::Arrow);
 
-        // Check for named association: formal => actual
-        let arrow_pos = elements.iter().position(|(k, _)| *k == SyntaxKind::Arrow);
-
-        if let Some(pos) = arrow_pos {
+        if has_arrow {
             // Named: port_name => expression
-            let port_name = elements.first().map(|(_, t)| t.clone()).unwrap_or_default();
+            // Extract port name from the first Name child node or bare Ident token
+            let port_name = self.extract_formal_name(node);
 
             let actual_elements: Vec<SyntaxElement> = node
                 .children_with_tokens()
@@ -2059,6 +2061,35 @@ impl VhdlHirBuilder {
                 expr,
             })
         }
+    }
+
+    /// Extract the formal port name from an association element.
+    /// Handles both bare Ident tokens and Name nodes wrapping the formal.
+    fn extract_formal_name(&self, node: &SyntaxNode) -> String {
+        for el in node.children_with_tokens() {
+            if el.kind() == SyntaxKind::Arrow {
+                break; // stop before =>
+            }
+            match el {
+                SyntaxElement::Token(ref t)
+                    if t.kind() == SyntaxKind::Ident
+                        || t.kind() == SyntaxKind::StdLogicKw
+                        || t.kind() == SyntaxKind::StdLogicVectorKw
+                        || t.kind() == SyntaxKind::UnsignedKw
+                        || t.kind() == SyntaxKind::SignedKw =>
+                {
+                    return t.text().to_string();
+                }
+                SyntaxElement::Node(ref n) if n.kind() == SyntaxKind::Name => {
+                    // Extract the first ident from the Name node
+                    if let Some(name) = first_ident(n) {
+                        return name;
+                    }
+                }
+                _ => {}
+            }
+        }
+        String::new()
     }
 
     // ====================================================================

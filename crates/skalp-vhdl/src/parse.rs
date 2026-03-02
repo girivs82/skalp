@@ -532,6 +532,20 @@ impl<'a> ParseState<'a> {
             self.skip_trivia();
         }
 
+        // Entity declarative region (between port clause and 'end')
+        // VHDL allows: attribute decl/spec, signal, constant, type, subtype,
+        // alias, component, function, procedure in entity declarative parts.
+        self.parse_entity_declarations();
+
+        // Optional entity statement part: begin { concurrent_statement }
+        // Used for passive processes/assertions in entity declarations
+        if self.at(SyntaxKind::BeginKw) {
+            self.bump(); // begin
+            self.skip_trivia();
+            // Parse concurrent statements until 'end'
+            self.parse_concurrent_statements();
+        }
+
         // end [entity] [name] ;
         self.expect(SyntaxKind::EndKw);
         self.skip_trivia();
@@ -545,6 +559,37 @@ impl<'a> ParseState<'a> {
         }
         self.expect(SyntaxKind::Semicolon);
         self.finish_node();
+    }
+
+    fn parse_entity_declarations(&mut self) {
+        loop {
+            self.skip_trivia();
+            if self.is_at_end() || self.at(SyntaxKind::EndKw) || self.at(SyntaxKind::BeginKw) {
+                break;
+            }
+            let pos_before = self.current;
+            match self.current_kind() {
+                Some(SyntaxKind::AttributeKw) => self.parse_attribute_decl_or_spec(),
+                Some(SyntaxKind::SignalKw) => self.parse_signal_decl(),
+                Some(SyntaxKind::ConstantKw) => self.parse_constant_decl(),
+                Some(SyntaxKind::TypeKw) => self.parse_type_decl(),
+                Some(SyntaxKind::SubtypeKw) => self.parse_subtype_decl(),
+                Some(SyntaxKind::ComponentKw) => self.parse_component_decl(),
+                Some(SyntaxKind::AliasKw) => self.parse_alias_decl(),
+                Some(SyntaxKind::FunctionKw)
+                | Some(SyntaxKind::PureKw)
+                | Some(SyntaxKind::ImpureKw) => {
+                    self.parse_function_decl_or_body();
+                }
+                Some(SyntaxKind::ProcedureKw) => {
+                    self.parse_procedure_decl_or_body();
+                }
+                _ => break,
+            }
+            if self.current == pos_before && !self.is_at_end() {
+                self.bump();
+            }
+        }
     }
 
     fn parse_generic_clause(&mut self) {
@@ -622,7 +667,7 @@ impl<'a> ParseState<'a> {
             return;
         }
 
-        // Regular value generic: name [, name]* : type [:= default]
+        // Regular value generic: name [, name]* : [in] type [:= default]
         self.bump(); // first name
         while self.eat(SyntaxKind::Comma) {
             self.skip_trivia();
@@ -631,6 +676,11 @@ impl<'a> ParseState<'a> {
         self.skip_trivia();
         self.expect(SyntaxKind::Colon);
         self.skip_trivia();
+        // Optional direction keyword (VHDL allows 'in' in generic interface constants)
+        if self.at(SyntaxKind::InKw) {
+            self.bump();
+            self.skip_trivia();
+        }
         self.parse_subtype_indication();
         self.skip_trivia();
         // Optional default value
@@ -689,19 +739,18 @@ impl<'a> ParseState<'a> {
             return;
         }
 
-        // Direction: in, out, inout, buffer
+        // Direction: in, out, inout, buffer (default: in, if omitted)
         self.start_node(SyntaxKind::PortDirection);
-        match self.current_kind() {
+        if matches!(
+            self.current_kind(),
             Some(SyntaxKind::InKw)
-            | Some(SyntaxKind::OutKw)
-            | Some(SyntaxKind::InoutKw)
-            | Some(SyntaxKind::BufferKw) => {
-                self.bump();
-            }
-            _ => {
-                self.error("expected port direction (in, out, inout, buffer, or view)");
-            }
+                | Some(SyntaxKind::OutKw)
+                | Some(SyntaxKind::InoutKw)
+                | Some(SyntaxKind::BufferKw)
+        ) {
+            self.bump();
         }
+        // else: no explicit direction — defaults to 'in' per VHDL standard
         self.finish_node();
         self.skip_trivia();
 
@@ -1360,18 +1409,24 @@ impl<'a> ParseState<'a> {
     }
 
     fn parse_concurrent_signal_assign_or_conditional(&mut self) {
-        // Parse target
-        // Look for <= to determine assignment type
-        // Then check for 'when' to determine conditional
+        // Parse target/name
+        // If followed by <= : concurrent signal assignment
+        // If followed by ;  : concurrent procedure call (name already includes args)
 
-        // Start the node — we'll decide which kind at the end
         self.start_node(SyntaxKind::ConcurrentSignalAssign);
         self.parse_name();
         self.skip_trivia();
 
+        // Concurrent procedure call: name(args) ;
+        if self.at(SyntaxKind::Semicolon) {
+            self.bump(); // ;
+            self.finish_node();
+            return;
+        }
+
         if !self.at(SyntaxKind::SignalAssign) {
             self.finish_node();
-            self.error_recover("expected '<=' in concurrent signal assignment");
+            self.error_recover("expected '<=' or ':=' in assignment");
             return;
         }
         self.bump(); // <=
@@ -1549,11 +1604,34 @@ impl<'a> ParseState<'a> {
             return;
         }
 
+        // Check for optional label: ident ':'
+        if self.at(SyntaxKind::Ident) && self.peek_kind(1) == Some(SyntaxKind::Colon) {
+            self.bump(); // label
+            self.skip_trivia();
+            self.bump(); // colon
+            self.skip_trivia();
+        }
+
         match self.current_kind() {
             Some(SyntaxKind::IfKw) => self.parse_if_stmt(),
             Some(SyntaxKind::CaseKw) => self.parse_case_stmt(),
             Some(SyntaxKind::ForKw) => self.parse_for_loop_stmt(),
             Some(SyntaxKind::WhileKw) => self.parse_while_loop_stmt(),
+            Some(SyntaxKind::LoopKw) => {
+                // Bare loop: [label:] loop ... end loop;
+                self.bump(); // loop
+                self.skip_trivia();
+                self.parse_sequential_statements();
+                self.expect(SyntaxKind::EndKw);
+                self.skip_trivia();
+                self.expect(SyntaxKind::LoopKw);
+                self.skip_trivia();
+                if self.at(SyntaxKind::Ident) {
+                    self.bump(); // optional label
+                    self.skip_trivia();
+                }
+                self.expect(SyntaxKind::Semicolon);
+            }
             Some(SyntaxKind::NullKw) => self.parse_null_stmt(),
             Some(SyntaxKind::ReturnKw) => self.parse_return_stmt(),
             Some(SyntaxKind::AssertKw) => self.parse_assert_stmt(),
@@ -1864,9 +1942,10 @@ impl<'a> ParseState<'a> {
     fn parse_component_inst_component(&mut self) {
         self.start_node(SyntaxKind::ComponentInst);
         // [component] name [generic map (...)] port map (...)
+        // Name can be dotted: lib.pkg.component (e.g., gaisler.memctrl.ssrctrl)
         self.eat(SyntaxKind::ComponentKw);
         self.skip_trivia();
-        self.bump(); // component name (ident)
+        self.parse_selected_name();
         self.skip_trivia();
         self.parse_port_and_generic_maps();
         self.expect(SyntaxKind::Semicolon);
@@ -1924,23 +2003,14 @@ impl<'a> ParseState<'a> {
         if self.at(SyntaxKind::OpenKw) {
             self.bump(); // open
         } else {
-            // Try to detect named association (name => expr)
-            // vs positional (just expr)
-            let saved = self.current;
-            let mut is_named = false;
-
-            // Consume potential name tokens
-            if self.at(SyntaxKind::Ident) || self.is_name_start() {
-                self.bump(); // potential formal name
-                self.skip_trivia();
-                if self.at(SyntaxKind::Arrow) {
-                    is_named = true;
-                }
-            }
-            self.current = saved;
+            // Detect named vs positional association by scanning ahead
+            // for '=>' after the formal name (which may include parenthesized
+            // index/slice, e.g., data(7 downto 0) => actual).
+            let is_named = self.lookahead_is_named_association();
 
             if is_named {
-                self.bump(); // formal name
+                // Parse the formal: name with optional index/slice
+                self.parse_name();
                 self.skip_trivia();
                 self.expect(SyntaxKind::Arrow);
                 self.skip_trivia();
@@ -1953,6 +2023,99 @@ impl<'a> ParseState<'a> {
             }
         }
         self.finish_node();
+    }
+
+    /// Lookahead (without consuming tokens) to detect named association.
+    /// Scans: name [.name]* [(...)]['..]* =>
+    fn lookahead_is_named_association(&self) -> bool {
+        let mut pos = self.current;
+        let len = self.tokens.len();
+
+        // Must start with identifier or type keyword
+        let kind = self.tokens.get(pos).map(|t| token_to_syntax_kind(&t.token));
+        if !matches!(
+            kind,
+            Some(SyntaxKind::Ident)
+                | Some(SyntaxKind::StdLogicKw)
+                | Some(SyntaxKind::StdLogicVectorKw)
+                | Some(SyntaxKind::StdUlogicVectorKw)
+                | Some(SyntaxKind::UnsignedKw)
+                | Some(SyntaxKind::SignedKw)
+                | Some(SyntaxKind::StdUlogicKw)
+                | Some(SyntaxKind::BooleanKw)
+                | Some(SyntaxKind::IntegerKw)
+                | Some(SyntaxKind::NaturalKw)
+                | Some(SyntaxKind::PositiveKw)
+        ) {
+            return false;
+        }
+        pos += 1;
+
+        // Skip name suffixes: dots, parens, ticks
+        loop {
+            // Skip trivia
+            while pos < len {
+                let k = token_to_syntax_kind(&self.tokens[pos].token);
+                if k == SyntaxKind::Whitespace || k == SyntaxKind::Comment {
+                    pos += 1;
+                } else {
+                    break;
+                }
+            }
+            if pos >= len {
+                return false;
+            }
+
+            let k = token_to_syntax_kind(&self.tokens[pos].token);
+            match k {
+                SyntaxKind::Dot => {
+                    pos += 1; // skip dot
+                              // Skip trivia
+                    while pos < len {
+                        let k2 = token_to_syntax_kind(&self.tokens[pos].token);
+                        if k2 == SyntaxKind::Whitespace || k2 == SyntaxKind::Comment {
+                            pos += 1;
+                        } else {
+                            break;
+                        }
+                    }
+                    if pos < len {
+                        pos += 1; // skip field name
+                    }
+                }
+                SyntaxKind::LParen => {
+                    // Skip to matching RParen
+                    pos += 1;
+                    let mut depth = 1;
+                    while depth > 0 && pos < len {
+                        let k2 = token_to_syntax_kind(&self.tokens[pos].token);
+                        match k2 {
+                            SyntaxKind::LParen => depth += 1,
+                            SyntaxKind::RParen => depth -= 1,
+                            _ => {}
+                        }
+                        pos += 1;
+                    }
+                }
+                SyntaxKind::Tick => {
+                    pos += 1; // skip tick
+                              // Skip trivia + attribute name
+                    while pos < len {
+                        let k2 = token_to_syntax_kind(&self.tokens[pos].token);
+                        if k2 == SyntaxKind::Whitespace || k2 == SyntaxKind::Comment {
+                            pos += 1;
+                        } else {
+                            break;
+                        }
+                    }
+                    if pos < len {
+                        pos += 1; // skip attribute name
+                    }
+                }
+                SyntaxKind::Arrow => return true,
+                _ => return false,
+            }
+        }
     }
 
     // ====================================================================
@@ -1972,8 +2135,8 @@ impl<'a> ParseState<'a> {
         self.expect(SyntaxKind::GenerateKw);
         self.skip_trivia();
 
-        // Generate body (concurrent statements)
-        self.parse_concurrent_statements();
+        // Optional declarative region + begin
+        self.parse_generate_body();
 
         self.expect(SyntaxKind::EndKw);
         self.skip_trivia();
@@ -1988,6 +2151,50 @@ impl<'a> ParseState<'a> {
         self.finish_node();
     }
 
+    /// Parse generate body: optional declarations, optional begin, concurrent statements.
+    /// Used by both for-generate and if-generate.
+    fn parse_generate_body(&mut self) {
+        // VHDL allows optional declarations + begin in generate bodies:
+        //   for ... generate
+        //     [declarations]
+        //   begin
+        //     [concurrent_statements]
+        //   end generate;
+        // Or simply:
+        //   for ... generate
+        //     [concurrent_statements]
+        //   end generate;
+        if self.at(SyntaxKind::BeginKw) {
+            self.bump(); // begin
+            self.skip_trivia();
+        } else {
+            // Check for declarative items before begin
+            let has_decls = matches!(
+                self.current_kind(),
+                Some(SyntaxKind::SignalKw)
+                    | Some(SyntaxKind::ConstantKw)
+                    | Some(SyntaxKind::VariableKw)
+                    | Some(SyntaxKind::TypeKw)
+                    | Some(SyntaxKind::SubtypeKw)
+                    | Some(SyntaxKind::ComponentKw)
+                    | Some(SyntaxKind::AttributeKw)
+                    | Some(SyntaxKind::AliasKw)
+                    | Some(SyntaxKind::FunctionKw)
+                    | Some(SyntaxKind::PureKw)
+                    | Some(SyntaxKind::ImpureKw)
+                    | Some(SyntaxKind::ProcedureKw)
+            );
+            if has_decls {
+                self.parse_architecture_declarations();
+                if self.at(SyntaxKind::BeginKw) {
+                    self.bump();
+                    self.skip_trivia();
+                }
+            }
+        }
+        self.parse_concurrent_statements();
+    }
+
     fn parse_if_generate(&mut self) {
         self.start_node(SyntaxKind::IfGenerate);
         self.expect(SyntaxKind::IfKw);
@@ -1997,7 +2204,7 @@ impl<'a> ParseState<'a> {
         self.expect(SyntaxKind::GenerateKw);
         self.skip_trivia();
 
-        self.parse_concurrent_statements();
+        self.parse_generate_body();
 
         // VHDL-2008: elsif generate / else generate
         while self.at(SyntaxKind::ElsifKw) {
@@ -2007,14 +2214,14 @@ impl<'a> ParseState<'a> {
             self.skip_trivia();
             self.expect(SyntaxKind::GenerateKw);
             self.skip_trivia();
-            self.parse_concurrent_statements();
+            self.parse_generate_body();
         }
         if self.at(SyntaxKind::ElseKw) {
             self.bump();
             self.skip_trivia();
             self.expect(SyntaxKind::GenerateKw);
             self.skip_trivia();
-            self.parse_concurrent_statements();
+            self.parse_generate_body();
         }
 
         self.expect(SyntaxKind::EndKw);
@@ -2534,6 +2741,35 @@ impl<'a> ParseState<'a> {
         )
     }
 
+    /// Parse a single argument in a function/procedure call or array index.
+    /// Handles: expression, discrete range (expr to/downto expr),
+    /// and named association (name => expr).
+    fn parse_call_or_index_arg(&mut self) {
+        self.skip_trivia();
+        // Check for named association using lookahead
+        if self.lookahead_is_named_association() {
+            self.parse_name(); // formal name (may include index/slice)
+            self.skip_trivia();
+            self.expect(SyntaxKind::Arrow); // =>
+            self.skip_trivia();
+            if self.at(SyntaxKind::OpenKw) {
+                self.bump();
+            } else {
+                self.parse_expression();
+            }
+        } else {
+            self.parse_expression();
+            self.skip_trivia();
+            // Check for discrete range
+            if self.at(SyntaxKind::ToKw) || self.at(SyntaxKind::DowntoKw) {
+                self.bump();
+                self.skip_trivia();
+                self.parse_expression();
+            }
+        }
+        self.skip_trivia();
+    }
+
     fn parse_name_or_call(&mut self) {
         self.parse_name();
     }
@@ -2549,23 +2785,14 @@ impl<'a> ParseState<'a> {
             match self.current_kind() {
                 Some(SyntaxKind::LParen) => {
                     // Function call, type conversion, index, or slice
+                    // Also handles named association: func(param => value, ...)
                     self.expect(SyntaxKind::LParen);
                     self.skip_trivia();
                     if !self.at(SyntaxKind::RParen) {
-                        self.parse_expression();
-                        self.skip_trivia();
-                        // Check for discrete range in parentheses
-                        if self.at(SyntaxKind::ToKw) || self.at(SyntaxKind::DowntoKw) {
-                            self.bump();
+                        self.parse_call_or_index_arg();
+                        while self.eat(SyntaxKind::Comma) {
                             self.skip_trivia();
-                            self.parse_expression();
-                        } else {
-                            // Multiple arguments
-                            while self.eat(SyntaxKind::Comma) {
-                                self.skip_trivia();
-                                self.parse_expression();
-                                self.skip_trivia();
-                            }
+                            self.parse_call_or_index_arg();
                         }
                     }
                     self.skip_trivia();
@@ -2584,16 +2811,17 @@ impl<'a> ParseState<'a> {
                     self.bump(); // '
                     self.skip_trivia();
                     if self.at(SyntaxKind::LParen) {
-                        // Qualified expression
+                        // Qualified expression: type'(aggregate_or_expr)
+                        // The content can be a plain expression OR an aggregate
+                        // with named associations: type'(field => val, ...)
                         self.bump(); // (
                         self.skip_trivia();
                         if !self.at(SyntaxKind::RParen) {
-                            self.parse_expression();
-                            // Handle aggregate inside qualified expression
+                            self.parse_aggregate_element();
                             self.skip_trivia();
                             while self.eat(SyntaxKind::Comma) {
                                 self.skip_trivia();
-                                self.parse_expression();
+                                self.parse_aggregate_element();
                                 self.skip_trivia();
                             }
                         }
@@ -2658,10 +2886,18 @@ impl<'a> ParseState<'a> {
             self.skip_trivia();
             self.parse_expression();
         } else {
-            // Parse expression, then check for =>
-            let saved = self.current;
+            // Parse expression, then check for range and/or =>
             self.parse_expression();
             self.skip_trivia();
+
+            // Check for range choice: expr to/downto expr => value
+            if self.at(SyntaxKind::ToKw) || self.at(SyntaxKind::DowntoKw) {
+                self.bump(); // to/downto
+                self.skip_trivia();
+                self.parse_expression();
+                self.skip_trivia();
+            }
+
             if self.at(SyntaxKind::Arrow) {
                 // Named association: already parsed the choice, now parse value
                 self.bump(); // =>
@@ -2680,8 +2916,18 @@ impl<'a> ParseState<'a> {
     fn parse_subtype_indication(&mut self) {
         self.start_node(SyntaxKind::SubtypeIndication);
         // Type mark (name or built-in type keyword)
+        // Supports dotted names: lib.pkg.type_name
         if self.is_name_or_builtin_start() {
-            self.bump(); // type name
+            self.bump(); // type name (first component)
+                         // Consume dotted suffixes: .pkg.type_name
+            while self.at(SyntaxKind::Dot) {
+                self.bump(); // .
+                if self.is_name_or_builtin_start() || self.at(SyntaxKind::AllKw) {
+                    self.bump(); // next name component
+                } else {
+                    break;
+                }
+            }
         } else {
             self.error("expected type name");
             self.finish_node();
