@@ -413,7 +413,7 @@ fn emit_sv_literal(lit: &HirLiteral) -> String {
         HirLiteral::BitVector(bits) => {
             let width = bits.len();
             let mut s = format!("{width}'b");
-            for b in bits {
+            for b in bits.iter().rev() {
                 s.push(if *b { '1' } else { '0' });
             }
             s
@@ -493,6 +493,37 @@ fn emit_expr(expr: &HirExpression, resolver: &NameResolver) -> String {
                 emit_expr(count, resolver),
                 emit_expr(value, resolver)
             )
+        }
+        HirExpression::If(if_expr) => {
+            format!(
+                "({} ? {} : {})",
+                emit_expr(&if_expr.condition, resolver),
+                emit_expr(&if_expr.then_expr, resolver),
+                emit_expr(&if_expr.else_expr, resolver)
+            )
+        }
+        HirExpression::Match(match_expr) => {
+            // Emit as nested ternary: (sel == pat1) ? val1 : (sel == pat2) ? val2 : default
+            let sel = emit_expr(&match_expr.expr, resolver);
+            let mut default = String::from("'0");
+            let mut arms_without_wildcard = Vec::new();
+            for arm in &match_expr.arms {
+                match &arm.pattern {
+                    HirPattern::Wildcard => {
+                        default = emit_expr(&arm.expr, resolver);
+                    }
+                    _ => {
+                        arms_without_wildcard.push(arm);
+                    }
+                }
+            }
+            let mut out = default;
+            for arm in arms_without_wildcard.iter().rev() {
+                let pat = emit_sv_pattern(&arm.pattern);
+                let val = emit_expr(&arm.expr, resolver);
+                out = format!("({sel} == {pat}) ? {val} : {out}");
+            }
+            out
         }
         _ => sk_expr(expr, resolver),
     }

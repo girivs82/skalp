@@ -458,7 +458,7 @@ fn emit_literal(lit: &HirLiteral) -> String {
         HirLiteral::String(s) => format!("\"{s}\""),
         HirLiteral::BitVector(bits) => {
             let mut s = String::from("0b");
-            for b in bits {
+            for b in bits.iter().rev() {
                 s.push(if *b { '1' } else { '0' });
             }
             s

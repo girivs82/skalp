@@ -402,7 +402,7 @@ fn emit_vhdl_literal(lit: &HirLiteral) -> String {
         HirLiteral::String(s) => format!("\"{s}\""),
         HirLiteral::BitVector(bits) => {
             let mut s = String::from("\"");
-            for b in bits {
+            for b in bits.iter().rev() {
                 s.push(if *b { '1' } else { '0' });
             }
             s.push('"');
@@ -476,6 +476,46 @@ fn emit_expr(expr: &HirExpression, resolver: &NameResolver) -> String {
             )
         }
         HirExpression::Cast(cast) => emit_vhdl_cast(&cast.expr, &cast.target_type, resolver),
+        HirExpression::If(if_expr) => {
+            format!(
+                "{} when {} else {}",
+                emit_expr(&if_expr.then_expr, resolver),
+                emit_expr(&if_expr.condition, resolver),
+                emit_expr(&if_expr.else_expr, resolver)
+            )
+        }
+        HirExpression::Match(match_expr) => {
+            // Emit as nested when...else: val1 when (sel = pat1) else val2 when (sel = pat2) else default
+            let sel = emit_expr(&match_expr.expr, resolver);
+            let mut parts = Vec::new();
+            let mut default = None;
+            for arm in &match_expr.arms {
+                let val = emit_expr(&arm.expr, resolver);
+                match &arm.pattern {
+                    HirPattern::Wildcard => {
+                        default = Some(val);
+                    }
+                    _ => {
+                        let pat = emit_vhdl_pattern(&arm.pattern);
+                        parts.push((val, pat));
+                    }
+                }
+            }
+            let mut out = String::new();
+            for (val, pat) in &parts {
+                if !out.is_empty() {
+                    out.push_str(" else ");
+                }
+                out.push_str(&format!("{val} when ({sel} = {pat})"));
+            }
+            if let Some(def) = default {
+                if !out.is_empty() {
+                    out.push_str(" else ");
+                }
+                out.push_str(&def);
+            }
+            out
+        }
         _ => sk_expr(expr, resolver),
     }
 }

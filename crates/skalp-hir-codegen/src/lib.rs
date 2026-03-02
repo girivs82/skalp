@@ -154,3 +154,72 @@ pub(crate) fn emit_comments(out: &mut String, comments: &[String], prefix: &str,
 pub(crate) fn indent(level: usize) -> String {
     "    ".repeat(level)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_alu_transpile() {
+        let source = r#"
+// Arithmetic Logic Unit
+entity ALU {
+    in a: bit[32]
+    in b: bit[32]
+    in op: bit[3]
+    in clk: clock
+    out result: bit[32]
+    out zero: bit[1]
+}
+
+impl ALU {
+    signal result_comb: bit[32]
+
+    // ALU operations
+    result_comb = match op {
+        0b000 => a + b,
+        0b001 => a - b,
+        0b010 => a & b,
+        0b011 => a | b,
+        _ => 0
+    };
+
+    zero = if result_comb == 0 { 1 } else { 0 };
+
+    on(clk.rise) {
+        result = result_comb
+    }
+}
+"#;
+        let hir = skalp_frontend::parse_and_build_hir(source).unwrap();
+
+        let vhdl = generate_vhdl(&hir).unwrap();
+        println!("=== VHDL ===\n{vhdl}");
+        assert!(vhdl.contains("entity ALU is"));
+        assert!(
+            !vhdl.contains("match op"),
+            "VHDL should not contain skalp match syntax"
+        );
+        assert!(
+            vhdl.contains("when"),
+            "VHDL should use when...else for match"
+        );
+
+        let sv = generate_systemverilog(&hir).unwrap();
+        println!("=== SystemVerilog ===\n{sv}");
+        assert!(sv.contains("module ALU"));
+        assert!(
+            !sv.contains("match op"),
+            "SV should not contain skalp match syntax"
+        );
+        assert!(sv.contains("?"), "SV should use ternary for match");
+
+        let sk = generate_skalp_source(&hir).unwrap();
+        println!("=== Skalp (round-trip) ===\n{sk}");
+        assert!(sk.contains("entity ALU"));
+        assert!(
+            sk.contains("0b000"),
+            "Binary literals should preserve correct bit order"
+        );
+    }
+}
