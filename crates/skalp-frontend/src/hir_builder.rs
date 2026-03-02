@@ -8,7 +8,7 @@ use crate::safety_attributes::{
     AsilLevel, HsrAllocation, HsrDef, SafetyGoalDef, SafetyMechanismDef, VerificationMethod,
 };
 use crate::span::{LineIndex, SourceSpan};
-use crate::syntax::{SyntaxKind, SyntaxNode, SyntaxNodeExt};
+use crate::syntax::{SyntaxElement, SyntaxKind, SyntaxNode, SyntaxNodeExt};
 use crate::typeck::TypeChecker;
 use indexmap::IndexMap;
 use std::path::PathBuf;
@@ -365,6 +365,40 @@ impl HirBuilderContext {
             span = span.with_file(file.clone());
         }
         Some(span)
+    }
+
+    /// Collect leading comments from preceding siblings of a CST node.
+    /// Returns comment text with the `//` or `/* */` prefix stripped.
+    fn collect_leading_comments(node: &SyntaxNode) -> Vec<String> {
+        let mut comments = Vec::new();
+        let mut prev = node.prev_sibling_or_token();
+        // Walk backward, collecting comments and skipping whitespace
+        while let Some(ref element) = prev {
+            match element {
+                SyntaxElement::Token(tok) if tok.kind() == SyntaxKind::Whitespace => {
+                    prev = element.prev_sibling_or_token();
+                }
+                SyntaxElement::Token(tok) if tok.kind() == SyntaxKind::Comment => {
+                    let text = tok.text().to_string();
+                    // Strip comment prefix
+                    let stripped = if let Some(s) = text.strip_prefix("//") {
+                        s.trim().to_string()
+                    } else if let Some(s) =
+                        text.strip_prefix("/*").and_then(|s| s.strip_suffix("*/"))
+                    {
+                        s.trim().to_string()
+                    } else {
+                        text
+                    };
+                    comments.push(stripped);
+                    prev = element.prev_sibling_or_token();
+                }
+                _ => break,
+            }
+        }
+        // Reverse since we collected back-to-front
+        comments.reverse();
+        comments
     }
 
     // ========== Context Stack Methods (for unified assignment operator) ==========
@@ -907,6 +941,7 @@ impl HirBuilderContext {
                                                 base: Box::new(rhs_expr.clone()),
                                                 field: idx.to_string(),
                                             },
+                                            comments: vec![],
                                         };
                                         assignments.push(assignment);
                                     }
@@ -940,6 +975,7 @@ impl HirBuilderContext {
                                     power_config: None,
                                     safety_config: None,
                                     power_domain: self.current_default_power_domain.clone(),
+                                    comments: vec![],
                                 };
                                 signals.push(signal);
 
@@ -949,6 +985,7 @@ impl HirBuilderContext {
                                     lhs: HirLValue::Signal(SignalId(let_stmt.id.0)),
                                     assignment_type: HirAssignmentType::Combinational,
                                     rhs: let_stmt.value,
+                                    comments: vec![],
                                 };
                                 assignments.push(assignment);
                             }
@@ -1086,6 +1123,7 @@ impl HirBuilderContext {
             safety_mechanism_config,
             seooc_config,
             compiled_ip_config,
+            comments: Self::collect_leading_comments(node),
         })
     }
 
@@ -1137,6 +1175,7 @@ impl HirBuilderContext {
             power_domain_config,
             isolation_config: None, // TODO: Extract from #[isolation] attribute
             retention_config: None, // TODO: Extract from #[retention] attribute
+            comments: Self::collect_leading_comments(node),
         })
     }
 
@@ -1326,6 +1365,7 @@ impl HirBuilderContext {
                                     power_config: None,
                                     safety_config: None,
                                     power_domain: self.current_default_power_domain.clone(),
+                                    comments: vec![],
                                 };
                                 signals.push(implicit_signal);
                                 // Register in symbol table so both LHS and RHS references resolve
@@ -1368,6 +1408,7 @@ impl HirBuilderContext {
                                 var_type: let_stmt.var_type.clone(),
                                 initial_value: Some(let_stmt.value.clone()),
                                 span: self.make_span(&child),
+                                comments: vec![],
                             };
 
                             // Variables are registered in symbol table by build_let_statement()
@@ -1380,6 +1421,7 @@ impl HirBuilderContext {
                                 lhs: HirLValue::Variable(let_stmt.id),
                                 assignment_type: HirAssignmentType::Combinational,
                                 rhs: let_stmt.value,
+                                comments: vec![],
                             };
                             assignments.push(assignment);
                         }
@@ -1728,6 +1770,7 @@ impl HirBuilderContext {
                 connections,
                 safety_config: None,
                 variable_id: None,
+                comments: vec![],
             });
         }
     }
@@ -1784,6 +1827,7 @@ impl HirBuilderContext {
                                 power_config: None,
                                 safety_config: None,
                                 power_domain: None,
+                                comments: vec![],
                             });
 
                             // Add output connection
@@ -2120,6 +2164,7 @@ impl HirBuilderContext {
             connections,
             safety_config,
             variable_id: None,
+            comments: Self::collect_leading_comments(node),
         })
     }
 
@@ -2328,6 +2373,7 @@ impl HirBuilderContext {
             power_config,
             safety_config,
             power_domain: final_power_domain,
+            comments: Self::collect_leading_comments(node),
         })
     }
 
@@ -2563,6 +2609,7 @@ impl HirBuilderContext {
                     lhs: HirLValue::Variable(signal_var_id),
                     rhs: field_access,
                     assignment_type: HirAssignmentType::Blocking,
+                    comments: vec![],
                 };
                 stmts.push(HirStatement::Assignment(assignment));
             }
@@ -2609,6 +2656,7 @@ impl HirBuilderContext {
             var_type,
             initial_value,
             span: self.make_span(node),
+            comments: Self::collect_leading_comments(node),
         })
     }
 
@@ -2631,6 +2679,7 @@ impl HirBuilderContext {
             name,
             const_type,
             value,
+            comments: Self::collect_leading_comments(node),
         })
     }
 
@@ -2744,6 +2793,7 @@ impl HirBuilderContext {
             body,
             span: self.make_span(node),
             pipeline_config,
+            comments: Self::collect_leading_comments(node),
         })
     }
 
@@ -2782,6 +2832,7 @@ impl HirBuilderContext {
             id,
             triggers,
             statements,
+            comments: Self::collect_leading_comments(node),
         })
     }
 
@@ -3803,6 +3854,7 @@ impl HirBuilderContext {
             lhs,
             assignment_type,
             rhs,
+            comments: vec![],
         })
     }
 
@@ -4725,6 +4777,7 @@ impl HirBuilderContext {
                                 i,
                             )),
                             span: None,
+                            comments: vec![],
                         };
                         variables.push(variable);
                         let assignment = HirAssignment {
@@ -4737,6 +4790,7 @@ impl HirBuilderContext {
                                 iterator,
                                 i,
                             ),
+                            comments: vec![],
                         };
                         assignments.push(assignment);
                     }
@@ -5088,6 +5142,7 @@ impl HirBuilderContext {
                 lhs: Self::substitute_in_lvalue(&assign.lhs, var_id, var_name, value),
                 assignment_type: assign.assignment_type.clone(),
                 rhs: Self::substitute_in_expr(&assign.rhs, var_id, var_name, value),
+                comments: assign.comments.clone(),
             }),
             HirStatement::If(if_stmt) => HirStatement::If(HirIfStatement {
                 condition: Self::substitute_in_expr(&if_stmt.condition, var_id, var_name, value),

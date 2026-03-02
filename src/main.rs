@@ -1066,6 +1066,38 @@ fn build_design(
         info!("Using custom passes: {}", passes);
     }
 
+    // HIR-based codegen targets (skip MIR lowering)
+    match target {
+        "sk" | "skalp" => {
+            info!("Generating skalp source from HIR...");
+            let code = skalp_hir_codegen::generate_skalp_source(&hir)?;
+            fs::create_dir_all(output_dir)?;
+            let path = output_dir.join("design.sk");
+            fs::write(&path, &code)?;
+            println!("📄 Output: {:?}", path);
+            return Ok(());
+        }
+        "vhdl" => {
+            info!("Generating VHDL from HIR...");
+            let code = skalp_hir_codegen::generate_vhdl(&hir)?;
+            fs::create_dir_all(output_dir)?;
+            let path = output_dir.join("design.vhd");
+            fs::write(&path, &code)?;
+            println!("📄 Output: {:?}", path);
+            return Ok(());
+        }
+        "sv-hir" => {
+            info!("Generating SystemVerilog from HIR...");
+            let code = skalp_hir_codegen::generate_systemverilog(&hir)?;
+            fs::create_dir_all(output_dir)?;
+            let path = output_dir.join("design.sv");
+            fs::write(&path, &code)?;
+            println!("📄 Output: {:?}", path);
+            return Ok(());
+        }
+        _ => {} // fall through to MIR-based targets
+    }
+
     // Lower to MIR with CDC analysis
     info!("Lowering to MIR with CDC analysis...");
     let compiler = skalp_mir::MirCompiler::new()
@@ -1104,8 +1136,8 @@ fn build_design(
             );
         }
         "vhdl" => {
-            // VHDL generation temporarily disabled (was using legacy LIR)
-            anyhow::bail!("VHDL generation is temporarily disabled. Use 'sv' for SystemVerilog.");
+            // VHDL is now handled via HIR-based codegen above; this shouldn't be reached
+            unreachable!("VHDL target should be handled by HIR codegen path");
         }
         "lir" => {
             // LIR output temporarily disabled

@@ -8,6 +8,7 @@ use skalp_mir::hir_to_mir::HirToMir;
 fn create_simple_entity() -> Hir {
     let mut hir = Hir {
         name: "test_module".to_string(),
+        comments: vec![],
         entities: vec![],
         implementations: vec![],
         protocols: vec![],
@@ -30,6 +31,7 @@ fn create_simple_entity() -> Hir {
     let entity = HirEntity {
         id: EntityId(1),
         name: "counter".to_string(),
+        comments: vec![],
         is_async: false,
         visibility: HirVisibility::Private,
         generics: vec![],
@@ -38,6 +40,7 @@ fn create_simple_entity() -> Hir {
             HirPort {
                 id: PortId(1),
                 name: "clk".to_string(),
+                comments: vec![],
                 direction: HirPortDirection::Input,
                 port_type: HirType::Clock(None),
                 physical_constraints: None,
@@ -49,6 +52,7 @@ fn create_simple_entity() -> Hir {
             HirPort {
                 id: PortId(2),
                 name: "rst".to_string(),
+                comments: vec![],
                 direction: HirPortDirection::Input,
                 port_type: HirType::Reset {
                     polarity: HirResetPolarity::ActiveHigh,
@@ -63,6 +67,7 @@ fn create_simple_entity() -> Hir {
             HirPort {
                 id: PortId(3),
                 name: "count".to_string(),
+                comments: vec![],
                 direction: HirPortDirection::Output,
                 port_type: HirType::Bit(8),
                 physical_constraints: None,
@@ -103,6 +108,7 @@ fn create_simple_entity() -> Hir {
             power_config: None,
             safety_config: None,
             power_domain: None,
+            comments: vec![],
         }],
         variables: vec![],
         constants: vec![],
@@ -123,7 +129,9 @@ fn create_simple_entity() -> Hir {
                     is_trait_op: false,
                 }),
                 assignment_type: HirAssignmentType::NonBlocking,
+                comments: vec![],
             })],
+            comments: vec![],
         }],
         assignments: vec![],
         instances: vec![],

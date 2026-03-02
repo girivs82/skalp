@@ -1155,6 +1155,7 @@ mod tests {
                     power_domain_config: None,
                     isolation_config: None,
                     retention_config: None,
+                    comments: vec![],
                 },
                 skalp_frontend::hir::HirPort {
                     id: skalp_frontend::hir::PortId(1),
@@ -1166,6 +1167,7 @@ mod tests {
                     power_domain_config: None,
                     isolation_config: None,
                     retention_config: None,
+                    comments: vec![],
                 },
             ],
             generics: vec![],
@@ -1180,6 +1182,7 @@ mod tests {
             safety_mechanism_config: None,
             seooc_config: None,
             compiled_ip_config: None,
+            comments: vec![],
         };
 
         let result = generator.generate_from_design(&[entity], &[], &[]);

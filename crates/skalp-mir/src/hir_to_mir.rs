@@ -5826,6 +5826,7 @@ impl<'hir> HirToMir<'hir> {
                         var_name,
                         value,
                     ),
+                    comments: vec![],
                 })
             }
             hir::HirStatement::If(if_stmt) => hir::HirStatement::If(hir::HirIfStatement {
@@ -12053,6 +12054,7 @@ impl<'hir> HirToMir<'hir> {
                                     lhs: assign_stmt.lhs.clone(),
                                     rhs: sub_rhs,
                                     assignment_type: assign_stmt.assignment_type.clone(),
+                                    comments: vec![],
                                 },
                             ));
                         }
@@ -14019,6 +14021,7 @@ impl<'hir> HirToMir<'hir> {
                                         lhs: assign_stmt.lhs.clone(),
                                         assignment_type: assign_stmt.assignment_type.clone(),
                                         rhs: rhs_sub,
+                                        comments: vec![],
                                     },
                                 ));
                             }
@@ -14308,6 +14311,7 @@ impl<'hir> HirToMir<'hir> {
                         lhs: assign_stmt.lhs.clone(),
                         assignment_type: assign_stmt.assignment_type.clone(),
                         rhs: rhs_sub,
+                        comments: vec![],
                     }));
                 }
                 other => {
@@ -14586,6 +14590,7 @@ impl<'hir> HirToMir<'hir> {
                                     lhs: assign_stmt.lhs.clone(),
                                     assignment_type: assign_stmt.assignment_type.clone(),
                                     rhs: sub_rhs,
+                                    comments: vec![],
                                 },
                             ));
                         }
@@ -14904,6 +14909,7 @@ impl<'hir> HirToMir<'hir> {
                                     lhs: assign_stmt.lhs.clone(),
                                     assignment_type: assign_stmt.assignment_type.clone(),
                                     rhs: sub_rhs,
+                                    comments: vec![],
                                 },
                             ));
                         }
@@ -15381,6 +15387,7 @@ impl<'hir> HirToMir<'hir> {
                     lhs: assign_stmt.lhs.clone(),
                     assignment_type: assign_stmt.assignment_type.clone(),
                     rhs: sub_rhs,
+                    comments: vec![],
                 })
             }
             _ => stmt.clone(),
@@ -15450,6 +15457,7 @@ impl<'hir> HirToMir<'hir> {
                     lhs: assign_stmt.lhs.clone(),
                     assignment_type: assign_stmt.assignment_type.clone(),
                     rhs: sub_rhs,
+                    comments: vec![],
                 }))
             }
             _ => Some(stmt.clone()),

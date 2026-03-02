@@ -550,10 +550,15 @@ pub enum Token {
     #[regex(r"'[bhd][a-zA-Z0-9_]*", |lex| lex.slice()[1..].to_owned())]
     Lifetime(String),
 
-    // Whitespace and comments (skipped but tracked for position)
+    // Comments (captured for comment preservation)
+    #[regex(r"//[^\n]*", |lex| lex.slice().to_string())]
+    LineComment(String),
+
+    #[regex(r"/\*[^*]*\*+([^/*][^*]*\*+)*/", |lex| lex.slice().to_string())]
+    BlockComment(String),
+
+    // Whitespace (skipped)
     #[regex(r"[ \t\n\f]+", logos::skip)]
-    #[regex(r"//[^\n]*", logos::skip)]
-    #[regex(r"/\*[^*]*\*+([^/*][^*]*\*+)*/", logos::skip)]
     // Error token for unknown/invalid input
     Error,
 }
@@ -573,6 +578,8 @@ impl fmt::Display for Token {
             Token::Lifetime(name) => write!(f, "'{}", name),
             Token::LeftParen => write!(f, "("),
             Token::RightParen => write!(f, ")"),
+            Token::LineComment(c) => write!(f, "{}", c),
+            Token::BlockComment(c) => write!(f, "{}", c),
             _ => write!(f, "{:?}", self),
         }
     }
@@ -938,9 +945,10 @@ entity Counter {
         let mut lexer = Lexer::new(source);
         let tokens: Vec<_> = lexer.tokenize().into_iter().map(|t| t.token).collect();
 
-        // Should skip the comment and only see: entity, Test
-        assert_eq!(tokens.len(), 2);
+        // Comments are now captured as tokens
+        assert_eq!(tokens.len(), 3);
         assert_eq!(tokens[0], Token::Entity);
-        assert_eq!(tokens[1], Token::Identifier("Test".to_string()));
+        assert_eq!(tokens[1], Token::BlockComment("/* comment */".to_string()));
+        assert_eq!(tokens[2], Token::Identifier("Test".to_string()));
     }
 }
