@@ -192,9 +192,7 @@ impl NameCtx {
         match expr {
             HirExpression::Port(id) => self.port_names.get(id).cloned().unwrap_or_default(),
             HirExpression::Signal(id) => self.signal_names.get(id).cloned().unwrap_or_default(),
-            HirExpression::Variable(id) => {
-                self.variable_names.get(id).cloned().unwrap_or_default()
-            }
+            HirExpression::Variable(id) => self.variable_names.get(id).cloned().unwrap_or_default(),
             HirExpression::Constant(id) => format!("const_{}", id.0),
             HirExpression::Literal(lit) => format!("{:?}", lit),
             HirExpression::FieldAccess { base, field } => {
@@ -213,14 +211,25 @@ impl NameCtx {
                 format!("{:?} {}", u.op, self.expr_to_string_depth(&u.operand, d))
             }
             HirExpression::Index(base, idx) => {
-                format!("{}[{}]", self.expr_to_string_depth(base, d), self.expr_to_string_depth(idx, d))
+                format!(
+                    "{}[{}]",
+                    self.expr_to_string_depth(base, d),
+                    self.expr_to_string_depth(idx, d)
+                )
             }
             HirExpression::Concat(parts) => {
-                let strs: Vec<_> = parts.iter().map(|p| self.expr_to_string_depth(p, d)).collect();
+                let strs: Vec<_> = parts
+                    .iter()
+                    .map(|p| self.expr_to_string_depth(p, d))
+                    .collect();
                 strs.join(" ++ ")
             }
             HirExpression::Call(c) => {
-                let args: Vec<_> = c.args.iter().map(|a| self.expr_to_string_depth(a, d)).collect();
+                let args: Vec<_> = c
+                    .args
+                    .iter()
+                    .map(|a| self.expr_to_string_depth(a, d))
+                    .collect();
                 format!("{}({})", c.function, args.join(", "))
             }
             HirExpression::StructLiteral(sl) => {
@@ -332,7 +341,10 @@ impl NameCtx {
                         stack.push(&arm.expr);
                     }
                 }
-                HirExpression::Block { statements, result_expr } => {
+                HirExpression::Block {
+                    statements,
+                    result_expr,
+                } => {
                     // For block expressions, only collect from the result expression
                     // Statement assignments are handled by collect_stmt_refs
                     stack.push(result_expr);
@@ -360,7 +372,12 @@ impl NameCtx {
             for stmt in current_stmts {
                 match stmt {
                     HirStatement::Assignment(a) => {
-                        let lhs_name = self.resolve_lvalue(&a.lhs).split('.').next().unwrap_or("").to_string();
+                        let lhs_name = self
+                            .resolve_lvalue(&a.lhs)
+                            .split('.')
+                            .next()
+                            .unwrap_or("")
+                            .to_string();
                         assigned.insert(lhs_name);
                         self.collect_referenced_names(&a.rhs, referenced);
                     }
@@ -470,7 +487,11 @@ fn hir_type_width(ty: &HirType) -> u32 {
 // Main entry point
 // ============================================================================
 
-pub fn get_schematic(source: &str, cursor_line: u32, language: FileLanguage) -> Option<SchematicData> {
+pub fn get_schematic(
+    source: &str,
+    cursor_line: u32,
+    language: FileLanguage,
+) -> Option<SchematicData> {
     let hir = parse_to_hir(source, language)?;
 
     // Find entity at cursor
@@ -730,10 +751,7 @@ fn find_entity_at_cursor<'a>(
     let entity = target_entity.unwrap_or(&hir.entities[0]);
 
     // Find matching implementation
-    let imp = hir
-        .implementations
-        .iter()
-        .find(|i| i.entity == entity.id);
+    let imp = hir.implementations.iter().find(|i| i.entity == entity.id);
 
     Some((entity, imp))
 }
@@ -766,13 +784,7 @@ fn build_connection_graph(
     // Set of signals driven by combinational assignments
     let driven_signals: HashSet<String> = assignments
         .iter()
-        .map(|a| {
-            a.lhs
-                .split('.')
-                .next()
-                .unwrap_or(&a.lhs)
-                .to_string()
-        })
+        .map(|a| a.lhs.split('.').next().unwrap_or(&a.lhs).to_string())
         .collect();
 
     // Direction inference for instance connections
@@ -816,8 +828,7 @@ fn build_connection_graph(
                 if conn.direction.as_deref() != Some("in") {
                     continue;
                 }
-                if conn.signal == port.name || conn.signal.starts_with(&format!("{}.", port.name))
-                {
+                if conn.signal == port.name || conn.signal.starts_with(&format!("{}.", port.name)) {
                     sinks.push(SchematicEndpoint {
                         endpoint_type: "instance".to_string(),
                         name: inst.name.clone(),
@@ -877,7 +888,10 @@ fn build_connection_graph(
                     continue;
                 }
                 let out_name = a.lhs.split('.').next().unwrap_or(&a.lhs).to_string();
-                if sinks.iter().any(|s| s.endpoint_type == "entity_port" && s.name == out_name) {
+                if sinks
+                    .iter()
+                    .any(|s| s.endpoint_type == "entity_port" && s.name == out_name)
+                {
                     continue;
                 }
                 let rhs_tokens = extract_tokens(&a.rhs);
@@ -907,7 +921,9 @@ fn build_connection_graph(
                         continue;
                     }
                     let out_name = oa.lhs.split('.').next().unwrap_or(&oa.lhs).to_string();
-                    if sinks.iter().any(|s| s.endpoint_type == "entity_port" && s.name == out_name)
+                    if sinks
+                        .iter()
+                        .any(|s| s.endpoint_type == "entity_port" && s.name == out_name)
                     {
                         continue;
                     }
@@ -1008,13 +1024,7 @@ fn build_connection_graph(
             }
             let rhs_tokens = extract_tokens(&a.rhs);
             if rhs_tokens.contains(&port.name) || a.rhs.contains(&format!("{}.", port.name)) {
-                all_derived.insert(
-                    a.lhs
-                        .split('.')
-                        .next()
-                        .unwrap_or(&a.lhs)
-                        .to_string(),
-                );
+                all_derived.insert(a.lhs.split('.').next().unwrap_or(&a.lhs).to_string());
             }
         }
 
@@ -1085,7 +1095,9 @@ fn build_connection_graph(
             continue;
         }
 
-        let out_port = match ports.iter().find(|p| p.name == out_port_name && p.direction == "out")
+        let out_port = match ports
+            .iter()
+            .find(|p| p.name == out_port_name && p.direction == "out")
         {
             Some(p) => p,
             None => continue,
@@ -1138,7 +1150,10 @@ fn build_connection_graph(
         let mut source_port = None;
         if source_inst.is_none() {
             for tok in &rhs_tokens {
-                if let Some(p) = ports.iter().find(|pp| pp.name == *tok && pp.direction == "in") {
+                if let Some(p) = ports
+                    .iter()
+                    .find(|pp| pp.name == *tok && pp.direction == "in")
+                {
                     source_port = Some(p);
                     break;
                 }
@@ -1250,7 +1265,11 @@ fn build_connection_graph(
             }
             if !is_inst_output {
                 let sig_info = signals.iter().find(|s| s.name == sig);
-                logic_signal_outputs.push((sig.clone(), sinks, sig_info.map(|s| s.width).unwrap_or(1)));
+                logic_signal_outputs.push((
+                    sig.clone(),
+                    sinks,
+                    sig_info.map(|s| s.width).unwrap_or(1),
+                ));
                 covered_signals.insert(sig);
             }
         }
@@ -1349,7 +1368,10 @@ fn build_connection_graph(
 
         for conn in &logic_connections {
             if conn.direction.as_deref() == Some("in") {
-                if let Some(port) = ports.iter().find(|p| p.name == conn.port && p.direction == "in") {
+                if let Some(port) = ports
+                    .iter()
+                    .find(|p| p.name == conn.port && p.direction == "in")
+                {
                     nets.push(SchematicNet {
                         name: port.name.clone(),
                         width: port.width,
@@ -1367,7 +1389,10 @@ fn build_connection_graph(
                     covered_signals.insert(port.name.clone());
                 }
             } else if conn.direction.as_deref() == Some("out") {
-                if let Some(port) = ports.iter().find(|p| p.name == conn.port && p.direction == "out") {
+                if let Some(port) = ports
+                    .iter()
+                    .find(|p| p.name == conn.port && p.direction == "out")
+                {
                     nets.push(SchematicNet {
                         name: port.name.clone(),
                         width: port.width,
@@ -1443,8 +1468,14 @@ impl Counter {
         let data = data.unwrap();
         assert_eq!(data.entity_name, "Counter");
         assert_eq!(data.ports.len(), 4);
-        assert!(data.ports.iter().any(|p| p.name == "clk" && p.direction == "in"));
-        assert!(data.ports.iter().any(|p| p.name == "count" && p.direction == "out"));
+        assert!(data
+            .ports
+            .iter()
+            .any(|p| p.name == "clk" && p.direction == "in"));
+        assert!(data
+            .ports
+            .iter()
+            .any(|p| p.name == "count" && p.direction == "out"));
     }
 
     #[test]

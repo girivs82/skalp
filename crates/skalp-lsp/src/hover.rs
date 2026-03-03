@@ -21,7 +21,9 @@ pub fn get_hover(doc: &DocumentState, position: Position, language: FileLanguage
 
     // Generate hover content based on the word and language
     let hover_content = match language {
-        FileLanguage::Vhdl => generate_vhdl_hover_content(&word).or_else(|| generate_hover_content(&word)),
+        FileLanguage::Vhdl => {
+            generate_vhdl_hover_content(&word).or_else(|| generate_hover_content(&word))
+        }
         FileLanguage::Skalp => generate_hover_content(&word),
     };
 

@@ -432,8 +432,7 @@ impl LanguageServer for SkalpLanguageServer {
 
                 if let Some(doc) = self.documents.get(&uri) {
                     let source = doc.content.to_string();
-                    let result =
-                        schematic::get_schematic(&source, line, doc.language);
+                    let result = schematic::get_schematic(&source, line, doc.language);
                     Ok(result.and_then(|r| serde_json::to_value(r).ok()))
                 } else {
                     Ok(None)

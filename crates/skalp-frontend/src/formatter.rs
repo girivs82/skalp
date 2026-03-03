@@ -53,7 +53,11 @@ fn nil() -> Doc {
 
 fn text(s: impl Into<String>) -> Doc {
     let s = s.into();
-    if s.is_empty() { Doc::Nil } else { Doc::Text(s) }
+    if s.is_empty() {
+        Doc::Nil
+    } else {
+        Doc::Text(s)
+    }
 }
 
 fn hardline() -> Doc {
@@ -69,7 +73,9 @@ fn line_or_empty() -> Doc {
 }
 
 fn nest(indent: i32, doc: Doc) -> Doc {
-    if matches!(doc, Doc::Nil) { return Doc::Nil; }
+    if matches!(doc, Doc::Nil) {
+        return Doc::Nil;
+    }
     Doc::Nest(indent, Box::new(doc))
 }
 
@@ -96,7 +102,9 @@ fn concat(docs: Vec<Doc>) -> Doc {
 fn intersperse(sep: Doc, docs: Vec<Doc>) -> Doc {
     let mut result = Vec::new();
     for (i, d) in docs.into_iter().enumerate() {
-        if i > 0 { result.push(sep.clone()); }
+        if i > 0 {
+            result.push(sep.clone());
+        }
         result.push(d);
     }
     concat(result)
@@ -111,7 +119,10 @@ fn space() -> Doc {
 // ============================================================================
 
 #[derive(Clone, Copy, PartialEq)]
-enum Mode { Flat, Break }
+enum Mode {
+    Flat,
+    Break,
+}
 
 fn layout(width: usize, doc: &Doc) -> String {
     let mut output = String::new();
@@ -121,20 +132,28 @@ fn layout(width: usize, doc: &Doc) -> String {
     while let Some((indent, mode, doc)) = stack.pop() {
         match doc {
             Doc::Nil => {}
-            Doc::Text(s) => { output.push_str(s); column += s.len(); }
+            Doc::Text(s) => {
+                output.push_str(s);
+                column += s.len();
+            }
             Doc::HardLine => {
                 output.push('\n');
                 let spaces = indent.max(0) as usize;
-                for _ in 0..spaces { output.push(' '); }
+                for _ in 0..spaces {
+                    output.push(' ');
+                }
                 column = spaces;
             }
             Doc::Line => {
                 if mode == Mode::Flat {
-                    output.push(' '); column += 1;
+                    output.push(' ');
+                    column += 1;
                 } else {
                     output.push('\n');
                     let spaces = indent.max(0) as usize;
-                    for _ in 0..spaces { output.push(' '); }
+                    for _ in 0..spaces {
+                        output.push(' ');
+                    }
                     column = spaces;
                 }
             }
@@ -142,14 +161,20 @@ fn layout(width: usize, doc: &Doc) -> String {
                 if mode != Mode::Flat {
                     output.push('\n');
                     let spaces = indent.max(0) as usize;
-                    for _ in 0..spaces { output.push(' '); }
+                    for _ in 0..spaces {
+                        output.push(' ');
+                    }
                     column = spaces;
                 }
             }
             Doc::Concat(docs) => {
-                for d in docs.iter().rev() { stack.push((indent, mode, d)); }
+                for d in docs.iter().rev() {
+                    stack.push((indent, mode, d));
+                }
             }
-            Doc::Nest(n, inner) => { stack.push((indent + n, mode, inner)); }
+            Doc::Nest(n, inner) => {
+                stack.push((indent + n, mode, inner));
+            }
             Doc::Group(inner) => {
                 if fits(width as i32 - column as i32, &[(indent, Mode::Flat, inner)]) {
                     stack.push((indent, Mode::Flat, inner));
@@ -165,20 +190,36 @@ fn layout(width: usize, doc: &Doc) -> String {
 fn fits(mut remaining: i32, stack: &[(i32, Mode, &Doc)]) -> bool {
     let mut work: Vec<(i32, Mode, &Doc)> = stack.to_vec();
     while remaining >= 0 {
-        let Some((indent, mode, doc)) = work.pop() else { return true; };
+        let Some((indent, mode, doc)) = work.pop() else {
+            return true;
+        };
         match doc {
             Doc::Nil => {}
             Doc::Text(s) => remaining -= s.len() as i32,
             Doc::HardLine => return true,
             Doc::Line => {
-                if mode == Mode::Flat { remaining -= 1; } else { return true; }
+                if mode == Mode::Flat {
+                    remaining -= 1;
+                } else {
+                    return true;
+                }
             }
-            Doc::LineOrEmpty => { if mode != Mode::Flat { return true; } }
+            Doc::LineOrEmpty => {
+                if mode != Mode::Flat {
+                    return true;
+                }
+            }
             Doc::Concat(docs) => {
-                for d in docs.iter().rev() { work.push((indent, mode, d)); }
+                for d in docs.iter().rev() {
+                    work.push((indent, mode, d));
+                }
             }
-            Doc::Nest(n, inner) => { work.push((indent + n, mode, inner)); }
-            Doc::Group(inner) => { work.push((indent, Mode::Flat, inner)); }
+            Doc::Nest(n, inner) => {
+                work.push((indent + n, mode, inner));
+            }
+            Doc::Group(inner) => {
+                work.push((indent, Mode::Flat, inner));
+            }
         }
     }
     false
@@ -201,7 +242,11 @@ const MAX_FORMAT_DEPTH: usize = 128;
 impl Formatter {
     fn new(options: FormatOptions, root: &SyntaxNode, original_source: &str) -> Self {
         let standalone_comments = Self::classify_comments(root, original_source);
-        Self { options, depth: std::cell::Cell::new(0), standalone_comments }
+        Self {
+            options,
+            depth: std::cell::Cell::new(0),
+            standalone_comments,
+        }
     }
 
     /// Walk the CST tokens in document order and match them against the original
@@ -241,9 +286,7 @@ impl Formatter {
 
                         if t.kind() == SyntaxKind::Comment {
                             // Check if this line (up to src_pos) has only whitespace before //
-                            let line_start = source[..*src_pos]
-                                .rfind('\n')
-                                .map_or(0, |p| p + 1);
+                            let line_start = source[..*src_pos].rfind('\n').map_or(0, |p| p + 1);
                             let before = &source[line_start..*src_pos];
                             if before.chars().all(|c| c.is_whitespace()) {
                                 let stripped_offset: usize = t.text_range().start().into();
@@ -264,7 +307,9 @@ impl Formatter {
 
     fn format_node(&self, node: &SyntaxNode) -> Doc {
         let d = self.depth.get();
-        if d >= MAX_FORMAT_DEPTH { return text(node.text().to_string()); }
+        if d >= MAX_FORMAT_DEPTH {
+            return text(node.text().to_string());
+        }
         self.depth.set(d + 1);
         let result = self.format_node_inner(node);
         self.depth.set(d);
@@ -306,9 +351,7 @@ impl Formatter {
                 self.fmt_inline(node)
             }
 
-            GenerateForStmt | GenerateIfStmt | GenerateMatchStmt => {
-                self.fmt_generate_stmt(node)
-            }
+            GenerateForStmt | GenerateIfStmt | GenerateMatchStmt => self.fmt_generate_stmt(node),
 
             MatchArmList => self.fmt_match_arm_list(node),
             MatchArm => self.fmt_inline(node),
@@ -320,16 +363,19 @@ impl Formatter {
             ConnectionList => self.fmt_connection_list_items(node),
             TraitItemList => self.fmt_item_list_newline(node),
 
-            SafetyGoalDecl | SafetyEntityDecl | SafetyTraitDecl | FmeaTraitDecl
-            | HsiTraitDecl | FmedaLibraryDecl | FormalBlock | CovergroupDecl
-            | GlobalConstraintBlock | PhysicalConstraintBlock => {
-                self.fmt_braced_block_with_body(node)
-            }
+            SafetyGoalDecl
+            | SafetyEntityDecl
+            | SafetyTraitDecl
+            | FmeaTraitDecl
+            | HsiTraitDecl
+            | FmedaLibraryDecl
+            | FormalBlock
+            | CovergroupDecl
+            | GlobalConstraintBlock
+            | PhysicalConstraintBlock => self.fmt_braced_block_with_body(node),
 
-            AssertStmt | PropertyStmt | CoverStmt | SequenceStmt | AssumeStmt
-            | ExpectStmt | ProveStmt | AssumeMacroStmt | CoverMacroStmt => {
-                self.fmt_inline(node)
-            }
+            AssertStmt | PropertyStmt | CoverStmt | SequenceStmt | AssumeStmt | ExpectStmt
+            | ProveStmt | AssumeMacroStmt | CoverMacroStmt => self.fmt_inline(node),
 
             _ => self.fmt_inline(node),
         }
@@ -389,9 +435,7 @@ impl Formatter {
             return false;
         }
 
-        if let (Some(l), Some(r)) =
-            (Self::last_token_kind(left), Self::first_token_kind(right))
-        {
+        if let (Some(l), Some(r)) = (Self::last_token_kind(left), Self::first_token_kind(right)) {
             needs_space_between(l, r)
         } else {
             true
@@ -408,7 +452,12 @@ impl Formatter {
     /// Emit any trailing children (typically comments) after index `i`.
     /// These are comments absorbed by the parser into a declaration node after RBrace.
     /// Adds a blank line before the comment block for visual separation.
-    fn emit_trailing_comments(&self, children: &[SyntaxElement], start: usize, docs: &mut Vec<Doc>) {
+    fn emit_trailing_comments(
+        &self,
+        children: &[SyntaxElement],
+        start: usize,
+        docs: &mut Vec<Doc>,
+    ) {
         let mut first = true;
         for j in start..children.len() {
             if children[j].kind() == SyntaxKind::Comment {
@@ -500,7 +549,7 @@ impl Formatter {
             let is_use = kind == SyntaxKind::UseDecl;
             let prev_is_use = prev_kind == Some(SyntaxKind::UseDecl);
             let is_design_unit = is_design_unit_kind(kind);
-            let prev_is_design = prev_kind.map_or(false, is_design_unit_kind);
+            let prev_is_design = prev_kind.is_some_and(is_design_unit_kind);
 
             if !docs.is_empty() && kind != SyntaxKind::Comment {
                 if is_use && prev_is_use {
@@ -571,11 +620,10 @@ impl Formatter {
 
         // Header (everything before LBrace)
         while i < children.len() && children[i].kind() != SyntaxKind::LBrace {
-            if !docs.is_empty() {
-                if Self::should_space_between(&children[i - 1], &children[i]) {
+            if !docs.is_empty()
+                && Self::should_space_between(&children[i - 1], &children[i]) {
                     docs.push(space());
                 }
-            }
             docs.push(self.fmt_element(&children[i]));
             i += 1;
         }
@@ -644,11 +692,10 @@ impl Formatter {
 
         // Header: impl Name
         while i < children.len() && children[i].kind() != SyntaxKind::LBrace {
-            if !docs.is_empty() {
-                if Self::should_space_between(&children[i - 1], &children[i]) {
+            if !docs.is_empty()
+                && Self::should_space_between(&children[i - 1], &children[i]) {
                     docs.push(space());
                 }
-            }
             docs.push(self.fmt_element(&children[i]));
             i += 1;
         }
@@ -665,11 +712,10 @@ impl Formatter {
 
         // Name (everything before LBrace)
         while i < children.len() && children[i].kind() != SyntaxKind::LBrace {
-            if !docs.is_empty() {
-                if Self::should_space_between(&children[i - 1], &children[i]) {
+            if !docs.is_empty()
+                && Self::should_space_between(&children[i - 1], &children[i]) {
                     docs.push(space());
                 }
-            }
             docs.push(self.fmt_element(&children[i]));
             i += 1;
         }
@@ -679,12 +725,7 @@ impl Formatter {
     }
 
     /// Shared: format { body } part of impl block with blank line handling
-    fn fmt_impl_body_from(
-        &self,
-        children: &[SyntaxElement],
-        i: &mut usize,
-        docs: &mut Vec<Doc>,
-    ) {
+    fn fmt_impl_body_from(&self, children: &[SyntaxElement], i: &mut usize, docs: &mut Vec<Doc>) {
         let indent = self.options.indent_width;
 
         if *i < children.len() && children[*i].kind() == SyntaxKind::LBrace {
@@ -701,7 +742,7 @@ impl Formatter {
         while *i < children.len() && children[*i].kind() != SyntaxKind::RBrace {
             let kind = children[*i].kind();
             let is_block_item = is_block_level_kind(kind);
-            let prev_was_block = prev_body_kind.map_or(false, is_block_level_kind);
+            let prev_was_block = prev_body_kind.is_some_and(is_block_level_kind);
 
             if !body_docs.is_empty() && (is_block_item || prev_was_block) {
                 body_docs.push(hardline());
@@ -828,9 +869,9 @@ impl Formatter {
                         && children[i].kind() != SyntaxKind::BlockStmt
                         && children[i].kind() != SyntaxKind::LBrace
                     {
-                        if cond_docs.is_empty() {
-                            cond_docs.push(space());
-                        } else if Self::should_space_between(&children[i - 1], &children[i]) {
+                        if cond_docs.is_empty()
+                            || Self::should_space_between(&children[i - 1], &children[i])
+                        {
                             cond_docs.push(space());
                         }
                         cond_docs.push(self.fmt_element(&children[i]));
@@ -877,7 +918,9 @@ impl Formatter {
                     }
                     i += 1;
                 }
-                _ => { i += 1; }
+                _ => {
+                    i += 1;
+                }
             }
         }
 
@@ -965,11 +1008,10 @@ impl Formatter {
             && children[i].kind() != SyntaxKind::BlockStmt
             && children[i].kind() != SyntaxKind::LBrace
         {
-            if !docs.is_empty() {
-                if Self::should_space_between(&children[i - 1], &children[i]) {
+            if !docs.is_empty()
+                && Self::should_space_between(&children[i - 1], &children[i]) {
                     docs.push(space());
                 }
-            }
             docs.push(self.fmt_element(&children[i]));
             i += 1;
         }
@@ -1026,14 +1068,11 @@ impl Formatter {
         let mut i = 0;
 
         // Header: let name = Entity<Args>
-        while i < children.len()
-            && children[i].kind() != SyntaxKind::LBrace
-        {
-            if !docs.is_empty() {
-                if Self::should_space_between(&children[i - 1], &children[i]) {
+        while i < children.len() && children[i].kind() != SyntaxKind::LBrace {
+            if !docs.is_empty()
+                && Self::should_space_between(&children[i - 1], &children[i]) {
                     docs.push(space());
                 }
-            }
             docs.push(self.fmt_element(&children[i]));
             i += 1;
         }
@@ -1108,11 +1147,10 @@ impl Formatter {
             && children[i].kind() != SyntaxKind::LBrace
             && children[i].kind() != SyntaxKind::BlockStmt
         {
-            if !docs.is_empty() {
-                if Self::should_space_between(&children[i - 1], &children[i]) {
+            if !docs.is_empty()
+                && Self::should_space_between(&children[i - 1], &children[i]) {
                     docs.push(space());
                 }
-            }
             docs.push(self.fmt_element(&children[i]));
             i += 1;
         }
@@ -1145,11 +1183,10 @@ impl Formatter {
             && children[i].kind() != SyntaxKind::LBrace
             && children[i].kind() != SyntaxKind::BlockStmt
         {
-            if !docs.is_empty() {
-                if Self::should_space_between(&children[i - 1], &children[i]) {
+            if !docs.is_empty()
+                && Self::should_space_between(&children[i - 1], &children[i]) {
                     docs.push(space());
                 }
-            }
             docs.push(self.fmt_element(&children[i]));
             i += 1;
         }
@@ -1202,7 +1239,9 @@ impl Formatter {
         }
         docs.push(hardline());
         docs.push(text("}"));
-        if *i < children.len() { *i += 1; }
+        if *i < children.len() {
+            *i += 1;
+        }
         concat(docs)
     }
 }
@@ -1215,8 +1254,19 @@ fn is_name_like(kind: SyntaxKind) -> bool {
     use SyntaxKind::*;
     matches!(
         kind,
-        Ident | IntLiteral | BinLiteral | HexLiteral | FloatLiteral | StringLiteral
-            | RParen | RBracket | RBrace | TrueKw | FalseKw | SelfKw | SelfTypeKw
+        Ident
+            | IntLiteral
+            | BinLiteral
+            | HexLiteral
+            | FloatLiteral
+            | StringLiteral
+            | RParen
+            | RBracket
+            | RBrace
+            | TrueKw
+            | FalseKw
+            | SelfKw
+            | SelfTypeKw
     )
 }
 
@@ -1224,13 +1274,28 @@ fn is_design_unit_kind(kind: SyntaxKind) -> bool {
     use SyntaxKind::*;
     matches!(
         kind,
-        EntityDecl | ImplBlock | StructDecl | EnumDecl | UnionDecl
-            | TraitDef | TraitImpl | TypeAlias | DistinctTypeDecl
-            | ModuleDecl | ProtocolDecl | FunctionDecl
-            | SafetyGoalDecl | SafetyEntityDecl | SafetyTraitDecl
-            | FmeaTraitDecl | HsiTraitDecl | FmedaLibraryDecl
-            | FormalBlock | CovergroupDecl
-            | GlobalConstraintBlock | PhysicalConstraintBlock
+        EntityDecl
+            | ImplBlock
+            | StructDecl
+            | EnumDecl
+            | UnionDecl
+            | TraitDef
+            | TraitImpl
+            | TypeAlias
+            | DistinctTypeDecl
+            | ModuleDecl
+            | ProtocolDecl
+            | FunctionDecl
+            | SafetyGoalDecl
+            | SafetyEntityDecl
+            | SafetyTraitDecl
+            | FmeaTraitDecl
+            | HsiTraitDecl
+            | FmedaLibraryDecl
+            | FormalBlock
+            | CovergroupDecl
+            | GlobalConstraintBlock
+            | PhysicalConstraintBlock
     )
 }
 
@@ -1238,9 +1303,16 @@ fn is_block_level_kind(kind: SyntaxKind) -> bool {
     use SyntaxKind::*;
     matches!(
         kind,
-        EventBlock | FunctionDecl | IfStmt | MatchStmt | ForStmt
-            | FormalBlock | CovergroupDecl
-            | GenerateForStmt | GenerateIfStmt | GenerateMatchStmt
+        EventBlock
+            | FunctionDecl
+            | IfStmt
+            | MatchStmt
+            | ForStmt
+            | FormalBlock
+            | CovergroupDecl
+            | GenerateForStmt
+            | GenerateIfStmt
+            | GenerateMatchStmt
     )
 }
 
@@ -1248,7 +1320,9 @@ fn needs_space_between(left: SyntaxKind, right: SyntaxKind) -> bool {
     use SyntaxKind::*;
 
     // No space before ';', ','
-    if matches!(right, Semicolon | Comma) { return false; }
+    if matches!(right, Semicolon | Comma) {
+        return false;
+    }
 
     // No space after '(' or '[' or before ')' or ']'
     if matches!(left, LParen | LBracket) || matches!(right, RParen | RBracket) {
@@ -1256,49 +1330,115 @@ fn needs_space_between(left: SyntaxKind, right: SyntaxKind) -> bool {
     }
 
     // No space around '.' (field access)
-    if left == Dot || right == Dot { return false; }
+    if left == Dot || right == Dot {
+        return false;
+    }
 
     // No space around '::' (path separator)
-    if left == ColonColon || right == ColonColon { return false; }
+    if left == ColonColon || right == ColonColon {
+        return false;
+    }
 
     // No space before '(' after identifier/keyword (fn calls, on(...))
-    if right == LParen && (is_name_like(left) || left == OnKw) { return false; }
+    if right == LParen && (is_name_like(left) || left == OnKw) {
+        return false;
+    }
 
     // No space before '[' after identifier or type keyword (indexing, width specs)
-    if right == LBracket && (is_name_like(left) || is_type_keyword(left)) { return false; }
+    if right == LBracket && (is_name_like(left) || is_type_keyword(left)) {
+        return false;
+    }
 
     // No space inside #[ (attributes)
-    if left == HashBracket { return false; }
+    if left == HashBracket {
+        return false;
+    }
 
     // No space after unary '!', '~' (but != needs space)
-    if matches!(left, Bang | Tilde) && !matches!(right, Assign | Eq) { return false; }
+    if matches!(left, Bang | Tilde) && !matches!(right, Assign | Eq) {
+        return false;
+    }
 
     // Space around '=' (assignment)
-    if left == Assign || right == Assign { return true; }
+    if left == Assign || right == Assign {
+        return true;
+    }
 
     // Space around '=>' (fat arrow)
-    if left == FatArrow || right == FatArrow { return true; }
+    if left == FatArrow || right == FatArrow {
+        return true;
+    }
 
     // Space around '->' (arrow)
-    if left == Arrow || right == Arrow { return true; }
+    if left == Arrow || right == Arrow {
+        return true;
+    }
 
     // Space around '|>' (pipeline)
-    if left == Pipeline || right == Pipeline { return true; }
+    if left == Pipeline || right == Pipeline {
+        return true;
+    }
 
     // Space around binary operators
-    if matches!(left, Plus | Minus | Star | Slash | Percent | Amp | Pipe | Caret
-        | AmpAmp | PipePipe | Shl | Shr | Eq | Neq | Lt | Gt | Le | Ge | WidenAdd)
-    { return true; }
-    if matches!(right, Plus | Minus | Star | Slash | Percent | Amp | Pipe | Caret
-        | AmpAmp | PipePipe | Shl | Shr | Eq | Neq | Lt | Gt | Le | Ge | WidenAdd)
-    { return true; }
+    if matches!(
+        left,
+        Plus | Minus
+            | Star
+            | Slash
+            | Percent
+            | Amp
+            | Pipe
+            | Caret
+            | AmpAmp
+            | PipePipe
+            | Shl
+            | Shr
+            | Eq
+            | Neq
+            | Lt
+            | Gt
+            | Le
+            | Ge
+            | WidenAdd
+    ) {
+        return true;
+    }
+    if matches!(
+        right,
+        Plus | Minus
+            | Star
+            | Slash
+            | Percent
+            | Amp
+            | Pipe
+            | Caret
+            | AmpAmp
+            | PipePipe
+            | Shl
+            | Shr
+            | Eq
+            | Neq
+            | Lt
+            | Gt
+            | Le
+            | Ge
+            | WidenAdd
+    ) {
+        return true;
+    }
 
     // No space before ':'
-    if right == Colon { return false; }
+    if right == Colon {
+        return false;
+    }
     // Space after ':' when followed by type name (keyword or identifier)
-    if left == Colon && (right.is_keyword() || right == Ident) { return true; }
+    if left == Colon && (right.is_keyword() || right == Ident) {
+        return true;
+    }
     // No space after ':' otherwise (e.g. bit slices 31:0)
-    if left == Colon { return false; }
+    if left == Colon {
+        return false;
+    }
 
     // No space around '..' / '..='
     if matches!(left, DotDot | DotDotEq) || matches!(right, DotDot | DotDotEq) {
@@ -1306,18 +1446,24 @@ fn needs_space_between(left: SyntaxKind, right: SyntaxKind) -> bool {
     }
 
     // Space between word-like tokens
-    if (left.is_keyword() || is_name_like(left))
-        && (right.is_keyword() || is_name_like(right))
-    { return true; }
+    if (left.is_keyword() || is_name_like(left)) && (right.is_keyword() || is_name_like(right)) {
+        return true;
+    }
 
     // Space after keyword before most tokens
     if left.is_keyword()
-        && !matches!(right, Semicolon | Comma | RParen | RBracket | LParen | Dot
-            | ColonColon | LBracket)
-    { return true; }
+        && !matches!(
+            right,
+            Semicolon | Comma | RParen | RBracket | LParen | Dot | ColonColon | LBracket
+        )
+    {
+        return true;
+    }
 
     // Space before keyword after name-like tokens
-    if right.is_keyword() && is_name_like(left) { return true; }
+    if right.is_keyword() && is_name_like(left) {
+        return true;
+    }
 
     true
 }
@@ -1342,7 +1488,10 @@ pub fn format_skalp_with_options(source: &str, options: &FormatOptions) -> Resul
 
     if !errors.is_empty() {
         let msgs: Vec<String> = errors.iter().map(|e| format!("{:?}", e)).collect();
-        anyhow::bail!("Cannot format skalp source with parse errors: {}", msgs.join("; "));
+        anyhow::bail!(
+            "Cannot format skalp source with parse errors: {}",
+            msgs.join("; ")
+        );
     }
 
     let formatter = Formatter::new(
@@ -1366,7 +1515,8 @@ mod tests {
 
     #[test]
     fn test_format_simple_entity() {
-        let source = "entity Counter {\n    in clk: clock\n    in rst: reset\n    out count: nat[8]\n}\n";
+        let source =
+            "entity Counter {\n    in clk: clock\n    in rst: reset\n    out count: nat[8]\n}\n";
         let result = format_skalp(source).unwrap();
         assert!(result.contains("entity Counter {"), "result:\n{}", result);
         assert!(result.contains("in clk: clock"), "result:\n{}", result);
@@ -1397,7 +1547,11 @@ impl Counter {
 "#;
         let result = format_skalp(source).unwrap();
         assert!(result.contains("impl Counter {"), "result:\n{}", result);
-        assert!(result.contains("signal counter: nat[8]"), "result:\n{}", result);
+        assert!(
+            result.contains("signal counter: nat[8]"),
+            "result:\n{}",
+            result
+        );
         assert!(result.contains("on(clk.rise) {"), "result:\n{}", result);
     }
 
@@ -1469,8 +1623,16 @@ enum State {
 }
 "#;
         let result = format_skalp(source).unwrap();
-        assert!(result.contains("struct PacketHeader {"), "result:\n{}", result);
-        assert!(result.contains("    src_addr: nat[32]"), "result:\n{}", result);
+        assert!(
+            result.contains("struct PacketHeader {"),
+            "result:\n{}",
+            result
+        );
+        assert!(
+            result.contains("    src_addr: nat[32]"),
+            "result:\n{}",
+            result
+        );
         assert!(result.contains("enum State {"), "result:\n{}", result);
     }
 
@@ -1513,52 +1675,81 @@ impl Counter {
 "#;
         let first = format_skalp(source).unwrap();
         let second = format_skalp(&first).unwrap();
-        assert_eq!(first, second, "formatter is not idempotent.\nFirst:\n{}\nSecond:\n{}", first, second);
+        assert_eq!(
+            first, second,
+            "formatter is not idempotent.\nFirst:\n{}\nSecond:\n{}",
+            first, second
+        );
     }
 
     #[test]
     fn test_format_comments_preserved() {
         let source = "// This is a counter entity\nentity Counter {\n    in clk: clock\n    out count: nat[8]\n}\n";
         let result = format_skalp(source).unwrap();
-        assert!(result.contains("// This is a counter entity"), "result:\n{}", result);
+        assert!(
+            result.contains("// This is a counter entity"),
+            "result:\n{}",
+            result
+        );
     }
 
     #[test]
     fn test_format_roundtrip_counter() {
         let source = std::fs::read_to_string(
             std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .parent().unwrap().parent().unwrap()
+                .parent()
+                .unwrap()
+                .parent()
+                .unwrap()
                 .join("examples/counter.sk"),
-        ).unwrap();
+        )
+        .unwrap();
         let result = format_skalp(&source).unwrap();
         let (_, errors) = crate::parse::parse_with_errors(&result);
-        assert!(errors.is_empty(), "formatted output has parse errors: {:?}\nformatted:\n{}", errors, result);
+        assert!(
+            errors.is_empty(),
+            "formatted output has parse errors: {:?}\nformatted:\n{}",
+            errors,
+            result
+        );
     }
 
     #[test]
     fn test_format_roundtrip_advanced_types() {
         let source = std::fs::read_to_string(
             std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .parent().unwrap().parent().unwrap()
+                .parent()
+                .unwrap()
+                .parent()
+                .unwrap()
                 .join("examples/advanced_types.sk"),
-        ).unwrap();
+        )
+        .unwrap();
         let result = format_skalp(&source).unwrap();
         let (_, errors) = crate::parse::parse_with_errors(&result);
-        assert!(errors.is_empty(), "formatted output has parse errors: {:?}\nformatted:\n{}", errors, result);
+        assert!(
+            errors.is_empty(),
+            "formatted output has parse errors: {:?}\nformatted:\n{}",
+            errors,
+            result
+        );
     }
 
     #[test]
     fn test_format_comment_own_line_in_body() {
-        let source = "impl X {\n    signal s: bit[8]\n\n    // Comment on own line\n    signal t: bit\n}\n";
+        let source =
+            "impl X {\n    signal s: bit[8]\n\n    // Comment on own line\n    signal t: bit\n}\n";
         let result = format_skalp(source).unwrap();
         // Comment should be on its own line, not merged with previous signal
         assert!(
             result.contains("bit[8]\n") && result.contains("// Comment on own line\n"),
-            "Comment should be on own line.\nresult:\n{}", result
+            "Comment should be on own line.\nresult:\n{}",
+            result
         );
         assert!(
             !result.contains("bit[8] // Comment"),
-            "Comment should NOT be on same line as signal.\nresult:\n{}", result
+            "Comment should NOT be on same line as signal.\nresult:\n{}",
+            result
         );
     }
 
@@ -1569,7 +1760,8 @@ impl Counter {
         // Trailing comment on same line should stay on same line
         assert!(
             result.contains("bit // less than"),
-            "Trailing comment should stay on same line.\nresult:\n{}", result
+            "Trailing comment should stay on same line.\nresult:\n{}",
+            result
         );
     }
 
@@ -1577,14 +1769,27 @@ impl Counter {
     fn test_format_roundtrip_hierarchical_alu() {
         let source = std::fs::read_to_string(
             std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .parent().unwrap().parent().unwrap()
+                .parent()
+                .unwrap()
+                .parent()
+                .unwrap()
                 .join("examples/hierarchical_alu.sk"),
-        ).unwrap();
+        )
+        .unwrap();
         let result = format_skalp(&source).unwrap();
         let (_, errors) = crate::parse::parse_with_errors(&result);
-        assert!(errors.is_empty(), "formatted output has parse errors: {:?}\nformatted:\n{}", errors, result);
+        assert!(
+            errors.is_empty(),
+            "formatted output has parse errors: {:?}\nformatted:\n{}",
+            errors,
+            result
+        );
         // Verify idempotency
         let result2 = format_skalp(&result).unwrap();
-        assert_eq!(result, result2, "formatter is not idempotent on hierarchical_alu.sk.\nFirst:\n{}\nSecond:\n{}", result, result2);
+        assert_eq!(
+            result, result2,
+            "formatter is not idempotent on hierarchical_alu.sk.\nFirst:\n{}\nSecond:\n{}",
+            result, result2
+        );
     }
 }

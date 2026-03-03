@@ -3,9 +3,7 @@
 //! Maintains a per-file parsed state using the SKALP frontend parser.
 //! Provides symbol resolution, type information, and position mapping.
 
-use skalp_frontend::hir::{
-    Hir, HirGenericType, HirImportPath, HirPortDirection, HirType,
-};
+use skalp_frontend::hir::{Hir, HirGenericType, HirImportPath, HirPortDirection, HirType};
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -691,13 +689,12 @@ impl AnalysisContext {
                     HirGenericType::Width => "width".to_string(),
                     HirGenericType::Type => "type".to_string(),
                     HirGenericType::ClockDomain => "clock_domain".to_string(),
-                    HirGenericType::TypeWithBounds(bounds) => format!("type: {}", bounds.join(" + ")),
+                    HirGenericType::TypeWithBounds(bounds) => {
+                        format!("type: {}", bounds.join(" + "))
+                    }
                     _ => "param".to_string(),
                 };
-                let default_value = generic
-                    .default_value
-                    .as_ref()
-                    .map(|_| "...".to_string());
+                let default_value = generic.default_value.as_ref().map(|_| "...".to_string());
                 ctx.generics.push(GenericInfo {
                     name: generic.name.clone(),
                     line,
@@ -1091,7 +1088,10 @@ fn parse_generic_params(
 /// Convert SourceSpan (1-indexed) to LSP (0-indexed) line/col
 fn span_to_lsp(span: Option<&skalp_frontend::SourceSpan>) -> (u32, u32) {
     match span {
-        Some(s) => (s.line.saturating_sub(1) as u32, s.column.saturating_sub(1) as u32),
+        Some(s) => (
+            s.line.saturating_sub(1) as u32,
+            s.column.saturating_sub(1) as u32,
+        ),
         None => (0, 0),
     }
 }
@@ -1116,7 +1116,10 @@ fn hir_type_to_string(ty: &HirType) -> String {
         HirType::String => "string".to_string(),
         HirType::Event => "event".to_string(),
         HirType::Stream(inner) => format!("stream<{}>", hir_type_to_string(inner)),
-        HirType::NatParam(p) | HirType::IntParam(p) | HirType::BitParam(p) | HirType::LogicParam(p) => p.clone(),
+        HirType::NatParam(p)
+        | HirType::IntParam(p)
+        | HirType::BitParam(p)
+        | HirType::LogicParam(p) => p.clone(),
         _ => format!("{:?}", ty),
     }
 }

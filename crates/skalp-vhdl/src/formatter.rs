@@ -295,25 +295,17 @@ impl Formatter {
             SyntaxKind::IfStmt => self.fmt_if_stmt(node),
             SyntaxKind::CaseStmt => self.fmt_case_stmt(node),
             SyntaxKind::CaseAlternative => self.fmt_case_alternative(node),
-            SyntaxKind::ForLoopStmt | SyntaxKind::WhileLoopStmt => {
-                self.fmt_loop_stmt(node)
-            }
+            SyntaxKind::ForLoopStmt | SyntaxKind::WhileLoopStmt => self.fmt_loop_stmt(node),
             SyntaxKind::ComponentDecl => self.fmt_component_decl(node),
             SyntaxKind::ComponentInst => self.fmt_component_inst(node),
-            SyntaxKind::ForGenerate | SyntaxKind::IfGenerate => {
-                self.fmt_generate_stmt(node)
-            }
+            SyntaxKind::ForGenerate | SyntaxKind::IfGenerate => self.fmt_generate_stmt(node),
             SyntaxKind::BlockStmt => self.fmt_block_stmt(node),
-            SyntaxKind::FunctionBody | SyntaxKind::ProcedureBody => {
-                self.fmt_subprogram_body(node)
-            }
+            SyntaxKind::FunctionBody | SyntaxKind::ProcedureBody => self.fmt_subprogram_body(node),
             SyntaxKind::ParamList => self.fmt_param_list(node),
             SyntaxKind::PortMap | SyntaxKind::GenericMap => self.fmt_map(node),
             SyntaxKind::AssociationList => self.fmt_association_list(node),
             SyntaxKind::RecordTypeDef => self.fmt_record_type_def(node),
-            SyntaxKind::InterfaceDecl | SyntaxKind::ViewDecl => {
-                self.fmt_interface_or_view(node)
-            }
+            SyntaxKind::InterfaceDecl | SyntaxKind::ViewDecl => self.fmt_interface_or_view(node),
             _ => self.fmt_inline(node),
         }
     }
@@ -415,11 +407,8 @@ impl Formatter {
                     | SyntaxKind::ViewDecl
                     | SyntaxKind::PackageInstantiation
             );
-            let is_context = matches!(
-                kind,
-                SyntaxKind::LibraryClause | SyntaxKind::UseClause
-            );
-            let prev_is_design = prev_kind.map_or(false, |pk| {
+            let is_context = matches!(kind, SyntaxKind::LibraryClause | SyntaxKind::UseClause);
+            let prev_is_design = prev_kind.is_some_and(|pk| {
                 matches!(
                     pk,
                     SyntaxKind::EntityDecl
@@ -431,7 +420,7 @@ impl Formatter {
                         | SyntaxKind::PackageInstantiation
                 )
             });
-            let prev_is_context = prev_kind.map_or(false, |pk| {
+            let prev_is_context = prev_kind.is_some_and(|pk| {
                 matches!(pk, SyntaxKind::LibraryClause | SyntaxKind::UseClause)
             });
 
@@ -825,8 +814,7 @@ impl Formatter {
                     i += 1;
                     // Condition (everything until 'then')
                     let mut cond_docs = Vec::new();
-                    while i < children.len() && children[i].kind() != SyntaxKind::ThenKw
-                    {
+                    while i < children.len() && children[i].kind() != SyntaxKind::ThenKw {
                         if !cond_docs.is_empty() {
                             cond_docs.push(space());
                         }
@@ -845,9 +833,7 @@ impl Formatter {
                     while i < children.len()
                         && !matches!(
                             children[i].kind(),
-                            SyntaxKind::ElsifKw
-                                | SyntaxKind::ElseKw
-                                | SyntaxKind::EndKw
+                            SyntaxKind::ElsifKw | SyntaxKind::ElseKw | SyntaxKind::EndKw
                         )
                     {
                         stmt_docs.push(hardline());
@@ -865,8 +851,7 @@ impl Formatter {
                     i += 1;
                     // Condition
                     let mut cond_docs = Vec::new();
-                    while i < children.len() && children[i].kind() != SyntaxKind::ThenKw
-                    {
+                    while i < children.len() && children[i].kind() != SyntaxKind::ThenKw {
                         if !cond_docs.is_empty() {
                             cond_docs.push(space());
                         }
@@ -885,9 +870,7 @@ impl Formatter {
                     while i < children.len()
                         && !matches!(
                             children[i].kind(),
-                            SyntaxKind::ElsifKw
-                                | SyntaxKind::ElseKw
-                                | SyntaxKind::EndKw
+                            SyntaxKind::ElsifKw | SyntaxKind::ElseKw | SyntaxKind::EndKw
                         )
                     {
                         stmt_docs.push(hardline());
@@ -1292,10 +1275,7 @@ impl Formatter {
         while i < children.len()
             && !matches!(
                 children[i].kind(),
-                SyntaxKind::IsKw
-                    | SyntaxKind::BeginKw
-                    | SyntaxKind::SignalDecl
-                    | SyntaxKind::EndKw
+                SyntaxKind::IsKw | SyntaxKind::BeginKw | SyntaxKind::SignalDecl | SyntaxKind::EndKw
             )
         {
             if !header_docs.is_empty() {
@@ -1823,9 +1803,7 @@ fn needs_space_between(left: SyntaxKind, right: SyntaxKind) -> bool {
         return true;
     }
     // Space between identifiers/keywords (word-like tokens)
-    if (is_keyword(left) || is_name_like(left))
-        && (is_keyword(right) || is_name_like(right))
-    {
+    if (is_keyword(left) || is_name_like(left)) && (is_keyword(right) || is_name_like(right)) {
         return true;
     }
     // Space after keyword before most tokens
@@ -1865,10 +1843,7 @@ pub fn format_vhdl_with_options(source: &str, options: &FormatOptions) -> Result
             .iter()
             .map(|e| e.message.clone())
             .collect();
-        anyhow::bail!(
-            "Cannot format VHDL with parse errors: {}",
-            msgs.join("; ")
-        );
+        anyhow::bail!("Cannot format VHDL with parse errors: {}", msgs.join("; "));
     }
 
     let formatter = Formatter::new(FormatOptions {
