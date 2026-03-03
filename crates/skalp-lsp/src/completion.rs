@@ -1,7 +1,7 @@
 //! Auto-completion support for SKALP
 
 use crate::analysis::AnalysisContext;
-use crate::DocumentState;
+use crate::{DocumentState, FileLanguage};
 use tower_lsp::lsp_types::{CompletionItem, CompletionItemKind, InsertTextFormat, Position};
 
 /// Get completion items for the current position
@@ -9,6 +9,7 @@ pub fn get_completions(
     doc: &DocumentState,
     position: Position,
     analysis: Option<&AnalysisContext>,
+    language: FileLanguage,
 ) -> Vec<CompletionItem> {
     let mut completions = Vec::new();
 
@@ -39,7 +40,10 @@ pub fn get_completions(
         ));
     } else if is_type_position(prefix) {
         // Type completions: after `:` in declarations
-        completions.extend(get_type_completions(analysis));
+        completions.extend(match language {
+            FileLanguage::Vhdl => get_vhdl_type_completions(analysis),
+            FileLanguage::Skalp => get_type_completions(analysis),
+        });
     } else if is_expression_position(prefix) {
         // Expression context: suggest signals, ports, constants, instances, enum variants
         if let Some(ctx) = analysis {
@@ -51,7 +55,10 @@ pub fn get_completions(
         }
     } else if prefix.trim().is_empty() || prefix.ends_with(' ') {
         // Top-level or after space — keywords + context-aware suggestions
-        completions.extend(get_keyword_completions());
+        completions.extend(match language {
+            FileLanguage::Vhdl => get_vhdl_keyword_completions(),
+            FileLanguage::Skalp => get_keyword_completions(),
+        });
         if let Some(ctx) = analysis {
             // If inside an impl block, suggest signals/ports/constants
             if ctx.scope_map.contains_key(&position.line) {
@@ -732,6 +739,215 @@ fn get_member_completions(
     completions
 }
 
+/// Get VHDL keyword completions
+fn get_vhdl_keyword_completions() -> Vec<CompletionItem> {
+    vec![
+        CompletionItem {
+            label: "entity".to_string(),
+            kind: Some(CompletionItemKind::KEYWORD),
+            detail: Some("VHDL entity declaration".to_string()),
+            insert_text: Some(
+                "entity ${1:name} is\n  port (\n    ${0}\n  );\nend entity ${1:name};".to_string(),
+            ),
+            insert_text_format: Some(InsertTextFormat::SNIPPET),
+            ..Default::default()
+        },
+        CompletionItem {
+            label: "architecture".to_string(),
+            kind: Some(CompletionItemKind::KEYWORD),
+            detail: Some("VHDL architecture body".to_string()),
+            insert_text: Some(
+                "architecture ${1:rtl} of ${2:entity_name} is\nbegin\n  ${0}\nend architecture ${1:rtl};".to_string(),
+            ),
+            insert_text_format: Some(InsertTextFormat::SNIPPET),
+            ..Default::default()
+        },
+        CompletionItem {
+            label: "process".to_string(),
+            kind: Some(CompletionItemKind::KEYWORD),
+            detail: Some("VHDL process statement".to_string()),
+            insert_text: Some(
+                "process(${1:clk})\nbegin\n  ${0}\nend process;".to_string(),
+            ),
+            insert_text_format: Some(InsertTextFormat::SNIPPET),
+            ..Default::default()
+        },
+        CompletionItem {
+            label: "signal".to_string(),
+            kind: Some(CompletionItemKind::KEYWORD),
+            detail: Some("Signal declaration".to_string()),
+            insert_text: Some("signal ${1:name} : ${2:std_logic};".to_string()),
+            insert_text_format: Some(InsertTextFormat::SNIPPET),
+            ..Default::default()
+        },
+        CompletionItem {
+            label: "component".to_string(),
+            kind: Some(CompletionItemKind::KEYWORD),
+            detail: Some("Component declaration".to_string()),
+            insert_text: Some(
+                "component ${1:name} is\n  port (\n    ${0}\n  );\nend component;".to_string(),
+            ),
+            insert_text_format: Some(InsertTextFormat::SNIPPET),
+            ..Default::default()
+        },
+        CompletionItem {
+            label: "port map".to_string(),
+            kind: Some(CompletionItemKind::KEYWORD),
+            detail: Some("Port map for instantiation".to_string()),
+            insert_text: Some(
+                "${1:instance} : ${2:component}\n  port map (\n    ${0}\n  );".to_string(),
+            ),
+            insert_text_format: Some(InsertTextFormat::SNIPPET),
+            ..Default::default()
+        },
+        CompletionItem {
+            label: "if".to_string(),
+            kind: Some(CompletionItemKind::KEYWORD),
+            detail: Some("If statement".to_string()),
+            insert_text: Some("if ${1:condition} then\n  ${0}\nend if;".to_string()),
+            insert_text_format: Some(InsertTextFormat::SNIPPET),
+            ..Default::default()
+        },
+        CompletionItem {
+            label: "case".to_string(),
+            kind: Some(CompletionItemKind::KEYWORD),
+            detail: Some("Case statement".to_string()),
+            insert_text: Some(
+                "case ${1:signal} is\n  when ${2:value} =>\n    ${0}\n  when others =>\n    null;\nend case;".to_string(),
+            ),
+            insert_text_format: Some(InsertTextFormat::SNIPPET),
+            ..Default::default()
+        },
+        CompletionItem {
+            label: "for generate".to_string(),
+            kind: Some(CompletionItemKind::KEYWORD),
+            detail: Some("For-generate statement".to_string()),
+            insert_text: Some(
+                "${1:label} : for ${2:i} in ${3:0} to ${4:N-1} generate\n  ${0}\nend generate ${1:label};".to_string(),
+            ),
+            insert_text_format: Some(InsertTextFormat::SNIPPET),
+            ..Default::default()
+        },
+        CompletionItem {
+            label: "constant".to_string(),
+            kind: Some(CompletionItemKind::KEYWORD),
+            detail: Some("Constant declaration".to_string()),
+            insert_text: Some("constant ${1:NAME} : ${2:integer} := ${3:0};".to_string()),
+            insert_text_format: Some(InsertTextFormat::SNIPPET),
+            ..Default::default()
+        },
+        CompletionItem {
+            label: "variable".to_string(),
+            kind: Some(CompletionItemKind::KEYWORD),
+            detail: Some("Variable declaration".to_string()),
+            insert_text: Some("variable ${1:name} : ${2:std_logic};".to_string()),
+            insert_text_format: Some(InsertTextFormat::SNIPPET),
+            ..Default::default()
+        },
+    ]
+}
+
+/// Get VHDL type completions
+fn get_vhdl_type_completions(analysis: Option<&AnalysisContext>) -> Vec<CompletionItem> {
+    let mut completions = vec![
+        CompletionItem {
+            label: "std_logic".to_string(),
+            kind: Some(CompletionItemKind::CLASS),
+            detail: Some("IEEE 1164 single-bit logic".to_string()),
+            ..Default::default()
+        },
+        CompletionItem {
+            label: "std_logic_vector".to_string(),
+            kind: Some(CompletionItemKind::CLASS),
+            detail: Some("IEEE 1164 logic vector".to_string()),
+            insert_text: Some("std_logic_vector(${1:7} downto ${2:0})".to_string()),
+            insert_text_format: Some(InsertTextFormat::SNIPPET),
+            ..Default::default()
+        },
+        CompletionItem {
+            label: "unsigned".to_string(),
+            kind: Some(CompletionItemKind::CLASS),
+            detail: Some("IEEE numeric_std unsigned".to_string()),
+            insert_text: Some("unsigned(${1:7} downto ${2:0})".to_string()),
+            insert_text_format: Some(InsertTextFormat::SNIPPET),
+            ..Default::default()
+        },
+        CompletionItem {
+            label: "signed".to_string(),
+            kind: Some(CompletionItemKind::CLASS),
+            detail: Some("IEEE numeric_std signed".to_string()),
+            insert_text: Some("signed(${1:7} downto ${2:0})".to_string()),
+            insert_text_format: Some(InsertTextFormat::SNIPPET),
+            ..Default::default()
+        },
+        CompletionItem {
+            label: "integer".to_string(),
+            kind: Some(CompletionItemKind::CLASS),
+            detail: Some("VHDL integer type".to_string()),
+            ..Default::default()
+        },
+        CompletionItem {
+            label: "natural".to_string(),
+            kind: Some(CompletionItemKind::CLASS),
+            detail: Some("Non-negative integer subtype".to_string()),
+            ..Default::default()
+        },
+        CompletionItem {
+            label: "positive".to_string(),
+            kind: Some(CompletionItemKind::CLASS),
+            detail: Some("Positive integer subtype".to_string()),
+            ..Default::default()
+        },
+        CompletionItem {
+            label: "boolean".to_string(),
+            kind: Some(CompletionItemKind::CLASS),
+            detail: Some("Boolean type".to_string()),
+            ..Default::default()
+        },
+        CompletionItem {
+            label: "bit".to_string(),
+            kind: Some(CompletionItemKind::CLASS),
+            detail: Some("Two-valued logic type".to_string()),
+            ..Default::default()
+        },
+        CompletionItem {
+            label: "real".to_string(),
+            kind: Some(CompletionItemKind::CLASS),
+            detail: Some("Floating-point type (simulation only)".to_string()),
+            ..Default::default()
+        },
+        CompletionItem {
+            label: "time".to_string(),
+            kind: Some(CompletionItemKind::CLASS),
+            detail: Some("Physical time type".to_string()),
+            ..Default::default()
+        },
+    ];
+
+    // Add user-defined types from analysis context
+    if let Some(ctx) = analysis {
+        for ta in &ctx.type_aliases {
+            let detail = ta.type_str.as_deref().unwrap_or("type");
+            completions.push(CompletionItem {
+                label: ta.name.clone(),
+                kind: Some(CompletionItemKind::CLASS),
+                detail: Some(detail.to_string()),
+                ..Default::default()
+            });
+        }
+        for entity in &ctx.entities {
+            completions.push(CompletionItem {
+                label: entity.name.clone(),
+                kind: Some(CompletionItemKind::CLASS),
+                detail: Some("entity".to_string()),
+                ..Default::default()
+            });
+        }
+    }
+
+    completions
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -745,6 +961,7 @@ mod tests {
             ast: None,
             diagnostics: Vec::new(),
             analysis: None,
+            language: FileLanguage::Skalp,
         };
 
         let completions = get_completions(
@@ -754,6 +971,7 @@ mod tests {
                 character: 0,
             },
             None,
+            FileLanguage::Skalp,
         );
         assert!(completions.iter().any(|c| c.label == "entity"));
         assert!(completions.iter().any(|c| c.label == "protocol"));
@@ -767,6 +985,7 @@ mod tests {
             ast: None,
             diagnostics: Vec::new(),
             analysis: None,
+            language: FileLanguage::Skalp,
         };
 
         let completions = get_completions(
@@ -776,6 +995,7 @@ mod tests {
                 character: 3,
             },
             None,
+            FileLanguage::Skalp,
         );
         assert!(completions.iter().any(|c| c.label == "clock.rise"));
         assert!(completions.iter().any(|c| c.label == "reset.active"));
@@ -792,6 +1012,7 @@ mod tests {
             ast: None,
             diagnostics: Vec::new(),
             analysis: Some(ctx.clone()),
+            language: FileLanguage::Skalp,
         };
 
         let completions = get_completions(
@@ -801,6 +1022,7 @@ mod tests {
                 character: 12,
             },
             Some(&ctx),
+            FileLanguage::Skalp,
         );
         // Should have built-in types
         assert!(completions.iter().any(|c| c.label == "bit"));
@@ -821,6 +1043,7 @@ mod tests {
             ast: None,
             diagnostics: Vec::new(),
             analysis: Some(ctx.clone()),
+            language: FileLanguage::Skalp,
         };
 
         let completions = get_completions(
@@ -830,6 +1053,7 @@ mod tests {
                 character: 5,
             },
             Some(&ctx),
+            FileLanguage::Skalp,
         );
         // Should suggest actual port names
         assert!(completions.iter().any(|c| c.label == "sys_clk.rise"));

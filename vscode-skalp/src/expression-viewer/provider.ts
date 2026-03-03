@@ -46,8 +46,9 @@ export class ExpressionViewerProvider {
 
     show(): void {
         const editor = vscode.window.activeTextEditor;
-        if (!editor || (!editor.document.fileName.endsWith('.sk') && !editor.document.fileName.endsWith('.skalp'))) {
-            vscode.window.showWarningMessage('Open a SKALP file first.');
+        const f = editor?.document.fileName || '';
+        if (!editor || !(f.endsWith('.sk') || f.endsWith('.skalp') || f.endsWith('.vhd') || f.endsWith('.vhdl'))) {
+            vscode.window.showWarningMessage('Open a SKALP or VHDL file first.');
             return;
         }
 
@@ -106,7 +107,8 @@ export class ExpressionViewerProvider {
         if (!this.panel) { return; }
 
         const doc = editor.document;
-        if (!doc.fileName.endsWith('.sk') && !doc.fileName.endsWith('.skalp')) {
+        const fn = doc.fileName;
+        if (!fn.endsWith('.sk') && !fn.endsWith('.skalp') && !fn.endsWith('.vhd') && !fn.endsWith('.vhdl')) {
             this.panel.webview.postMessage({ type: 'clearExpression' });
             return;
         }

@@ -2,6 +2,7 @@
 
 pub mod builtins;
 pub mod diagnostics;
+pub mod formatter;
 pub mod hir_lower;
 pub mod lexer;
 pub mod parse;

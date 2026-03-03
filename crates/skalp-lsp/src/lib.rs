@@ -30,8 +30,31 @@ pub mod completion;
 pub mod diagnostics;
 pub mod expression_circuit;
 pub mod hover;
+pub mod schematic;
 pub mod semantic_tokens;
 pub mod symbols;
+
+/// File language type
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileLanguage {
+    Skalp,
+    Vhdl,
+}
+
+/// Check if a URI points to a VHDL file
+fn is_vhdl(uri: &Url) -> bool {
+    let path = uri.path();
+    path.ends_with(".vhd") || path.ends_with(".vhdl")
+}
+
+/// Get the file language from a URI
+fn file_language(uri: &Url) -> FileLanguage {
+    if is_vhdl(uri) {
+        FileLanguage::Vhdl
+    } else {
+        FileLanguage::Skalp
+    }
+}
 
 /// SKALP Language Server
 pub struct SkalpLanguageServer {
@@ -52,6 +75,8 @@ pub struct DocumentState {
     pub diagnostics: Vec<Diagnostic>,
     /// Cached analysis context
     pub analysis: Option<analysis::AnalysisContext>,
+    /// File language type
+    pub language: FileLanguage,
 }
 
 impl SkalpLanguageServer {
@@ -66,11 +91,27 @@ impl SkalpLanguageServer {
     async fn update_diagnostics(&self, uri: &Url) {
         if let Some(doc) = self.documents.get(uri) {
             let content_str = doc.content.to_string();
-            let diagnostics = diagnostics::analyze_document(&content_str);
-            let analysis = if let Ok(path) = uri.to_file_path() {
-                analysis::AnalysisContext::from_source_with_path(&content_str, &path)
-            } else {
-                analysis::AnalysisContext::from_source(&content_str)
+            let language = doc.language;
+
+            let (diagnostics, analysis) = match language {
+                FileLanguage::Vhdl => {
+                    let diags = diagnostics::analyze_vhdl_document(&content_str);
+                    let file_path = uri.to_file_path().ok();
+                    let ctx = analysis::AnalysisContext::from_vhdl_source(
+                        &content_str,
+                        file_path.as_deref(),
+                    );
+                    (diags, ctx)
+                }
+                FileLanguage::Skalp => {
+                    let diags = diagnostics::analyze_document(&content_str);
+                    let ctx = if let Ok(path) = uri.to_file_path() {
+                        analysis::AnalysisContext::from_source_with_path(&content_str, &path)
+                    } else {
+                        analysis::AnalysisContext::from_source(&content_str)
+                    };
+                    (diags, ctx)
+                }
             };
 
             // Send diagnostics to client
@@ -117,7 +158,10 @@ impl LanguageServer for SkalpLanguageServer {
                     ),
                 ),
                 execute_command_provider: Some(ExecuteCommandOptions {
-                    commands: vec!["skalp.getExpressionCircuit".into()],
+                    commands: vec![
+                        "skalp.getExpressionCircuit".into(),
+                        "skalp.getSchematic".into(),
+                    ],
                     ..Default::default()
                 }),
                 ..Default::default()
@@ -139,6 +183,7 @@ impl LanguageServer for SkalpLanguageServer {
     async fn did_open(&self, params: DidOpenTextDocumentParams) {
         let uri = params.text_document.uri;
         let content = Rope::from_str(&params.text_document.text);
+        let language = file_language(&uri);
 
         self.documents.insert(
             uri.clone(),
@@ -148,6 +193,7 @@ impl LanguageServer for SkalpLanguageServer {
                 ast: None,
                 diagnostics: Vec::new(),
                 analysis: None,
+                language,
             },
         );
 
@@ -180,7 +226,8 @@ impl LanguageServer for SkalpLanguageServer {
         let position = params.text_document_position.position;
 
         if let Some(doc) = self.documents.get(&uri) {
-            let completions = completion::get_completions(&doc, position, doc.analysis.as_ref());
+            let completions =
+                completion::get_completions(&doc, position, doc.analysis.as_ref(), doc.language);
             Ok(Some(CompletionResponse::Array(completions)))
         } else {
             Ok(None)
@@ -211,7 +258,7 @@ impl LanguageServer for SkalpLanguageServer {
                     }
                 }
             }
-            Ok(hover::get_hover(&doc, position))
+            Ok(hover::get_hover(&doc, position, doc.language))
         } else {
             Ok(None)
         }
@@ -325,7 +372,10 @@ impl LanguageServer for SkalpLanguageServer {
 
         if let Some(doc) = self.documents.get(&uri) {
             let content = doc.content.to_string();
-            let tokens = semantic_tokens::get_semantic_tokens(&content);
+            let tokens = match doc.language {
+                FileLanguage::Vhdl => semantic_tokens::get_vhdl_semantic_tokens(&content),
+                FileLanguage::Skalp => semantic_tokens::get_semantic_tokens(&content),
+            };
             Ok(Some(SemanticTokensResult::Tokens(SemanticTokens {
                 result_id: None,
                 data: tokens,
@@ -356,7 +406,34 @@ impl LanguageServer for SkalpLanguageServer {
 
                 if let Some(doc) = self.documents.get(&uri) {
                     let source = doc.content.to_string();
-                    let result = expression_circuit::get_expression_circuit(&source, line, col);
+                    let result = expression_circuit::get_expression_circuit(
+                        &source,
+                        line,
+                        col,
+                        doc.language,
+                    );
+                    Ok(result.and_then(|r| serde_json::to_value(r).ok()))
+                } else {
+                    Ok(None)
+                }
+            }
+            "skalp.getSchematic" => {
+                if params.arguments.len() < 2 {
+                    return Ok(None);
+                }
+                let uri_str: String =
+                    serde_json::from_value(params.arguments[0].clone()).unwrap_or_default();
+                let line: u32 = serde_json::from_value(params.arguments[1].clone()).unwrap_or(0);
+
+                let uri = match Url::parse(&uri_str) {
+                    Ok(u) => u,
+                    Err(_) => return Ok(None),
+                };
+
+                if let Some(doc) = self.documents.get(&uri) {
+                    let source = doc.content.to_string();
+                    let result =
+                        schematic::get_schematic(&source, line, doc.language);
                     Ok(result.and_then(|r| serde_json::to_value(r).ok()))
                 } else {
                     Ok(None)
@@ -385,6 +462,7 @@ mod tests {
             ast: None,
             diagnostics: Vec::new(),
             analysis: None,
+            language: FileLanguage::Skalp,
         };
 
         assert_eq!(state.version, 1);
@@ -393,5 +471,18 @@ mod tests {
             "entity counter { in clk: clock; }"
         );
         assert!(state.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn test_file_language_detection() {
+        let skalp_url = Url::parse("file:///test/counter.sk").unwrap();
+        let vhdl_url = Url::parse("file:///test/counter.vhd").unwrap();
+        let vhdl2_url = Url::parse("file:///test/counter.vhdl").unwrap();
+
+        assert_eq!(file_language(&skalp_url), FileLanguage::Skalp);
+        assert_eq!(file_language(&vhdl_url), FileLanguage::Vhdl);
+        assert_eq!(file_language(&vhdl2_url), FileLanguage::Vhdl);
+        assert!(!is_vhdl(&skalp_url));
+        assert!(is_vhdl(&vhdl_url));
     }
 }

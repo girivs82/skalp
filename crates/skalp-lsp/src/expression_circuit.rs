@@ -1,3 +1,4 @@
+use crate::FileLanguage;
 use serde::Serialize;
 use skalp_frontend::parse::parse;
 use skalp_frontend::syntax::{SyntaxKind, SyntaxNode, SyntaxNodeExt};
@@ -169,7 +170,11 @@ pub fn get_expression_circuit(
     source: &str,
     line: u32,
     _column: u32,
+    language: FileLanguage,
 ) -> Option<ExpressionCircuitData> {
+    if language == FileLanguage::Vhdl {
+        return None;
+    }
     let tree = parse(source);
 
     // Build a mapping from tree TextSize offsets to source line numbers.
@@ -1388,7 +1393,7 @@ impl Foo {
         counter = counter + 1
     }
 }"#;
-        let result = get_expression_circuit(source, 6, 10);
+        let result = get_expression_circuit(source, 6, 10, FileLanguage::Skalp);
         assert!(
             result.is_some(),
             "Expected circuit for assignment inside on-block"
@@ -1455,7 +1460,7 @@ impl Foo {
     result = state
 }"#;
         // Cursor on line 12 (state = data inside else)
-        let result = get_expression_circuit(source, 12, 10);
+        let result = get_expression_circuit(source, 12, 10, FileLanguage::Skalp);
         assert!(
             result.is_some(),
             "Expected circuit for assignment inside async reset on-block"
@@ -1497,7 +1502,7 @@ impl Foo {
 impl Foo {
     q = enable & !rst
 }"#;
-        let result = get_expression_circuit(source, 7, 8);
+        let result = get_expression_circuit(source, 7, 8, FileLanguage::Skalp);
         assert!(result.is_some());
         let data = result.unwrap();
         // rst input should have role=reset
@@ -1529,7 +1534,7 @@ impl Foo {
     any_fault_flag = prot_faults.ov | prot_faults.uv | prot_faults.oc | prot_faults.ot |
                      prot_faults.desat | bms_fault_flag | bms_timeout | lockstep_fault
 }"#;
-        let result = get_expression_circuit(source, 8, 20);
+        let result = get_expression_circuit(source, 8, 20, FileLanguage::Skalp);
         assert!(result.is_some(), "Expected circuit data");
         let data = result.unwrap();
         assert_eq!(data.target_name, "any_fault_flag");
@@ -1552,7 +1557,7 @@ impl Foo {
     #[test]
     fn test_simple_binary() {
         let source = "entity Foo { out x: bit[8]; }\nimpl Foo { x = a + b; }";
-        let result = get_expression_circuit(source, 1, 15);
+        let result = get_expression_circuit(source, 1, 15, FileLanguage::Skalp);
         assert!(result.is_some(), "Expected circuit data for 'x = a + b'");
         let data = result.unwrap();
         assert_eq!(data.target_name, "x");
@@ -1564,7 +1569,7 @@ impl Foo {
     #[test]
     fn test_no_expression_on_blank() {
         let source = "entity Foo { out x: bit[8]; }\n\nimpl Foo { x = a + b; }";
-        let result = get_expression_circuit(source, 1, 0);
+        let result = get_expression_circuit(source, 1, 0, FileLanguage::Skalp);
         assert!(result.is_none());
     }
 
@@ -1582,7 +1587,7 @@ impl Foo {
     #[test]
     fn test_chained_or() {
         let source = "entity Foo { out x: bit; }\nimpl Foo { x = a | b | c | d; }";
-        let result = get_expression_circuit(source, 1, 15);
+        let result = get_expression_circuit(source, 1, 15, FileLanguage::Skalp);
         assert!(result.is_some());
         let data = result.unwrap();
         assert_eq!(data.target_name, "x");
@@ -1595,7 +1600,7 @@ impl Foo {
     #[test]
     fn test_cast_expression() {
         let source = "entity Foo { out x: nat[32]; }\nimpl Foo { x = counter as nat[32]; }";
-        let result = get_expression_circuit(source, 1, 15);
+        let result = get_expression_circuit(source, 1, 15, FileLanguage::Skalp);
         assert!(result.is_some());
         let data = result.unwrap();
         assert_eq!(data.target_name, "x");
@@ -1607,7 +1612,7 @@ impl Foo {
     #[test]
     fn test_source_range() {
         let source = "entity Foo { out x: bit[8]; }\nimpl Foo {\n    x = a + b;\n}";
-        let result = get_expression_circuit(source, 2, 8);
+        let result = get_expression_circuit(source, 2, 8, FileLanguage::Skalp);
         assert!(result.is_some());
         let data = result.unwrap();
         assert_eq!(data.source_range[0], 2); // assignment is on line 2
@@ -1627,7 +1632,7 @@ impl Foo {
     temp_max = if temp_pri > temp_sec { temp_pri } else { temp_sec }
 }"#;
         // Cursor on the assignment line (line 6)
-        let result = get_expression_circuit(source, 6, 10);
+        let result = get_expression_circuit(source, 6, 10, FileLanguage::Skalp);
         assert!(result.is_some(), "Expected circuit for if/else expression");
         let data = result.unwrap();
         assert_eq!(data.target_name, "temp_max");
@@ -1659,7 +1664,7 @@ impl Foo {
     }
 }"#;
         // Cursor on line 7 (inside the else block)
-        let result = get_expression_circuit(source, 7, 8);
+        let result = get_expression_circuit(source, 7, 8, FileLanguage::Skalp);
         assert!(
             result.is_some(),
             "Expected circuit for multiline if/else, cursor in else block"
@@ -1688,7 +1693,7 @@ impl Foo {
 impl Foo {
     power_mw = ((v_bat_mv as int[32]) * (i_bat_ma as int[32])) / 1000;
 }"#;
-        let result = get_expression_circuit(source, 6, 15);
+        let result = get_expression_circuit(source, 6, 15, FileLanguage::Skalp);
         assert!(result.is_some(), "Expected circuit for complex arithmetic");
         let data = result.unwrap();
         assert_eq!(data.target_name, "power_mw");

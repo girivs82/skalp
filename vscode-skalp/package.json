@@ -23,6 +23,7 @@
     ],
     "activationEvents": [
         "onLanguage:skalp",
+        "onLanguage:vhdl",
         "onCommand:skalp.build",
         "onCommand:skalp.simulate",
         "onCommand:skalp.ec",
@@ -52,6 +53,18 @@
                     ".skalp"
                 ],
                 "configuration": "./language-configuration.json"
+            },
+            {
+                "id": "vhdl",
+                "aliases": [
+                    "VHDL",
+                    "vhdl"
+                ],
+                "extensions": [
+                    ".vhd",
+                    ".vhdl"
+                ],
+                "configuration": "./language-configuration-vhdl.json"
             }
         ],
         "grammars": [
@@ -59,6 +72,11 @@
                 "language": "skalp",
                 "scopeName": "source.skalp",
                 "path": "./syntaxes/skalp.tmLanguage.json"
+            },
+            {
+                "language": "vhdl",
+                "scopeName": "source.vhdl",
+                "path": "./syntaxes/vhdl.tmLanguage.json"
             }
         ],
         "commands": [
@@ -233,81 +251,81 @@
         "menus": {
             "explorer/context": [
                 {
-                    "when": "resourceExtname == .sk || resourceExtname == .skalp",
+                    "when": "resourceExtname == .sk || resourceExtname == .skalp || resourceExtname == .vhd || resourceExtname == .vhdl",
                     "command": "skalp.build",
                     "group": "skalp@1"
                 },
                 {
-                    "when": "resourceExtname == .sk || resourceExtname == .skalp",
+                    "when": "resourceExtname == .sk || resourceExtname == .skalp || resourceExtname == .vhd || resourceExtname == .vhdl",
                     "command": "skalp.simulate",
                     "group": "skalp@2"
                 },
                 {
-                    "when": "resourceExtname == .sk || resourceExtname == .skalp",
+                    "when": "resourceExtname == .sk || resourceExtname == .skalp || resourceExtname == .vhd || resourceExtname == .vhdl",
                     "command": "skalp.synthesize",
                     "group": "skalp@3"
                 },
                 {
-                    "when": "resourceExtname == .sk || resourceExtname == .skalp",
+                    "when": "resourceExtname == .sk || resourceExtname == .skalp || resourceExtname == .vhd || resourceExtname == .vhdl",
                     "command": "skalp.ec",
                     "group": "skalp@4"
                 },
                 {
-                    "when": "resourceExtname == .sk || resourceExtname == .skalp",
+                    "when": "resourceExtname == .sk || resourceExtname == .skalp || resourceExtname == .vhd || resourceExtname == .vhdl",
                     "command": "skalp.format",
                     "group": "skalp@5"
                 },
                 {
-                    "when": "resourceExtname == .sk || resourceExtname == .skalp",
+                    "when": "resourceExtname == .sk || resourceExtname == .skalp || resourceExtname == .vhd || resourceExtname == .vhdl",
                     "command": "skalp.genTestbench",
                     "group": "skalp@6"
                 }
             ],
             "editor/context": [
                 {
-                    "when": "resourceLangId == skalp",
+                    "when": "resourceLangId == skalp || resourceLangId == vhdl",
                     "command": "skalp.build",
                     "group": "skalp@1"
                 },
                 {
-                    "when": "resourceLangId == skalp",
+                    "when": "resourceLangId == skalp || resourceLangId == vhdl",
                     "command": "skalp.simulate",
                     "group": "skalp@2"
                 },
                 {
-                    "when": "resourceLangId == skalp",
+                    "when": "resourceLangId == skalp || resourceLangId == vhdl",
                     "command": "skalp.synthesize",
                     "group": "skalp@3"
                 },
                 {
-                    "when": "resourceLangId == skalp",
+                    "when": "resourceLangId == skalp || resourceLangId == vhdl",
                     "command": "skalp.ec",
                     "group": "skalp@4"
                 },
                 {
-                    "when": "resourceLangId == skalp",
+                    "when": "resourceLangId == skalp || resourceLangId == vhdl",
                     "command": "skalp.format",
                     "group": "skalp@5"
                 },
                 {
-                    "when": "resourceLangId == skalp",
+                    "when": "resourceLangId == skalp || resourceLangId == vhdl",
                     "command": "skalp.showSchematic",
                     "group": "skalp@6"
                 },
                 {
-                    "when": "resourceLangId == skalp",
+                    "when": "resourceLangId == skalp || resourceLangId == vhdl",
                     "command": "skalp.showExpressionViewer",
                     "group": "skalp@7"
                 },
                 {
-                    "when": "resourceLangId == skalp",
+                    "when": "resourceLangId == skalp || resourceLangId == vhdl",
                     "command": "skalp.genTestbench",
                     "group": "skalp@8"
                 }
             ],
             "editor/title": [
                 {
-                    "when": "resourceLangId == skalp",
+                    "when": "resourceLangId == skalp || resourceLangId == vhdl",
                     "command": "skalp.build",
                     "group": "navigation"
                 }
@@ -325,25 +343,25 @@
                 "command": "skalp.build",
                 "key": "ctrl+shift+b",
                 "mac": "cmd+shift+b",
-                "when": "resourceLangId == skalp"
+                "when": "resourceLangId == skalp || resourceLangId == vhdl"
             },
             {
                 "command": "skalp.simulate",
                 "key": "ctrl+shift+s",
                 "mac": "cmd+shift+s",
-                "when": "resourceLangId == skalp"
+                "when": "resourceLangId == skalp || resourceLangId == vhdl"
             },
             {
                 "command": "skalp.ec",
                 "key": "ctrl+shift+e",
                 "mac": "cmd+shift+e",
-                "when": "resourceLangId == skalp"
+                "when": "resourceLangId == skalp || resourceLangId == vhdl"
             },
             {
                 "command": "skalp.showExpressionViewer",
                 "key": "ctrl+shift+x",
                 "mac": "cmd+shift+x",
-                "when": "resourceLangId == skalp"
+                "when": "resourceLangId == skalp || resourceLangId == vhdl"
             }
         ],
         "customEditors": [
@@ -365,14 +383,14 @@
             {
                 "type": "skalp",
                 "label": "SKALP Debug",
-                "languages": ["skalp"],
+                "languages": ["skalp", "vhdl"],
                 "configurationAttributes": {
                     "launch": {
                         "required": ["program"],
                         "properties": {
                             "program": {
                                 "type": "string",
-                                "description": "Path to .sk file to debug"
+                                "description": "Path to .sk or .vhd file to debug"
                             },
                             "stopOnEntry": {
                                 "type": "boolean",
@@ -424,6 +442,9 @@
         "breakpoints": [
             {
                 "language": "skalp"
+            },
+            {
+                "language": "vhdl"
             }
         ],
         "configuration": {

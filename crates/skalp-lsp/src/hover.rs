@@ -1,10 +1,10 @@
 //! Hover information provider for SKALP
 
-use crate::DocumentState;
+use crate::{DocumentState, FileLanguage};
 use tower_lsp::lsp_types::{Hover, HoverContents, MarkupContent, MarkupKind, Position};
 
 /// Get hover information for a position in the document
-pub fn get_hover(doc: &DocumentState, position: Position) -> Option<Hover> {
+pub fn get_hover(doc: &DocumentState, position: Position, language: FileLanguage) -> Option<Hover> {
     let line_idx = position.line as usize;
     let char_pos = position.character as usize;
 
@@ -19,8 +19,11 @@ pub fn get_hover(doc: &DocumentState, position: Position) -> Option<Hover> {
     // Find word boundaries
     let word = get_word_at_position(line_str, char_pos)?;
 
-    // Generate hover content based on the word
-    let hover_content = generate_hover_content(&word);
+    // Generate hover content based on the word and language
+    let hover_content = match language {
+        FileLanguage::Vhdl => generate_vhdl_hover_content(&word).or_else(|| generate_hover_content(&word)),
+        FileLanguage::Skalp => generate_hover_content(&word),
+    };
 
     hover_content.map(|content| Hover {
         contents: HoverContents::Markup(MarkupContent {
@@ -250,6 +253,30 @@ fn generate_hover_content(word: &str) -> Option<String> {
     }
 }
 
+/// Generate hover content for VHDL constructs
+fn generate_vhdl_hover_content(word: &str) -> Option<String> {
+    let w = word.to_lowercase();
+    match w.as_str() {
+        "entity" => Some("## entity\n\nVHDL entity declaration. Defines the external interface (ports and generics) of a design unit.\n\n```vhdl\nentity counter is\n  port (\n    clk : in std_logic;\n    count : out unsigned(7 downto 0)\n  );\nend entity counter;\n```".to_string()),
+        "architecture" => Some("## architecture\n\nVHDL architecture body. Contains the implementation of an entity.\n\n```vhdl\narchitecture rtl of counter is\nbegin\n  -- implementation\nend architecture rtl;\n```".to_string()),
+        "process" => Some("## process\n\nVHDL process statement. A sequential region with a sensitivity list.\n\n```vhdl\nprocess(clk)\nbegin\n  if rising_edge(clk) then\n    count <= count + 1;\n  end if;\nend process;\n```".to_string()),
+        "signal" => Some("## signal\n\nVHDL signal declaration. Represents a wire or register.\n\n```vhdl\nsignal data : std_logic_vector(7 downto 0);\nsignal counter : unsigned(7 downto 0) := (others => '0');\n```".to_string()),
+        "variable" => Some("## variable\n\nVHDL variable declaration. Used inside processes, updated immediately.\n\n```vhdl\nvariable temp : integer := 0;\n```".to_string()),
+        "constant" => Some("## constant\n\nVHDL constant declaration.\n\n```vhdl\nconstant WIDTH : integer := 8;\n```".to_string()),
+        "component" => Some("## component\n\nVHDL component declaration. Declares the interface of an entity for structural instantiation.\n\n```vhdl\ncomponent counter is\n  port (clk : in std_logic; count : out unsigned(7 downto 0));\nend component;\n```".to_string()),
+        "std_logic" => Some("## std_logic\n\nIEEE 1164 9-valued logic type. Values: '0', '1', 'Z', 'X', 'U', 'W', 'L', 'H', '-'.\n\nMost commonly used signal type in VHDL designs.".to_string()),
+        "std_logic_vector" => Some("## std_logic_vector\n\nIEEE 1164 array of std_logic. Unconstrained — must specify range.\n\n```vhdl\nsignal data : std_logic_vector(7 downto 0);\n```".to_string()),
+        "unsigned" => Some("## unsigned\n\nIEEE numeric_std unsigned integer type. Supports arithmetic operations.\n\n```vhdl\nlibrary ieee;\nuse ieee.numeric_std.all;\nsignal count : unsigned(7 downto 0);\n```".to_string()),
+        "signed" => Some("## signed\n\nIEEE numeric_std signed integer type. Two's complement representation.\n\n```vhdl\nlibrary ieee;\nuse ieee.numeric_std.all;\nsignal value : signed(15 downto 0);\n```".to_string()),
+        "rising_edge" => Some("## rising_edge\n\nDetects a rising edge (0→1 transition) on a signal.\n\n```vhdl\nif rising_edge(clk) then\n  -- sequential logic\nend if;\n```".to_string()),
+        "falling_edge" => Some("## falling_edge\n\nDetects a falling edge (1→0 transition) on a signal.\n\n```vhdl\nif falling_edge(clk) then\n  -- sequential logic\nend if;\n```".to_string()),
+        "generic" => Some("## generic\n\nVHDL generic parameter. Allows parameterization of entities and components.\n\n```vhdl\nentity fifo is\n  generic (\n    WIDTH : integer := 8;\n    DEPTH : integer := 16\n  );\n```".to_string()),
+        "port" => Some("## port\n\nVHDL port declaration. Defines the I/O interface of an entity.\n\n```vhdl\nport (\n  clk : in std_logic;\n  data_out : out std_logic_vector(7 downto 0)\n);\n```".to_string()),
+        "generate" => Some("## generate\n\nVHDL generate statement. Creates replicated or conditional structure.\n\n```vhdl\ngen: for i in 0 to N-1 generate\n  inst: component_name port map (...);\nend generate gen;\n```".to_string()),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -278,6 +305,7 @@ mod tests {
             ast: None,
             diagnostics: Vec::new(),
             analysis: None,
+            language: FileLanguage::Skalp,
         };
 
         let hover = get_hover(
@@ -286,6 +314,7 @@ mod tests {
                 line: 0,
                 character: 3,
             },
+            FileLanguage::Skalp,
         );
         assert!(hover.is_some());
 

@@ -808,7 +808,7 @@ export class SkalpDebugSession extends DebugSession {
     private openDebugWaveform(): void {
         // Create a minimal stub .debug.skw file so the waveform viewer can open it.
         // Live data will be streamed via addChanges messages on each stopped event.
-        const skwPath = this.sourceFile.replace(/\.(sk|skalp)$/, '.debug.skw');
+        const skwPath = this.sourceFile.replace(/\.(sk|skalp|vhd|vhdl)$/, '.debug.skw');
         const fs = require('fs');
 
         // Build empty waveform structure from signal names + widths

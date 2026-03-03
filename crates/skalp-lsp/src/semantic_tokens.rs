@@ -396,6 +396,153 @@ fn push_token(
     *prev_start = start;
 }
 
+/// Generate semantic tokens for a VHDL document
+pub fn get_vhdl_semantic_tokens(content: &str) -> Vec<SemanticToken> {
+    let mut tokens = Vec::new();
+    let mut prev_line = 0u32;
+    let mut prev_start = 0u32;
+
+    let vhdl_keywords: &[&str] = &[
+        "entity", "architecture", "package", "body", "configuration",
+        "component", "port", "generic", "map", "process", "begin", "end",
+        "if", "then", "else", "elsif", "case", "when", "for", "while",
+        "loop", "generate", "exit", "next", "return", "is", "of", "with",
+        "select", "others", "open", "null", "after", "transport",
+        "report", "severity", "assert", "wait", "until", "on",
+        "rising_edge", "falling_edge", "use", "library", "all",
+        "function", "procedure", "impure", "pure", "signal", "variable",
+        "constant", "type", "subtype", "alias", "attribute", "file",
+        "in", "out", "inout", "buffer", "array", "record", "range",
+        "downto", "to", "not", "and", "or", "nand", "nor", "xor", "xnor",
+        "sll", "srl", "sla", "sra", "rol", "ror", "mod", "rem", "abs",
+        "new", "shared", "access", "block", "label",
+    ];
+
+    let vhdl_types: &[&str] = &[
+        "std_logic", "std_logic_vector", "std_ulogic", "std_ulogic_vector",
+        "unsigned", "signed", "integer", "natural", "positive", "boolean",
+        "real", "time", "bit", "bit_vector", "character", "string",
+    ];
+
+    for (line_num, line) in content.lines().enumerate() {
+        let line_u32 = line_num as u32;
+        let trimmed = line.trim();
+
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        // Comment lines (-- style)
+        if trimmed.starts_with("--") {
+            let start = line.find("--").unwrap() as u32;
+            push_token(
+                &mut tokens, &mut prev_line, &mut prev_start,
+                line_u32, start, line.len() as u32 - start, TOKEN_COMMENT, 0,
+            );
+            continue;
+        }
+
+        let chars: Vec<char> = line.chars().collect();
+        let mut i = 0;
+
+        while i < chars.len() {
+            if chars[i].is_whitespace() {
+                i += 1;
+                continue;
+            }
+
+            // Inline comments (--)
+            if i + 1 < chars.len() && chars[i] == '-' && chars[i + 1] == '-' {
+                push_token(
+                    &mut tokens, &mut prev_line, &mut prev_start,
+                    line_u32, i as u32, (chars.len() - i) as u32, TOKEN_COMMENT, 0,
+                );
+                break;
+            }
+
+            // Numbers
+            if chars[i].is_ascii_digit() {
+                let start = i;
+                while i < chars.len()
+                    && (chars[i].is_ascii_alphanumeric() || chars[i] == '_' || chars[i] == '.')
+                {
+                    i += 1;
+                }
+                push_token(
+                    &mut tokens, &mut prev_line, &mut prev_start,
+                    line_u32, start as u32, (i - start) as u32, TOKEN_NUMBER, 0,
+                );
+                continue;
+            }
+
+            // String literals
+            if chars[i] == '"' {
+                let start = i;
+                i += 1;
+                while i < chars.len() && chars[i] != '"' {
+                    i += 1;
+                }
+                if i < chars.len() {
+                    i += 1;
+                }
+                push_token(
+                    &mut tokens, &mut prev_line, &mut prev_start,
+                    line_u32, start as u32, (i - start) as u32, TOKEN_NUMBER, 0,
+                );
+                continue;
+            }
+
+            // Identifiers and keywords (case-insensitive)
+            if chars[i].is_alphabetic() || chars[i] == '_' {
+                let start = i;
+                while i < chars.len() && (chars[i].is_alphanumeric() || chars[i] == '_') {
+                    i += 1;
+                }
+                let word: String = chars[start..i].iter().collect();
+                let word_lower = word.to_lowercase();
+
+                let token_type = if vhdl_keywords.contains(&word_lower.as_str()) {
+                    TOKEN_KEYWORD
+                } else if vhdl_types.contains(&word_lower.as_str()) {
+                    TOKEN_TYPE
+                } else if word.chars().all(|c| c.is_ascii_uppercase() || c == '_') && word.len() > 1 {
+                    TOKEN_CONSTANT
+                } else if word.chars().next().unwrap().is_uppercase()
+                    && word.contains(|c: char| c.is_lowercase())
+                {
+                    TOKEN_ENTITY
+                } else {
+                    TOKEN_VARIABLE
+                };
+
+                push_token(
+                    &mut tokens, &mut prev_line, &mut prev_start,
+                    line_u32, start as u32, word.len() as u32, token_type, 0,
+                );
+                continue;
+            }
+
+            // Operators
+            if "<>=:!&|^~+-*/%".contains(chars[i]) {
+                let start = i;
+                i += 1;
+                if i < chars.len() && "<>=".contains(chars[i]) {
+                    i += 1;
+                }
+                push_token(
+                    &mut tokens, &mut prev_line, &mut prev_start,
+                    line_u32, start as u32, (i - start) as u32, TOKEN_OPERATOR, 0,
+                );
+                continue;
+            }
+
+            i += 1;
+        }
+    }
+
+    tokens
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

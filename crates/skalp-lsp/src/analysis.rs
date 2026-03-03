@@ -3,6 +3,9 @@
 //! Maintains a per-file parsed state using the SKALP frontend parser.
 //! Provides symbol resolution, type information, and position mapping.
 
+use skalp_frontend::hir::{
+    Hir, HirGenericType, HirImportPath, HirPortDirection, HirType,
+};
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -636,6 +639,195 @@ impl AnalysisContext {
         ctx
     }
 
+    /// Build analysis context from VHDL source via HIR
+    pub fn from_vhdl_source(content: &str, file_path: Option<&Path>) -> Self {
+        match skalp_vhdl::parse_vhdl_source(content, file_path) {
+            Ok(hir) => Self::from_hir(&hir),
+            Err(_) => Self::empty(),
+        }
+    }
+
+    /// Build analysis context from HIR (language-agnostic — works for both skalp and VHDL)
+    pub fn from_hir(hir: &Hir) -> Self {
+        let mut ctx = Self::empty();
+
+        for entity in &hir.entities {
+            let (line, col) = span_to_lsp(entity.span.as_ref());
+            let entity_name = entity.name.clone();
+
+            ctx.entities.push(SymbolInfo {
+                name: entity_name.clone(),
+                line,
+                column: col,
+                ..Default::default()
+            });
+
+            // Ports
+            for port in &entity.ports {
+                let (pline, pcol) = (line, col); // HIR ports don't always have separate spans
+                let direction = match port.direction {
+                    HirPortDirection::Input => "in",
+                    HirPortDirection::Output => "out",
+                    HirPortDirection::Bidirectional => "inout",
+                    HirPortDirection::Protocol => "in",
+                };
+                let type_str = hir_type_to_string(&port.port_type);
+                let width = infer_width(&type_str);
+                ctx.ports.push(PortInfo {
+                    name: port.name.clone(),
+                    line: pline,
+                    column: pcol,
+                    direction: direction.to_string(),
+                    type_str,
+                    width,
+                    entity: entity_name.clone(),
+                });
+            }
+
+            // Generics
+            for generic in &entity.generics {
+                let type_str = match &generic.param_type {
+                    HirGenericType::Const(ty) => hir_type_to_string(ty),
+                    HirGenericType::Width => "width".to_string(),
+                    HirGenericType::Type => "type".to_string(),
+                    HirGenericType::ClockDomain => "clock_domain".to_string(),
+                    HirGenericType::TypeWithBounds(bounds) => format!("type: {}", bounds.join(" + ")),
+                    _ => "param".to_string(),
+                };
+                let default_value = generic
+                    .default_value
+                    .as_ref()
+                    .map(|_| "...".to_string());
+                ctx.generics.push(GenericInfo {
+                    name: generic.name.clone(),
+                    line,
+                    column: col,
+                    type_str,
+                    default_value,
+                    entity: entity_name.clone(),
+                });
+            }
+        }
+
+        for imp in &hir.implementations {
+            let entity_name = hir
+                .entities
+                .iter()
+                .find(|e| e.id == imp.entity)
+                .map(|e| e.name.clone())
+                .unwrap_or_else(|| format!("entity_{}", imp.entity.0));
+
+            // Signals
+            for signal in &imp.signals {
+                let (sline, scol) = span_to_lsp(signal.span.as_ref());
+                let type_str = hir_type_to_string(&signal.signal_type);
+                ctx.signals.push(SymbolInfo {
+                    name: signal.name.clone(),
+                    line: sline,
+                    column: scol,
+                    scope: Some(entity_name.clone()),
+                    type_str: Some(type_str),
+                    ..Default::default()
+                });
+            }
+
+            // Constants
+            for constant in &imp.constants {
+                let type_str = hir_type_to_string(&constant.const_type);
+                ctx.constants.push(SymbolInfo {
+                    name: constant.name.clone(),
+                    line: 0,
+                    column: 0,
+                    scope: Some(entity_name.clone()),
+                    type_str: Some(type_str),
+                    ..Default::default()
+                });
+            }
+
+            // Instances
+            for instance in &imp.instances {
+                let inst_entity_name = hir
+                    .entities
+                    .iter()
+                    .find(|e| e.id == instance.entity)
+                    .map(|e| e.name.clone())
+                    .unwrap_or_else(|| format!("entity_{}", instance.entity.0));
+                ctx.instances.push(InstanceInfo {
+                    name: instance.name.clone(),
+                    line: 0,
+                    column: 0,
+                    entity_type: inst_entity_name,
+                    scope: entity_name.clone(),
+                });
+            }
+
+            // Build scope map for lines that have signals/entities
+            for signal in &imp.signals {
+                if let Some(ref span) = signal.span {
+                    let line = span.line.saturating_sub(1) as u32;
+                    ctx.scope_map.insert(line, entity_name.clone());
+                }
+            }
+        }
+
+        // Type aliases
+        for ta in &hir.type_aliases {
+            let underlying = hir_type_to_string(&ta.target_type);
+            ctx.type_aliases.push(SymbolInfo {
+                name: ta.name.clone(),
+                line: 0,
+                column: 0,
+                scope: None,
+                type_str: Some(underlying),
+                ..Default::default()
+            });
+        }
+
+        // Trait definitions
+        for td in &hir.trait_definitions {
+            ctx.traits.push(SymbolInfo {
+                name: td.name.clone(),
+                line: 0,
+                column: 0,
+                ..Default::default()
+            });
+        }
+
+        // Imports
+        for imp in &hir.imports {
+            let module_path = match &imp.path {
+                HirImportPath::Simple { segments } => segments.join("::"),
+                HirImportPath::Renamed { segments, alias } => {
+                    format!("{} as {}", segments.join("::"), alias)
+                }
+                HirImportPath::Glob { segments } => format!("{}::*", segments.join("::")),
+                _ => "...".to_string(),
+            };
+            ctx.imports.push(ImportInfo {
+                module_path,
+                line: 0,
+            });
+        }
+
+        ctx
+    }
+
+    /// Create an empty analysis context
+    pub fn empty() -> Self {
+        AnalysisContext {
+            entities: Vec::new(),
+            signals: Vec::new(),
+            ports: Vec::new(),
+            constants: Vec::new(),
+            traits: Vec::new(),
+            instances: Vec::new(),
+            generics: Vec::new(),
+            type_aliases: Vec::new(),
+            imports: Vec::new(),
+            scope_map: HashMap::new(),
+        }
+    }
+
     /// Find definition of a symbol by name.
     /// Returns (line, column, optional_source_file_path).
     pub fn find_definition(&self, name: &str) -> Option<(u32, u32, Option<&str>)> {
@@ -893,6 +1085,39 @@ fn parse_generic_params(
             default_value,
             entity: entity.to_string(),
         });
+    }
+}
+
+/// Convert SourceSpan (1-indexed) to LSP (0-indexed) line/col
+fn span_to_lsp(span: Option<&skalp_frontend::SourceSpan>) -> (u32, u32) {
+    match span {
+        Some(s) => (s.line.saturating_sub(1) as u32, s.column.saturating_sub(1) as u32),
+        None => (0, 0),
+    }
+}
+
+/// Convert HIR type to a display string
+fn hir_type_to_string(ty: &HirType) -> String {
+    match ty {
+        HirType::Bit(1) => "bit".to_string(),
+        HirType::Bit(n) => format!("bit<{}>", n),
+        HirType::Bool => "bool".to_string(),
+        HirType::Clock(_) => "clock".to_string(),
+        HirType::Reset { .. } => "reset".to_string(),
+        HirType::Nat(n) => format!("nat<{}>", n),
+        HirType::Int(n) => format!("int<{}>", n),
+        HirType::Logic(1) => "logic".to_string(),
+        HirType::Logic(n) => format!("logic<{}>", n),
+        HirType::Custom(name) => name.clone(),
+        HirType::Array(inner, size) => format!("[{}; {}]", hir_type_to_string(inner), size),
+        HirType::Float32 => "fp32".to_string(),
+        HirType::Float16 => "fp16".to_string(),
+        HirType::Float64 => "fp64".to_string(),
+        HirType::String => "string".to_string(),
+        HirType::Event => "event".to_string(),
+        HirType::Stream(inner) => format!("stream<{}>", hir_type_to_string(inner)),
+        HirType::NatParam(p) | HirType::IntParam(p) | HirType::BitParam(p) | HirType::LogicParam(p) => p.clone(),
+        _ => format!("{:?}", ty),
     }
 }
 

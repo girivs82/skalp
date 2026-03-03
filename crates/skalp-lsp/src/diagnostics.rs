@@ -82,6 +82,92 @@ fn parse_error_to_diagnostic(error: &ParseError) -> Option<Diagnostic> {
     })
 }
 
+/// Analyze a VHDL document and generate diagnostics
+pub fn analyze_vhdl_document(content: &str) -> Vec<Diagnostic> {
+    let mut diagnostics = Vec::new();
+
+    // Try to parse with the VHDL parser
+    let parse_result = skalp_vhdl::parse::parse_vhdl(content);
+
+    for error in &parse_result.errors {
+        // Convert byte position to line:col
+        let (line, col) = byte_offset_to_line_col(content, error.position);
+        diagnostics.push(Diagnostic {
+            range: Range {
+                start: Position {
+                    line: line as u32,
+                    character: col as u32,
+                },
+                end: Position {
+                    line: line as u32,
+                    character: (col + 1) as u32,
+                },
+            },
+            severity: Some(match error.severity {
+                skalp_vhdl::diagnostics::VhdlSeverity::Error => DiagnosticSeverity::ERROR,
+                skalp_vhdl::diagnostics::VhdlSeverity::Warning => DiagnosticSeverity::WARNING,
+            }),
+            code: Some(tower_lsp::lsp_types::NumberOrString::String(
+                "V100".to_string(),
+            )),
+            source: Some("skalp-vhdl".to_string()),
+            message: error.message.clone(),
+            related_information: None,
+            tags: None,
+            code_description: None,
+            data: None,
+        });
+    }
+
+    // If parsing succeeded, try HIR lowering for deeper diagnostics
+    if parse_result.errors.is_empty() {
+        if let Err(e) = skalp_vhdl::parse_vhdl_source(content, None) {
+            diagnostics.push(Diagnostic {
+                range: Range {
+                    start: Position {
+                        line: 0,
+                        character: 0,
+                    },
+                    end: Position {
+                        line: 0,
+                        character: 1,
+                    },
+                },
+                severity: Some(DiagnosticSeverity::ERROR),
+                code: Some(tower_lsp::lsp_types::NumberOrString::String(
+                    "V200".to_string(),
+                )),
+                source: Some("skalp-vhdl".to_string()),
+                message: format!("{}", e),
+                related_information: None,
+                tags: None,
+                code_description: None,
+                data: None,
+            });
+        }
+    }
+
+    diagnostics
+}
+
+/// Convert byte offset to (line, column) — both 0-indexed
+fn byte_offset_to_line_col(content: &str, offset: usize) -> (usize, usize) {
+    let mut line = 0;
+    let mut col = 0;
+    for (i, ch) in content.char_indices() {
+        if i >= offset {
+            break;
+        }
+        if ch == '\n' {
+            line += 1;
+            col = 0;
+        } else {
+            col += 1;
+        }
+    }
+    (line, col)
+}
+
 /// Check for style and best practice warnings
 fn check_style_warnings(content: &str, diagnostics: &mut Vec<Diagnostic>) {
     let lines: Vec<&str> = content.lines().collect();

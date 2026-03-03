@@ -15,8 +15,20 @@ import { SkalpTaskProvider } from './tasks/provider';
 import { SkalpTestController } from './testing/controller';
 import { SkalpDebugAdapterFactory } from './debug/adapter-factory';
 import { resolveBinaryPath } from './utils/resolve-binary';
-import { parseEntities } from './scaffolding/entity-parser';
+import { parseEntities, parseVhdlEntities } from './scaffolding/entity-parser';
 import { generateTestbench } from './scaffolding/testbench-generator';
+
+function isSkalpFile(path: string): boolean {
+    return path.endsWith('.sk') || path.endsWith('.skalp');
+}
+
+function isVhdlFile(path: string): boolean {
+    return path.endsWith('.vhd') || path.endsWith('.vhdl');
+}
+
+function isHdlFile(path: string): boolean {
+    return isSkalpFile(path) || isVhdlFile(path);
+}
 
 let client: LanguageClient;
 let cliRunner: CliRunner;
@@ -61,9 +73,12 @@ export function activate(context: vscode.ExtensionContext) {
     };
 
     const clientOptions: LanguageClientOptions = {
-        documentSelector: [{ scheme: 'file', language: 'skalp' }],
+        documentSelector: [
+            { scheme: 'file', language: 'skalp' },
+            { scheme: 'file', language: 'vhdl' },
+        ],
         synchronize: {
-            fileEvents: vscode.workspace.createFileSystemWatcher('**/*.{sk,skalp}')
+            fileEvents: vscode.workspace.createFileSystemWatcher('**/*.{sk,skalp,vhd,vhdl}')
         }
     };
 
@@ -324,15 +339,21 @@ export function activate(context: vscode.ExtensionContext) {
                 source = doc.getText();
             } else {
                 const editor = vscode.window.activeTextEditor;
-                if (!editor || !(editor.document.fileName.endsWith('.sk') || editor.document.fileName.endsWith('.skalp'))) {
-                    vscode.window.showWarningMessage('No SKALP file selected.');
+                if (!editor || !isHdlFile(editor.document.fileName)) {
+                    vscode.window.showWarningMessage('No SKALP or VHDL file selected.');
                     return;
                 }
                 filePath = editor.document.fileName;
                 source = editor.document.getText();
             }
 
-            const entities = parseEntities(source);
+            // Dispatch based on file type
+            let entities;
+            if (isVhdlFile(filePath!)) {
+                entities = parseVhdlEntities(source);
+            } else {
+                entities = parseEntities(source);
+            }
             if (entities.length === 0) {
                 vscode.window.showWarningMessage('No entity declarations found in this file.');
                 return;
@@ -467,7 +488,7 @@ export function activate(context: vscode.ExtensionContext) {
     context.subscriptions.push(
         vscode.workspace.onDidSaveTextDocument(async (doc) => {
             const buildOnSave = vscode.workspace.getConfiguration('skalp').get<boolean>('buildOnSave');
-            if (buildOnSave && (doc.fileName.endsWith('.sk') || doc.fileName.endsWith('.skalp'))) {
+            if (buildOnSave && isHdlFile(doc.fileName)) {
                 vscode.commands.executeCommand('skalp.build', vscode.Uri.file(doc.fileName));
             }
         })
@@ -479,10 +500,10 @@ function resolveFilePath(uri?: vscode.Uri): string | undefined {
         return uri.fsPath;
     }
     const editor = vscode.window.activeTextEditor;
-    if (editor && (editor.document.fileName.endsWith('.sk') || editor.document.fileName.endsWith('.skalp'))) {
+    if (editor && isHdlFile(editor.document.fileName)) {
         return editor.document.fileName;
     }
-    vscode.window.showWarningMessage('No SKALP file selected.');
+    vscode.window.showWarningMessage('No SKALP or VHDL file selected.');
     return undefined;
 }
 

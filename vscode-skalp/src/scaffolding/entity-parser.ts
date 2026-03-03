@@ -188,3 +188,92 @@ export function parseEntity(source: string): SkalpEntity | null {
     const entities = parseEntities(source);
     return entities.length > 0 ? entities[0] : null;
 }
+
+/**
+ * Parse VHDL entity declarations from source text
+ */
+export function parseVhdlEntities(source: string): SkalpEntity[] {
+    const entities: SkalpEntity[] = [];
+    // Case-insensitive regex for entity...is...port(...)...end
+    const entityRegex = /entity\s+(\w+)\s+is/gi;
+    let match;
+
+    while ((match = entityRegex.exec(source)) !== null) {
+        const entityName = match[1];
+        const entityStart = match.index;
+
+        // Find port section
+        const afterEntity = source.substring(entityStart);
+        const portMatch = afterEntity.match(/port\s*\(([\s\S]*?)\)\s*;/i);
+
+        const ports: SkalpPort[] = [];
+        if (portMatch) {
+            const portBlock = portMatch[1];
+            // Split by semicolons (VHDL port separator)
+            const portLines = portBlock.split(';');
+            for (const portLine of portLines) {
+                const trimmed = portLine.trim();
+                if (!trimmed || trimmed.startsWith('--')) { continue; }
+
+                // Match: name1, name2 : direction type
+                const portDeclMatch = trimmed.match(/^([\w\s,]+)\s*:\s*(in|out|inout|buffer)\s+(.+)$/i);
+                if (portDeclMatch) {
+                    const names = portDeclMatch[1].split(',').map(n => n.trim()).filter(n => n);
+                    const direction = portDeclMatch[2].toLowerCase() as 'in' | 'out' | 'inout';
+                    const typeStr = portDeclMatch[3].trim();
+                    const mapped = mapVhdlType(typeStr);
+
+                    for (const name of names) {
+                        ports.push({
+                            direction: direction === 'buffer' ? 'out' : direction,
+                            name,
+                            type: typeStr,
+                            width: mapped.width,
+                            rustType: mapped.rustType,
+                            isCustomType: mapped.isCustom,
+                        });
+                    }
+                }
+            }
+        }
+
+        entities.push({ name: entityName, generics: null, ports });
+    }
+
+    return entities;
+}
+
+function mapVhdlType(typeStr: string): { rustType: string; width: number | null; isCustom: boolean } {
+    const t = typeStr.toLowerCase().trim();
+
+    if (t === 'std_logic' || t === 'bit' || t === 'boolean') {
+        return { rustType: 'u8', width: 1, isCustom: false };
+    }
+
+    // std_logic_vector(N downto 0)
+    const slvMatch = t.match(/std_logic_vector\s*\(\s*(\d+)\s+downto\s+0\s*\)/);
+    if (slvMatch) {
+        const bits = parseInt(slvMatch[1]) + 1;
+        return { rustType: unsignedRustType(bits), width: bits, isCustom: false };
+    }
+
+    // unsigned(N downto 0)
+    const unsMatch = t.match(/unsigned\s*\(\s*(\d+)\s+downto\s+0\s*\)/);
+    if (unsMatch) {
+        const bits = parseInt(unsMatch[1]) + 1;
+        return { rustType: unsignedRustType(bits), width: bits, isCustom: false };
+    }
+
+    // signed(N downto 0)
+    const sigMatch = t.match(/signed\s*\(\s*(\d+)\s+downto\s+0\s*\)/);
+    if (sigMatch) {
+        const bits = parseInt(sigMatch[1]) + 1;
+        return { rustType: signedRustType(bits), width: bits, isCustom: false };
+    }
+
+    if (t === 'integer' || t === 'natural' || t === 'positive') {
+        return { rustType: 'i32', width: 32, isCustom: false };
+    }
+
+    return { rustType: 'u32', width: null, isCustom: true };
+}
