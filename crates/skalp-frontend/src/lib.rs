@@ -10,6 +10,7 @@
 pub mod ast;
 pub mod const_eval;
 pub mod constraints;
+pub mod formatter;
 pub mod generics;
 pub mod hir;
 pub mod hir_builder;

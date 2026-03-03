@@ -4136,8 +4136,6 @@ fn program_device(
 
 /// Format SKALP source files
 fn format_files(files: &[PathBuf], check: bool) -> Result<()> {
-    use skalp_frontend::{format_ast, parse_file};
-
     if files.is_empty() {
         println!("No files specified");
         return Ok(());
@@ -4146,15 +4144,21 @@ fn format_files(files: &[PathBuf], check: bool) -> Result<()> {
     let mut needs_formatting = false;
 
     for file in files {
-        if file.extension() != Some(std::ffi::OsStr::new("sk"))
-            && file.extension() != Some(std::ffi::OsStr::new("skalp"))
-        {
+        let ext = file.extension().and_then(|e| e.to_str()).unwrap_or("");
+        let is_skalp = ext == "sk" || ext == "skalp";
+        let is_vhdl = ext == "vhd" || ext == "vhdl";
+
+        if !is_skalp && !is_vhdl {
             continue;
         }
 
         let source = fs::read_to_string(file)?;
-        let ast = parse_file(&source)?;
-        let formatted = format_ast(&ast)?;
+
+        let formatted = if is_vhdl {
+            skalp_vhdl::formatter::format_vhdl(&source)?
+        } else {
+            skalp_frontend::formatter::format_skalp(&source)?
+        };
 
         if source != formatted {
             needs_formatting = true;
