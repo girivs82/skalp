@@ -51,6 +51,22 @@ pub enum TestbenchMode {
     Ncl,
 }
 
+/// Controls when pending inputs are flushed relative to the clock edges.
+///
+/// Both modes produce functionally identical DFF captures — the difference
+/// is purely how input transitions appear in waveform viewers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum InputTiming {
+    /// Inputs change before falling edge: apply inputs → clk=0 → step → clk=1 → step
+    BeforeFallingEdge,
+    /// Inputs change before rising edge: clk=0 → step → apply inputs → clk=1 → step
+    ///
+    /// This is the default and matches HDL convention: drive inputs on the
+    /// negative edge so they appear aligned with the rising edge in waveforms.
+    #[default]
+    BeforeRisingEdge,
+}
+
 /// High-level testbench builder for ergonomic verification
 ///
 /// Uses `UnifiedSimulator` as the backend to support all simulation modes.
@@ -74,6 +90,8 @@ pub struct Testbench {
     /// Coverage sampling rate: sample every N cycles (default 1 = every cycle)
     /// Higher values allow GPU batched execution between samples
     coverage_sample_rate: usize,
+    /// When pending inputs are applied relative to clock edges
+    input_timing: InputTiming,
 }
 
 impl Testbench {
@@ -277,6 +295,7 @@ impl Testbench {
             coverage_enabled: false,
             coverage_input_info: vec![],
             coverage_sample_rate: 1,
+            input_timing: InputTiming::default(),
         })
     }
 
@@ -422,6 +441,7 @@ impl Testbench {
             coverage_enabled: true,
             coverage_input_info,
             coverage_sample_rate: 10, // Sample every 10 cycles for GPU efficiency
+            input_timing: InputTiming::default(),
         })
     }
 
@@ -533,6 +553,7 @@ impl Testbench {
             coverage_enabled: true,
             coverage_input_info,
             coverage_sample_rate: 10, // Sample every 10 cycles for GPU efficiency
+            input_timing: InputTiming::default(),
         })
     }
 
@@ -593,6 +614,7 @@ impl Testbench {
             coverage_enabled: false,
             coverage_input_info: vec![],
             coverage_sample_rate: 1,
+            input_timing: InputTiming::default(),
         })
     }
 
@@ -689,6 +711,7 @@ impl Testbench {
             coverage_enabled: false,
             coverage_input_info: vec![],
             coverage_sample_rate: 1,
+            input_timing: InputTiming::default(),
         })
     }
 
@@ -751,6 +774,7 @@ impl Testbench {
             coverage_enabled: false,
             coverage_input_info: vec![],
             coverage_sample_rate: 1,
+            input_timing: InputTiming::default(),
         })
     }
 
@@ -896,6 +920,21 @@ impl Testbench {
     // Common methods (work for all modes)
     // ========================================================================
 
+    /// Set the input timing mode.
+    ///
+    /// See [`InputTiming`] for details on how this affects waveform appearance.
+    pub fn set_input_timing(&mut self, timing: InputTiming) -> &mut Self {
+        self.input_timing = timing;
+        self
+    }
+
+    /// Flush all pending inputs to the simulator.
+    async fn flush_pending_inputs(&mut self) {
+        for (signal, value) in self.pending_inputs.drain(..) {
+            self.sim.set_input(&signal, value).await;
+        }
+    }
+
     /// Set an input signal value (chainable)
     pub fn set(&mut self, signal: &str, value: impl IntoSignalValue) -> &mut Self {
         let bytes = value.into_bytes();
@@ -911,9 +950,9 @@ impl Testbench {
 
     /// Apply pending inputs and run for N cycles on a specific clock signal
     pub async fn clock_signal(&mut self, clock_name: &str, cycles: usize) -> &mut Self {
-        // Apply all pending inputs
-        for (signal, value) in self.pending_inputs.drain(..) {
-            self.sim.set_input(&signal, value).await;
+        // BeforeFallingEdge: flush inputs first (legacy behavior)
+        if self.input_timing == InputTiming::BeforeFallingEdge {
+            self.flush_pending_inputs().await;
         }
 
         // When coverage is enabled, use batched execution with periodic sampling
@@ -936,6 +975,10 @@ impl Testbench {
                 if remaining > 0 {
                     self.sim.set_input(clock_name, 0).await;
                     self.step_with_coverage_update().await;
+                    // BeforeRisingEdge: flush inputs between falling and rising
+                    if self.input_timing == InputTiming::BeforeRisingEdge {
+                        self.flush_pending_inputs().await;
+                    }
                     self.sim.set_input(clock_name, 1).await;
                     self.step_with_coverage_update().await;
                     if let Some(ref mut db) = self.coverage_db {
@@ -955,6 +998,13 @@ impl Testbench {
         const BATCH_CHUNK: usize = 100_000; // Process in 100K cycle chunks
 
         if cycles >= BATCH_MIN {
+            // BeforeRisingEdge: best-effort flush before batch start
+            // (GPU kernel handles toggling internally, so we can't insert
+            // inputs between edges within the batch)
+            if self.input_timing == InputTiming::BeforeRisingEdge {
+                self.flush_pending_inputs().await;
+            }
+
             // Set clock high initially (batched kernel handles toggling internally)
             self.sim.set_input(clock_name, 1).await;
 
@@ -971,6 +1021,10 @@ impl Testbench {
             for _ in 0..cycles {
                 self.sim.set_input(clock_name, 0).await;
                 self.sim.step().await;
+                // BeforeRisingEdge: flush inputs between falling and rising
+                if self.input_timing == InputTiming::BeforeRisingEdge {
+                    self.flush_pending_inputs().await;
+                }
                 self.sim.set_input(clock_name, 1).await;
                 self.sim.step().await;
                 self.cycle_count += 1;
@@ -991,9 +1045,9 @@ impl Testbench {
     /// tb.clock_multi(&[("wr_clk", 2), ("rd_clk", 4)]).await;
     /// ```
     pub async fn clock_multi(&mut self, clocks: &[(&str, usize)]) -> &mut Self {
-        // Apply all pending inputs
-        for (signal, value) in self.pending_inputs.drain(..) {
-            self.sim.set_input(&signal, value).await;
+        // BeforeFallingEdge: flush inputs first (legacy behavior)
+        if self.input_timing == InputTiming::BeforeFallingEdge {
+            self.flush_pending_inputs().await;
         }
 
         // Find the maximum number of cycles needed
@@ -1011,6 +1065,11 @@ impl Testbench {
                 self.step_with_coverage_update().await;
             } else {
                 self.sim.step().await;
+            }
+
+            // BeforeRisingEdge: flush inputs between falling and rising
+            if self.input_timing == InputTiming::BeforeRisingEdge {
+                self.flush_pending_inputs().await;
             }
 
             // Clock high phase

@@ -14,7 +14,7 @@ pub mod testbench;
 // Re-export common types for ergonomic use
 pub use cache::CompilationCache;
 pub use golden::GoldenTest;
-pub use testbench::{FromSignalValue, IntoSignalValue, Testbench, TestbenchMode};
+pub use testbench::{FromSignalValue, InputTiming, IntoSignalValue, Testbench, TestbenchMode};
 
 // Coverage types re-exported for user convenience
 pub use skalp_sim::{CoverageMetrics, CoverageReport, SimCoverageDb};
