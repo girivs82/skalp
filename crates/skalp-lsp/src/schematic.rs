@@ -702,10 +702,10 @@ fn parse_to_hir(source: &str, language: FileLanguage) -> Option<Hir> {
     }
 }
 
-fn find_entity_at_cursor<'a>(
-    hir: &'a Hir,
+fn find_entity_at_cursor(
+    hir: &Hir,
     cursor_line: u32,
-) -> Option<(&'a HirEntity, Option<&'a HirImplementation>)> {
+) -> Option<(&HirEntity, Option<&HirImplementation>)> {
     if hir.entities.is_empty() {
         return None;
     }
@@ -793,16 +793,13 @@ fn build_connection_graph(
             let sig = &conn.signal;
             let is_simple = sig.chars().all(|c| c.is_alphanumeric() || c == '_');
 
-            let direction = if !is_simple {
+            let direction = if !is_simple
+                || input_port_names.contains(sig.as_str())
+                || driven_signals.contains(sig)
+            {
                 "in"
-            } else if input_port_names.contains(sig.as_str()) {
-                "in"
-            } else if driven_signals.contains(sig) {
-                "in"
-            } else if output_port_names.contains(sig.as_str()) {
-                "out"
             } else {
-                "out" // not driven by anything else → instance produces it
+                "out"
             };
 
             conn.direction = Some(direction.to_string());
@@ -1500,9 +1497,9 @@ impl Adder {
         let data = data.unwrap();
         assert_eq!(data.entity_name, "Adder");
         assert_eq!(data.ports.len(), 3);
-        assert!(data.signals.len() >= 1);
+        assert!(!data.signals.is_empty());
         assert_eq!(data.signals[0].name, "internal");
-        assert!(data.assignments.len() >= 1);
+        assert!(!data.assignments.is_empty());
     }
 
     #[test]

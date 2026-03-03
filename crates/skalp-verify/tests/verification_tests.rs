@@ -1,17 +1,17 @@
 use skalp_mir::mir::{Expression, Value};
+use skalp_mir::Type;
 use skalp_verify::assertions::*;
 use skalp_verify::coverage::*;
 use skalp_verify::properties::*;
 use skalp_verify::requirements::*;
 use skalp_verify::testbench;
-use skalp_verify::*;
 
 #[test]
 fn test_immediate_assertions() {
     let assertion = Assertion {
         id: "test_imm".to_string(),
         kind: AssertionKind::Immediate(ImmediateAssertion {
-            condition: Expression::Literal(Value::Integer(1)),
+            condition: Expression::literal(Value::Integer(1), Type::Bool),
             timing: AssertionTiming::Always,
             action: FailureAction::Error,
         }),
@@ -201,7 +201,7 @@ fn test_verification_report() {
 #[test]
 fn test_testbench_builder() {
     let clock = testbench::Signal::new(false);
-    let reset = testbench::Signal::new(true);
+    let _reset = testbench::Signal::new(true);
 
     let _tb = testbench::TestbenchBuilder::new("test_tb")
         .clock_period(10)
