@@ -459,14 +459,14 @@ impl Formatter {
         docs: &mut Vec<Doc>,
     ) {
         let mut first = true;
-        for j in start..children.len() {
-            if children[j].kind() == SyntaxKind::Comment {
+        for child in children.iter().skip(start) {
+            if child.kind() == SyntaxKind::Comment {
                 if first {
                     docs.push(hardline()); // blank line before comment block
                     first = false;
                 }
                 docs.push(hardline());
-                docs.push(self.fmt_element(&children[j]));
+                docs.push(self.fmt_element(child));
             }
         }
     }
@@ -676,11 +676,7 @@ impl Formatter {
         } else {
             // Split case: this is the body part (Ident, LBrace, body, RBrace)
             // When called standalone (not from source_file merger), prefix with "impl"
-            let mut docs = Vec::new();
-            docs.push(text("impl"));
-            docs.push(space());
-            docs.push(self.fmt_impl_body(node));
-            concat(docs)
+            concat(vec![text("impl"), space(), self.fmt_impl_body(node)])
         }
     }
 
