@@ -620,10 +620,9 @@ impl Formatter {
 
         // Header (everything before LBrace)
         while i < children.len() && children[i].kind() != SyntaxKind::LBrace {
-            if !docs.is_empty()
-                && Self::should_space_between(&children[i - 1], &children[i]) {
-                    docs.push(space());
-                }
+            if !docs.is_empty() && Self::should_space_between(&children[i - 1], &children[i]) {
+                docs.push(space());
+            }
             docs.push(self.fmt_element(&children[i]));
             i += 1;
         }
@@ -688,10 +687,9 @@ impl Formatter {
 
         // Header: impl Name
         while i < children.len() && children[i].kind() != SyntaxKind::LBrace {
-            if !docs.is_empty()
-                && Self::should_space_between(&children[i - 1], &children[i]) {
-                    docs.push(space());
-                }
+            if !docs.is_empty() && Self::should_space_between(&children[i - 1], &children[i]) {
+                docs.push(space());
+            }
             docs.push(self.fmt_element(&children[i]));
             i += 1;
         }
@@ -708,10 +706,9 @@ impl Formatter {
 
         // Name (everything before LBrace)
         while i < children.len() && children[i].kind() != SyntaxKind::LBrace {
-            if !docs.is_empty()
-                && Self::should_space_between(&children[i - 1], &children[i]) {
-                    docs.push(space());
-                }
+            if !docs.is_empty() && Self::should_space_between(&children[i - 1], &children[i]) {
+                docs.push(space());
+            }
             docs.push(self.fmt_element(&children[i]));
             i += 1;
         }
@@ -1004,10 +1001,9 @@ impl Formatter {
             && children[i].kind() != SyntaxKind::BlockStmt
             && children[i].kind() != SyntaxKind::LBrace
         {
-            if !docs.is_empty()
-                && Self::should_space_between(&children[i - 1], &children[i]) {
-                    docs.push(space());
-                }
+            if !docs.is_empty() && Self::should_space_between(&children[i - 1], &children[i]) {
+                docs.push(space());
+            }
             docs.push(self.fmt_element(&children[i]));
             i += 1;
         }
@@ -1065,10 +1061,9 @@ impl Formatter {
 
         // Header: let name = Entity<Args>
         while i < children.len() && children[i].kind() != SyntaxKind::LBrace {
-            if !docs.is_empty()
-                && Self::should_space_between(&children[i - 1], &children[i]) {
-                    docs.push(space());
-                }
+            if !docs.is_empty() && Self::should_space_between(&children[i - 1], &children[i]) {
+                docs.push(space());
+            }
             docs.push(self.fmt_element(&children[i]));
             i += 1;
         }
@@ -1143,10 +1138,9 @@ impl Formatter {
             && children[i].kind() != SyntaxKind::LBrace
             && children[i].kind() != SyntaxKind::BlockStmt
         {
-            if !docs.is_empty()
-                && Self::should_space_between(&children[i - 1], &children[i]) {
-                    docs.push(space());
-                }
+            if !docs.is_empty() && Self::should_space_between(&children[i - 1], &children[i]) {
+                docs.push(space());
+            }
             docs.push(self.fmt_element(&children[i]));
             i += 1;
         }
@@ -1179,10 +1173,9 @@ impl Formatter {
             && children[i].kind() != SyntaxKind::LBrace
             && children[i].kind() != SyntaxKind::BlockStmt
         {
-            if !docs.is_empty()
-                && Self::should_space_between(&children[i - 1], &children[i]) {
-                    docs.push(space());
-                }
+            if !docs.is_empty() && Self::should_space_between(&children[i - 1], &children[i]) {
+                docs.push(space());
+            }
             docs.push(self.fmt_element(&children[i]));
             i += 1;
         }

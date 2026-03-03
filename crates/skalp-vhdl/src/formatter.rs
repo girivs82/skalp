@@ -420,9 +420,8 @@ impl Formatter {
                         | SyntaxKind::PackageInstantiation
                 )
             });
-            let prev_is_context = prev_kind.is_some_and(|pk| {
-                matches!(pk, SyntaxKind::LibraryClause | SyntaxKind::UseClause)
-            });
+            let prev_is_context = prev_kind
+                .is_some_and(|pk| matches!(pk, SyntaxKind::LibraryClause | SyntaxKind::UseClause));
 
             if !docs.is_empty() {
                 if (is_design_unit && (prev_is_design || prev_is_context))
