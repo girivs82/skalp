@@ -9,6 +9,11 @@ use crate::diagnostics::{VhdlError, VhdlErrorKind, VhdlSeverity};
 use crate::syntax::{SyntaxElement, SyntaxKind, SyntaxNode};
 use crate::vhdl_types::*;
 
+/// Info about an async reset detected from VHDL process body pattern.
+struct AsyncResetInfo {
+    active_high: bool,
+}
+
 /// Snapshot of a generic package's declarations for instantiation
 #[derive(Debug, Clone)]
 struct PackageScope {
@@ -1238,11 +1243,41 @@ impl VhdlHirBuilder {
         statements: &[HirStatement],
     ) -> Vec<HirEventTrigger> {
         // 1. Try to detect edge from process body (rising_edge/falling_edge calls)
-        if let Some(edge_triggers) = self.extract_edge_from_body(statements) {
+        if let Some(mut edge_triggers) = self.extract_edge_from_body(statements) {
+            // 2. For async reset pattern (rising_edge in elsif, not outermost if),
+            // add non-clock sensitivity list signals as level-sensitive reset triggers.
+            // E.g. process(clk, rst) with "if rst='1' then ... elsif rising_edge(clk)"
+            // should have rst as an Active trigger for async reset behavior.
+            if let Some(reset_info) = self.detect_async_reset_from_body(statements) {
+                // Find the reset signal in the sensitivity list
+                for name in sens_names {
+                    let lower = name.to_ascii_lowercase();
+                    // Skip signals already in edge_triggers (i.e. the clock)
+                    let is_clock = edge_triggers.iter().any(|t| match &t.signal {
+                        HirEventSignal::Port(pid) => {
+                            self.port_map.get(&lower).map(|p| p == pid).unwrap_or(false)
+                        }
+                        HirEventSignal::Signal(sid) => self
+                            .signal_map
+                            .get(&lower)
+                            .map(|s| s == sid)
+                            .unwrap_or(false),
+                    });
+                    if !is_clock {
+                        let signal = self.resolve_signal_ref(name);
+                        let edge = if reset_info.active_high {
+                            HirEdgeType::Active
+                        } else {
+                            HirEdgeType::Inactive
+                        };
+                        edge_triggers.push(HirEventTrigger { signal, edge });
+                    }
+                }
+            }
             return edge_triggers;
         }
 
-        // 2. If no edge calls found in body, this is a combinational process.
+        // 3. If no edge calls found in body, this is a combinational process.
         // Don't use name-based heuristics — names like "sys_clk_cnt_max" contain
         // "clk" but are counter signals, not clocks. Only rising_edge()/falling_edge()
         // calls in the process body reliably indicate sequential logic.
@@ -1278,7 +1313,25 @@ impl VhdlHirBuilder {
             }
         })?;
 
-        self.extract_edge_from_condition(&first_if.condition)
+        // Check the outermost condition first (sync reset pattern: if rising_edge(clk) then ...)
+        if let Some(triggers) = self.extract_edge_from_condition(&first_if.condition) {
+            return Some(triggers);
+        }
+
+        // Check elsif branches for async reset pattern:
+        //   if rst = '1' then ...
+        //   elsif rising_edge(clk) then ...
+        if let Some(ref else_stmts) = first_if.else_statements {
+            for stmt in else_stmts {
+                if let HirStatement::If(elsif) = stmt {
+                    if let Some(triggers) = self.extract_edge_from_condition(&elsif.condition) {
+                        return Some(triggers);
+                    }
+                }
+            }
+        }
+
+        None
     }
 
     fn extract_edge_from_condition(&self, expr: &HirExpression) -> Option<Vec<HirEventTrigger>> {
@@ -1317,6 +1370,57 @@ impl VhdlHirBuilder {
             HirExpression::Signal(sid) => Some(HirEventSignal::Signal(*sid)),
             _ => None,
         }
+    }
+
+    /// Detect async reset pattern: `if <reset_cond> then ... elsif rising_edge(clk) then ...`
+    /// Returns reset polarity info if the pattern is found.
+    fn detect_async_reset_from_body(&self, statements: &[HirStatement]) -> Option<AsyncResetInfo> {
+        let first_if = statements.iter().find_map(|s| {
+            if let HirStatement::If(ifs) = s {
+                Some(ifs)
+            } else {
+                None
+            }
+        })?;
+
+        // The outermost condition must NOT be a rising_edge/falling_edge call
+        // (otherwise it's a sync reset pattern, not async)
+        if self
+            .extract_edge_from_condition(&first_if.condition)
+            .is_some()
+        {
+            return None;
+        }
+
+        // Check if an elsif branch has rising_edge/falling_edge
+        if let Some(ref else_stmts) = first_if.else_statements {
+            for stmt in else_stmts {
+                if let HirStatement::If(elsif) = stmt {
+                    if self.extract_edge_from_condition(&elsif.condition).is_some() {
+                        // Async reset pattern confirmed. Determine polarity from outer condition.
+                        // `if rst = '1'` => active_high=true
+                        // `if rst = '0'` => active_high=false (active-low reset)
+                        let active_high = match &first_if.condition {
+                            HirExpression::Binary(op) => {
+                                // `rst = '0'` means active-low
+                                if matches!(op.op, HirBinaryOp::Equal) {
+                                    !matches!(
+                                        *op.right,
+                                        HirExpression::Literal(HirLiteral::Integer(0))
+                                    )
+                                } else {
+                                    true // default to active-high
+                                }
+                            }
+                            _ => true, // default to active-high
+                        };
+                        return Some(AsyncResetInfo { active_high });
+                    }
+                }
+            }
+        }
+
+        None
     }
 
     fn resolve_signal_ref(&mut self, name: &str) -> HirEventSignal {
