@@ -3385,6 +3385,7 @@ dependencies = [
  "skalp-lir",
  "skalp-mir",
  "skalp-sir",
+ "skalp-vhdl",
  "thiserror 1.0.69",
  "tokio",
  "tracing",

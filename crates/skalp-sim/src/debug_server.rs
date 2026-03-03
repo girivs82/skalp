@@ -400,7 +400,6 @@ impl DebugServer {
         top_module: Option<&str>,
         max_cycles: Option<u64>,
     ) {
-        use skalp_frontend::parse_and_build_hir_from_file;
         use skalp_mir::MirCompiler;
         use skalp_sir::convert_mir_to_sir_with_hierarchy;
 
@@ -415,24 +414,43 @@ impl DebugServer {
         let waveform_path = path.with_extension("debug.skw");
         self.waveform_path = Some(waveform_path);
 
-        // Parse → HIR
+        // Parse → HIR → MIR (dispatch on file extension)
         eprintln!("[skalp-debug] Parsing {}...", file);
-        let hir = match parse_and_build_hir_from_file(&path) {
-            Ok(h) => h,
-            Err(e) => {
-                self.emit_error(&format!("Failed to parse: {}", e));
-                return;
-            }
-        };
+        let is_vhdl = matches!(
+            path.extension().and_then(|s| s.to_str()),
+            Some("vhd") | Some("vhdl")
+        );
 
-        // HIR → MIR
-        eprintln!("[skalp-debug] Compiling to MIR...");
         let compiler = MirCompiler::new();
-        let mir = match compiler.compile_to_mir(&hir) {
-            Ok(m) => m,
-            Err(e) => {
-                self.emit_error(&format!("Failed to compile to MIR: {}", e));
-                return;
+        let mir = if is_vhdl {
+            let context = match skalp_vhdl::parse_vhdl(&path) {
+                Ok(c) => c,
+                Err(e) => {
+                    self.emit_error(&format!("Failed to parse VHDL: {}", e));
+                    return;
+                }
+            };
+            match compiler.compile_to_mir_with_modules(&context.main_hir, &context.module_hirs) {
+                Ok(m) => m,
+                Err(e) => {
+                    self.emit_error(&format!("Failed to compile to MIR: {}", e));
+                    return;
+                }
+            }
+        } else {
+            let context = match skalp_frontend::parse_and_build_compilation_context(&path) {
+                Ok(c) => c,
+                Err(e) => {
+                    self.emit_error(&format!("Failed to parse: {}", e));
+                    return;
+                }
+            };
+            match compiler.compile_to_mir_with_modules(&context.main_hir, &context.module_hirs) {
+                Ok(m) => m,
+                Err(e) => {
+                    self.emit_error(&format!("Failed to compile to MIR: {}", e));
+                    return;
+                }
             }
         };
 
