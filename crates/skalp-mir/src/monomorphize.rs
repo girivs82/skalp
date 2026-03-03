@@ -88,6 +88,12 @@ impl TypeSubstitution {
 
     /// Substitute a type
     fn substitute_type(&self, ty: &HirType) -> HirType {
+        stacker::maybe_grow(256 * 1024, 8 * 1024 * 1024, || {
+            self.substitute_type_impl(ty)
+        })
+    }
+
+    fn substitute_type_impl(&self, ty: &HirType) -> HirType {
         match ty {
             // Parametric types that need substitution
             HirType::BitParam(param_name) => {
@@ -1101,8 +1107,14 @@ impl Monomorphizer {
     }
 
     /// Substitute 'Self' type with concrete type
-    #[allow(clippy::only_used_in_recursion)]
     fn substitute_self_type(&self, ty: &HirType, concrete_type: &HirType) -> HirType {
+        stacker::maybe_grow(256 * 1024, 8 * 1024 * 1024, || {
+            self.substitute_self_type_impl(ty, concrete_type)
+        })
+    }
+
+    #[allow(clippy::only_used_in_recursion)]
+    fn substitute_self_type_impl(&self, ty: &HirType, concrete_type: &HirType) -> HirType {
         match ty {
             // 'Self' type gets replaced
             HirType::Custom(name) if name == "Self" => concrete_type.clone(),

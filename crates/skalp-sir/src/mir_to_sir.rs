@@ -10,6 +10,9 @@ use skalp_mir::{
 };
 use std::collections::HashMap;
 
+const STACK_RED_ZONE: usize = 256 * 1024; // 256 KB
+const STACK_GROW_SIZE: usize = 8 * 1024 * 1024; // 8 MB
+
 /// Convert MIR to SIR with full hierarchical elaboration
 /// This function takes the entire Mir (all modules) and elaborates the first module
 /// by recursively flattening all instantiated submodules
@@ -573,6 +576,12 @@ impl<'a> MirToSirConverter<'a> {
     }
 
     fn convert_combinational_block(&mut self, statements: &[Statement]) {
+        stacker::maybe_grow(STACK_RED_ZONE, STACK_GROW_SIZE, || {
+            self.convert_combinational_block_impl(statements)
+        })
+    }
+
+    fn convert_combinational_block_impl(&mut self, statements: &[Statement]) {
         // CRITICAL FIX: Use shared context for dependency tracking in combinational blocks
         let mut local_context = std::collections::HashMap::new();
 
@@ -2946,6 +2955,16 @@ impl<'a> MirToSirConverter<'a> {
         expr: &Expression,
         context: &std::collections::HashMap<String, usize>,
     ) -> usize {
+        stacker::maybe_grow(STACK_RED_ZONE, STACK_GROW_SIZE, || {
+            self.create_expression_node_with_context_impl(expr, context)
+        })
+    }
+
+    fn create_expression_node_with_context_impl(
+        &mut self,
+        expr: &Expression,
+        context: &std::collections::HashMap<String, usize>,
+    ) -> usize {
         match &expr.kind {
             ExpressionKind::Literal(value) => self.create_literal_node(value),
             ExpressionKind::Ref(lvalue) => {
@@ -3454,6 +3473,16 @@ impl<'a> MirToSirConverter<'a> {
     }
 
     fn create_expression_node_with_width(
+        &mut self,
+        expr: &Expression,
+        target_width: Option<usize>,
+    ) -> usize {
+        stacker::maybe_grow(STACK_RED_ZONE, STACK_GROW_SIZE, || {
+            self.create_expression_node_with_width_impl(expr, target_width)
+        })
+    }
+
+    fn create_expression_node_with_width_impl(
         &mut self,
         expr: &Expression,
         target_width: Option<usize>,
@@ -4931,6 +4960,15 @@ impl<'a> MirToSirConverter<'a> {
         &mut self,
         if_stmt: &skalp_mir::IfStatement,
     ) -> HashMap<String, usize> {
+        stacker::maybe_grow(STACK_RED_ZONE, STACK_GROW_SIZE, || {
+            self.convert_if_to_mux_nodes_impl(if_stmt)
+        })
+    }
+
+    fn convert_if_to_mux_nodes_impl(
+        &mut self,
+        if_stmt: &skalp_mir::IfStatement,
+    ) -> HashMap<String, usize> {
         let cond_node = self.create_expression_node(&if_stmt.condition);
 
         let then_nodes = self.process_case_arm_statements(&if_stmt.then_block.statements);
@@ -4979,6 +5017,15 @@ impl<'a> MirToSirConverter<'a> {
     /// Returns a map of signal_name → mux_node_id. Used for nested case statements
     /// inside case arms.
     fn convert_case_to_mux_tree_nodes(
+        &mut self,
+        case_stmt: &skalp_mir::CaseStatement,
+    ) -> HashMap<String, usize> {
+        stacker::maybe_grow(STACK_RED_ZONE, STACK_GROW_SIZE, || {
+            self.convert_case_to_mux_tree_nodes_impl(case_stmt)
+        })
+    }
+
+    fn convert_case_to_mux_tree_nodes_impl(
         &mut self,
         case_stmt: &skalp_mir::CaseStatement,
     ) -> HashMap<String, usize> {
@@ -6517,6 +6564,25 @@ impl<'a> MirToSirConverter<'a> {
     /// For nested instances, parent_module_for_signals contains the module
     /// that owns the SignalIds in instance.connections
     fn elaborate_instance_with_context(
+        &mut self,
+        instance: &skalp_mir::ModuleInstance,
+        child_module: &Module,
+        inst_prefix: &str,
+        parent_module_for_signals: Option<&Module>,
+        parent_prefix: &str,
+    ) {
+        stacker::maybe_grow(STACK_RED_ZONE, STACK_GROW_SIZE, || {
+            self.elaborate_instance_with_context_impl(
+                instance,
+                child_module,
+                inst_prefix,
+                parent_module_for_signals,
+                parent_prefix,
+            )
+        })
+    }
+
+    fn elaborate_instance_with_context_impl(
         &mut self,
         instance: &skalp_mir::ModuleInstance,
         child_module: &Module,
@@ -8435,6 +8501,25 @@ impl<'a> MirToSirConverter<'a> {
         child_module: &Module,
         is_sequential: bool,
     ) {
+        stacker::maybe_grow(STACK_RED_ZONE, STACK_GROW_SIZE, || {
+            self.convert_statement_for_instance_impl(
+                statement,
+                inst_prefix,
+                port_mapping,
+                child_module,
+                is_sequential,
+            )
+        })
+    }
+
+    fn convert_statement_for_instance_impl(
+        &mut self,
+        statement: &Statement,
+        inst_prefix: &str,
+        port_mapping: &HashMap<String, Expression>,
+        child_module: &Module,
+        is_sequential: bool,
+    ) {
         match statement {
             Statement::Assignment(assign) => {
                 // Get LHS signal name with prefix
@@ -8589,6 +8674,27 @@ impl<'a> MirToSirConverter<'a> {
 
     /// Create expression node with instance context and optional parent module context
     fn create_expression_node_for_instance_with_context(
+        &mut self,
+        expr: &Expression,
+        inst_prefix: &str,
+        port_mapping: &HashMap<String, Expression>,
+        child_module: &Module,
+        parent_module_for_signals: Option<&Module>,
+        parent_prefix: &str,
+    ) -> usize {
+        stacker::maybe_grow(STACK_RED_ZONE, STACK_GROW_SIZE, || {
+            self.create_expression_node_for_instance_with_context_impl(
+                expr,
+                inst_prefix,
+                port_mapping,
+                child_module,
+                parent_module_for_signals,
+                parent_prefix,
+            )
+        })
+    }
+
+    fn create_expression_node_for_instance_with_context_impl(
         &mut self,
         expr: &Expression,
         inst_prefix: &str,
