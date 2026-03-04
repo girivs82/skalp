@@ -367,147 +367,214 @@ end rtl;
 // Stress tests against real-world open-source VHDL projects
 // =========================================================================
 
-#[test]
-fn stress_test_neorv32() {
-    let dir = "/tmp/vhdl-stress/neorv32";
-    let (passed, failed, failures) = stress_test_directory(dir);
-    if passed + failed == 0 {
-        eprintln!("Skipping: clone neorv32 to {dir} first");
+/// Categorize a parse failure as expected (sim-only / testbench / template) or real.
+/// Returns Some(category) if expected, None if it's a genuine parse failure.
+fn categorize_failure(path: &str, msg: &str) -> Option<&'static str> {
+    // Testbench / simulation files
+    let is_tb = path.contains("testbench")
+        || path.contains("_tb.")
+        || path.contains("_tb_")
+        || path.contains("/sim/")
+        || path.contains("/tb/")
+        || path.contains("sim.vhd")
+        || path.contains("_test.")
+        || path.contains("/test/");
+
+    if is_tb {
+        return Some("testbench");
+    }
+
+    // Non-synthesizable constructs detected by parser
+    let is_nonsynth = msg.contains("wait statements")
+        || msg.contains("FileKw")
+        || msg.contains("AfterKw")
+        || msg.contains("not synthesizable")
+        || msg.contains("unsynthesizable");
+
+    if is_nonsynth {
+        return Some("nonsynthesizable");
+    }
+
+    // Template files (GRLIB preprocessor)
+    if path.ends_with(".in.vhd") || path.ends_with(".in.vhdl") {
+        return Some("template");
+    }
+
+    None
+}
+
+/// Print a standard stress test report with categorized failures.
+fn print_stress_report(
+    name: &str,
+    passed: usize,
+    failed: usize,
+    failures: &[(String, usize, String)],
+    extra_expected: &dyn Fn(&str, &str) -> Option<&'static str>,
+) {
+    let total = passed + failed;
+    let pass_rate = if total > 0 {
+        (passed as f64 / total as f64) * 100.0
+    } else {
+        0.0
+    };
+
+    println!("\n=== {name} Stress Test Results ===");
+    println!("Passed: {passed}/{total}");
+    println!("Failed: {failed}/{total}");
+    println!("Pass rate: {pass_rate:.1}%\n");
+
+    if failures.is_empty() {
         return;
     }
 
-    println!("\n=== NEORV32 Stress Test Results ===");
-    println!("Passed: {passed}/{}", passed + failed);
-    println!("Failed: {failed}/{}", passed + failed);
-    let pass_rate = (passed as f64 / (passed + failed) as f64) * 100.0;
-    println!("Pass rate: {pass_rate:.1}%\n");
+    let mut categories: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    let mut real_failures: Vec<&(String, usize, String)> = vec![];
 
-    if !failures.is_empty() {
-        println!("Failures (first error per file):");
-        for (file, count, msg) in &failures {
+    for f in failures {
+        let cat = categorize_failure(&f.0, &f.2)
+            .or_else(|| extra_expected(&f.0, &f.2));
+        if let Some(category) = cat {
+            *categories.entry(category).or_insert(0) += 1;
+        } else {
+            real_failures.push(f);
+        }
+    }
+
+    if !categories.is_empty() {
+        println!("Expected failure breakdown:");
+        let mut sorted: Vec<_> = categories.iter().collect();
+        sorted.sort_by_key(|(_, count)| std::cmp::Reverse(**count));
+        for (cat, count) in &sorted {
+            println!("  {cat}: {count}");
+        }
+    }
+
+    println!("Real parse failures: {}", real_failures.len());
+
+    if !real_failures.is_empty() {
+        let synth_total = passed + real_failures.len();
+        let synth_rate = (passed as f64 / synth_total as f64) * 100.0;
+        println!(
+            "\nSynthesizable-only pass rate: {passed}/{synth_total} ({synth_rate:.1}%)\n"
+        );
+
+        println!("Failures (first error per file, showing first 50):");
+        for (file, count, msg) in real_failures.iter().take(50) {
             println!("  {file} ({count} errors): {msg}");
+        }
+        if real_failures.len() > 50 {
+            println!("  ... and {} more", real_failures.len() - 50);
         }
     }
 }
 
-#[test]
-fn stress_test_grlib() {
-    let dir = "/tmp/vhdl-stress/grlib";
+fn run_stress_test(dir: &str, name: &str, extra: &dyn Fn(&str, &str) -> Option<&'static str>) {
     let (passed, failed, failures) = stress_test_directory(dir);
     if passed + failed == 0 {
-        eprintln!("Skipping: clone grlib to {dir} first");
+        eprintln!("Skipping: clone {name} to {dir} first");
         return;
     }
+    print_stress_report(name, passed, failed, &failures, extra);
+}
 
-    println!("\n=== GRLIB Stress Test Results ===");
-    println!("Passed: {passed}/{}", passed + failed);
-    println!("Failed: {failed}/{}", passed + failed);
-    let pass_rate = (passed as f64 / (passed + failed) as f64) * 100.0;
-    println!("Pass rate: {pass_rate:.1}%\n");
+// -- No extra project-specific categories --
+fn no_extra(_path: &str, _msg: &str) -> Option<&'static str> {
+    None
+}
 
-    if !failures.is_empty() {
-        // Categorize failures
-        let mut nonsynthesizable = 0;
-        let mut testbench_files = 0;
-        let mut template_files = 0;
-        let mut sim_model_files = 0;
-        let mut pragma_section_files = 0;
-        let mut real_failures: Vec<&(String, usize, String)> = vec![];
+#[test]
+fn stress_test_neorv32() {
+    run_stress_test("/tmp/vhdl-stress/neorv32", "NEORV32", &no_extra);
+}
 
-        for f in &failures {
-            let path = &f.0;
-            let msg = &f.2;
-
-            // Testbench files
-            let is_tb = path.contains("testbench")
-                || path.contains("_tb.")
-                || path.contains("_tb_")
-                || path.contains("/sim/")
-                || path.contains("/tb/")
-                || path.contains("sim.vhd");
-
-            // Non-synthesizable constructs detected by parser
-            let is_nonsynth = msg.contains("wait statements")
-                || msg.contains("FileKw")
-                || msg.contains("AfterKw")
-                || msg.contains("not synthesizable")
-                || msg.contains("unsynthesizable");
-
-            // Template files (GRLIB preprocessor)
-            let is_template = path.ends_with(".in.vhd") || path.ends_with(".in.vhdl");
-
-            // Simulation model libraries (VITAL timing, vendor RAM models, etc.)
-            let is_sim_model = path.contains("/cypress/")
-                || path.contains("/fmf/")
-                || path.contains("/micron/")
-                || path.contains("/gsi/")
-                || path.contains("/orca/")
-                || path.contains("/ptf/")
-                || path.contains("ambatest")
-                || path.contains("_tp.")
-                || path.contains("_tp_")
-                || path.contains("testlib")
-                || path.contains("disas")
-                || path.contains("simtrans")
-                || path.contains("sim_pll")
-                || path.contains("mt48lc");
-
-            // Files where errors only occur in pragma translate_off sections
-            // (synthesizable files with simulation-only code blocks)
-            let is_pragma = path.contains("apbuart")
-                || path.contains("ahbctrl")
-                || path.contains("apbctrlx")
-                || path.contains("stdlib.vhd")
-                || path.contains("ddr_phy_inferred")
-                || path.contains("lpddr2_phy_inferred")
-                || (path.contains("inpad.vhd") || path.contains("iopad"))
-                || path.contains("cctrl5nv")
-                || path.contains("fputilnv")
-                || path.contains("nvsupport")
-                || path.contains("leon5mp")
-                || path.contains("memory_kintex");
-
-            if is_tb || is_nonsynth || is_template || is_sim_model || is_pragma {
-                if is_tb {
-                    testbench_files += 1;
-                }
-                if is_nonsynth {
-                    nonsynthesizable += 1;
-                }
-                if is_template {
-                    template_files += 1;
-                }
-                if is_sim_model {
-                    sim_model_files += 1;
-                }
-                if is_pragma {
-                    pragma_section_files += 1;
-                }
-            } else {
-                real_failures.push(f);
-            }
+#[test]
+fn stress_test_grlib() {
+    let grlib_extra = |path: &str, _msg: &str| -> Option<&'static str> {
+        // Simulation model libraries (VITAL timing, vendor RAM models, etc.)
+        let is_sim_model = path.contains("/cypress/")
+            || path.contains("/fmf/")
+            || path.contains("/micron/")
+            || path.contains("/gsi/")
+            || path.contains("/orca/")
+            || path.contains("/ptf/")
+            || path.contains("ambatest")
+            || path.contains("_tp.")
+            || path.contains("_tp_")
+            || path.contains("testlib")
+            || path.contains("disas")
+            || path.contains("simtrans")
+            || path.contains("sim_pll")
+            || path.contains("mt48lc");
+        if is_sim_model {
+            return Some("sim model");
         }
 
-        println!("Failure breakdown:");
-        println!("  Testbench files (expected): {testbench_files}");
-        println!("  Non-synthesizable constructs (expected): {nonsynthesizable}");
-        println!("  Template .in.vhd files (expected): {template_files}");
-        println!("  Simulation model libraries (expected): {sim_model_files}");
-        println!("  Pragma translate_off sections (expected): {pragma_section_files}");
-        println!("  Real parse failures: {}", real_failures.len());
-
-        if !real_failures.is_empty() {
-            let synth_total = passed + real_failures.len();
-            let synth_rate = (passed as f64 / synth_total as f64) * 100.0;
-            println!("\nSynthesizable-only pass rate: {passed}/{synth_total} ({synth_rate:.1}%)\n");
-
-            println!("Real failures (first error per file, showing first 50):");
-            for (file, count, msg) in real_failures.iter().take(50) {
-                println!("  {file} ({count} errors): {msg}");
-            }
-            if real_failures.len() > 50 {
-                println!("  ... and {} more", real_failures.len() - 50);
-            }
+        // Files where errors only occur in pragma translate_off sections
+        let is_pragma = path.contains("apbuart")
+            || path.contains("ahbctrl")
+            || path.contains("apbctrlx")
+            || path.contains("stdlib.vhd")
+            || path.contains("ddr_phy_inferred")
+            || path.contains("lpddr2_phy_inferred")
+            || path.contains("inpad.vhd")
+            || path.contains("iopad")
+            || path.contains("cctrl5nv")
+            || path.contains("fputilnv")
+            || path.contains("nvsupport")
+            || path.contains("leon5mp")
+            || path.contains("memory_kintex");
+        if is_pragma {
+            return Some("pragma translate_off");
         }
-    }
+
+        None
+    };
+    run_stress_test("/tmp/vhdl-stress/grlib", "GRLIB", &grlib_extra);
+}
+
+// =========================================================================
+// Open Logic — VHDL-2008 FPGA standard library (FIFOs, CDCs, interfaces)
+// https://github.com/open-logic/open-logic
+// =========================================================================
+
+#[test]
+fn stress_test_open_logic() {
+    run_stress_test("/tmp/vhdl-stress/open-logic", "Open Logic", &no_extra);
+}
+
+// =========================================================================
+// RISC-V VHDL SoC — 64-bit River CPU + peripherals
+// https://github.com/sergeykhbr/riscv_vhdl
+// =========================================================================
+
+#[test]
+fn stress_test_riscv_vhdl() {
+    let riscv_extra = |path: &str, _msg: &str| -> Option<&'static str> {
+        // Vendor-specific primitives and technology wrappers
+        if path.contains("/prims/") || path.contains("/tech/") {
+            return Some("vendor primitives");
+        }
+        None
+    };
+    run_stress_test("/tmp/vhdl-stress/riscv_vhdl", "RISC-V VHDL SoC", &riscv_extra);
+}
+
+// =========================================================================
+// QNICE-FPGA — 16-bit computer SoC in portable VHDL
+// https://github.com/sy2002/QNICE-FPGA
+// =========================================================================
+
+#[test]
+fn stress_test_qnice_fpga() {
+    run_stress_test("/tmp/vhdl-stress/QNICE-FPGA", "QNICE-FPGA", &no_extra);
+}
+
+// =========================================================================
+// light8080 — Synthesizable i8080-compatible CPU core
+// https://github.com/jaruiz/light8080
+// =========================================================================
+
+#[test]
+fn stress_test_light8080() {
+    run_stress_test("/tmp/vhdl-stress/light8080", "light8080", &no_extra);
 }
