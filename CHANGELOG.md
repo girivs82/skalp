@@ -29,6 +29,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Stack Overflow Protection** — `stacker`-based overflow protection in `skalp-sir` and `skalp-mir`
 - **Cross-process Serialization** — `flock`-based compilation serialization replacing in-process `Mutex`
 - **Compiler Fingerprinting** — compiler fingerprint included in SIR cache key to prevent stale cache hits
+- **VS Code Extension** — `.vsix` included in GitHub releases, with VHDL support, waveform viewer, schematic viewer, debugger, and testbench scaffolding
 - VHDL file support in `skalp-debug` server
 - VHDL frontend architecture design document
 
