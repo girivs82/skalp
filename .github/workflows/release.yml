@@ -53,9 +53,35 @@ jobs:
           name: ${{ matrix.asset_name }}
           path: target/${{ matrix.target }}/release/${{ matrix.artifact_name }}
 
+  build-vsix:
+    name: Build VS Code Extension
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        working-directory: vscode-skalp
+        run: npm ci
+
+      - name: Package extension
+        working-directory: vscode-skalp
+        run: npx @vscode/vsce package --no-dependencies
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: skalp-vscode.vsix
+          path: vscode-skalp/*.vsix
+
   create-release:
     name: Create Release
-    needs: build-release
+    needs: [build-release, build-vsix]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -97,6 +123,14 @@ jobs:
             cargo install --git https://github.com/girivs82/skalp --tag ${{ github.ref_name }}
             ```
 
+            ### VS Code Extension
+
+            Download `skalp-vscode.vsix` and install with:
+
+            ```bash
+            code --install-extension skalp-vscode.vsix
+            ```
+
             ## Supported Platforms
 
             | Platform | Binary |
@@ -105,4 +139,5 @@ jobs:
             | macOS x86_64 | `skalp-macos-x86_64` |
             | macOS ARM64 | `skalp-macos-arm64` |
             | Windows x86_64 | `skalp-windows-x86_64.exe` |
+            | VS Code (all platforms) | `skalp-vscode.vsix` |
           files: release-assets/*
