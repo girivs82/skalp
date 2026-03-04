@@ -889,3 +889,88 @@ end rtl;
     let result = parse_vhdl(source);
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 }
+
+// ========================================================================
+// when...else in expression context
+// ========================================================================
+
+#[test]
+fn test_parse_when_else_expression() {
+    let source = r#"
+library ieee;
+use ieee.std_logic_1164.all;
+
+entity when_expr is
+    port (
+        sel : in  std_logic;
+        a   : in  std_logic_vector(7 downto 0);
+        b   : in  std_logic_vector(7 downto 0);
+        c   : in  std_logic_vector(7 downto 0);
+        y   : out std_logic_vector(7 downto 0)
+    );
+end entity when_expr;
+
+architecture rtl of when_expr is
+begin
+    y <= (a + b) when sel = '1' else (c + b);
+end architecture rtl;
+"#;
+    let result = parse_vhdl(source);
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+}
+
+// ========================================================================
+// External names << ... >>
+// ========================================================================
+
+#[test]
+fn test_parse_external_name() {
+    let source = r#"
+library ieee;
+use ieee.std_logic_1164.all;
+
+entity ext_name is
+    port (
+        dbg : out std_logic
+    );
+end entity ext_name;
+
+architecture rtl of ext_name is
+begin
+    dbg <= << signal .top.uut.internal_sig : std_logic >>;
+end architecture rtl;
+"#;
+    let result = parse_vhdl(source);
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+}
+
+// ========================================================================
+// Multi-dimensional array types
+// ========================================================================
+
+#[test]
+fn test_parse_multi_dim_array() {
+    let source = r#"
+library ieee;
+use ieee.std_logic_1164.all;
+use ieee.numeric_std.all;
+
+entity multi_arr is
+    port (
+        clk : in std_logic
+    );
+end entity multi_arr;
+
+architecture rtl of multi_arr is
+    type matrix_t is array (0 to 3, 0 to 3) of unsigned(7 downto 0);
+    signal m : matrix_t;
+begin
+    process(clk)
+    begin
+        null;
+    end process;
+end architecture rtl;
+"#;
+    let result = parse_vhdl(source);
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+}

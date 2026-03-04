@@ -481,9 +481,25 @@ impl VhdlHirBuilder {
         if has_token(node, SyntaxKind::TypeKw) {
             let name = first_ident(node)?;
             self.generic_type_params.insert(name.clone());
+
+            // Check for type bounds: `is (<>)` and/or `range <>`
+            let has_is = has_token(node, SyntaxKind::IsKw);
+            let has_box = has_token(node, SyntaxKind::BoxOp);
+            let has_range = has_token(node, SyntaxKind::RangeKw);
+
+            let param_type = if has_is && has_box {
+                let mut bounds = vec!["discrete".to_string()];
+                if has_range {
+                    bounds.push("range".to_string());
+                }
+                HirGenericType::TypeWithBounds(bounds)
+            } else {
+                HirGenericType::Type
+            };
+
             return Some(HirGeneric {
                 name,
-                param_type: HirGenericType::Type,
+                param_type,
                 default_value: None,
             });
         }
@@ -968,11 +984,17 @@ impl VhdlHirBuilder {
                     ));
                     HirType::Logic(1)
                 };
-            // Try to extract size from discrete range
-            let size = first_child_of_kind(&arr_def, SyntaxKind::DiscreteRange)
-                .and_then(|dr| self.extract_range_size(&dr))
-                .unwrap_or(1);
-            let ty = make_array_type(elem_type, size);
+            // Collect all discrete ranges (supports multi-dimensional arrays)
+            let ranges = all_children_of_kind(&arr_def, SyntaxKind::DiscreteRange);
+            let sizes: Vec<u32> = ranges
+                .iter()
+                .map(|dr| self.extract_range_size(dr).unwrap_or(1))
+                .collect();
+            // Build nested array type: innermost dimension last
+            // For array(0 to 3, 0 to 7) of T → Array(Array(T, 8), 4)
+            let ty = sizes.iter().rev().fold(elem_type, |inner, &sz| {
+                make_array_type(inner, sz)
+            });
             self.user_types.insert(name, ty);
         }
     }
@@ -1985,6 +2007,7 @@ impl VhdlHirBuilder {
             HirAssignmentType::Combinational
         };
         let mut found_assign = false;
+        let mut has_when = false;
 
         for el in &elements {
             match el.kind() {
@@ -1999,6 +2022,10 @@ impl VhdlHirBuilder {
                     assignment_type = HirAssignmentType::Blocking;
                 }
                 SyntaxKind::Semicolon => {}
+                SyntaxKind::WhenKw if found_assign => {
+                    has_when = true;
+                    rhs_elements.push(el.clone());
+                }
                 _ => {
                     if found_assign {
                         rhs_elements.push(el.clone());
@@ -2014,7 +2041,11 @@ impl VhdlHirBuilder {
         }
 
         let lhs = self.lower_lvalue_from_elements(&lhs_elements);
-        let rhs = self.lower_expr_from_elements(&rhs_elements);
+        let rhs = if has_when {
+            self.lower_conditional_expr(&rhs_elements)
+        } else {
+            self.lower_expr_from_elements(&rhs_elements)
+        };
 
         Some(HirAssignment {
             id: self.alloc_assignment_id(),
@@ -3042,6 +3073,23 @@ impl VhdlHirBuilder {
             return self.lower_single_element(&elements[0]);
         }
 
+        // Check for conditional expression (when...else) at depth 0 — lowest precedence
+        {
+            let mut depth = 0i32;
+            let has_when = elements.iter().any(|el| {
+                match el.kind() {
+                    SyntaxKind::LParen => depth += 1,
+                    SyntaxKind::RParen => depth -= 1,
+                    SyntaxKind::WhenKw if depth == 0 => return true,
+                    _ => {}
+                }
+                false
+            });
+            if has_when {
+                return self.lower_conditional_expr(elements);
+            }
+        }
+
         // Look for binary operators (lowest precedence first)
         // Logical: and, or, xor, nand, nor, xnor
         if let Some(expr) = self.try_binary_split(
@@ -3345,6 +3393,22 @@ impl VhdlHirBuilder {
                 // Type conversion: unsigned(x), std_logic_vector(y)
                 self.lower_type_conversion(node)
             }
+            SyntaxKind::ExternalNameExpr => {
+                // << signal .path.to.sig : type >> → hierarchical reference
+                let tokens: Vec<String> = node
+                    .children_with_tokens()
+                    .filter_map(|el| match el {
+                        SyntaxElement::Token(t)
+                            if t.kind() == SyntaxKind::Ident || t.kind() == SyntaxKind::Dot =>
+                        {
+                            Some(t.text().to_string())
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                let path = tokens.join("");
+                self.resolve_name(&path)
+            }
             _ => {
                 // Try to recurse into child elements
                 let elements: Vec<SyntaxElement> = node
@@ -3622,7 +3686,7 @@ impl VhdlHirBuilder {
                         // Type not found — produce a generic param reference as best-effort
                         return HirExpression::GenericParam(format!("{}_{}", name, lower_attr));
                     }
-                    "range" | "ascending" | "reverse_range" | "image" | "value" => {
+                    "subtype" | "range" | "ascending" | "reverse_range" | "image" | "value" => {
                         return HirExpression::Call(HirCallExpr {
                             function: format!("{}_{}", name, lower_attr),
                             type_args: Vec::new(),
@@ -3761,9 +3825,11 @@ impl VhdlHirBuilder {
         // Regular aggregate — lower to struct literal or array literal
         let mut field_inits = Vec::new();
         let mut positional = Vec::new();
+        let mut others_value: Option<HirExpression> = None;
 
         for child in &children {
             let has_arrow = has_token(child, SyntaxKind::Arrow);
+            let has_others = has_token(child, SyntaxKind::OthersKw);
             let elements: Vec<SyntaxElement> = child
                 .children_with_tokens()
                 .filter(|el| {
@@ -3771,7 +3837,26 @@ impl VhdlHirBuilder {
                 })
                 .collect();
 
-            if has_arrow {
+            if has_others && has_arrow {
+                // others => value — extract the default fill value
+                let val_elements: Vec<SyntaxElement> = elements
+                    .into_iter()
+                    .filter(|el| {
+                        el.kind() != SyntaxKind::OthersKw && el.kind() != SyntaxKind::Arrow
+                    })
+                    .collect();
+                // Handle (others => '1') specially
+                if val_elements.len() == 1 {
+                    if let Some(tok) = val_elements[0].as_token() {
+                        if tok.text() == "'1'" {
+                            others_value =
+                                Some(HirExpression::Literal(HirLiteral::Integer(u64::MAX)));
+                            continue;
+                        }
+                    }
+                }
+                others_value = Some(self.lower_expr_from_elements(&val_elements));
+            } else if has_arrow {
                 // Named: key => value
                 let arrow_pos = elements
                     .iter()
@@ -3796,6 +3881,14 @@ impl VhdlHirBuilder {
                 let expr = self.lower_expr_from_elements(&elements);
                 positional.push(expr);
             }
+        }
+
+        // If we have an `others` default, add it as a special "__others" field
+        if let Some(default_val) = others_value {
+            field_inits.push(HirStructFieldInit {
+                name: "__others".to_string(),
+                value: default_val,
+            });
         }
 
         if !field_inits.is_empty() {
@@ -4439,8 +4532,48 @@ impl VhdlHirBuilder {
     }
 
     fn extract_range_size(&mut self, node: &SyntaxNode) -> Option<u32> {
-        let ri = self.subtype_indication_range(node)?;
-        Some(ri.width())
+        // First try the subtype_indication_range path (handles parenthesized ranges)
+        if let Some(ri) = self.subtype_indication_range(node) {
+            return Some(ri.width());
+        }
+        // Fallback: handle bare ranges like `0 to 3` in DiscreteRange nodes
+        let elements: Vec<SyntaxElement> = node
+            .children_with_tokens()
+            .filter(|el| {
+                el.kind() != SyntaxKind::Whitespace && el.kind() != SyntaxKind::Comment
+            })
+            .collect();
+        let mut before = Vec::new();
+        let mut after = Vec::new();
+        let mut direction = None;
+        for el in &elements {
+            match el.kind() {
+                SyntaxKind::ToKw => direction = Some(RangeDirection::To),
+                SyntaxKind::DowntoKw => direction = Some(RangeDirection::Downto),
+                _ => {
+                    if direction.is_none() {
+                        before.push(el.clone());
+                    } else {
+                        after.push(el.clone());
+                    }
+                }
+            }
+        }
+        if let Some(dir) = direction {
+            if !before.is_empty() && !after.is_empty() {
+                let left = self.eval_const_expr(&before);
+                let right = self.eval_const_expr(&after);
+                let ri = RangeInfo {
+                    left,
+                    right,
+                    direction: dir,
+                    left_expr: None,
+                    right_expr: None,
+                };
+                return Some(ri.width());
+            }
+        }
+        None
     }
 
     fn name_first_text(&self, node: &SyntaxNode) -> Option<String> {

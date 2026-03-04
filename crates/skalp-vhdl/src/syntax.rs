@@ -282,6 +282,7 @@ pub enum SyntaxKind {
     AggregateElement,
     AttributeExpr,
     ConcatExpr,
+    ExternalNameExpr,
 
     // Choices (case/aggregate)
     ChoiceList,

@@ -14,6 +14,8 @@ struct ParseState<'a> {
     builder: GreenNodeBuilder<'static>,
     source: &'a str,
     errors: Vec<VhdlError>,
+    /// When true, `parse_expression()` will not consume trailing `when...else`
+    inhibit_when_else: bool,
 }
 
 /// Map a lexer Token to its SyntaxKind for the rowan tree
@@ -178,6 +180,7 @@ impl<'a> ParseState<'a> {
             builder: GreenNodeBuilder::new(),
             source,
             errors: Vec::new(),
+            inhibit_when_else: false,
         }
     }
 
@@ -1000,9 +1003,14 @@ impl<'a> ParseState<'a> {
         self.skip_trivia();
         self.expect(SyntaxKind::LParen);
         self.skip_trivia();
-        // Index range
+        // Index range(s) — may be multi-dimensional: (range1, range2, ...)
         self.parse_discrete_range();
         self.skip_trivia();
+        while self.eat(SyntaxKind::Comma) {
+            self.skip_trivia();
+            self.parse_discrete_range();
+            self.skip_trivia();
+        }
         self.expect(SyntaxKind::RParen);
         self.skip_trivia();
         self.expect(SyntaxKind::OfKw);
@@ -1470,6 +1478,9 @@ impl<'a> ParseState<'a> {
         self.skip_trivia();
 
         // value when choices, value when choices, ... value when others
+        // Inhibit when...else expression parsing so `when` is consumed at statement level
+        let prev = self.inhibit_when_else;
+        self.inhibit_when_else = true;
         loop {
             self.parse_expression(); // value
             self.skip_trivia();
@@ -1483,6 +1494,7 @@ impl<'a> ParseState<'a> {
                 break;
             }
         }
+        self.inhibit_when_else = prev;
         self.expect(SyntaxKind::Semicolon);
         self.finish_node();
     }
@@ -2549,6 +2561,20 @@ impl<'a> ParseState<'a> {
 
     fn parse_expression(&mut self) {
         self.parse_logical_expr();
+        self.skip_trivia();
+        // Conditional expression: value when condition else value (lowest precedence)
+        // Inhibited in contexts where `when` has different meaning (e.g. selected assignments)
+        if !self.inhibit_when_else && self.at(SyntaxKind::WhenKw) {
+            self.bump(); // when
+            self.skip_trivia();
+            self.parse_logical_expr(); // condition
+            self.skip_trivia();
+            if self.at(SyntaxKind::ElseKw) {
+                self.bump(); // else
+                self.skip_trivia();
+                self.parse_expression(); // else value (recursive for chaining)
+            }
+        }
     }
 
     // Precedence (lowest to highest):
@@ -2702,6 +2728,10 @@ impl<'a> ParseState<'a> {
                 // Parenthesized expression or aggregate
                 self.parse_parenthesized_or_aggregate();
             }
+            Some(SyntaxKind::DoubleLess) => {
+                // External name: << signal .path.to.sig : type >>
+                self.parse_external_name();
+            }
             // Named primary: identifier, type keyword as name, or function call
             _ if self.is_name_or_builtin_start() => {
                 self.parse_name_or_call();
@@ -2739,6 +2769,38 @@ impl<'a> ParseState<'a> {
                 | Some(SyntaxKind::BitKw)
                 | Some(SyntaxKind::BitVectorKw)
         )
+    }
+
+    /// Parse external name: `<< signal|variable|constant .path.to.sig : subtype >>`
+    fn parse_external_name(&mut self) {
+        self.start_node(SyntaxKind::ExternalNameExpr);
+        self.expect(SyntaxKind::DoubleLess);
+        self.skip_trivia();
+        // Object class keyword (signal, variable, constant)
+        if self.at(SyntaxKind::SignalKw)
+            || self.at(SyntaxKind::VariableKw)
+            || self.at(SyntaxKind::ConstantKw)
+        {
+            self.bump();
+            self.skip_trivia();
+        }
+        // Pathname: .path.to.signal (dots and identifiers until colon)
+        while !self.is_at_end()
+            && !self.at(SyntaxKind::Colon)
+            && !self.at(SyntaxKind::DoubleGreater)
+        {
+            self.bump();
+            self.skip_trivia();
+        }
+        // : subtype_indication
+        if self.at(SyntaxKind::Colon) {
+            self.bump();
+            self.skip_trivia();
+            self.parse_subtype_indication();
+            self.skip_trivia();
+        }
+        self.expect(SyntaxKind::DoubleGreater);
+        self.finish_node();
     }
 
     /// Parse a single argument in a function/procedure call or array index.
