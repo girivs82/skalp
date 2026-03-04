@@ -68,6 +68,8 @@ impl BuiltinScope {
                 | "std_ulogic_vector"
                 | "conv_integer"
                 | "conv_std_logic_vector"
+                | "std_logic"
+                | "std_ulogic"
         )
     }
 }

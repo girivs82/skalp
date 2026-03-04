@@ -3645,6 +3645,24 @@ impl VhdlHirBuilder {
                 );
             }
 
+            // Check for builtin type conversion functions: std_logic(expr), unsigned(expr), etc.
+            // These are VHDL type conversion function calls that should become Cast expressions
+            if args.len() == 1 {
+                let cast_type = match name.as_str() {
+                    "unsigned" => Some(HirType::Nat(0)),
+                    "signed" => Some(HirType::Int(0)),
+                    "std_logic_vector" | "std_ulogic_vector" => Some(HirType::Logic(0)),
+                    "std_logic" | "std_ulogic" => Some(HirType::Logic(1)),
+                    _ => None,
+                };
+                if let Some(target_type) = cast_type {
+                    return HirExpression::Cast(HirCastExpr {
+                        expr: Box::new(args.into_iter().next().unwrap()),
+                        target_type,
+                    });
+                }
+            }
+
             // Otherwise it's a function call
             return HirExpression::Call(HirCallExpr {
                 function: name,
@@ -3723,6 +3741,7 @@ impl VhdlHirBuilder {
                     "unsigned" => Some(HirType::Nat(0)),
                     "signed" => Some(HirType::Int(0)),
                     "std_logic_vector" | "std_ulogic_vector" => Some(HirType::Logic(0)),
+                    "std_logic" | "std_ulogic" => Some(HirType::Logic(1)),
                     _ => None,
                 };
                 return if let Some(ty) = target_type {
