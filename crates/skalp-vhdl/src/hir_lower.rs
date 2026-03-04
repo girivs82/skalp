@@ -60,6 +60,9 @@ pub struct VhdlHirBuilder {
 
     inside_event_block: bool,
 
+    /// Signals created from external name expressions (<< signal .path : type >>)
+    external_signals: Vec<HirSignal>,
+
     errors: Vec<VhdlError>,
     file_path: Option<std::path::PathBuf>,
 }
@@ -243,6 +246,7 @@ impl VhdlHirBuilder {
             generic_type_params: HashSet::new(),
             package_scopes: IndexMap::new(),
             inside_event_block: false,
+            external_signals: Vec::new(),
             errors: Vec::new(),
             file_path: file_path.map(|p| p.to_path_buf()),
         }
@@ -813,6 +817,9 @@ impl VhdlHirBuilder {
                 _ => {}
             }
         }
+
+        // Merge any external name signals created during expression lowering
+        signals.append(&mut self.external_signals);
 
         Some(HirImplementation {
             entity: entity_id,
@@ -3407,7 +3414,45 @@ impl VhdlHirBuilder {
                     })
                     .collect();
                 let path = tokens.join("");
-                self.resolve_name(&path)
+
+                // Extract SubtypeIndication to get the declared type
+                let sig_type = if let Some(sti) =
+                    first_child_of_kind(node, SyntaxKind::SubtypeIndication)
+                {
+                    self.lower_subtype_indication(&sti)
+                } else {
+                    HirType::Logic(1)
+                };
+
+                // Sanitize path: replace dots with underscores for a valid signal name
+                let sanitized = path.trim_start_matches('.').replace('.', "_");
+                let lower_name = sanitized.to_ascii_lowercase();
+
+                // If already registered (e.g. same external name used twice), reuse
+                if let Some(sig_id) = self.signal_map.get(&lower_name) {
+                    return HirExpression::Signal(*sig_id);
+                }
+
+                let id = self.alloc_signal_id();
+                self.signal_map.insert(lower_name.clone(), id);
+                self.name_type_map.insert(lower_name.clone(), sig_type.clone());
+                self.external_signals.push(HirSignal {
+                    id,
+                    name: lower_name,
+                    comments: vec![],
+                    signal_type: sig_type,
+                    initial_value: None,
+                    clock_domain: None,
+                    span: None,
+                    memory_config: None,
+                    trace_config: None,
+                    cdc_config: None,
+                    breakpoint_config: None,
+                    power_config: None,
+                    safety_config: None,
+                    power_domain: None,
+                });
+                HirExpression::Signal(id)
             }
             _ => {
                 // Try to recurse into child elements
@@ -3686,7 +3731,12 @@ impl VhdlHirBuilder {
                         // Type not found — produce a generic param reference as best-effort
                         return HirExpression::GenericParam(format!("{}_{}", name, lower_attr));
                     }
-                    "subtype" | "range" | "ascending" | "reverse_range" | "image" | "value" => {
+                    "subtype" => {
+                        // 'subtype is a type assertion — the signal's type is already
+                        // tracked in name_type_map. Return the base expression directly.
+                        return base;
+                    }
+                    "range" | "ascending" | "reverse_range" | "image" | "value" => {
                         return HirExpression::Call(HirCallExpr {
                             function: format!("{}_{}", name, lower_attr),
                             type_args: Vec::new(),
@@ -3880,6 +3930,42 @@ impl VhdlHirBuilder {
             } else {
                 let expr = self.lower_expr_from_elements(&elements);
                 positional.push(expr);
+            }
+        }
+
+        // If we have named integer-index fields + a simple others fill ('0' or '1'),
+        // compute the concrete integer value directly. This covers (0 => '1', others => '0')
+        // and similar patterns without producing a StructLiteral with __others.
+        if let Some(ref default_val) = others_value {
+            let others_is_zero = matches!(default_val, HirExpression::Literal(HirLiteral::Integer(0)));
+            let others_is_ones = matches!(default_val, HirExpression::Literal(HirLiteral::Integer(v)) if *v == u64::MAX);
+
+            if (others_is_zero || others_is_ones) && !field_inits.is_empty() {
+                // Check if ALL named keys parse as integer indices and values are simple literals
+                let all_simple = field_inits.iter().all(|f| {
+                    f.name.parse::<u64>().is_ok()
+                        && matches!(
+                            f.value,
+                            HirExpression::Literal(HirLiteral::Integer(_))
+                        )
+                });
+
+                if all_simple {
+                    let mut result: u64 = if others_is_zero { 0 } else { u64::MAX };
+                    for f in &field_inits {
+                        let index = f.name.parse::<u64>().unwrap();
+                        if let HirExpression::Literal(HirLiteral::Integer(val)) = &f.value {
+                            if others_is_zero && *val != 0 {
+                                // others='0', field='1' → set bit
+                                result |= 1u64 << index;
+                            } else if others_is_ones && *val == 0 {
+                                // others='1', field='0' → clear bit
+                                result &= !(1u64 << index);
+                            }
+                        }
+                    }
+                    return HirExpression::Literal(HirLiteral::Integer(result));
+                }
             }
         }
 

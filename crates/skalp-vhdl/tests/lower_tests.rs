@@ -1777,12 +1777,11 @@ end architecture rtl;
     assert!(!imp.assignments.is_empty());
 
     use skalp_frontend::hir::{HirExpression, HirLiteral};
-    // The aggregate should NOT just be Literal(0) — it should be a StructLiteral
-    // with explicit field assignments including the others default
+    // (0 => '1', others => '0') should compute to Literal(1) — bit 0 set
     let rhs = &imp.assignments[0].rhs;
     assert!(
-        !matches!(rhs, HirExpression::Literal(HirLiteral::Integer(0))),
-        "mixed named+others aggregate should not produce bare Literal(0), got {:?}",
+        matches!(rhs, HirExpression::Literal(HirLiteral::Integer(1))),
+        "mixed named+others aggregate (0 => '1', others => '0') should produce Literal(1), got {:?}",
         rhs
     );
 }
@@ -1881,4 +1880,62 @@ end architecture rtl;
             );
         }
     }
+}
+
+// ========================================================================
+// External names — synthetic signal with declared type
+// ========================================================================
+
+#[test]
+fn test_lower_external_name_signal() {
+    let source = r#"
+library ieee;
+use ieee.std_logic_1164.all;
+
+entity ext_test is
+    port (
+        y : out std_logic
+    );
+end entity ext_test;
+
+architecture rtl of ext_test is
+begin
+    y <= << signal .top.uut.sig : std_logic >>;
+end architecture rtl;
+"#;
+    let hir = parse_vhdl_source(source, None).unwrap();
+    let imp = &hir.implementations[0];
+
+    // The external name should register a synthetic signal
+    assert!(
+        !imp.signals.is_empty(),
+        "expected at least one signal from external name, got {}",
+        imp.signals.len()
+    );
+
+    // The signal name should be the sanitized path
+    let ext_sig = imp.signals.iter().find(|s| s.name.contains("top"));
+    assert!(
+        ext_sig.is_some(),
+        "expected a signal with 'top' in the name, got: {:?}",
+        imp.signals.iter().map(|s| &s.name).collect::<Vec<_>>()
+    );
+
+    // The signal type should be Logic(1) from the declared std_logic type
+    use skalp_frontend::hir::HirType;
+    assert!(
+        matches!(ext_sig.unwrap().signal_type, HirType::Logic(1)),
+        "external name signal should have Logic(1) type, got {:?}",
+        ext_sig.unwrap().signal_type
+    );
+
+    // The assignment RHS should be Signal, not GenericParam
+    assert!(!imp.assignments.is_empty());
+    use skalp_frontend::hir::HirExpression;
+    let rhs = &imp.assignments[0].rhs;
+    assert!(
+        matches!(rhs, HirExpression::Signal(_)),
+        "external name should produce Signal reference, got {:?}",
+        rhs
+    );
 }
