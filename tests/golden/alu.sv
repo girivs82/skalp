@@ -6,9 +6,9 @@ module ALU (
     input [31:0] b,
     input [2:0] op,
     input clk,
-    output [31:0] result,
-    output zero,
-    output overflow
+    output reg [31:0] result,
+    output reg zero,
+    output reg overflow
 );
 
     wire [31:0] result_comb;

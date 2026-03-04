@@ -496,7 +496,13 @@ fn generate_module(mir_module: &Module, mir: &Mir) -> Result<String> {
     for port in &mir_module.ports {
         let direction = match port.direction {
             skalp_mir::PortDirection::Input => "input",
-            skalp_mir::PortDirection::Output => "output",
+            skalp_mir::PortDirection::Output => {
+                if is_port_register(port, mir_module) {
+                    "output reg"
+                } else {
+                    "output"
+                }
+            }
             skalp_mir::PortDirection::InOut => "inout",
         };
 
@@ -2284,6 +2290,73 @@ fn lvalue_contains_signal(lvalue: &skalp_mir::LValue, signal_id: &skalp_mir::Sig
         skalp_mir::LValue::Concat(items) => items
             .iter()
             .any(|item| lvalue_contains_signal(item, signal_id)),
+        _ => false,
+    }
+}
+
+/// Check if an output port is a register (assigned in sequential blocks)
+fn is_port_register(port: &skalp_mir::Port, module: &Module) -> bool {
+    for process in &module.processes {
+        if process.kind == ProcessKind::Sequential
+            && is_port_assigned_in_block(&port.id, &process.body)
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// Check if a port is assigned in a block
+fn is_port_assigned_in_block(port_id: &skalp_mir::PortId, block: &skalp_mir::Block) -> bool {
+    for stmt in &block.statements {
+        match stmt {
+            Statement::Assignment(assign) => {
+                if lvalue_contains_port(&assign.lhs, port_id) {
+                    return true;
+                }
+            }
+            Statement::If(if_stmt) => {
+                if is_port_assigned_in_block(port_id, &if_stmt.then_block) {
+                    return true;
+                }
+                if let Some(else_block) = &if_stmt.else_block {
+                    if is_port_assigned_in_block(port_id, else_block) {
+                        return true;
+                    }
+                }
+            }
+            Statement::Case(case_stmt) => {
+                for item in &case_stmt.items {
+                    if is_port_assigned_in_block(port_id, &item.block) {
+                        return true;
+                    }
+                }
+                if let Some(default_block) = &case_stmt.default {
+                    if is_port_assigned_in_block(port_id, default_block) {
+                        return true;
+                    }
+                }
+            }
+            Statement::Block(block) => {
+                if is_port_assigned_in_block(port_id, block) {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+/// Check if an LValue references a specific port (directly or through indexing/slicing)
+fn lvalue_contains_port(lvalue: &skalp_mir::LValue, port_id: &skalp_mir::PortId) -> bool {
+    match lvalue {
+        skalp_mir::LValue::Port(id) => id == port_id,
+        skalp_mir::LValue::BitSelect { base, .. } => lvalue_contains_port(base, port_id),
+        skalp_mir::LValue::RangeSelect { base, .. } => lvalue_contains_port(base, port_id),
+        skalp_mir::LValue::Concat(items) => {
+            items.iter().any(|item| lvalue_contains_port(item, port_id))
+        }
         _ => false,
     }
 }
