@@ -5,6 +5,22 @@ All notable changes to SKALP will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] - 2026-03-03
+
+### Added
+
+- **VHDL Frontend** — first-class VHDL-2008/2019 input language
+  - Complete lexer and parser for synthesizable VHDL subset
+  - HIR lowering from VHDL AST into the shared compiler pipeline
+  - VHDL-2019 interfaces and mode views
+  - Generic type parameters and generic package instantiation
+  - Synthesizable subset enforcement at parse time
+  - Rust async testbench support for VHDL designs
+
+### New Crate
+
+- `skalp-vhdl` — VHDL frontend (lex → parse → HIR lowering)
+
 ## [0.1.1] - 2026-02-23
 
 ### Changed
@@ -72,5 +88,6 @@ Initial release of the SKALP intent-driven hardware synthesis language and compi
 - macOS (x86_64 and ARM64)
 - Windows (x86_64)
 
+[0.2.0]: https://github.com/girivs82/skalp/releases/tag/v0.2.0
 [0.1.1]: https://github.com/girivs82/skalp/releases/tag/v0.1.1
 [0.1.0]: https://github.com/girivs82/skalp/releases/tag/v0.1.0

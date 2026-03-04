@@ -65,7 +65,7 @@ Common hardware patterns with copy-paste code:
 Already know another HDL? Learn SKALP quickly:
 
 - [**From SystemVerilog**](migration/from-systemverilog.md) - Translate SV to SKALP
-- [**From VHDL**](migration/from-vhdl.md) - VHDL → SKALP patterns
+- [**From VHDL**](migration/from-vhdl.md) - Compile VHDL directly or migrate to SKALP
 - [**From Chisel**](migration/from-chisel.md) - Chisel → SKALP guide
 - [**Syntax Comparison Table**](migration/comparison-table.md) - Side-by-side
 

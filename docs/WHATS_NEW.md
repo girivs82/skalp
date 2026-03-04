@@ -4,6 +4,63 @@
 
 ---
 
+## 🏗️ VHDL Frontend (NEW)
+
+**Status:** ✅ Complete
+**Documentation:** [VHDL Frontend Architecture](vhdl-frontend-architecture.md)
+
+SKALP now accepts **VHDL-2008/2019** as a first-class input language. VHDL designs are parsed, lowered to HIR, and compiled through the same backend pipeline as native SKALP sources — same optimizations, same simulation, same FPGA targets.
+
+### Features
+
+- **Full VHDL-2008/2019 lexer and parser** for the synthesizable subset
+- **VHDL-2019 interfaces and mode views**
+- **Generic type parameters** and generic package instantiation
+- **Synthesizable subset enforcement** at parse time (non-synthesizable constructs rejected early)
+- **Shared backend pipeline** — VHDL and SKALP designs produce identical HIR
+- **Rust async testbench support** for VHDL designs
+
+### Example
+
+```vhdl
+library ieee;
+use ieee.std_logic_1164.all;
+use ieee.numeric_std.all;
+
+entity counter is
+    port (
+        clk   : in  std_logic;
+        rst   : in  std_logic;
+        count : out unsigned(7 downto 0)
+    );
+end entity counter;
+
+architecture rtl of counter is
+    signal cnt : unsigned(7 downto 0) := (others => '0');
+begin
+    process (clk)
+    begin
+        if rising_edge(clk) then
+            if rst = '1' then
+                cnt <= (others => '0');
+            else
+                cnt <= cnt + 1;
+            end if;
+        end if;
+    end process;
+    count <= cnt;
+end architecture rtl;
+```
+
+```bash
+# Compile VHDL through the skalp pipeline
+skalp build counter.vhd
+```
+
+See [VHDL Frontend Architecture](vhdl-frontend-architecture.md) for complete details.
+
+---
+
 ## ⚡ NCL Asynchronous Circuit Support (NEW)
 
 **Status:** ✅ Complete

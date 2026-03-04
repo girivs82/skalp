@@ -15,18 +15,21 @@ The SKALP compiler transforms high-level hardware descriptions with intent into 
 ## Compilation Pipeline
 
 ```
-┌─────────────────┐
-│ SKALP Source    │ (.sk files)
-│ with Intent     │
-└────────┬────────┘
-         │ Frontend
-         ↓
-┌─────────────────┐
-│ AST + Types     │ Abstract Syntax Tree
-│ + Clock Domains │ with full type information
-└────────┬────────┘
-         │ HIR Generation
-         ↓
+┌─────────────────┐     ┌─────────────────┐
+│ SKALP Source    │     │ VHDL Source     │
+│ (.sk files)     │     │ (.vhd files)   │
+│ with Intent     │     │ VHDL-2008/2019 │
+└────────┬────────┘     └────────┬────────┘
+         │ SKALP Frontend        │ VHDL Frontend
+         │                       │ (skalp-vhdl)
+         ↓                       ↓
+┌─────────────────┐     ┌─────────────────┐
+│ AST + Types     │     │ VHDL AST       │
+│ + Clock Domains │     │ + Type Info    │
+└────────┬────────┘     └────────┬────────┘
+         │ HIR Generation        │ HIR Lowering
+         └───────────┬───────────┘
+                     ↓
 ┌─────────────────┐
 │ HIR             │ High-level IR
 │ (Dataflow +     │ Intent preserved
@@ -59,6 +62,12 @@ The SKALP compiler transforms high-level hardware descriptions with intent into 
   Metal Kernels         Bitstream      Place & Route
   (GPU Simulation)      (FPGA)         (Open FPGAs)
 ```
+
+## Multi-Frontend Design
+
+The pipeline above shows two entry points converging at HIR. Both the native SKALP frontend (`skalp-frontend`) and the VHDL frontend (`skalp-vhdl`) lower their respective ASTs into the same HIR representation. From HIR onwards the compilation path is identical — the same optimizations, simulation, synthesis, and code-generation stages apply regardless of the source language. This means a VHDL design compiled with `skalp build counter.vhd` benefits from the full IR pipeline, GPU-accelerated simulation, and iCE40 backend just as a `.sk` design would.
+
+See [VHDL Frontend Architecture](vhdl-frontend-architecture.md) for details on the VHDL lexer, parser, and HIR lowering.
 
 ## IR Layers
 

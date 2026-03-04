@@ -19,6 +19,7 @@ The name comes from Sanskrit *Sankalpana* (संकल्पना), meaning "c
 - **iCE40 FPGA backend** — synthesis, place-and-route, and programmer support for iCE40 devices
 - **Formal verification** — equivalence checking (simulation + SAT), SVA generation, bounded model checking
 - **ISO 26262 safety analysis** — fault injection-driven FMEA/FMEDA with measured diagnostic coverage
+- **VHDL frontend** — parse VHDL-2008/2019 (including interfaces and views) and compile through the same backend pipeline
 - **NCL async circuits** — Null Convention Logic support for clockless, delay-insensitive designs
 - **ML-guided synthesis** — train and apply ML models for optimization pass ordering
 
@@ -81,6 +82,9 @@ skalp build
 # Simulate the design
 skalp sim build/design.lir --duration 1000
 
+# Compile a VHDL design
+skalp build counter.vhd
+
 # Synthesize for iCE40 FPGA
 skalp synth src/main.sk --device ice40-hx8k
 ```
@@ -92,7 +96,7 @@ See the [tutorial](https://mikaana.com/projects/skalp/) for a walkthrough.
 | Command | Description |
 |---------|-------------|
 | `skalp new <name>` | Create a new project from a starter template |
-| `skalp build` | Compile SKALP source to HDL or gate-level netlists |
+| `skalp build` | Compile SKALP or VHDL source to HDL or gate-level netlists |
 | `skalp sim <file>` | Run behavioral or gate-level simulation (CPU or GPU) |
 | `skalp synth <file>` | Synthesize for iCE40 FPGA with optional place-and-route |
 | `skalp pnr <netlist>` | Place and route an existing gate-level netlist |
@@ -142,6 +146,7 @@ skalp/
 │   ├── skalp-lint/               # Hardware-aware linter
 │   ├── skalp-lsp/                # Language Server Protocol
 │   ├── skalp-stdlib/             # Standard library (bitops, math, vectors, fixed-point)
+│   ├── skalp-vhdl/               # VHDL frontend (lex, parse, HIR lowering)
 │   ├── skalp-testing/            # Test infrastructure and testbench API
 │   ├── skalp-parallel/           # Parallel compilation
 │   ├── skalp-incremental/        # Incremental compilation

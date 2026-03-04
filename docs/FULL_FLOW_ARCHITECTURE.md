@@ -15,10 +15,11 @@ For open FPGA architectures with documented bitstream formats, SKALP can provide
 ## Extended Pipeline
 
 ```
-SKALP Source (.sk)
-       ↓
-    [Frontend]
-       ↓
+SKALP Source (.sk)    VHDL Source (.vhd)
+       ↓                     ↓
+    [SKALP Frontend]   [VHDL Frontend]
+       └─────────┬───────────┘
+                 ↓
     HIR (High-level IR)
        ↓
     [Architecture Selection]

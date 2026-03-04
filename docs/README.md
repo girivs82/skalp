@@ -83,6 +83,11 @@ Or dive into the [User Documentation Hub →](user/README.md)
 2. [Simulation Guide](user/guides/simulation.md)
 3. [Testing Patterns](user/cookbook/testing.md)
 
+### "I have existing VHDL designs"
+1. [VHDL Frontend Architecture](vhdl-frontend-architecture.md)
+2. [Migration Guide: VHDL → SKALP](user/migration/from-vhdl.md)
+3. [Quick Start](user/quick-start.md) — `skalp build design.vhd` works out of the box
+
 ### "I'm contributing to SKALP"
 1. [Developer Setup](developer/contributing/setup.md)
 2. [Architecture Overview](developer/architecture/overview.md)
@@ -158,6 +163,23 @@ impl NclAdder {
 }
 ```
 
+### VHDL Frontend
+
+SKALP accepts **VHDL-2008/2019** as a first-class input language, compiling through the same backend pipeline:
+
+- [**VHDL Frontend Architecture**](vhdl-frontend-architecture.md) - Complete VHDL frontend documentation
+
+**Key features:**
+- Full VHDL-2008/2019 lexer and parser (synthesizable subset)
+- VHDL-2019 interfaces and mode views
+- Generic type parameters and generic package instantiation
+- Synthesizable subset enforcement at parse time
+
+```bash
+# Compile VHDL directly
+skalp build counter.vhd
+```
+
 ### Other Advanced Features
 
 - [**Clock Domain Crossing**](CDC_SUPPORT.md) - Safe multi-clock designs
@@ -172,6 +194,8 @@ impl NclAdder {
 ### ✅ Complete
 - Quick Start Guide
 - SystemVerilog Migration Guide
+- VHDL Frontend Architecture
+- VHDL Migration Guide
 - User Documentation Hub
 - Why SKALP comparison
 - SKALP vs Veryl comparison
@@ -187,7 +211,6 @@ impl NclAdder {
 - Examples with tests
 
 ### 📋 Planned
-- VHDL migration guide
 - Chisel migration guide
 - Advanced patterns
 - Video tutorials
