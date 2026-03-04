@@ -1186,3 +1186,82 @@ end rtl;
     let result = parse_vhdl(source);
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 }
+
+// ====================================================================
+// Rich error diagnostic tests
+// ====================================================================
+
+#[test]
+fn test_error_message_includes_line_info() {
+    // Parse invalid VHDL: missing colon before type
+    let source = "entity e is\nend entity e;\n\narchitecture rtl of e is\n  signal x std_logic;\nbegin\nend rtl;\n";
+    let result = parse_vhdl(source);
+    assert!(
+        !result.errors.is_empty(),
+        "should have parse errors for missing ':'"
+    );
+
+    // Use DiagnosticRenderer to render the error and check for line info
+    use skalp_frontend::diagnostic_render::{DiagnosticMessage, DiagnosticRenderer, Severity};
+    let renderer = DiagnosticRenderer::new("test.vhd", source);
+    let e = &result.errors[0];
+    let diag = DiagnosticMessage {
+        severity: Severity::Error,
+        message: &e.message,
+        start: e.position,
+        end: e.end_position,
+        labels: &[],
+    };
+    let output = renderer.render_to_string(&diag);
+
+    // Should contain filename reference and source snippet, NOT just "at pos N"
+    assert!(
+        output.contains("test.vhd"),
+        "error should reference filename, got: {}",
+        output
+    );
+    assert!(
+        !output.contains("at pos "),
+        "error should NOT contain raw 'at pos', got: {}",
+        output
+    );
+}
+
+#[test]
+fn test_parse_error_has_span_positions() {
+    // Parse something that will fail — architecture missing 'of'
+    let bad_source = "entity e is\nend entity e;\narchitecture rtl e is\nbegin\nend rtl;\n";
+    let result = parse_vhdl(bad_source);
+    assert!(
+        !result.errors.is_empty(),
+        "should have errors for missing 'of'"
+    );
+
+    let e = &result.errors[0];
+    // end_position >= position
+    assert!(
+        e.end_position >= e.position,
+        "end_position ({}) should be >= position ({})",
+        e.end_position,
+        e.position
+    );
+}
+
+#[test]
+fn test_full_error_rendering_via_lib() {
+    // Call parse_vhdl_source which now uses DiagnosticRenderer internally
+    let bad_source = "entity e is\n  port( clk in std_logic );\nend entity e;\n";
+    let result = skalp_vhdl::parse_vhdl_source(bad_source, None);
+
+    // It may succeed with warnings or fail — either way, we check that it
+    // doesn't crash and produces a usable error if it does fail
+    if let Err(e) = result {
+        let msg = format!("{}", e);
+        // Should NOT contain the old "at pos N" format
+        assert!(
+            !msg.contains("at pos "),
+            "anyhow error should use codespan rendering, got: {}",
+            msg
+        );
+    }
+}

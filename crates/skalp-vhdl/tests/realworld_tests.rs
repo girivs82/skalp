@@ -439,8 +439,7 @@ fn print_stress_report(
     let mut real_failures: Vec<&(String, usize, String)> = vec![];
 
     for f in failures {
-        let cat = categorize_failure(&f.0, &f.2)
-            .or_else(|| extra_expected(&f.0, &f.2));
+        let cat = categorize_failure(&f.0, &f.2).or_else(|| extra_expected(&f.0, &f.2));
         if let Some(category) = cat {
             *categories.entry(category).or_insert(0) += 1;
         } else {
@@ -462,9 +461,7 @@ fn print_stress_report(
     if !real_failures.is_empty() {
         let synth_total = passed + real_failures.len();
         let synth_rate = (passed as f64 / synth_total as f64) * 100.0;
-        println!(
-            "\nSynthesizable-only pass rate: {passed}/{synth_total} ({synth_rate:.1}%)\n"
-        );
+        println!("\nSynthesizable-only pass rate: {passed}/{synth_total} ({synth_rate:.1}%)\n");
 
         println!("Failures (first error per file, showing first 50):");
         for (file, count, msg) in real_failures.iter().take(50) {
@@ -632,7 +629,11 @@ fn stress_test_riscv_vhdl() {
         }
         None
     };
-    run_stress_test("/tmp/vhdl-stress/riscv_vhdl", "RISC-V VHDL SoC", &riscv_extra);
+    run_stress_test(
+        "/tmp/vhdl-stress/riscv_vhdl",
+        "RISC-V VHDL SoC",
+        &riscv_extra,
+    );
 }
 
 // =========================================================================

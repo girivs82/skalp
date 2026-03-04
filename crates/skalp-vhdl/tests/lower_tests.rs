@@ -1657,10 +1657,7 @@ end entity bounded_generic;
                 bounds
             );
         }
-        other => panic!(
-            "expected TypeWithBounds, got {:?}",
-            other
-        ),
+        other => panic!("expected TypeWithBounds, got {:?}", other),
     }
 }
 
@@ -1686,10 +1683,7 @@ end entity discrete_generic;
             assert_eq!(bounds.len(), 1);
             assert_eq!(bounds[0], "discrete");
         }
-        other => panic!(
-            "expected TypeWithBounds, got {:?}",
-            other
-        ),
+        other => panic!("expected TypeWithBounds, got {:?}", other),
     }
 }
 
@@ -1856,7 +1850,10 @@ end architecture rtl;
     let imp = &hir.implementations[0];
 
     // matrix_t signal should exist and be a nested array type
-    assert!(!imp.signals.is_empty(), "expected at least 1 signal for matrix_t");
+    assert!(
+        !imp.signals.is_empty(),
+        "expected at least 1 signal for matrix_t"
+    );
     use skalp_frontend::hir::HirType;
     match &imp.signals[0].signal_type {
         HirType::Array(element_type, size) => {

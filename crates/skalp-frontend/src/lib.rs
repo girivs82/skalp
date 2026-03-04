@@ -10,6 +10,7 @@
 pub mod ast;
 pub mod const_eval;
 pub mod constraints;
+pub mod diagnostic_render;
 pub mod formatter;
 pub mod generics;
 pub mod hir;
@@ -103,29 +104,57 @@ pub fn parse_and_build_compilation_context(file_path: &Path) -> Result<Compilati
     let (syntax_tree, parse_errors) = parse::parse_with_errors(&source);
 
     if !parse_errors.is_empty() {
-        let error_msgs: Vec<String> = parse_errors
+        let filename = file_path.display().to_string();
+        let renderer = diagnostic_render::DiagnosticRenderer::new(&filename, &source);
+        let diags: Vec<diagnostic_render::DiagnosticMessage> = parse_errors
             .iter()
-            .map(|e| format!("  {} at pos {}", e.message, e.position))
+            .map(|e| diagnostic_render::DiagnosticMessage {
+                severity: diagnostic_render::Severity::Error,
+                message: &e.message,
+                start: e.position,
+                end: e.position, // ParseError has only a point position
+                labels: &[],
+            })
             .collect();
-        let error_msg = format!(
-            "Parsing failed with {} errors:\n{}",
+
+        for d in &diags {
+            renderer.emit(d);
+        }
+
+        let rendered = renderer.render_all_to_string(&diags);
+        anyhow::bail!(
+            "Parsing failed with {} error(s):\n{}",
             parse_errors.len(),
-            error_msgs.join("\n")
+            rendered
         );
-        anyhow::bail!(error_msg);
     }
 
     // Build HIR (first pass - will have incomplete instances for imported entities)
     let mut builder =
         hir_builder::HirBuilderContext::with_source(&source, Some(file_path.to_path_buf()));
     let mut hir = builder.build(&syntax_tree).map_err(|errors| {
-        anyhow::anyhow!(
-            "HIR build failed: {}",
-            errors
-                .first()
-                .map(|e| e.message.clone())
-                .unwrap_or_else(|| "unknown error".to_string())
-        )
+        let filename = file_path.display().to_string();
+        let renderer = diagnostic_render::DiagnosticRenderer::new(&filename, &source);
+        let diags: Vec<diagnostic_render::DiagnosticMessage> = errors
+            .iter()
+            .map(|e| {
+                let (start, end) = e.span.as_ref().map(|s| (s.start, s.end)).unwrap_or((0, 0));
+                diagnostic_render::DiagnosticMessage {
+                    severity: diagnostic_render::Severity::Error,
+                    message: &e.message,
+                    start,
+                    end,
+                    labels: &[],
+                }
+            })
+            .collect();
+
+        for d in &diags {
+            renderer.emit(d);
+        }
+
+        let rendered = renderer.render_all_to_string(&diags);
+        anyhow::anyhow!("HIR build failed:\n{}", rendered)
     })?;
 
     // Resolve and load all dependencies

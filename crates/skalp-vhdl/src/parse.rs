@@ -214,6 +214,12 @@ impl<'a> ParseState<'a> {
             .unwrap_or(self.source.len())
     }
 
+    fn current_end_offset(&self) -> usize {
+        self.current_token()
+            .map(|t| t.offset + t.text.len())
+            .unwrap_or(self.source.len())
+    }
+
     fn current_text(&self) -> &str {
         self.current_token().map(|t| t.text.as_str()).unwrap_or("")
     }
@@ -279,6 +285,7 @@ impl<'a> ParseState<'a> {
             true
         } else {
             let pos = self.current_offset();
+            let end = self.current_end_offset();
             let found = self
                 .current_kind()
                 .map(|k| format!("{:?}", k))
@@ -287,6 +294,7 @@ impl<'a> ParseState<'a> {
                 kind: crate::diagnostics::VhdlErrorKind::ParseError,
                 message: format!("expected {:?}, found {}", kind, found),
                 position: pos,
+                end_position: end,
                 severity: crate::diagnostics::VhdlSeverity::Error,
             });
             false
@@ -305,10 +313,12 @@ impl<'a> ParseState<'a> {
 
     fn error(&mut self, message: &str) {
         let pos = self.current_offset();
+        let end = self.current_end_offset();
         self.errors.push(VhdlError {
             kind: crate::diagnostics::VhdlErrorKind::ParseError,
             message: message.to_string(),
             position: pos,
+            end_position: end,
             severity: crate::diagnostics::VhdlSeverity::Error,
         });
     }
@@ -344,6 +354,8 @@ impl<'a> ParseState<'a> {
     /// Check for unsynthesizable constructs
     fn check_unsynthesizable(&mut self) -> bool {
         let kind = self.current_kind();
+        let pos = self.current_offset();
+        let end = self.current_end_offset();
         match kind {
             Some(SyntaxKind::WaitKw) => {
                 self.errors.push(VhdlError {
@@ -351,7 +363,8 @@ impl<'a> ParseState<'a> {
                         "wait statement".to_string(),
                     ),
                     message: "wait statements are not synthesizable".to_string(),
-                    position: self.current_offset(),
+                    position: pos,
+                    end_position: end,
                     severity: crate::diagnostics::VhdlSeverity::Error,
                 });
                 true
@@ -362,7 +375,8 @@ impl<'a> ParseState<'a> {
                         "after clause".to_string(),
                     ),
                     message: "after clauses are not synthesizable".to_string(),
-                    position: self.current_offset(),
+                    position: pos,
+                    end_position: end,
                     severity: crate::diagnostics::VhdlSeverity::Error,
                 });
                 true
@@ -373,7 +387,8 @@ impl<'a> ParseState<'a> {
                         "transport/reject delay".to_string(),
                     ),
                     message: "transport/reject delay models are not synthesizable".to_string(),
-                    position: self.current_offset(),
+                    position: pos,
+                    end_position: end,
                     severity: crate::diagnostics::VhdlSeverity::Error,
                 });
                 true
@@ -384,7 +399,8 @@ impl<'a> ParseState<'a> {
                         "file declaration".to_string(),
                     ),
                     message: "file declarations are not synthesizable".to_string(),
-                    position: self.current_offset(),
+                    position: pos,
+                    end_position: end,
                     severity: crate::diagnostics::VhdlSeverity::Error,
                 });
                 true
@@ -395,7 +411,8 @@ impl<'a> ParseState<'a> {
                         "access type".to_string(),
                     ),
                     message: "access types are not synthesizable".to_string(),
-                    position: self.current_offset(),
+                    position: pos,
+                    end_position: end,
                     severity: crate::diagnostics::VhdlSeverity::Error,
                 });
                 true
@@ -3043,7 +3060,7 @@ impl<'a> ParseState<'a> {
         // real base type mark.
         if self.is_name_or_builtin_start() {
             self.bump(); // actual base type name
-            // Consume dotted suffixes on the base type
+                         // Consume dotted suffixes on the base type
             while self.at(SyntaxKind::Dot) {
                 self.bump(); // .
                 if self.is_name_or_builtin_start() || self.at(SyntaxKind::AllKw) {
