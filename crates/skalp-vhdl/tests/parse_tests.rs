@@ -974,3 +974,215 @@ end architecture rtl;
     let result = parse_vhdl(source);
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 }
+
+// ========================================================================
+// Regression tests for stress test parser fixes
+// ========================================================================
+
+#[test]
+fn test_parse_string_with_doubled_quotes() {
+    // VHDL doubled-quote escaping: "" = literal " inside strings
+    let source = r#"
+architecture rtl of test is
+begin
+    process(clk)
+    begin
+        report "either ""SMOOTH"" or ""BLOCK""";
+    end process;
+end rtl;
+"#;
+    let result = parse_vhdl(source);
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+}
+
+#[test]
+fn test_parse_use_clause_in_architecture() {
+    // use clause in architecture declarative region
+    let source = r#"
+architecture rtl of test is
+    use work.my_pkg.all;
+    signal s : std_logic;
+begin
+end rtl;
+"#;
+    let result = parse_vhdl(source);
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+}
+
+#[test]
+fn test_parse_use_clause_in_entity_decls() {
+    // use clause in entity declarative region (after port clause)
+    let source = r#"
+entity test is
+    port (clk : in std_logic);
+    use work.my_pkg.all;
+end entity test;
+"#;
+    let result = parse_vhdl(source);
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+}
+
+#[test]
+fn test_parse_resolution_function_subtype() {
+    // subtype with resolution function: subtype T is resolve_fn base_type;
+    let source = r#"
+package my_pkg is
+    subtype resolved_type is resolve_fn base_type;
+end package;
+"#;
+    let result = parse_vhdl(source);
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+}
+
+#[test]
+fn test_parse_physical_type_literal() {
+    // Physical type literals: numeric value followed by unit name
+    let source = r#"
+architecture rtl of test is
+    constant CLK_period : integer := 10 ns;
+    constant delay : integer := 1 ps;
+    constant t : integer := 100 ms;
+begin
+end rtl;
+"#;
+    let result = parse_vhdl(source);
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+}
+
+#[test]
+fn test_parse_standalone_report_statement() {
+    // report as standalone sequential statement (no assert)
+    let source = r#"
+architecture rtl of test is
+begin
+    process(clk)
+    begin
+        if rising_edge(clk) then
+            report "tick";
+            report "hello" severity note;
+        end if;
+    end process;
+end rtl;
+"#;
+    let result = parse_vhdl(source);
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+}
+
+#[test]
+fn test_parse_concurrent_report_statement() {
+    // report as concurrent statement
+    let source = r#"
+architecture rtl of test is
+begin
+    report "simulation started" severity note;
+end rtl;
+"#;
+    let result = parse_vhdl(source);
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+}
+
+#[test]
+fn test_parse_chained_subtype_constraint() {
+    // Array of array with chained constraint: type(range1)(range2)
+    let source = r#"
+architecture rtl of test is
+    variable x : my_array_t(0 to 3)(7 downto 0);
+begin
+end rtl;
+"#;
+    let result = parse_vhdl(source);
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+}
+
+#[test]
+fn test_parse_array_type_integer_range_box() {
+    // Array type with integer range <> index
+    let source = r#"
+package my_pkg is
+    type obj_code_t is array(integer range <>) of std_logic_vector(7 downto 0);
+end package;
+"#;
+    let result = parse_vhdl(source);
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+}
+
+#[test]
+fn test_parse_unconstrained_array_element_type() {
+    // Unconstrained element type in array declaration (VHDL-2008)
+    let source = r#"
+package my_pkg is
+    type StlvArray_t is array (natural range <>) of std_logic_vector;
+    type UnsignedArray_t is array (natural range <>) of unsigned;
+end package;
+"#;
+    let result = parse_vhdl(source);
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+}
+
+#[test]
+fn test_parse_character_attributes() {
+    // character'pos() and character'val() attribute calls
+    let source = r#"
+architecture rtl of test is
+begin
+    process(clk)
+        variable idx : natural;
+    begin
+        idx := character'pos('a') - character'pos('A');
+    end process;
+end rtl;
+"#;
+    let result = parse_vhdl(source);
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+}
+
+#[test]
+fn test_parse_generate_body_with_declarations() {
+    // Generate body with signal declarations before begin
+    let source = r#"
+architecture rtl of test is
+begin
+    gen: if true generate
+        signal s : std_logic;
+    begin
+        s <= '0';
+    end generate gen;
+end rtl;
+"#;
+    let result = parse_vhdl(source);
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+}
+
+#[test]
+fn test_parse_new_allocator() {
+    // new allocator expression
+    let source = r#"
+architecture rtl of test is
+begin
+    process(clk)
+        variable s : string;
+    begin
+        s := new string'("hello");
+    end process;
+end rtl;
+"#;
+    let result = parse_vhdl(source);
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+}
+
+#[test]
+fn test_parse_use_clause_in_generate() {
+    let source = r#"
+architecture rtl of test is
+begin
+    gen: if true generate
+        use work.pkg.all;
+        signal s : std_logic;
+    begin
+        s <= '0';
+    end generate gen;
+end rtl;
+"#;
+    let result = parse_vhdl(source);
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+}

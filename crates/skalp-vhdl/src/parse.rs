@@ -579,6 +579,7 @@ impl<'a> ParseState<'a> {
                 Some(SyntaxKind::SubtypeKw) => self.parse_subtype_decl(),
                 Some(SyntaxKind::ComponentKw) => self.parse_component_decl(),
                 Some(SyntaxKind::AliasKw) => self.parse_alias_decl(),
+                Some(SyntaxKind::UseKw) => self.parse_use_clause(),
                 Some(SyntaxKind::FunctionKw)
                 | Some(SyntaxKind::PureKw)
                 | Some(SyntaxKind::ImpureKw) => {
@@ -823,6 +824,7 @@ impl<'a> ParseState<'a> {
                 Some(SyntaxKind::TypeKw) => self.parse_type_decl(),
                 Some(SyntaxKind::SubtypeKw) => self.parse_subtype_decl(),
                 Some(SyntaxKind::ComponentKw) => self.parse_component_decl(),
+                Some(SyntaxKind::UseKw) => self.parse_use_clause(),
                 Some(SyntaxKind::FunctionKw)
                 | Some(SyntaxKind::PureKw)
                 | Some(SyntaxKind::ImpureKw) => {
@@ -1309,6 +1311,10 @@ impl<'a> ParseState<'a> {
                     // (simulation-only construct, ubiquitous in real VHDL)
                     self.parse_assert_stmt();
                 }
+                Some(SyntaxKind::ReportKw) => {
+                    // Standalone report (equivalent to assert false report ...)
+                    self.parse_report_stmt();
+                }
                 Some(SyntaxKind::ComponentKw) => {
                     // Component declaration in architecture (should be in declarative region
                     // but some designs put them here)
@@ -1566,6 +1572,7 @@ impl<'a> ParseState<'a> {
                 Some(SyntaxKind::ConstantKw) => self.parse_constant_decl(),
                 Some(SyntaxKind::TypeKw) => self.parse_type_decl(),
                 Some(SyntaxKind::SubtypeKw) => self.parse_subtype_decl(),
+                Some(SyntaxKind::UseKw) => self.parse_use_clause(),
                 Some(SyntaxKind::FunctionKw)
                 | Some(SyntaxKind::PureKw)
                 | Some(SyntaxKind::ImpureKw) => {
@@ -1647,6 +1654,7 @@ impl<'a> ParseState<'a> {
             Some(SyntaxKind::NullKw) => self.parse_null_stmt(),
             Some(SyntaxKind::ReturnKw) => self.parse_return_stmt(),
             Some(SyntaxKind::AssertKw) => self.parse_assert_stmt(),
+            Some(SyntaxKind::ReportKw) => self.parse_report_stmt(),
             Some(SyntaxKind::NextKw) => self.parse_next_stmt(),
             Some(SyntaxKind::ExitKw) => self.parse_exit_stmt(),
             _ => {
@@ -1823,6 +1831,24 @@ impl<'a> ParseState<'a> {
             self.parse_expression();
             self.skip_trivia();
         }
+        if self.at(SyntaxKind::SeverityKw) {
+            self.bump();
+            self.skip_trivia();
+            self.parse_expression();
+            self.skip_trivia();
+        }
+        self.expect(SyntaxKind::Semicolon);
+        self.finish_node();
+    }
+
+    /// Standalone report statement: report "msg" [severity level];
+    /// Equivalent to: assert false report "msg" severity ...;
+    fn parse_report_stmt(&mut self) {
+        self.start_node(SyntaxKind::AssertStmt);
+        self.expect(SyntaxKind::ReportKw);
+        self.skip_trivia();
+        self.parse_expression();
+        self.skip_trivia();
         if self.at(SyntaxKind::SeverityKw) {
             self.bump();
             self.skip_trivia();
@@ -2191,6 +2217,7 @@ impl<'a> ParseState<'a> {
                     | Some(SyntaxKind::ComponentKw)
                     | Some(SyntaxKind::AttributeKw)
                     | Some(SyntaxKind::AliasKw)
+                    | Some(SyntaxKind::UseKw)
                     | Some(SyntaxKind::FunctionKw)
                     | Some(SyntaxKind::PureKw)
                     | Some(SyntaxKind::ImpureKw)
@@ -2711,6 +2738,12 @@ impl<'a> ParseState<'a> {
             | Some(SyntaxKind::RealLiteral)
             | Some(SyntaxKind::BasedLiteral) => {
                 self.bump();
+                // VHDL physical type literals: numeric value followed by unit name
+                // e.g. "10 ns", "1.5 ps", "100 ms"
+                self.skip_trivia();
+                if self.at(SyntaxKind::Ident) {
+                    self.bump(); // unit suffix
+                }
             }
             Some(SyntaxKind::StringLiteral) | Some(SyntaxKind::BitStringLiteral) => {
                 self.bump();
@@ -2723,6 +2756,13 @@ impl<'a> ParseState<'a> {
             }
             Some(SyntaxKind::NullKw) => {
                 self.bump();
+            }
+            Some(SyntaxKind::NewKw) => {
+                // Allocator: new subtype_indication or new qualified_expression
+                self.bump(); // new
+                self.skip_trivia();
+                // Parse the type name and optional constraint/qualified expression
+                self.parse_name_or_call();
             }
             Some(SyntaxKind::LParen) => {
                 // Parenthesized expression or aggregate
@@ -2997,20 +3037,59 @@ impl<'a> ParseState<'a> {
         }
         self.skip_trivia();
 
-        // Optional constraint: (range) or (N-1 downto 0)
-        if self.at(SyntaxKind::LParen) {
+        // VHDL resolution function: "subtype T is resolve_fn base_type;"
+        // If the next token is another type name (Ident or builtin), the first
+        // name we parsed was actually a resolution function, and this is the
+        // real base type mark.
+        if self.is_name_or_builtin_start() {
+            self.bump(); // actual base type name
+            // Consume dotted suffixes on the base type
+            while self.at(SyntaxKind::Dot) {
+                self.bump(); // .
+                if self.is_name_or_builtin_start() || self.at(SyntaxKind::AllKw) {
+                    self.bump();
+                } else {
+                    break;
+                }
+            }
+            self.skip_trivia();
+        }
+
+        // Optional constraint(s): (range) or (N-1 downto 0)
+        // VHDL allows chained constraints for arrays of arrays:
+        //   StlvArray_t(0 to N-1)(7 downto 0)
+        // Also handles discrete range constraints with range keyword:
+        //   ram_t(integer range 0 to size-1)
+        while self.at(SyntaxKind::LParen) {
             self.bump(); // (
             self.skip_trivia();
             self.parse_expression();
             self.skip_trivia();
-            if self.at(SyntaxKind::ToKw) || self.at(SyntaxKind::DowntoKw) {
+            if self.at(SyntaxKind::RangeKw) {
+                // type range expr to/downto expr  OR  type range <>
+                self.bump(); // range
+                self.skip_trivia();
+                if self.at(SyntaxKind::BoxOp) {
+                    self.bump(); // <>
+                } else {
+                    self.parse_expression();
+                    self.skip_trivia();
+                    if self.at(SyntaxKind::ToKw) || self.at(SyntaxKind::DowntoKw) {
+                        self.bump();
+                        self.skip_trivia();
+                        self.parse_expression();
+                    }
+                }
+            } else if self.at(SyntaxKind::ToKw) || self.at(SyntaxKind::DowntoKw) {
                 self.bump();
                 self.skip_trivia();
                 self.parse_expression();
             }
             self.skip_trivia();
             self.expect(SyntaxKind::RParen);
-        } else if self.at(SyntaxKind::RangeKw) {
+            self.skip_trivia();
+        }
+        if self.at(SyntaxKind::RangeKw) {
             self.bump(); // range
             self.skip_trivia();
             self.parse_expression();

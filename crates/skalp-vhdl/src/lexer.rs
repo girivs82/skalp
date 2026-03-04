@@ -279,8 +279,8 @@ pub enum Token {
     #[regex(r#"[xXoObBdD]"[0-9a-fA-F_]+""#)]
     BitStringLiteral,
 
-    // String literal
-    #[regex(r#""[^"]*""#)]
+    // String literal (handles VHDL doubled-quote escaping: "" = literal ")
+    #[regex(r#""([^"]|"")*""#)]
     StringLiteral,
 
     // Based literal: 16#FF#, 2#1010#, 8#77#

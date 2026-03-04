@@ -395,9 +395,17 @@ fn categorize_failure(path: &str, msg: &str) -> Option<&'static str> {
         return Some("nonsynthesizable");
     }
 
-    // Template files (GRLIB preprocessor)
-    if path.ends_with(".in.vhd") || path.ends_with(".in.vhdl") {
+    // Template files (GRLIB preprocessor, build_rom, etc.)
+    if path.ends_with(".in.vhd")
+        || path.ends_with(".in.vhdl")
+        || path.contains("/templates/template")
+    {
         return Some("template");
+    }
+
+    // Code fragments (not full VHDL files)
+    if path.ends_with("RbExample.vhd") {
+        return Some("code fragment");
     }
 
     None
@@ -480,6 +488,74 @@ fn run_stress_test(dir: &str, name: &str, extra: &dyn Fn(&str, &str) -> Option<&
 // -- No extra project-specific categories --
 fn no_extra(_path: &str, _msg: &str) -> Option<&'static str> {
     None
+}
+
+/// Diagnostic: parse each failing file and print the first error with line/column.
+#[test]
+fn diagnostic_individual_failures() {
+    let files = [
+        // QNICE-FPGA
+        "/tmp/vhdl-stress/QNICE-FPGA/vhdl/hw/MEGA65/drivers/debugtools.vhdl",
+        "/tmp/vhdl-stress/QNICE-FPGA/vhdl/hw/MEGA65/drivers/hdmi_i2c.vhdl",
+        "/tmp/vhdl-stress/QNICE-FPGA/vhdl/hw/MEGA65/drivers/hyperram.vhdl",
+        "/tmp/vhdl-stress/QNICE-FPGA/vhdl/hw/MEGA65/drivers/i2c_master.vhdl",
+        // Open Logic
+        "/tmp/vhdl-stress/open-logic/src/base/vhdl/olo_base_arb_wrr.vhd",
+        "/tmp/vhdl-stress/open-logic/src/base/vhdl/olo_base_dyn_sft.vhd",
+        "/tmp/vhdl-stress/open-logic/src/base/vhdl/olo_base_latency_comp.vhd",
+        "/tmp/vhdl-stress/open-logic/src/base/vhdl/olo_base_pkg_array.vhd",
+        "/tmp/vhdl-stress/open-logic/src/base/vhdl/olo_base_pkg_string.vhd",
+        // RISC-V
+        "/tmp/vhdl-stress/riscv_vhdl/vhdl/rtl/commonlib/types_util.vhd",
+        // light8080
+        "/tmp/vhdl-stress/light8080/src/vhdl/rtl/mcu/mcu80_pkg.vhdl",
+        // Expected non-VHDL
+        "/tmp/vhdl-stress/open-logic/doc/axi/slave/RbExample.vhd",
+        "/tmp/vhdl-stress/light8080/tools/build_rom/templates/template.vhdl",
+    ];
+
+    for path in &files {
+        let Ok(source) = std::fs::read_to_string(path) else {
+            eprintln!("SKIP: {path} not found");
+            continue;
+        };
+        let result = skalp_vhdl::parse::parse_vhdl(&source);
+        if result.errors.is_empty() {
+            println!("OK: {path}");
+        } else {
+            let e = &result.errors[0];
+            // Convert byte offset to line:col
+            let (line, col) = byte_offset_to_line_col(&source, e.position);
+            let snippet = source_snippet(&source, e.position);
+            println!(
+                "FAIL: {path}\n  errors: {}\n  first: line {}:{} (byte {}): {}\n  context: ...{}...\n",
+                result.errors.len(), line, col, e.position, e.message, snippet
+            );
+        }
+    }
+}
+
+fn byte_offset_to_line_col(source: &str, offset: usize) -> (usize, usize) {
+    let mut line = 1;
+    let mut col = 1;
+    for (i, ch) in source.char_indices() {
+        if i >= offset {
+            break;
+        }
+        if ch == '\n' {
+            line += 1;
+            col = 1;
+        } else {
+            col += 1;
+        }
+    }
+    (line, col)
+}
+
+fn source_snippet(source: &str, offset: usize) -> String {
+    let start = offset.saturating_sub(30);
+    let end = (offset + 30).min(source.len());
+    source[start..end].replace('\n', "\\n")
 }
 
 #[test]
