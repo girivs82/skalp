@@ -3009,7 +3009,7 @@ checksum = "bbbb5d9659141646ae647b42fe094daf6c6192d1620870b449d9557f748b2daa"
 
 [[package]]
 name = "skalp"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "arrowhead",
@@ -3060,7 +3060,7 @@ dependencies = [
 
 [[package]]
 name = "skalp-asic"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bincode 2.0.1",
  "chrono",
@@ -3079,7 +3079,7 @@ dependencies = [
 
 [[package]]
 name = "skalp-backends"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -3098,7 +3098,7 @@ dependencies = [
 
 [[package]]
 name = "skalp-codegen"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "indoc",
@@ -3111,7 +3111,7 @@ dependencies = [
 
 [[package]]
 name = "skalp-formal"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bitvec",
  "boolector",
@@ -3136,7 +3136,7 @@ dependencies = [
 
 [[package]]
 name = "skalp-frontend"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "codespan-reporting",
@@ -3154,7 +3154,7 @@ dependencies = [
 
 [[package]]
 name = "skalp-hir-codegen"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "skalp-frontend",
@@ -3162,7 +3162,7 @@ dependencies = [
 
 [[package]]
 name = "skalp-incremental"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "chrono",
  "dashmap",
@@ -3182,7 +3182,7 @@ dependencies = [
 
 [[package]]
 name = "skalp-lint"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "indexmap",
  "skalp-frontend",
@@ -3193,7 +3193,7 @@ dependencies = [
 
 [[package]]
 name = "skalp-lir"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -3216,7 +3216,7 @@ dependencies = [
 
 [[package]]
 name = "skalp-lsp"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "dashmap",
  "ropey",
@@ -3233,7 +3233,7 @@ dependencies = [
 
 [[package]]
 name = "skalp-manifest"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "semver",
  "serde",
@@ -3244,7 +3244,7 @@ dependencies = [
 
 [[package]]
 name = "skalp-mir"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "indexmap",
@@ -3258,7 +3258,7 @@ dependencies = [
 
 [[package]]
 name = "skalp-ml"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "chrono",
  "ndarray",
@@ -3272,7 +3272,7 @@ dependencies = [
 
 [[package]]
 name = "skalp-package"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "chrono",
  "dirs",
@@ -3293,7 +3293,7 @@ dependencies = [
 
 [[package]]
 name = "skalp-parallel"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "crossbeam",
@@ -3314,7 +3314,7 @@ dependencies = [
 
 [[package]]
 name = "skalp-place-route"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "indexmap",
  "libftd2xx",
@@ -3330,7 +3330,7 @@ dependencies = [
 
 [[package]]
 name = "skalp-resolve"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "indexmap",
  "petgraph",
@@ -3339,7 +3339,7 @@ dependencies = [
 
 [[package]]
 name = "skalp-safety"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "chrono",
  "indexmap",
@@ -3359,7 +3359,7 @@ dependencies = [
 
 [[package]]
 name = "skalp-sim"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3395,7 +3395,7 @@ dependencies = [
 
 [[package]]
 name = "skalp-sir"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "cocoa-foundation",
  "metal",
@@ -3409,11 +3409,11 @@ dependencies = [
 
 [[package]]
 name = "skalp-stdlib"
-version = "0.1.0"
+version = "0.2.0"
 
 [[package]]
 name = "skalp-testing"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "arbitrary",
@@ -3439,7 +3439,7 @@ dependencies = [
 
 [[package]]
 name = "skalp-verify"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "indexmap",
  "ouroboros",
@@ -3454,7 +3454,7 @@ dependencies = [
 
 [[package]]
 name = "skalp-vhdl"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "indexmap",

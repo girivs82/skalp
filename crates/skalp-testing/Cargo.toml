@@ -1,6 +1,6 @@
 [package]
 name = "skalp-testing"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 authors = ["SKALP Team"]
 description = "Property-based testing framework for SKALP hardware designs"

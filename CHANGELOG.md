@@ -5,7 +5,7 @@ All notable changes to SKALP will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.2.0] - 2026-03-03
+## [0.2.0] - 2026-03-04
 
 ### Added
 
@@ -16,10 +16,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Generic type parameters and generic package instantiation
   - Synthesizable subset enforcement at parse time
   - Rust async testbench support for VHDL designs
+  - Hierarchical VHDL-2019 support with end-to-end behavioral simulation
+  - VHDL generics wired into native const eval flow
+  - Deferred type resolution and attribute evaluation through the generic pipeline
+  - VHDL-to-SystemVerilog transpilation
+- **Rich Diagnostics** — rustc-style error reporting using `codespan-reporting`
+- **VHDL LSP Support** — language server protocol support for VHDL files, including semantic tokens and schematic support
+- **VHDL Formatter** — Wadler-Lindig pretty-printing formatter for VHDL source
+- **skalp Source Formatter** — `skalp fmt` rewritten with Wadler-Lindig pretty-printing
+- **HIR Codegen** — HIR-based code generation for skalp, VHDL, and SystemVerilog with comment preservation, entity deduplication, and per-entity file output
+- **InputTiming** — testbench control for waveform-aligned input drives
+- **Stack Overflow Protection** — `stacker`-based overflow protection in `skalp-sir` and `skalp-mir`
+- **Cross-process Serialization** — `flock`-based compilation serialization replacing in-process `Mutex`
+- **Compiler Fingerprinting** — compiler fingerprint included in SIR cache key to prevent stale cache hits
+- VHDL file support in `skalp-debug` server
+- VHDL frontend architecture design document
 
-### New Crate
+### Fixed
+
+- Async reset pattern causing double-increment in simulator
+- Dynamic array read/write and conditional default propagation in hierarchical elaboration
+- Multi-entity elaboration bugs causing simulation failures
+- Signal initial value propagation in MIR→SIR
+- 4 codegen bugs and adder.sk width issue
+- Struct literal with entity field access crash (Bug #85)
+- CDC clock lifetime parameters: lexer and parser support
+- Widening add (`+:`) operator across all compiler stages
+- Redundant `if(clk)` in `always_ff` and recursive target collection
+- `VariableId` collision in `entity_instance_outputs` across entities
+- Parser infinite loop on real-world VHDL
+- All VHDL parser gaps found across 6 stress-test projects
+- 3 VHDL features to work end-to-end through MIR/codegen
+- C++ and Metal shader compilation OOM/SIGKILL via serialization
+- Clippy warnings across `skalp-lsp`, `skalp-verify`, `skalp-frontend`, `skalp-vhdl`
+
+### New Crates
 
 - `skalp-vhdl` — VHDL frontend (lex → parse → HIR lowering)
+- `skalp-hir-codegen` — HIR-based code generation
 
 ## [0.1.1] - 2026-02-23
 
