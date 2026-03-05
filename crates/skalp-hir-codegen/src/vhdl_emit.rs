@@ -22,7 +22,10 @@ pub(crate) fn emit_per_entity(
             writeln!(out).unwrap();
             emit_comments(&mut out, &entity.comments, "--", "");
             emit_entity(&mut out, entity, resolver);
-            if let Some(imp) = hir
+            if let Some(ref vendor_ip) = entity.vendor_ip_config {
+                writeln!(out).unwrap();
+                emit_vhdl_vendor_ip_wrapper(&mut out, entity, vendor_ip, resolver, 1);
+            } else if let Some(imp) = hir
                 .implementations
                 .iter()
                 .find(|imp| imp.entity == entity.id)
@@ -111,10 +114,31 @@ fn emit_architecture(
 ) {
     writeln!(out, "architecture rtl of {} is", entity.name).unwrap();
 
-    // Signal declarations
+    // Entity-level signal declarations
+    for signal in &entity.signals {
+        let ind = indent(1);
+        emit_comments(out, &signal.comments, "--", &ind);
+        emit_vhdl_power_attributes(out, signal, 1);
+        let ty = emit_type(&signal.signal_type);
+        if let Some(ref init) = signal.initial_value {
+            writeln!(
+                out,
+                "{ind}signal {} : {ty} := {};",
+                signal.name,
+                emit_expr(init, resolver)
+            )
+            .unwrap();
+        } else {
+            writeln!(out, "{ind}signal {} : {ty};", signal.name).unwrap();
+        }
+    }
+
+    // Signal declarations (from implementation)
     for signal in &imp.signals {
         let ind = indent(1);
         emit_comments(out, &signal.comments, "--", &ind);
+        // Emit power attributes as VHDL attributes/comments
+        emit_vhdl_power_attributes(out, signal, 1);
         let ty = emit_type(&signal.signal_type);
         if let Some(ref init) = signal.initial_value {
             writeln!(
@@ -153,6 +177,70 @@ fn emit_architecture(
 
     writeln!(out, "begin").unwrap();
 
+    // Entity-level breakpoint assertions
+    let entity_bp_signals: Vec<_> = entity
+        .signals
+        .iter()
+        .filter(|s| s.breakpoint_config.is_some())
+        .collect();
+    if !entity_bp_signals.is_empty() {
+        let ind = indent(1);
+        writeln!(out, "{ind}-- Debug Breakpoint Assertions").unwrap();
+        for signal in &entity_bp_signals {
+            if let Some(ref bp) = signal.breakpoint_config {
+                let bp_name = bp.name.as_deref().unwrap_or(&signal.name);
+                let condition = bp.condition.as_deref().unwrap_or(&signal.name);
+                let msg = bp.message.as_deref().unwrap_or("triggered");
+                let severity = if bp.is_error { "failure" } else { "error" };
+                writeln!(
+                    out,
+                    "{ind}assert not ({condition}) report \"BREAKPOINT [{bp_name}]: {msg}\" severity {severity};"
+                )
+                .unwrap();
+            }
+        }
+        writeln!(out).unwrap();
+    }
+
+    // Entity-level CDC synchronizers
+    let entity_cdc_signals: Vec<_> = entity
+        .signals
+        .iter()
+        .filter(|s| s.cdc_config.is_some())
+        .collect();
+    if !entity_cdc_signals.is_empty() {
+        let ind = indent(1);
+        writeln!(out, "{ind}-- CDC Synchronizer Logic").unwrap();
+        for signal in &entity_cdc_signals {
+            emit_vhdl_cdc_synchronizer(out, signal, 1);
+        }
+    }
+
+    // Breakpoint assertions (from implementation)
+    let breakpoint_signals: Vec<_> = imp
+        .signals
+        .iter()
+        .filter(|s| s.breakpoint_config.is_some())
+        .collect();
+    if !breakpoint_signals.is_empty() {
+        let ind = indent(1);
+        writeln!(out, "{ind}-- Debug Breakpoint Assertions").unwrap();
+        for signal in &breakpoint_signals {
+            if let Some(ref bp) = signal.breakpoint_config {
+                let bp_name = bp.name.as_deref().unwrap_or(&signal.name);
+                let condition = bp.condition.as_deref().unwrap_or(&signal.name);
+                let msg = bp.message.as_deref().unwrap_or("triggered");
+                let severity = if bp.is_error { "failure" } else { "error" };
+                writeln!(
+                    out,
+                    "{ind}assert not ({condition}) report \"BREAKPOINT [{bp_name}]: {msg}\" severity {severity};"
+                )
+                .unwrap();
+            }
+        }
+        writeln!(out).unwrap();
+    }
+
     // Continuous assignments
     for assign in &imp.assignments {
         let ind = indent(1);
@@ -170,6 +258,25 @@ fn emit_architecture(
     // Event blocks (processes)
     for eb in &imp.event_blocks {
         emit_process(out, eb, resolver, 1);
+    }
+
+    // CDC synchronizer processes
+    let cdc_signals: Vec<_> = imp
+        .signals
+        .iter()
+        .filter(|s| s.cdc_config.is_some())
+        .collect();
+    if !cdc_signals.is_empty() {
+        let ind = indent(1);
+        writeln!(out, "{ind}-- CDC Synchronizer Logic").unwrap();
+        for signal in &cdc_signals {
+            emit_vhdl_cdc_synchronizer(out, signal, 1);
+        }
+    }
+
+    // Formal verification blocks (as PSL comments)
+    for fb in &imp.formal_blocks {
+        emit_vhdl_formal_block(out, fb, resolver, 1);
     }
 
     writeln!(out, "end architecture rtl;").unwrap();
@@ -192,52 +299,313 @@ fn emit_process(out: &mut String, eb: &HirEventBlock, resolver: &NameResolver, l
     writeln!(out, "{ind}process({})", sensitivity.join(", ")).unwrap();
     writeln!(out, "{ind}begin").unwrap();
 
-    // Wrap body in edge detection if needed
-    let has_edge = eb
+    // Check for clock edge and async reset
+    let clock_trigger = eb
         .triggers
         .iter()
-        .any(|t| matches!(t.edge, HirEdgeType::Rising | HirEdgeType::Falling));
+        .find(|t| matches!(t.edge, HirEdgeType::Rising | HirEdgeType::Falling));
+    let reset_trigger = eb
+        .triggers
+        .iter()
+        .find(|t| matches!(t.edge, HirEdgeType::Active | HirEdgeType::Inactive));
 
-    if has_edge {
-        let trigger = &eb.triggers[0];
-        let sig = match &trigger.signal {
+    if let (Some(clk), Some(_rst)) = (clock_trigger, reset_trigger) {
+        // Async reset pattern: the HIR body already contains the if/else structure
+        // for reset vs clock. We just need the enclosing clock edge check for VHDL.
+        // The inner if/else handles the async reset condition.
+        let clk_name = match &clk.signal {
             HirEventSignal::Port(id) => resolver.port_name(*id).to_string(),
             HirEventSignal::Signal(id) => resolver.signal_name(*id).to_string(),
         };
-        let edge_fn = match trigger.edge {
+        let edge_fn = match clk.edge {
+            HirEdgeType::Rising => "rising_edge",
+            HirEdgeType::Falling => "falling_edge",
+            _ => "rising_edge",
+        };
+
+        // Emit the body directly — it contains the if (reset) ... else ... pattern
+        // For VHDL async reset, we emit it as-is; the first `if` tests reset,
+        // and we transform the `else` to `elsif rising_edge(clk) then`
+        emit_vhdl_async_reset_body(out, &eb.statements, resolver, level + 1, edge_fn, &clk_name);
+    } else if let Some(clk) = clock_trigger {
+        // Synchronous only
+        let clk_name = match &clk.signal {
+            HirEventSignal::Port(id) => resolver.port_name(*id).to_string(),
+            HirEventSignal::Signal(id) => resolver.signal_name(*id).to_string(),
+        };
+        let edge_fn = match clk.edge {
             HirEdgeType::Rising => "rising_edge",
             HirEdgeType::Falling => "falling_edge",
             _ => "rising_edge",
         };
         let ind2 = indent(level + 1);
-        writeln!(out, "{ind2}if {edge_fn}({sig}) then").unwrap();
-
-        // Check for reset in additional triggers
-        let reset_trigger = eb.triggers.iter().skip(1).find(|t| {
-            matches!(
-                t.edge,
-                HirEdgeType::Active | HirEdgeType::Inactive | HirEdgeType::Rising
-            )
-        });
-
-        if let Some(_reset) = reset_trigger {
-            // Emit reset + body pattern
-            for stmt in &eb.statements {
-                emit_vhdl_statement(out, stmt, resolver, level + 2);
-            }
-        } else {
-            for stmt in &eb.statements {
-                emit_vhdl_statement(out, stmt, resolver, level + 2);
-            }
+        writeln!(out, "{ind2}if {edge_fn}({clk_name}) then").unwrap();
+        for stmt in &eb.statements {
+            emit_vhdl_statement(out, stmt, resolver, level + 2);
         }
         writeln!(out, "{ind2}end if;").unwrap();
     } else {
+        // Combinational process
         for stmt in &eb.statements {
             emit_vhdl_statement(out, stmt, resolver, level + 1);
         }
     }
 
     writeln!(out, "{ind}end process;").unwrap();
+}
+
+/// Emit VHDL async reset body. If the body starts with an if statement (the reset check),
+/// transform it to VHDL's `if rst then ... elsif rising_edge(clk) then ... end if;` pattern.
+fn emit_vhdl_async_reset_body(
+    out: &mut String,
+    stmts: &[HirStatement],
+    resolver: &NameResolver,
+    level: usize,
+    edge_fn: &str,
+    clk_name: &str,
+) {
+    let ind = indent(level);
+    // The body should be a single if statement: if (reset_cond) { reset_stmts } else { clk_stmts }
+    if let Some(HirStatement::If(if_stmt)) = stmts.first() {
+        let cond = emit_expr(&if_stmt.condition, resolver);
+        writeln!(out, "{ind}if {cond} then").unwrap();
+        for s in &if_stmt.then_statements {
+            emit_vhdl_statement(out, s, resolver, level + 1);
+        }
+        writeln!(out, "{ind}elsif {edge_fn}({clk_name}) then").unwrap();
+        if let Some(ref else_stmts) = if_stmt.else_statements {
+            for s in else_stmts {
+                emit_vhdl_statement(out, s, resolver, level + 1);
+            }
+        }
+        writeln!(out, "{ind}end if;").unwrap();
+    } else {
+        // Fallback: just emit statements under clock edge
+        writeln!(out, "{ind}if {edge_fn}({clk_name}) then").unwrap();
+        for stmt in stmts {
+            emit_vhdl_statement(out, stmt, resolver, level + 1);
+        }
+        writeln!(out, "{ind}end if;").unwrap();
+    }
+}
+
+/// Emit a VHDL vendor IP wrapper architecture.
+fn emit_vhdl_vendor_ip_wrapper(
+    out: &mut String,
+    entity: &HirEntity,
+    config: &VendorIpConfig,
+    _resolver: &NameResolver,
+    _level: usize,
+) {
+    let vendor_name = match config.vendor {
+        VendorType::Xilinx => "Xilinx (AMD)",
+        VendorType::Intel => "Intel (Altera)",
+        VendorType::Lattice => "Lattice",
+        VendorType::Generic => "Generic",
+    };
+
+    writeln!(out, "architecture rtl of {} is", entity.name).unwrap();
+    let ind = indent(1);
+    writeln!(out, "{ind}-- Vendor IP Wrapper: {}", config.ip_name).unwrap();
+    writeln!(out, "{ind}-- Vendor: {vendor_name}").unwrap();
+    if let Some(ref lib) = config.library {
+        writeln!(out, "{ind}-- Library: {lib}").unwrap();
+    }
+    writeln!(out, "{ind}-- Generated by Skalp - do not edit manually").unwrap();
+
+    if config.black_box {
+        writeln!(out, "begin").unwrap();
+        writeln!(out, "{ind}-- Black-box: implementation provided externally").unwrap();
+        writeln!(out, "end architecture rtl;").unwrap();
+        return;
+    }
+
+    // Component declaration
+    writeln!(out, "{ind}component {} is", config.ip_name).unwrap();
+    if !config.parameters.is_empty() {
+        writeln!(out, "{ind}    generic (").unwrap();
+        for (i, (name, _val)) in config.parameters.iter().enumerate() {
+            let sep = if i + 1 < config.parameters.len() {
+                ";"
+            } else {
+                ""
+            };
+            writeln!(out, "{ind}        {name} : natural{sep}").unwrap();
+        }
+        writeln!(out, "{ind}    );").unwrap();
+    }
+    writeln!(out, "{ind}end component;").unwrap();
+
+    writeln!(out, "begin").unwrap();
+
+    // Build port mapping
+    let port_map: std::collections::HashMap<&str, &str> = config
+        .port_map
+        .iter()
+        .map(|(e, ip)| (e.as_str(), ip.as_str()))
+        .collect();
+
+    // IP instantiation
+    write!(out, "{ind}ip_inst: {}", config.ip_name).unwrap();
+
+    // Generic map
+    if !config.parameters.is_empty() {
+        writeln!(out).unwrap();
+        writeln!(out, "{ind}    generic map (").unwrap();
+        for (i, (name, val)) in config.parameters.iter().enumerate() {
+            let sep = if i + 1 < config.parameters.len() {
+                ","
+            } else {
+                ""
+            };
+            writeln!(out, "{ind}        {name} => {val}{sep}").unwrap();
+        }
+        writeln!(out, "{ind}    )").unwrap();
+    }
+
+    // Port map
+    writeln!(out).unwrap();
+    writeln!(out, "{ind}    port map (").unwrap();
+    let mut connections = Vec::new();
+    for port in &entity.ports {
+        let ip_port = port_map
+            .get(port.name.as_str())
+            .copied()
+            .unwrap_or(&port.name);
+        connections.push(format!("{ip_port} => {}", port.name));
+    }
+    for port in &config.tie_low {
+        connections.push(format!("{port} => '0'"));
+    }
+    for port in &config.tie_high {
+        connections.push(format!("{port} => '1'"));
+    }
+    for port in &config.unconnected {
+        connections.push(format!("{port} => open"));
+    }
+    for (i, conn) in connections.iter().enumerate() {
+        let sep = if i + 1 < connections.len() { "," } else { "" };
+        writeln!(out, "{ind}        {conn}{sep}").unwrap();
+    }
+    writeln!(out, "{ind}    );").unwrap();
+    writeln!(out, "end architecture rtl;").unwrap();
+}
+
+/// Emit a VHDL CDC synchronizer for a signal.
+fn emit_vhdl_cdc_synchronizer(out: &mut String, signal: &HirSignal, level: usize) {
+    let ind = indent(level);
+    let Some(ref cdc) = signal.cdc_config else {
+        return;
+    };
+    let name = &signal.name;
+    let stages = cdc.sync_stages;
+    let ty = emit_type(&signal.signal_type);
+    let from = cdc.from_domain.as_deref().unwrap_or("src");
+    let to = cdc.to_domain.as_deref().unwrap_or("dst");
+
+    writeln!(out, "{ind}-- CDC: {name} ({from} -> {to})").unwrap();
+
+    match cdc.cdc_type {
+        CdcType::TwoFF => {
+            // Declare sync chain signals
+            for i in 0..stages {
+                writeln!(
+                    out,
+                    "{ind}-- attribute ASYNC_REG of {name}_sync_{i} : signal is \"TRUE\";"
+                )
+                .unwrap();
+                writeln!(out, "{ind}signal {name}_sync_{i} : {ty};").unwrap();
+            }
+            writeln!(out, "{ind}{name} <= {name}_sync_{};", stages - 1).unwrap();
+        }
+        CdcType::Gray => {
+            writeln!(out, "{ind}signal {name}_bin_in : {ty};").unwrap();
+            writeln!(out, "{ind}signal {name}_gray : {ty};").unwrap();
+            for i in 0..stages {
+                writeln!(out, "{ind}signal {name}_gray_sync_{i} : {ty};").unwrap();
+            }
+            writeln!(
+                out,
+                "{ind}{name}_gray <= {name}_bin_in xor shift_right({name}_bin_in, 1);"
+            )
+            .unwrap();
+        }
+        CdcType::Pulse => {
+            writeln!(out, "{ind}signal {name}_toggle : std_logic;").unwrap();
+            for i in 0..stages {
+                writeln!(out, "{ind}signal {name}_toggle_sync_{i} : std_logic;").unwrap();
+            }
+            writeln!(out, "{ind}signal {name}_toggle_prev : std_logic;").unwrap();
+            writeln!(
+                out,
+                "{ind}{name} <= {name}_toggle_sync_{} xor {name}_toggle_prev;",
+                stages - 1
+            )
+            .unwrap();
+        }
+        CdcType::Handshake => {
+            writeln!(out, "{ind}signal {name}_req : std_logic;").unwrap();
+            for i in 0..stages {
+                writeln!(out, "{ind}signal {name}_req_sync_{i} : std_logic;").unwrap();
+            }
+            writeln!(out, "{ind}signal {name}_ack : std_logic;").unwrap();
+            for i in 0..stages {
+                writeln!(out, "{ind}signal {name}_ack_sync_{i} : std_logic;").unwrap();
+            }
+            writeln!(out, "{ind}signal {name}_data : {ty};").unwrap();
+            writeln!(out, "{ind}{name} <= {name}_data;").unwrap();
+        }
+        CdcType::AsyncFifo => {
+            writeln!(
+                out,
+                "{ind}-- TODO: Async FIFO synchronizer for {name} requires external module"
+            )
+            .unwrap();
+        }
+    }
+}
+
+/// Emit VHDL power intent attributes/comments before a signal declaration.
+fn emit_vhdl_power_attributes(out: &mut String, signal: &HirSignal, level: usize) {
+    let ind = indent(level);
+
+    if let Some(ref domain) = signal.power_domain {
+        writeln!(out, "{ind}-- Power domain: {domain}").unwrap();
+    }
+
+    if let Some(ref pc) = signal.power_config {
+        if let Some(ref ret) = pc.retention {
+            let strategy = match ret.strategy {
+                RetentionStrategy::Auto => "auto",
+                RetentionStrategy::BalloonLatch => "balloon_latch",
+                RetentionStrategy::ShadowRegister => "shadow_register",
+            };
+            writeln!(out, "{ind}-- Retention: strategy={strategy}").unwrap();
+            // VHDL attribute for synthesis
+            writeln!(
+                out,
+                "{ind}attribute preserve of {} : signal is \"true\";",
+                signal.name
+            )
+            .unwrap();
+        }
+        if let Some(ref ls) = pc.level_shift {
+            let ls_type = match ls.shifter_type {
+                LevelShifterType::Auto => "auto",
+                LevelShifterType::LowToHigh => "low_to_high",
+                LevelShifterType::HighToLow => "high_to_low",
+            };
+            writeln!(out, "{ind}-- Level shifter: type={ls_type}").unwrap();
+        }
+        if let Some(ref iso) = pc.isolation {
+            let clamp = match iso.clamp {
+                IsolationClamp::Low => "low",
+                IsolationClamp::High => "high",
+                IsolationClamp::Latch => "latch",
+            };
+            writeln!(out, "{ind}-- Isolation: clamp={clamp} for {}", signal.name).unwrap();
+        }
+    }
 }
 
 fn emit_instance(out: &mut String, inst: &HirInstance, resolver: &NameResolver, level: usize) {
@@ -372,9 +740,121 @@ fn emit_vhdl_statement(
                 emit_vhdl_statement(out, s, resolver, level);
             }
         }
+        HirStatement::Assert(assert_stmt) => {
+            let cond = emit_expr(&assert_stmt.condition, resolver);
+            let severity = match assert_stmt.severity {
+                HirAssertionSeverity::Info => "note",
+                HirAssertionSeverity::Warning => "warning",
+                HirAssertionSeverity::Error => "error",
+                HirAssertionSeverity::Fatal => "failure",
+            };
+            if let Some(ref msg) = assert_stmt.message {
+                writeln!(
+                    out,
+                    "{ind}assert {cond} report \"{msg}\" severity {severity};"
+                )
+                .unwrap();
+            } else {
+                writeln!(
+                    out,
+                    "{ind}assert {cond} report \"Assertion failed\" severity {severity};"
+                )
+                .unwrap();
+            }
+        }
+        HirStatement::Assume(assume_stmt) => {
+            // VHDL-2008 doesn't have assume; emit as assert with comment
+            let cond = emit_expr(&assume_stmt.condition, resolver);
+            if let Some(ref msg) = assume_stmt.message {
+                writeln!(out, "{ind}-- assume: {msg}").unwrap();
+            }
+            writeln!(
+                out,
+                "{ind}assert {cond} report \"Assumption\" severity warning;"
+            )
+            .unwrap();
+        }
+        HirStatement::Cover(cover_stmt) => {
+            // VHDL doesn't have native cover; emit as comment + PSL pragma
+            let prop = emit_vhdl_property(&cover_stmt.property, resolver);
+            if let Some(ref name) = cover_stmt.name {
+                writeln!(out, "{ind}-- psl cover {{{prop}}}; -- {name}").unwrap();
+            } else {
+                writeln!(out, "{ind}-- psl cover {{{prop}}};").unwrap();
+            }
+        }
+        HirStatement::Property(prop_stmt) => {
+            let prop = emit_vhdl_property(&prop_stmt.property, resolver);
+            writeln!(
+                out,
+                "{ind}-- psl {}: assert always ({prop});",
+                prop_stmt.name
+            )
+            .unwrap();
+        }
         _ => {
             writeln!(out, "{ind}-- unsupported statement").unwrap();
         }
+    }
+}
+
+/// Emit a VHDL formal verification block (as PSL comments).
+fn emit_vhdl_formal_block(
+    out: &mut String,
+    fb: &HirFormalBlock,
+    resolver: &NameResolver,
+    level: usize,
+) {
+    let ind = indent(level);
+    if let Some(ref name) = fb.name {
+        writeln!(out, "{ind}-- Formal verification: {name}").unwrap();
+    }
+
+    for assumption in &fb.assumptions {
+        let prop = emit_vhdl_property(assumption, resolver);
+        writeln!(out, "{ind}-- psl assume always ({prop});").unwrap();
+    }
+
+    for fp in &fb.properties {
+        let prop = emit_vhdl_property(&fp.property, resolver);
+        writeln!(out, "{ind}-- psl {}: assert always ({prop});", fp.name).unwrap();
+    }
+}
+
+/// Emit a PSL/VHDL-2008 property expression.
+fn emit_vhdl_property(prop: &HirProperty, resolver: &NameResolver) -> String {
+    match prop {
+        HirProperty::Expression(expr) => emit_expr(expr, resolver),
+        HirProperty::Implication {
+            antecedent,
+            consequent,
+        } => {
+            format!(
+                "{} -> {}",
+                emit_vhdl_property(antecedent, resolver),
+                emit_vhdl_property(consequent, resolver)
+            )
+        }
+        HirProperty::And(a, b) => {
+            format!(
+                "({} and {})",
+                emit_vhdl_property(a, resolver),
+                emit_vhdl_property(b, resolver)
+            )
+        }
+        HirProperty::Or(a, b) => {
+            format!(
+                "({} or {})",
+                emit_vhdl_property(a, resolver),
+                emit_vhdl_property(b, resolver)
+            )
+        }
+        HirProperty::Not(p) => format!("not ({})", emit_vhdl_property(p, resolver)),
+        HirProperty::Always(p) => format!("always ({})", emit_vhdl_property(p, resolver)),
+        HirProperty::Eventually(p) => {
+            format!("eventually! ({})", emit_vhdl_property(p, resolver))
+        }
+        _ => "/* unsupported property */".to_string(),
     }
 }
 

@@ -67,6 +67,12 @@ fn emit_entity(out: &mut String, entity: &HirEntity, resolver: &NameResolver) {
         writeln!(out, "{ind}{dir} {}: {ty}", port.name).unwrap();
     }
 
+    // Entity-level signals (with attributes)
+    for signal in &entity.signals {
+        writeln!(out).unwrap();
+        emit_signal(out, signal, resolver, 1);
+    }
+
     out.push_str("}\n");
 }
 
@@ -143,18 +149,148 @@ fn emit_impl(out: &mut String, imp: &HirImplementation, resolver: &NameResolver)
         emit_event_block(out, eb, resolver, 1);
     }
 
+    // Formal verification blocks
+    for fb in &imp.formal_blocks {
+        emit_skalp_formal_block(out, fb, resolver, 1);
+    }
+
     out.push_str("}\n");
 }
 
 fn emit_signal(out: &mut String, signal: &HirSignal, resolver: &NameResolver, level: usize) {
     let ind = indent(level);
     emit_comments(out, &signal.comments, "//", &ind);
+
+    // Emit annotation attributes before signal
+    emit_signal_attributes(out, signal, &ind);
+
     let ty = emit_type(&signal.signal_type, resolver);
     write!(out, "{ind}signal {}: {ty}", signal.name).unwrap();
     if let Some(ref init) = signal.initial_value {
         write!(out, " = {}", emit_expression_inline(init, resolver)).unwrap();
     }
     writeln!(out).unwrap();
+}
+
+/// Emit skalp annotation attributes for a signal (breakpoint, cdc, power, etc.)
+fn emit_signal_attributes(out: &mut String, signal: &HirSignal, ind: &str) {
+    // Power domain attribute
+    if let Some(ref domain) = signal.power_domain {
+        writeln!(out, "{ind}#[power('{domain})]").unwrap();
+    }
+
+    // Retention attribute
+    if let Some(ref pc) = signal.power_config {
+        if let Some(ref ret) = pc.retention {
+            let mut parts = Vec::new();
+            match ret.strategy {
+                RetentionStrategy::Auto => {}
+                RetentionStrategy::BalloonLatch => {
+                    parts.push("strategy=\"balloon_latch\"".to_string())
+                }
+                RetentionStrategy::ShadowRegister => {
+                    parts.push("strategy=\"shadow_register\"".to_string())
+                }
+            }
+            if let Some(ref save) = ret.save_signal {
+                parts.push(format!("save=\"{save}\""));
+            }
+            if let Some(ref restore) = ret.restore_signal {
+                parts.push(format!("restore=\"{restore}\""));
+            }
+            if parts.is_empty() {
+                writeln!(out, "{ind}#[retain]").unwrap();
+            } else {
+                writeln!(out, "{ind}#[retain({})]", parts.join(", ")).unwrap();
+            }
+        }
+
+        // Isolation attribute
+        if let Some(ref iso) = pc.isolation {
+            let mut parts = Vec::new();
+            match iso.clamp {
+                IsolationClamp::Low => parts.push("clamp=low".to_string()),
+                IsolationClamp::High => parts.push("clamp=high".to_string()),
+                IsolationClamp::Latch => parts.push("clamp=latch".to_string()),
+            }
+            if let Some(ref en) = iso.enable_signal {
+                parts.push(format!("enable=\"{en}\""));
+            }
+            if !iso.active_high {
+                parts.push("active_low".to_string());
+            }
+            writeln!(out, "{ind}#[isolate({})]", parts.join(", ")).unwrap();
+        }
+
+        // Level shift attribute
+        if let Some(ref ls) = pc.level_shift {
+            let mut parts = Vec::new();
+            if let Some(ref from) = ls.from_domain {
+                parts.push(format!("from='{from}"));
+            }
+            if let Some(ref to) = ls.to_domain {
+                parts.push(format!("to='{to}"));
+            }
+            match ls.shifter_type {
+                LevelShifterType::Auto => {}
+                LevelShifterType::LowToHigh => parts.push("type=\"low_to_high\"".to_string()),
+                LevelShifterType::HighToLow => parts.push("type=\"high_to_low\"".to_string()),
+            }
+            if parts.is_empty() {
+                writeln!(out, "{ind}#[level_shift]").unwrap();
+            } else {
+                writeln!(out, "{ind}#[level_shift({})]", parts.join(", ")).unwrap();
+            }
+        }
+    }
+
+    // CDC attribute
+    if let Some(ref cdc) = signal.cdc_config {
+        let mut parts = Vec::new();
+        match cdc.cdc_type {
+            CdcType::TwoFF => {} // default, omit
+            CdcType::Gray => parts.push("type=\"gray\"".to_string()),
+            CdcType::Pulse => parts.push("type=\"pulse\"".to_string()),
+            CdcType::Handshake => parts.push("type=\"handshake\"".to_string()),
+            CdcType::AsyncFifo => parts.push("type=\"async_fifo\"".to_string()),
+        }
+        if cdc.sync_stages != 2 {
+            parts.push(format!("stages={}", cdc.sync_stages));
+        }
+        if let Some(ref from) = cdc.from_domain {
+            parts.push(format!("from='{from}"));
+        }
+        if let Some(ref to) = cdc.to_domain {
+            parts.push(format!("to='{to}"));
+        }
+        if parts.is_empty() {
+            writeln!(out, "{ind}#[cdc]").unwrap();
+        } else {
+            writeln!(out, "{ind}#[cdc({})]", parts.join(", ")).unwrap();
+        }
+    }
+
+    // Breakpoint attribute
+    if let Some(ref bp) = signal.breakpoint_config {
+        let mut parts = Vec::new();
+        if let Some(ref name) = bp.name {
+            parts.push(format!("name=\"{name}\""));
+        }
+        if let Some(ref condition) = bp.condition {
+            parts.push(format!("condition=\"{condition}\""));
+        }
+        if let Some(ref message) = bp.message {
+            parts.push(format!("message=\"{message}\""));
+        }
+        if bp.is_error {
+            parts.push("error".to_string());
+        }
+        if parts.is_empty() {
+            writeln!(out, "{ind}#[breakpoint]").unwrap();
+        } else {
+            writeln!(out, "{ind}#[breakpoint({})]", parts.join(", ")).unwrap();
+        }
+    }
 }
 
 fn emit_variable(out: &mut String, variable: &HirVariable, resolver: &NameResolver, level: usize) {
@@ -414,9 +550,139 @@ fn emit_statement(out: &mut String, stmt: &HirStatement, resolver: &NameResolver
         HirStatement::Barrier(barrier) => {
             writeln!(out, "{ind}barrier // stage {}", barrier.stage_id).unwrap();
         }
+        HirStatement::Assert(assert_stmt) => {
+            let cond = emit_expression_inline(&assert_stmt.condition, resolver);
+            if let Some(ref msg) = assert_stmt.message {
+                writeln!(out, "{ind}assert!({cond}, \"{msg}\")").unwrap();
+            } else {
+                writeln!(out, "{ind}assert!({cond})").unwrap();
+            }
+        }
+        HirStatement::Assume(assume_stmt) => {
+            let cond = emit_expression_inline(&assume_stmt.condition, resolver);
+            if let Some(ref msg) = assume_stmt.message {
+                writeln!(out, "{ind}assume!({cond}, \"{msg}\")").unwrap();
+            } else {
+                writeln!(out, "{ind}assume!({cond})").unwrap();
+            }
+        }
+        HirStatement::Cover(cover_stmt) => {
+            let prop = emit_skalp_property(&cover_stmt.property, resolver);
+            if let Some(ref name) = cover_stmt.name {
+                writeln!(out, "{ind}cover!({prop}) // {name}").unwrap();
+            } else {
+                writeln!(out, "{ind}cover!({prop})").unwrap();
+            }
+        }
+        HirStatement::Property(prop_stmt) => {
+            let prop = emit_skalp_property(&prop_stmt.property, resolver);
+            writeln!(out, "{ind}property {} = {prop}", prop_stmt.name).unwrap();
+        }
         _ => {
             writeln!(out, "{ind}// unsupported statement").unwrap();
         }
+    }
+}
+
+/// Emit a skalp formal verification block.
+fn emit_skalp_formal_block(
+    out: &mut String,
+    fb: &HirFormalBlock,
+    resolver: &NameResolver,
+    level: usize,
+) {
+    let ind = indent(level);
+    if let Some(ref name) = fb.name {
+        writeln!(out, "{ind}formal \"{name}\" {{").unwrap();
+    } else {
+        writeln!(out, "{ind}formal {{").unwrap();
+    }
+
+    // Emit assumptions
+    for assumption in &fb.assumptions {
+        let prop = emit_skalp_property(assumption, resolver);
+        let ind2 = indent(level + 1);
+        writeln!(out, "{ind2}assume!({prop})").unwrap();
+    }
+
+    // Emit properties
+    for fp in &fb.properties {
+        let prop = emit_skalp_property(&fp.property, resolver);
+        let ind2 = indent(level + 1);
+        let kw = match fp.property_type {
+            HirFormalPropertyType::Safety | HirFormalPropertyType::Invariant => "assert",
+            HirFormalPropertyType::Liveness => "assert",
+            HirFormalPropertyType::Bounded => "assert",
+        };
+        writeln!(out, "{ind2}{kw}!({prop}) // {}", fp.name).unwrap();
+    }
+
+    writeln!(out, "{ind}}}").unwrap();
+}
+
+/// Emit a skalp property expression.
+fn emit_skalp_property(prop: &HirProperty, resolver: &NameResolver) -> String {
+    match prop {
+        HirProperty::Expression(expr) => emit_expression_inline(expr, resolver),
+        HirProperty::Implication {
+            antecedent,
+            consequent,
+        } => {
+            format!(
+                "{} |-> {}",
+                emit_skalp_property(antecedent, resolver),
+                emit_skalp_property(consequent, resolver)
+            )
+        }
+        HirProperty::OverlappingImplication {
+            antecedent,
+            consequent,
+        } => {
+            format!(
+                "{} |=> {}",
+                emit_skalp_property(antecedent, resolver),
+                emit_skalp_property(consequent, resolver)
+            )
+        }
+        HirProperty::And(a, b) => {
+            format!(
+                "({} && {})",
+                emit_skalp_property(a, resolver),
+                emit_skalp_property(b, resolver)
+            )
+        }
+        HirProperty::Or(a, b) => {
+            format!(
+                "({} || {})",
+                emit_skalp_property(a, resolver),
+                emit_skalp_property(b, resolver)
+            )
+        }
+        HirProperty::Not(p) => format!("!{}", emit_skalp_property(p, resolver)),
+        HirProperty::Always(p) => format!("always({})", emit_skalp_property(p, resolver)),
+        HirProperty::Eventually(p) => {
+            format!("eventually({})", emit_skalp_property(p, resolver))
+        }
+        HirProperty::Until {
+            left,
+            right,
+            strong,
+        } => {
+            let kw = if *strong { "s_until" } else { "until" };
+            format!(
+                "{} {kw} {}",
+                emit_skalp_property(left, resolver),
+                emit_skalp_property(right, resolver)
+            )
+        }
+        HirProperty::Throughout { left, right } => {
+            format!(
+                "{} throughout {}",
+                emit_skalp_property(left, resolver),
+                emit_skalp_property(right, resolver)
+            )
+        }
+        _ => "/* unsupported property */".to_string(),
     }
 }
 
