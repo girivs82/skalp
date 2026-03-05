@@ -115,6 +115,10 @@ pub struct LibraryCell {
     /// RAM cell capability metadata (only for cells with function = Ram)
     #[serde(default)]
     pub ram_info: Option<RamCellInfo>,
+
+    /// DSP cell capability metadata (only for cells with function = Dsp)
+    #[serde(default)]
+    pub dsp_info: Option<DspCellInfo>,
 }
 
 /// RAM cell capabilities — technology-specific, queried by tech mapper
@@ -152,6 +156,59 @@ pub struct RamPinMap {
     pub write_clk_en: String,
     #[serde(default)]
     pub write_mask: Option<String>,
+}
+
+/// DSP cell capabilities — technology-specific, queried by tech mapper
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DspCellInfo {
+    /// Max A-input width (e.g., 18 for MULT18X18D)
+    pub a_width: u32,
+    /// Max B-input width (e.g., 18 for MULT18X18D)
+    pub b_width: u32,
+    /// Product output width (e.g., 36 for MULT18X18D)
+    pub p_width: u32,
+    /// Has native signed mode (via SIGNEDA/SIGNEDB pins)
+    pub supports_signed: bool,
+    /// Has input pipeline register stage
+    pub has_input_register: bool,
+    /// Has internal pipeline register stage
+    pub has_pipeline_register: bool,
+    /// Has output pipeline register stage
+    pub has_output_register: bool,
+    /// Port pin names for tech mapper wiring (technology-specific)
+    pub pin_map: DspPinMap,
+}
+
+/// Maps logical DSP port functions to physical cell pin names
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DspPinMap {
+    /// A-input bus base name (e.g., "A" → A0, A1, ..., A17)
+    pub a_input: String,
+    /// B-input bus base name (e.g., "B" → B0, B1, ..., B17)
+    pub b_input: String,
+    /// Product output bus base name (e.g., "P" → P0, P1, ..., P35)
+    pub product: String,
+    /// Signed-A control pin (e.g., "SIGNEDA")
+    #[serde(default)]
+    pub signed_a: Option<String>,
+    /// Signed-B control pin (e.g., "SIGNEDB")
+    #[serde(default)]
+    pub signed_b: Option<String>,
+    /// Clock pin (e.g., "CLK0")
+    #[serde(default)]
+    pub clock: Option<String>,
+    /// Clock enable pin (e.g., "CE0")
+    #[serde(default)]
+    pub clock_enable: Option<String>,
+    /// Reset pin (e.g., "RST0")
+    #[serde(default)]
+    pub reset: Option<String>,
+    /// Source-A mode pin (e.g., "SOURCEA")
+    #[serde(default)]
+    pub source_a: Option<String>,
+    /// Source-B mode pin (e.g., "SOURCEB")
+    #[serde(default)]
+    pub source_b: Option<String>,
 }
 
 /// Timing characteristics for a cell
@@ -422,6 +479,7 @@ impl LibraryCell {
             hold_ps: None,
             clk_to_q_ps: None,
             ram_info: None,
+            dsp_info: None,
         }
     }
 
@@ -654,6 +712,9 @@ pub enum CellFunction {
     /// RAM/BRAM cell (vendor-specific block RAM primitive)
     Ram,
 
+    /// DSP/multiplier hard block (vendor-specific DSP primitive)
+    Dsp,
+
     // Tristate
     Tristate,
 
@@ -854,6 +915,13 @@ impl CellFunction {
                         "WE".into(),
                     ],
                     vec!["RDATA".into()],
+                )
+            }
+            CellFunction::Dsp => {
+                // Default DSP pins — overridden by library cell's explicit pin lists
+                (
+                    vec!["A".into(), "B".into(), "SIGNEDA".into(), "SIGNEDB".into()],
+                    vec!["P".into()],
                 )
             }
             CellFunction::Tristate => (vec!["a".into(), "en".into()], vec!["y".into()]),
@@ -1457,6 +1525,14 @@ impl TechLibrary {
             .and_then(|cell| cell.ram_info.as_ref().map(|info| (cell, info)))
     }
 
+    /// Find a DSP cell in the library
+    ///
+    /// Returns the DSP cell and its capability metadata, or None if no DSP cell exists.
+    pub fn find_dsp_cell(&self) -> Option<(&LibraryCell, &DspCellInfo)> {
+        self.find_best_cell(&CellFunction::Dsp)
+            .and_then(|cell| cell.dsp_info.as_ref().map(|info| (cell, info)))
+    }
+
     /// Iterate over all cells in the library
     pub fn iter_cells(&self) -> impl Iterator<Item = (&String, &LibraryCell)> {
         self.cells.iter()
@@ -1979,6 +2055,7 @@ const ASIC_28NM_SKLIB: &str = include_str!("../../skalp-stdlib/libraries/asic_28
 const FPGA_LUT4_SKLIB: &str = include_str!("../../skalp-stdlib/libraries/fpga_lut4.sklib");
 const FPGA_LUT6_SKLIB: &str = include_str!("../../skalp-stdlib/libraries/fpga_lut6.sklib");
 const ICE40_SKLIB: &str = include_str!("../../skalp-stdlib/libraries/ice40.sklib");
+const ECP5_SKLIB: &str = include_str!("../../skalp-stdlib/libraries/ecp5.sklib");
 
 /// List all available standard library names
 pub fn list_stdlib_libraries() -> Vec<&'static str> {
@@ -1989,6 +2066,7 @@ pub fn list_stdlib_libraries() -> Vec<&'static str> {
         "fpga_lut4",
         "fpga_lut6",
         "ice40",
+        "ecp5",
     ]
 }
 
@@ -2005,6 +2083,7 @@ pub fn list_stdlib_libraries() -> Vec<&'static str> {
 /// - `fpga_lut4` (alias: `fpga`) - FPGA with 4-input LUTs
 /// - `fpga_lut6` - FPGA with 6-input LUTs
 /// - `ice40` (aliases: `lattice`, `lattice_ice40`) - Lattice iCE40 FPGA
+/// - `ecp5` (alias: `lattice_ecp5`) - Lattice ECP5 FPGA (with DSP blocks)
 pub fn get_stdlib_library(name: &str) -> Result<TechLibrary, LibraryLoadError> {
     // Normalize name to canonical form
     let canonical_name = match name {
@@ -2014,6 +2093,7 @@ pub fn get_stdlib_library(name: &str) -> Result<TechLibrary, LibraryLoadError> {
         "fpga_lut4" | "fpga" => "fpga_lut4",
         "fpga_lut6" => "fpga_lut6",
         "ice40" | "lattice" | "lattice_ice40" => "ice40",
+        "ecp5" | "lattice_ecp5" => "ecp5",
         _ => {
             return Err(LibraryLoadError::NotFound(format!(
                 "Unknown library '{}'. Available: {}",
@@ -2042,6 +2122,7 @@ pub fn get_stdlib_library(name: &str) -> Result<TechLibrary, LibraryLoadError> {
         "fpga_lut4" => FPGA_LUT4_SKLIB,
         "fpga_lut6" => FPGA_LUT6_SKLIB,
         "ice40" => ICE40_SKLIB,
+        "ecp5" => ECP5_SKLIB,
         _ => unreachable!(), // Already validated above
     };
 
@@ -2118,6 +2199,9 @@ struct TomlCell {
     // RAM capability metadata (for cells with function = "ram")
     #[serde(default)]
     ram_info: Option<TomlRamInfo>,
+    // DSP capability metadata (for cells with function = "dsp")
+    #[serde(default)]
+    dsp_info: Option<TomlDspInfo>,
     // Failure modes
     #[serde(default)]
     failure_modes: Vec<TomlFailureMode>,
@@ -2222,6 +2306,45 @@ struct TomlRamPinMap {
     write_clk_en: String,
     #[serde(default)]
     write_mask: Option<String>,
+}
+
+/// DSP capability metadata in TOML format
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TomlDspInfo {
+    a_width: u32,
+    b_width: u32,
+    p_width: u32,
+    #[serde(default)]
+    supports_signed: bool,
+    #[serde(default)]
+    has_input_register: bool,
+    #[serde(default)]
+    has_pipeline_register: bool,
+    #[serde(default)]
+    has_output_register: bool,
+    pin_map: TomlDspPinMap,
+}
+
+/// DSP pin map in TOML format
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TomlDspPinMap {
+    a_input: String,
+    b_input: String,
+    product: String,
+    #[serde(default)]
+    signed_a: Option<String>,
+    #[serde(default)]
+    signed_b: Option<String>,
+    #[serde(default)]
+    clock: Option<String>,
+    #[serde(default)]
+    clock_enable: Option<String>,
+    #[serde(default)]
+    reset: Option<String>,
+    #[serde(default)]
+    source_a: Option<String>,
+    #[serde(default)]
+    source_b: Option<String>,
 }
 
 impl TomlLibrary {
@@ -2406,6 +2529,27 @@ impl TomlCell {
                     write_mask: ri.pin_map.write_mask,
                 },
             }),
+            dsp_info: self.dsp_info.map(|di| DspCellInfo {
+                a_width: di.a_width,
+                b_width: di.b_width,
+                p_width: di.p_width,
+                supports_signed: di.supports_signed,
+                has_input_register: di.has_input_register,
+                has_pipeline_register: di.has_pipeline_register,
+                has_output_register: di.has_output_register,
+                pin_map: DspPinMap {
+                    a_input: di.pin_map.a_input,
+                    b_input: di.pin_map.b_input,
+                    product: di.pin_map.product,
+                    signed_a: di.pin_map.signed_a,
+                    signed_b: di.pin_map.signed_b,
+                    clock: di.pin_map.clock,
+                    clock_enable: di.pin_map.clock_enable,
+                    reset: di.pin_map.reset,
+                    source_a: di.pin_map.source_a,
+                    source_b: di.pin_map.source_b,
+                },
+            }),
         })
     }
 
@@ -2510,6 +2654,27 @@ impl TomlCell {
                     write_mask: ri.pin_map.write_mask.clone(),
                 },
             }),
+            dsp_info: cell.dsp_info.as_ref().map(|di| TomlDspInfo {
+                a_width: di.a_width,
+                b_width: di.b_width,
+                p_width: di.p_width,
+                supports_signed: di.supports_signed,
+                has_input_register: di.has_input_register,
+                has_pipeline_register: di.has_pipeline_register,
+                has_output_register: di.has_output_register,
+                pin_map: TomlDspPinMap {
+                    a_input: di.pin_map.a_input.clone(),
+                    b_input: di.pin_map.b_input.clone(),
+                    product: di.pin_map.product.clone(),
+                    signed_a: di.pin_map.signed_a.clone(),
+                    signed_b: di.pin_map.signed_b.clone(),
+                    clock: di.pin_map.clock.clone(),
+                    clock_enable: di.pin_map.clock_enable.clone(),
+                    reset: di.pin_map.reset.clone(),
+                    source_a: di.pin_map.source_a.clone(),
+                    source_b: di.pin_map.source_b.clone(),
+                },
+            }),
             failure_modes,
         }
     }
@@ -2552,6 +2717,7 @@ fn parse_cell_function(s: &str) -> Result<CellFunction, LibraryLoadError> {
         "dffre" | "dff_re" => Ok(CellFunction::DffRE),
         "latch" => Ok(CellFunction::Latch),
         "ram" | "bram" | "sram" => Ok(CellFunction::Ram),
+        "dsp" | "multiplier" | "mult" => Ok(CellFunction::Dsp),
         "tristate" | "tri" => Ok(CellFunction::Tristate),
         // Power infrastructure
         "level_shifter_lh" | "lslh" => Ok(CellFunction::LevelShifterLH),
@@ -2637,6 +2803,7 @@ fn format_cell_function(f: &CellFunction) -> String {
         CellFunction::DffRE => "dffre".to_string(),
         CellFunction::Latch => "latch".to_string(),
         CellFunction::Ram => "ram".to_string(),
+        CellFunction::Dsp => "dsp".to_string(),
         CellFunction::Tristate => "tristate".to_string(),
         CellFunction::LevelShifterLH => "level_shifter_lh".to_string(),
         CellFunction::LevelShifterHL => "level_shifter_hl".to_string(),

@@ -814,6 +814,14 @@ impl<'a> AigBuilder<'a> {
                      RAM cells should be preserved in the gate netlist."
                 );
             }
+            CellFunction::Dsp => {
+                // DSP cells should not be converted to AIG - they are
+                // preserved as technology primitives in the gate netlist.
+                panic!(
+                    "Cannot convert DSP cell to AIG. \
+                     DSP cells should be preserved in the gate netlist."
+                );
+            }
         };
 
         // Map cell outputs to AIG literals

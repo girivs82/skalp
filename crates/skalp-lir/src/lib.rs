@@ -81,9 +81,9 @@ pub use gate_netlist::{
 pub use tech_library::{
     arrhenius_acceleration_factor, get_stdlib_library, list_stdlib_libraries,
     process_corner_factor, voltage_acceleration_factor, CellFunction, DecompConnectivity,
-    DecompSource, DecompositionRule, DeratingFactors, DeratingPreset, LibraryCell,
-    LibraryDeratingSummary, LibraryFailureMode, LibraryLoadError, OperatingConditions,
-    ProcessCorner, TechLibrary, TimingCorner,
+    DecompSource, DecompositionRule, DeratingFactors, DeratingPreset, DspCellInfo, DspPinMap,
+    LibraryCell, LibraryDeratingSummary, LibraryFailureMode, LibraryLoadError,
+    OperatingConditions, ProcessCorner, TechLibrary, TimingCorner,
 };
 
 // Technology mapper

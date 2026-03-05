@@ -1139,3 +1139,270 @@ fn test_generic_asic_has_no_ram_cell() {
         "generic_asic should not have RAM cells"
     );
 }
+
+// =============================================================================
+// ECP5 Library + DSP Inference Tests
+// =============================================================================
+
+#[test]
+fn test_ecp5_library_loads() {
+    let library = get_stdlib_library("ecp5").expect("Failed to load ecp5 library");
+    assert_eq!(library.name, "ecp5");
+    assert!(library.is_fpga(), "ecp5 should be recognized as FPGA");
+    assert_eq!(library.get_lut_size(), 4, "ECP5 should have LUT4");
+
+    // Should have DSP, RAM, and basic cells
+    assert!(
+        library.find_dsp_cell().is_some(),
+        "ECP5 should have DSP cell"
+    );
+    assert!(
+        library.find_ram_cell().is_some(),
+        "ECP5 should have RAM cell"
+    );
+    assert!(
+        library
+            .find_best_cell(&CellFunction::And2)
+            .is_some(),
+        "ECP5 should have AND2 cell"
+    );
+}
+
+#[test]
+fn test_ecp5_library_aliases() {
+    let lib1 = get_stdlib_library("ecp5").expect("ecp5 failed");
+    let lib2 = get_stdlib_library("lattice_ecp5").expect("lattice_ecp5 failed");
+    assert_eq!(lib1.name, lib2.name);
+}
+
+#[test]
+fn test_ecp5_library_in_list() {
+    let libraries = list_stdlib_libraries();
+    assert!(
+        libraries.contains(&"ecp5"),
+        "ecp5 should be in library list. Available: {:?}",
+        libraries
+    );
+}
+
+#[test]
+fn test_ecp5_dsp_cell_info() {
+    let library = get_stdlib_library("ecp5").expect("Failed to load ecp5");
+    let (cell, info) = library.find_dsp_cell().expect("ECP5 should have DSP cell");
+
+    assert_eq!(cell.name, "MULT18X18D");
+    assert_eq!(info.a_width, 18);
+    assert_eq!(info.b_width, 18);
+    assert_eq!(info.p_width, 36);
+    assert!(info.supports_signed);
+    assert!(info.has_input_register);
+    assert!(info.has_pipeline_register);
+    assert!(info.has_output_register);
+
+    // Check pin map
+    assert_eq!(info.pin_map.a_input, "A");
+    assert_eq!(info.pin_map.b_input, "B");
+    assert_eq!(info.pin_map.product, "P");
+    assert_eq!(info.pin_map.signed_a.as_deref(), Some("SIGNEDA"));
+    assert_eq!(info.pin_map.signed_b.as_deref(), Some("SIGNEDB"));
+}
+
+#[test]
+fn test_ecp5_ram_cell_info() {
+    let library = get_stdlib_library("ecp5").expect("Failed to load ecp5");
+    let (cell, info) = library.find_ram_cell().expect("ECP5 should have RAM cell");
+
+    assert_eq!(cell.name, "DP16KD");
+    assert_eq!(info.block_bits, 18432);
+    assert!(info.true_dual_port);
+    assert!(info.has_output_register);
+}
+
+/// Build a LIR with a Mul node programmatically
+fn build_multiply_lir(width: u32, result_width: u32, signed: bool) -> Lir {
+    let mut lir = Lir::new("TestMul".to_string());
+
+    let a = lir.add_input("a".to_string(), width);
+    let b = lir.add_input("b".to_string(), width);
+    let p = lir.add_output("p".to_string(), result_width);
+
+    lir.add_node(
+        LirOp::Mul {
+            width,
+            result_width,
+            signed,
+        },
+        vec![a, b],
+        p,
+        "mul".to_string(),
+    );
+
+    lir
+}
+
+/// Count MULT18X18D cells in a gate netlist
+fn count_dsp_cells(result: &skalp_lir::TechMapResult) -> usize {
+    result
+        .netlist
+        .cells
+        .iter()
+        .filter(|c| c.cell_type == "MULT18X18D")
+        .count()
+}
+
+/// Count partial product AND gates (used in gate-level multiply)
+fn count_partial_product_cells(result: &skalp_lir::TechMapResult) -> usize {
+    result
+        .netlist
+        .cells
+        .iter()
+        .filter(|c| {
+            c.source_op
+                .as_ref()
+                .map_or(false, |op| op == "PartialProduct")
+        })
+        .count()
+}
+
+#[test]
+fn test_ecp5_dsp_multiply_8x8() {
+    let lir = build_multiply_lir(8, 16, false);
+    let library = get_stdlib_library("ecp5").expect("Failed to load ecp5");
+    let result = map_lir_to_gates(&lir, &library);
+
+    let dsp_count = count_dsp_cells(&result);
+    let pp_count = count_partial_product_cells(&result);
+
+    assert_eq!(dsp_count, 1, "8x8 multiply should use exactly 1 MULT18X18D");
+    assert_eq!(
+        pp_count, 0,
+        "Should not use partial products when DSP is available"
+    );
+
+    // Verify the DSP cell has correct parameters
+    let dsp_cell = result
+        .netlist
+        .cells
+        .iter()
+        .find(|c| c.cell_type == "MULT18X18D")
+        .expect("Should have MULT18X18D cell");
+    assert_eq!(
+        dsp_cell.parameters.get("SIGNED_MODE").map(|s| s.as_str()),
+        Some("UNSIGNED")
+    );
+    assert_eq!(
+        dsp_cell.parameters.get("REG_INPUTA_CLK").map(|s| s.as_str()),
+        Some("NONE"),
+        "Should be combinational mode"
+    );
+}
+
+#[test]
+fn test_ecp5_dsp_multiply_18x18() {
+    let lir = build_multiply_lir(18, 36, false);
+    let library = get_stdlib_library("ecp5").expect("Failed to load ecp5");
+    let result = map_lir_to_gates(&lir, &library);
+
+    let dsp_count = count_dsp_cells(&result);
+    assert_eq!(
+        dsp_count, 1,
+        "18x18 multiply should use exactly 1 MULT18X18D (max single block)"
+    );
+}
+
+#[test]
+fn test_ecp5_dsp_multiply_signed() {
+    let lir = build_multiply_lir(16, 32, true);
+    let library = get_stdlib_library("ecp5").expect("Failed to load ecp5");
+    let result = map_lir_to_gates(&lir, &library);
+
+    let dsp_count = count_dsp_cells(&result);
+    assert_eq!(
+        dsp_count, 1,
+        "16x16 signed multiply should use 1 MULT18X18D with native signed mode"
+    );
+
+    let dsp_cell = result
+        .netlist
+        .cells
+        .iter()
+        .find(|c| c.cell_type == "MULT18X18D")
+        .expect("Should have MULT18X18D cell");
+    assert_eq!(
+        dsp_cell.parameters.get("SIGNED_MODE").map(|s| s.as_str()),
+        Some("SIGNED"),
+        "Should use native signed mode"
+    );
+}
+
+#[test]
+fn test_ecp5_dsp_wide_multiply() {
+    let lir = build_multiply_lir(32, 64, false);
+    let library = get_stdlib_library("ecp5").expect("Failed to load ecp5");
+    let result = map_lir_to_gates(&lir, &library);
+
+    let dsp_count = count_dsp_cells(&result);
+    assert_eq!(
+        dsp_count, 4,
+        "32x32 multiply should use 4 MULT18X18D blocks (tiled decomposition)"
+    );
+
+    // Should also have addition logic for combining partial products
+    assert!(
+        result.netlist.cells.len() > 4,
+        "Should have additional cells for partial product addition"
+    );
+}
+
+#[test]
+fn test_ecp5_dsp_too_wide_fallback() {
+    let lir = build_multiply_lir(64, 128, false);
+    let library = get_stdlib_library("ecp5").expect("Failed to load ecp5");
+    let result = map_lir_to_gates(&lir, &library);
+
+    let dsp_count = count_dsp_cells(&result);
+    assert_eq!(
+        dsp_count, 0,
+        "64x64 multiply should fall back to gate-level (too wide for DSP tiling)"
+    );
+
+    let pp_count = count_partial_product_cells(&result);
+    assert!(
+        pp_count > 0,
+        "Should use partial product decomposition for 64x64"
+    );
+}
+
+#[test]
+fn test_ice40_no_dsp_fallback() {
+    // Regression: iCE40 has no DSP blocks, should use gate-level multiply
+    let lir = build_multiply_lir(8, 16, false);
+    let library = get_stdlib_library("ice40").expect("Failed to load ice40");
+    let result = map_lir_to_gates(&lir, &library);
+
+    let dsp_count = result
+        .netlist
+        .cells
+        .iter()
+        .filter(|c| c.cell_type == "MULT18X18D")
+        .count();
+    assert_eq!(
+        dsp_count, 0,
+        "iCE40 should not use DSP blocks (none available)"
+    );
+
+    let pp_count = count_partial_product_cells(&result);
+    assert!(
+        pp_count > 0,
+        "iCE40 should use partial products for multiply"
+    );
+}
+
+#[test]
+fn test_generic_asic_no_dsp() {
+    let library = get_stdlib_library("generic_asic").expect("Failed to load generic_asic");
+    assert!(
+        library.find_dsp_cell().is_none(),
+        "generic_asic should not have DSP cells"
+    );
+}
