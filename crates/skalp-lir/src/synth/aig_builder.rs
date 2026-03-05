@@ -806,6 +806,14 @@ impl<'a> AigBuilder<'a> {
                     name
                 );
             }
+            CellFunction::Ram => {
+                // RAM cells should not be converted to AIG - they are
+                // preserved as technology primitives in the gate netlist.
+                panic!(
+                    "Cannot convert RAM cell to AIG. \
+                     RAM cells should be preserved in the gate netlist."
+                );
+            }
         };
 
         // Map cell outputs to AIG literals

@@ -111,6 +111,47 @@ pub struct LibraryCell {
     /// Clock-to-Q delay in picoseconds (for sequential cells)
     #[serde(default)]
     pub clk_to_q_ps: Option<u32>,
+
+    /// RAM cell capability metadata (only for cells with function = Ram)
+    #[serde(default)]
+    pub ram_info: Option<RamCellInfo>,
+}
+
+/// RAM cell capabilities — technology-specific, queried by tech mapper
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RamCellInfo {
+    /// Total bits per block (e.g., 4096 for iCE40, 18432 for ECP5, 36864 for Xilinx)
+    pub block_bits: u32,
+    /// Supported aspect ratios: (depth, data_width) pairs
+    /// e.g., [(256,16), (512,8), (1024,4), (2048,2)] for SB_RAM40_4K
+    pub aspect_ratios: Vec<(u32, u32)>,
+    /// True dual-port (independent R+W with separate clocks)
+    pub true_dual_port: bool,
+    /// Has per-bit or per-byte write mask
+    pub has_write_mask: bool,
+    /// Write mask granularity in bits (1 = per-bit, 8 = per-byte, 0 = none)
+    pub write_mask_granularity: u32,
+    /// Has output register (adds 1 cycle read latency, improves timing)
+    pub has_output_register: bool,
+    /// Port pin names for tech mapper wiring (technology-specific)
+    pub pin_map: RamPinMap,
+}
+
+/// Maps logical memory port functions to physical cell pin names
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RamPinMap {
+    pub read_data: String,
+    pub read_addr: String,
+    pub read_clk: String,
+    pub read_en: String,
+    pub read_clk_en: String,
+    pub write_data: String,
+    pub write_addr: String,
+    pub write_clk: String,
+    pub write_en: String,
+    pub write_clk_en: String,
+    #[serde(default)]
+    pub write_mask: Option<String>,
 }
 
 /// Timing characteristics for a cell
@@ -380,6 +421,7 @@ impl LibraryCell {
             setup_ps: None,
             hold_ps: None,
             clk_to_q_ps: None,
+            ram_info: None,
         }
     }
 
@@ -608,6 +650,10 @@ pub enum CellFunction {
     DffRE, // DFF with reset and enable
     Latch,
 
+    // Memory
+    /// RAM/BRAM cell (vendor-specific block RAM primitive)
+    Ram,
+
     // Tristate
     Tristate,
 
@@ -793,6 +839,23 @@ impl CellFunction {
                 vec!["q".into()],
             ),
             CellFunction::Latch => (vec!["en".into(), "d".into()], vec!["q".into()]),
+            CellFunction::Ram => {
+                // Default RAM pins — overridden by library cell's explicit pin lists
+                (
+                    vec![
+                        "RADDR".into(),
+                        "RCLK".into(),
+                        "RCLKE".into(),
+                        "RE".into(),
+                        "WDATA".into(),
+                        "WADDR".into(),
+                        "WCLK".into(),
+                        "WCLKE".into(),
+                        "WE".into(),
+                    ],
+                    vec!["RDATA".into()],
+                )
+            }
             CellFunction::Tristate => (vec!["a".into(), "en".into()], vec!["y".into()]),
             // Power infrastructure
             CellFunction::LevelShifterLH | CellFunction::LevelShifterHL => {
@@ -917,6 +980,7 @@ impl CellFunction {
                 | CellFunction::DffE
                 | CellFunction::DffRE
                 | CellFunction::Latch
+                | CellFunction::Ram
                 | CellFunction::RetentionDff
                 | CellFunction::RetentionDffR
                 | CellFunction::IsolationLatch
@@ -1381,6 +1445,16 @@ impl TechLibrary {
     /// Find a decomposition rule for a LirOp
     pub fn find_decomposition(&self, op: &LirOp) -> Option<&DecompositionRule> {
         self.decomposition_rules.iter().find(|r| r.matches(op))
+    }
+
+    /// Find the RAM cell in the library along with its capability metadata.
+    ///
+    /// Returns `None` if the library has no cell with `CellFunction::Ram` or
+    /// if the cell lacks `ram_info`. The tech mapper calls this — it never
+    /// hardcodes cell names like "SB_RAM40_4K".
+    pub fn find_ram_cell(&self) -> Option<(&LibraryCell, &RamCellInfo)> {
+        self.find_best_cell(&CellFunction::Ram)
+            .and_then(|cell| cell.ram_info.as_ref().map(|info| (cell, info)))
     }
 
     /// Iterate over all cells in the library
@@ -2041,6 +2115,9 @@ struct TomlCell {
     hold_ps: Option<u32>,
     #[serde(default)]
     clk_to_q_ps: Option<u32>,
+    // RAM capability metadata (for cells with function = "ram")
+    #[serde(default)]
+    ram_info: Option<TomlRamInfo>,
     // Failure modes
     #[serde(default)]
     failure_modes: Vec<TomlFailureMode>,
@@ -2112,6 +2189,39 @@ struct TomlFailureMode {
 
 fn default_fault_type() -> String {
     "stuck_at_0".to_string()
+}
+
+/// RAM capability metadata in TOML format
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TomlRamInfo {
+    block_bits: u32,
+    aspect_ratios: Vec<(u32, u32)>,
+    #[serde(default)]
+    true_dual_port: bool,
+    #[serde(default)]
+    has_write_mask: bool,
+    #[serde(default)]
+    write_mask_granularity: u32,
+    #[serde(default)]
+    has_output_register: bool,
+    pin_map: TomlRamPinMap,
+}
+
+/// RAM pin map in TOML format
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TomlRamPinMap {
+    read_data: String,
+    read_addr: String,
+    read_clk: String,
+    read_en: String,
+    read_clk_en: String,
+    write_data: String,
+    write_addr: String,
+    write_clk: String,
+    write_en: String,
+    write_clk_en: String,
+    #[serde(default)]
+    write_mask: Option<String>,
 }
 
 impl TomlLibrary {
@@ -2275,6 +2385,27 @@ impl TomlCell {
             setup_ps: self.setup_ps,
             hold_ps: self.hold_ps,
             clk_to_q_ps: self.clk_to_q_ps,
+            ram_info: self.ram_info.map(|ri| RamCellInfo {
+                block_bits: ri.block_bits,
+                aspect_ratios: ri.aspect_ratios,
+                true_dual_port: ri.true_dual_port,
+                has_write_mask: ri.has_write_mask,
+                write_mask_granularity: ri.write_mask_granularity,
+                has_output_register: ri.has_output_register,
+                pin_map: RamPinMap {
+                    read_data: ri.pin_map.read_data,
+                    read_addr: ri.pin_map.read_addr,
+                    read_clk: ri.pin_map.read_clk,
+                    read_en: ri.pin_map.read_en,
+                    read_clk_en: ri.pin_map.read_clk_en,
+                    write_data: ri.pin_map.write_data,
+                    write_addr: ri.pin_map.write_addr,
+                    write_clk: ri.pin_map.write_clk,
+                    write_en: ri.pin_map.write_en,
+                    write_clk_en: ri.pin_map.write_clk_en,
+                    write_mask: ri.pin_map.write_mask,
+                },
+            }),
         })
     }
 
@@ -2358,6 +2489,27 @@ impl TomlCell {
             setup_ps: cell.setup_ps,
             hold_ps: cell.hold_ps,
             clk_to_q_ps: cell.clk_to_q_ps,
+            ram_info: cell.ram_info.as_ref().map(|ri| TomlRamInfo {
+                block_bits: ri.block_bits,
+                aspect_ratios: ri.aspect_ratios.clone(),
+                true_dual_port: ri.true_dual_port,
+                has_write_mask: ri.has_write_mask,
+                write_mask_granularity: ri.write_mask_granularity,
+                has_output_register: ri.has_output_register,
+                pin_map: TomlRamPinMap {
+                    read_data: ri.pin_map.read_data.clone(),
+                    read_addr: ri.pin_map.read_addr.clone(),
+                    read_clk: ri.pin_map.read_clk.clone(),
+                    read_en: ri.pin_map.read_en.clone(),
+                    read_clk_en: ri.pin_map.read_clk_en.clone(),
+                    write_data: ri.pin_map.write_data.clone(),
+                    write_addr: ri.pin_map.write_addr.clone(),
+                    write_clk: ri.pin_map.write_clk.clone(),
+                    write_en: ri.pin_map.write_en.clone(),
+                    write_clk_en: ri.pin_map.write_clk_en.clone(),
+                    write_mask: ri.pin_map.write_mask.clone(),
+                },
+            }),
             failure_modes,
         }
     }
@@ -2399,6 +2551,7 @@ fn parse_cell_function(s: &str) -> Result<CellFunction, LibraryLoadError> {
         "dffe" | "dff_e" => Ok(CellFunction::DffE),
         "dffre" | "dff_re" => Ok(CellFunction::DffRE),
         "latch" => Ok(CellFunction::Latch),
+        "ram" | "bram" | "sram" => Ok(CellFunction::Ram),
         "tristate" | "tri" => Ok(CellFunction::Tristate),
         // Power infrastructure
         "level_shifter_lh" | "lslh" => Ok(CellFunction::LevelShifterLH),
@@ -2483,6 +2636,7 @@ fn format_cell_function(f: &CellFunction) -> String {
         CellFunction::DffE => "dffe".to_string(),
         CellFunction::DffRE => "dffre".to_string(),
         CellFunction::Latch => "latch".to_string(),
+        CellFunction::Ram => "ram".to_string(),
         CellFunction::Tristate => "tristate".to_string(),
         CellFunction::LevelShifterLH => "level_shifter_lh".to_string(),
         CellFunction::LevelShifterHL => "level_shifter_hl".to_string(),

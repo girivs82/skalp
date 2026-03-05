@@ -751,6 +751,29 @@ impl<'a> TechMapper<'a> {
                 self.map_ncl_null(*width, &output_nets, &node.path);
             }
 
+            // Memory block — vendor-agnostic mapping to RAM primitives
+            LirOp::MemBlock {
+                data_width,
+                addr_width,
+                depth,
+                has_write,
+                ..
+            } => {
+                let clock_net = node
+                    .clock
+                    .and_then(|c| self.signal_to_net.get(&c).and_then(|n| n.first().copied()));
+                self.map_memory_block(
+                    *data_width,
+                    *addr_width,
+                    *depth,
+                    *has_write,
+                    &input_nets,
+                    &output_nets,
+                    &node.path,
+                    clock_net,
+                );
+            }
+
             _ => {
                 self.warnings
                     .push(format!("Unsupported operation: {:?}", node.op));
@@ -5324,6 +5347,740 @@ impl<'a> TechMapper<'a> {
         }
     }
 
+    // ========================================================================
+    // Memory Block Mapping (vendor-agnostic)
+    // ========================================================================
+
+    /// Map a MemBlock node to RAM primitive cells from the technology library.
+    ///
+    /// Queries `RamCellInfo` from the library for capabilities (aspect ratios,
+    /// pin names). Never hardcodes cell names — works with any tech library
+    /// that defines a RAM cell with `ram_info`.
+    #[allow(clippy::too_many_arguments)]
+    fn map_memory_block(
+        &mut self,
+        data_width: u32,
+        addr_width: u32,
+        depth: u32,
+        has_write: bool,
+        inputs: &[Vec<GateNetId>],
+        outputs: &[GateNetId],
+        path: &str,
+        clock: Option<GateNetId>,
+    ) {
+        // 1. Query library for RAM cell
+        let (ram_cell, ram_info) = match self.library.find_ram_cell() {
+            Some(info) => info,
+            None => {
+                self.warnings.push(format!(
+                    "No RAM cell in library '{}' — cannot map MemBlock at {}",
+                    self.library.name, path
+                ));
+                return;
+            }
+        };
+        let ram_cell_name = ram_cell.name.clone();
+        let ram_cell_fit = ram_cell.fit;
+        let ram_cell_info = LibraryCellInfo::from_library_cell(ram_cell);
+
+        // 2. Select best aspect ratio
+        let (block_depth, block_width) =
+            Self::select_best_aspect_ratio(&ram_info.aspect_ratios, data_width, depth);
+
+        // 3. Compute tiling
+        let width_blocks = data_width.div_ceil(block_width);
+        let depth_blocks = depth.div_ceil(block_depth);
+        let block_addr_width = Self::clog2(block_depth);
+
+        let tie_low = self.get_tie_low();
+        let tie_high = self.get_tie_high();
+        let clk = clock.unwrap_or(tie_low);
+
+        // Extract input nets
+        // Inputs: [raddr, waddr, wdata, we] for read-write, [raddr] for read-only
+        let raddr_nets = &inputs[0];
+        let waddr_nets = if has_write && inputs.len() > 1 {
+            &inputs[1]
+        } else {
+            &inputs[0] // read-only — won't be used
+        };
+        let wdata_nets = if has_write && inputs.len() > 2 {
+            &inputs[2]
+        } else {
+            &Vec::new()
+        };
+        let we_net = if has_write && inputs.len() > 3 {
+            inputs[3].first().copied().unwrap_or(tie_low)
+        } else {
+            tie_low
+        };
+
+        if depth_blocks == 1 && width_blocks == 1 {
+            // Simple case: single RAM block
+            self.instantiate_ram_block(
+                &ram_cell_name,
+                &ram_cell_info,
+                ram_cell_fit,
+                block_depth,
+                block_width,
+                block_addr_width,
+                data_width,
+                addr_width,
+                raddr_nets,
+                waddr_nets,
+                wdata_nets,
+                we_net,
+                outputs,
+                clk,
+                tie_low,
+                tie_high,
+                has_write,
+                path,
+                ram_info,
+            );
+        } else if depth_blocks == 1 {
+            // Width tiling only: multiple blocks in parallel, same address
+            self.map_memory_width_tiling(
+                &ram_cell_name,
+                &ram_cell_info,
+                ram_cell_fit,
+                block_depth,
+                block_width,
+                block_addr_width,
+                data_width,
+                addr_width,
+                width_blocks,
+                raddr_nets,
+                waddr_nets,
+                wdata_nets,
+                we_net,
+                outputs,
+                clk,
+                tie_low,
+                tie_high,
+                has_write,
+                path,
+                ram_info,
+            );
+        } else {
+            // Depth tiling (possibly with width tiling too)
+            self.map_memory_depth_tiling(
+                &ram_cell_name,
+                &ram_cell_info,
+                ram_cell_fit,
+                block_depth,
+                block_width,
+                block_addr_width,
+                data_width,
+                addr_width,
+                depth,
+                width_blocks,
+                depth_blocks,
+                raddr_nets,
+                waddr_nets,
+                wdata_nets,
+                we_net,
+                outputs,
+                clk,
+                tie_low,
+                tie_high,
+                has_write,
+                path,
+                ram_info,
+            );
+        }
+
+        self.stats.direct_mappings += 1;
+    }
+
+    /// Select the best aspect ratio from available options.
+    ///
+    /// Prefers single-block fit. If no single-block fit, minimizes total block count.
+    fn select_best_aspect_ratio(
+        aspect_ratios: &[(u32, u32)],
+        data_width: u32,
+        depth: u32,
+    ) -> (u32, u32) {
+        // Try to find a single-block fit
+        let mut best_single: Option<(u32, u32, u32)> = None; // (depth, width, waste)
+        for &(bd, bw) in aspect_ratios {
+            if bw >= data_width && bd >= depth {
+                let waste = (bw - data_width) * bd + (bd - depth) * bw;
+                if best_single.is_none() || waste < best_single.unwrap().2 {
+                    best_single = Some((bd, bw, waste));
+                }
+            }
+        }
+        if let Some((bd, bw, _)) = best_single {
+            return (bd, bw);
+        }
+
+        // No single-block fit — minimize total block count
+        let mut best: (u32, u32) = aspect_ratios[0];
+        let mut best_count = u32::MAX;
+        for &(bd, bw) in aspect_ratios {
+            let w_blocks = data_width.div_ceil(bw);
+            let d_blocks = depth.div_ceil(bd);
+            let total = w_blocks * d_blocks;
+            if total < best_count {
+                best_count = total;
+                best = (bd, bw);
+            }
+        }
+        best
+    }
+
+    /// Ceiling log2
+    fn clog2(n: u32) -> u32 {
+        if n <= 1 {
+            return 0;
+        }
+        32 - (n - 1).leading_zeros()
+    }
+
+    /// Instantiate a single RAM block with the given port connections.
+    #[allow(clippy::too_many_arguments)]
+    fn instantiate_ram_block(
+        &mut self,
+        ram_cell_name: &str,
+        ram_cell_info: &LibraryCellInfo,
+        ram_cell_fit: f64,
+        block_depth: u32,
+        block_width: u32,
+        block_addr_width: u32,
+        data_width: u32,
+        addr_width: u32,
+        raddr_nets: &[GateNetId],
+        waddr_nets: &[GateNetId],
+        wdata_nets: &[GateNetId],
+        we_net: GateNetId,
+        output_nets: &[GateNetId],
+        clk: GateNetId,
+        tie_low: GateNetId,
+        tie_high: GateNetId,
+        has_write: bool,
+        path: &str,
+        ram_info: &crate::tech_library::RamCellInfo,
+    ) {
+        // Build input net list: raddr (padded), re, rclke, wdata (padded), waddr (padded), we, wclke
+        // Order matches the cell's pin list from the library
+        let mut cell_inputs = Vec::new();
+
+        // Read address — pad to block_addr_width
+        for bit in 0..block_addr_width as usize {
+            cell_inputs.push(
+                raddr_nets
+                    .get(bit)
+                    .copied()
+                    .unwrap_or(tie_low),
+            );
+        }
+        // RCLK
+        cell_inputs.push(clk);
+        // RCLKE — tie high (always enabled)
+        cell_inputs.push(tie_high);
+        // RE — tie high (always enabled)
+        cell_inputs.push(tie_high);
+
+        if has_write {
+            // Write data — pad to block_width
+            for bit in 0..block_width as usize {
+                cell_inputs
+                    .push(wdata_nets.get(bit).copied().unwrap_or(tie_low));
+            }
+            // Write address — pad to block_addr_width
+            for bit in 0..block_addr_width as usize {
+                cell_inputs
+                    .push(waddr_nets.get(bit).copied().unwrap_or(tie_low));
+            }
+            // WCLK
+            cell_inputs.push(clk);
+            // WCLKE — tie high
+            cell_inputs.push(tie_high);
+            // WE
+            cell_inputs.push(we_net);
+        } else {
+            // ROM mode: tie write inputs low
+            for _ in 0..block_width as usize {
+                cell_inputs.push(tie_low);
+            }
+            for _ in 0..block_addr_width as usize {
+                cell_inputs.push(tie_low);
+            }
+            cell_inputs.push(clk);
+            cell_inputs.push(tie_low); // WCLKE
+            cell_inputs.push(tie_low); // WE
+        }
+
+        // MASK — tie all high (no masking)
+        if ram_info.has_write_mask {
+            for _ in 0..block_width as usize {
+                cell_inputs.push(tie_high);
+            }
+        }
+
+        // Output nets: only data_width bits are used, rest are unconnected
+        let mut cell_outputs = Vec::new();
+        for bit in 0..block_width as usize {
+            if bit < data_width as usize {
+                cell_outputs.push(
+                    output_nets
+                        .get(bit)
+                        .copied()
+                        .unwrap_or(output_nets[0]),
+                );
+            } else {
+                // Unused output bit — create a dangling net
+                let unused = self
+                    .netlist
+                    .add_net_with_name(format!("{}.unused_rdata{}", path, bit));
+                cell_outputs.push(unused);
+            }
+        }
+
+        let mut cell = Cell::new_seq(
+            CellId(0),
+            ram_cell_name.to_string(),
+            self.library.name.clone(),
+            ram_cell_fit,
+            path.to_string(),
+            cell_inputs,
+            cell_outputs,
+            clk,
+            None,
+        );
+        cell.source_op = Some("MemBlock".to_string());
+        cell.parameters.insert(
+            "READ_MODE".to_string(),
+            block_width.to_string(),
+        );
+        cell.parameters.insert(
+            "WRITE_MODE".to_string(),
+            block_width.to_string(),
+        );
+        ram_cell_info.apply_to_cell(&mut cell);
+        self.add_cell(cell);
+    }
+
+    /// Width tiling: multiple RAM blocks in parallel, each handling a data slice.
+    #[allow(clippy::too_many_arguments)]
+    fn map_memory_width_tiling(
+        &mut self,
+        ram_cell_name: &str,
+        ram_cell_info: &LibraryCellInfo,
+        ram_cell_fit: f64,
+        block_depth: u32,
+        block_width: u32,
+        block_addr_width: u32,
+        data_width: u32,
+        addr_width: u32,
+        width_blocks: u32,
+        raddr_nets: &[GateNetId],
+        waddr_nets: &[GateNetId],
+        wdata_nets: &[GateNetId],
+        we_net: GateNetId,
+        output_nets: &[GateNetId],
+        clk: GateNetId,
+        tie_low: GateNetId,
+        tie_high: GateNetId,
+        has_write: bool,
+        path: &str,
+        ram_info: &crate::tech_library::RamCellInfo,
+    ) {
+        for wb in 0..width_blocks {
+            let bit_lo = (wb * block_width) as usize;
+            let bit_hi = std::cmp::min(((wb + 1) * block_width) as usize, data_width as usize);
+            let slice_width = bit_hi - bit_lo;
+
+            // Slice the data/output nets for this width block
+            let wdata_slice: Vec<GateNetId> = (0..block_width as usize)
+                .map(|b| {
+                    if b < slice_width {
+                        wdata_nets.get(bit_lo + b).copied().unwrap_or(tie_low)
+                    } else {
+                        tie_low
+                    }
+                })
+                .collect();
+
+            let mut output_slice: Vec<GateNetId> = Vec::new();
+            for b in 0..block_width as usize {
+                if b < slice_width {
+                    output_slice.push(
+                        output_nets
+                            .get(bit_lo + b)
+                            .copied()
+                            .unwrap_or(output_nets[0]),
+                    );
+                } else {
+                    let unused = self.netlist.add_net_with_name(format!(
+                        "{}.wb{}.unused_rdata{}",
+                        path, wb, b
+                    ));
+                    output_slice.push(unused);
+                }
+            }
+
+            self.instantiate_ram_block(
+                ram_cell_name,
+                ram_cell_info,
+                ram_cell_fit,
+                block_depth,
+                block_width,
+                block_addr_width,
+                block_width, // each block uses full block_width
+                addr_width,
+                raddr_nets,
+                waddr_nets,
+                &wdata_slice,
+                we_net,
+                &output_slice,
+                clk,
+                tie_low,
+                tie_high,
+                has_write,
+                &format!("{}.wb{}", path, wb),
+                ram_info,
+            );
+        }
+    }
+
+    /// Depth tiling: multiple RAM blocks with address decode + output mux.
+    ///
+    /// Upper address bits select which block is active. Output mux routes
+    /// the selected block's data to the final output. Decode logic and mux
+    /// are built from standard cells.
+    #[allow(clippy::too_many_arguments)]
+    fn map_memory_depth_tiling(
+        &mut self,
+        ram_cell_name: &str,
+        ram_cell_info: &LibraryCellInfo,
+        ram_cell_fit: f64,
+        block_depth: u32,
+        block_width: u32,
+        block_addr_width: u32,
+        data_width: u32,
+        addr_width: u32,
+        _depth: u32,
+        width_blocks: u32,
+        depth_blocks: u32,
+        raddr_nets: &[GateNetId],
+        waddr_nets: &[GateNetId],
+        wdata_nets: &[GateNetId],
+        we_net: GateNetId,
+        output_nets: &[GateNetId],
+        clk: GateNetId,
+        tie_low: GateNetId,
+        tie_high: GateNetId,
+        has_write: bool,
+        path: &str,
+        ram_info: &crate::tech_library::RamCellInfo,
+    ) {
+        let upper_bits_count = Self::clog2(depth_blocks);
+        // Upper address bits for depth decode
+        let upper_raddr: Vec<GateNetId> = (0..upper_bits_count)
+            .map(|i| {
+                raddr_nets
+                    .get((block_addr_width + i) as usize)
+                    .copied()
+                    .unwrap_or(tie_low)
+            })
+            .collect();
+        let upper_waddr: Vec<GateNetId> = (0..upper_bits_count)
+            .map(|i| {
+                waddr_nets
+                    .get((block_addr_width + i) as usize)
+                    .copied()
+                    .unwrap_or(tie_low)
+            })
+            .collect();
+
+        // Per-depth-block output nets and write-enable nets
+        let mut block_outputs: Vec<Vec<GateNetId>> = Vec::new();
+        let mut block_we_nets: Vec<GateNetId> = Vec::new();
+
+        for db in 0..depth_blocks {
+            // Decode write-enable: we_block = we & (upper_addr == db)
+            let we_block = if depth_blocks > 1 && has_write {
+                self.build_addr_decode(
+                    &upper_waddr,
+                    db,
+                    upper_bits_count,
+                    we_net,
+                    tie_low,
+                    tie_high,
+                    &format!("{}.db{}.we_decode", path, db),
+                )
+            } else {
+                we_net
+            };
+            block_we_nets.push(we_block);
+
+            // Create output nets for this depth block
+            let mut db_outputs = Vec::new();
+            for bit in 0..data_width {
+                let net = self.netlist.add_net_with_name(format!(
+                    "{}.db{}.rdata{}",
+                    path, db, bit
+                ));
+                db_outputs.push(net);
+            }
+            block_outputs.push(db_outputs.clone());
+
+            // Instantiate RAM block(s) for this depth slice
+            if width_blocks == 1 {
+                self.instantiate_ram_block(
+                    ram_cell_name,
+                    ram_cell_info,
+                    ram_cell_fit,
+                    block_depth,
+                    block_width,
+                    block_addr_width,
+                    data_width,
+                    addr_width,
+                    raddr_nets,
+                    waddr_nets,
+                    wdata_nets,
+                    we_block,
+                    &db_outputs,
+                    clk,
+                    tie_low,
+                    tie_high,
+                    has_write,
+                    &format!("{}.db{}", path, db),
+                    ram_info,
+                );
+            } else {
+                // Width + depth tiling
+                self.map_memory_width_tiling(
+                    ram_cell_name,
+                    ram_cell_info,
+                    ram_cell_fit,
+                    block_depth,
+                    block_width,
+                    block_addr_width,
+                    data_width,
+                    addr_width,
+                    width_blocks,
+                    raddr_nets,
+                    waddr_nets,
+                    wdata_nets,
+                    we_block,
+                    &db_outputs,
+                    clk,
+                    tie_low,
+                    tie_high,
+                    has_write,
+                    &format!("{}.db{}", path, db),
+                    ram_info,
+                );
+            }
+        }
+
+        // Build output mux: select among depth blocks using upper read address bits
+        self.build_depth_output_mux(
+            &block_outputs,
+            &upper_raddr,
+            output_nets,
+            data_width,
+            depth_blocks,
+            tie_low,
+            &format!("{}.depth_mux", path),
+        );
+    }
+
+    /// Build address decode logic: output = enable & (addr_bits == target_value)
+    #[allow(clippy::too_many_arguments)]
+    fn build_addr_decode(
+        &mut self,
+        addr_bits: &[GateNetId],
+        target_value: u32,
+        num_bits: u32,
+        enable: GateNetId,
+        tie_low: GateNetId,
+        _tie_high: GateNetId,
+        path: &str,
+    ) -> GateNetId {
+        // Build AND tree: match each bit against the target value
+        let mut match_net = enable;
+
+        for bit in 0..num_bits as usize {
+            let addr_bit = addr_bits.get(bit).copied().unwrap_or(tie_low);
+            let target_bit = (target_value >> bit) & 1;
+
+            let bit_match = if target_bit == 0 {
+                // Need inverted bit
+                let inv_net = self
+                    .netlist
+                    .add_net_with_name(format!("{}.inv_bit{}", path, bit));
+                let inv_info = self.get_cell_info(&CellFunction::Inv);
+                let mut inv_cell = Cell::new_comb(
+                    CellId(0),
+                    inv_info.name.clone(),
+                    self.library.name.clone(),
+                    inv_info.fit,
+                    format!("{}.inv{}", path, bit),
+                    vec![addr_bit],
+                    vec![inv_net],
+                );
+                inv_info.apply_to_cell(&mut inv_cell);
+                self.add_cell(inv_cell);
+                inv_net
+            } else {
+                addr_bit
+            };
+
+            // AND with running result
+            let and_out = self
+                .netlist
+                .add_net_with_name(format!("{}.and{}", path, bit));
+            let and_info = self.get_cell_info(&CellFunction::And2);
+            let mut and_cell = Cell::new_comb(
+                CellId(0),
+                and_info.name.clone(),
+                self.library.name.clone(),
+                and_info.fit,
+                format!("{}.and{}", path, bit),
+                vec![match_net, bit_match],
+                vec![and_out],
+            );
+            and_info.apply_to_cell(&mut and_cell);
+            self.add_cell(and_cell);
+
+            match_net = and_out;
+        }
+
+        match_net
+    }
+
+    /// Build output mux for depth tiling using cascaded 2:1 muxes.
+    ///
+    /// Each select bit picks between pairs of block outputs.
+    #[allow(clippy::too_many_arguments)]
+    fn build_depth_output_mux(
+        &mut self,
+        block_outputs: &[Vec<GateNetId>],
+        select_bits: &[GateNetId],
+        final_outputs: &[GateNetId],
+        data_width: u32,
+        depth_blocks: u32,
+        tie_low: GateNetId,
+        path: &str,
+    ) {
+        if depth_blocks == 1 {
+            // No mux needed — but we should never get here (caller handles single block)
+            return;
+        }
+
+        // For 2 depth blocks: simple 2:1 mux
+        if depth_blocks == 2 {
+            let sel = select_bits.first().copied().unwrap_or(tie_low);
+            let mux_info = self.get_cell_info(&CellFunction::Mux2);
+
+            for bit in 0..data_width as usize {
+                let d0 = block_outputs[0].get(bit).copied().unwrap_or(tie_low);
+                let d1 = block_outputs[1].get(bit).copied().unwrap_or(tie_low);
+                let y = final_outputs.get(bit).copied().unwrap_or(final_outputs[0]);
+
+                let mut cell = Cell::new_comb(
+                    CellId(0),
+                    mux_info.name.clone(),
+                    self.library.name.clone(),
+                    mux_info.fit,
+                    format!("{}.bit{}", path, bit),
+                    vec![sel, d0, d1],
+                    vec![y],
+                );
+                cell.source_op = Some("DepthMux".to_string());
+                mux_info.apply_to_cell(&mut cell);
+                self.add_cell(cell);
+            }
+            return;
+        }
+
+        // For >2 depth blocks: cascaded mux tree
+        // Layer-by-layer: pair up blocks, mux with select_bits[layer]
+        let mut current_level = block_outputs.to_vec();
+
+        for layer in 0..select_bits.len() {
+            let sel = select_bits[layer];
+            let mut next_level = Vec::new();
+            let mux_info = self.get_cell_info(&CellFunction::Mux2);
+
+            let pairs = current_level.len() / 2;
+            for p in 0..pairs {
+                let mut mux_outputs = Vec::new();
+                for bit in 0..data_width as usize {
+                    let d0 = current_level[p * 2]
+                        .get(bit)
+                        .copied()
+                        .unwrap_or(tie_low);
+                    let d1 = current_level[p * 2 + 1]
+                        .get(bit)
+                        .copied()
+                        .unwrap_or(tie_low);
+
+                    let is_final = pairs == 1
+                        && current_level.len() <= 2
+                        && layer == select_bits.len() - 1;
+                    let y = if is_final {
+                        final_outputs.get(bit).copied().unwrap_or(final_outputs[0])
+                    } else {
+                        self.netlist.add_net_with_name(format!(
+                            "{}.l{}.p{}.bit{}",
+                            path, layer, p, bit
+                        ))
+                    };
+
+                    let mut cell = Cell::new_comb(
+                        CellId(0),
+                        mux_info.name.clone(),
+                        self.library.name.clone(),
+                        mux_info.fit,
+                        format!("{}.l{}.p{}.bit{}", path, layer, p, bit),
+                        vec![sel, d0, d1],
+                        vec![y],
+                    );
+                    cell.source_op = Some("DepthMux".to_string());
+                    mux_info.apply_to_cell(&mut cell);
+                    self.add_cell(cell);
+                    mux_outputs.push(y);
+                }
+                next_level.push(mux_outputs);
+            }
+            // If odd number, pass through the last one
+            if current_level.len() % 2 == 1 {
+                next_level.push(current_level.last().unwrap().clone());
+            }
+            current_level = next_level;
+        }
+
+        // Connect final level to outputs (if not already done in the last mux layer)
+        if current_level.len() == 1 {
+            // The final mux should have output to final_outputs already
+            // This handles the case where it didn't (e.g., odd depth_blocks)
+            for bit in 0..data_width as usize {
+                let src = current_level[0].get(bit).copied().unwrap_or(tie_low);
+                let dst = final_outputs.get(bit).copied().unwrap_or(final_outputs[0]);
+                if src != dst {
+                    // Buffer to connect
+                    let buf_info = self.get_cell_info(&CellFunction::Buf);
+                    let mut cell = Cell::new_comb(
+                        CellId(0),
+                        buf_info.name.clone(),
+                        self.library.name.clone(),
+                        buf_info.fit,
+                        format!("{}.final_buf.bit{}", path, bit),
+                        vec![src],
+                        vec![dst],
+                    );
+                    buf_info.apply_to_cell(&mut cell);
+                    self.add_cell(cell);
+                }
+            }
+        }
+    }
+
     /// Get or create a tie-low net
     fn get_tie_low(&mut self) -> GateNetId {
         // Look for existing tie-low
@@ -5873,6 +6630,7 @@ fn create_blackbox_netlist(
         source_op: Some(format!("blackbox:{}", blackbox_info.cell_name)),
         safety_classification: CellSafetyClassification::Functional,
         lut_init: None,
+        parameters: IndexMap::new(),
     };
     netlist.cells.push(blackbox_cell);
 

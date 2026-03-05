@@ -14,9 +14,10 @@
 //! ```
 
 use crate::compiled_ip::CompiledIp;
-use crate::lir::{Lir, LirOp, LirSafetyInfo, LirSignalId, LirStats};
+use crate::lir::{Lir, LirNodeId, LirOp, LirSafetyInfo, LirSignalId, LirStats};
 use crate::ncl_expand::{expand_to_ncl, NclConfig};
 use indexmap::IndexMap;
+use skalp_frontend::hir::MemoryStyle;
 use skalp_mir::mir::{
     AssignmentKind, BinaryOp, Block, CaseStatement, ContinuousAssign, DataType, EdgeType,
     Expression, ExpressionKind, IfStatement, LValue, Module, PortDirection, PortId, Process,
@@ -92,6 +93,31 @@ pub struct MirToLirResult {
 pub type MirToWordLirResult = MirToLirResult;
 
 /// MIR to LIR transformer
+/// Information about a memory signal for MemBlock lowering
+#[derive(Debug, Clone)]
+struct MemoryInfo {
+    /// Element width in bits (e.g., 64 for bit[64])
+    element_width: u32,
+    /// Number of entries
+    depth: u32,
+    /// Address width: ceil(log2(depth))
+    addr_width: u32,
+    /// Read address input signal
+    raddr_signal: LirSignalId,
+    /// Write address input signal
+    waddr_signal: LirSignalId,
+    /// Write data input signal
+    wdata_signal: LirSignalId,
+    /// Write enable input signal (1 bit)
+    we_signal: LirSignalId,
+    /// Read data output signal (= the original signal)
+    rdata_signal: LirSignalId,
+    /// MemBlock node ID (for deferred clock assignment)
+    node_id: LirNodeId,
+    /// Whether the memory is read-only
+    read_only: bool,
+}
+
 pub struct MirToLirTransform {
     /// Output LIR being built
     lir: Lir,
@@ -128,6 +154,10 @@ pub struct MirToLirTransform {
     node_counter: u32,
     /// Whether the current process uses async reset (Active/Inactive edge in sensitivity list)
     async_reset: bool,
+    /// Memory signals: maps MIR SignalId to MemBlock port info
+    memory_signals: IndexMap<SignalId, MemoryInfo>,
+    /// Whether the target has BRAM (from tech library)
+    target_has_bram: bool,
 }
 
 impl MirToLirTransform {
@@ -153,7 +183,45 @@ impl MirToLirTransform {
             temp_counter: 0,
             node_counter: 0,
             async_reset: false,
+            memory_signals: IndexMap::new(),
+            target_has_bram: false,
         }
+    }
+
+    /// Set whether the target has BRAM capability
+    ///
+    /// Called by the compiler before `transform()` when a tech library
+    /// with RAM cells is available. Controls auto-inference heuristic.
+    pub fn set_target_has_bram(&mut self, has_bram: bool) {
+        self.target_has_bram = has_bram;
+    }
+
+    /// Determine whether a memory signal should use BRAM inference
+    fn should_use_bram(
+        config: &skalp_frontend::hir::MemoryConfig,
+        element_width: u32,
+        target_has_bram: bool,
+    ) -> bool {
+        match config.style {
+            MemoryStyle::Block | MemoryStyle::Ultra => true,
+            MemoryStyle::Distributed | MemoryStyle::Register => false,
+            MemoryStyle::Auto => {
+                if !target_has_bram {
+                    return false;
+                }
+                let total_bits = element_width as usize * config.depth as usize;
+                // Heuristic: use BRAM when memory > 256 bits and depth > 16
+                total_bits > 256 && config.depth > 16
+            }
+        }
+    }
+
+    /// Ceiling log2
+    fn clog2(n: u32) -> u32 {
+        if n <= 1 {
+            return 0;
+        }
+        32 - (n - 1).leading_zeros()
     }
 
     /// Transform a MIR module to LIR
@@ -556,6 +624,15 @@ impl MirToLirTransform {
         );
         self.signal_is_signed.insert(signal.id, is_signed);
 
+        // Check for memory inference
+        if let Some(ref mem_config) = signal.memory_config {
+            let element_width = width; // signal type IS the element type
+            if Self::should_use_bram(mem_config, element_width, self.target_has_bram) {
+                self.create_memory_signal(signal, mem_config, element_width);
+                return;
+            }
+        }
+
         let signal_id = self.lir.add_signal(signal.name.clone(), width);
         self.signal_to_lir_signal.insert(signal.id, signal_id);
         // BUG #237 FIX: Track by position for monomorphized module lookups
@@ -571,6 +648,88 @@ impl MirToLirTransform {
             );
             self.lir.mark_as_detection(signal_id);
         }
+    }
+
+    /// Create memory port signals and MemBlock node for a memory signal.
+    ///
+    /// Instead of creating a flat signal, creates separate read/write port
+    /// signals and a MemBlock node. The original signal maps to the read data
+    /// output for transparent read access.
+    fn create_memory_signal(
+        &mut self,
+        signal: &skalp_mir::mir::Signal,
+        mem_config: &skalp_frontend::hir::MemoryConfig,
+        element_width: u32,
+    ) {
+        let depth = mem_config.depth;
+        let addr_width = Self::clog2(depth);
+        let read_only = mem_config.read_only;
+
+        // Create port signals
+        let rdata_signal = self
+            .lir
+            .add_signal(format!("{}_rdata", signal.name), element_width);
+        let raddr_signal = self
+            .lir
+            .add_signal(format!("{}_raddr", signal.name), addr_width);
+        let waddr_signal = self
+            .lir
+            .add_signal(format!("{}_waddr", signal.name), addr_width);
+        let wdata_signal = self
+            .lir
+            .add_signal(format!("{}_wdata", signal.name), element_width);
+        let we_signal = self
+            .lir
+            .add_signal(format!("{}_we", signal.name), 1);
+
+        // Create MemBlock node (clock will be set later during process analysis)
+        let inputs = if read_only {
+            vec![raddr_signal]
+        } else {
+            vec![raddr_signal, waddr_signal, wdata_signal, we_signal]
+        };
+
+        let node_id = self.lir.add_node(
+            LirOp::MemBlock {
+                data_width: element_width,
+                addr_width,
+                depth,
+                has_write: !read_only,
+                read_only,
+            },
+            inputs,
+            rdata_signal,
+            format!("{}.{}", self.hierarchy_path, signal.name),
+        );
+
+        // Map the original signal to rdata (for transparent read access)
+        self.signal_to_lir_signal.insert(signal.id, rdata_signal);
+        self.signal_by_position.push(rdata_signal);
+
+        // Store memory info
+        self.memory_signals.insert(
+            signal.id,
+            MemoryInfo {
+                element_width,
+                depth,
+                addr_width,
+                raddr_signal,
+                waddr_signal,
+                wdata_signal,
+                we_signal,
+                rdata_signal,
+                node_id,
+                read_only,
+            },
+        );
+
+        trace!(
+            "📦 [MEMORY] Created MemBlock for '{}': {}x{} (addr_width={})",
+            signal.name,
+            depth,
+            element_width,
+            addr_width
+        );
     }
 
     /// Create a signal for a variable (BUG #150 FIX)
@@ -756,6 +915,20 @@ impl MirToLirTransform {
         match stmt {
             Statement::Assignment(assign) => {
                 if matches!(assign.kind, AssignmentKind::NonBlocking) {
+                    // Check for memory write: mem(index) <= value
+                    if let LValue::BitSelect { base, index } = &assign.lhs {
+                        if let Some(mem_signal_id) = self.get_memory_signal_id(base) {
+                            self.handle_memory_write(
+                                mem_signal_id,
+                                index,
+                                &assign.rhs,
+                                clock_signal,
+                                reset_signal,
+                            );
+                            return;
+                        }
+                    }
+
                     // Non-blocking assignment -> create register
                     let target_signal = self.get_lvalue_signal(&assign.lhs);
                     let target_width = self.get_lvalue_width(&assign.lhs);
@@ -3747,6 +3920,11 @@ impl MirToLirTransform {
                     })
             }
             LValue::BitSelect { base, index } => {
+                // Check if this is a memory read (array element access on a memory signal)
+                if let Some(mem_signal_id) = self.get_memory_signal_id(base) {
+                    return self.handle_memory_read(mem_signal_id, index);
+                }
+
                 let base_signal = self.get_lvalue_signal(base);
                 let base_width = self.get_lvalue_width(base);
 
@@ -3879,6 +4057,130 @@ impl MirToLirTransform {
     }
 
     /// Get width of an LValue
+    /// Check if an LValue base refers to a memory signal, returning its SignalId.
+    fn get_memory_signal_id(&self, lvalue: &LValue) -> Option<SignalId> {
+        match lvalue {
+            LValue::Signal(signal_id) => {
+                if self.memory_signals.contains_key(signal_id) {
+                    Some(*signal_id)
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// Handle a memory read operation: wire address to raddr, return rdata.
+    fn handle_memory_read(
+        &mut self,
+        mem_signal_id: SignalId,
+        index: &Expression,
+    ) -> LirSignalId {
+        let mem_info = self.memory_signals[&mem_signal_id].clone();
+
+        // Transform the index expression to get the address signal
+        let addr_signal = self.transform_expression(index, mem_info.addr_width);
+
+        // Wire address to the memory's raddr input
+        // Create a buffer/assignment node: raddr <= addr
+        let path = self.unique_node_path("mem_raddr");
+        self.lir.add_node(
+            LirOp::Reg {
+                width: mem_info.addr_width,
+                has_enable: false,
+                has_reset: false,
+                async_reset: false,
+                reset_value: None,
+            },
+            vec![addr_signal],
+            mem_info.raddr_signal,
+            path,
+        );
+
+        // Return the rdata signal (read data output)
+        mem_info.rdata_signal
+    }
+
+    /// Handle a memory write operation in a sequential context.
+    ///
+    /// Wires the index to waddr, the data to wdata, and asserts we.
+    fn handle_memory_write(
+        &mut self,
+        mem_signal_id: SignalId,
+        index: &Expression,
+        rhs: &Expression,
+        clock_signal: Option<LirSignalId>,
+        _reset_signal: Option<LirSignalId>,
+    ) {
+        let mem_info = self.memory_signals[&mem_signal_id].clone();
+
+        // Set the MemBlock node's clock (deferred from create_memory_signal)
+        if let Some(clk) = clock_signal {
+            self.lir.set_node_clock(mem_info.node_id, clk);
+        }
+
+        // Transform the index → write address
+        let addr_signal = self.transform_expression(index, mem_info.addr_width);
+        let path_waddr = self.unique_node_path("mem_waddr");
+        if let Some(clk) = clock_signal {
+            self.lir.add_seq_node(
+                LirOp::Reg {
+                    width: mem_info.addr_width,
+                    has_enable: false,
+                    has_reset: false,
+                    async_reset: false,
+                    reset_value: None,
+                },
+                vec![addr_signal],
+                mem_info.waddr_signal,
+                path_waddr,
+                clk,
+                None,
+            );
+        }
+
+        // Transform the RHS → write data
+        let data_signal = self.transform_expression(rhs, mem_info.element_width);
+        let path_wdata = self.unique_node_path("mem_wdata");
+        if let Some(clk) = clock_signal {
+            self.lir.add_seq_node(
+                LirOp::Reg {
+                    width: mem_info.element_width,
+                    has_enable: false,
+                    has_reset: false,
+                    async_reset: false,
+                    reset_value: None,
+                },
+                vec![data_signal],
+                mem_info.wdata_signal,
+                path_wdata,
+                clk,
+                None,
+            );
+        }
+
+        // Assert write enable
+        let we_const = self.create_constant_value(1, 1);
+        let path_we = self.unique_node_path("mem_we");
+        if let Some(clk) = clock_signal {
+            self.lir.add_seq_node(
+                LirOp::Reg {
+                    width: 1,
+                    has_enable: false,
+                    has_reset: true,
+                    async_reset: false,
+                    reset_value: Some(0),
+                },
+                vec![we_const],
+                mem_info.we_signal,
+                path_we,
+                clk,
+                None,
+            );
+        }
+    }
+
     fn get_lvalue_width(&self, lvalue: &LValue) -> u32 {
         match lvalue {
             LValue::Port(port_id) => self.port_widths.get(port_id).copied().unwrap_or(1),
@@ -4132,6 +4434,19 @@ impl MirToLirTransform {
     }
 
     /// Allocate a temporary signal
+    /// Create a constant value signal
+    fn create_constant_value(&mut self, value: u64, width: u32) -> LirSignalId {
+        let out = self.alloc_temp_signal(width);
+        let path = self.unique_node_path(&format!("const_{}", value));
+        self.lir.add_node(
+            LirOp::Constant { width, value },
+            vec![],
+            out,
+            path,
+        );
+        out
+    }
+
     fn alloc_temp_signal(&mut self, width: u32) -> LirSignalId {
         let name = format!("_t{}", self.temp_counter);
         self.temp_counter += 1;
@@ -4150,6 +4465,17 @@ impl MirToLirTransform {
 /// Transform a MIR module to LIR
 pub fn lower_mir_module_to_lir(module: &Module) -> MirToLirResult {
     lower_mir_module_to_lir_with_context(module, false)
+}
+
+/// Transform a MIR module to LIR with BRAM inference enabled
+///
+/// Use this when targeting an FPGA with block RAM resources.
+/// Memory signals with `#[memory(style=block)]` or large `style=Auto`
+/// memories will be lowered to `LirOp::MemBlock` nodes.
+pub fn lower_mir_module_to_lir_with_bram(module: &Module) -> MirToLirResult {
+    let mut transformer = MirToLirTransform::new(&module.name);
+    transformer.set_target_has_bram(true);
+    transformer.transform(module)
 }
 
 /// Lower MIR module to LIR with async context propagation

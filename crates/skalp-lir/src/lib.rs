@@ -58,7 +58,7 @@ pub use lir::{WordLir, WordLirStats, WordNode, WordNodeId, WordOp, WordSignal, W
 // MIR to LIR transformation
 pub use mir_to_lir::{
     lower_mir_module_to_lir, lower_mir_module_to_lir_skip_ncl,
-    lower_mir_module_to_lir_with_context, MirToLirResult,
+    lower_mir_module_to_lir_with_bram, lower_mir_module_to_lir_with_context, MirToLirResult,
 };
 
 // Backward-compatible aliases for MIR to LIR

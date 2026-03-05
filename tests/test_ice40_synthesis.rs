@@ -9,8 +9,9 @@
 //! - nextpnr JSON and Verilog output
 
 use skalp_lir::{
-    get_stdlib_library, list_stdlib_libraries, lower_mir_module_to_lir, map_lir_to_gates,
-    map_lir_to_gates_optimized, synthesize_for_area, synthesize_for_timing,
+    get_stdlib_library, list_stdlib_libraries, lower_mir_module_to_lir,
+    lower_mir_module_to_lir_with_bram, map_lir_to_gates, map_lir_to_gates_optimized,
+    synthesize_for_area, synthesize_for_timing, CellFunction, Lir, LirOp,
 };
 use skalp_mir::MirCompiler;
 use skalp_testing::testbench::*;
@@ -857,4 +858,284 @@ fn test_ice40_library_cell_fit_rates() {
             );
         }
     }
+}
+
+// =============================================================================
+// BRAM Inference Tests
+// =============================================================================
+
+/// Helper to compile with BRAM inference enabled
+fn compile_inline_to_lir_with_bram(source: &str) -> skalp_lir::Lir {
+    use skalp_frontend::parse_and_build_hir;
+
+    let hir = parse_and_build_hir(source).expect("HIR parsing failed");
+    let compiler = MirCompiler::new();
+    let mir = compiler
+        .compile_to_mir(&hir)
+        .expect("MIR compilation failed");
+    let top_module = mir.modules.first().expect("No modules");
+    let lir_result = lower_mir_module_to_lir_with_bram(top_module);
+    lir_result.lir
+}
+
+/// Build a LIR with a MemBlock node programmatically (bypasses frontend)
+fn build_memblock_lir(data_width: u32, addr_width: u32, depth: u32) -> Lir {
+    let mut lir = Lir::new("TestMem".to_string());
+
+    // Inputs
+    let clk = lir.add_input("clk".to_string(), 1);
+    lir.clocks.push(clk);
+    let raddr = lir.add_input("raddr".to_string(), addr_width);
+    let waddr = lir.add_input("waddr".to_string(), addr_width);
+    let wdata = lir.add_input("wdata".to_string(), data_width);
+    let we = lir.add_input("we".to_string(), 1);
+
+    // Output
+    let rdata = lir.add_output("rdata".to_string(), data_width);
+
+    // MemBlock node
+    lir.add_seq_node(
+        LirOp::MemBlock {
+            data_width,
+            addr_width,
+            depth,
+            has_write: true,
+            read_only: false,
+        },
+        vec![raddr, waddr, wdata, we],
+        rdata,
+        "mem".to_string(),
+        clk,
+        None,
+    );
+
+    lir
+}
+
+#[test]
+fn test_ice40_library_has_ram_cell() {
+    let library = get_stdlib_library("ice40").expect("Failed to load ice40");
+    let ram = library.find_ram_cell();
+    assert!(ram.is_some(), "ice40 library should have a RAM cell");
+
+    let (cell, info) = ram.unwrap();
+    assert_eq!(cell.name, "SB_RAM40_4K");
+    assert_eq!(info.block_bits, 4096);
+    assert!(info.true_dual_port);
+    assert!(info.has_write_mask);
+
+    // Check aspect ratios
+    assert!(
+        info.aspect_ratios.contains(&(256, 16)),
+        "Should support 256x16"
+    );
+    assert!(
+        info.aspect_ratios.contains(&(512, 8)),
+        "Should support 512x8"
+    );
+    assert!(
+        info.aspect_ratios.contains(&(1024, 4)),
+        "Should support 1024x4"
+    );
+    assert!(
+        info.aspect_ratios.contains(&(2048, 2)),
+        "Should support 2048x2"
+    );
+}
+
+#[test]
+fn test_ice40_ram_cell_function() {
+    let library = get_stdlib_library("ice40").expect("Failed to load ice40");
+    let (cell, _) = library.find_ram_cell().unwrap();
+    assert!(
+        matches!(cell.function, CellFunction::Ram),
+        "SB_RAM40_4K should have CellFunction::Ram, got {:?}",
+        cell.function
+    );
+}
+
+#[test]
+fn test_ice40_ram_pin_map() {
+    let library = get_stdlib_library("ice40").expect("Failed to load ice40");
+    let (_, info) = library.find_ram_cell().unwrap();
+
+    assert_eq!(info.pin_map.read_data, "RDATA");
+    assert_eq!(info.pin_map.read_addr, "RADDR");
+    assert_eq!(info.pin_map.read_clk, "RCLK");
+    assert_eq!(info.pin_map.read_en, "RE");
+    assert_eq!(info.pin_map.write_data, "WDATA");
+    assert_eq!(info.pin_map.write_addr, "WADDR");
+    assert_eq!(info.pin_map.write_clk, "WCLK");
+    assert_eq!(info.pin_map.write_en, "WE");
+    assert_eq!(info.pin_map.write_mask, Some("MASK".to_string()));
+}
+
+#[test]
+fn test_bram_inference_single_block_256x8() {
+    // A 256x8 memory fits in a single SB_RAM40_4K (256x16 mode)
+    let lir = build_memblock_lir(8, 8, 256);
+    let library = get_stdlib_library("ice40").expect("Failed to load ice40");
+    let result = map_lir_to_gates(&lir, &library);
+
+    // Should have exactly 1 RAM cell
+    let ram_cells: Vec<_> = result
+        .netlist
+        .cells
+        .iter()
+        .filter(|c| c.cell_type == "SB_RAM40_4K")
+        .collect();
+    assert_eq!(
+        ram_cells.len(),
+        1,
+        "256x8 should fit in 1 SB_RAM40_4K, got {}",
+        ram_cells.len()
+    );
+
+    // Should NOT have hundreds of LUTs for mux tree
+    let lut_count = result
+        .netlist
+        .cells
+        .iter()
+        .filter(|c| c.cell_type.contains("LUT"))
+        .count();
+    println!(
+        "256x8 BRAM: {} RAM cells, {} LUTs",
+        ram_cells.len(),
+        lut_count
+    );
+}
+
+#[test]
+fn test_bram_inference_single_block_512x4() {
+    // A 512x4 memory fits in a single SB_RAM40_4K (512x8 mode)
+    let lir = build_memblock_lir(4, 9, 512);
+    let library = get_stdlib_library("ice40").expect("Failed to load ice40");
+    let result = map_lir_to_gates(&lir, &library);
+
+    let ram_cells: Vec<_> = result
+        .netlist
+        .cells
+        .iter()
+        .filter(|c| c.cell_type == "SB_RAM40_4K")
+        .collect();
+    assert_eq!(
+        ram_cells.len(),
+        1,
+        "512x4 should fit in 1 SB_RAM40_4K, got {}",
+        ram_cells.len()
+    );
+}
+
+#[test]
+fn test_bram_width_tiling() {
+    // A 256x32 memory needs width tiling: 32/16 = 2 blocks in parallel
+    let lir = build_memblock_lir(32, 8, 256);
+    let library = get_stdlib_library("ice40").expect("Failed to load ice40");
+    let result = map_lir_to_gates(&lir, &library);
+
+    let ram_count = result
+        .netlist
+        .cells
+        .iter()
+        .filter(|c| c.cell_type == "SB_RAM40_4K")
+        .count();
+    assert_eq!(
+        ram_count, 2,
+        "256x32 should need 2 SB_RAM40_4K (width tiling), got {}",
+        ram_count
+    );
+    println!("256x32 BRAM width tiling: {} RAM cells", ram_count);
+}
+
+#[test]
+fn test_bram_depth_tiling() {
+    // A 4096x4 memory needs depth tiling: 4096/1024 = 4 blocks deep
+    let lir = build_memblock_lir(4, 12, 4096);
+    let library = get_stdlib_library("ice40").expect("Failed to load ice40");
+    let result = map_lir_to_gates(&lir, &library);
+
+    let ram_count = result
+        .netlist
+        .cells
+        .iter()
+        .filter(|c| c.cell_type == "SB_RAM40_4K")
+        .count();
+    assert_eq!(
+        ram_count, 4,
+        "4096x4 should need 4 SB_RAM40_4K (depth tiling), got {}",
+        ram_count
+    );
+    println!("4096x4 BRAM depth tiling: {} RAM cells", ram_count);
+}
+
+#[test]
+fn test_bram_width_and_depth_tiling() {
+    // A 1024x32 memory needs both: 2 wide x 4 deep = 8 blocks
+    // With 256x16 aspect ratio: width_blocks = 32/16 = 2, depth_blocks = 1024/256 = 4
+    let lir = build_memblock_lir(32, 10, 1024);
+    let library = get_stdlib_library("ice40").expect("Failed to load ice40");
+    let result = map_lir_to_gates(&lir, &library);
+
+    let ram_count = result
+        .netlist
+        .cells
+        .iter()
+        .filter(|c| c.cell_type == "SB_RAM40_4K")
+        .count();
+    // 32-bit width needs 2 blocks wide (16 bits each), 1024 depth / 256 = 4 deep
+    assert_eq!(
+        ram_count, 8,
+        "1024x32 should need 8 SB_RAM40_4K (2 wide x 4 deep), got {}",
+        ram_count
+    );
+    println!("1024x32 BRAM tiling: {} RAM cells", ram_count);
+}
+
+#[test]
+fn test_bram_rom_inference() {
+    // Read-only memory: single input (raddr), no write ports
+    let mut lir = Lir::new("TestRom".to_string());
+    let clk = lir.add_input("clk".to_string(), 1);
+    lir.clocks.push(clk);
+    let raddr = lir.add_input("raddr".to_string(), 8);
+    let rdata = lir.add_output("rdata".to_string(), 8);
+
+    lir.add_seq_node(
+        LirOp::MemBlock {
+            data_width: 8,
+            addr_width: 8,
+            depth: 256,
+            has_write: false,
+            read_only: true,
+        },
+        vec![raddr],
+        rdata,
+        "rom".to_string(),
+        clk,
+        None,
+    );
+
+    let library = get_stdlib_library("ice40").expect("Failed to load ice40");
+    let result = map_lir_to_gates(&lir, &library);
+
+    let ram_count = result
+        .netlist
+        .cells
+        .iter()
+        .filter(|c| c.cell_type == "SB_RAM40_4K")
+        .count();
+    assert_eq!(
+        ram_count, 1,
+        "256x8 ROM should use 1 SB_RAM40_4K, got {}",
+        ram_count
+    );
+}
+
+#[test]
+fn test_generic_asic_has_no_ram_cell() {
+    let library = get_stdlib_library("generic_asic").expect("Failed to load generic_asic");
+    assert!(
+        library.find_ram_cell().is_none(),
+        "generic_asic should not have RAM cells"
+    );
 }

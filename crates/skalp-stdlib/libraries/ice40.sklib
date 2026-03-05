@@ -485,16 +485,34 @@ mechanism = "clock_jitter"
 name = "SB_RAM40_4K"
 function = "ram"
 fit = 1.50
-inputs = ["RDATA", "RADDR", "RCLK", "RCLKE", "RE", "WDATA", "WADDR", "WCLK", "WCLKE", "WE"]
+inputs = ["RADDR", "RCLK", "RCLKE", "RE", "WDATA", "WADDR", "WCLK", "WCLKE", "WE", "MASK"]
 outputs = ["RDATA"]
 nominal_voltage_mv = 1200
 min_voltage_mv = 1100
-timing_margin_voltage_mv = 1140
-voltage_delay_coefficient = 0.15
-voltage_sensitivity = 4
 setup_ps = 300
 hold_ps = 100
 clk_to_q_ps = 800
+
+[cells.ram_info]
+block_bits = 4096
+aspect_ratios = [[256, 16], [512, 8], [1024, 4], [2048, 2]]
+true_dual_port = true
+has_write_mask = true
+write_mask_granularity = 1
+has_output_register = false
+
+[cells.ram_info.pin_map]
+read_data = "RDATA"
+read_addr = "RADDR"
+read_clk = "RCLK"
+read_en = "RE"
+read_clk_en = "RCLKE"
+write_data = "WDATA"
+write_addr = "WADDR"
+write_clk = "WCLK"
+write_en = "WE"
+write_clk_en = "WCLKE"
+write_mask = "MASK"
 
 [[cells.failure_modes]]
 name = "config_upset"

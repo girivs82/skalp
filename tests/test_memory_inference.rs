@@ -368,3 +368,279 @@ impl RegMemTest {
 
     println!("Register memory style test PASSED!");
 }
+
+// =============================================================================
+// LIR-Level Memory Inference Tests
+// =============================================================================
+
+use skalp_lir::{lower_mir_module_to_lir, lower_mir_module_to_lir_with_bram, LirOp};
+use skalp_mir::MirCompiler;
+
+fn compile_to_mir_module(
+    source: &str,
+) -> skalp_mir::mir::Module {
+    use skalp_frontend::parse_and_build_hir;
+
+    let hir = parse_and_build_hir(source).expect("HIR parsing failed");
+    let compiler = MirCompiler::new();
+    let mir = compiler
+        .compile_to_mir(&hir)
+        .expect("MIR compilation failed");
+    mir.modules.into_iter().next().expect("No modules")
+}
+
+/// Verify that memory signals with style=block produce MemBlock in LIR
+/// when target_has_bram is enabled
+#[test]
+fn test_memory_block_style_produces_memblock_lir() {
+    let source = r#"
+entity BramLirTest {
+    in clk: clock
+    in addr: bit[8]
+    in wdata: bit[8]
+    in we: bit
+    out rdata: bit[8]
+
+    #[memory(depth = 256, style = block)]
+    signal mem: bit[8]
+}
+
+impl BramLirTest {
+    on(clk.rise) {
+        if we {
+            mem[addr] = wdata
+        }
+    }
+    rdata = mem[addr]
+}
+"#;
+
+    let module = compile_to_mir_module(source);
+
+    // With BRAM enabled, should produce MemBlock
+    let lir_result = lower_mir_module_to_lir_with_bram(&module);
+    let lir = &lir_result.lir;
+
+    let memblock_count = lir
+        .nodes
+        .iter()
+        .filter(|n| matches!(n.op, LirOp::MemBlock { .. }))
+        .count();
+    assert!(
+        memblock_count > 0,
+        "LIR should contain MemBlock node for style=block memory. Nodes: {:?}",
+        lir.nodes.iter().map(|n| format!("{:?}", n.op)).collect::<Vec<_>>()
+    );
+
+    println!("MemBlock LIR node count: {}", memblock_count);
+}
+
+/// Verify that memory signals without BRAM target do NOT produce MemBlock
+#[test]
+fn test_memory_block_style_without_bram_target() {
+    let source = r#"
+entity NoBramTest {
+    in clk: clock
+    in addr: bit[4]
+    in wdata: bit[8]
+    in we: bit
+    out rdata: bit[8]
+
+    #[memory(depth = 16, style = block)]
+    signal mem: bit[8]
+}
+
+impl NoBramTest {
+    on(clk.rise) {
+        if we {
+            mem[addr] = wdata
+        }
+    }
+    rdata = mem[addr]
+}
+"#;
+
+    let module = compile_to_mir_module(source);
+
+    // Without BRAM target, style=block still forces BRAM inference
+    // (it's a user override — they explicitly requested block RAM)
+    let lir_result = lower_mir_module_to_lir(&module);
+    let lir = &lir_result.lir;
+
+    let memblock_count = lir
+        .nodes
+        .iter()
+        .filter(|n| matches!(n.op, LirOp::MemBlock { .. }))
+        .count();
+    // style=block always uses BRAM regardless of target
+    assert!(
+        memblock_count > 0,
+        "style=block should produce MemBlock even without target BRAM"
+    );
+}
+
+/// Verify that style=distributed does NOT produce MemBlock
+#[test]
+fn test_memory_distributed_stays_luts() {
+    let source = r#"
+entity DistLirTest {
+    in clk: clock
+    in addr: bit[4]
+    in wdata: bit[8]
+    in we: bit
+    out rdata: bit[8]
+
+    #[memory(depth = 16, style = distributed)]
+    signal mem: bit[8]
+}
+
+impl DistLirTest {
+    on(clk.rise) {
+        if we {
+            mem[addr] = wdata
+        }
+    }
+    rdata = mem[addr]
+}
+"#;
+
+    let module = compile_to_mir_module(source);
+    let lir_result = lower_mir_module_to_lir_with_bram(&module);
+    let lir = &lir_result.lir;
+
+    let memblock_count = lir
+        .nodes
+        .iter()
+        .filter(|n| matches!(n.op, LirOp::MemBlock { .. }))
+        .count();
+    assert_eq!(
+        memblock_count, 0,
+        "style=distributed should NOT produce MemBlock, should stay as LUT mux tree"
+    );
+}
+
+/// Verify auto-inference heuristic: large memory → BRAM
+#[test]
+fn test_auto_inference_large_memory() {
+    let source = r#"
+entity AutoLargeTest {
+    in clk: clock
+    in addr: bit[10]
+    in wdata: bit[8]
+    in we: bit
+    out rdata: bit[8]
+
+    #[memory(depth = 1024)]
+    signal mem: bit[8]
+}
+
+impl AutoLargeTest {
+    on(clk.rise) {
+        if we {
+            mem[addr] = wdata
+        }
+    }
+    rdata = mem[addr]
+}
+"#;
+
+    let module = compile_to_mir_module(source);
+
+    // With BRAM target: 1024x8 = 8192 bits > 256, depth 1024 > 16 → BRAM
+    let lir_result = lower_mir_module_to_lir_with_bram(&module);
+    let lir = &lir_result.lir;
+
+    let memblock_count = lir
+        .nodes
+        .iter()
+        .filter(|n| matches!(n.op, LirOp::MemBlock { .. }))
+        .count();
+    assert!(
+        memblock_count > 0,
+        "Auto style with 1024x8 should infer BRAM when target has BRAM"
+    );
+}
+
+/// Verify auto-inference heuristic: small memory → LUTs
+#[test]
+fn test_auto_inference_small_memory() {
+    let source = r#"
+entity AutoSmallTest {
+    in clk: clock
+    in addr: bit[3]
+    in wdata: bit[4]
+    in we: bit
+    out rdata: bit[4]
+
+    #[memory(depth = 8)]
+    signal mem: bit[4]
+}
+
+impl AutoSmallTest {
+    on(clk.rise) {
+        if we {
+            mem[addr] = wdata
+        }
+    }
+    rdata = mem[addr]
+}
+"#;
+
+    let module = compile_to_mir_module(source);
+
+    // With BRAM target: 8x4 = 32 bits < 256 → stays as LUTs
+    let lir_result = lower_mir_module_to_lir_with_bram(&module);
+    let lir = &lir_result.lir;
+
+    let memblock_count = lir
+        .nodes
+        .iter()
+        .filter(|n| matches!(n.op, LirOp::MemBlock { .. }))
+        .count();
+    assert_eq!(
+        memblock_count, 0,
+        "Auto style with 8x4 (32 bits) should NOT infer BRAM"
+    );
+}
+
+/// Verify that auto-inference without BRAM target never uses BRAM
+#[test]
+fn test_auto_inference_no_bram_target() {
+    let source = r#"
+entity AutoNoBramTest {
+    in clk: clock
+    in addr: bit[10]
+    in wdata: bit[8]
+    in we: bit
+    out rdata: bit[8]
+
+    #[memory(depth = 1024)]
+    signal mem: bit[8]
+}
+
+impl AutoNoBramTest {
+    on(clk.rise) {
+        if we {
+            mem[addr] = wdata
+        }
+    }
+    rdata = mem[addr]
+}
+"#;
+
+    let module = compile_to_mir_module(source);
+
+    // Without BRAM target, even large memories stay as LUTs for auto
+    let lir_result = lower_mir_module_to_lir(&module);
+    let lir = &lir_result.lir;
+
+    let memblock_count = lir
+        .nodes
+        .iter()
+        .filter(|n| matches!(n.op, LirOp::MemBlock { .. }))
+        .count();
+    assert_eq!(
+        memblock_count, 0,
+        "Auto style without BRAM target should NOT produce MemBlock"
+    );
+}

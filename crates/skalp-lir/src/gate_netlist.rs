@@ -66,6 +66,9 @@ pub struct Cell {
     /// LUT initialization value (for FPGA LUT cells)
     /// For LUT4: 16-bit truth table, For LUT6: 64-bit truth table
     pub lut_init: Option<u64>,
+    /// Vendor-specific parameters (e.g., READ_MODE, WRITE_MODE for BRAM cells)
+    #[serde(default)]
+    pub parameters: IndexMap<String, String>,
 }
 
 impl Cell {
@@ -94,6 +97,7 @@ impl Cell {
             source_op: None,
             safety_classification: CellSafetyClassification::default(),
             lut_init: None,
+            parameters: IndexMap::new(),
         }
     }
 
@@ -124,6 +128,7 @@ impl Cell {
             source_op: None,
             safety_classification: CellSafetyClassification::default(),
             lut_init: Some(init),
+            parameters: IndexMap::new(),
         }
     }
 
@@ -155,6 +160,7 @@ impl Cell {
             source_op: None,
             safety_classification: CellSafetyClassification::default(),
             lut_init: None,
+            parameters: IndexMap::new(),
         }
     }
 
@@ -189,6 +195,7 @@ impl Cell {
             source_op: None,
             safety_classification: CellSafetyClassification::default(),
             lut_init: None,
+            parameters: IndexMap::new(),
         }
     }
 

@@ -800,6 +800,20 @@ pub enum LirOp {
     MemRead { data_width: u32, addr_width: u32 },
     /// Memory write port
     MemWrite { data_width: u32, addr_width: u32 },
+    /// Combined memory block (read + optional write)
+    ///
+    /// Technology-independent representation: "I need a memory with these dimensions."
+    /// The tech mapper decides how to implement it (BRAM, LUT-RAM, etc.).
+    ///
+    /// Inputs: [raddr, waddr, wdata, we] (subset for read_only: [raddr])
+    /// Output: rdata
+    MemBlock {
+        data_width: u32,
+        addr_width: u32,
+        depth: u32,
+        has_write: bool,
+        read_only: bool,
+    },
 
     // === Special ===
     /// Constant value
@@ -917,6 +931,7 @@ impl LirOp {
             LirOp::Reg { width, .. } | LirOp::Latch { width } => *width,
             LirOp::MemRead { data_width, .. } => *data_width,
             LirOp::MemWrite { .. } => 0, // Write has no data output
+            LirOp::MemBlock { data_width, .. } => *data_width,
             LirOp::Constant { width, .. } | LirOp::Buffer { width } | LirOp::Tristate { width } => {
                 *width
             }
@@ -990,6 +1005,9 @@ impl LirOp {
             LirOp::Latch { .. } => 2,    // en, d
             LirOp::MemRead { .. } => 1,  // addr
             LirOp::MemWrite { .. } => 3, // addr, data, we
+            LirOp::MemBlock { has_write, .. } => {
+                if *has_write { 4 } else { 1 } // [raddr, waddr, wdata, we] or [raddr]
+            }
             LirOp::Constant { .. } => 0,
             LirOp::Buffer { .. } => 1,
             LirOp::Tristate { .. } => 2, // data, enable
@@ -1021,6 +1039,7 @@ impl LirOp {
                 | LirOp::Latch { .. }
                 | LirOp::MemRead { .. }
                 | LirOp::MemWrite { .. }
+                | LirOp::MemBlock { .. }
                 | LirOp::NclReg { .. } // NCL register holds state between phases
         )
     }
@@ -1223,6 +1242,13 @@ impl Lir {
             reset,
         });
         id
+    }
+
+    /// Set the clock signal on a node (used for deferred clock assignment)
+    pub fn set_node_clock(&mut self, node_id: LirNodeId, clock: LirSignalId) {
+        if let Some(node) = self.nodes.get_mut(node_id.0 as usize) {
+            node.clock = Some(clock);
+        }
     }
 
     /// Get a signal by name

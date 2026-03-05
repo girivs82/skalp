@@ -30,6 +30,7 @@ use crate::gate_netlist::{
     Cell, CellId, CellSafetyClassification, GateNet, GateNetId, GateNetlist,
 };
 use crate::tech_library::TimingCorner;
+use indexmap::IndexMap;
 
 /// Fix strategy for fork timing violations
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -433,6 +434,7 @@ fn insert_delay_on_net(
             source_op: Some("async_sta_fix_ready_delay".to_string()),
             safety_classification: CellSafetyClassification::default(),
             lut_init: None,
+            parameters: IndexMap::new(),
         };
 
         // Add buffer cell's fanout to the input net
@@ -615,6 +617,7 @@ fn fix_single_violation(
             source_op: Some("async_sta_fix".to_string()),
             safety_classification: CellSafetyClassification::default(),
             lut_init: None,
+            parameters: IndexMap::new(),
         };
 
         let buffer_cell_id = buffer_cell.id;
@@ -841,6 +844,7 @@ mod tests {
             source_op: None,
             safety_classification: Default::default(),
             lut_init: None,
+            parameters: IndexMap::new(),
             function: None,
         };
 
@@ -859,6 +863,7 @@ mod tests {
             source_op: None,
             safety_classification: Default::default(),
             lut_init: None,
+            parameters: IndexMap::new(),
             function: None,
         };
 
