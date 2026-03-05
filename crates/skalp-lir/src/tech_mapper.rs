@@ -88,6 +88,8 @@ pub struct TechMapStats {
     pub direct_mappings: usize,
     /// Decomposed mappings (1:N)
     pub decomposed_mappings: usize,
+    /// Clock buffers inserted
+    pub clock_buffers_inserted: usize,
 }
 
 /// Technology mapper
@@ -233,6 +235,9 @@ impl<'a> TechMapper<'a> {
             self.map_node(node, word_lir);
             self.stats.nodes_processed += 1;
         }
+
+        // Phase 3: Insert global clock buffers on clock nets
+        self.insert_clock_buffers();
 
         // Propagate NCL flag from LIR (set by expand_to_ncl)
         self.netlist.is_ncl = word_lir.is_ncl;
@@ -3772,6 +3777,109 @@ impl<'a> TechMapper<'a> {
     }
 
     // =========================================================================
+    // Clock Buffer Insertion
+    // =========================================================================
+
+    /// Insert global clock buffers on all clock nets.
+    ///
+    /// For each clock net, creates a ClkBuf cell (e.g., SB_GB on iCE40, DCCA on ECP5)
+    /// and rewires all clock consumers to use the buffered output. This ensures clocks
+    /// are routed through dedicated global clock routing fabric for timing closure.
+    fn insert_clock_buffers(&mut self) {
+        // Check if the library has a clock buffer cell
+        let (clk_buf_cell, clk_buf_info) = match self.library.find_clk_buf_cell() {
+            Some(pair) => pair,
+            None => return, // No clock buffer in library (e.g., generic_asic)
+        };
+
+        let cell_name = clk_buf_cell.name.clone();
+        let cell_fit = clk_buf_cell.fit;
+        let cell_info = LibraryCellInfo::from_library_cell(clk_buf_cell);
+        let input_pin = clk_buf_info.input.clone();
+        let output_pin = clk_buf_info.output.clone();
+        let has_enable = clk_buf_info.has_enable;
+        let enable_pin = clk_buf_info.enable.clone();
+
+        // Clone clock net IDs to avoid borrow conflict
+        let clock_nets: Vec<GateNetId> = self.netlist.clocks.clone();
+
+        for clock_net_id in clock_nets {
+            let clock_name = self
+                .netlist
+                .nets
+                .get(clock_net_id.0 as usize)
+                .map(|n| n.name.clone())
+                .unwrap_or_else(|| format!("clk_{}", clock_net_id.0));
+
+            // Create buffered output net
+            let buf_out_id = self.alloc_net_id();
+            let mut buf_out_net =
+                GateNet::new(buf_out_id, format!("{}_gbuf", clock_name));
+            buf_out_net.is_clock = true;
+            self.netlist.add_net(buf_out_net);
+
+            // Build input list: clock input, plus tie-high for enable if needed
+            let mut cell_inputs = vec![clock_net_id];
+            if has_enable {
+                let tie_high = self.get_tie_high();
+                cell_inputs.push(tie_high);
+            }
+
+            // Create clock buffer cell
+            let mut cell = Cell::new_comb(
+                CellId(0),
+                cell_name.clone(),
+                self.library.name.clone(),
+                cell_fit,
+                format!("{}_gbuf", clock_name),
+                cell_inputs,
+                vec![buf_out_id],
+            );
+            cell.source_op = Some("ClockBuffer".to_string());
+            cell_info.apply_to_cell(&mut cell);
+            self.add_cell(cell);
+
+            // Rewire all clock consumers to use the buffered net
+            self.rewire_clock_consumers(clock_net_id, buf_out_id);
+
+            self.stats.clock_buffers_inserted += 1;
+        }
+    }
+
+    /// Rewire all clock consumers from `old_net` to `new_net`.
+    ///
+    /// Updates cell clock connections and input pin connections, skipping the
+    /// clock buffer cell itself (which drives `new_net` from `old_net`).
+    fn rewire_clock_consumers(&mut self, old_net: GateNetId, new_net: GateNetId) {
+        for cell_idx in 0..self.netlist.cells.len() {
+            let cell = &self.netlist.cells[cell_idx];
+
+            // Skip the clock buffer cell itself (its input is old_net and output is new_net)
+            if cell.inputs.contains(&old_net) && cell.outputs.contains(&new_net) {
+                continue;
+            }
+
+            // Rewire clock connection
+            if self.netlist.cells[cell_idx].clock == Some(old_net) {
+                self.netlist.cells[cell_idx].clock = Some(new_net);
+            }
+
+            // Rewire input pins
+            for pin_idx in 0..self.netlist.cells[cell_idx].inputs.len() {
+                if self.netlist.cells[cell_idx].inputs[pin_idx] == old_net {
+                    self.netlist.cells[cell_idx].inputs[pin_idx] = new_net;
+                }
+            }
+        }
+
+        // Note: netlist.clocks is NOT updated — it must keep pointing to the
+        // original primary input clock nets for simulation clock edge detection.
+        // The SIR builder uses netlist.clocks to identify the clock signal for
+        // sequential blocks. The physical routing through clock buffers is captured
+        // by the cell input/output connections.
+    }
+
+    // =========================================================================
     // NCL (Null Convention Logic) Mapping Functions
     // =========================================================================
     //
@@ -6957,6 +7065,7 @@ pub fn map_hierarchical_to_gates(
                         nets_created: compiled_ip.netlist.nets.len(),
                         direct_mappings: 0,
                         decomposed_mappings: 0,
+                        clock_buffers_inserted: 0,
                     },
                     warnings: vec![format!(
                         "Loaded pre-compiled netlist from '{}'",
@@ -7180,6 +7289,7 @@ fn create_blackbox_netlist(
             nets_created: total_nets,
             direct_mappings: 1,
             decomposed_mappings: 0,
+            clock_buffers_inserted: 0,
         },
         warnings: vec![format!(
             "Created blackbox cell '{}' for vendor IP",

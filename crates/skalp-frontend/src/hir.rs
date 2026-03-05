@@ -1942,6 +1942,9 @@ pub struct HirClockDomain {
     pub id: ClockDomainId,
     /// Clock domain name (e.g., 'clk)
     pub name: String,
+    /// Target frequency in Hz (from `'clk: 100MHz` or VHDL `clock_frequency` attribute)
+    #[serde(default)]
+    pub frequency_hz: Option<u64>,
 }
 
 /// Struct type in HIR

@@ -227,6 +227,8 @@ struct SymbolTable {
     variables: IndexMap<String, VariableId>,
     constants: IndexMap<String, ConstantId>,
     clock_domains: IndexMap<String, ClockDomainId>,
+    /// Frequency constraints for clock domains (name → Hz)
+    clock_domain_frequencies: IndexMap<String, u64>,
     power_domains: IndexMap<String, PowerDomainId>,
 
     /// User-defined types (struct, enum, union)
@@ -800,12 +802,16 @@ impl HirBuilderContext {
                 }
 
                 // Register clock domain lifetimes in symbol table
+                // (may already be registered by build_generic_param for frequency-bound lifetimes)
                 for param in &params {
                     if let HirGenericType::ClockDomain = param.param_type {
-                        let domain_id = ClockDomainId(self.symbols.clock_domains.len() as u32);
-                        self.symbols
-                            .clock_domains
-                            .insert(param.name.clone(), domain_id);
+                        if !self.symbols.clock_domains.contains_key(&param.name) {
+                            let domain_id =
+                                ClockDomainId(self.symbols.clock_domains.len() as u32);
+                            self.symbols
+                                .clock_domains
+                                .insert(param.name.clone(), domain_id);
+                        }
                     }
                 }
 
@@ -999,8 +1005,7 @@ impl HirBuilderContext {
         // Build clock domains - look for lifetime-like annotations
         let mut clock_domains = Vec::new();
 
-        // For now, extract any clock domain from port types
-        // In the future, this should parse explicit clock domain parameters
+        // Extract clock domains from port types, with optional frequency from generic params
         let mut seen_domains = std::collections::HashSet::new();
         for port in &ports {
             let domain_id = match &port.port_type {
@@ -1014,9 +1019,26 @@ impl HirBuilderContext {
 
             if let Some(domain_id) = domain_id {
                 if seen_domains.insert(domain_id) {
+                    // Look up domain name and frequency from symbol table
+                    let (domain_name, frequency_hz) = self
+                        .symbols
+                        .clock_domains
+                        .iter()
+                        .find(|(_, &id)| id == domain_id)
+                        .map(|(name, _)| {
+                            let freq = self
+                                .symbols
+                                .clock_domain_frequencies
+                                .get(name)
+                                .copied();
+                            (name.clone(), freq)
+                        })
+                        .unwrap_or_else(|| (format!("clk_{}", domain_id.0), None));
+
                     clock_domains.push(HirClockDomain {
                         id: domain_id,
-                        name: format!("clk_{}", domain_id.0),
+                        name: domain_name,
+                        frequency_hz,
                     });
                 }
             }
@@ -13990,6 +14012,7 @@ impl SymbolTable {
             variables: IndexMap::new(),
             constants: IndexMap::new(),
             clock_domains: IndexMap::new(),
+            clock_domain_frequencies: IndexMap::new(),
             power_domains: IndexMap::new(),
             user_types: IndexMap::new(),
             variable_types: IndexMap::new(),
@@ -14175,13 +14198,71 @@ impl HirBuilderContext {
         generics
     }
 
+    /// Parse a frequency bound from a generic parameter node.
+    ///
+    /// Looks for the pattern `: <number> <unit>` after a lifetime token.
+    /// Returns the frequency in Hz if found.
+    fn parse_frequency_bound(&self, node: &SyntaxNode) -> Option<u64> {
+        let tokens: Vec<_> = node
+            .children_with_tokens()
+            .filter_map(|elem| elem.into_token())
+            .collect();
+
+        // Look for Colon → IntLiteral → Ident(unit) sequence
+        let colon_pos = tokens.iter().position(|t| t.kind() == SyntaxKind::Colon)?;
+        let number_token = tokens.get(colon_pos + 1)?;
+        if number_token.kind() != SyntaxKind::IntLiteral {
+            return None;
+        }
+
+        let number_text = number_token.text().replace('_', "");
+        let number: u64 = number_text.parse().ok()?;
+
+        // Check for unit identifier
+        if let Some(unit_token) = tokens.get(colon_pos + 2) {
+            if unit_token.kind() == SyntaxKind::Ident {
+                let unit = unit_token.text();
+                match unit.to_lowercase().as_str() {
+                    "ghz" => return Some(number * 1_000_000_000),
+                    "mhz" => return Some(number * 1_000_000),
+                    "khz" => return Some(number * 1_000),
+                    "hz" => return Some(number),
+                    _ => return None,
+                }
+            }
+        }
+
+        // No unit — treat as Hz
+        Some(number)
+    }
+
     /// Build generic parameter
     fn build_generic_param(&mut self, node: &SyntaxNode) -> Option<HirGeneric> {
         // Check if it's a lifetime parameter ('core, 'aon, etc.)
         // Entity-level lifetimes are power domains; clock domains come from clock<'clk> types
+        // UNLESS a frequency bound is present ('clk: 100MHz), which makes it a clock domain
         if let Some(lifetime_token) = node.first_token_of_kind(SyntaxKind::Lifetime) {
             // Strip the leading apostrophe from the lifetime name
             let name = lifetime_token.text().trim_start_matches('\'').to_string();
+
+            // Check for frequency bound ('clk: 100MHz → ClockDomain)
+            let frequency_hz = self.parse_frequency_bound(node);
+            if let Some(freq) = frequency_hz {
+                // Lifetime with frequency → clock domain
+                let domain_id = ClockDomainId(self.symbols.clock_domains.len() as u32);
+                self.symbols
+                    .clock_domains
+                    .insert(name.clone(), domain_id);
+                self.symbols
+                    .clock_domain_frequencies
+                    .insert(name.clone(), freq);
+
+                return Some(HirGeneric {
+                    name,
+                    param_type: HirGenericType::ClockDomain,
+                    default_value: None,
+                });
+            }
 
             // Check for (default) marker after the lifetime
             // Syntax: 'core (default) or 'core(default)

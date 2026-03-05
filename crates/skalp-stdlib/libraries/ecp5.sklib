@@ -979,6 +979,78 @@ fault_type = "open"
 mechanism = "power_rail_failure"
 
 # =============================================================================
+# DCCA - Dynamic Clock Control and Alignment
+# Global clock buffer with optional clock enable.
+# =============================================================================
+
+[[cells]]
+name = "DCCA"
+function = "clk_buf"
+fit = 0.08
+inputs = ["CLKI", "CE"]
+outputs = ["CLKO"]
+nominal_voltage_mv = 1100
+min_voltage_mv = 1000
+
+[cells.clk_buf_info]
+input = "CLKI"
+output = "CLKO"
+has_enable = true
+enable = "CE"
+
+# =============================================================================
+# EHXPLLL - Enhanced PLL
+# High-performance PLL with up to 4 clock outputs.
+# Input: 8-400 MHz, Output: 3.125-800 MHz.
+# =============================================================================
+
+[[cells]]
+name = "EHXPLLL"
+function = "pll"
+fit = 0.15
+inputs = ["CLKI", "CLKFB", "PHASESEL1", "PHASESEL0", "PHASEDIR", "PHASESTEP", "PHASELOADREG", "STDBY", "PLLWAKESYNC", "RST", "ENCLKOP", "ENCLKOS", "ENCLKOS2", "ENCLKOS3"]
+outputs = ["CLKOP", "CLKOS", "CLKOS2", "CLKOS3", "LOCK", "INTLOCK", "REFCLK", "CLKINTFB"]
+nominal_voltage_mv = 1100
+min_voltage_mv = 1000
+
+[cells.pll_info]
+min_input_freq_mhz = 8.0
+max_input_freq_mhz = 400.0
+min_output_freq_mhz = 3.125
+max_output_freq_mhz = 800.0
+num_outputs = 4
+supports_feedback = true
+
+[cells.pll_info.pin_map]
+ref_clk = "CLKI"
+out_clk = "CLKOP"
+lock = "LOCK"
+reset = "RST"
+feedback = "CLKFB"
+secondary_outputs = ["CLKOS", "CLKOS2", "CLKOS3"]
+
+# =============================================================================
+# CLKDIVF - Clock Divider
+# Divides input clock by programmable ratio.
+# Supported dividers: 2, 3.5, 4, 5, 6, 7, 8.
+# =============================================================================
+
+[[cells]]
+name = "CLKDIVF"
+function = "clk_div"
+fit = 0.06
+inputs = ["CLKI", "RST", "ALIGNWD"]
+outputs = ["CDIVX"]
+nominal_voltage_mv = 1100
+min_voltage_mv = 1000
+
+[cells.clk_div_info]
+clk_input = "CLKI"
+clk_output = "CDIVX"
+reset = "RST"
+supported_dividers = [2.0, 3.5, 4.0, 5.0, 6.0, 7.0, 8.0]
+
+# =============================================================================
 # Decomposition Rules for ECP5
 # =============================================================================
 

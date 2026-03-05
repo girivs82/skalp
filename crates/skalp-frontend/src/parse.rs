@@ -4460,9 +4460,18 @@ impl<'a> ParseState<'a> {
     fn parse_generic_param(&mut self) {
         self.start_node(SyntaxKind::GenericParam);
 
-        // Check if it's a lifetime parameter ('clk)
+        // Check if it's a lifetime parameter ('clk) or ('clk: 100MHz)
         if self.at(SyntaxKind::Lifetime) {
             self.bump(); // consume 'lifetime
+
+            // Optional frequency bound: ': 100MHz' / ': 48KHz' / ': 1GHz'
+            if self.at(SyntaxKind::Colon) {
+                self.bump(); // consume ':'
+                self.expect(SyntaxKind::IntLiteral); // frequency value
+                if self.at(SyntaxKind::Ident) {
+                    self.bump(); // consume unit (MHz, KHz, GHz, Hz)
+                }
+            }
         }
         // Legacy support for apostrophe + ident
         else if self.at(SyntaxKind::Apostrophe) {

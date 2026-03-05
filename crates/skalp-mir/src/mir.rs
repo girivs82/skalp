@@ -450,6 +450,9 @@ pub struct ClockDomain {
     pub clock_signal: Option<SignalId>,
     /// Reset signal for this domain
     pub reset_signal: Option<SignalId>,
+    /// Target frequency in Hz (from `'clk: 100MHz` or VHDL `clock_frequency` attribute)
+    #[serde(default)]
+    pub frequency_hz: Option<u64>,
 }
 
 /// Process block (maps to always block)

@@ -1406,3 +1406,288 @@ fn test_generic_asic_no_dsp() {
         "generic_asic should not have DSP cells"
     );
 }
+
+// =============================================================================
+// Clock Infrastructure Tests
+// =============================================================================
+
+#[test]
+fn test_ice40_has_clock_buf() {
+    let library = get_stdlib_library("ice40").expect("Failed to load ice40");
+    let clk_buf = library.find_clk_buf_cell();
+    assert!(clk_buf.is_some(), "ice40 should have a clock buffer cell");
+
+    let (cell, info) = clk_buf.unwrap();
+    assert_eq!(cell.name, "SB_GB");
+    assert!(
+        matches!(cell.function, CellFunction::ClkBuf),
+        "SB_GB should have CellFunction::ClkBuf, got {:?}",
+        cell.function
+    );
+    assert_eq!(info.input, "USER_SIGNAL_TO_GLOBAL_BUFFER");
+    assert_eq!(info.output, "GLOBAL_BUFFER_OUTPUT");
+    assert!(!info.has_enable, "SB_GB should not have an enable pin");
+}
+
+#[test]
+fn test_ice40_has_pll() {
+    let library = get_stdlib_library("ice40").expect("Failed to load ice40");
+    let pll = library.find_pll_cell();
+    assert!(pll.is_some(), "ice40 should have a PLL cell");
+
+    let (cell, info) = pll.unwrap();
+    assert_eq!(cell.name, "SB_PLL40_CORE");
+    assert!(
+        matches!(cell.function, CellFunction::Pll),
+        "SB_PLL40_CORE should have CellFunction::Pll, got {:?}",
+        cell.function
+    );
+
+    // Frequency ranges
+    assert!((info.min_input_freq_mhz - 10.0).abs() < 0.01);
+    assert!((info.max_input_freq_mhz - 133.0).abs() < 0.01);
+    assert!((info.min_output_freq_mhz - 16.0).abs() < 0.01);
+    assert!((info.max_output_freq_mhz - 275.0).abs() < 0.01);
+    assert_eq!(info.num_outputs, 1);
+    assert!(!info.supports_feedback);
+
+    // Pin map
+    assert_eq!(info.pin_map.ref_clk, "REFERENCECLK");
+    assert_eq!(info.pin_map.out_clk, "PLLOUTCORE");
+    assert_eq!(info.pin_map.lock, "LOCK");
+    assert_eq!(info.pin_map.global_out, Some("PLLOUTGLOBAL".to_string()));
+}
+
+#[test]
+fn test_ecp5_has_clock_cells() {
+    let library = get_stdlib_library("ecp5").expect("Failed to load ecp5");
+
+    // DCCA — clock buffer
+    let clk_buf = library.find_clk_buf_cell();
+    assert!(clk_buf.is_some(), "ECP5 should have a clock buffer cell");
+    let (cell, info) = clk_buf.unwrap();
+    assert_eq!(cell.name, "DCCA");
+    assert!(matches!(cell.function, CellFunction::ClkBuf));
+    assert_eq!(info.input, "CLKI");
+    assert_eq!(info.output, "CLKO");
+    assert!(info.has_enable, "DCCA should have an enable pin");
+    assert_eq!(info.enable, Some("CE".to_string()));
+
+    // EHXPLLL — PLL
+    let pll = library.find_pll_cell();
+    assert!(pll.is_some(), "ECP5 should have a PLL cell");
+    let (cell, _) = pll.unwrap();
+    assert_eq!(cell.name, "EHXPLLL");
+    assert!(matches!(cell.function, CellFunction::Pll));
+
+    // CLKDIVF — clock divider
+    let clk_div = library.find_clk_div_cell();
+    assert!(clk_div.is_some(), "ECP5 should have a clock divider cell");
+    let (cell, info) = clk_div.unwrap();
+    assert_eq!(cell.name, "CLKDIVF");
+    assert!(matches!(cell.function, CellFunction::ClkDiv));
+    assert_eq!(info.clk_input, "CLKI");
+    assert_eq!(info.clk_output, "CDIVX");
+    assert!(
+        info.supported_dividers.contains(&2.0),
+        "Should support divide-by-2"
+    );
+    assert!(
+        info.supported_dividers.contains(&8.0),
+        "Should support divide-by-8"
+    );
+}
+
+#[test]
+fn test_ecp5_pll_cell_info() {
+    let library = get_stdlib_library("ecp5").expect("Failed to load ecp5");
+    let (cell, info) = library.find_pll_cell().expect("ECP5 should have PLL cell");
+
+    assert_eq!(cell.name, "EHXPLLL");
+    assert_eq!(info.num_outputs, 4);
+    assert!(info.supports_feedback);
+
+    // Frequency ranges
+    assert!((info.min_input_freq_mhz - 8.0).abs() < 0.01);
+    assert!((info.max_input_freq_mhz - 400.0).abs() < 0.01);
+    assert!((info.min_output_freq_mhz - 3.125).abs() < 0.01);
+    assert!((info.max_output_freq_mhz - 800.0).abs() < 0.01);
+
+    // Pin map
+    assert_eq!(info.pin_map.ref_clk, "CLKI");
+    assert_eq!(info.pin_map.out_clk, "CLKOP");
+    assert_eq!(info.pin_map.lock, "LOCK");
+    assert_eq!(info.pin_map.feedback, Some("CLKFB".to_string()));
+    assert_eq!(
+        info.pin_map.secondary_outputs,
+        vec!["CLKOS", "CLKOS2", "CLKOS3"]
+    );
+}
+
+/// Build a simple 4-bit register LIR: output = reg(input) on rising clock edge
+fn build_register_lir(width: u32) -> Lir {
+    let mut lir = Lir::new("TestRegister".to_string());
+
+    let clk = lir.add_input("clk".to_string(), 1);
+    lir.clocks.push(clk);
+    let d = lir.add_input("d".to_string(), width);
+    let q = lir.add_output("q".to_string(), width);
+
+    lir.add_seq_node(
+        LirOp::Reg {
+            width,
+            has_enable: false,
+            has_reset: false,
+            async_reset: false,
+            reset_value: None,
+        },
+        vec![d],
+        q,
+        "reg0".to_string(),
+        clk,
+        None,
+    );
+
+    lir
+}
+
+#[test]
+fn test_clock_buffer_insertion_ice40() {
+    let lir = build_register_lir(4);
+    let library = get_stdlib_library("ice40").expect("Failed to load ice40");
+    let result = map_lir_to_gates(&lir, &library);
+
+    // Should have exactly 1 SB_GB cell
+    let gb_cells: Vec<_> = result
+        .netlist
+        .cells
+        .iter()
+        .filter(|c| c.cell_type == "SB_GB")
+        .collect();
+    assert_eq!(
+        gb_cells.len(),
+        1,
+        "Should insert exactly 1 SB_GB clock buffer, got {}",
+        gb_cells.len()
+    );
+    assert_eq!(
+        gb_cells[0].source_op.as_deref(),
+        Some("ClockBuffer"),
+        "Clock buffer cell should have source_op 'ClockBuffer'"
+    );
+
+    // The buffered clock net should be used by DFF cells
+    let buf_out_net = gb_cells[0].outputs[0];
+    let dff_cells: Vec<_> = result
+        .netlist
+        .cells
+        .iter()
+        .filter(|c| c.cell_type.starts_with("SB_DFF"))
+        .collect();
+    assert!(
+        !dff_cells.is_empty(),
+        "Should have at least one DFF cell for the register"
+    );
+    for dff in &dff_cells {
+        assert_eq!(
+            dff.clock,
+            Some(buf_out_net),
+            "DFF cell '{}' should use the buffered clock net, not the raw clock input",
+            dff.path
+        );
+    }
+}
+
+#[test]
+fn test_clock_buffer_insertion_ecp5() {
+    let lir = build_register_lir(4);
+    let library = get_stdlib_library("ecp5").expect("Failed to load ecp5");
+    let result = map_lir_to_gates(&lir, &library);
+
+    // Should have exactly 1 DCCA cell
+    let dcca_cells: Vec<_> = result
+        .netlist
+        .cells
+        .iter()
+        .filter(|c| c.cell_type == "DCCA")
+        .collect();
+    assert_eq!(
+        dcca_cells.len(),
+        1,
+        "Should insert exactly 1 DCCA clock buffer, got {}",
+        dcca_cells.len()
+    );
+    assert_eq!(
+        dcca_cells[0].source_op.as_deref(),
+        Some("ClockBuffer"),
+        "Clock buffer cell should have source_op 'ClockBuffer'"
+    );
+
+    // DCCA has enable pin — it should be tied high (2 inputs: CLKI + CE)
+    assert_eq!(
+        dcca_cells[0].inputs.len(),
+        2,
+        "DCCA should have 2 inputs (CLKI + CE tied high)"
+    );
+
+    // The buffered clock net should be used by DFF cells
+    let buf_out_net = dcca_cells[0].outputs[0];
+    let dff_cells: Vec<_> = result
+        .netlist
+        .cells
+        .iter()
+        .filter(|c| c.cell_type.contains("DFF") || c.cell_type.contains("TRELLIS_FF"))
+        .collect();
+    assert!(
+        !dff_cells.is_empty(),
+        "Should have at least one DFF cell for the register"
+    );
+    for dff in &dff_cells {
+        assert_eq!(
+            dff.clock,
+            Some(buf_out_net),
+            "DFF cell '{}' should use the buffered clock net",
+            dff.path
+        );
+    }
+}
+
+#[test]
+fn test_no_clock_buffer_generic_asic() {
+    let lir = build_register_lir(4);
+    let library = get_stdlib_library("generic_asic").expect("Failed to load generic_asic");
+
+    // generic_asic has no clock buffer cell
+    assert!(
+        library.find_clk_buf_cell().is_none(),
+        "generic_asic should not have clock buffer cells"
+    );
+
+    // Should still synthesize without panic
+    let result = map_lir_to_gates(&lir, &library);
+
+    // No clock buffer cells should be inserted
+    let clk_buf_count = result
+        .netlist
+        .cells
+        .iter()
+        .filter(|c| {
+            c.function
+                .as_ref()
+                .map_or(false, |f| matches!(f, CellFunction::ClkBuf))
+        })
+        .count();
+    assert_eq!(
+        clk_buf_count, 0,
+        "generic_asic should not insert any clock buffer cells"
+    );
+}
+
+#[test]
+fn test_generic_asic_no_pll() {
+    let library = get_stdlib_library("generic_asic").expect("Failed to load generic_asic");
+    assert!(
+        library.find_pll_cell().is_none(),
+        "generic_asic should not have PLL cells"
+    );
+}

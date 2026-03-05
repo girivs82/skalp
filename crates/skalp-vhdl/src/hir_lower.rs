@@ -63,6 +63,10 @@ pub struct VhdlHirBuilder {
     /// Signals created from external name expressions (<< signal .path : type >>)
     external_signals: Vec<HirSignal>,
 
+    /// Clock frequency attributes: maps signal name → frequency in Hz
+    /// From: attribute clock_frequency of clk : signal is 100_000_000;
+    clock_frequency_attrs: IndexMap<String, u64>,
+
     errors: Vec<VhdlError>,
     file_path: Option<std::path::PathBuf>,
 }
@@ -247,6 +251,7 @@ impl VhdlHirBuilder {
             package_scopes: IndexMap::new(),
             inside_event_block: false,
             external_signals: Vec::new(),
+            clock_frequency_attrs: IndexMap::new(),
             errors: Vec::new(),
             file_path: file_path.map(|p| p.to_path_buf()),
         }
@@ -388,6 +393,11 @@ impl VhdlHirBuilder {
                 }
                 SyntaxKind::ArchitectureBody => {
                     if let Some(imp) = self.lower_architecture(&child) {
+                        // Apply clock_frequency attributes to the entity's clock domains
+                        if !self.clock_frequency_attrs.is_empty() {
+                            self.apply_clock_frequency_attrs(imp.entity, &mut hir);
+                            self.clock_frequency_attrs.clear();
+                        }
                         hir.implementations.push(imp);
                     }
                 }
@@ -442,6 +452,75 @@ impl VhdlHirBuilder {
     // ====================================================================
     // Entity
     // ====================================================================
+
+    /// Apply collected clock_frequency attributes to an entity's clock domains.
+    ///
+    /// For each signal with a clock_frequency attribute, finds or creates a clock domain
+    /// on the entity and sets its frequency_hz.
+    fn apply_clock_frequency_attrs(&self, entity_id: EntityId, hir: &mut Hir) {
+        if let Some(entity) = hir.entities.iter_mut().find(|e| e.id == entity_id) {
+            for (signal_name, freq_hz) in &self.clock_frequency_attrs {
+                // Check if there's already a clock domain for this signal
+                let existing = entity
+                    .clock_domains
+                    .iter_mut()
+                    .find(|cd| cd.name == *signal_name);
+                if let Some(cd) = existing {
+                    cd.frequency_hz = Some(*freq_hz);
+                } else {
+                    // Create a new clock domain for this signal
+                    let domain_id =
+                        ClockDomainId(entity.clock_domains.len() as u32);
+                    entity.clock_domains.push(HirClockDomain {
+                        id: domain_id,
+                        name: signal_name.clone(),
+                        frequency_hz: Some(*freq_hz),
+                    });
+                }
+            }
+        }
+    }
+
+    /// Try to parse a `clock_frequency` attribute specification.
+    ///
+    /// Recognizes: `attribute clock_frequency of <signal> : signal is <value>;`
+    /// Stores the frequency in `self.clock_frequency_attrs` for later use
+    /// when building clock domains.
+    fn try_parse_clock_frequency_attr(&mut self, node: &SyntaxNode) {
+        let tokens = all_token_texts(node);
+        // Expected pattern: attribute clock_frequency of <target> : signal is <value> ;
+        // Token indices:     0         1                2  3        4 5      6  7       8
+        if tokens.len() < 8 {
+            return;
+        }
+
+        // tokens[0] = "attribute", tokens[1] = attribute name
+        let attr_name = tokens[1].1.to_ascii_lowercase();
+        if attr_name != "clock_frequency" {
+            return;
+        }
+
+        // tokens[2] = "of", tokens[3] = target signal name
+        if !tokens[2].1.eq_ignore_ascii_case("of") {
+            return;
+        }
+        let target_signal = tokens[3].1.to_ascii_lowercase();
+
+        // Find "is" keyword and the value after it
+        let is_pos = tokens
+            .iter()
+            .position(|(_, text)| text.eq_ignore_ascii_case("is"));
+        if let Some(is_idx) = is_pos {
+            if let Some((_, value_text)) = tokens.get(is_idx + 1) {
+                // Parse the frequency value (may contain underscores)
+                let cleaned = value_text.replace('_', "");
+                if let Ok(freq_hz) = cleaned.parse::<u64>() {
+                    self.clock_frequency_attrs
+                        .insert(target_signal, freq_hz);
+                }
+            }
+        }
+    }
 
     fn lower_entity_decl(&mut self, node: &SyntaxNode) -> Option<HirEntity> {
         // VHDL is case-insensitive: normalize entity name to lowercase
@@ -781,8 +860,12 @@ impl VhdlHirBuilder {
                 SyntaxKind::FunctionDecl | SyntaxKind::ProcedureDecl => {
                     // Forward declarations — ignore
                 }
-                SyntaxKind::AttributeDecl | SyntaxKind::AttributeSpec => {
-                    // Synthesis tool metadata — ignore
+                SyntaxKind::AttributeDecl => {
+                    // Attribute declarations — ignore
+                }
+                SyntaxKind::AttributeSpec => {
+                    // Check for clock_frequency attribute specification
+                    self.try_parse_clock_frequency_attr(&child);
                 }
                 SyntaxKind::ComponentDecl => {
                     // Component declarations — handled at instantiation

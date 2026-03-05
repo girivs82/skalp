@@ -820,7 +820,25 @@ impl<'a> AigBuilder<'a> {
                 panic!(
                     "Cannot convert DSP cell to AIG. \
                      DSP cells should be preserved in the gate netlist."
-                );
+                )
+            }
+            CellFunction::ClkBuf => {
+                panic!(
+                    "Cannot convert clock buffer cell to AIG. \
+                     Clock buffer cells should be preserved in the gate netlist."
+                )
+            }
+            CellFunction::Pll => {
+                panic!(
+                    "Cannot convert PLL cell to AIG. \
+                     PLL cells should be preserved in the gate netlist."
+                )
+            }
+            CellFunction::ClkDiv => {
+                panic!(
+                    "Cannot convert clock divider cell to AIG. \
+                     Clock divider cells should be preserved in the gate netlist."
+                )
             }
         };
 

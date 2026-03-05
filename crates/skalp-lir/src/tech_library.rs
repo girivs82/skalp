@@ -119,6 +119,18 @@ pub struct LibraryCell {
     /// DSP cell capability metadata (only for cells with function = Dsp)
     #[serde(default)]
     pub dsp_info: Option<DspCellInfo>,
+
+    /// PLL cell capability metadata (only for cells with function = Pll)
+    #[serde(default)]
+    pub pll_info: Option<PllCellInfo>,
+
+    /// Clock buffer cell capability metadata (only for cells with function = ClkBuf)
+    #[serde(default)]
+    pub clk_buf_info: Option<ClkBufCellInfo>,
+
+    /// Clock divider cell capability metadata (only for cells with function = ClkDiv)
+    #[serde(default)]
+    pub clk_div_info: Option<ClkDivCellInfo>,
 }
 
 /// RAM cell capabilities — technology-specific, queried by tech mapper
@@ -209,6 +221,79 @@ pub struct DspPinMap {
     /// Source-B mode pin (e.g., "SOURCEB")
     #[serde(default)]
     pub source_b: Option<String>,
+}
+
+/// PLL cell capabilities — technology-specific, queried by tech mapper
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PllCellInfo {
+    /// Minimum reference clock frequency in MHz
+    pub min_input_freq_mhz: f64,
+    /// Maximum reference clock frequency in MHz
+    pub max_input_freq_mhz: f64,
+    /// Minimum output clock frequency in MHz
+    pub min_output_freq_mhz: f64,
+    /// Maximum output clock frequency in MHz
+    pub max_output_freq_mhz: f64,
+    /// Number of clock outputs
+    pub num_outputs: u32,
+    /// Whether the PLL supports external feedback
+    pub supports_feedback: bool,
+    /// Port pin names for tech mapper wiring
+    pub pin_map: PllPinMap,
+}
+
+/// Maps logical PLL port functions to physical cell pin names
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PllPinMap {
+    /// Reference clock input (e.g., "REFERENCECLK" / "CLKI")
+    pub ref_clk: String,
+    /// Primary output clock (e.g., "PLLOUTCORE" / "CLKOP")
+    pub out_clk: String,
+    /// Lock indicator output (e.g., "LOCK")
+    pub lock: String,
+    /// Reset input (e.g., "RESETB" / "RST")
+    #[serde(default)]
+    pub reset: Option<String>,
+    /// Bypass input (e.g., "BYPASS")
+    #[serde(default)]
+    pub bypass: Option<String>,
+    /// Feedback clock input (e.g., "CLKFB")
+    #[serde(default)]
+    pub feedback: Option<String>,
+    /// Secondary output clocks (e.g., ["CLKOS", "CLKOS2", "CLKOS3"])
+    #[serde(default)]
+    pub secondary_outputs: Vec<String>,
+    /// Global output (e.g., "PLLOUTGLOBAL" for iCE40)
+    #[serde(default)]
+    pub global_out: Option<String>,
+}
+
+/// Clock buffer cell capabilities
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClkBufCellInfo {
+    /// Clock input pin name (e.g., "USER_SIGNAL_TO_GLOBAL_BUFFER" / "CLKI")
+    pub input: String,
+    /// Clock output pin name (e.g., "GLOBAL_BUFFER_OUTPUT" / "CLKO")
+    pub output: String,
+    /// Whether the buffer has a clock enable pin
+    pub has_enable: bool,
+    /// Clock enable pin name (e.g., "CE" for DCCA)
+    #[serde(default)]
+    pub enable: Option<String>,
+}
+
+/// Clock divider cell capabilities
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClkDivCellInfo {
+    /// Clock input pin name (e.g., "CLKI")
+    pub clk_input: String,
+    /// Clock output pin name (e.g., "CDIVX")
+    pub clk_output: String,
+    /// Reset pin name (e.g., "RST")
+    #[serde(default)]
+    pub reset: Option<String>,
+    /// Supported clock division ratios
+    pub supported_dividers: Vec<f64>,
 }
 
 /// Timing characteristics for a cell
@@ -480,6 +565,9 @@ impl LibraryCell {
             clk_to_q_ps: None,
             ram_info: None,
             dsp_info: None,
+            pll_info: None,
+            clk_buf_info: None,
+            clk_div_info: None,
         }
     }
 
@@ -715,6 +803,14 @@ pub enum CellFunction {
     /// DSP/multiplier hard block (vendor-specific DSP primitive)
     Dsp,
 
+    // Clock infrastructure
+    /// Global clock buffer (SB_GB on iCE40, DCCA on ECP5)
+    ClkBuf,
+    /// Phase-locked loop (SB_PLL40_CORE on iCE40, EHXPLLL on ECP5)
+    Pll,
+    /// Clock divider (CLKDIVF on ECP5)
+    ClkDiv,
+
     // Tristate
     Tristate,
 
@@ -924,6 +1020,15 @@ impl CellFunction {
                     vec!["P".into()],
                 )
             }
+            CellFunction::ClkBuf => (vec!["clk_in".into()], vec!["clk_out".into()]),
+            CellFunction::Pll => (
+                vec!["ref_clk".into(), "reset".into()],
+                vec!["out_clk".into(), "lock".into()],
+            ),
+            CellFunction::ClkDiv => (
+                vec!["clk_in".into(), "rst".into()],
+                vec!["clk_out".into()],
+            ),
             CellFunction::Tristate => (vec!["a".into(), "en".into()], vec!["y".into()]),
             // Power infrastructure
             CellFunction::LevelShifterLH | CellFunction::LevelShifterHL => {
@@ -1090,6 +1195,14 @@ impl CellFunction {
     /// Check if this is an LDO (Low Dropout Regulator) pad
     pub fn is_ldo_pad(&self) -> bool {
         matches!(self, CellFunction::PowerPadLdo)
+    }
+
+    /// Check if this is a clock infrastructure cell
+    pub fn is_clock_infrastructure(&self) -> bool {
+        matches!(
+            self,
+            CellFunction::ClkBuf | CellFunction::Pll | CellFunction::ClkDiv
+        )
     }
 }
 
@@ -1531,6 +1644,30 @@ impl TechLibrary {
     pub fn find_dsp_cell(&self) -> Option<(&LibraryCell, &DspCellInfo)> {
         self.find_best_cell(&CellFunction::Dsp)
             .and_then(|cell| cell.dsp_info.as_ref().map(|info| (cell, info)))
+    }
+
+    /// Find a PLL cell in the library
+    ///
+    /// Returns the PLL cell and its capability metadata, or None if no PLL cell exists.
+    pub fn find_pll_cell(&self) -> Option<(&LibraryCell, &PllCellInfo)> {
+        self.find_best_cell(&CellFunction::Pll)
+            .and_then(|cell| cell.pll_info.as_ref().map(|info| (cell, info)))
+    }
+
+    /// Find a global clock buffer cell in the library
+    ///
+    /// Returns the clock buffer cell and its metadata, or None if none exists.
+    pub fn find_clk_buf_cell(&self) -> Option<(&LibraryCell, &ClkBufCellInfo)> {
+        self.find_best_cell(&CellFunction::ClkBuf)
+            .and_then(|cell| cell.clk_buf_info.as_ref().map(|info| (cell, info)))
+    }
+
+    /// Find a clock divider cell in the library
+    ///
+    /// Returns the clock divider cell and its metadata, or None if none exists.
+    pub fn find_clk_div_cell(&self) -> Option<(&LibraryCell, &ClkDivCellInfo)> {
+        self.find_best_cell(&CellFunction::ClkDiv)
+            .and_then(|cell| cell.clk_div_info.as_ref().map(|info| (cell, info)))
     }
 
     /// Iterate over all cells in the library
@@ -2202,6 +2339,15 @@ struct TomlCell {
     // DSP capability metadata (for cells with function = "dsp")
     #[serde(default)]
     dsp_info: Option<TomlDspInfo>,
+    // PLL capability metadata (for cells with function = "pll")
+    #[serde(default)]
+    pll_info: Option<TomlPllInfo>,
+    // Clock buffer capability metadata (for cells with function = "clk_buf")
+    #[serde(default)]
+    clk_buf_info: Option<TomlClkBufInfo>,
+    // Clock divider capability metadata (for cells with function = "clk_div")
+    #[serde(default)]
+    clk_div_info: Option<TomlClkDivInfo>,
     // Failure modes
     #[serde(default)]
     failure_modes: Vec<TomlFailureMode>,
@@ -2345,6 +2491,64 @@ struct TomlDspPinMap {
     source_a: Option<String>,
     #[serde(default)]
     source_b: Option<String>,
+}
+
+/// PLL capability metadata in TOML format
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TomlPllInfo {
+    min_input_freq_mhz: f64,
+    max_input_freq_mhz: f64,
+    min_output_freq_mhz: f64,
+    max_output_freq_mhz: f64,
+    #[serde(default = "default_num_outputs")]
+    num_outputs: u32,
+    #[serde(default)]
+    supports_feedback: bool,
+    pin_map: TomlPllPinMap,
+}
+
+fn default_num_outputs() -> u32 {
+    1
+}
+
+/// PLL pin map in TOML format
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TomlPllPinMap {
+    ref_clk: String,
+    out_clk: String,
+    lock: String,
+    #[serde(default)]
+    reset: Option<String>,
+    #[serde(default)]
+    bypass: Option<String>,
+    #[serde(default)]
+    feedback: Option<String>,
+    #[serde(default)]
+    secondary_outputs: Vec<String>,
+    #[serde(default)]
+    global_out: Option<String>,
+}
+
+/// Clock buffer capability metadata in TOML format
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TomlClkBufInfo {
+    input: String,
+    output: String,
+    #[serde(default)]
+    has_enable: bool,
+    #[serde(default)]
+    enable: Option<String>,
+}
+
+/// Clock divider capability metadata in TOML format
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TomlClkDivInfo {
+    clk_input: String,
+    clk_output: String,
+    #[serde(default)]
+    reset: Option<String>,
+    #[serde(default)]
+    supported_dividers: Vec<f64>,
 }
 
 impl TomlLibrary {
@@ -2550,6 +2754,36 @@ impl TomlCell {
                     source_b: di.pin_map.source_b,
                 },
             }),
+            pll_info: self.pll_info.map(|pi| PllCellInfo {
+                min_input_freq_mhz: pi.min_input_freq_mhz,
+                max_input_freq_mhz: pi.max_input_freq_mhz,
+                min_output_freq_mhz: pi.min_output_freq_mhz,
+                max_output_freq_mhz: pi.max_output_freq_mhz,
+                num_outputs: pi.num_outputs,
+                supports_feedback: pi.supports_feedback,
+                pin_map: PllPinMap {
+                    ref_clk: pi.pin_map.ref_clk,
+                    out_clk: pi.pin_map.out_clk,
+                    lock: pi.pin_map.lock,
+                    reset: pi.pin_map.reset,
+                    bypass: pi.pin_map.bypass,
+                    feedback: pi.pin_map.feedback,
+                    secondary_outputs: pi.pin_map.secondary_outputs,
+                    global_out: pi.pin_map.global_out,
+                },
+            }),
+            clk_buf_info: self.clk_buf_info.map(|ci| ClkBufCellInfo {
+                input: ci.input,
+                output: ci.output,
+                has_enable: ci.has_enable,
+                enable: ci.enable,
+            }),
+            clk_div_info: self.clk_div_info.map(|di| ClkDivCellInfo {
+                clk_input: di.clk_input,
+                clk_output: di.clk_output,
+                reset: di.reset,
+                supported_dividers: di.supported_dividers,
+            }),
         })
     }
 
@@ -2675,6 +2909,36 @@ impl TomlCell {
                     source_b: di.pin_map.source_b.clone(),
                 },
             }),
+            pll_info: cell.pll_info.as_ref().map(|pi| TomlPllInfo {
+                min_input_freq_mhz: pi.min_input_freq_mhz,
+                max_input_freq_mhz: pi.max_input_freq_mhz,
+                min_output_freq_mhz: pi.min_output_freq_mhz,
+                max_output_freq_mhz: pi.max_output_freq_mhz,
+                num_outputs: pi.num_outputs,
+                supports_feedback: pi.supports_feedback,
+                pin_map: TomlPllPinMap {
+                    ref_clk: pi.pin_map.ref_clk.clone(),
+                    out_clk: pi.pin_map.out_clk.clone(),
+                    lock: pi.pin_map.lock.clone(),
+                    reset: pi.pin_map.reset.clone(),
+                    bypass: pi.pin_map.bypass.clone(),
+                    feedback: pi.pin_map.feedback.clone(),
+                    secondary_outputs: pi.pin_map.secondary_outputs.clone(),
+                    global_out: pi.pin_map.global_out.clone(),
+                },
+            }),
+            clk_buf_info: cell.clk_buf_info.as_ref().map(|ci| TomlClkBufInfo {
+                input: ci.input.clone(),
+                output: ci.output.clone(),
+                has_enable: ci.has_enable,
+                enable: ci.enable.clone(),
+            }),
+            clk_div_info: cell.clk_div_info.as_ref().map(|di| TomlClkDivInfo {
+                clk_input: di.clk_input.clone(),
+                clk_output: di.clk_output.clone(),
+                reset: di.reset.clone(),
+                supported_dividers: di.supported_dividers.clone(),
+            }),
             failure_modes,
         }
     }
@@ -2718,6 +2982,9 @@ fn parse_cell_function(s: &str) -> Result<CellFunction, LibraryLoadError> {
         "latch" => Ok(CellFunction::Latch),
         "ram" | "bram" | "sram" => Ok(CellFunction::Ram),
         "dsp" | "multiplier" | "mult" => Ok(CellFunction::Dsp),
+        "clk_buf" | "clkbuf" | "global_buffer" | "gb" => Ok(CellFunction::ClkBuf),
+        "pll" | "phase_locked_loop" => Ok(CellFunction::Pll),
+        "clk_div" | "clkdiv" | "clock_divider" => Ok(CellFunction::ClkDiv),
         "tristate" | "tri" => Ok(CellFunction::Tristate),
         // Power infrastructure
         "level_shifter_lh" | "lslh" => Ok(CellFunction::LevelShifterLH),
@@ -2804,6 +3071,9 @@ fn format_cell_function(f: &CellFunction) -> String {
         CellFunction::Latch => "latch".to_string(),
         CellFunction::Ram => "ram".to_string(),
         CellFunction::Dsp => "dsp".to_string(),
+        CellFunction::ClkBuf => "clk_buf".to_string(),
+        CellFunction::Pll => "pll".to_string(),
+        CellFunction::ClkDiv => "clk_div".to_string(),
         CellFunction::Tristate => "tristate".to_string(),
         CellFunction::LevelShifterLH => "level_shifter_lh".to_string(),
         CellFunction::LevelShifterHL => "level_shifter_hl".to_string(),

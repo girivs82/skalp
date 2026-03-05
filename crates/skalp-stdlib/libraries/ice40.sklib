@@ -448,7 +448,7 @@ mechanism = "input_buffer_failure"
 
 [[cells]]
 name = "SB_GB"
-function = "buf"
+function = "clk_buf"
 fit = 0.08
 inputs = ["USER_SIGNAL_TO_GLOBAL_BUFFER"]
 outputs = ["GLOBAL_BUFFER_OUTPUT"]
@@ -457,6 +457,11 @@ min_voltage_mv = 1100
 timing_margin_voltage_mv = 1140
 voltage_delay_coefficient = 0.05
 voltage_sensitivity = 2
+
+[cells.clk_buf_info]
+input = "USER_SIGNAL_TO_GLOBAL_BUFFER"
+output = "GLOBAL_BUFFER_OUTPUT"
+has_enable = false
 
 [[cells.failure_modes]]
 name = "config_upset"
@@ -475,6 +480,37 @@ name = "delay"
 fit = 0.02
 fault_type = "delay"
 mechanism = "clock_jitter"
+
+# =============================================================================
+# SB_PLL40_CORE - Phase-Locked Loop
+# Generates clock frequencies from a reference clock.
+# Input: 10-133 MHz, Output: 16-275 MHz.
+# =============================================================================
+
+[[cells]]
+name = "SB_PLL40_CORE"
+function = "pll"
+fit = 0.15
+inputs = ["REFERENCECLK", "RESETB", "BYPASS"]
+outputs = ["PLLOUTCORE", "PLLOUTGLOBAL", "LOCK"]
+nominal_voltage_mv = 1200
+min_voltage_mv = 1100
+
+[cells.pll_info]
+min_input_freq_mhz = 10.0
+max_input_freq_mhz = 133.0
+min_output_freq_mhz = 16.0
+max_output_freq_mhz = 275.0
+num_outputs = 1
+supports_feedback = false
+
+[cells.pll_info.pin_map]
+ref_clk = "REFERENCECLK"
+out_clk = "PLLOUTCORE"
+lock = "LOCK"
+reset = "RESETB"
+bypass = "BYPASS"
+global_out = "PLLOUTGLOBAL"
 
 # =============================================================================
 # SB_RAM40_4K - 4Kbit Block RAM

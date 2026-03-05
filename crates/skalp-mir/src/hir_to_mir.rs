@@ -486,6 +486,17 @@ impl<'hir> HirToMir<'hir> {
                 );
             }
 
+            // Propagate clock domains from HIR entity to MIR module
+            for hir_cd in &entity.clock_domains {
+                module.clock_domains.push(ClockDomain {
+                    id: ClockDomainId(hir_cd.id.0),
+                    name: hir_cd.name.clone(),
+                    clock_signal: None,
+                    reset_signal: None,
+                    frequency_hz: hir_cd.frequency_hz,
+                });
+            }
+
             // Propagate power domains from HIR entity to MIR module
             if !entity.power_domains.is_empty() {
                 module.power_domains = entity.power_domains.clone();
