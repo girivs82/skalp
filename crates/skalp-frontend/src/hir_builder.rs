@@ -807,8 +807,7 @@ impl HirBuilderContext {
                 for param in &params {
                     if let HirGenericType::ClockDomain = param.param_type {
                         if !self.symbols.clock_domains.contains_key(&param.name) {
-                            let domain_id =
-                                ClockDomainId(self.symbols.clock_domains.len() as u32);
+                            let domain_id = ClockDomainId(self.symbols.clock_domains.len() as u32);
                             self.symbols
                                 .clock_domains
                                 .insert(param.name.clone(), domain_id);
@@ -1027,11 +1026,7 @@ impl HirBuilderContext {
                         .iter()
                         .find(|(_, &id)| id == domain_id)
                         .map(|(name, _)| {
-                            let freq = self
-                                .symbols
-                                .clock_domain_frequencies
-                                .get(name)
-                                .copied();
+                            let freq = self.symbols.clock_domain_frequencies.get(name).copied();
                             (name.clone(), freq)
                         })
                         .unwrap_or_else(|| (format!("clk_{}", domain_id.0), None));
@@ -14252,9 +14247,7 @@ impl HirBuilderContext {
             if let Some(freq) = frequency_hz {
                 // Lifetime with frequency → clock domain
                 let domain_id = ClockDomainId(self.symbols.clock_domains.len() as u32);
-                self.symbols
-                    .clock_domains
-                    .insert(name.clone(), domain_id);
+                self.symbols.clock_domains.insert(name.clone(), domain_id);
                 self.symbols
                     .clock_domain_frequencies
                     .insert(name.clone(), freq);

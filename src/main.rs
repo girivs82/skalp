@@ -2198,8 +2198,8 @@ fn simulate_behavioral(
         Some("vhd") | Some("vhdl")
     );
     let mut hir = if is_vhdl {
-        let ctx =
-            skalp_vhdl::parse_vhdl_directory(source_file).context("Failed to parse VHDL project")?;
+        let ctx = skalp_vhdl::parse_vhdl_directory(source_file)
+            .context("Failed to parse VHDL project")?;
         ctx.main_hir
     } else {
         parse_and_build_hir_from_file(source_file).context("Failed to parse and build HIR")?

@@ -330,10 +330,7 @@ fn emit_vendor_ip_attribute(out: &mut String, config: &VendorIpConfig) {
         parts.push(format!("tie_high=[{}]", config.tie_high.join(", ")));
     }
     if !config.unconnected.is_empty() {
-        parts.push(format!(
-            "unconnected=[{}]",
-            config.unconnected.join(", ")
-        ));
+        parts.push(format!("unconnected=[{}]", config.unconnected.join(", ")));
     }
     for (entity_port, ip_port) in &config.port_map {
         parts.push(format!("{entity_port}=\"{ip_port}\""));

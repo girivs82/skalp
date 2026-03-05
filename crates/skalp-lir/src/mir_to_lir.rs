@@ -678,9 +678,7 @@ impl MirToLirTransform {
         let wdata_signal = self
             .lir
             .add_signal(format!("{}_wdata", signal.name), element_width);
-        let we_signal = self
-            .lir
-            .add_signal(format!("{}_we", signal.name), 1);
+        let we_signal = self.lir.add_signal(format!("{}_we", signal.name), 1);
 
         // Create MemBlock node (clock will be set later during process analysis)
         let inputs = if read_only {
@@ -4072,11 +4070,7 @@ impl MirToLirTransform {
     }
 
     /// Handle a memory read operation: wire address to raddr, return rdata.
-    fn handle_memory_read(
-        &mut self,
-        mem_signal_id: SignalId,
-        index: &Expression,
-    ) -> LirSignalId {
+    fn handle_memory_read(&mut self, mem_signal_id: SignalId, index: &Expression) -> LirSignalId {
         let mem_info = self.memory_signals[&mem_signal_id].clone();
 
         // Transform the index expression to get the address signal
@@ -4438,12 +4432,8 @@ impl MirToLirTransform {
     fn create_constant_value(&mut self, value: u64, width: u32) -> LirSignalId {
         let out = self.alloc_temp_signal(width);
         let path = self.unique_node_path(&format!("const_{}", value));
-        self.lir.add_node(
-            LirOp::Constant { width, value },
-            vec![],
-            out,
-            path,
-        );
+        self.lir
+            .add_node(LirOp::Constant { width, value }, vec![], out, path);
         out
     }
 

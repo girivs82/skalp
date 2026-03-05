@@ -202,7 +202,12 @@ fn collect_leading_comments(node: &SyntaxNode) -> Vec<String> {
 /// 2. Next siblings of the PortDecl (comments between ports, after semicolons)
 fn collect_trailing_comment(node: &SyntaxNode) -> Option<String> {
     // First check trailing tokens within the node itself (last-to-first)
-    for element in node.children_with_tokens().collect::<Vec<_>>().into_iter().rev() {
+    for element in node
+        .children_with_tokens()
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+    {
         match &element {
             SyntaxElement::Token(tok) if tok.kind() == SyntaxKind::Comment => {
                 return Some(tok.text().to_string());
@@ -354,12 +359,16 @@ fn extract_skalp_constraint_from_comment(comment_text: &str) -> Option<PhysicalC
                     };
                 }
                 "schmitt" => {
-                    schmitt_trigger =
-                        Some(matches!(unquoted.to_ascii_lowercase().as_str(), "true" | "yes" | "1"));
+                    schmitt_trigger = Some(matches!(
+                        unquoted.to_ascii_lowercase().as_str(),
+                        "true" | "yes" | "1"
+                    ));
                 }
                 "diff_term" => {
-                    diff_term =
-                        Some(matches!(unquoted.to_ascii_lowercase().as_str(), "true" | "yes" | "1"));
+                    diff_term = Some(matches!(
+                        unquoted.to_ascii_lowercase().as_str(),
+                        "true" | "yes" | "1"
+                    ));
                 }
                 "bank" => {
                     bank = unquoted.parse::<u32>().ok();
@@ -719,8 +728,7 @@ impl VhdlHirBuilder {
                     cd.frequency_hz = Some(*freq_hz);
                 } else {
                     // Create a new clock domain for this signal
-                    let domain_id =
-                        ClockDomainId(entity.clock_domains.len() as u32);
+                    let domain_id = ClockDomainId(entity.clock_domains.len() as u32);
                     entity.clock_domains.push(HirClockDomain {
                         id: domain_id,
                         name: signal_name.clone(),
@@ -765,8 +773,7 @@ impl VhdlHirBuilder {
                 // Parse the frequency value (may contain underscores)
                 let cleaned = value_text.replace('_', "");
                 if let Ok(freq_hz) = cleaned.parse::<u64>() {
-                    self.clock_frequency_attrs
-                        .insert(target_signal, freq_hz);
+                    self.clock_frequency_attrs.insert(target_signal, freq_hz);
                 }
             }
         }

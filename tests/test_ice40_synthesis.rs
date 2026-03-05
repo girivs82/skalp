@@ -1162,9 +1162,7 @@ fn test_ecp5_library_loads() {
         "ECP5 should have RAM cell"
     );
     assert!(
-        library
-            .find_best_cell(&CellFunction::And2)
-            .is_some(),
+        library.find_best_cell(&CellFunction::And2).is_some(),
         "ECP5 should have AND2 cell"
     );
 }
@@ -1292,7 +1290,10 @@ fn test_ecp5_dsp_multiply_8x8() {
         Some("UNSIGNED")
     );
     assert_eq!(
-        dsp_cell.parameters.get("REG_INPUTA_CLK").map(|s| s.as_str()),
+        dsp_cell
+            .parameters
+            .get("REG_INPUTA_CLK")
+            .map(|s| s.as_str()),
         Some("NONE"),
         "Should be combinational mode"
     );
@@ -1712,7 +1713,10 @@ fn test_ice40_has_io_cell() {
     // Check capabilities
     assert!(io_info.supports_ddr, "SB_IO supports DDR");
     assert!(io_info.supports_tristate, "SB_IO supports tristate");
-    assert!(!io_info.supports_differential, "SB_IO does not support differential");
+    assert!(
+        !io_info.supports_differential,
+        "SB_IO does not support differential"
+    );
     assert!(io_info.has_input_register, "SB_IO has input register");
     assert!(io_info.has_output_register, "SB_IO has output register");
     assert_eq!(io_info.max_drive_strength_ma, Some(8));
@@ -1722,12 +1726,21 @@ fn test_ice40_has_io_cell() {
     assert_eq!(io_info.pin_map.data_in_ddr.as_deref(), Some("D_IN_1"));
     assert_eq!(io_info.pin_map.data_out.as_deref(), Some("D_OUT_0"));
     assert_eq!(io_info.pin_map.data_out_ddr.as_deref(), Some("D_OUT_1"));
-    assert_eq!(io_info.pin_map.output_enable.as_deref(), Some("OUTPUT_ENABLE"));
+    assert_eq!(
+        io_info.pin_map.output_enable.as_deref(),
+        Some("OUTPUT_ENABLE")
+    );
     assert_eq!(io_info.pin_map.pad.as_deref(), Some("PACKAGE_PIN"));
     assert_eq!(io_info.pin_map.input_clk.as_deref(), Some("INPUT_CLK"));
     assert_eq!(io_info.pin_map.output_clk.as_deref(), Some("OUTPUT_CLK"));
-    assert_eq!(io_info.pin_map.clock_enable.as_deref(), Some("CLOCK_ENABLE"));
-    assert_eq!(io_info.pin_map.latch_input.as_deref(), Some("LATCH_INPUT_VALUE"));
+    assert_eq!(
+        io_info.pin_map.clock_enable.as_deref(),
+        Some("CLOCK_ENABLE")
+    );
+    assert_eq!(
+        io_info.pin_map.latch_input.as_deref(),
+        Some("LATCH_INPUT_VALUE")
+    );
 
     // find_input_pad should fall back to SB_IO (no dedicated input pad)
     let (input_cell, _) = library

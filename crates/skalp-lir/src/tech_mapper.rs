@@ -3822,8 +3822,7 @@ impl<'a> TechMapper<'a> {
 
             // Create buffered output net
             let buf_out_id = self.alloc_net_id();
-            let mut buf_out_net =
-                GateNet::new(buf_out_id, format!("{}_gbuf", clock_name));
+            let mut buf_out_net = GateNet::new(buf_out_id, format!("{}_gbuf", clock_name));
             buf_out_net.is_clock = true;
             self.netlist.add_net(buf_out_net);
 
@@ -6404,12 +6403,7 @@ impl<'a> TechMapper<'a> {
 
         // Read address — pad to block_addr_width
         for bit in 0..block_addr_width as usize {
-            cell_inputs.push(
-                raddr_nets
-                    .get(bit)
-                    .copied()
-                    .unwrap_or(tie_low),
-            );
+            cell_inputs.push(raddr_nets.get(bit).copied().unwrap_or(tie_low));
         }
         // RCLK
         cell_inputs.push(clk);
@@ -6421,13 +6415,11 @@ impl<'a> TechMapper<'a> {
         if has_write {
             // Write data — pad to block_width
             for bit in 0..block_width as usize {
-                cell_inputs
-                    .push(wdata_nets.get(bit).copied().unwrap_or(tie_low));
+                cell_inputs.push(wdata_nets.get(bit).copied().unwrap_or(tie_low));
             }
             // Write address — pad to block_addr_width
             for bit in 0..block_addr_width as usize {
-                cell_inputs
-                    .push(waddr_nets.get(bit).copied().unwrap_or(tie_low));
+                cell_inputs.push(waddr_nets.get(bit).copied().unwrap_or(tie_low));
             }
             // WCLK
             cell_inputs.push(clk);
@@ -6459,12 +6451,7 @@ impl<'a> TechMapper<'a> {
         let mut cell_outputs = Vec::new();
         for bit in 0..block_width as usize {
             if bit < data_width as usize {
-                cell_outputs.push(
-                    output_nets
-                        .get(bit)
-                        .copied()
-                        .unwrap_or(output_nets[0]),
-                );
+                cell_outputs.push(output_nets.get(bit).copied().unwrap_or(output_nets[0]));
             } else {
                 // Unused output bit — create a dangling net
                 let unused = self
@@ -6486,14 +6473,10 @@ impl<'a> TechMapper<'a> {
             None,
         );
         cell.source_op = Some("MemBlock".to_string());
-        cell.parameters.insert(
-            "READ_MODE".to_string(),
-            block_width.to_string(),
-        );
-        cell.parameters.insert(
-            "WRITE_MODE".to_string(),
-            block_width.to_string(),
-        );
+        cell.parameters
+            .insert("READ_MODE".to_string(), block_width.to_string());
+        cell.parameters
+            .insert("WRITE_MODE".to_string(), block_width.to_string());
         ram_cell_info.apply_to_cell(&mut cell);
         self.add_cell(cell);
     }
@@ -6549,10 +6532,9 @@ impl<'a> TechMapper<'a> {
                             .unwrap_or(output_nets[0]),
                     );
                 } else {
-                    let unused = self.netlist.add_net_with_name(format!(
-                        "{}.wb{}.unused_rdata{}",
-                        path, wb, b
-                    ));
+                    let unused = self
+                        .netlist
+                        .add_net_with_name(format!("{}.wb{}.unused_rdata{}", path, wb, b));
                     output_slice.push(unused);
                 }
             }
@@ -6655,10 +6637,9 @@ impl<'a> TechMapper<'a> {
             // Create output nets for this depth block
             let mut db_outputs = Vec::new();
             for bit in 0..data_width {
-                let net = self.netlist.add_net_with_name(format!(
-                    "{}.db{}.rdata{}",
-                    path, db, bit
-                ));
+                let net = self
+                    .netlist
+                    .add_net_with_name(format!("{}.db{}.rdata{}", path, db, bit));
                 db_outputs.push(net);
             }
             block_outputs.push(db_outputs.clone());
@@ -6847,25 +6828,19 @@ impl<'a> TechMapper<'a> {
             for p in 0..pairs {
                 let mut mux_outputs = Vec::new();
                 for bit in 0..data_width as usize {
-                    let d0 = current_level[p * 2]
-                        .get(bit)
-                        .copied()
-                        .unwrap_or(tie_low);
+                    let d0 = current_level[p * 2].get(bit).copied().unwrap_or(tie_low);
                     let d1 = current_level[p * 2 + 1]
                         .get(bit)
                         .copied()
                         .unwrap_or(tie_low);
 
-                    let is_final = pairs == 1
-                        && current_level.len() <= 2
-                        && layer == select_bits.len() - 1;
+                    let is_final =
+                        pairs == 1 && current_level.len() <= 2 && layer == select_bits.len() - 1;
                     let y = if is_final {
                         final_outputs.get(bit).copied().unwrap_or(final_outputs[0])
                     } else {
-                        self.netlist.add_net_with_name(format!(
-                            "{}.l{}.p{}.bit{}",
-                            path, layer, p, bit
-                        ))
+                        self.netlist
+                            .add_net_with_name(format!("{}.l{}.p{}.bit{}", path, layer, p, bit))
                     };
 
                     let mut cell = Cell::new_comb(

@@ -5,7 +5,7 @@
 //! validate that HIR codegen produces equivalent output.
 
 use skalp_frontend::parse_and_build_hir;
-use skalp_hir_codegen::{generate_systemverilog, generate_vhdl, generate_skalp_source};
+use skalp_hir_codegen::{generate_skalp_source, generate_systemverilog, generate_vhdl};
 
 // ============================================================================
 // Helper Functions
@@ -32,7 +32,8 @@ fn compile_hir_to_skalp(source: &str) -> String {
 
 #[test]
 fn test_alu_codegen() {
-    let sv = compile_hir_to_sv(r#"
+    let sv = compile_hir_to_sv(
+        r#"
 entity ALU {
     in a: bit[32]
     in b: bit[32]
@@ -59,16 +60,21 @@ impl ALU {
         result = result_comb
     }
 }
-"#);
+"#,
+    );
 
     assert!(sv.contains("module ALU"), "Should have module declaration");
     assert!(sv.contains("always_ff"), "Should have always_ff block");
-    assert!(sv.contains("output reg"), "Sequential output should be 'output reg'");
+    assert!(
+        sv.contains("output reg"),
+        "Sequential output should be 'output reg'"
+    );
 }
 
 #[test]
 fn test_counter_codegen() {
-    let sv = compile_hir_to_sv(r#"
+    let sv = compile_hir_to_sv(
+        r#"
 entity Counter {
     in clk: clock
     in reset: bit
@@ -89,16 +95,24 @@ impl Counter {
 
     count = counter_reg
 }
-"#);
+"#,
+    );
 
-    assert!(sv.contains("module Counter"), "Should have module declaration");
+    assert!(
+        sv.contains("module Counter"),
+        "Should have module declaration"
+    );
     assert!(sv.contains("always_ff"), "Should have always_ff block");
-    assert!(sv.contains("counter_reg"), "Should reference counter register");
+    assert!(
+        sv.contains("counter_reg"),
+        "Should reference counter register"
+    );
 }
 
 #[test]
 fn test_simple_wire() {
-    let sv = compile_hir_to_sv(r#"
+    let sv = compile_hir_to_sv(
+        r#"
 entity Wire {
     in a: bit[8]
     out b: bit[8]
@@ -107,7 +121,8 @@ entity Wire {
 impl Wire {
     b = a
 }
-"#);
+"#,
+    );
 
     assert!(sv.contains("module Wire"));
     assert!(sv.contains("assign b = a"));
@@ -115,7 +130,8 @@ impl Wire {
 
 #[test]
 fn test_simple_and_gate() {
-    let sv = compile_hir_to_sv(r#"
+    let sv = compile_hir_to_sv(
+        r#"
 entity AndGate {
     in a: bit
     in b: bit
@@ -125,7 +141,8 @@ entity AndGate {
 impl AndGate {
     y = a & b
 }
-"#);
+"#,
+    );
 
     assert!(sv.contains("module AndGate"));
     assert!(sv.contains("assign y = (a & b)"));
@@ -133,7 +150,8 @@ impl AndGate {
 
 #[test]
 fn test_simple_mux() {
-    let sv = compile_hir_to_sv(r#"
+    let sv = compile_hir_to_sv(
+        r#"
 entity Mux2 {
     in sel: bit
     in a: bit[8]
@@ -144,7 +162,8 @@ entity Mux2 {
 impl Mux2 {
     y = if sel { b } else { a }
 }
-"#);
+"#,
+    );
 
     assert!(sv.contains("module Mux2"));
     assert!(sv.contains("?"), "Should use ternary for mux");
@@ -152,7 +171,8 @@ impl Mux2 {
 
 #[test]
 fn test_register() {
-    let sv = compile_hir_to_sv(r#"
+    let sv = compile_hir_to_sv(
+        r#"
 entity Register {
     in clk: clock
     in d: bit[8]
@@ -164,16 +184,21 @@ impl Register {
         q = d
     }
 }
-"#);
+"#,
+    );
 
     assert!(sv.contains("module Register"));
     assert!(sv.contains("always_ff"));
-    assert!(sv.contains("output reg"), "q is assigned in always_ff so should be output reg");
+    assert!(
+        sv.contains("output reg"),
+        "q is assigned in always_ff so should be output reg"
+    );
 }
 
 #[test]
 fn test_output_reg_classification() {
-    let sv = compile_hir_to_sv(r#"
+    let sv = compile_hir_to_sv(
+        r#"
 entity MixedOutputs {
     in clk: clock
     in a: bit[8]
@@ -188,7 +213,8 @@ impl MixedOutputs {
         seq_out = a
     }
 }
-"#);
+"#,
+    );
 
     // comb_out is combinational → "output"
     // seq_out is in always_ff → "output reg"
@@ -196,7 +222,10 @@ impl MixedOutputs {
     // The combinational output should just be "output" (not "output reg")
     let lines: Vec<&str> = sv.lines().collect();
     let comb_line = lines.iter().find(|l| l.contains("comb_out")).unwrap();
-    assert!(!comb_line.contains("reg"), "comb_out should NOT be output reg");
+    assert!(
+        !comb_line.contains("reg"),
+        "comb_out should NOT be output reg"
+    );
 }
 
 // ============================================================================
@@ -205,7 +234,8 @@ impl MixedOutputs {
 
 #[test]
 fn test_async_reset_active_high() {
-    let sv = compile_hir_to_sv(r#"
+    let sv = compile_hir_to_sv(
+        r#"
 entity AsyncResetTest {
     in clk: clock
     in rst: reset(active_high)
@@ -226,7 +256,8 @@ impl AsyncResetTest {
 
     result = state
 }
-"#);
+"#,
+    );
 
     println!("SV:\n{sv}");
     assert!(
@@ -237,7 +268,8 @@ impl AsyncResetTest {
 
 #[test]
 fn test_async_reset_active_low() {
-    let sv = compile_hir_to_sv(r#"
+    let sv = compile_hir_to_sv(
+        r#"
 entity AsyncResetLowTest {
     in clk: clock
     in rst_n: reset(active_low)
@@ -258,7 +290,8 @@ impl AsyncResetLowTest {
 
     result = state
 }
-"#);
+"#,
+    );
 
     println!("SV:\n{sv}");
     assert!(
@@ -269,7 +302,8 @@ impl AsyncResetLowTest {
 
 #[test]
 fn test_sync_reset_unchanged() {
-    let sv = compile_hir_to_sv(r#"
+    let sv = compile_hir_to_sv(
+        r#"
 entity SyncResetTest {
     in clk: clock
     in rst: reset(active_high)
@@ -290,7 +324,8 @@ impl SyncResetTest {
 
     result = state
 }
-"#);
+"#,
+    );
 
     println!("SV:\n{sv}");
     assert!(
@@ -309,7 +344,8 @@ impl SyncResetTest {
 
 #[test]
 fn test_assert_sva_generation() {
-    let sv = compile_hir_to_sv(r#"
+    let sv = compile_hir_to_sv(
+        r#"
 entity AssertTest {
     in clk: clock
     in data: nat[8]
@@ -326,7 +362,8 @@ impl AssertTest {
 
     valid = counter > 0
 }
-"#);
+"#,
+    );
 
     println!("SV:\n{sv}");
     assert!(
@@ -337,7 +374,8 @@ impl AssertTest {
 
 #[test]
 fn test_assume_sva_generation() {
-    let sv = compile_hir_to_sv(r#"
+    let sv = compile_hir_to_sv(
+        r#"
 entity AssumeTest {
     in clk: clock
     in valid: bool
@@ -357,7 +395,8 @@ impl AssumeTest {
 
     result = stored
 }
-"#);
+"#,
+    );
 
     println!("SV:\n{sv}");
     assert!(
@@ -369,7 +408,8 @@ impl AssumeTest {
 #[test]
 fn test_cover_sva_generation() {
     // cover!() must be in an event block with proper syntax
-    let sv = compile_hir_to_sv(r#"
+    let sv = compile_hir_to_sv(
+        r#"
         entity CoverTest {
             in clk: clock
             in state: nat[2]
@@ -383,18 +423,17 @@ fn test_cover_sva_generation() {
 
             assign active = state != 0;
         }
-"#);
+"#,
+    );
 
     println!("SV:\n{sv}");
-    assert!(
-        sv.contains("cover"),
-        "Should contain cover statement"
-    );
+    assert!(sv.contains("cover"), "Should contain cover statement");
 }
 
 #[test]
 fn test_mixed_sva_generation() {
-    let sv = compile_hir_to_sv(r#"
+    let sv = compile_hir_to_sv(
+        r#"
 entity MixedSvaTest {
     in clk: clock
     in reset: bool
@@ -419,7 +458,8 @@ impl MixedSvaTest {
 
     result = counter
 }
-"#);
+"#,
+    );
 
     println!("SV:\n{sv}");
     assert!(
@@ -438,7 +478,8 @@ impl MixedSvaTest {
 
 #[test]
 fn test_breakpoint_codegen() {
-    let sv = compile_hir_to_sv(r#"
+    let sv = compile_hir_to_sv(
+        r#"
 entity CodegenTest {
     in clk: bit
     in data: bit[8]
@@ -452,7 +493,8 @@ impl CodegenTest {
     valid = 1
     data_high = data > 128
 }
-"#);
+"#,
+    );
 
     println!("SV:\n{sv}");
     assert!(
@@ -471,7 +513,8 @@ impl CodegenTest {
 
 #[test]
 fn test_breakpoint_simple_codegen() {
-    let sv = compile_hir_to_sv(r#"
+    let sv = compile_hir_to_sv(
+        r#"
 entity SimpleBreakpoint {
     in clk: bit
     in error: bit
@@ -485,7 +528,8 @@ impl SimpleBreakpoint {
     ok = !error
     error_signal = error
 }
-"#);
+"#,
+    );
 
     println!("SV:\n{sv}");
     assert!(
@@ -496,7 +540,8 @@ impl SimpleBreakpoint {
 
 #[test]
 fn test_breakpoint_skalp_roundtrip() {
-    let sk = compile_hir_to_skalp(r#"
+    let sk = compile_hir_to_skalp(
+        r#"
 entity BpTest {
     in clk: bit
     out ok: bit
@@ -509,7 +554,8 @@ impl BpTest {
     ok = 1
     count = 0
 }
-"#);
+"#,
+    );
 
     println!("Skalp:\n{sk}");
     assert!(
@@ -525,7 +571,8 @@ impl BpTest {
 
 #[test]
 fn test_cdc_codegen_two_ff() {
-    let sv = compile_hir_to_sv(r#"
+    let sv = compile_hir_to_sv(
+        r#"
 entity CdcCodegenTest {
     in clk: bit
     in async_input: bit
@@ -539,7 +586,8 @@ impl CdcCodegenTest {
     synced = async_input
     sync_output = synced
 }
-"#);
+"#,
+    );
 
     println!("SV:\n{sv}");
     assert!(
@@ -553,7 +601,8 @@ impl CdcCodegenTest {
 
 #[test]
 fn test_cdc_codegen_gray() {
-    let sv = compile_hir_to_sv(r#"
+    let sv = compile_hir_to_sv(
+        r#"
 entity CdcGrayTest {
     in clk: bit
     in async_counter: bit[4]
@@ -567,7 +616,8 @@ impl CdcGrayTest {
     gray_synced = async_counter
     sync_counter = gray_synced
 }
-"#);
+"#,
+    );
 
     println!("SV:\n{sv}");
     assert!(
@@ -586,7 +636,8 @@ impl CdcGrayTest {
 
 #[test]
 fn test_cdc_skalp_roundtrip() {
-    let sk = compile_hir_to_skalp(r#"
+    let sk = compile_hir_to_skalp(
+        r#"
 entity CdcRoundtrip {
     in clk: bit
     out sync_out: bit
@@ -599,7 +650,8 @@ impl CdcRoundtrip {
     crossing = 0
     sync_out = 0
 }
-"#);
+"#,
+    );
 
     println!("Skalp:\n{sk}");
     assert!(sk.contains("#[cdc("), "Should emit #[cdc] attribute");
@@ -613,7 +665,8 @@ impl CdcRoundtrip {
 
 #[test]
 fn test_retention_codegen() {
-    let sv = compile_hir_to_sv(r#"
+    let sv = compile_hir_to_sv(
+        r#"
 entity RetentionCodegen {
     in clk: bit
     in data: bit[8]
@@ -627,7 +680,8 @@ impl RetentionCodegen {
     saved_data = data
     valid = 1
 }
-"#);
+"#,
+    );
 
     println!("SV:\n{sv}");
     assert!(
@@ -642,7 +696,8 @@ impl RetentionCodegen {
 
 #[test]
 fn test_isolation_codegen() {
-    let sv = compile_hir_to_sv(r#"
+    let sv = compile_hir_to_sv(
+        r#"
 entity IsolationCodegen {
     in clk: bit
     in iso_en: bit
@@ -657,7 +712,8 @@ impl IsolationCodegen {
     isolated_data = data
     valid = 1
 }
-"#);
+"#,
+    );
 
     println!("SV:\n{sv}");
     assert!(
@@ -668,7 +724,8 @@ impl IsolationCodegen {
 
 #[test]
 fn test_level_shift_codegen() {
-    let sv = compile_hir_to_sv(r#"
+    let sv = compile_hir_to_sv(
+        r#"
 entity LevelShiftCodegen {
     in clk: bit
     in data: bit[8]
@@ -682,7 +739,8 @@ impl LevelShiftCodegen {
     shifted_data = data
     valid = 1
 }
-"#);
+"#,
+    );
 
     println!("SV:\n{sv}");
     assert!(
@@ -693,7 +751,8 @@ impl LevelShiftCodegen {
 
 #[test]
 fn test_power_skalp_roundtrip() {
-    let sk = compile_hir_to_skalp(r#"
+    let sk = compile_hir_to_skalp(
+        r#"
 entity PowerTest {
     in clk: bit
     out ok: bit
@@ -706,7 +765,8 @@ impl PowerTest {
     retained = 0
     ok = 1
 }
-"#);
+"#,
+    );
 
     println!("Skalp:\n{sk}");
     assert!(sk.contains("#[retain"), "Should emit #[retain] attribute");
@@ -718,7 +778,8 @@ impl PowerTest {
 
 #[test]
 fn test_vendor_ip_codegen() {
-    let sv = compile_hir_to_sv(r#"
+    let sv = compile_hir_to_sv(
+        r#"
 #[xilinx_ip("xpm_fifo_sync")]
 entity XpmFifoWrapper {
     in clk: clock
@@ -733,7 +794,8 @@ entity XpmFifoWrapper {
 
 impl XpmFifoWrapper {
 }
-"#);
+"#,
+    );
 
     println!("SV:\n{sv}");
     assert!(
@@ -767,14 +829,8 @@ impl XpmFifoWrapper {
         sk.contains("#[xilinx_ip("),
         "Should emit xilinx_ip attribute"
     );
-    assert!(
-        sk.contains("xpm_fifo_sync"),
-        "Should preserve IP name"
-    );
-    assert!(
-        sk.contains("library="),
-        "Should preserve library parameter"
-    );
+    assert!(sk.contains("xpm_fifo_sync"), "Should preserve IP name");
+    assert!(sk.contains("library="), "Should preserve library parameter");
 }
 
 // ============================================================================
@@ -783,7 +839,8 @@ impl XpmFifoWrapper {
 
 #[test]
 fn test_alu_vhdl_codegen() {
-    let vhdl = compile_hir_to_vhdl(r#"
+    let vhdl = compile_hir_to_vhdl(
+        r#"
 entity ALU {
     in a: bit[32]
     in b: bit[32]
@@ -810,17 +867,22 @@ impl ALU {
         result = result_comb
     }
 }
-"#);
+"#,
+    );
 
     assert!(vhdl.contains("entity ALU is"), "Should have VHDL entity");
-    assert!(vhdl.contains("architecture rtl"), "Should have VHDL architecture");
+    assert!(
+        vhdl.contains("architecture rtl"),
+        "Should have VHDL architecture"
+    );
     assert!(vhdl.contains("process("), "Should have VHDL process");
     assert!(vhdl.contains("when"), "VHDL should use when...else");
 }
 
 #[test]
 fn test_counter_vhdl_codegen() {
-    let vhdl = compile_hir_to_vhdl(r#"
+    let vhdl = compile_hir_to_vhdl(
+        r#"
 entity Counter {
     in clk: clock
     in reset: bit
@@ -841,10 +903,14 @@ impl Counter {
 
     count = counter_reg
 }
-"#);
+"#,
+    );
 
     assert!(vhdl.contains("entity Counter is"));
-    assert!(vhdl.contains("rising_edge"), "Should have rising_edge in VHDL");
+    assert!(
+        vhdl.contains("rising_edge"),
+        "Should have rising_edge in VHDL"
+    );
 }
 
 // ============================================================================
@@ -853,7 +919,8 @@ impl Counter {
 
 #[test]
 fn test_alu_skalp_roundtrip() {
-    let sk = compile_hir_to_skalp(r#"
+    let sk = compile_hir_to_skalp(
+        r#"
 entity ALU {
     in a: bit[32]
     in b: bit[32]
@@ -880,11 +947,15 @@ impl ALU {
         result = result_comb
     }
 }
-"#);
+"#,
+    );
 
     assert!(sk.contains("entity ALU"), "Should have skalp entity");
     assert!(sk.contains("on(clk.rise)"), "Should have on block");
-    assert!(sk.contains("0b000"), "Binary literals should preserve bit order");
+    assert!(
+        sk.contains("0b000"),
+        "Binary literals should preserve bit order"
+    );
 }
 
 // ============================================================================

@@ -1006,7 +1006,11 @@ impl LirOp {
             LirOp::MemRead { .. } => 1,  // addr
             LirOp::MemWrite { .. } => 3, // addr, data, we
             LirOp::MemBlock { has_write, .. } => {
-                if *has_write { 4 } else { 1 } // [raddr, waddr, wdata, we] or [raddr]
+                if *has_write {
+                    4
+                } else {
+                    1
+                } // [raddr, waddr, wdata, we] or [raddr]
             }
             LirOp::Constant { .. } => 0,
             LirOp::Buffer { .. } => 1,

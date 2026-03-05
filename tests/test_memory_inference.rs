@@ -376,9 +376,7 @@ impl RegMemTest {
 use skalp_lir::{lower_mir_module_to_lir, lower_mir_module_to_lir_with_bram, LirOp};
 use skalp_mir::MirCompiler;
 
-fn compile_to_mir_module(
-    source: &str,
-) -> skalp_mir::mir::Module {
+fn compile_to_mir_module(source: &str) -> skalp_mir::mir::Module {
     use skalp_frontend::parse_and_build_hir;
 
     let hir = parse_and_build_hir(source).expect("HIR parsing failed");
@@ -429,7 +427,10 @@ impl BramLirTest {
     assert!(
         memblock_count > 0,
         "LIR should contain MemBlock node for style=block memory. Nodes: {:?}",
-        lir.nodes.iter().map(|n| format!("{:?}", n.op)).collect::<Vec<_>>()
+        lir.nodes
+            .iter()
+            .map(|n| format!("{:?}", n.op))
+            .collect::<Vec<_>>()
     );
 
     println!("MemBlock LIR node count: {}", memblock_count);

@@ -1093,10 +1093,7 @@ impl CellFunction {
                 vec!["ref_clk".into(), "reset".into()],
                 vec!["out_clk".into(), "lock".into()],
             ),
-            CellFunction::ClkDiv => (
-                vec!["clk_in".into(), "rst".into()],
-                vec!["clk_out".into()],
-            ),
+            CellFunction::ClkDiv => (vec!["clk_in".into(), "rst".into()], vec!["clk_out".into()]),
             CellFunction::Tristate => (vec!["a".into(), "en".into()], vec!["y".into()]),
             // Power infrastructure
             CellFunction::LevelShifterLH | CellFunction::LevelShifterHL => {

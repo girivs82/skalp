@@ -1989,14 +1989,8 @@ end architecture structural;
 "#;
     let hir = parse_vhdl_source(source, None).unwrap();
     assert_eq!(hir.implementations.len(), 2);
-    assert_eq!(
-        hir.implementations[0].name,
-        Some("behavioral".to_string())
-    );
-    assert_eq!(
-        hir.implementations[1].name,
-        Some("structural".to_string())
-    );
+    assert_eq!(hir.implementations[0].name, Some("behavioral".to_string()));
+    assert_eq!(hir.implementations[1].name, Some("structural".to_string()));
 }
 
 // ============================================================
@@ -2090,7 +2084,10 @@ end entity top;
     // clk port
     let clk = &entity.ports[0];
     assert_eq!(clk.name, "clk");
-    let pc = clk.physical_constraints.as_ref().expect("clk should have constraints");
+    let pc = clk
+        .physical_constraints
+        .as_ref()
+        .expect("clk should have constraints");
     use skalp_frontend::hir::PinLocation;
     assert!(matches!(&pc.pin_location, Some(PinLocation::Single(p)) if p == "A1"));
     assert_eq!(pc.io_standard.as_deref(), Some("LVCMOS33"));
@@ -2098,7 +2095,10 @@ end entity top;
     // led port
     let led = &entity.ports[1];
     assert_eq!(led.name, "led");
-    let pc = led.physical_constraints.as_ref().expect("led should have constraints");
+    let pc = led
+        .physical_constraints
+        .as_ref()
+        .expect("led should have constraints");
     assert!(matches!(&pc.pin_location, Some(PinLocation::Single(p)) if p == "B2"));
     use skalp_frontend::hir::DriveStrength;
     assert_eq!(pc.drive_strength, Some(DriveStrength::Ma8));
@@ -2145,7 +2145,10 @@ end entity top;
 "#;
     let hir = parse_vhdl_source(source, None).unwrap();
     let port = &hir.entities[0].ports[0];
-    let pc = port.physical_constraints.as_ref().expect("should have constraints");
+    let pc = port
+        .physical_constraints
+        .as_ref()
+        .expect("should have constraints");
     use skalp_frontend::hir::PinLocation;
     match &pc.pin_location {
         Some(PinLocation::Differential { positive, negative }) => {
@@ -2245,7 +2248,10 @@ end entity test;
     use skalp_frontend::hir::PinLocation;
     match &pc.pin_location {
         Some(PinLocation::Multiple(pins)) => {
-            assert_eq!(pins, &vec!["A1".to_string(), "A2".to_string(), "A3".to_string()]);
+            assert_eq!(
+                pins,
+                &vec!["A1".to_string(), "A2".to_string(), "A3".to_string()]
+            );
         }
         other => panic!("Expected Multiple pin location, got {:?}", other),
     }
