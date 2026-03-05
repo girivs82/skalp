@@ -82,14 +82,15 @@ pub use tech_library::{
     arrhenius_acceleration_factor, get_stdlib_library, list_stdlib_libraries,
     process_corner_factor, voltage_acceleration_factor, CellFunction, ClkBufCellInfo,
     ClkDivCellInfo, DecompConnectivity, DecompSource, DecompositionRule, DeratingFactors,
-    DeratingPreset, DspCellInfo, DspPinMap, LibraryCell, LibraryDeratingSummary,
-    LibraryFailureMode, LibraryLoadError, OperatingConditions, PllCellInfo, PllPinMap,
-    ProcessCorner, TechLibrary, TimingCorner,
+    DeratingPreset, DspCellInfo, DspPinMap, IoCellInfo, IoPinMap, LibraryCell,
+    LibraryDeratingSummary, LibraryFailureMode, LibraryLoadError, OperatingConditions,
+    PllCellInfo, PllPinMap, ProcessCorner, TechLibrary, TimingCorner,
 };
 
 // Technology mapper
 pub use tech_mapper::{
     map_hierarchical_to_gates, map_lir_to_gates, map_lir_to_gates_optimized,
+    map_lir_to_gates_with_constraints, map_lir_to_gates_with_constraints_optimized,
     map_lir_to_gates_with_opt_level, map_word_lir_to_gates, synthesize, synthesize_balanced,
     synthesize_for_area, synthesize_for_timing, TechMapResult, TechMapStats, TechMapper,
 };

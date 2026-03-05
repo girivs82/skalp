@@ -616,6 +616,10 @@ impl GateNetlistToSirConverter {
         if upper.starts_with("SB_IO") {
             return PrimitiveType::Buf;
         }
+        // ECP5 I/O cells
+        if upper == "BB" || upper == "IB" || upper == "OB" || upper == "OBZ" {
+            return PrimitiveType::Buf;
+        }
 
         // Normalize cell type (remove drive strength suffix like "_X1", "_X2")
         let base_type = cell_type

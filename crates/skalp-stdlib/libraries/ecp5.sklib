@@ -1051,6 +1051,99 @@ reset = "RST"
 supported_dividers = [2.0, 3.5, 4.0, 5.0, 6.0, 7.0, 8.0]
 
 # =============================================================================
+# BB - Bidirectional IO Buffer
+# General-purpose bidirectional IO with tristate and differential support.
+# =============================================================================
+
+[[cells]]
+name = "BB"
+function = "bidir_pad"
+fit = 0.30
+inputs = ["I", "T"]
+outputs = ["O"]
+nominal_voltage_mv = 3300
+min_voltage_mv = 1650
+
+[cells.io_info]
+supported_standards = ["LVCMOS33", "LVCMOS25", "LVCMOS18", "LVCMOS12", "LVDS"]
+max_drive_strength_ma = 16
+supports_tristate = true
+supports_differential = true
+
+[cells.io_info.pin_map]
+data_in = "O"
+data_out = "I"
+output_enable = "T"
+pad = "B"
+
+# =============================================================================
+# IB - Input Buffer
+# Dedicated input-only IO buffer.
+# =============================================================================
+
+[[cells]]
+name = "IB"
+function = "input_pad"
+fit = 0.20
+inputs = ["I"]
+outputs = ["O"]
+nominal_voltage_mv = 3300
+min_voltage_mv = 1650
+
+[cells.io_info]
+supported_standards = ["LVCMOS33", "LVCMOS25", "LVCMOS18", "LVCMOS12"]
+
+[cells.io_info.pin_map]
+data_in = "O"
+pad = "I"
+
+# =============================================================================
+# OB - Output Buffer
+# Dedicated output-only IO buffer.
+# =============================================================================
+
+[[cells]]
+name = "OB"
+function = "output_pad"
+fit = 0.20
+inputs = ["I"]
+outputs = ["O"]
+nominal_voltage_mv = 3300
+min_voltage_mv = 1650
+
+[cells.io_info]
+supported_standards = ["LVCMOS33", "LVCMOS25", "LVCMOS18", "LVCMOS12"]
+max_drive_strength_ma = 16
+
+[cells.io_info.pin_map]
+data_out = "I"
+pad = "O"
+
+# =============================================================================
+# OBZ - Output Buffer with Tristate
+# Output IO buffer with tristate control.
+# =============================================================================
+
+[[cells]]
+name = "OBZ"
+function = "output_pad"
+fit = 0.25
+inputs = ["I", "T"]
+outputs = ["O"]
+nominal_voltage_mv = 3300
+min_voltage_mv = 1650
+
+[cells.io_info]
+supported_standards = ["LVCMOS33", "LVCMOS25", "LVCMOS18", "LVCMOS12"]
+max_drive_strength_ma = 16
+supports_tristate = true
+
+[cells.io_info.pin_map]
+data_out = "I"
+output_enable = "T"
+pad = "O"
+
+# =============================================================================
 # Decomposition Rules for ECP5
 # =============================================================================
 

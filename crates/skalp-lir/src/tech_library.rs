@@ -131,6 +131,10 @@ pub struct LibraryCell {
     /// Clock divider cell capability metadata (only for cells with function = ClkDiv)
     #[serde(default)]
     pub clk_div_info: Option<ClkDivCellInfo>,
+
+    /// IO cell capability metadata (only for cells with IO pad functions)
+    #[serde(default)]
+    pub io_info: Option<IoCellInfo>,
 }
 
 /// RAM cell capabilities — technology-specific, queried by tech mapper
@@ -294,6 +298,69 @@ pub struct ClkDivCellInfo {
     pub reset: Option<String>,
     /// Supported clock division ratios
     pub supported_dividers: Vec<f64>,
+}
+
+/// IO cell capabilities — technology-specific, queried by tech mapper
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IoCellInfo {
+    /// Supported IO standards (e.g., ["LVCMOS33", "SB_LVCMOS"])
+    #[serde(default)]
+    pub supported_standards: Vec<String>,
+    /// Maximum drive strength in milliamps
+    #[serde(default)]
+    pub max_drive_strength_ma: Option<u32>,
+    /// Supports DDR (double data rate) mode
+    #[serde(default)]
+    pub supports_ddr: bool,
+    /// Supports tristate (output enable) mode
+    #[serde(default)]
+    pub supports_tristate: bool,
+    /// Supports differential signaling (e.g., LVDS)
+    #[serde(default)]
+    pub supports_differential: bool,
+    /// Has input register stage
+    #[serde(default)]
+    pub has_input_register: bool,
+    /// Has output register stage
+    #[serde(default)]
+    pub has_output_register: bool,
+    /// Port pin names for tech mapper wiring (technology-specific)
+    pub pin_map: IoPinMap,
+}
+
+/// Maps logical IO port functions to physical cell pin names
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IoPinMap {
+    /// Data input from pad (e.g., "D_IN_0", "O")
+    #[serde(default)]
+    pub data_in: Option<String>,
+    /// DDR data input from pad (e.g., "D_IN_1")
+    #[serde(default)]
+    pub data_in_ddr: Option<String>,
+    /// Data output to pad (e.g., "D_OUT_0", "I")
+    #[serde(default)]
+    pub data_out: Option<String>,
+    /// DDR data output to pad (e.g., "D_OUT_1")
+    #[serde(default)]
+    pub data_out_ddr: Option<String>,
+    /// Output enable control (e.g., "OUTPUT_ENABLE", "T")
+    #[serde(default)]
+    pub output_enable: Option<String>,
+    /// Package pin / pad connection (e.g., "PACKAGE_PIN", "B")
+    #[serde(default)]
+    pub pad: Option<String>,
+    /// Input clock for registered IO (e.g., "INPUT_CLK")
+    #[serde(default)]
+    pub input_clk: Option<String>,
+    /// Output clock for registered IO (e.g., "OUTPUT_CLK")
+    #[serde(default)]
+    pub output_clk: Option<String>,
+    /// Clock enable (e.g., "CLOCK_ENABLE")
+    #[serde(default)]
+    pub clock_enable: Option<String>,
+    /// Latch input value (e.g., "LATCH_INPUT_VALUE")
+    #[serde(default)]
+    pub latch_input: Option<String>,
 }
 
 /// Timing characteristics for a cell
@@ -568,6 +635,7 @@ impl LibraryCell {
             pll_info: None,
             clk_buf_info: None,
             clk_div_info: None,
+            io_info: None,
         }
     }
 
@@ -1670,6 +1738,34 @@ impl TechLibrary {
             .and_then(|cell| cell.clk_div_info.as_ref().map(|info| (cell, info)))
     }
 
+    /// Find a bidirectional IO cell in the library
+    ///
+    /// Returns the IO cell and its capability metadata, or None if no IO cell exists.
+    pub fn find_io_cell(&self) -> Option<(&LibraryCell, &IoCellInfo)> {
+        self.find_best_cell(&CellFunction::BidirPad)
+            .and_then(|cell| cell.io_info.as_ref().map(|info| (cell, info)))
+    }
+
+    /// Find an input pad cell in the library
+    ///
+    /// Prefers cells with `InputPad` function; falls back to `BidirPad`
+    /// (e.g., iCE40 only has SB_IO for all IO directions).
+    pub fn find_input_pad(&self) -> Option<(&LibraryCell, &IoCellInfo)> {
+        self.find_best_cell(&CellFunction::InputPad)
+            .and_then(|cell| cell.io_info.as_ref().map(|info| (cell, info)))
+            .or_else(|| self.find_io_cell())
+    }
+
+    /// Find an output pad cell in the library
+    ///
+    /// Prefers cells with `OutputPad` function; falls back to `BidirPad`
+    /// (e.g., iCE40 only has SB_IO for all IO directions).
+    pub fn find_output_pad(&self) -> Option<(&LibraryCell, &IoCellInfo)> {
+        self.find_best_cell(&CellFunction::OutputPad)
+            .and_then(|cell| cell.io_info.as_ref().map(|info| (cell, info)))
+            .or_else(|| self.find_io_cell())
+    }
+
     /// Iterate over all cells in the library
     pub fn iter_cells(&self) -> impl Iterator<Item = (&String, &LibraryCell)> {
         self.cells.iter()
@@ -2348,6 +2444,9 @@ struct TomlCell {
     // Clock divider capability metadata (for cells with function = "clk_div")
     #[serde(default)]
     clk_div_info: Option<TomlClkDivInfo>,
+    // IO cell capability metadata (for cells with IO pad functions)
+    #[serde(default)]
+    io_info: Option<TomlIoCellInfo>,
     // Failure modes
     #[serde(default)]
     failure_modes: Vec<TomlFailureMode>,
@@ -2549,6 +2648,51 @@ struct TomlClkDivInfo {
     reset: Option<String>,
     #[serde(default)]
     supported_dividers: Vec<f64>,
+}
+
+/// IO cell capability metadata in TOML format
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TomlIoCellInfo {
+    #[serde(default)]
+    supported_standards: Vec<String>,
+    #[serde(default)]
+    max_drive_strength_ma: Option<u32>,
+    #[serde(default)]
+    supports_ddr: bool,
+    #[serde(default)]
+    supports_tristate: bool,
+    #[serde(default)]
+    supports_differential: bool,
+    #[serde(default)]
+    has_input_register: bool,
+    #[serde(default)]
+    has_output_register: bool,
+    pin_map: TomlIoPinMap,
+}
+
+/// IO pin map in TOML format
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TomlIoPinMap {
+    #[serde(default)]
+    data_in: Option<String>,
+    #[serde(default)]
+    data_in_ddr: Option<String>,
+    #[serde(default)]
+    data_out: Option<String>,
+    #[serde(default)]
+    data_out_ddr: Option<String>,
+    #[serde(default)]
+    output_enable: Option<String>,
+    #[serde(default)]
+    pad: Option<String>,
+    #[serde(default)]
+    input_clk: Option<String>,
+    #[serde(default)]
+    output_clk: Option<String>,
+    #[serde(default)]
+    clock_enable: Option<String>,
+    #[serde(default)]
+    latch_input: Option<String>,
 }
 
 impl TomlLibrary {
@@ -2784,6 +2928,27 @@ impl TomlCell {
                 reset: di.reset,
                 supported_dividers: di.supported_dividers,
             }),
+            io_info: self.io_info.map(|ii| IoCellInfo {
+                supported_standards: ii.supported_standards,
+                max_drive_strength_ma: ii.max_drive_strength_ma,
+                supports_ddr: ii.supports_ddr,
+                supports_tristate: ii.supports_tristate,
+                supports_differential: ii.supports_differential,
+                has_input_register: ii.has_input_register,
+                has_output_register: ii.has_output_register,
+                pin_map: IoPinMap {
+                    data_in: ii.pin_map.data_in,
+                    data_in_ddr: ii.pin_map.data_in_ddr,
+                    data_out: ii.pin_map.data_out,
+                    data_out_ddr: ii.pin_map.data_out_ddr,
+                    output_enable: ii.pin_map.output_enable,
+                    pad: ii.pin_map.pad,
+                    input_clk: ii.pin_map.input_clk,
+                    output_clk: ii.pin_map.output_clk,
+                    clock_enable: ii.pin_map.clock_enable,
+                    latch_input: ii.pin_map.latch_input,
+                },
+            }),
         })
     }
 
@@ -2939,6 +3104,27 @@ impl TomlCell {
                 reset: di.reset.clone(),
                 supported_dividers: di.supported_dividers.clone(),
             }),
+            io_info: cell.io_info.as_ref().map(|ii| TomlIoCellInfo {
+                supported_standards: ii.supported_standards.clone(),
+                max_drive_strength_ma: ii.max_drive_strength_ma,
+                supports_ddr: ii.supports_ddr,
+                supports_tristate: ii.supports_tristate,
+                supports_differential: ii.supports_differential,
+                has_input_register: ii.has_input_register,
+                has_output_register: ii.has_output_register,
+                pin_map: TomlIoPinMap {
+                    data_in: ii.pin_map.data_in.clone(),
+                    data_in_ddr: ii.pin_map.data_in_ddr.clone(),
+                    data_out: ii.pin_map.data_out.clone(),
+                    data_out_ddr: ii.pin_map.data_out_ddr.clone(),
+                    output_enable: ii.pin_map.output_enable.clone(),
+                    pad: ii.pin_map.pad.clone(),
+                    input_clk: ii.pin_map.input_clk.clone(),
+                    output_clk: ii.pin_map.output_clk.clone(),
+                    clock_enable: ii.pin_map.clock_enable.clone(),
+                    latch_input: ii.pin_map.latch_input.clone(),
+                },
+            }),
             failure_modes,
         }
     }
@@ -3018,6 +3204,8 @@ fn parse_cell_function(s: &str) -> Result<CellFunction, LibraryLoadError> {
         "ground_pad" | "vsspad" | "gndpad" => Ok(CellFunction::GroundPad),
         "analog_pad" | "apad" => Ok(CellFunction::AnalogPad),
         "power_pad_ldo" | "vddpad_ldo" | "ldopad" => Ok(CellFunction::PowerPadLdo),
+        // Legacy FPGA IO function name → BidirPad
+        "io" => Ok(CellFunction::BidirPad),
         _ => {
             // Check for adder with width
             if lower.starts_with("adder") {

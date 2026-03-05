@@ -407,7 +407,7 @@ mechanism = "electromigration"
 
 [[cells]]
 name = "SB_IO"
-function = "io"
+function = "bidir_pad"
 fit = 0.30
 inputs = ["D_OUT_0", "D_OUT_1", "OUTPUT_ENABLE"]
 outputs = ["D_IN_0", "D_IN_1"]
@@ -416,6 +416,26 @@ min_voltage_mv = 1650
 timing_margin_voltage_mv = 2500
 voltage_delay_coefficient = 0.05
 voltage_sensitivity = 2
+
+[cells.io_info]
+supported_standards = ["SB_LVCMOS", "SB_LVTTL"]
+max_drive_strength_ma = 8
+supports_ddr = true
+supports_tristate = true
+has_input_register = true
+has_output_register = true
+
+[cells.io_info.pin_map]
+data_in = "D_IN_0"
+data_in_ddr = "D_IN_1"
+data_out = "D_OUT_0"
+data_out_ddr = "D_OUT_1"
+output_enable = "OUTPUT_ENABLE"
+pad = "PACKAGE_PIN"
+input_clk = "INPUT_CLK"
+output_clk = "OUTPUT_CLK"
+clock_enable = "CLOCK_ENABLE"
+latch_input = "LATCH_INPUT_VALUE"
 
 [[cells.failure_modes]]
 name = "esd_damage"

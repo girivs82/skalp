@@ -11,7 +11,8 @@
 use skalp_lir::{
     get_stdlib_library, list_stdlib_libraries, lower_mir_module_to_lir,
     lower_mir_module_to_lir_with_bram, map_lir_to_gates, map_lir_to_gates_optimized,
-    synthesize_for_area, synthesize_for_timing, CellFunction, Lir, LirOp,
+    map_lir_to_gates_with_constraints, synthesize_for_area, synthesize_for_timing, CellFunction,
+    Lir, LirOp,
 };
 use skalp_mir::MirCompiler;
 use skalp_testing::testbench::*;
@@ -1690,4 +1691,341 @@ fn test_generic_asic_no_pll() {
         library.find_pll_cell().is_none(),
         "generic_asic should not have PLL cells"
     );
+}
+
+// =============================================================================
+// IO Cell Infrastructure Tests
+// =============================================================================
+
+#[test]
+fn test_ice40_has_io_cell() {
+    let library = get_stdlib_library("ice40").expect("Failed to load ice40");
+
+    // SB_IO should load as BidirPad with IoCellInfo
+    let (cell, io_info) = library
+        .find_io_cell()
+        .expect("ice40 should have an IO cell (SB_IO)");
+
+    assert_eq!(cell.name, "SB_IO");
+    assert!(matches!(cell.function, CellFunction::BidirPad));
+
+    // Check capabilities
+    assert!(io_info.supports_ddr, "SB_IO supports DDR");
+    assert!(io_info.supports_tristate, "SB_IO supports tristate");
+    assert!(!io_info.supports_differential, "SB_IO does not support differential");
+    assert!(io_info.has_input_register, "SB_IO has input register");
+    assert!(io_info.has_output_register, "SB_IO has output register");
+    assert_eq!(io_info.max_drive_strength_ma, Some(8));
+
+    // Check pin map
+    assert_eq!(io_info.pin_map.data_in.as_deref(), Some("D_IN_0"));
+    assert_eq!(io_info.pin_map.data_in_ddr.as_deref(), Some("D_IN_1"));
+    assert_eq!(io_info.pin_map.data_out.as_deref(), Some("D_OUT_0"));
+    assert_eq!(io_info.pin_map.data_out_ddr.as_deref(), Some("D_OUT_1"));
+    assert_eq!(io_info.pin_map.output_enable.as_deref(), Some("OUTPUT_ENABLE"));
+    assert_eq!(io_info.pin_map.pad.as_deref(), Some("PACKAGE_PIN"));
+    assert_eq!(io_info.pin_map.input_clk.as_deref(), Some("INPUT_CLK"));
+    assert_eq!(io_info.pin_map.output_clk.as_deref(), Some("OUTPUT_CLK"));
+    assert_eq!(io_info.pin_map.clock_enable.as_deref(), Some("CLOCK_ENABLE"));
+    assert_eq!(io_info.pin_map.latch_input.as_deref(), Some("LATCH_INPUT_VALUE"));
+
+    // find_input_pad should fall back to SB_IO (no dedicated input pad)
+    let (input_cell, _) = library
+        .find_input_pad()
+        .expect("ice40 should find an input pad (fallback to SB_IO)");
+    assert_eq!(input_cell.name, "SB_IO");
+
+    // find_output_pad should fall back to SB_IO
+    let (output_cell, _) = library
+        .find_output_pad()
+        .expect("ice40 should find an output pad (fallback to SB_IO)");
+    assert_eq!(output_cell.name, "SB_IO");
+}
+
+#[test]
+fn test_ecp5_has_io_cells() {
+    let library = get_stdlib_library("ecp5").expect("Failed to load ecp5");
+
+    // BB should be BidirPad
+    let (bb_cell, bb_info) = library
+        .find_io_cell()
+        .expect("ecp5 should have a bidirectional IO cell (BB)");
+    assert_eq!(bb_cell.name, "BB");
+    assert!(matches!(bb_cell.function, CellFunction::BidirPad));
+    assert!(bb_info.supports_tristate);
+    assert!(bb_info.supports_differential);
+    assert_eq!(bb_info.max_drive_strength_ma, Some(16));
+    assert_eq!(bb_info.pin_map.data_in.as_deref(), Some("O"));
+    assert_eq!(bb_info.pin_map.data_out.as_deref(), Some("I"));
+    assert_eq!(bb_info.pin_map.output_enable.as_deref(), Some("T"));
+    assert_eq!(bb_info.pin_map.pad.as_deref(), Some("B"));
+
+    // IB should be InputPad (preferred over BB for inputs)
+    let (ib_cell, ib_info) = library
+        .find_input_pad()
+        .expect("ecp5 should have an input pad (IB)");
+    assert_eq!(ib_cell.name, "IB");
+    assert!(matches!(ib_cell.function, CellFunction::InputPad));
+    assert_eq!(ib_info.pin_map.data_in.as_deref(), Some("O"));
+    assert_eq!(ib_info.pin_map.pad.as_deref(), Some("I"));
+
+    // OB should be OutputPad (preferred over BB for outputs)
+    let (ob_cell, _) = library
+        .find_output_pad()
+        .expect("ecp5 should have an output pad (OB)");
+    assert_eq!(ob_cell.name, "OB");
+    assert!(matches!(ob_cell.function, CellFunction::OutputPad));
+}
+
+#[test]
+fn test_io_buffer_insertion_ice40() {
+    let lir = build_register_lir(4);
+    let library = get_stdlib_library("ice40").expect("Failed to load ice40");
+    let result = map_lir_to_gates(&lir, &library);
+
+    // Should have SB_IO cells inserted for input (d) and output (q) ports
+    let io_cells: Vec<_> = result
+        .netlist
+        .cells
+        .iter()
+        .filter(|c| c.cell_type == "SB_IO")
+        .collect();
+    assert!(
+        !io_cells.is_empty(),
+        "Should insert SB_IO cells for IO buffering"
+    );
+
+    // All IO cells should have source_op = "IOBuffer"
+    for cell in &io_cells {
+        assert_eq!(
+            cell.source_op.as_deref(),
+            Some("IOBuffer"),
+            "IO cell '{}' should have source_op 'IOBuffer'",
+            cell.path
+        );
+    }
+
+    // Stats should report IO buffers inserted
+    assert!(
+        result.stats.io_buffers_inserted > 0,
+        "Should report IO buffers inserted in stats"
+    );
+}
+
+#[test]
+fn test_io_buffer_insertion_ecp5() {
+    let lir = build_register_lir(4);
+    let library = get_stdlib_library("ecp5").expect("Failed to load ecp5");
+    let result = map_lir_to_gates(&lir, &library);
+
+    // ECP5 should use IB for input pads and OB for output pads
+    let ib_cells: Vec<_> = result
+        .netlist
+        .cells
+        .iter()
+        .filter(|c| c.cell_type == "IB")
+        .collect();
+    let ob_cells: Vec<_> = result
+        .netlist
+        .cells
+        .iter()
+        .filter(|c| c.cell_type == "OB")
+        .collect();
+
+    assert!(
+        !ib_cells.is_empty(),
+        "Should insert IB cells for input ports"
+    );
+    assert!(
+        !ob_cells.is_empty(),
+        "Should insert OB cells for output ports"
+    );
+
+    // All IO cells should have source_op = "IOBuffer"
+    for cell in ib_cells.iter().chain(ob_cells.iter()) {
+        assert_eq!(
+            cell.source_op.as_deref(),
+            Some("IOBuffer"),
+            "IO cell '{}' should have source_op 'IOBuffer'",
+            cell.path
+        );
+    }
+}
+
+#[test]
+fn test_no_io_buffer_generic_asic() {
+    let lir = build_register_lir(4);
+    let library = get_stdlib_library("generic_asic").expect("Failed to load generic_asic");
+
+    // generic_asic has ASIC pads (via CellFunction) but no io_info → no IO buffer insertion
+    let result = map_lir_to_gates(&lir, &library);
+
+    let io_buffer_cells: Vec<_> = result
+        .netlist
+        .cells
+        .iter()
+        .filter(|c| c.source_op.as_deref() == Some("IOBuffer"))
+        .collect();
+    assert_eq!(
+        io_buffer_cells.len(),
+        0,
+        "generic_asic should not insert IO buffer cells (no io_info)"
+    );
+    assert_eq!(
+        result.stats.io_buffers_inserted, 0,
+        "generic_asic should report 0 IO buffers inserted"
+    );
+}
+
+#[test]
+fn test_generic_asic_has_io_pads() {
+    let library = get_stdlib_library("generic_asic").expect("Failed to load generic_asic");
+
+    // generic_asic should have IO pads by CellFunction (no io_info)
+    assert!(
+        library.has_function(&CellFunction::InputPad),
+        "generic_asic should have InputPad cells"
+    );
+    assert!(
+        library.has_function(&CellFunction::OutputPad),
+        "generic_asic should have OutputPad cells"
+    );
+    assert!(
+        library.has_function(&CellFunction::BidirPad),
+        "generic_asic should have BidirPad cells"
+    );
+
+    // But no io_info
+    assert!(
+        library.find_io_cell().is_none(),
+        "generic_asic should not have io_info on its pad cells"
+    );
+}
+
+#[test]
+fn test_legacy_io_function_backward_compat() {
+    // Parsing "io" should produce BidirPad (backward compat for old .sklib files)
+    use skalp_lir::TechLibrary;
+
+    let toml_content = r#"
+[library]
+name = "test_legacy_io"
+
+[[cells]]
+name = "LEGACY_IO"
+function = "io"
+fit = 0.1
+inputs = ["D"]
+outputs = ["Q"]
+"#;
+    let library = TechLibrary::from_toml(toml_content).expect("Failed to parse legacy IO");
+    let cell = library
+        .find_best_cell(&CellFunction::BidirPad)
+        .expect("Should find legacy IO cell as BidirPad");
+    assert_eq!(cell.name, "LEGACY_IO");
+}
+
+#[test]
+fn test_io_constraint_propagation() {
+    use indexmap::IndexMap;
+    use skalp_frontend::hir::{PhysicalConstraints, PinLocation};
+
+    let lir = build_register_lir(4);
+    let library = get_stdlib_library("ice40").expect("Failed to load ice40");
+
+    // Build constraints for the "d" input port
+    let mut port_constraints: IndexMap<String, PhysicalConstraints> = IndexMap::new();
+    port_constraints.insert(
+        "d[0]".to_string(),
+        PhysicalConstraints {
+            pin_location: Some(PinLocation::Single("A1".to_string())),
+            io_standard: Some("LVCMOS33".to_string()),
+            drive_strength: None,
+            slew_rate: None,
+            termination: None,
+            schmitt_trigger: None,
+            bank: None,
+            diff_term: None,
+            pad_type: None,
+            pad_cell: None,
+            ldo_config: None,
+        },
+    );
+    port_constraints.insert(
+        "q[0]".to_string(),
+        PhysicalConstraints {
+            pin_location: Some(PinLocation::Single("B2".to_string())),
+            io_standard: Some("LVCMOS25".to_string()),
+            drive_strength: None,
+            slew_rate: None,
+            termination: None,
+            schmitt_trigger: None,
+            bank: None,
+            diff_term: None,
+            pad_type: None,
+            pad_cell: None,
+            ldo_config: None,
+        },
+    );
+
+    let result = map_lir_to_gates_with_constraints(&lir, &library, port_constraints);
+
+    // Find IO cells and check their parameters
+    let io_cells: Vec<_> = result
+        .netlist
+        .cells
+        .iter()
+        .filter(|c| c.source_op.as_deref() == Some("IOBuffer"))
+        .collect();
+    assert!(
+        !io_cells.is_empty(),
+        "Should have IO buffer cells with constraints"
+    );
+
+    // Find the IO cell for d[0] input
+    let d0_cell = io_cells
+        .iter()
+        .find(|c| c.path.contains("d[0]"))
+        .expect("Should have IO cell for d[0]");
+    assert_eq!(
+        d0_cell.parameters.get("LOC").map(|s| s.as_str()),
+        Some("A1"),
+        "d[0] IO cell should have LOC=A1"
+    );
+    assert_eq!(
+        d0_cell.parameters.get("IO_STANDARD").map(|s| s.as_str()),
+        Some("LVCMOS33"),
+        "d[0] IO cell should have IO_STANDARD=LVCMOS33"
+    );
+
+    // Find the IO cell for q[0] output
+    let q0_cell = io_cells
+        .iter()
+        .find(|c| c.path.contains("q[0]"))
+        .expect("Should have IO cell for q[0]");
+    assert_eq!(
+        q0_cell.parameters.get("LOC").map(|s| s.as_str()),
+        Some("B2"),
+        "q[0] IO cell should have LOC=B2"
+    );
+    assert_eq!(
+        q0_cell.parameters.get("IO_STANDARD").map(|s| s.as_str()),
+        Some("LVCMOS25"),
+        "q[0] IO cell should have IO_STANDARD=LVCMOS25"
+    );
+
+    // IO cells without constraints should NOT have LOC/IO_STANDARD
+    let unconstrained_io = io_cells
+        .iter()
+        .find(|c| c.path.contains("d[1]") || c.path.contains("d[2]") || c.path.contains("d[3]"));
+    if let Some(cell) = unconstrained_io {
+        assert!(
+            !cell.parameters.contains_key("LOC"),
+            "Unconstrained IO cell should not have LOC parameter"
+        );
+        assert!(
+            !cell.parameters.contains_key("IO_STANDARD"),
+            "Unconstrained IO cell should not have IO_STANDARD parameter"
+        );
+    }
 }

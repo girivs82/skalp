@@ -19,9 +19,10 @@ use crate::gate_netlist::{
 };
 use crate::lir::{Lir, LirNode, LirOp, LirSafetyInfo, LirSignalId};
 use crate::tech_library::{
-    CellFunction, DecompConnectivity, LibraryCell, LibraryFailureMode, TechLibrary,
+    CellFunction, DecompConnectivity, IoCellInfo, LibraryCell, LibraryFailureMode, TechLibrary,
 };
 use indexmap::IndexMap;
+use skalp_frontend::hir::PhysicalConstraints;
 
 /// Information extracted from a library cell for tech mapping
 struct LibraryCellInfo {
@@ -90,6 +91,8 @@ pub struct TechMapStats {
     pub decomposed_mappings: usize,
     /// Clock buffers inserted
     pub clock_buffers_inserted: usize,
+    /// IO buffers inserted
+    pub io_buffers_inserted: usize,
 }
 
 /// Technology mapper
@@ -111,6 +114,8 @@ pub struct TechMapper<'a> {
     module_safety_info: Option<LirSafetyInfo>,
     /// Counter for unique C-element naming (to avoid duplicate internal net names)
     c_elem_counter: u32,
+    /// Physical constraints per port name (pin location, IO standard, drive strength, etc.)
+    port_constraints: IndexMap<String, PhysicalConstraints>,
 }
 
 impl<'a> TechMapper<'a> {
@@ -125,6 +130,7 @@ impl<'a> TechMapper<'a> {
             next_cell_id: 0,
             module_safety_info: None,
             c_elem_counter: 0,
+            port_constraints: IndexMap::new(),
         }
     }
 
@@ -238,6 +244,9 @@ impl<'a> TechMapper<'a> {
 
         // Phase 3: Insert global clock buffers on clock nets
         self.insert_clock_buffers();
+
+        // Phase 4: Insert IO buffers on primary input/output ports
+        self.insert_io_buffers();
 
         // Propagate NCL flag from LIR (set by expand_to_ncl)
         self.netlist.is_ncl = word_lir.is_ncl;
@@ -3880,6 +3889,204 @@ impl<'a> TechMapper<'a> {
     }
 
     // =========================================================================
+    // IO Buffer Insertion
+    // =========================================================================
+
+    /// Insert IO buffers on primary input and output ports.
+    ///
+    /// For each primary input (excluding clocks), inserts an input pad cell.
+    /// For each primary output, inserts an output pad cell.
+    /// Constraints from `self.port_constraints` are propagated to cell parameters.
+    fn insert_io_buffers(&mut self) {
+        // Check if the library has any IO cells (any cell with io_info)
+        let has_io_cells = self
+            .library
+            .iter_cells()
+            .any(|(_, cell)| cell.io_info.is_some());
+        if !has_io_cells {
+            return;
+        }
+
+        // Clone port lists to avoid borrow conflicts
+        let input_nets: Vec<GateNetId> = self.netlist.inputs.clone();
+        let output_nets: Vec<GateNetId> = self.netlist.outputs.clone();
+        let clock_nets: std::collections::HashSet<GateNetId> =
+            self.netlist.clocks.iter().copied().collect();
+
+        // Insert input IO buffers
+        for &input_net_id in &input_nets {
+            // Skip clock nets (already handled by clock buffers)
+            if clock_nets.contains(&input_net_id) {
+                continue;
+            }
+
+            let (input_cell, input_io_info) = match self.library.find_input_pad() {
+                Some(pair) => pair,
+                None => continue,
+            };
+
+            let port_name = self
+                .netlist
+                .nets
+                .get(input_net_id.0 as usize)
+                .map(|n| n.name.clone())
+                .unwrap_or_else(|| format!("in_{}", input_net_id.0));
+
+            // Create internal buffered net
+            let buf_out_id = self.alloc_net_id();
+            let buf_out_net = GateNet::new(buf_out_id, format!("{}_io", port_name));
+            self.netlist.add_net(buf_out_net);
+
+            let cell_name = input_cell.name.clone();
+            let cell_fit = input_cell.fit;
+            let cell_info = LibraryCellInfo::from_library_cell(input_cell);
+
+            // Build IO buffer cell: input from pad net, output to internal net
+            let mut cell = Cell::new_comb(
+                CellId(0),
+                cell_name,
+                self.library.name.clone(),
+                cell_fit,
+                format!("{}_ibuf", port_name),
+                vec![input_net_id],
+                vec![buf_out_id],
+            );
+            cell.source_op = Some("IOBuffer".to_string());
+            cell_info.apply_to_cell(&mut cell);
+
+            // Apply physical constraints (pin location, IO standard, etc.)
+            self.apply_io_constraints(&mut cell, &port_name);
+
+            self.add_cell(cell);
+
+            // Rewire all consumers of the original input to use the buffered net
+            self.rewire_io_consumers(input_net_id, buf_out_id);
+
+            self.stats.io_buffers_inserted += 1;
+        }
+
+        // Insert output IO buffers
+        for &output_net_id in &output_nets {
+            let (output_cell, output_io_info) = match self.library.find_output_pad() {
+                Some(pair) => pair,
+                None => continue,
+            };
+
+            let port_name = self
+                .netlist
+                .nets
+                .get(output_net_id.0 as usize)
+                .map(|n| n.name.clone())
+                .unwrap_or_else(|| format!("out_{}", output_net_id.0));
+
+            // Create pad output net
+            let pad_out_id = self.alloc_net_id();
+            let pad_out_net = GateNet::new(pad_out_id, format!("{}_pad", port_name));
+            self.netlist.add_net(pad_out_net);
+
+            let cell_name = output_cell.name.clone();
+            let cell_fit = output_cell.fit;
+            let cell_info = LibraryCellInfo::from_library_cell(output_cell);
+            let supports_tristate = output_io_info.supports_tristate;
+
+            // Build inputs: signal + optional tie-high for output enable
+            let mut cell_inputs = vec![output_net_id];
+            if supports_tristate {
+                let tie_high = self.get_tie_high();
+                cell_inputs.push(tie_high);
+            }
+
+            let mut cell = Cell::new_comb(
+                CellId(0),
+                cell_name,
+                self.library.name.clone(),
+                cell_fit,
+                format!("{}_obuf", port_name),
+                cell_inputs,
+                vec![pad_out_id],
+            );
+            cell.source_op = Some("IOBuffer".to_string());
+            cell_info.apply_to_cell(&mut cell);
+
+            // Apply physical constraints
+            self.apply_io_constraints(&mut cell, &port_name);
+
+            self.add_cell(cell);
+
+            self.stats.io_buffers_inserted += 1;
+        }
+    }
+
+    /// Apply physical constraints from port annotations to IO cell parameters.
+    ///
+    /// Maps `PhysicalConstraints` fields to cell `parameters` entries that the
+    /// native PnR reads directly. External flows (nextpnr) can still use
+    /// `constraint_gen.rs` for PCF/XDC file generation.
+    fn apply_io_constraints(&self, cell: &mut Cell, port_name: &str) {
+        let constraints = match self.port_constraints.get(port_name) {
+            Some(c) => c,
+            None => return,
+        };
+
+        if let Some(ref pin_loc) = constraints.pin_location {
+            use skalp_frontend::hir::PinLocation;
+            match pin_loc {
+                PinLocation::Single(pin) => {
+                    cell.parameters.insert("LOC".into(), pin.clone());
+                }
+                PinLocation::Differential { positive, negative } => {
+                    cell.parameters.insert("LOC".into(), positive.clone());
+                    cell.parameters.insert("LOC_N".into(), negative.clone());
+                }
+                _ => {} // Multi-bit handled per-bit by caller
+            }
+        }
+        if let Some(ref std) = constraints.io_standard {
+            cell.parameters.insert("IO_STANDARD".into(), std.clone());
+        }
+        if let Some(ref drive) = constraints.drive_strength {
+            cell.parameters
+                .insert("DRIVE_STRENGTH".into(), format!("{:?}", drive));
+        }
+        if let Some(ref slew) = constraints.slew_rate {
+            cell.parameters
+                .insert("SLEW_RATE".into(), format!("{:?}", slew));
+        }
+        if let Some(ref term) = constraints.termination {
+            cell.parameters
+                .insert("TERMINATION".into(), format!("{:?}", term));
+        }
+        if let Some(schmitt) = constraints.schmitt_trigger {
+            cell.parameters
+                .insert("SCHMITT_TRIGGER".into(), schmitt.to_string());
+        }
+    }
+
+    /// Rewire all consumers of `old_net` to use `new_net`, skipping IO buffer cells.
+    fn rewire_io_consumers(&mut self, old_net: GateNetId, new_net: GateNetId) {
+        for cell_idx in 0..self.netlist.cells.len() {
+            let cell = &self.netlist.cells[cell_idx];
+
+            // Skip the IO buffer cell itself (its input is old_net and output is new_net)
+            if cell.inputs.contains(&old_net) && cell.outputs.contains(&new_net) {
+                continue;
+            }
+
+            // Rewire input pins
+            for pin_idx in 0..self.netlist.cells[cell_idx].inputs.len() {
+                if self.netlist.cells[cell_idx].inputs[pin_idx] == old_net {
+                    self.netlist.cells[cell_idx].inputs[pin_idx] = new_net;
+                }
+            }
+
+            // Rewire clock connection (in case a non-clock input was routed through clock)
+            if self.netlist.cells[cell_idx].clock == Some(old_net) {
+                self.netlist.cells[cell_idx].clock = Some(new_net);
+            }
+        }
+    }
+
+    // =========================================================================
     // NCL (Null Convention Logic) Mapping Functions
     // =========================================================================
     //
@@ -6879,6 +7086,53 @@ pub fn map_lir_to_gates(lir: &Lir, library: &TechLibrary) -> TechMapResult {
     mapper.map(lir)
 }
 
+/// Map a Lir to GateNetlist with physical constraints for IO buffer insertion.
+///
+/// Constraints from source-level annotations (e.g., `@ { pin: "A1", io_standard: "LVCMOS33" }`)
+/// are propagated directly to IO cell parameters. The native PnR reads `cell.parameters["LOC"]`
+/// and `cell.parameters["IO_STANDARD"]` directly — no separate PCF/XDC needed.
+pub fn map_lir_to_gates_with_constraints(
+    lir: &Lir,
+    library: &TechLibrary,
+    port_constraints: IndexMap<String, PhysicalConstraints>,
+) -> TechMapResult {
+    let mut mapper = TechMapper::new(library);
+    mapper.port_constraints = port_constraints;
+    mapper.map(lir)
+}
+
+/// Map a Lir to GateNetlist with constraints and gate-level optimizations
+pub fn map_lir_to_gates_with_constraints_optimized(
+    lir: &Lir,
+    library: &TechLibrary,
+    port_constraints: IndexMap<String, PhysicalConstraints>,
+) -> TechMapResult {
+    use crate::gate_optimizer::GateOptimizer;
+
+    let mut mapper = TechMapper::new(library);
+    mapper.port_constraints = port_constraints;
+    let mut result = mapper.map(lir);
+
+    let mut optimizer = GateOptimizer::new();
+    let opt_stats = optimizer.optimize(&mut result.netlist);
+
+    result.stats.cells_created = result.netlist.cells.len();
+    result.stats.nets_created = result.netlist.nets.len();
+
+    if opt_stats.cells_removed > 0 {
+        result.warnings.push(format!(
+            "Optimization: removed {} cells ({} → {}), FIT {} → {}",
+            opt_stats.cells_removed,
+            opt_stats.cells_before,
+            opt_stats.cells_after,
+            opt_stats.fit_before,
+            opt_stats.fit_after
+        ));
+    }
+
+    result
+}
+
 /// Map a Lir to GateNetlist and run gate-level optimizations
 pub fn map_lir_to_gates_optimized(lir: &Lir, library: &TechLibrary) -> TechMapResult {
     use crate::gate_optimizer::GateOptimizer;
@@ -7066,6 +7320,7 @@ pub fn map_hierarchical_to_gates(
                         direct_mappings: 0,
                         decomposed_mappings: 0,
                         clock_buffers_inserted: 0,
+                        io_buffers_inserted: 0,
                     },
                     warnings: vec![format!(
                         "Loaded pre-compiled netlist from '{}'",
@@ -7290,6 +7545,7 @@ fn create_blackbox_netlist(
             direct_mappings: 1,
             decomposed_mappings: 0,
             clock_buffers_inserted: 0,
+            io_buffers_inserted: 0,
         },
         warnings: vec![format!(
             "Created blackbox cell '{}' for vendor IP",
