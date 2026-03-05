@@ -1127,6 +1127,7 @@ fn filter_vhdl_architectures(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_design(
     source: &PathBuf,
     target: &str,
@@ -2103,6 +2104,7 @@ fn compile_to_ip(
 /// - Behavioral (default): HIR → MIR → SIR (fast, functional)
 /// - Gate-level (--gate-level): HIR → MIR → LIR → SIR (gate-level primitives, fault injection ready)
 /// - NCL (--ncl): Async NCL simulation with THmn gates and wavefront propagation
+#[allow(clippy::too_many_arguments)]
 fn simulate_design(
     design_file: &PathBuf,
     duration: Option<&str>,

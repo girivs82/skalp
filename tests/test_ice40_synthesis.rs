@@ -866,6 +866,7 @@ fn test_ice40_library_cell_fit_rates() {
 // =============================================================================
 
 /// Helper to compile with BRAM inference enabled
+#[allow(dead_code)]
 fn compile_inline_to_lir_with_bram(source: &str) -> skalp_lir::Lir {
     use skalp_frontend::parse_and_build_hir;
 
@@ -1258,7 +1259,7 @@ fn count_partial_product_cells(result: &skalp_lir::TechMapResult) -> usize {
         .filter(|c| {
             c.source_op
                 .as_ref()
-                .map_or(false, |op| op == "PartialProduct")
+                .is_some_and(|op| op == "PartialProduct")
         })
         .count()
 }
@@ -1676,7 +1677,7 @@ fn test_no_clock_buffer_generic_asic() {
         .filter(|c| {
             c.function
                 .as_ref()
-                .map_or(false, |f| matches!(f, CellFunction::ClkBuf))
+                .is_some_and(|f| matches!(f, CellFunction::ClkBuf))
         })
         .count();
     assert_eq!(
