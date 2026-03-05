@@ -674,6 +674,7 @@ impl HirBuilderContext {
                         } else {
                             // Create global impl if it doesn't exist
                             hir.implementations.push(HirImplementation {
+                                name: None,
                                 entity: EntityId::GLOBAL_IMPL,
                                 signals: Vec::new(),
                                 variables: Vec::new(),
@@ -1536,6 +1537,7 @@ impl HirBuilderContext {
         self.symbols.exit_scope();
 
         let mut implementation = HirImplementation {
+            name: None,
             entity,
             signals,
             variables,

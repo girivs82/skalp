@@ -429,6 +429,7 @@ fn rebuild_instances_with_imports(hir: &Hir, file_path: &Path) -> Result<Hir> {
         } else {
             // No global implementation block exists - create one with the imported constants
             final_hir.implementations.push(hir::HirImplementation {
+                name: None,
                 entity: hir::EntityId::GLOBAL_IMPL,
                 signals: Vec::new(),
                 variables: Vec::new(),
@@ -1632,6 +1633,7 @@ fn merge_symbol(target: &mut Hir, source: &Hir, symbol_name: &str) -> Result<()>
                         .any(|i| i.entity == hir::EntityId::GLOBAL_IMPL)
                     {
                         target.implementations.push(hir::HirImplementation {
+                            name: None,
                             entity: hir::EntityId::GLOBAL_IMPL,
                             signals: Vec::new(),
                             variables: Vec::new(),
@@ -1783,6 +1785,7 @@ fn merge_symbol(target: &mut Hir, source: &Hir, symbol_name: &str) -> Result<()>
             // Create one if it doesn't exist
             if target.implementations.is_empty() {
                 target.implementations.push(hir::HirImplementation {
+                    name: None,
                     entity: hir::EntityId::GLOBAL_IMPL, // Dummy entity ID for global scope
                     signals: Vec::new(),
                     variables: Vec::new(),
@@ -1818,6 +1821,7 @@ fn merge_symbol(target: &mut Hir, source: &Hir, symbol_name: &str) -> Result<()>
             // Create one if it doesn't exist
             if target.implementations.is_empty() {
                 target.implementations.push(hir::HirImplementation {
+                    name: None,
                     entity: hir::EntityId::GLOBAL_IMPL, // Dummy entity ID for global scope
                     signals: Vec::new(),
                     variables: Vec::new(),
@@ -1968,6 +1972,7 @@ fn merge_symbol_with_rename(
             // Create one if it doesn't exist
             if target.implementations.is_empty() {
                 target.implementations.push(hir::HirImplementation {
+                    name: None,
                     entity: hir::EntityId::GLOBAL_IMPL, // Dummy entity ID for global scope
                     signals: Vec::new(),
                     variables: Vec::new(),
@@ -2273,6 +2278,7 @@ fn merge_all_symbols(target: &mut Hir, source: &Hir) -> Result<()> {
                 if global_impl_idx.is_none() {
                     // Create GLOBAL_IMPL if it doesn't exist
                     target.implementations.push(hir::HirImplementation {
+                        name: None,
                         entity: hir::EntityId::GLOBAL_IMPL,
                         signals: Vec::new(),
                         variables: Vec::new(),
@@ -2316,6 +2322,7 @@ fn merge_all_symbols(target: &mut Hir, source: &Hir) -> Result<()> {
 
                 if global_impl_idx.is_none() {
                     target.implementations.push(hir::HirImplementation {
+                        name: None,
                         entity: hir::EntityId::GLOBAL_IMPL,
                         signals: Vec::new(),
                         variables: Vec::new(),

@@ -260,7 +260,18 @@ impl<'a> ParseState<'a> {
 
     fn skip_trivia(&mut self) {
         while let Some(kind) = self.current_kind() {
-            if kind == SyntaxKind::Comment || kind == SyntaxKind::Whitespace {
+            if kind == SyntaxKind::Whitespace {
+                self.bump();
+            } else {
+                break;
+            }
+        }
+    }
+
+    /// Skip whitespace AND comments — used at structural boundaries (between declarations/statements)
+    fn skip_trivia_and_comments(&mut self) {
+        while let Some(kind) = self.current_kind() {
+            if kind == SyntaxKind::Whitespace || kind == SyntaxKind::Comment {
                 self.bump();
             } else {
                 break;
@@ -279,7 +290,7 @@ impl<'a> ParseState<'a> {
     }
 
     fn expect(&mut self, kind: SyntaxKind) -> bool {
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
         if self.at(kind) {
             self.bump();
             true
@@ -302,7 +313,7 @@ impl<'a> ParseState<'a> {
     }
 
     fn eat(&mut self, kind: SyntaxKind) -> bool {
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
         if self.at(kind) {
             self.bump();
             true
@@ -448,7 +459,7 @@ impl<'a> ParseState<'a> {
         self.start_node(SyntaxKind::SourceFile);
 
         while !self.is_at_end() {
-            self.skip_trivia();
+            self.skip_trivia_and_comments();
             if self.is_at_end() {
                 break;
             }
@@ -490,11 +501,11 @@ impl<'a> ParseState<'a> {
     fn parse_library_clause(&mut self) {
         self.start_node(SyntaxKind::LibraryClause);
         self.expect(SyntaxKind::LibraryKw);
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
         // library name(s)
         self.bump(); // identifier
         while self.eat(SyntaxKind::Comma) {
-            self.skip_trivia();
+            self.skip_trivia_and_comments();
             self.bump(); // next library name
         }
         self.expect(SyntaxKind::Semicolon);
@@ -504,11 +515,11 @@ impl<'a> ParseState<'a> {
     fn parse_use_clause(&mut self) {
         self.start_node(SyntaxKind::UseClause);
         self.expect(SyntaxKind::UseKw);
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
         // Parse selected name: lib.pkg.item or lib.pkg.all
         self.parse_selected_name();
         while self.eat(SyntaxKind::Comma) {
-            self.skip_trivia();
+            self.skip_trivia_and_comments();
             self.parse_selected_name();
         }
         self.expect(SyntaxKind::Semicolon);
@@ -520,7 +531,7 @@ impl<'a> ParseState<'a> {
         // First component
         self.bump(); // ident or keyword like 'all'
         while self.eat(SyntaxKind::Dot) {
-            self.skip_trivia();
+            self.skip_trivia_and_comments();
             self.bump(); // next component (ident or 'all')
         }
         self.finish_node();
@@ -533,23 +544,23 @@ impl<'a> ParseState<'a> {
     fn parse_entity_decl(&mut self) {
         self.start_node(SyntaxKind::EntityDecl);
         self.expect(SyntaxKind::EntityKw);
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
         // Entity name
         self.bump(); // ident
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
         self.expect(SyntaxKind::IsKw);
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
 
         // Optional generic clause
         if self.at(SyntaxKind::GenericKw) {
             self.parse_generic_clause();
-            self.skip_trivia();
+            self.skip_trivia_and_comments();
         }
 
         // Optional port clause
         if self.at(SyntaxKind::PortKw) {
             self.parse_port_clause();
-            self.skip_trivia();
+            self.skip_trivia_and_comments();
         }
 
         // Entity declarative region (between port clause and 'end')
@@ -561,21 +572,21 @@ impl<'a> ParseState<'a> {
         // Used for passive processes/assertions in entity declarations
         if self.at(SyntaxKind::BeginKw) {
             self.bump(); // begin
-            self.skip_trivia();
+            self.skip_trivia_and_comments();
             // Parse concurrent statements until 'end'
             self.parse_concurrent_statements();
         }
 
         // end [entity] [name] ;
         self.expect(SyntaxKind::EndKw);
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
         // Optional 'entity' keyword
         self.eat(SyntaxKind::EntityKw);
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
         // Optional entity name
         if !self.at(SyntaxKind::Semicolon) {
             self.bump(); // entity name
-            self.skip_trivia();
+            self.skip_trivia_and_comments();
         }
         self.expect(SyntaxKind::Semicolon);
         self.finish_node();
@@ -583,7 +594,7 @@ impl<'a> ParseState<'a> {
 
     fn parse_entity_declarations(&mut self) {
         loop {
-            self.skip_trivia();
+            self.skip_trivia_and_comments();
             if self.is_at_end() || self.at(SyntaxKind::EndKw) || self.at(SyntaxKind::BeginKw) {
                 break;
             }
@@ -616,15 +627,15 @@ impl<'a> ParseState<'a> {
     fn parse_generic_clause(&mut self) {
         self.start_node(SyntaxKind::GenericClause);
         self.expect(SyntaxKind::GenericKw);
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
         self.expect(SyntaxKind::LParen);
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
 
         // Parse generic declarations
         if !self.at(SyntaxKind::RParen) {
             self.parse_generic_decl();
             while self.eat(SyntaxKind::Semicolon) {
-                self.skip_trivia();
+                self.skip_trivia_and_comments();
                 if self.at(SyntaxKind::RParen) {
                     break;
                 }
@@ -633,25 +644,25 @@ impl<'a> ParseState<'a> {
         }
 
         self.expect(SyntaxKind::RParen);
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
         self.expect(SyntaxKind::Semicolon);
         self.finish_node();
     }
 
     fn parse_generic_decl(&mut self) {
         self.start_node(SyntaxKind::GenericDecl);
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
 
         // Check for generic type parameter: type T [is (<>) [range <>]]
         if self.at(SyntaxKind::TypeKw) {
             self.bump(); // type keyword
-            self.skip_trivia();
+            self.skip_trivia_and_comments();
             self.bump(); // type parameter name (ident)
-            self.skip_trivia();
+            self.skip_trivia_and_comments();
             // Optional constraint: is (<>) or is (<>) range <>
             if self.at(SyntaxKind::IsKw) {
                 self.bump(); // is
-                self.skip_trivia();
+                self.skip_trivia_and_comments();
                 // Parse parenthesized constraint like (<>) or (<>) range <>
                 if self.at(SyntaxKind::LParen) {
                     let mut depth = 0;
@@ -671,13 +682,13 @@ impl<'a> ParseState<'a> {
                             continue;
                         }
                         self.bump();
-                        self.skip_trivia();
+                        self.skip_trivia_and_comments();
                     }
-                    self.skip_trivia();
+                    self.skip_trivia_and_comments();
                     // Optional "range <>"
                     if self.at(SyntaxKind::RangeKw) {
                         self.bump(); // range
-                        self.skip_trivia();
+                        self.skip_trivia_and_comments();
                         if self.at(SyntaxKind::BoxOp) {
                             self.bump(); // <>
                         }
@@ -691,23 +702,23 @@ impl<'a> ParseState<'a> {
         // Regular value generic: name [, name]* : [in] type [:= default]
         self.bump(); // first name
         while self.eat(SyntaxKind::Comma) {
-            self.skip_trivia();
+            self.skip_trivia_and_comments();
             self.bump(); // next name
         }
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
         self.expect(SyntaxKind::Colon);
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
         // Optional direction keyword (VHDL allows 'in' in generic interface constants)
         if self.at(SyntaxKind::InKw) {
             self.bump();
-            self.skip_trivia();
+            self.skip_trivia_and_comments();
         }
         self.parse_subtype_indication();
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
         // Optional default value
         if self.at(SyntaxKind::VarAssign) {
             self.bump(); // :=
-            self.skip_trivia();
+            self.skip_trivia_and_comments();
             self.parse_expression();
         }
         self.finish_node();
@@ -716,15 +727,15 @@ impl<'a> ParseState<'a> {
     fn parse_port_clause(&mut self) {
         self.start_node(SyntaxKind::PortClause);
         self.expect(SyntaxKind::PortKw);
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
         self.expect(SyntaxKind::LParen);
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
 
         // Parse port declarations
         if !self.at(SyntaxKind::RParen) {
             self.parse_port_decl();
             while self.eat(SyntaxKind::Semicolon) {
-                self.skip_trivia();
+                self.skip_trivia_and_comments();
                 if self.at(SyntaxKind::RParen) {
                     break;
                 }
@@ -733,28 +744,28 @@ impl<'a> ParseState<'a> {
         }
 
         self.expect(SyntaxKind::RParen);
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
         self.expect(SyntaxKind::Semicolon);
         self.finish_node();
     }
 
     fn parse_port_decl(&mut self) {
         self.start_node(SyntaxKind::PortDecl);
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
         // name [, name]* : direction type
         self.bump(); // first name
         while self.eat(SyntaxKind::Comma) {
-            self.skip_trivia();
+            self.skip_trivia_and_comments();
             self.bump(); // next name
         }
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
         self.expect(SyntaxKind::Colon);
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
 
         // View port: `name : view view_name` — no PortDirection or SubtypeIndication
         if self.at(SyntaxKind::ViewKw) {
             self.bump(); // 'view'
-            self.skip_trivia();
+            self.skip_trivia_and_comments();
             self.bump(); // view name
             self.finish_node();
             return;
@@ -773,16 +784,16 @@ impl<'a> ParseState<'a> {
         }
         // else: no explicit direction — defaults to 'in' per VHDL standard
         self.finish_node();
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
 
         // Type
         self.parse_subtype_indication();
 
         // Optional default value
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
         if self.at(SyntaxKind::VarAssign) {
             self.bump(); // :=
-            self.skip_trivia();
+            self.skip_trivia_and_comments();
             self.parse_expression();
         }
 
@@ -796,32 +807,32 @@ impl<'a> ParseState<'a> {
     fn parse_architecture_body(&mut self) {
         self.start_node(SyntaxKind::ArchitectureBody);
         self.expect(SyntaxKind::ArchitectureKw);
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
         self.bump(); // architecture name
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
         self.expect(SyntaxKind::OfKw);
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
         self.bump(); // entity name
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
         self.expect(SyntaxKind::IsKw);
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
 
         // Declarative region
         self.parse_architecture_declarations();
 
         self.expect(SyntaxKind::BeginKw);
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
 
         // Concurrent statement region
         self.parse_concurrent_statements();
 
         self.expect(SyntaxKind::EndKw);
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
         self.eat(SyntaxKind::ArchitectureKw);
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
         if !self.at(SyntaxKind::Semicolon) {
             self.bump(); // architecture name
-            self.skip_trivia();
+            self.skip_trivia_and_comments();
         }
         self.expect(SyntaxKind::Semicolon);
         self.finish_node();
@@ -829,7 +840,7 @@ impl<'a> ParseState<'a> {
 
     fn parse_architecture_declarations(&mut self) {
         loop {
-            self.skip_trivia();
+            self.skip_trivia_and_comments();
             if self.is_at_end() || self.at(SyntaxKind::BeginKw) {
                 break;
             }
@@ -872,24 +883,24 @@ impl<'a> ParseState<'a> {
     fn parse_signal_decl(&mut self) {
         self.start_node(SyntaxKind::SignalDecl);
         self.expect(SyntaxKind::SignalKw);
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
         // name [, name]* : type [:= expr] ;
         self.bump(); // first name
         while self.eat(SyntaxKind::Comma) {
-            self.skip_trivia();
+            self.skip_trivia_and_comments();
             self.bump();
         }
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
         self.expect(SyntaxKind::Colon);
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
         self.parse_subtype_indication();
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
         if self.at(SyntaxKind::VarAssign) {
             self.bump(); // :=
-            self.skip_trivia();
+            self.skip_trivia_and_comments();
             self.parse_expression();
         }
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
         self.expect(SyntaxKind::Semicolon);
         self.finish_node();
     }
@@ -897,19 +908,19 @@ impl<'a> ParseState<'a> {
     fn parse_constant_decl(&mut self) {
         self.start_node(SyntaxKind::ConstantDecl);
         self.expect(SyntaxKind::ConstantKw);
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
         self.bump(); // name
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
         self.expect(SyntaxKind::Colon);
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
         self.parse_subtype_indication();
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
         if self.at(SyntaxKind::VarAssign) {
             self.bump(); // :=
-            self.skip_trivia();
+            self.skip_trivia_and_comments();
             self.parse_expression();
         }
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
         self.expect(SyntaxKind::Semicolon);
         self.finish_node();
     }
@@ -917,23 +928,23 @@ impl<'a> ParseState<'a> {
     fn parse_variable_decl(&mut self) {
         self.start_node(SyntaxKind::VariableDecl);
         self.expect(SyntaxKind::VariableKw);
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
         self.bump(); // name
         while self.eat(SyntaxKind::Comma) {
-            self.skip_trivia();
+            self.skip_trivia_and_comments();
             self.bump();
         }
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
         self.expect(SyntaxKind::Colon);
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
         self.parse_subtype_indication();
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
         if self.at(SyntaxKind::VarAssign) {
             self.bump(); // :=
-            self.skip_trivia();
+            self.skip_trivia_and_comments();
             self.parse_expression();
         }
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
         self.expect(SyntaxKind::Semicolon);
         self.finish_node();
     }
@@ -941,11 +952,11 @@ impl<'a> ParseState<'a> {
     fn parse_type_decl(&mut self) {
         self.start_node(SyntaxKind::TypeDecl);
         self.expect(SyntaxKind::TypeKw);
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
         self.bump(); // type name
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
         self.expect(SyntaxKind::IsKw);
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
 
         match self.current_kind() {
             Some(SyntaxKind::LParen) => self.parse_enum_type_def(),
@@ -954,7 +965,7 @@ impl<'a> ParseState<'a> {
             Some(SyntaxKind::RangeKw) => {
                 // range <> is unconstrained
                 self.bump(); // range
-                self.skip_trivia();
+                self.skip_trivia_and_comments();
                 self.parse_expression(); // or <>
             }
             _ => {
@@ -962,7 +973,7 @@ impl<'a> ParseState<'a> {
                 self.parse_subtype_indication();
             }
         }
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
         self.expect(SyntaxKind::Semicolon);
         self.finish_node();
     }
@@ -970,13 +981,13 @@ impl<'a> ParseState<'a> {
     fn parse_enum_type_def(&mut self) {
         self.start_node(SyntaxKind::EnumTypeDef);
         self.expect(SyntaxKind::LParen);
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
         self.bump(); // first variant (ident or char literal)
         while self.eat(SyntaxKind::Comma) {
-            self.skip_trivia();
+            self.skip_trivia_and_comments();
             self.bump(); // next variant
         }
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
         self.expect(SyntaxKind::RParen);
         self.finish_node();
     }
@@ -984,34 +995,34 @@ impl<'a> ParseState<'a> {
     fn parse_record_type_def(&mut self) {
         self.start_node(SyntaxKind::RecordTypeDef);
         self.expect(SyntaxKind::RecordKw);
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
 
         while !self.is_at_end() && !self.at(SyntaxKind::EndKw) {
             self.start_node(SyntaxKind::RecordField);
-            self.skip_trivia();
+            self.skip_trivia_and_comments();
             self.bump(); // field name
             while self.eat(SyntaxKind::Comma) {
-                self.skip_trivia();
+                self.skip_trivia_and_comments();
                 self.bump();
             }
-            self.skip_trivia();
+            self.skip_trivia_and_comments();
             self.expect(SyntaxKind::Colon);
-            self.skip_trivia();
+            self.skip_trivia_and_comments();
             self.parse_subtype_indication();
-            self.skip_trivia();
+            self.skip_trivia_and_comments();
             self.expect(SyntaxKind::Semicolon);
             self.finish_node();
-            self.skip_trivia();
+            self.skip_trivia_and_comments();
         }
 
         self.expect(SyntaxKind::EndKw);
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
         self.expect(SyntaxKind::RecordKw);
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
         // Optional name after end record
         if !self.at(SyntaxKind::Semicolon) {
             self.bump();
-            self.skip_trivia();
+            self.skip_trivia_and_comments();
         }
         self.finish_node();
     }
@@ -1019,21 +1030,21 @@ impl<'a> ParseState<'a> {
     fn parse_array_type_def(&mut self) {
         self.start_node(SyntaxKind::ArrayTypeDef);
         self.expect(SyntaxKind::ArrayKw);
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
         self.expect(SyntaxKind::LParen);
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
         // Index range(s) — may be multi-dimensional: (range1, range2, ...)
         self.parse_discrete_range();
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
         while self.eat(SyntaxKind::Comma) {
-            self.skip_trivia();
+            self.skip_trivia_and_comments();
             self.parse_discrete_range();
-            self.skip_trivia();
+            self.skip_trivia_and_comments();
         }
         self.expect(SyntaxKind::RParen);
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
         self.expect(SyntaxKind::OfKw);
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
         self.parse_subtype_indication();
         self.finish_node();
     }
@@ -1042,24 +1053,24 @@ impl<'a> ParseState<'a> {
         self.start_node(SyntaxKind::DiscreteRange);
         // Could be: "0 to N", "N-1 downto 0", "natural range <>", "type_name range expression"
         self.parse_expression();
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
         match self.current_kind() {
             Some(SyntaxKind::ToKw) | Some(SyntaxKind::DowntoKw) => {
                 self.bump(); // to/downto
-                self.skip_trivia();
+                self.skip_trivia_and_comments();
                 self.parse_expression();
             }
             Some(SyntaxKind::RangeKw) => {
                 self.bump(); // range
-                self.skip_trivia();
+                self.skip_trivia_and_comments();
                 if self.at(SyntaxKind::BoxOp) {
                     self.bump(); // <>
                 } else {
                     self.parse_expression();
-                    self.skip_trivia();
+                    self.skip_trivia_and_comments();
                     if self.at(SyntaxKind::ToKw) || self.at(SyntaxKind::DowntoKw) {
                         self.bump();
-                        self.skip_trivia();
+                        self.skip_trivia_and_comments();
                         self.parse_expression();
                     }
                 }
@@ -1072,13 +1083,13 @@ impl<'a> ParseState<'a> {
     fn parse_subtype_decl(&mut self) {
         self.start_node(SyntaxKind::SubtypeDecl);
         self.expect(SyntaxKind::SubtypeKw);
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
         self.bump(); // subtype name
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
         self.expect(SyntaxKind::IsKw);
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
         self.parse_subtype_indication();
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
         self.expect(SyntaxKind::Semicolon);
         self.finish_node();
     }
@@ -1086,30 +1097,30 @@ impl<'a> ParseState<'a> {
     fn parse_component_decl(&mut self) {
         self.start_node(SyntaxKind::ComponentDecl);
         self.expect(SyntaxKind::ComponentKw);
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
         self.bump(); // component name
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
         if self.at(SyntaxKind::IsKw) {
             self.bump();
-            self.skip_trivia();
+            self.skip_trivia_and_comments();
         }
         // Optional generic clause
         if self.at(SyntaxKind::GenericKw) {
             self.parse_generic_clause();
-            self.skip_trivia();
+            self.skip_trivia_and_comments();
         }
         // Optional port clause
         if self.at(SyntaxKind::PortKw) {
             self.parse_port_clause();
-            self.skip_trivia();
+            self.skip_trivia_and_comments();
         }
         self.expect(SyntaxKind::EndKw);
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
         self.eat(SyntaxKind::ComponentKw);
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
         if !self.at(SyntaxKind::Semicolon) {
             self.bump(); // optional name
-            self.skip_trivia();
+            self.skip_trivia_and_comments();
         }
         self.expect(SyntaxKind::Semicolon);
         self.finish_node();
@@ -1118,20 +1129,20 @@ impl<'a> ParseState<'a> {
     fn parse_alias_decl(&mut self) {
         self.start_node(SyntaxKind::AliasDecl);
         self.expect(SyntaxKind::AliasKw);
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
         self.bump(); // alias name
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
         // Optional : type
         if self.at(SyntaxKind::Colon) {
             self.bump();
-            self.skip_trivia();
+            self.skip_trivia_and_comments();
             self.parse_subtype_indication();
-            self.skip_trivia();
+            self.skip_trivia_and_comments();
         }
         self.expect(SyntaxKind::IsKw);
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
         self.parse_expression(); // the aliased name/expression
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
         self.expect(SyntaxKind::Semicolon);
         self.finish_node();
     }
@@ -1148,13 +1159,13 @@ impl<'a> ParseState<'a> {
         };
         self.start_node(node_kind);
         self.expect(SyntaxKind::AttributeKw);
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
         self.bump(); // attribute name
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
         // Skip to semicolon — attributes are synthesis tool metadata
         while !self.is_at_end() && !self.at(SyntaxKind::Semicolon) {
             self.bump();
-            self.skip_trivia();
+            self.skip_trivia_and_comments();
         }
         self.expect(SyntaxKind::Semicolon);
         self.finish_node();
@@ -1165,40 +1176,40 @@ impl<'a> ParseState<'a> {
         // [pure|impure] function name [(params)] return type is ... begin ... end;
         if self.at(SyntaxKind::PureKw) || self.at(SyntaxKind::ImpureKw) {
             self.bump();
-            self.skip_trivia();
+            self.skip_trivia_and_comments();
         }
         self.expect(SyntaxKind::FunctionKw);
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
         self.bump(); // function name
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
 
         // Optional parameter list
         if self.at(SyntaxKind::LParen) {
             self.parse_param_list();
-            self.skip_trivia();
+            self.skip_trivia_and_comments();
         }
 
         self.expect(SyntaxKind::ReturnKw);
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
         self.parse_subtype_indication();
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
 
         if self.at(SyntaxKind::IsKw) {
             // Function body
             self.bump(); // is
-            self.skip_trivia();
+            self.skip_trivia_and_comments();
             // Declarations
             self.parse_process_declarations();
             self.expect(SyntaxKind::BeginKw);
-            self.skip_trivia();
+            self.skip_trivia_and_comments();
             self.parse_sequential_statements();
             self.expect(SyntaxKind::EndKw);
-            self.skip_trivia();
+            self.skip_trivia_and_comments();
             self.eat(SyntaxKind::FunctionKw);
-            self.skip_trivia();
+            self.skip_trivia_and_comments();
             if !self.at(SyntaxKind::Semicolon) {
                 self.bump(); // optional name
-                self.skip_trivia();
+                self.skip_trivia_and_comments();
             }
         }
         // else: just a declaration, end at ;
@@ -1209,29 +1220,29 @@ impl<'a> ParseState<'a> {
     fn parse_procedure_decl_or_body(&mut self) {
         self.start_node(SyntaxKind::ProcedureBody);
         self.expect(SyntaxKind::ProcedureKw);
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
         self.bump(); // procedure name
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
 
         if self.at(SyntaxKind::LParen) {
             self.parse_param_list();
-            self.skip_trivia();
+            self.skip_trivia_and_comments();
         }
 
         if self.at(SyntaxKind::IsKw) {
             self.bump(); // is
-            self.skip_trivia();
+            self.skip_trivia_and_comments();
             self.parse_process_declarations();
             self.expect(SyntaxKind::BeginKw);
-            self.skip_trivia();
+            self.skip_trivia_and_comments();
             self.parse_sequential_statements();
             self.expect(SyntaxKind::EndKw);
-            self.skip_trivia();
+            self.skip_trivia_and_comments();
             self.eat(SyntaxKind::ProcedureKw);
-            self.skip_trivia();
+            self.skip_trivia_and_comments();
             if !self.at(SyntaxKind::Semicolon) {
                 self.bump();
-                self.skip_trivia();
+                self.skip_trivia_and_comments();
             }
         }
         self.expect(SyntaxKind::Semicolon);
@@ -1241,11 +1252,11 @@ impl<'a> ParseState<'a> {
     fn parse_param_list(&mut self) {
         self.start_node(SyntaxKind::ParamList);
         self.expect(SyntaxKind::LParen);
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
         if !self.at(SyntaxKind::RParen) {
             self.parse_param_decl();
             while self.eat(SyntaxKind::Semicolon) {
-                self.skip_trivia();
+                self.skip_trivia_and_comments();
                 if self.at(SyntaxKind::RParen) {
                     break;
                 }
@@ -1258,7 +1269,7 @@ impl<'a> ParseState<'a> {
 
     fn parse_param_decl(&mut self) {
         self.start_node(SyntaxKind::ParamDecl);
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
         // Optional: signal|variable|constant|file
         if matches!(
             self.current_kind(),
@@ -1268,30 +1279,30 @@ impl<'a> ParseState<'a> {
                 | Some(SyntaxKind::FileKw)
         ) {
             self.bump();
-            self.skip_trivia();
+            self.skip_trivia_and_comments();
         }
         // name [, name]*
         self.bump(); // first name
         while self.eat(SyntaxKind::Comma) {
-            self.skip_trivia();
+            self.skip_trivia_and_comments();
             self.bump();
         }
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
         self.expect(SyntaxKind::Colon);
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
         // Optional direction
         if matches!(
             self.current_kind(),
             Some(SyntaxKind::InKw) | Some(SyntaxKind::OutKw) | Some(SyntaxKind::InoutKw)
         ) {
             self.bump();
-            self.skip_trivia();
+            self.skip_trivia_and_comments();
         }
         self.parse_subtype_indication();
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
         if self.at(SyntaxKind::VarAssign) {
             self.bump();
-            self.skip_trivia();
+            self.skip_trivia_and_comments();
             self.parse_expression();
         }
         self.finish_node();
@@ -1303,7 +1314,7 @@ impl<'a> ParseState<'a> {
 
     fn parse_concurrent_statements(&mut self) {
         loop {
-            self.skip_trivia();
+            self.skip_trivia_and_comments();
             if self.is_at_end() || self.at(SyntaxKind::EndKw) {
                 break;
             }
@@ -1395,9 +1406,9 @@ impl<'a> ParseState<'a> {
             // It's a label
             let label_start = self.current;
             self.bump(); // label ident
-            self.skip_trivia();
+            self.skip_trivia_and_comments();
             self.bump(); // colon
-            self.skip_trivia();
+            self.skip_trivia_and_comments();
 
             // What follows the label?
             match self.current_kind() {
@@ -1446,7 +1457,7 @@ impl<'a> ParseState<'a> {
 
         self.start_node(SyntaxKind::ConcurrentSignalAssign);
         self.parse_name();
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
 
         // Concurrent procedure call: name(args) ;
         if self.at(SyntaxKind::Semicolon) {
@@ -1461,24 +1472,24 @@ impl<'a> ParseState<'a> {
             return;
         }
         self.bump(); // <=
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
 
         // Parse RHS — check for conditional (expr when cond else ...)
         self.parse_expression();
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
 
         if self.at(SyntaxKind::WhenKw) {
             // Conditional assignment — parse when/else chain
             while self.at(SyntaxKind::WhenKw) {
                 self.bump(); // when
-                self.skip_trivia();
+                self.skip_trivia_and_comments();
                 self.parse_expression(); // condition
-                self.skip_trivia();
+                self.skip_trivia_and_comments();
                 if self.at(SyntaxKind::ElseKw) {
                     self.bump(); // else
-                    self.skip_trivia();
+                    self.skip_trivia_and_comments();
                     self.parse_expression(); // next value
-                    self.skip_trivia();
+                    self.skip_trivia_and_comments();
                 }
             }
         }
@@ -1490,15 +1501,15 @@ impl<'a> ParseState<'a> {
     fn parse_selected_assign(&mut self) {
         self.start_node(SyntaxKind::SelectedAssign);
         self.expect(SyntaxKind::WithKw);
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
         self.parse_expression(); // selector expression
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
         self.expect(SyntaxKind::SelectKw);
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
         self.parse_name(); // target
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
         self.expect(SyntaxKind::SignalAssign);
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
 
         // value when choices, value when choices, ... value when others
         // Inhibit when...else expression parsing so `when` is consumed at statement level
@@ -1506,13 +1517,13 @@ impl<'a> ParseState<'a> {
         self.inhibit_when_else = true;
         loop {
             self.parse_expression(); // value
-            self.skip_trivia();
+            self.skip_trivia_and_comments();
             self.expect(SyntaxKind::WhenKw);
-            self.skip_trivia();
+            self.skip_trivia_and_comments();
             self.parse_choices();
-            self.skip_trivia();
+            self.skip_trivia_and_comments();
             if self.eat(SyntaxKind::Comma) {
-                self.skip_trivia();
+                self.skip_trivia_and_comments();
             } else {
                 break;
             }
@@ -1525,35 +1536,35 @@ impl<'a> ParseState<'a> {
     fn parse_process_stmt(&mut self, _label_pos: Option<usize>) {
         self.start_node(SyntaxKind::ProcessStmt);
         self.expect(SyntaxKind::ProcessKw);
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
 
         // Optional sensitivity list
         if self.at(SyntaxKind::LParen) {
             self.parse_sensitivity_list();
-            self.skip_trivia();
+            self.skip_trivia_and_comments();
         }
 
         // Optional 'is'
         self.eat(SyntaxKind::IsKw);
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
 
         // Process declarations (variables, types, etc.)
         self.parse_process_declarations();
 
         self.expect(SyntaxKind::BeginKw);
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
 
         // Sequential statements
         self.parse_sequential_statements();
 
         self.expect(SyntaxKind::EndKw);
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
         self.eat(SyntaxKind::ProcessKw);
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
         // Optional label
         if !self.at(SyntaxKind::Semicolon) && self.at(SyntaxKind::Ident) {
             self.bump();
-            self.skip_trivia();
+            self.skip_trivia_and_comments();
         }
         self.expect(SyntaxKind::Semicolon);
         self.finish_node();
@@ -1562,25 +1573,25 @@ impl<'a> ParseState<'a> {
     fn parse_sensitivity_list(&mut self) {
         self.start_node(SyntaxKind::SensitivityList);
         self.expect(SyntaxKind::LParen);
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
 
         if self.at(SyntaxKind::AllKw) {
             self.bump(); // all
         } else if !self.at(SyntaxKind::RParen) {
             self.parse_name();
             while self.eat(SyntaxKind::Comma) {
-                self.skip_trivia();
+                self.skip_trivia_and_comments();
                 self.parse_name();
             }
         }
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
         self.expect(SyntaxKind::RParen);
         self.finish_node();
     }
 
     fn parse_process_declarations(&mut self) {
         loop {
-            self.skip_trivia();
+            self.skip_trivia_and_comments();
             if self.is_at_end() || self.at(SyntaxKind::BeginKw) {
                 break;
             }
@@ -1610,7 +1621,7 @@ impl<'a> ParseState<'a> {
 
     fn parse_sequential_statements(&mut self) {
         loop {
-            self.skip_trivia();
+            self.skip_trivia_and_comments();
             if self.is_at_end()
                 || self.at(SyntaxKind::EndKw)
                 || self.at(SyntaxKind::ElseKw)
@@ -1630,7 +1641,7 @@ impl<'a> ParseState<'a> {
     }
 
     fn parse_sequential_statement(&mut self) {
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
         if self.is_at_end() {
             return;
         }
@@ -1643,9 +1654,9 @@ impl<'a> ParseState<'a> {
         // Check for optional label: ident ':'
         if self.at(SyntaxKind::Ident) && self.peek_kind(1) == Some(SyntaxKind::Colon) {
             self.bump(); // label
-            self.skip_trivia();
+            self.skip_trivia_and_comments();
             self.bump(); // colon
-            self.skip_trivia();
+            self.skip_trivia_and_comments();
         }
 
         match self.current_kind() {
@@ -1656,15 +1667,15 @@ impl<'a> ParseState<'a> {
             Some(SyntaxKind::LoopKw) => {
                 // Bare loop: [label:] loop ... end loop;
                 self.bump(); // loop
-                self.skip_trivia();
+                self.skip_trivia_and_comments();
                 self.parse_sequential_statements();
                 self.expect(SyntaxKind::EndKw);
-                self.skip_trivia();
+                self.skip_trivia_and_comments();
                 self.expect(SyntaxKind::LoopKw);
-                self.skip_trivia();
+                self.skip_trivia_and_comments();
                 if self.at(SyntaxKind::Ident) {
                     self.bump(); // optional label
-                    self.skip_trivia();
+                    self.skip_trivia_and_comments();
                 }
                 self.expect(SyntaxKind::Semicolon);
             }
@@ -1684,33 +1695,33 @@ impl<'a> ParseState<'a> {
     fn parse_if_stmt(&mut self) {
         self.start_node(SyntaxKind::IfStmt);
         self.expect(SyntaxKind::IfKw);
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
         self.parse_expression(); // condition
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
         self.expect(SyntaxKind::ThenKw);
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
         self.parse_sequential_statements();
 
         // elsif chain
         while self.eat(SyntaxKind::ElsifKw) {
-            self.skip_trivia();
+            self.skip_trivia_and_comments();
             self.parse_expression(); // condition
-            self.skip_trivia();
+            self.skip_trivia_and_comments();
             self.expect(SyntaxKind::ThenKw);
-            self.skip_trivia();
+            self.skip_trivia_and_comments();
             self.parse_sequential_statements();
         }
 
         // Optional else
         if self.eat(SyntaxKind::ElseKw) {
-            self.skip_trivia();
+            self.skip_trivia_and_comments();
             self.parse_sequential_statements();
         }
 
         self.expect(SyntaxKind::EndKw);
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
         self.expect(SyntaxKind::IfKw);
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
         self.expect(SyntaxKind::Semicolon);
         self.finish_node();
     }
@@ -1718,29 +1729,29 @@ impl<'a> ParseState<'a> {
     fn parse_case_stmt(&mut self) {
         self.start_node(SyntaxKind::CaseStmt);
         self.expect(SyntaxKind::CaseKw);
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
         self.parse_expression(); // selector
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
         self.expect(SyntaxKind::IsKw);
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
 
         // Case alternatives: when choices => statements
         while self.at(SyntaxKind::WhenKw) {
             self.start_node(SyntaxKind::CaseAlternative);
             self.bump(); // when
-            self.skip_trivia();
+            self.skip_trivia_and_comments();
             self.parse_choices();
-            self.skip_trivia();
+            self.skip_trivia_and_comments();
             self.expect(SyntaxKind::Arrow);
-            self.skip_trivia();
+            self.skip_trivia_and_comments();
             self.parse_sequential_statements();
             self.finish_node();
         }
 
         self.expect(SyntaxKind::EndKw);
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
         self.expect(SyntaxKind::CaseKw);
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
         self.expect(SyntaxKind::Semicolon);
         self.finish_node();
     }
@@ -1749,7 +1760,7 @@ impl<'a> ParseState<'a> {
         self.start_node(SyntaxKind::ChoiceList);
         self.parse_choice();
         while self.eat(SyntaxKind::Bar) {
-            self.skip_trivia();
+            self.skip_trivia_and_comments();
             self.parse_choice();
         }
         self.finish_node();
@@ -1757,16 +1768,16 @@ impl<'a> ParseState<'a> {
 
     fn parse_choice(&mut self) {
         self.start_node(SyntaxKind::Choice);
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
         if self.at(SyntaxKind::OthersKw) {
             self.bump(); // others
         } else {
             self.parse_expression();
-            self.skip_trivia();
+            self.skip_trivia_and_comments();
             // range: expr to/downto expr
             if self.at(SyntaxKind::ToKw) || self.at(SyntaxKind::DowntoKw) {
                 self.bump();
-                self.skip_trivia();
+                self.skip_trivia_and_comments();
                 self.parse_expression();
             }
         }
@@ -1776,24 +1787,24 @@ impl<'a> ParseState<'a> {
     fn parse_for_loop_stmt(&mut self) {
         self.start_node(SyntaxKind::ForLoopStmt);
         self.expect(SyntaxKind::ForKw);
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
         self.bump(); // iterator variable
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
         self.expect(SyntaxKind::InKw);
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
         self.parse_discrete_range();
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
         self.expect(SyntaxKind::LoopKw);
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
         self.parse_sequential_statements();
         self.expect(SyntaxKind::EndKw);
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
         self.expect(SyntaxKind::LoopKw);
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
         // Optional label
         if self.at(SyntaxKind::Ident) {
             self.bump();
-            self.skip_trivia();
+            self.skip_trivia_and_comments();
         }
         self.expect(SyntaxKind::Semicolon);
         self.finish_node();
@@ -1802,16 +1813,16 @@ impl<'a> ParseState<'a> {
     fn parse_while_loop_stmt(&mut self) {
         self.start_node(SyntaxKind::WhileLoopStmt);
         self.expect(SyntaxKind::WhileKw);
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
         self.parse_expression();
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
         self.expect(SyntaxKind::LoopKw);
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
         self.parse_sequential_statements();
         self.expect(SyntaxKind::EndKw);
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
         self.expect(SyntaxKind::LoopKw);
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
         self.expect(SyntaxKind::Semicolon);
         self.finish_node();
     }
@@ -1819,7 +1830,7 @@ impl<'a> ParseState<'a> {
     fn parse_null_stmt(&mut self) {
         self.start_node(SyntaxKind::NullStmt);
         self.expect(SyntaxKind::NullKw);
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
         self.expect(SyntaxKind::Semicolon);
         self.finish_node();
     }
@@ -1827,10 +1838,10 @@ impl<'a> ParseState<'a> {
     fn parse_return_stmt(&mut self) {
         self.start_node(SyntaxKind::ReturnStmt);
         self.expect(SyntaxKind::ReturnKw);
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
         if !self.at(SyntaxKind::Semicolon) {
             self.parse_expression();
-            self.skip_trivia();
+            self.skip_trivia_and_comments();
         }
         self.expect(SyntaxKind::Semicolon);
         self.finish_node();
@@ -1839,20 +1850,20 @@ impl<'a> ParseState<'a> {
     fn parse_assert_stmt(&mut self) {
         self.start_node(SyntaxKind::AssertStmt);
         self.expect(SyntaxKind::AssertKw);
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
         self.parse_expression();
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
         if self.at(SyntaxKind::ReportKw) {
             self.bump();
-            self.skip_trivia();
+            self.skip_trivia_and_comments();
             self.parse_expression();
-            self.skip_trivia();
+            self.skip_trivia_and_comments();
         }
         if self.at(SyntaxKind::SeverityKw) {
             self.bump();
-            self.skip_trivia();
+            self.skip_trivia_and_comments();
             self.parse_expression();
-            self.skip_trivia();
+            self.skip_trivia_and_comments();
         }
         self.expect(SyntaxKind::Semicolon);
         self.finish_node();
@@ -1863,14 +1874,14 @@ impl<'a> ParseState<'a> {
     fn parse_report_stmt(&mut self) {
         self.start_node(SyntaxKind::AssertStmt);
         self.expect(SyntaxKind::ReportKw);
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
         self.parse_expression();
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
         if self.at(SyntaxKind::SeverityKw) {
             self.bump();
-            self.skip_trivia();
+            self.skip_trivia_and_comments();
             self.parse_expression();
-            self.skip_trivia();
+            self.skip_trivia_and_comments();
         }
         self.expect(SyntaxKind::Semicolon);
         self.finish_node();
@@ -1879,18 +1890,18 @@ impl<'a> ParseState<'a> {
     fn parse_next_stmt(&mut self) {
         self.start_node(SyntaxKind::NextStmt);
         self.expect(SyntaxKind::NextKw);
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
         // Optional label
         if self.at(SyntaxKind::Ident) {
             self.bump();
-            self.skip_trivia();
+            self.skip_trivia_and_comments();
         }
         // Optional when condition
         if self.at(SyntaxKind::WhenKw) {
             self.bump();
-            self.skip_trivia();
+            self.skip_trivia_and_comments();
             self.parse_expression();
-            self.skip_trivia();
+            self.skip_trivia_and_comments();
         }
         self.expect(SyntaxKind::Semicolon);
         self.finish_node();
@@ -1899,16 +1910,16 @@ impl<'a> ParseState<'a> {
     fn parse_exit_stmt(&mut self) {
         self.start_node(SyntaxKind::ExitStmt);
         self.expect(SyntaxKind::ExitKw);
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
         if self.at(SyntaxKind::Ident) {
             self.bump();
-            self.skip_trivia();
+            self.skip_trivia_and_comments();
         }
         if self.at(SyntaxKind::WhenKw) {
             self.bump();
-            self.skip_trivia();
+            self.skip_trivia_and_comments();
             self.parse_expression();
-            self.skip_trivia();
+            self.skip_trivia_and_comments();
         }
         self.expect(SyntaxKind::Semicolon);
         self.finish_node();
@@ -1919,30 +1930,30 @@ impl<'a> ParseState<'a> {
         let start = self.current;
         self.start_node(SyntaxKind::SequentialSignalAssign);
         self.parse_name();
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
 
         match self.current_kind() {
             Some(SyntaxKind::SignalAssign) => {
                 self.bump(); // <=
-                self.skip_trivia();
+                self.skip_trivia_and_comments();
                 self.parse_expression();
-                self.skip_trivia();
+                self.skip_trivia_and_comments();
                 // Check for "when" conditional assignment in sequential context
                 if self.at(SyntaxKind::WhenKw) {
                     self.bump(); // when
-                    self.skip_trivia();
+                    self.skip_trivia_and_comments();
                     self.parse_expression(); // condition
-                    self.skip_trivia();
+                    self.skip_trivia_and_comments();
                     while self.at(SyntaxKind::ElseKw) {
                         self.bump();
-                        self.skip_trivia();
+                        self.skip_trivia_and_comments();
                         self.parse_expression(); // value
-                        self.skip_trivia();
+                        self.skip_trivia_and_comments();
                         if self.at(SyntaxKind::WhenKw) {
                             self.bump();
-                            self.skip_trivia();
+                            self.skip_trivia_and_comments();
                             self.parse_expression(); // condition
-                            self.skip_trivia();
+                            self.skip_trivia_and_comments();
                         }
                     }
                 }
@@ -1950,9 +1961,9 @@ impl<'a> ParseState<'a> {
             }
             Some(SyntaxKind::VarAssign) => {
                 self.bump(); // :=
-                self.skip_trivia();
+                self.skip_trivia_and_comments();
                 self.parse_expression();
-                self.skip_trivia();
+                self.skip_trivia_and_comments();
                 self.expect(SyntaxKind::Semicolon);
             }
             _ => {
@@ -1977,17 +1988,17 @@ impl<'a> ParseState<'a> {
         self.start_node(SyntaxKind::ComponentInst);
         // entity work.Name[(arch)] [generic map (...)] port map (...)
         self.expect(SyntaxKind::EntityKw);
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
         self.parse_selected_name();
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
         // Optional (architecture_name)
         if self.at(SyntaxKind::LParen) {
             self.bump();
-            self.skip_trivia();
+            self.skip_trivia_and_comments();
             self.bump(); // arch name
-            self.skip_trivia();
+            self.skip_trivia_and_comments();
             self.expect(SyntaxKind::RParen);
-            self.skip_trivia();
+            self.skip_trivia_and_comments();
         }
         self.parse_port_and_generic_maps();
         self.expect(SyntaxKind::Semicolon);
@@ -1999,9 +2010,9 @@ impl<'a> ParseState<'a> {
         // [component] name [generic map (...)] port map (...)
         // Name can be dotted: lib.pkg.component (e.g., gaisler.memctrl.ssrctrl)
         self.eat(SyntaxKind::ComponentKw);
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
         self.parse_selected_name();
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
         self.parse_port_and_generic_maps();
         self.expect(SyntaxKind::Semicolon);
         self.finish_node();
@@ -2012,48 +2023,48 @@ impl<'a> ParseState<'a> {
         if self.at(SyntaxKind::GenericKw) {
             self.start_node(SyntaxKind::GenericMap);
             self.bump(); // generic
-            self.skip_trivia();
+            self.skip_trivia_and_comments();
             self.expect(SyntaxKind::MapKw);
-            self.skip_trivia();
+            self.skip_trivia_and_comments();
             self.parse_association_list();
             self.finish_node();
-            self.skip_trivia();
+            self.skip_trivia_and_comments();
         }
 
         // Port map (required for instantiation)
         if self.at(SyntaxKind::PortKw) {
             self.start_node(SyntaxKind::PortMap);
             self.bump(); // port
-            self.skip_trivia();
+            self.skip_trivia_and_comments();
             self.expect(SyntaxKind::MapKw);
-            self.skip_trivia();
+            self.skip_trivia_and_comments();
             self.parse_association_list();
             self.finish_node();
-            self.skip_trivia();
+            self.skip_trivia_and_comments();
         }
     }
 
     fn parse_association_list(&mut self) {
         self.start_node(SyntaxKind::AssociationList);
         self.expect(SyntaxKind::LParen);
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
 
         if !self.at(SyntaxKind::RParen) {
             self.parse_association_element();
             while self.eat(SyntaxKind::Comma) {
-                self.skip_trivia();
+                self.skip_trivia_and_comments();
                 self.parse_association_element();
             }
         }
 
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
         self.expect(SyntaxKind::RParen);
         self.finish_node();
     }
 
     fn parse_association_element(&mut self) {
         self.start_node(SyntaxKind::AssociationElement);
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
 
         if self.at(SyntaxKind::OpenKw) {
             self.bump(); // open
@@ -2066,9 +2077,9 @@ impl<'a> ParseState<'a> {
             if is_named {
                 // Parse the formal: name with optional index/slice
                 self.parse_name();
-                self.skip_trivia();
+                self.skip_trivia_and_comments();
                 self.expect(SyntaxKind::Arrow);
-                self.skip_trivia();
+                self.skip_trivia_and_comments();
             }
 
             if self.at(SyntaxKind::OpenKw) {
@@ -2180,27 +2191,27 @@ impl<'a> ParseState<'a> {
     fn parse_for_generate(&mut self) {
         self.start_node(SyntaxKind::ForGenerate);
         self.expect(SyntaxKind::ForKw);
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
         self.bump(); // iterator variable
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
         self.expect(SyntaxKind::InKw);
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
         self.parse_discrete_range();
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
         self.expect(SyntaxKind::GenerateKw);
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
 
         // Optional declarative region + begin
         self.parse_generate_body();
 
         self.expect(SyntaxKind::EndKw);
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
         self.expect(SyntaxKind::GenerateKw);
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
         // Optional label
         if self.at(SyntaxKind::Ident) {
             self.bump();
-            self.skip_trivia();
+            self.skip_trivia_and_comments();
         }
         self.expect(SyntaxKind::Semicolon);
         self.finish_node();
@@ -2221,7 +2232,7 @@ impl<'a> ParseState<'a> {
         //   end generate;
         if self.at(SyntaxKind::BeginKw) {
             self.bump(); // begin
-            self.skip_trivia();
+            self.skip_trivia_and_comments();
         } else {
             // Check for declarative items before begin
             let has_decls = matches!(
@@ -2244,7 +2255,7 @@ impl<'a> ParseState<'a> {
                 self.parse_architecture_declarations();
                 if self.at(SyntaxKind::BeginKw) {
                     self.bump();
-                    self.skip_trivia();
+                    self.skip_trivia_and_comments();
                 }
             }
         }
@@ -2254,39 +2265,39 @@ impl<'a> ParseState<'a> {
     fn parse_if_generate(&mut self) {
         self.start_node(SyntaxKind::IfGenerate);
         self.expect(SyntaxKind::IfKw);
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
         self.parse_expression(); // condition
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
         self.expect(SyntaxKind::GenerateKw);
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
 
         self.parse_generate_body();
 
         // VHDL-2008: elsif generate / else generate
         while self.at(SyntaxKind::ElsifKw) {
             self.bump();
-            self.skip_trivia();
+            self.skip_trivia_and_comments();
             self.parse_expression();
-            self.skip_trivia();
+            self.skip_trivia_and_comments();
             self.expect(SyntaxKind::GenerateKw);
-            self.skip_trivia();
+            self.skip_trivia_and_comments();
             self.parse_generate_body();
         }
         if self.at(SyntaxKind::ElseKw) {
             self.bump();
-            self.skip_trivia();
+            self.skip_trivia_and_comments();
             self.expect(SyntaxKind::GenerateKw);
-            self.skip_trivia();
+            self.skip_trivia_and_comments();
             self.parse_generate_body();
         }
 
         self.expect(SyntaxKind::EndKw);
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
         self.expect(SyntaxKind::GenerateKw);
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
         if self.at(SyntaxKind::Ident) {
             self.bump();
-            self.skip_trivia();
+            self.skip_trivia_and_comments();
         }
         self.expect(SyntaxKind::Semicolon);
         self.finish_node();
@@ -2295,7 +2306,7 @@ impl<'a> ParseState<'a> {
     fn parse_block_stmt(&mut self) {
         self.start_node(SyntaxKind::BlockStmt);
         self.expect(SyntaxKind::BlockKw);
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
 
         // Optional guard expression in parens — skip past it
         if self.at(SyntaxKind::LParen) {
@@ -2317,30 +2328,30 @@ impl<'a> ParseState<'a> {
                 }
                 self.bump();
             }
-            self.skip_trivia();
+            self.skip_trivia_and_comments();
         }
 
         // Optional 'is'
         self.eat(SyntaxKind::IsKw);
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
 
         // Declarations (same as architecture declarative region)
         self.parse_architecture_declarations();
 
         self.expect(SyntaxKind::BeginKw);
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
 
         // Concurrent statements
         self.parse_concurrent_statements();
 
         self.expect(SyntaxKind::EndKw);
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
         self.eat(SyntaxKind::BlockKw);
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
         // Optional label
         if self.at(SyntaxKind::Ident) {
             self.bump();
-            self.skip_trivia();
+            self.skip_trivia_and_comments();
         }
         self.expect(SyntaxKind::Semicolon);
         self.finish_node();
@@ -2405,28 +2416,28 @@ impl<'a> ParseState<'a> {
 
         self.start_node(SyntaxKind::PackageDecl);
         self.expect(SyntaxKind::PackageKw);
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
         self.bump(); // package name
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
         self.expect(SyntaxKind::IsKw);
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
 
         // Optional generic clause
         if self.at(SyntaxKind::GenericKw) {
             self.parse_generic_clause();
-            self.skip_trivia();
+            self.skip_trivia_and_comments();
         }
 
         // Declarations until end
         self.parse_package_declarations();
 
         self.expect(SyntaxKind::EndKw);
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
         self.eat(SyntaxKind::PackageKw);
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
         if !self.at(SyntaxKind::Semicolon) {
             self.bump();
-            self.skip_trivia();
+            self.skip_trivia_and_comments();
         }
         self.expect(SyntaxKind::Semicolon);
         self.finish_node();
@@ -2436,26 +2447,26 @@ impl<'a> ParseState<'a> {
         // package X is new Y generic map (...);
         self.start_node(SyntaxKind::PackageInstantiation);
         self.expect(SyntaxKind::PackageKw);
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
         self.bump(); // instance name (X)
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
         self.expect(SyntaxKind::IsKw);
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
         self.expect(SyntaxKind::NewKw);
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
         // Source package name — may be selected name (work.pkg)
         self.parse_selected_name();
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
         // Optional generic map
         if self.at(SyntaxKind::GenericKw) {
             self.start_node(SyntaxKind::GenericMap);
             self.bump(); // generic
-            self.skip_trivia();
+            self.skip_trivia_and_comments();
             self.expect(SyntaxKind::MapKw);
-            self.skip_trivia();
+            self.skip_trivia_and_comments();
             self.parse_association_list();
             self.finish_node();
-            self.skip_trivia();
+            self.skip_trivia_and_comments();
         }
         self.expect(SyntaxKind::Semicolon);
         self.finish_node();
@@ -2464,25 +2475,25 @@ impl<'a> ParseState<'a> {
     fn parse_package_body(&mut self) {
         self.start_node(SyntaxKind::PackageBody);
         self.expect(SyntaxKind::PackageKw);
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
         self.expect(SyntaxKind::BodyKw);
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
         self.bump(); // package name
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
         self.expect(SyntaxKind::IsKw);
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
 
         self.parse_package_declarations();
 
         self.expect(SyntaxKind::EndKw);
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
         self.eat(SyntaxKind::PackageKw);
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
         self.eat(SyntaxKind::BodyKw);
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
         if !self.at(SyntaxKind::Semicolon) {
             self.bump();
-            self.skip_trivia();
+            self.skip_trivia_and_comments();
         }
         self.expect(SyntaxKind::Semicolon);
         self.finish_node();
@@ -2490,7 +2501,7 @@ impl<'a> ParseState<'a> {
 
     fn parse_package_declarations(&mut self) {
         loop {
-            self.skip_trivia();
+            self.skip_trivia_and_comments();
             if self.is_at_end() || self.at(SyntaxKind::EndKw) {
                 break;
             }
@@ -2534,25 +2545,25 @@ impl<'a> ParseState<'a> {
     fn parse_interface_decl(&mut self) {
         self.start_node(SyntaxKind::InterfaceDecl);
         self.expect(SyntaxKind::InterfaceKw);
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
         self.bump(); // interface name
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
         self.expect(SyntaxKind::IsKw);
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
 
         // Signal declarations until 'end'
         while !self.is_at_end() && !self.at(SyntaxKind::EndKw) {
             self.parse_signal_decl();
-            self.skip_trivia();
+            self.skip_trivia_and_comments();
         }
 
         self.expect(SyntaxKind::EndKw);
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
         self.eat(SyntaxKind::InterfaceKw);
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
         if !self.at(SyntaxKind::Semicolon) {
             self.bump();
-            self.skip_trivia();
+            self.skip_trivia_and_comments();
         }
         self.expect(SyntaxKind::Semicolon);
         self.finish_node();
@@ -2561,39 +2572,39 @@ impl<'a> ParseState<'a> {
     fn parse_view_decl(&mut self) {
         self.start_node(SyntaxKind::ViewDecl);
         self.expect(SyntaxKind::ViewKw);
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
         self.bump(); // view name
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
         self.expect(SyntaxKind::OfKw);
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
         self.bump(); // interface name
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
         self.expect(SyntaxKind::IsKw);
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
 
         // Field direction assignments until 'end'
         while !self.is_at_end() && !self.at(SyntaxKind::EndKw) {
             self.start_node(SyntaxKind::ViewFieldDirection);
-            self.skip_trivia();
+            self.skip_trivia_and_comments();
             self.bump(); // field name
-            self.skip_trivia();
+            self.skip_trivia_and_comments();
             self.expect(SyntaxKind::Colon);
-            self.skip_trivia();
+            self.skip_trivia_and_comments();
             // Direction: in, out, inout
             self.bump();
-            self.skip_trivia();
+            self.skip_trivia_and_comments();
             self.expect(SyntaxKind::Semicolon);
             self.finish_node();
-            self.skip_trivia();
+            self.skip_trivia_and_comments();
         }
 
         self.expect(SyntaxKind::EndKw);
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
         self.eat(SyntaxKind::ViewKw);
-        self.skip_trivia();
+        self.skip_trivia_and_comments();
         if !self.at(SyntaxKind::Semicolon) {
             self.bump();
-            self.skip_trivia();
+            self.skip_trivia_and_comments();
         }
         self.expect(SyntaxKind::Semicolon);
         self.finish_node();

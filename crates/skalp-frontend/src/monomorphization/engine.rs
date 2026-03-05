@@ -719,6 +719,7 @@ impl<'hir> MonomorphizationEngine<'hir> {
         // the original impl_block.constants. The specialized constants have generic params
         // like F.total_bits already evaluated to concrete values like 32.
         HirImplementation {
+            name: impl_block.name.clone(),
             entity: specialized_entity.id,
             signals: specialized_signals,
             variables: specialized_variables,

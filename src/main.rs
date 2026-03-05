@@ -162,6 +162,11 @@ enum Commands {
             default_value = "1"
         )]
         gate_opt_level: u8,
+
+        // === VHDL Options ===
+        /// Select a specific VHDL architecture by name (default: last defined)
+        #[arg(long, value_name = "NAME")]
+        architecture: Option<String>,
     },
 
     /// Simulate the design
@@ -200,6 +205,10 @@ enum Commands {
         /// and wavefront propagation instead of clock-based simulation.
         #[arg(long)]
         ncl: bool,
+
+        /// Select a specific VHDL architecture by name (default: last defined)
+        #[arg(long, value_name = "NAME")]
+        architecture: Option<String>,
     },
 
     /// Synthesize for FPGA target
@@ -644,6 +653,7 @@ fn main() -> Result<()> {
             collect_training_data,
             library,
             gate_opt_level,
+            architecture,
         } => {
             let source_file = source.unwrap_or_else(|| PathBuf::from("src/main.sk"));
 
@@ -679,6 +689,7 @@ fn main() -> Result<()> {
                 optimization_options,
                 library.as_ref(),
                 no_async_sta,
+                architecture.as_deref(),
             )?;
         }
 
@@ -690,6 +701,7 @@ fn main() -> Result<()> {
             gpu,
             gate_opt_level,
             ncl,
+            architecture,
         } => {
             // Default output: <design_dir>/build/<name>.skw.gz
             let waveform_path = output.unwrap_or_else(|| {
@@ -705,6 +717,7 @@ fn main() -> Result<()> {
                 gate_opt_level,
                 ncl,
                 &waveform_path,
+                architecture.as_deref(),
             )?;
         }
 
@@ -1022,6 +1035,98 @@ skalpc synth src/main.sk --device ice40-hx8k
 }
 
 /// Build SKALP design
+/// Filter VHDL architectures: if `--architecture` is specified, keep only the named one
+/// per entity. Otherwise, if multiple architectures exist for the same entity, keep the
+/// last one (standard VHDL tool convention) and warn.
+fn filter_vhdl_architectures(
+    hir: &mut skalp_frontend::Hir,
+    architecture: Option<&str>,
+) -> Result<()> {
+    use indexmap::IndexMap;
+    use skalp_frontend::hir::EntityId;
+
+    if hir.implementations.len() <= 1 {
+        return Ok(());
+    }
+
+    // Group implementations by entity
+    let mut by_entity: IndexMap<EntityId, Vec<usize>> = IndexMap::new();
+    for (idx, imp) in hir.implementations.iter().enumerate() {
+        by_entity.entry(imp.entity).or_default().push(idx);
+    }
+
+    let mut keep_indices: Vec<usize> = Vec::new();
+
+    for (entity_id, indices) in &by_entity {
+        if indices.len() <= 1 {
+            keep_indices.extend(indices);
+            continue;
+        }
+
+        if let Some(arch_name) = architecture {
+            // User specified --architecture: find the matching one
+            let arch_lower = arch_name.to_ascii_lowercase();
+            let found = indices.iter().find(|&&idx| {
+                hir.implementations[idx]
+                    .name
+                    .as_deref()
+                    .map(|n| n.to_ascii_lowercase() == arch_lower)
+                    .unwrap_or(false)
+            });
+            match found {
+                Some(&idx) => keep_indices.push(idx),
+                None => {
+                    let available: Vec<String> = indices
+                        .iter()
+                        .filter_map(|&idx| hir.implementations[idx].name.clone())
+                        .collect();
+                    let entity_name = hir
+                        .entities
+                        .iter()
+                        .find(|e| e.id == *entity_id)
+                        .map(|e| e.name.as_str())
+                        .unwrap_or("?");
+                    anyhow::bail!(
+                        "Architecture '{}' not found for entity '{}'. Available: {}",
+                        arch_name,
+                        entity_name,
+                        available.join(", ")
+                    );
+                }
+            }
+        } else {
+            // No --architecture: keep last (VHDL convention), warn if multiple
+            let entity_name = hir
+                .entities
+                .iter()
+                .find(|e| e.id == *entity_id)
+                .map(|e| e.name.as_str())
+                .unwrap_or("?");
+            let names: Vec<String> = indices
+                .iter()
+                .filter_map(|&idx| hir.implementations[idx].name.clone())
+                .collect();
+            eprintln!(
+                "Warning: Multiple architectures for entity '{}': {}. Using last ('{}').",
+                entity_name,
+                names.join(", "),
+                names.last().unwrap_or(&"?".to_string())
+            );
+            keep_indices.push(*indices.last().unwrap());
+        }
+    }
+
+    // Rebuild implementations keeping only selected indices
+    keep_indices.sort();
+    let new_impls: Vec<_> = keep_indices
+        .into_iter()
+        .map(|idx| hir.implementations[idx].clone())
+        .collect();
+    hir.implementations = new_impls;
+
+    Ok(())
+}
+
 fn build_design(
     source: &PathBuf,
     target: &str,
@@ -1030,6 +1135,7 @@ fn build_design(
     optimization_options: OptimizationOptions,
     library_path: Option<&PathBuf>,
     skip_async_sta: bool,
+    architecture: Option<&str>,
 ) -> Result<()> {
     use skalp_codegen::systemverilog::{
         generate_constraints_toml, generate_systemverilog_from_mir,
@@ -1044,14 +1150,20 @@ fn build_design(
         source.extension().and_then(|s| s.to_str()),
         Some("vhd") | Some("vhdl")
     );
-    let (hir, module_hirs) = if is_vhdl {
-        let ctx = skalp_vhdl::parse_vhdl(source).context("Failed to parse VHDL")?;
+    let (mut hir, module_hirs) = if is_vhdl {
+        let ctx =
+            skalp_vhdl::parse_vhdl_directory(source).context("Failed to parse VHDL project")?;
         (ctx.main_hir, indexmap::IndexMap::new())
     } else {
         let context =
             parse_and_build_compilation_context(source).context("Failed to parse and build HIR")?;
         (context.main_hir, context.module_hirs)
     };
+
+    // Filter VHDL architectures if --architecture was specified
+    if is_vhdl {
+        filter_vhdl_architectures(&mut hir, architecture)?;
+    }
 
     // Run safety analysis if enabled
     if let Some(ref safety_opts) = safety_options {
@@ -1999,6 +2111,7 @@ fn simulate_design(
     gate_opt_level: u8,
     ncl_mode: bool,
     waveform_path: &Path,
+    architecture: Option<&str>,
 ) -> Result<()> {
     use skalp_mir::Mir;
     use skalp_sir::convert_mir_to_sir;
@@ -2029,7 +2142,7 @@ fn simulate_design(
             } else if gate_level {
                 simulate_gate_level(design_file, cycles, use_gpu, gate_opt_level, waveform_path)
             } else {
-                simulate_behavioral(design_file, cycles, use_gpu, waveform_path)
+                simulate_behavioral(design_file, cycles, use_gpu, waveform_path, architecture)
             }
         }
         Some("mir") => {
@@ -2065,6 +2178,7 @@ fn simulate_behavioral(
     cycles: u64,
     use_gpu: bool,
     waveform_path: &Path,
+    architecture: Option<&str>,
 ) -> Result<()> {
     use skalp_frontend::parse_and_build_hir_from_file;
     use skalp_mir::MirCompiler;
@@ -2079,13 +2193,22 @@ fn simulate_behavioral(
 
     // Parse and build HIR
     info!("Parsing source...");
-    let hir = match source_file.extension().and_then(|s| s.to_str()) {
-        Some("vhd") | Some("vhdl") => {
-            let ctx = skalp_vhdl::parse_vhdl(source_file).context("Failed to parse VHDL")?;
-            ctx.main_hir
-        }
-        _ => parse_and_build_hir_from_file(source_file).context("Failed to parse and build HIR")?,
+    let is_vhdl = matches!(
+        source_file.extension().and_then(|s| s.to_str()),
+        Some("vhd") | Some("vhdl")
+    );
+    let mut hir = if is_vhdl {
+        let ctx =
+            skalp_vhdl::parse_vhdl_directory(source_file).context("Failed to parse VHDL project")?;
+        ctx.main_hir
+    } else {
+        parse_and_build_hir_from_file(source_file).context("Failed to parse and build HIR")?
     };
+
+    // Filter VHDL architectures if --architecture was specified
+    if is_vhdl {
+        filter_vhdl_architectures(&mut hir, architecture)?;
+    }
 
     // Lower to MIR
     info!("Compiling to MIR...");

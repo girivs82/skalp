@@ -244,6 +244,9 @@ impl SafetyMechanismConfig {
 /// Implementation in HIR
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HirImplementation {
+    /// Architecture/implementation name (None for native .sk, Some("rtl") for VHDL)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     /// Target entity
     pub entity: EntityId,
     /// Signals

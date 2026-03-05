@@ -1936,3 +1936,318 @@ end architecture rtl;
         rhs
     );
 }
+
+// ============================================================
+// Phase 1: Architecture name stored in HirImplementation
+// ============================================================
+
+#[test]
+fn test_architecture_name_stored() {
+    let source = r#"
+library ieee;
+use ieee.std_logic_1164.all;
+
+entity foo is
+    port (
+        clk : in std_logic
+    );
+end entity foo;
+
+architecture rtl of foo is
+begin
+end architecture rtl;
+"#;
+    let hir = parse_vhdl_source(source, None).unwrap();
+    assert_eq!(hir.implementations.len(), 1);
+    assert_eq!(hir.implementations[0].name, Some("rtl".to_string()));
+}
+
+#[test]
+fn test_multiple_architectures() {
+    let source = r#"
+library ieee;
+use ieee.std_logic_1164.all;
+
+entity mux is
+    port (
+        a : in  std_logic;
+        b : in  std_logic;
+        s : in  std_logic;
+        y : out std_logic
+    );
+end entity mux;
+
+architecture behavioral of mux is
+begin
+    y <= a when s = '0' else b;
+end architecture behavioral;
+
+architecture structural of mux is
+begin
+    y <= (a and not s) or (b and s);
+end architecture structural;
+"#;
+    let hir = parse_vhdl_source(source, None).unwrap();
+    assert_eq!(hir.implementations.len(), 2);
+    assert_eq!(
+        hir.implementations[0].name,
+        Some("behavioral".to_string())
+    );
+    assert_eq!(
+        hir.implementations[1].name,
+        Some("structural".to_string())
+    );
+}
+
+// ============================================================
+// Phase 2: Multi-file VHDL parsing
+// ============================================================
+
+#[test]
+fn test_multi_file_entity_and_architecture() {
+    use std::io::Write;
+
+    let dir_path = std::env::temp_dir().join("skalp_vhdl_multi_file_test");
+    let _ = std::fs::remove_dir_all(&dir_path);
+    std::fs::create_dir_all(&dir_path).unwrap();
+
+    // File A: entity only
+    let entity_path = dir_path.join("types.vhd");
+    let mut f = std::fs::File::create(&entity_path).unwrap();
+    write!(
+        f,
+        r#"
+library ieee;
+use ieee.std_logic_1164.all;
+
+entity adder is
+    port (
+        a : in  std_logic_vector(7 downto 0);
+        b : in  std_logic_vector(7 downto 0);
+        sum : out std_logic_vector(7 downto 0)
+    );
+end entity adder;
+"#
+    )
+    .unwrap();
+
+    // File B: architecture only
+    let arch_path = dir_path.join("impl.vhd");
+    let mut f = std::fs::File::create(&arch_path).unwrap();
+    write!(
+        f,
+        r#"
+library ieee;
+use ieee.std_logic_1164.all;
+use ieee.numeric_std.all;
+
+architecture rtl of adder is
+begin
+    sum <= std_logic_vector(unsigned(a) + unsigned(b));
+end architecture rtl;
+"#
+    )
+    .unwrap();
+
+    let files = vec![entity_path, arch_path];
+    let ctx = skalp_vhdl::parse_vhdl_project(&files).unwrap();
+
+    assert_eq!(ctx.main_hir.entities.len(), 1);
+    assert_eq!(ctx.main_hir.entities[0].name, "Adder");
+    assert_eq!(ctx.main_hir.implementations.len(), 1);
+    assert_eq!(
+        ctx.main_hir.implementations[0].name,
+        Some("rtl".to_string())
+    );
+    // Architecture should reference the entity from file A
+    assert_eq!(
+        ctx.main_hir.implementations[0].entity,
+        ctx.main_hir.entities[0].id
+    );
+}
+
+// ============================================================
+// Phase 3: VHDL inline pin constraint comments
+// ============================================================
+
+#[test]
+fn test_inline_pin_constraint_comment() {
+    let source = r#"
+library ieee;
+use ieee.std_logic_1164.all;
+
+entity top is
+    port (
+        clk : in  std_logic; -- skalp: { pin: "A1", io_standard: "LVCMOS33" }
+        led : out std_logic  -- skalp: { pin: "B2", drive: 8mA, slew: fast }
+    );
+end entity top;
+"#;
+    let hir = parse_vhdl_source(source, None).unwrap();
+    let entity = &hir.entities[0];
+    assert_eq!(entity.ports.len(), 2);
+
+    // clk port
+    let clk = &entity.ports[0];
+    assert_eq!(clk.name, "clk");
+    let pc = clk.physical_constraints.as_ref().expect("clk should have constraints");
+    use skalp_frontend::hir::PinLocation;
+    assert!(matches!(&pc.pin_location, Some(PinLocation::Single(p)) if p == "A1"));
+    assert_eq!(pc.io_standard.as_deref(), Some("LVCMOS33"));
+
+    // led port
+    let led = &entity.ports[1];
+    assert_eq!(led.name, "led");
+    let pc = led.physical_constraints.as_ref().expect("led should have constraints");
+    assert!(matches!(&pc.pin_location, Some(PinLocation::Single(p)) if p == "B2"));
+    use skalp_frontend::hir::DriveStrength;
+    assert_eq!(pc.drive_strength, Some(DriveStrength::Ma8));
+    use skalp_frontend::hir::SlewRate;
+    assert_eq!(pc.slew_rate, Some(SlewRate::Fast));
+}
+
+#[test]
+fn test_non_skalp_comment_ignored() {
+    let source = r#"
+library ieee;
+use ieee.std_logic_1164.all;
+
+entity top is
+    port (
+        clk : in std_logic; -- system clock
+        rst : in std_logic  -- active high reset
+    );
+end entity top;
+"#;
+    let hir = parse_vhdl_source(source, None).unwrap();
+    let entity = &hir.entities[0];
+    assert!(
+        entity.ports[0].physical_constraints.is_none(),
+        "regular comment should not create constraints"
+    );
+    assert!(
+        entity.ports[1].physical_constraints.is_none(),
+        "regular comment should not create constraints"
+    );
+}
+
+#[test]
+fn test_differential_pin_constraint() {
+    let source = r#"
+library ieee;
+use ieee.std_logic_1164.all;
+
+entity top is
+    port (
+        lvds_in : in std_logic -- skalp: { pin_p: "C1", pin_n: "C2", io_standard: "LVDS_25", diff_term: true }
+    );
+end entity top;
+"#;
+    let hir = parse_vhdl_source(source, None).unwrap();
+    let port = &hir.entities[0].ports[0];
+    let pc = port.physical_constraints.as_ref().expect("should have constraints");
+    use skalp_frontend::hir::PinLocation;
+    match &pc.pin_location {
+        Some(PinLocation::Differential { positive, negative }) => {
+            assert_eq!(positive, "C1");
+            assert_eq!(negative, "C2");
+        }
+        other => panic!("Expected Differential pin location, got {:?}", other),
+    }
+    assert_eq!(pc.io_standard.as_deref(), Some("LVDS_25"));
+    assert_eq!(pc.diff_term, Some(true));
+}
+
+#[test]
+fn test_extract_skalp_constraint_basic() {
+    // Unit test the parser function directly via parse_vhdl_source
+    let source = r#"
+library ieee;
+use ieee.std_logic_1164.all;
+
+entity test is
+    port (
+        sig : in std_logic -- skalp: { pin: "D5", io_standard: "LVCMOS18", bank: 3 }
+    );
+end entity test;
+"#;
+    let hir = parse_vhdl_source(source, None).unwrap();
+    let pc = hir.entities[0].ports[0]
+        .physical_constraints
+        .as_ref()
+        .expect("should have constraints");
+    use skalp_frontend::hir::PinLocation;
+    assert!(matches!(&pc.pin_location, Some(PinLocation::Single(p)) if p == "D5"));
+    assert_eq!(pc.io_standard.as_deref(), Some("LVCMOS18"));
+    assert_eq!(pc.bank, Some(3));
+}
+
+#[test]
+fn test_extract_skalp_constraint_drive_slew() {
+    let source = r#"
+library ieee;
+use ieee.std_logic_1164.all;
+
+entity test is
+    port (
+        sig : out std_logic -- skalp: { pin: "E1", drive: 12mA, slew: slow, schmitt: true, pull: up }
+    );
+end entity test;
+"#;
+    let hir = parse_vhdl_source(source, None).unwrap();
+    let pc = hir.entities[0].ports[0]
+        .physical_constraints
+        .as_ref()
+        .expect("should have constraints");
+    use skalp_frontend::hir::{DriveStrength, SlewRate, Termination};
+    assert_eq!(pc.drive_strength, Some(DriveStrength::Ma12));
+    assert_eq!(pc.slew_rate, Some(SlewRate::Slow));
+    assert_eq!(pc.schmitt_trigger, Some(true));
+    assert_eq!(pc.termination, Some(Termination::PullUp));
+}
+
+#[test]
+fn test_extract_non_skalp_comment_returns_none() {
+    let source = r#"
+library ieee;
+use ieee.std_logic_1164.all;
+
+entity test is
+    port (
+        sig : in std_logic -- just a regular comment
+    );
+end entity test;
+"#;
+    let hir = parse_vhdl_source(source, None).unwrap();
+    assert!(
+        hir.entities[0].ports[0].physical_constraints.is_none(),
+        "non-skalp comment should not produce constraints"
+    );
+}
+
+#[test]
+fn test_multi_pin_constraint() {
+    let source = r#"
+library ieee;
+use ieee.std_logic_1164.all;
+
+entity test is
+    port (
+        bus : out std_logic_vector(2 downto 0) -- skalp: { pins: ["A1", "A2", "A3"], io_standard: "LVCMOS33" }
+    );
+end entity test;
+"#;
+    let hir = parse_vhdl_source(source, None).unwrap();
+    let pc = hir.entities[0].ports[0]
+        .physical_constraints
+        .as_ref()
+        .expect("should have constraints");
+    use skalp_frontend::hir::PinLocation;
+    match &pc.pin_location {
+        Some(PinLocation::Multiple(pins)) => {
+            assert_eq!(pins, &vec!["A1".to_string(), "A2".to_string(), "A3".to_string()]);
+        }
+        other => panic!("Expected Multiple pin location, got {:?}", other),
+    }
+    assert_eq!(pc.io_standard.as_deref(), Some("LVCMOS33"));
+}

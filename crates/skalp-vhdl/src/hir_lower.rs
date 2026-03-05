@@ -196,6 +196,237 @@ fn collect_leading_comments(node: &SyntaxNode) -> Vec<String> {
     comments
 }
 
+/// Collect trailing comment from a PortDecl node.
+/// Checks both:
+/// 1. Trailing children of the PortDecl itself (comments consumed by skip_trivia inside parse_port_decl)
+/// 2. Next siblings of the PortDecl (comments between ports, after semicolons)
+fn collect_trailing_comment(node: &SyntaxNode) -> Option<String> {
+    // First check trailing tokens within the node itself (last-to-first)
+    for element in node.children_with_tokens().collect::<Vec<_>>().into_iter().rev() {
+        match &element {
+            SyntaxElement::Token(tok) if tok.kind() == SyntaxKind::Comment => {
+                return Some(tok.text().to_string());
+            }
+            SyntaxElement::Token(tok) if tok.kind() == SyntaxKind::Whitespace => {
+                // Skip whitespace, keep looking
+                continue;
+            }
+            _ => break, // Stop at first non-trivia
+        }
+    }
+
+    // Then check next siblings (for comments after semicolons between ports)
+    let mut next = node.next_sibling_or_token();
+    while let Some(ref element) = next {
+        match element {
+            SyntaxElement::Token(tok) if tok.kind() == SyntaxKind::Whitespace => {
+                // Only continue on same-line whitespace
+                if tok.text().contains('\n') {
+                    return None;
+                }
+                next = element.next_sibling_or_token();
+            }
+            SyntaxElement::Token(tok) if tok.kind() == SyntaxKind::Semicolon => {
+                next = element.next_sibling_or_token();
+            }
+            SyntaxElement::Token(tok) if tok.kind() == SyntaxKind::Comment => {
+                return Some(tok.text().to_string());
+            }
+            _ => return None,
+        }
+    }
+    None
+}
+
+/// Parse a `-- skalp: { key: value, ... }` comment into PhysicalConstraints.
+/// Returns None if the comment doesn't start with `skalp:`.
+fn extract_skalp_constraint_from_comment(comment_text: &str) -> Option<PhysicalConstraints> {
+    // Strip `--` prefix and whitespace
+    let stripped = comment_text.strip_prefix("--")?.trim();
+
+    // Check for `skalp:` prefix
+    let body = stripped.strip_prefix("skalp:")?.trim();
+
+    // Extract content between `{` and `}`
+    let inner = body.strip_prefix('{')?.trim();
+    let inner = inner.strip_suffix('}')?.trim();
+
+    if inner.is_empty() {
+        return None;
+    }
+
+    let mut pin_location = None;
+    let mut io_standard = None;
+    let mut drive_strength = None;
+    let mut slew_rate = None;
+    let mut termination = None;
+    let mut schmitt_trigger = None;
+    let mut bank = None;
+    let mut diff_term = None;
+    let mut pad_type = None;
+    let mut pad_cell = None;
+
+    // Parse comma-separated key: value pairs
+    // Handle pins: ["A1", "A2"] by tracking bracket nesting
+    let pairs = split_constraint_pairs(inner);
+    for pair in &pairs {
+        let pair = pair.trim();
+        if let Some((key, value)) = pair.split_once(':') {
+            let key = key.trim();
+            let value = value.trim();
+            // Strip surrounding quotes from value if present
+            let unquoted = value
+                .strip_prefix('"')
+                .and_then(|v| v.strip_suffix('"'))
+                .unwrap_or(value);
+
+            match key {
+                "pin" => {
+                    pin_location = Some(PinLocation::Single(unquoted.to_string()));
+                }
+                "pins" => {
+                    // Parse ["A1", "A2", ...] array
+                    let arr = value
+                        .strip_prefix('[')
+                        .and_then(|v| v.strip_suffix(']'))
+                        .unwrap_or(value);
+                    let pins: Vec<String> = arr
+                        .split(',')
+                        .map(|s| {
+                            s.trim()
+                                .strip_prefix('"')
+                                .and_then(|v| v.strip_suffix('"'))
+                                .unwrap_or(s.trim())
+                                .to_string()
+                        })
+                        .collect();
+                    pin_location = Some(PinLocation::Multiple(pins));
+                }
+                "pin_p" => {
+                    // Differential positive — set or update
+                    let neg = match &pin_location {
+                        Some(PinLocation::Differential { negative, .. }) => negative.clone(),
+                        _ => String::new(),
+                    };
+                    pin_location = Some(PinLocation::Differential {
+                        positive: unquoted.to_string(),
+                        negative: neg,
+                    });
+                }
+                "pin_n" => {
+                    // Differential negative — set or update
+                    let pos = match &pin_location {
+                        Some(PinLocation::Differential { positive, .. }) => positive.clone(),
+                        _ => String::new(),
+                    };
+                    pin_location = Some(PinLocation::Differential {
+                        positive: pos,
+                        negative: unquoted.to_string(),
+                    });
+                }
+                "io_standard" => {
+                    io_standard = Some(unquoted.to_string());
+                }
+                "drive" => {
+                    drive_strength = match unquoted.to_ascii_lowercase().as_str() {
+                        "4ma" => Some(DriveStrength::Ma4),
+                        "8ma" => Some(DriveStrength::Ma8),
+                        "12ma" => Some(DriveStrength::Ma12),
+                        "16ma" => Some(DriveStrength::Ma16),
+                        _ => None,
+                    };
+                }
+                "slew" => {
+                    slew_rate = match unquoted.to_ascii_lowercase().as_str() {
+                        "fast" => Some(SlewRate::Fast),
+                        "slow" => Some(SlewRate::Slow),
+                        "medium" => Some(SlewRate::Medium),
+                        _ => None,
+                    };
+                }
+                "pull" => {
+                    termination = match unquoted.to_ascii_lowercase().as_str() {
+                        "up" => Some(Termination::PullUp),
+                        "down" => Some(Termination::PullDown),
+                        "none" => Some(Termination::None),
+                        "keeper" => Some(Termination::Keeper),
+                        _ => None,
+                    };
+                }
+                "schmitt" => {
+                    schmitt_trigger =
+                        Some(matches!(unquoted.to_ascii_lowercase().as_str(), "true" | "yes" | "1"));
+                }
+                "diff_term" => {
+                    diff_term =
+                        Some(matches!(unquoted.to_ascii_lowercase().as_str(), "true" | "yes" | "1"));
+                }
+                "bank" => {
+                    bank = unquoted.parse::<u32>().ok();
+                }
+                "pad_type" => {
+                    pad_type = match unquoted.to_ascii_lowercase().as_str() {
+                        "input" => Some(PadType::Input),
+                        "output" => Some(PadType::Output),
+                        "bidirectional" | "bidir" => Some(PadType::Bidirectional),
+                        "clock" => Some(PadType::Clock),
+                        "power" => Some(PadType::Power),
+                        "ground" => Some(PadType::Ground),
+                        "analog" => Some(PadType::Analog),
+                        _ => None,
+                    };
+                }
+                "pad_cell" => {
+                    pad_cell = Some(unquoted.to_string());
+                }
+                _ => {} // Unknown keys are silently ignored
+            }
+        }
+    }
+
+    Some(PhysicalConstraints {
+        pin_location,
+        io_standard,
+        drive_strength,
+        slew_rate,
+        termination,
+        schmitt_trigger,
+        bank,
+        diff_term,
+        pad_type,
+        pad_cell,
+        ldo_config: None,
+    })
+}
+
+/// Split constraint pairs by commas, respecting bracket nesting for array values like `["A1", "A2"]`.
+fn split_constraint_pairs(s: &str) -> Vec<String> {
+    let mut pairs = Vec::new();
+    let mut current = String::new();
+    let mut bracket_depth = 0;
+
+    for ch in s.chars() {
+        match ch {
+            '[' => {
+                bracket_depth += 1;
+                current.push(ch);
+            }
+            ']' => {
+                bracket_depth -= 1;
+                current.push(ch);
+            }
+            ',' if bracket_depth == 0 => {
+                pairs.push(std::mem::take(&mut current));
+            }
+            _ => current.push(ch),
+        }
+    }
+    if !current.is_empty() {
+        pairs.push(current);
+    }
+    pairs
+}
+
 /// Collect all non-trivia token texts
 fn all_token_texts(node: &SyntaxNode) -> Vec<(SyntaxKind, String)> {
     node.children_with_tokens()
@@ -363,25 +594,46 @@ impl VhdlHirBuilder {
             .unwrap_or("vhdl_design")
             .to_string();
 
-        let mut hir = Hir::new(file_name);
+        self.lower_multiple_roots(file_name, &[root.clone()])
+    }
 
-        // First pass: collect entity names for forward references
-        for child in root.children() {
-            if child.kind() == SyntaxKind::EntityDecl {
-                if let Some(name) = first_ident(&child) {
-                    let id = self.alloc_entity_id();
-                    let pascal = to_pascal_case(&name);
-                    self.entity_map.insert(name.clone(), id);
-                    self.entity_map.insert(pascal, id);
+    /// Lower multiple VHDL syntax roots (from different files) into a single HIR.
+    /// Two-pass: first collect all entity names across files, then full lowering.
+    pub fn lower_multiple_roots(
+        &mut self,
+        design_name: String,
+        roots: &[SyntaxNode],
+    ) -> Result<Hir> {
+        let mut hir = Hir::new(design_name);
+
+        // First pass: collect entity names from ALL roots for forward references
+        for root in roots {
+            for child in root.children() {
+                if child.kind() == SyntaxKind::EntityDecl {
+                    if let Some(name) = first_ident(&child) {
+                        let id = self.alloc_entity_id();
+                        let pascal = to_pascal_case(&name);
+                        self.entity_map.insert(name.clone(), id);
+                        self.entity_map.insert(pascal, id);
+                    }
+                    // Reset ID counter — we'll re-allocate in the real pass
+                    self.next_entity_id -= 1;
                 }
-                // Reset ID counter — we'll re-allocate in the real pass
-                self.next_entity_id -= 1;
             }
         }
         self.next_entity_id = 0;
         self.entity_map.clear();
 
-        // Second pass: full lowering
+        // Second pass: full lowering across all roots
+        for root in roots {
+            self.lower_root_into(root, &mut hir);
+        }
+
+        Ok(hir)
+    }
+
+    /// Lower a single root node into an existing HIR (used by both lower() and lower_multiple_roots())
+    fn lower_root_into(&mut self, root: &SyntaxNode, hir: &mut Hir) {
         for child in root.children() {
             match child.kind() {
                 SyntaxKind::LibraryClause => self.lower_library_clause(&child),
@@ -395,7 +647,7 @@ impl VhdlHirBuilder {
                     if let Some(imp) = self.lower_architecture(&child) {
                         // Apply clock_frequency attributes to the entity's clock domains
                         if !self.clock_frequency_attrs.is_empty() {
-                            self.apply_clock_frequency_attrs(imp.entity, &mut hir);
+                            self.apply_clock_frequency_attrs(imp.entity, hir);
                             self.clock_frequency_attrs.clear();
                         }
                         hir.implementations.push(imp);
@@ -408,16 +660,14 @@ impl VhdlHirBuilder {
                     self.lower_view_decl(&child);
                 }
                 SyntaxKind::PackageDecl | SyntaxKind::PackageBody => {
-                    self.lower_package(&child, &mut hir);
+                    self.lower_package(&child, hir);
                 }
                 SyntaxKind::PackageInstantiation => {
-                    self.lower_package_instantiation(&child, &mut hir);
+                    self.lower_package_instantiation(&child, hir);
                 }
                 _ => {}
             }
         }
-
-        Ok(hir)
     }
 
     // ====================================================================
@@ -679,6 +929,10 @@ impl VhdlHirBuilder {
             HirType::Logic(1)
         };
 
+        // Extract physical constraints from trailing skalp comment
+        let physical_constraints = collect_trailing_comment(node)
+            .and_then(|comment| extract_skalp_constraint_from_comment(&comment));
+
         let mut ports = Vec::new();
         for name in &idents {
             let id = self.alloc_port_id();
@@ -690,7 +944,7 @@ impl VhdlHirBuilder {
                 comments: collect_leading_comments(node),
                 direction: direction.clone(),
                 port_type: port_type.clone(),
-                physical_constraints: None,
+                physical_constraints: physical_constraints.clone(),
                 detection_config: None,
                 power_domain_config: None,
                 isolation_config: None,
@@ -928,7 +1182,14 @@ impl VhdlHirBuilder {
         // Merge any external name signals created during expression lowering
         signals.append(&mut self.external_signals);
 
+        let arch_name = idents
+            .first()
+            .cloned()
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+
         Some(HirImplementation {
+            name: Some(arch_name),
             entity: entity_id,
             signals,
             variables,

@@ -680,6 +680,7 @@ impl ModuleResolver {
                                 .any(|i| i.entity == crate::hir::EntityId::GLOBAL_IMPL)
                         {
                             target.implementations.push(crate::hir::HirImplementation {
+                                name: None,
                                 entity: crate::hir::EntityId::GLOBAL_IMPL,
                                 signals: Vec::new(),
                                 variables: Vec::new(),

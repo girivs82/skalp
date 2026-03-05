@@ -93,6 +93,7 @@ fn create_simple_entity() -> Hir {
 
     // Create implementation
     let implementation = HirImplementation {
+        name: None,
         entity: EntityId(1),
         signals: vec![HirSignal {
             id: SignalId(1),
