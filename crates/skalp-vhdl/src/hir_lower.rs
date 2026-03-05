@@ -603,7 +603,7 @@ impl VhdlHirBuilder {
             .unwrap_or("vhdl_design")
             .to_string();
 
-        self.lower_multiple_roots(file_name, &[root.clone()])
+        self.lower_multiple_roots(file_name, std::slice::from_ref(root))
     }
 
     /// Lower multiple VHDL syntax roots (from different files) into a single HIR.
