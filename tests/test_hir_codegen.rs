@@ -746,6 +746,37 @@ impl XpmFifoWrapper {
     );
 }
 
+#[test]
+fn test_vendor_ip_skalp_roundtrip() {
+    let sk = compile_hir_to_skalp(
+        r#"
+#[xilinx_ip("xpm_fifo_sync", library="xpm")]
+entity XpmFifoWrapper {
+    in clk: clock
+    in din: bit[32]
+    out dout: bit[32]
+}
+
+impl XpmFifoWrapper {
+}
+"#,
+    );
+
+    println!("Skalp:\n{sk}");
+    assert!(
+        sk.contains("#[xilinx_ip("),
+        "Should emit xilinx_ip attribute"
+    );
+    assert!(
+        sk.contains("xpm_fifo_sync"),
+        "Should preserve IP name"
+    );
+    assert!(
+        sk.contains("library="),
+        "Should preserve library parameter"
+    );
+}
+
 // ============================================================================
 // VHDL Output Tests
 // ============================================================================

@@ -34,6 +34,11 @@ pub(crate) fn emit_per_entity(
 fn emit_entity(out: &mut String, entity: &HirEntity, resolver: &NameResolver) {
     emit_comments(out, &entity.comments, "//", "");
 
+    // Vendor IP attribute
+    if let Some(ref config) = entity.vendor_ip_config {
+        emit_vendor_ip_attribute(out, config);
+    }
+
     if entity.is_async {
         out.push_str("async ");
     }
@@ -291,6 +296,50 @@ fn emit_signal_attributes(out: &mut String, signal: &HirSignal, ind: &str) {
             writeln!(out, "{ind}#[breakpoint({})]", parts.join(", ")).unwrap();
         }
     }
+}
+
+/// Emit a `#[vendor_ip(...)]` attribute before an entity declaration
+fn emit_vendor_ip_attribute(out: &mut String, config: &VendorIpConfig) {
+    let attr_name = match config.vendor {
+        VendorType::Xilinx => "xilinx_ip",
+        VendorType::Intel => "intel_ip",
+        VendorType::Lattice => "lattice_ip",
+        VendorType::Generic => "vendor_ip",
+    };
+
+    let mut parts = Vec::new();
+    // IP name — always present
+    parts.push(format!("\"{}\"", config.ip_name));
+
+    if let Some(ref lib) = config.library {
+        parts.push(format!("library=\"{lib}\""));
+    }
+    if let Some(ref ver) = config.version {
+        parts.push(format!("version=\"{ver}\""));
+    }
+    if config.black_box && !matches!(config.vendor, VendorType::Generic) {
+        parts.push("black_box".to_string());
+    }
+    for (key, value) in &config.parameters {
+        parts.push(format!("{key}=\"{value}\""));
+    }
+    if !config.tie_low.is_empty() {
+        parts.push(format!("tie_low=[{}]", config.tie_low.join(", ")));
+    }
+    if !config.tie_high.is_empty() {
+        parts.push(format!("tie_high=[{}]", config.tie_high.join(", ")));
+    }
+    if !config.unconnected.is_empty() {
+        parts.push(format!(
+            "unconnected=[{}]",
+            config.unconnected.join(", ")
+        ));
+    }
+    for (entity_port, ip_port) in &config.port_map {
+        parts.push(format!("{entity_port}=\"{ip_port}\""));
+    }
+
+    writeln!(out, "#[{}({})]", attr_name, parts.join(", ")).unwrap();
 }
 
 fn emit_variable(out: &mut String, variable: &HirVariable, resolver: &NameResolver, level: usize) {
