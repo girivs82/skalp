@@ -1276,10 +1276,8 @@ impl GateNetlist {
         // Net indices start from 2 (0 and 1 are reserved for constants)
         let mut net_indices: std::collections::HashMap<GateNetId, u32> =
             std::collections::HashMap::new();
-        let mut next_index = 2u32;
-        for net in &self.nets {
+        for (next_index, net) in (2u32..).zip(self.nets.iter()) {
             net_indices.insert(net.id, next_index);
-            next_index += 1;
         }
 
         // Build cells object

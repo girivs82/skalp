@@ -757,13 +757,9 @@ impl DebugServer {
 
     /// Extract port name from `in <name>:` or `out <name>:` patterns.
     fn extract_port_decl(line: &str) -> Option<String> {
-        let rest = if let Some(stripped) = line.strip_prefix("in ") {
-            stripped
-        } else if let Some(stripped) = line.strip_prefix("out ") {
-            stripped
-        } else {
-            return None;
-        };
+        let rest = line
+            .strip_prefix("in ")
+            .or_else(|| line.strip_prefix("out "))?;
         let rest = rest.trim_start();
         // Take identifier chars until `:` or whitespace
         let name: String = rest

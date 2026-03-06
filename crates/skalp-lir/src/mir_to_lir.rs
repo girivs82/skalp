@@ -1696,17 +1696,15 @@ impl MirToLirTransform {
                         }
                     }
                 }
-                Statement::ResolvedConditional(rc) => {
+                Statement::ResolvedConditional(rc) if &rc.target == target => {
                     // ResolvedConditional is a synthesis-resolved if-else-if chain
                     // If it targets our signal, it counts as nested conditional logic
-                    if &rc.target == target {
-                        return true;
-                    }
+                    return true;
                 }
-                Statement::Block(inner_block) => {
-                    if Self::block_has_nested_if_for_target(inner_block, target) {
-                        return true;
-                    }
+                Statement::Block(inner_block)
+                    if Self::block_has_nested_if_for_target(inner_block, target) =>
+                {
+                    return true;
                 }
                 _ => {}
             }
@@ -2464,16 +2462,16 @@ impl MirToLirTransform {
                         return mux_out;
                     }
                 }
-                Statement::Block(inner_block) => {
+                Statement::Block(inner_block)
+                    if Self::block_assigns_to_target(inner_block, target) =>
+                {
                     // Recursively check inner block
-                    if Self::block_assigns_to_target(inner_block, target) {
-                        return self.synthesize_case_arm_for_target(
-                            inner_block,
-                            target,
-                            target_width,
-                            feedback_signal,
-                        );
-                    }
+                    return self.synthesize_case_arm_for_target(
+                        inner_block,
+                        target,
+                        target_width,
+                        feedback_signal,
+                    );
                 }
                 _ => {}
             }
@@ -2502,10 +2500,10 @@ impl MirToLirTransform {
                         }
                     }
                 }
-                Statement::Block(inner_block) => {
-                    if Self::block_assigns_to_target(inner_block, target) {
-                        return true;
-                    }
+                Statement::Block(inner_block)
+                    if Self::block_assigns_to_target(inner_block, target) =>
+                {
+                    return true;
                 }
                 _ => {}
             }
@@ -6686,13 +6684,7 @@ fn extract_constant_value(expr: &Expression) -> Option<u64> {
                 BinaryOp::Add => Some(left_val.wrapping_add(right_val)),
                 BinaryOp::Sub => Some(left_val.wrapping_sub(right_val)),
                 BinaryOp::Mul => Some(left_val.wrapping_mul(right_val)),
-                BinaryOp::Div | BinaryOp::Mod => {
-                    if right_val != 0 {
-                        Some(left_val / right_val)
-                    } else {
-                        None
-                    }
-                }
+                BinaryOp::Div | BinaryOp::Mod => left_val.checked_div(right_val),
                 BinaryOp::LeftShift => Some(left_val << (right_val & 63)),
                 BinaryOp::RightShift => Some(left_val >> (right_val & 63)),
                 BinaryOp::BitwiseAnd => Some(left_val & right_val),

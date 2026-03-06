@@ -941,7 +941,7 @@ impl FmeaGenerator {
             .iter()
             .filter_map(|e| e.risk_assessment.rpn.map(|rpn| (rpn, e.id.clone())))
             .collect();
-        rpn_entries.sort_by(|a, b| b.0.cmp(&a.0));
+        rpn_entries.sort_by_key(|x| std::cmp::Reverse(x.0));
         let highest_risk_entries = rpn_entries.into_iter().take(5).map(|(_, id)| id).collect();
 
         FmeaSummary {

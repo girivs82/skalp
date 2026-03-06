@@ -5389,19 +5389,14 @@ impl SequentialEquivalenceChecker {
         let matches = match_registers(&regs1, &regs2);
         for (r1, r2) in &matches {
             match (r1, r2) {
-                (Some(reg1), Some(reg2)) => {
-                    if reg1.width != reg2.width {
-                        return Ok(SequentialEquivalenceResult {
-                            equivalent: false,
-                            register_matches: vec![],
-                            counterexample: None,
-                            failure_reason: Some(format!(
-                                "Register '{}' width mismatch",
-                                reg1.name
-                            )),
-                            time_ms: start.elapsed().as_millis() as u64,
-                        });
-                    }
+                (Some(reg1), Some(reg2)) if reg1.width != reg2.width => {
+                    return Ok(SequentialEquivalenceResult {
+                        equivalent: false,
+                        register_matches: vec![],
+                        counterexample: None,
+                        failure_reason: Some(format!("Register '{}' width mismatch", reg1.name)),
+                        time_ms: start.elapsed().as_millis() as u64,
+                    });
                 }
                 (Some(r), None) | (None, Some(r)) => {
                     return Ok(SequentialEquivalenceResult {

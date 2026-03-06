@@ -136,10 +136,10 @@ impl Resub {
             visited.insert(node);
 
             match aig.get_node(node) {
-                Some(AigNode::Input { .. }) | Some(AigNode::Latch { .. }) => {
-                    if !leaves.contains(&node) {
-                        leaves.push(node);
-                    }
+                Some(AigNode::Input { .. }) | Some(AigNode::Latch { .. })
+                    if !leaves.contains(&node) =>
+                {
+                    leaves.push(node);
                 }
                 Some(AigNode::And { left, right, .. }) => {
                     stack.push(left.node);
@@ -150,6 +150,7 @@ impl Resub {
                     stack.push(data.node);
                 }
                 None => {}
+                _ => {}
             }
         }
 

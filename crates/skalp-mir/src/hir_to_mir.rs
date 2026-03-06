@@ -3683,44 +3683,33 @@ impl<'hir> HirToMir<'hir> {
         // Check if LHS is a simple signal/port that was flattened
         // BUG #237 FIX: Also verify the port/signal belongs to the current entity
         let (lhs_hir_id, lhs_is_signal) = match &assign.lhs {
-            hir::HirLValue::Signal(id) => {
+            hir::HirLValue::Signal(id)
                 if self.flattened_signals.contains_key(id)
-                    && self.signal_belongs_to_current_entity(id)
-                {
-                    (id.0, true)
-                } else {
-                    return None;
-                }
+                    && self.signal_belongs_to_current_entity(id) =>
+            {
+                (id.0, true)
             }
-            hir::HirLValue::Port(id) => {
-                if self.flattened_ports.contains_key(id) && self.port_belongs_to_current_entity(id)
-                {
-                    (id.0, false)
-                } else {
-                    return None;
-                }
+            hir::HirLValue::Port(id)
+                if self.flattened_ports.contains_key(id)
+                    && self.port_belongs_to_current_entity(id) =>
+            {
+                (id.0, false)
             }
             _ => return None, // Not a simple signal/port
         };
 
         // Check if RHS is a field access or signal that can be expanded
         let (rhs_hir_id, rhs_is_signal, rhs_field_path) = match &assign.rhs {
-            hir::HirExpression::Signal(id) => {
-                if self.flattened_signals.contains_key(id) {
+            hir::HirExpression::Signal(id)
+                if self.flattened_signals.contains_key(id) => {
                     (id.0, true, vec![])
-                } else {
-                    return None;
                 }
-            }
-            hir::HirExpression::Port(id) => {
+            hir::HirExpression::Port(id)
                 // BUG #237 FIX: Verify port belongs to current entity
                 if self.flattened_ports.contains_key(id) && self.port_belongs_to_current_entity(id)
-                {
+                => {
                     (id.0, false, vec![])
-                } else {
-                    return None;
                 }
-            }
             hir::HirExpression::FieldAccess { base, field } => {
                 // Extract field path and base signal/port
                 let mut field_path = vec![field.clone()];
@@ -3734,23 +3723,17 @@ impl<'hir> HirToMir<'hir> {
                             field_path.insert(0, inner_field.clone());
                             current = inner_base.as_ref();
                         }
-                        hir::HirExpression::Signal(id) => {
-                            if self.flattened_signals.contains_key(id) {
+                        hir::HirExpression::Signal(id)
+                            if self.flattened_signals.contains_key(id) => {
                                 break (id.0, true, field_path);
-                            } else {
-                                return None;
                             }
-                        }
-                        hir::HirExpression::Port(id) => {
+                        hir::HirExpression::Port(id)
                             // BUG #237 FIX: Verify port belongs to current entity
                             if self.flattened_ports.contains_key(id)
                                 && self.port_belongs_to_current_entity(id)
-                            {
+                            => {
                                 break (id.0, false, field_path);
-                            } else {
-                                return None;
                             }
-                        }
                         _ => return None,
                     }
                 }
@@ -3925,19 +3908,13 @@ impl<'hir> HirToMir<'hir> {
             hir::HirLValue::Index(base, index) => {
                 // Check if base is a flattened signal or port
                 match base.as_ref() {
-                    hir::HirLValue::Signal(sig_id) => {
-                        if self.flattened_signals.contains_key(sig_id) {
-                            (sig_id.0, index, true)
-                        } else {
-                            return None;
-                        }
+                    hir::HirLValue::Signal(sig_id)
+                        if self.flattened_signals.contains_key(sig_id) =>
+                    {
+                        (sig_id.0, index, true)
                     }
-                    hir::HirLValue::Port(port_id) => {
-                        if self.flattened_ports.contains_key(port_id) {
-                            (port_id.0, index, false)
-                        } else {
-                            return None;
-                        }
+                    hir::HirLValue::Port(port_id) if self.flattened_ports.contains_key(port_id) => {
+                        (port_id.0, index, false)
                     }
                     _ => {
                         return None;
@@ -4052,20 +4029,8 @@ impl<'hir> HirToMir<'hir> {
     ) -> Option<Vec<ContinuousAssign>> {
         // Check if LHS is a flattened signal/port (struct)
         let (lhs_hir_id, lhs_is_signal) = match &assign.lhs {
-            hir::HirLValue::Signal(id) => {
-                if self.flattened_signals.contains_key(id) {
-                    (id.0, true)
-                } else {
-                    return None;
-                }
-            }
-            hir::HirLValue::Port(id) => {
-                if self.flattened_ports.contains_key(id) {
-                    (id.0, false)
-                } else {
-                    return None;
-                }
-            }
+            hir::HirLValue::Signal(id) if self.flattened_signals.contains_key(id) => (id.0, true),
+            hir::HirLValue::Port(id) if self.flattened_ports.contains_key(id) => (id.0, false),
             _ => {
                 return None;
             }
@@ -4081,20 +4046,10 @@ impl<'hir> HirToMir<'hir> {
 
         // Check if the array base is a flattened signal/port
         let (array_hir_id, array_is_signal) = match array_base {
-            hir::HirExpression::Signal(id) => {
-                if self.flattened_signals.contains_key(id) {
-                    (id.0, true)
-                } else {
-                    return None;
-                }
+            hir::HirExpression::Signal(id) if self.flattened_signals.contains_key(id) => {
+                (id.0, true)
             }
-            hir::HirExpression::Port(id) => {
-                if self.flattened_ports.contains_key(id) {
-                    (id.0, false)
-                } else {
-                    return None;
-                }
-            }
+            hir::HirExpression::Port(id) if self.flattened_ports.contains_key(id) => (id.0, false),
             _ => {
                 return None;
             }
@@ -4805,22 +4760,17 @@ impl<'hir> HirToMir<'hir> {
         // Check if LHS is a simple signal/port that was flattened
         // BUG #237 FIX: Also verify the port/signal belongs to the current entity
         let (lhs_hir_id, lhs_is_signal) = match &assign.lhs {
-            hir::HirLValue::Signal(id) => {
+            hir::HirLValue::Signal(id)
                 if self.flattened_signals.contains_key(id)
-                    && self.signal_belongs_to_current_entity(id)
-                {
-                    (id.0, true)
-                } else {
-                    return None;
-                }
+                    && self.signal_belongs_to_current_entity(id) =>
+            {
+                (id.0, true)
             }
-            hir::HirLValue::Port(id) => {
-                if self.flattened_ports.contains_key(id) && self.port_belongs_to_current_entity(id)
-                {
-                    (id.0, false)
-                } else {
-                    return None;
-                }
+            hir::HirLValue::Port(id)
+                if self.flattened_ports.contains_key(id)
+                    && self.port_belongs_to_current_entity(id) =>
+            {
+                (id.0, false)
             }
             _ => return None, // Not a simple signal/port
         };
@@ -4828,24 +4778,18 @@ impl<'hir> HirToMir<'hir> {
         // Check if RHS is a field access or signal that can be expanded
         // BUG #237 FIX: Also verify the port/signal belongs to the current entity
         let (rhs_hir_id, rhs_is_signal, rhs_field_path) = match &assign.rhs {
-            hir::HirExpression::Signal(id) => {
+            hir::HirExpression::Signal(id)
                 if self.flattened_signals.contains_key(id)
                     && self.signal_belongs_to_current_entity(id)
-                {
+                => {
                     (id.0, true, vec![])
-                } else {
-                    return None;
                 }
-            }
-            hir::HirExpression::Port(id) => {
+            hir::HirExpression::Port(id)
                 // BUG #237 FIX: Verify port belongs to current entity
                 if self.flattened_ports.contains_key(id) && self.port_belongs_to_current_entity(id)
-                {
+                => {
                     (id.0, false, vec![])
-                } else {
-                    return None;
                 }
-            }
             hir::HirExpression::FieldAccess { base, field } => {
                 // Extract field path and base signal/port
                 let mut field_path = vec![field.clone()];
@@ -4859,23 +4803,17 @@ impl<'hir> HirToMir<'hir> {
                             field_path.insert(0, inner_field.clone());
                             current = inner_base.as_ref();
                         }
-                        hir::HirExpression::Signal(id) => {
-                            if self.flattened_signals.contains_key(id) {
+                        hir::HirExpression::Signal(id)
+                            if self.flattened_signals.contains_key(id) => {
                                 break (id.0, true, field_path);
-                            } else {
-                                return None;
                             }
-                        }
-                        hir::HirExpression::Port(id) => {
+                        hir::HirExpression::Port(id)
                             // BUG #237 FIX: Verify port belongs to current entity
                             if self.flattened_ports.contains_key(id)
                                 && self.port_belongs_to_current_entity(id)
-                            {
+                            => {
                                 break (id.0, false, field_path);
-                            } else {
-                                return None;
                             }
-                        }
                         _ => return None,
                     }
                 }
@@ -4981,10 +4919,10 @@ impl<'hir> HirToMir<'hir> {
                     return None;
                 }
             }
-            hir::HirLValue::Port(id) => {
+            hir::HirLValue::Port(id)
                 // BUG #237 FIX: Only use flattened_ports if the port belongs to the current entity
                 if self.flattened_ports.contains_key(id) && self.port_belongs_to_current_entity(id)
-                {
+                => {
                     if let Some(fields) = self.flattened_ports.get(id) {
                         if fields.len() > 1 {
                             // Multiple flattened fields indicates struct/composite type
@@ -4995,10 +4933,7 @@ impl<'hir> HirToMir<'hir> {
                     } else {
                         return None;
                     }
-                } else {
-                    return None;
                 }
-            }
             _ => return None,
         };
 
@@ -7945,23 +7880,17 @@ impl<'hir> HirToMir<'hir> {
                 let mut try_dynamic_array_index = || -> Option<Expression> {
                     // Check if base is a flattened signal or port
                     let (base_hir_id, is_signal) = match base.as_ref() {
-                        hir::HirExpression::Signal(id) => {
-                            if self.flattened_signals.contains_key(id) {
+                        hir::HirExpression::Signal(id)
+                            if self.flattened_signals.contains_key(id) => {
                                 (id.0, true)
-                            } else {
-                                return None;
                             }
-                        }
-                        hir::HirExpression::Port(id) => {
+                        hir::HirExpression::Port(id)
                             // BUG #237 FIX: Only use flattened_ports if port belongs to current entity
                             if self.flattened_ports.contains_key(id)
                                 && self.port_belongs_to_current_entity(id)
-                            {
+                            => {
                                 (id.0, false)
-                            } else {
-                                return None;
                             }
-                        }
                         _ => return None,
                     };
 
@@ -13166,15 +13095,15 @@ impl<'hir> HirToMir<'hir> {
     fn contains_recursive_call(&self, body: &[hir::HirStatement], func_name: &str) -> bool {
         for stmt in body {
             match stmt {
-                hir::HirStatement::Return(Some(expr)) => {
-                    if self.expression_contains_call(expr, func_name) {
-                        return true;
-                    }
+                hir::HirStatement::Return(Some(expr))
+                    if self.expression_contains_call(expr, func_name) =>
+                {
+                    return true;
                 }
-                hir::HirStatement::Let(let_stmt) => {
-                    if self.expression_contains_call(&let_stmt.value, func_name) {
-                        return true;
-                    }
+                hir::HirStatement::Let(let_stmt)
+                    if self.expression_contains_call(&let_stmt.value, func_name) =>
+                {
+                    return true;
                 }
                 _ => {}
             }
@@ -15025,10 +14954,8 @@ impl<'hir> HirToMir<'hir> {
         let mut count = 0;
         while let Some(e) = stack.pop() {
             match e {
-                hir::HirExpression::Variable(var_id) => {
-                    if var_ids.contains(var_id) {
-                        count += 1;
-                    }
+                hir::HirExpression::Variable(var_id) if var_ids.contains(var_id) => {
+                    count += 1;
                 }
                 hir::HirExpression::TupleLiteral(elements) => {
                     for elem in elements {
@@ -20007,14 +19934,13 @@ impl<'hir> HirToMir<'hir> {
         let mut stack = vec![expr];
         while let Some(e) = stack.pop() {
             match e {
-                hir::HirExpression::Cast(cast_expr) => {
-                    if matches!(
+                hir::HirExpression::Cast(cast_expr)
+                    if (matches!(
                         cast_expr.target_type,
                         hir::HirType::Float16 | hir::HirType::Float32 | hir::HirType::Float64
-                    ) || matches!(cast_expr.target_type, hir::HirType::Custom(ref s) if s.starts_with("fp"))
-                    {
-                        return true;
-                    }
+                    ) || matches!(cast_expr.target_type, hir::HirType::Custom(ref s) if s.starts_with("fp"))) =>
+                {
+                    return true;
                 }
                 hir::HirExpression::Binary(bin) => {
                     stack.push(&bin.left);
@@ -23258,20 +23184,14 @@ impl<'hir> HirToMir<'hir> {
         index: &hir::HirExpression,
     ) -> Option<Expression> {
         let (base_hir_id, is_signal) = match base {
-            hir::HirExpression::Signal(id) => {
-                if self.flattened_signals.contains_key(id) {
-                    (id.0, true)
-                } else {
-                    return None;
-                }
+            hir::HirExpression::Signal(id) if self.flattened_signals.contains_key(id) => {
+                (id.0, true)
             }
-            hir::HirExpression::Port(id) => {
-                if self.flattened_ports.contains_key(id) && self.port_belongs_to_current_entity(id)
-                {
-                    (id.0, false)
-                } else {
-                    return None;
-                }
+            hir::HirExpression::Port(id)
+                if self.flattened_ports.contains_key(id)
+                    && self.port_belongs_to_current_entity(id) =>
+            {
+                (id.0, false)
             }
             _ => return None,
         };

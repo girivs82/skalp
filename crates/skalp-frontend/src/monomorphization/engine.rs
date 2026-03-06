@@ -2073,10 +2073,8 @@ impl<'hir> MonomorphizationEngine<'hir> {
     /// Collect port IDs referenced in an expression
     fn collect_port_ids_from_expr(expr: &HirExpression, port_ids: &mut Vec<crate::hir::PortId>) {
         match expr {
-            HirExpression::Port(id) => {
-                if !port_ids.contains(id) {
-                    port_ids.push(*id);
-                }
+            HirExpression::Port(id) if !port_ids.contains(id) => {
+                port_ids.push(*id);
             }
             HirExpression::Binary(bin) => {
                 Self::collect_port_ids_from_expr(&bin.left, port_ids);

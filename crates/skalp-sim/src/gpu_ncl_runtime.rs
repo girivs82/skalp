@@ -1756,7 +1756,7 @@ kernel void eval_ncl(
             })
             .collect();
 
-        oscillating.sort_by(|a, b| b.2.cmp(&a.2));
+        oscillating.sort_by_key(|x| std::cmp::Reverse(x.2));
         oscillating
     }
 

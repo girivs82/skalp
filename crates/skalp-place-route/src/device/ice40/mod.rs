@@ -564,15 +564,13 @@ impl Ice40Device {
                                 diff_pairs: false,
                             });
                         }
-                        TileType::RamTop | TileType::RamBottom => {
-                            if tile_type == TileType::RamTop {
-                                self.memory_blocks.push(MemoryBlock {
-                                    x,
-                                    y,
-                                    size_bits: 4096,
-                                    widths: vec![1, 2, 4, 8, 16],
-                                });
-                            }
+                        TileType::RamTop => {
+                            self.memory_blocks.push(MemoryBlock {
+                                x,
+                                y,
+                                size_bits: 4096,
+                                widths: vec![1, 2, 4, 8, 16],
+                            });
                         }
                         _ => {}
                     }

@@ -442,39 +442,34 @@ fn mechanism_covers_fault(mechanism: &AssumedMechanism, fault_type: &str) -> boo
 
         // Common aliases
         match cover_lower.as_str() {
-            "voltagedropout" | "voltage_dropout" => {
-                if fault_type_lower.contains("voltage") {
-                    return true;
-                }
+            "voltagedropout" | "voltage_dropout" if fault_type_lower.contains("voltage") => {
+                return true;
             }
-            "groundbounce" | "ground_bounce" => {
-                if fault_type_lower.contains("ground") || fault_type_lower.contains("bounce") {
-                    return true;
-                }
+            "groundbounce" | "ground_bounce"
+                if fault_type_lower.contains("ground") || fault_type_lower.contains("bounce") =>
+            {
+                return true;
             }
-            "stuckat0" | "stuck_at_0" | "sa0" => {
+            "stuckat0" | "stuck_at_0" | "sa0"
                 if fault_type_lower.contains("stuck_at_0")
                     || fault_type_lower.contains("stuckat0")
-                    || fault_type_lower == "sa0"
-                {
-                    return true;
-                }
+                    || fault_type_lower == "sa0" =>
+            {
+                return true;
             }
-            "stuckat1" | "stuck_at_1" | "sa1" => {
+            "stuckat1" | "stuck_at_1" | "sa1"
                 if fault_type_lower.contains("stuck_at_1")
                     || fault_type_lower.contains("stuckat1")
-                    || fault_type_lower == "sa1"
-                {
-                    return true;
-                }
+                    || fault_type_lower == "sa1" =>
+            {
+                return true;
             }
-            "bitflip" | "bit_flip" | "seu" => {
+            "bitflip" | "bit_flip" | "seu"
                 if fault_type_lower.contains("bitflip")
                     || fault_type_lower.contains("transient")
-                    || fault_type_lower.contains("seu")
-                {
-                    return true;
-                }
+                    || fault_type_lower.contains("seu") =>
+            {
+                return true;
             }
             _ => {}
         }

@@ -163,10 +163,8 @@ impl Dc2 {
                             }
                         }
                     }
-                    AigNode::Input { .. } | AigNode::Latch { .. } => {
-                        if !leaves.contains(&node) {
-                            leaves.push(node);
-                        }
+                    AigNode::Input { .. } | AigNode::Latch { .. } if !leaves.contains(&node) => {
+                        leaves.push(node);
                     }
                     _ => {}
                 }

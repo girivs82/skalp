@@ -174,7 +174,7 @@ impl BufferInsertion {
             .collect();
 
         // Sort by fanout (highest first) for prioritized buffering
-        high_fanout.sort_by(|a, b| b.1.cmp(&a.1));
+        high_fanout.sort_by_key(|b| std::cmp::Reverse(b.1));
 
         high_fanout
     }

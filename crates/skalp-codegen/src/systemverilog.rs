@@ -2240,11 +2240,9 @@ fn is_register(signal: &skalp_mir::Signal, module: &Module) -> bool {
 fn is_signal_assigned_in_block(signal_id: &skalp_mir::SignalId, block: &skalp_mir::Block) -> bool {
     for stmt in &block.statements {
         match stmt {
-            Statement::Assignment(assign) => {
-                // Check if this assignment targets the signal (directly or through indexing/slicing)
-                if lvalue_contains_signal(&assign.lhs, signal_id) {
-                    return true;
-                }
+            Statement::Assignment(assign) if lvalue_contains_signal(&assign.lhs, signal_id) => {
+                // This assignment targets the signal (directly or through indexing/slicing)
+                return true;
             }
             Statement::If(if_stmt) => {
                 if is_signal_assigned_in_block(signal_id, &if_stmt.then_block) {
@@ -2270,10 +2268,8 @@ fn is_signal_assigned_in_block(signal_id: &skalp_mir::SignalId, block: &skalp_mi
                     }
                 }
             }
-            Statement::Block(block) => {
-                if is_signal_assigned_in_block(signal_id, block) {
-                    return true;
-                }
+            Statement::Block(block) if is_signal_assigned_in_block(signal_id, block) => {
+                return true;
             }
             _ => {}
         }
@@ -2310,10 +2306,8 @@ fn is_port_register(port: &skalp_mir::Port, module: &Module) -> bool {
 fn is_port_assigned_in_block(port_id: &skalp_mir::PortId, block: &skalp_mir::Block) -> bool {
     for stmt in &block.statements {
         match stmt {
-            Statement::Assignment(assign) => {
-                if lvalue_contains_port(&assign.lhs, port_id) {
-                    return true;
-                }
+            Statement::Assignment(assign) if lvalue_contains_port(&assign.lhs, port_id) => {
+                return true;
             }
             Statement::If(if_stmt) => {
                 if is_port_assigned_in_block(port_id, &if_stmt.then_block) {
@@ -2337,10 +2331,8 @@ fn is_port_assigned_in_block(port_id: &skalp_mir::PortId, block: &skalp_mir::Blo
                     }
                 }
             }
-            Statement::Block(block) => {
-                if is_port_assigned_in_block(port_id, block) {
-                    return true;
-                }
+            Statement::Block(block) if is_port_assigned_in_block(port_id, block) => {
+                return true;
             }
             _ => {}
         }
@@ -2466,77 +2458,72 @@ fn generate_typedefs_for_datatype(
     target_enums: &HashSet<String>,
 ) {
     match data_type {
-        DataType::Struct(struct_type) => {
+        DataType::Struct(struct_type)
             if target_structs.contains(&struct_type.name)
-                && !generated_structs.contains(&struct_type.name)
-            {
-                // Generate struct fields first (in case they reference other types)
-                for field in &struct_type.fields {
-                    generate_typedefs_for_datatype(
-                        &field.field_type,
-                        typedefs,
-                        generated_structs,
-                        generated_enums,
-                        target_structs,
-                        target_enums,
-                    );
-                }
-
-                // Generate the struct typedef
-                typedefs.push_str("typedef struct {\n");
-                for field in &struct_type.fields {
-                    let field_width = get_width_spec(&field.field_type);
-                    typedefs.push_str(&format!(
-                        "    {}{} {};\n",
-                        get_systemverilog_type(&field.field_type),
-                        field_width,
-                        field.name
-                    ));
-                }
-                typedefs.push_str(&format!("}} {};\n\n", struct_type.name));
-
-                generated_structs.insert(struct_type.name.clone());
-            }
-        }
-        DataType::Enum(enum_type) => {
-            if target_enums.contains(&enum_type.name) && !generated_enums.contains(&enum_type.name)
-            {
-                // Generate base type first
+                && !generated_structs.contains(&struct_type.name) =>
+        {
+            // Generate struct fields first (in case they reference other types)
+            for field in &struct_type.fields {
                 generate_typedefs_for_datatype(
-                    &enum_type.base_type,
+                    &field.field_type,
                     typedefs,
                     generated_structs,
                     generated_enums,
                     target_structs,
                     target_enums,
                 );
-
-                // Generate the enum typedef
-                let base_width = get_width_spec(&enum_type.base_type);
-                typedefs.push_str(&format!(
-                    "typedef enum {}{} {{\n",
-                    get_systemverilog_type(&enum_type.base_type),
-                    base_width
-                ));
-
-                for (i, variant) in enum_type.variants.iter().enumerate() {
-                    if i > 0 {
-                        typedefs.push_str(",\n");
-                    }
-                    if let Some(value) = &variant.value {
-                        typedefs.push_str(&format!(
-                            "    {} = {}",
-                            variant.name,
-                            format_value(value)
-                        ));
-                    } else {
-                        typedefs.push_str(&format!("    {}", variant.name));
-                    }
-                }
-                typedefs.push_str(&format!("\n}} {};\n\n", enum_type.name));
-
-                generated_enums.insert(enum_type.name.clone());
             }
+
+            // Generate the struct typedef
+            typedefs.push_str("typedef struct {\n");
+            for field in &struct_type.fields {
+                let field_width = get_width_spec(&field.field_type);
+                typedefs.push_str(&format!(
+                    "    {}{} {};\n",
+                    get_systemverilog_type(&field.field_type),
+                    field_width,
+                    field.name
+                ));
+            }
+            typedefs.push_str(&format!("}} {};\n\n", struct_type.name));
+
+            generated_structs.insert(struct_type.name.clone());
+        }
+        DataType::Enum(enum_type)
+            if target_enums.contains(&enum_type.name)
+                && !generated_enums.contains(&enum_type.name) =>
+        {
+            // Generate base type first
+            generate_typedefs_for_datatype(
+                &enum_type.base_type,
+                typedefs,
+                generated_structs,
+                generated_enums,
+                target_structs,
+                target_enums,
+            );
+
+            // Generate the enum typedef
+            let base_width = get_width_spec(&enum_type.base_type);
+            typedefs.push_str(&format!(
+                "typedef enum {}{} {{\n",
+                get_systemverilog_type(&enum_type.base_type),
+                base_width
+            ));
+
+            for (i, variant) in enum_type.variants.iter().enumerate() {
+                if i > 0 {
+                    typedefs.push_str(",\n");
+                }
+                if let Some(value) = &variant.value {
+                    typedefs.push_str(&format!("    {} = {}", variant.name, format_value(value)));
+                } else {
+                    typedefs.push_str(&format!("    {}", variant.name));
+                }
+            }
+            typedefs.push_str(&format!("\n}} {};\n\n", enum_type.name));
+
+            generated_enums.insert(enum_type.name.clone());
         }
         DataType::Array(element_type, _) => {
             generate_typedefs_for_datatype(

@@ -226,7 +226,7 @@ impl<'a, D: Device> PathFinder<'a, D> {
             });
         } else {
             // Non-timing-driven: route by bbox size (larger first)
-            nets_with_criticality.sort_by(|a, b| b.bbox.cmp(&a.bbox));
+            nets_with_criticality.sort_by_key(|x| std::cmp::Reverse(x.bbox));
         }
 
         let nets_to_route: Vec<_> = nets_with_criticality.iter().map(|c| c.net_id).collect();

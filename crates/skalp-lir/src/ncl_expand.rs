@@ -2238,124 +2238,100 @@ pub fn expand_to_ncl(lir: &Lir, config: &NclConfig) -> NclExpandResult {
         let output_pair = expander.dual_rail_map.get(&node.output).copied();
 
         match &node.op {
-            LirOp::And { width } => {
-                if node.inputs.len() >= 2 {
-                    let a = expander.dual_rail_map.get(&node.inputs[0]).copied();
-                    let b = expander.dual_rail_map.get(&node.inputs[1]).copied();
-                    if let (Some(a), Some(b), Some(dest)) = (a, b, output_pair) {
-                        expander.expand_and(a, b, dest, *width);
+            LirOp::And { width } if node.inputs.len() >= 2 => {
+                let a = expander.dual_rail_map.get(&node.inputs[0]).copied();
+                let b = expander.dual_rail_map.get(&node.inputs[1]).copied();
+                if let (Some(a), Some(b), Some(dest)) = (a, b, output_pair) {
+                    expander.expand_and(a, b, dest, *width);
+                }
+            }
+            LirOp::Or { width } if node.inputs.len() >= 2 => {
+                let a = expander.dual_rail_map.get(&node.inputs[0]).copied();
+                let b = expander.dual_rail_map.get(&node.inputs[1]).copied();
+                if let (Some(a), Some(b), Some(dest)) = (a, b, output_pair) {
+                    expander.expand_or(a, b, dest, *width);
+                }
+            }
+            LirOp::Not { width } if !node.inputs.is_empty() => {
+                let a = expander.dual_rail_map.get(&node.inputs[0]).copied();
+                if let (Some(a), Some(dest)) = (a, output_pair) {
+                    // Use the existing output dual-rail pair as destination
+                    expander.expand_not(a, dest, *width);
+                    // No need to update dual_rail_map - dest is already the output's pair
+                }
+            }
+            LirOp::Xor { width } if node.inputs.len() >= 2 => {
+                let a = expander.dual_rail_map.get(&node.inputs[0]).copied();
+                let b = expander.dual_rail_map.get(&node.inputs[1]).copied();
+                if let (Some(a), Some(b), Some(dest)) = (a, b, output_pair) {
+                    expander.expand_xor(a, b, dest, *width);
+                }
+            }
+            LirOp::Add { width, .. } if node.inputs.len() >= 2 => {
+                let a = expander.dual_rail_map.get(&node.inputs[0]).copied();
+                let b = expander.dual_rail_map.get(&node.inputs[1]).copied();
+                if let (Some(a), Some(b), Some(dest)) = (a, b, output_pair) {
+                    if expander.config.use_opaque_arithmetic {
+                        expander.expand_add_opaque(a, b, dest, *width);
+                    } else {
+                        expander.expand_add(a, b, dest, *width);
                     }
                 }
             }
-            LirOp::Or { width } => {
-                if node.inputs.len() >= 2 {
-                    let a = expander.dual_rail_map.get(&node.inputs[0]).copied();
-                    let b = expander.dual_rail_map.get(&node.inputs[1]).copied();
-                    if let (Some(a), Some(b), Some(dest)) = (a, b, output_pair) {
-                        expander.expand_or(a, b, dest, *width);
+            LirOp::Sub { width, .. } if node.inputs.len() >= 2 => {
+                let a = expander.dual_rail_map.get(&node.inputs[0]).copied();
+                let b = expander.dual_rail_map.get(&node.inputs[1]).copied();
+                if let (Some(a), Some(b), Some(dest)) = (a, b, output_pair) {
+                    if expander.config.use_opaque_arithmetic {
+                        expander.expand_sub_opaque(a, b, dest, *width);
+                    } else {
+                        expander.expand_sub(a, b, dest, *width);
                     }
                 }
             }
-            LirOp::Not { width } => {
-                if !node.inputs.is_empty() {
-                    let a = expander.dual_rail_map.get(&node.inputs[0]).copied();
-                    if let (Some(a), Some(dest)) = (a, output_pair) {
-                        // Use the existing output dual-rail pair as destination
-                        expander.expand_not(a, dest, *width);
-                        // No need to update dual_rail_map - dest is already the output's pair
-                    }
+            LirOp::Mul { result_width, .. } if node.inputs.len() >= 2 => {
+                let a = expander.dual_rail_map.get(&node.inputs[0]).copied();
+                let b = expander.dual_rail_map.get(&node.inputs[1]).copied();
+                // Get actual input width from the input signals
+                let input_width = lir.signals[node.inputs[0].0 as usize].width;
+                if let (Some(a), Some(b), Some(dest)) = (a, b, output_pair) {
+                    expander.expand_mul(a, b, dest, input_width, *result_width);
                 }
             }
-            LirOp::Xor { width } => {
-                if node.inputs.len() >= 2 {
-                    let a = expander.dual_rail_map.get(&node.inputs[0]).copied();
-                    let b = expander.dual_rail_map.get(&node.inputs[1]).copied();
-                    if let (Some(a), Some(b), Some(dest)) = (a, b, output_pair) {
-                        expander.expand_xor(a, b, dest, *width);
-                    }
+            LirOp::Lt { width } if node.inputs.len() >= 2 => {
+                let a = expander.dual_rail_map.get(&node.inputs[0]).copied();
+                let b = expander.dual_rail_map.get(&node.inputs[1]).copied();
+                if let (Some(a), Some(b), Some(dest)) = (a, b, output_pair) {
+                    expander.expand_lt(a, b, dest, *width);
                 }
             }
-            LirOp::Add { width, .. } => {
-                if node.inputs.len() >= 2 {
-                    let a = expander.dual_rail_map.get(&node.inputs[0]).copied();
-                    let b = expander.dual_rail_map.get(&node.inputs[1]).copied();
-                    if let (Some(a), Some(b), Some(dest)) = (a, b, output_pair) {
-                        if expander.config.use_opaque_arithmetic {
-                            expander.expand_add_opaque(a, b, dest, *width);
-                        } else {
-                            expander.expand_add(a, b, dest, *width);
-                        }
-                    }
+            LirOp::Eq { width } if node.inputs.len() >= 2 => {
+                let a = expander.dual_rail_map.get(&node.inputs[0]).copied();
+                let b = expander.dual_rail_map.get(&node.inputs[1]).copied();
+                if let (Some(a), Some(b), Some(dest)) = (a, b, output_pair) {
+                    expander.expand_eq(a, b, dest, *width);
                 }
             }
-            LirOp::Sub { width, .. } => {
-                if node.inputs.len() >= 2 {
-                    let a = expander.dual_rail_map.get(&node.inputs[0]).copied();
-                    let b = expander.dual_rail_map.get(&node.inputs[1]).copied();
-                    if let (Some(a), Some(b), Some(dest)) = (a, b, output_pair) {
-                        if expander.config.use_opaque_arithmetic {
-                            expander.expand_sub_opaque(a, b, dest, *width);
-                        } else {
-                            expander.expand_sub(a, b, dest, *width);
-                        }
-                    }
+            LirOp::Mux2 { width } if node.inputs.len() >= 3 => {
+                let sel = expander.dual_rail_map.get(&node.inputs[0]).copied();
+                let a = expander.dual_rail_map.get(&node.inputs[1]).copied();
+                let b = expander.dual_rail_map.get(&node.inputs[2]).copied();
+                if let (Some(sel), Some(a), Some(b), Some(dest)) = (sel, a, b, output_pair) {
+                    expander.expand_mux2(sel, a, b, dest, *width);
                 }
             }
-            LirOp::Mul { result_width, .. } => {
-                if node.inputs.len() >= 2 {
-                    let a = expander.dual_rail_map.get(&node.inputs[0]).copied();
-                    let b = expander.dual_rail_map.get(&node.inputs[1]).copied();
-                    // Get actual input width from the input signals
-                    let input_width = lir.signals[node.inputs[0].0 as usize].width;
-                    if let (Some(a), Some(b), Some(dest)) = (a, b, output_pair) {
-                        expander.expand_mul(a, b, dest, input_width, *result_width);
-                    }
-                }
-            }
-            LirOp::Lt { width } => {
-                if node.inputs.len() >= 2 {
-                    let a = expander.dual_rail_map.get(&node.inputs[0]).copied();
-                    let b = expander.dual_rail_map.get(&node.inputs[1]).copied();
-                    if let (Some(a), Some(b), Some(dest)) = (a, b, output_pair) {
-                        expander.expand_lt(a, b, dest, *width);
-                    }
-                }
-            }
-            LirOp::Eq { width } => {
-                if node.inputs.len() >= 2 {
-                    let a = expander.dual_rail_map.get(&node.inputs[0]).copied();
-                    let b = expander.dual_rail_map.get(&node.inputs[1]).copied();
-                    if let (Some(a), Some(b), Some(dest)) = (a, b, output_pair) {
-                        expander.expand_eq(a, b, dest, *width);
-                    }
-                }
-            }
-            LirOp::Mux2 { width } => {
-                if node.inputs.len() >= 3 {
-                    let sel = expander.dual_rail_map.get(&node.inputs[0]).copied();
-                    let a = expander.dual_rail_map.get(&node.inputs[1]).copied();
-                    let b = expander.dual_rail_map.get(&node.inputs[2]).copied();
-                    if let (Some(sel), Some(a), Some(b), Some(dest)) = (sel, a, b, output_pair) {
-                        expander.expand_mux2(sel, a, b, dest, *width);
-                    }
-                }
-            }
-            LirOp::Reg { width, .. } => {
-                if !node.inputs.is_empty() {
-                    let d = expander.dual_rail_map.get(&node.inputs[0]).copied();
-                    if let (Some(d), Some(dest)) = (d, output_pair) {
-                        expander.expand_reg(d, dest, *width);
-                    }
+            LirOp::Reg { width, .. } if !node.inputs.is_empty() => {
+                let d = expander.dual_rail_map.get(&node.inputs[0]).copied();
+                if let (Some(d), Some(dest)) = (d, output_pair) {
+                    expander.expand_reg(d, dest, *width);
                 }
             }
             // Buffer operations - just copy dual-rail signals
-            LirOp::Buf { width } | LirOp::Buffer { width } => {
-                if !node.inputs.is_empty() {
-                    let a = expander.dual_rail_map.get(&node.inputs[0]).copied();
-                    if let (Some(a), Some(dest)) = (a, output_pair) {
-                        // Buffer copies both rails from input to output
-                        expander.expand_buf(a, dest, *width);
-                    }
+            LirOp::Buf { width } | LirOp::Buffer { width } if !node.inputs.is_empty() => {
+                let a = expander.dual_rail_map.get(&node.inputs[0]).copied();
+                if let (Some(a), Some(dest)) = (a, output_pair) {
+                    // Buffer copies both rails from input to output
+                    expander.expand_buf(a, dest, *width);
                 }
             }
             // Constants - create dual-rail encoding
@@ -2365,50 +2341,44 @@ pub fn expand_to_ncl(lir: &Lir, config: &NclConfig) -> NclExpandResult {
                 }
             }
             // Shifts - use THmn-based barrel shifter for proper NCL dual-rail semantics
-            LirOp::Shl { width } => {
-                if node.inputs.len() >= 2 {
-                    let a = expander.dual_rail_map.get(&node.inputs[0]).copied();
-                    let shamt = expander.dual_rail_map.get(&node.inputs[1]).copied();
-                    if let (Some(a), Some(shamt), Some(dest)) = (a, shamt, output_pair) {
-                        expander.expand_shl(a, shamt, dest, *width);
-                    }
+            LirOp::Shl { width } if node.inputs.len() >= 2 => {
+                let a = expander.dual_rail_map.get(&node.inputs[0]).copied();
+                let shamt = expander.dual_rail_map.get(&node.inputs[1]).copied();
+                if let (Some(a), Some(shamt), Some(dest)) = (a, shamt, output_pair) {
+                    expander.expand_shl(a, shamt, dest, *width);
                 }
             }
-            LirOp::Shr { width } => {
-                if node.inputs.len() >= 2 {
-                    let a = expander.dual_rail_map.get(&node.inputs[0]).copied();
-                    let shamt = expander.dual_rail_map.get(&node.inputs[1]).copied();
-                    if let (Some(a), Some(shamt), Some(dest)) = (a, shamt, output_pair) {
-                        expander.expand_shr(a, shamt, dest, *width);
-                    }
+            LirOp::Shr { width } if node.inputs.len() >= 2 => {
+                let a = expander.dual_rail_map.get(&node.inputs[0]).copied();
+                let shamt = expander.dual_rail_map.get(&node.inputs[1]).copied();
+                if let (Some(a), Some(shamt), Some(dest)) = (a, shamt, output_pair) {
+                    expander.expand_shr(a, shamt, dest, *width);
                 }
             }
             // RangeSelect - extract a range of bits from a signal
-            LirOp::RangeSelect { width, high, low } => {
-                if !node.inputs.is_empty() {
-                    let a = expander.dual_rail_map.get(&node.inputs[0]).copied();
-                    if let (Some(a), Some(dest)) = (a, output_pair) {
-                        // For dual-rail, RangeSelect extracts range from both rails
-                        // Since we're using simplified NCL with interleaved bits, we pass through
-                        expander.alloc_node(
-                            LirOp::RangeSelect {
-                                width: *width,
-                                high: *high,
-                                low: *low,
-                            },
-                            vec![a.t],
-                            dest.t,
-                        );
-                        expander.alloc_node(
-                            LirOp::RangeSelect {
-                                width: *width,
-                                high: *high,
-                                low: *low,
-                            },
-                            vec![a.f],
-                            dest.f,
-                        );
-                    }
+            LirOp::RangeSelect { width, high, low } if !node.inputs.is_empty() => {
+                let a = expander.dual_rail_map.get(&node.inputs[0]).copied();
+                if let (Some(a), Some(dest)) = (a, output_pair) {
+                    // For dual-rail, RangeSelect extracts range from both rails
+                    // Since we're using simplified NCL with interleaved bits, we pass through
+                    expander.alloc_node(
+                        LirOp::RangeSelect {
+                            width: *width,
+                            high: *high,
+                            low: *low,
+                        },
+                        vec![a.t],
+                        dest.t,
+                    );
+                    expander.alloc_node(
+                        LirOp::RangeSelect {
+                            width: *width,
+                            high: *high,
+                            low: *low,
+                        },
+                        vec![a.f],
+                        dest.f,
+                    );
                 }
             }
             // Concat - concatenate multiple signals
@@ -2452,163 +2422,137 @@ pub fn expand_to_ncl(lir: &Lir, config: &NclConfig) -> NclExpandResult {
             // Greater than or equal: ge = NOT(lt) - swap lt outputs
             // ge_t = lt_f (a >= b when NOT a < b)
             // ge_f = lt_t (a < b)
-            LirOp::Ge { width } => {
-                if node.inputs.len() >= 2 {
-                    let a = expander.dual_rail_map.get(&node.inputs[0]).copied();
-                    let b = expander.dual_rail_map.get(&node.inputs[1]).copied();
-                    if let (Some(a), Some(b), Some(dest)) = (a, b, output_pair) {
-                        // Swap output rails: ge = NOT(lt)
-                        let swapped_dest = DualRailPair {
-                            t: dest.f,
-                            f: dest.t,
-                        };
-                        expander.expand_lt(a, b, swapped_dest, *width);
-                    }
+            LirOp::Ge { width } if node.inputs.len() >= 2 => {
+                let a = expander.dual_rail_map.get(&node.inputs[0]).copied();
+                let b = expander.dual_rail_map.get(&node.inputs[1]).copied();
+                if let (Some(a), Some(b), Some(dest)) = (a, b, output_pair) {
+                    // Swap output rails: ge = NOT(lt)
+                    let swapped_dest = DualRailPair {
+                        t: dest.f,
+                        f: dest.t,
+                    };
+                    expander.expand_lt(a, b, swapped_dest, *width);
                 }
             }
             // Greater than: gt = lt with swapped inputs (a > b is b < a)
-            LirOp::Gt { width } => {
-                if node.inputs.len() >= 2 {
-                    let a = expander.dual_rail_map.get(&node.inputs[0]).copied();
-                    let b = expander.dual_rail_map.get(&node.inputs[1]).copied();
-                    if let (Some(a), Some(b), Some(dest)) = (a, b, output_pair) {
-                        // Swap inputs: gt(a, b) = lt(b, a)
-                        expander.expand_lt(b, a, dest, *width);
-                    }
+            LirOp::Gt { width } if node.inputs.len() >= 2 => {
+                let a = expander.dual_rail_map.get(&node.inputs[0]).copied();
+                let b = expander.dual_rail_map.get(&node.inputs[1]).copied();
+                if let (Some(a), Some(b), Some(dest)) = (a, b, output_pair) {
+                    // Swap inputs: gt(a, b) = lt(b, a)
+                    expander.expand_lt(b, a, dest, *width);
                 }
             }
             // Less than or equal: le = NOT(gt) = NOT(lt with swapped inputs)
             // le_t = gt_f = lt(b,a)_f
             // le_f = gt_t = lt(b,a)_t
-            LirOp::Le { width } => {
-                if node.inputs.len() >= 2 {
-                    let a = expander.dual_rail_map.get(&node.inputs[0]).copied();
-                    let b = expander.dual_rail_map.get(&node.inputs[1]).copied();
-                    if let (Some(a), Some(b), Some(dest)) = (a, b, output_pair) {
-                        // Swap both inputs and outputs: le(a, b) = NOT(lt(b, a))
-                        let swapped_dest = DualRailPair {
-                            t: dest.f,
-                            f: dest.t,
-                        };
-                        expander.expand_lt(b, a, swapped_dest, *width);
-                    }
+            LirOp::Le { width } if node.inputs.len() >= 2 => {
+                let a = expander.dual_rail_map.get(&node.inputs[0]).copied();
+                let b = expander.dual_rail_map.get(&node.inputs[1]).copied();
+                if let (Some(a), Some(b), Some(dest)) = (a, b, output_pair) {
+                    // Swap both inputs and outputs: le(a, b) = NOT(lt(b, a))
+                    let swapped_dest = DualRailPair {
+                        t: dest.f,
+                        f: dest.t,
+                    };
+                    expander.expand_lt(b, a, swapped_dest, *width);
                 }
             }
             // Not equal: ne = NOT(eq) - swap eq outputs
-            LirOp::Ne { width } => {
-                if node.inputs.len() >= 2 {
-                    let a = expander.dual_rail_map.get(&node.inputs[0]).copied();
-                    let b = expander.dual_rail_map.get(&node.inputs[1]).copied();
-                    if let (Some(a), Some(b), Some(dest)) = (a, b, output_pair) {
-                        // Swap output rails: ne = NOT(eq)
-                        let swapped_dest = DualRailPair {
-                            t: dest.f,
-                            f: dest.t,
-                        };
-                        expander.expand_eq(a, b, swapped_dest, *width);
-                    }
+            LirOp::Ne { width } if node.inputs.len() >= 2 => {
+                let a = expander.dual_rail_map.get(&node.inputs[0]).copied();
+                let b = expander.dual_rail_map.get(&node.inputs[1]).copied();
+                if let (Some(a), Some(b), Some(dest)) = (a, b, output_pair) {
+                    // Swap output rails: ne = NOT(eq)
+                    let swapped_dest = DualRailPair {
+                        t: dest.f,
+                        f: dest.t,
+                    };
+                    expander.expand_eq(a, b, swapped_dest, *width);
                 }
             }
             // Signed less than: Slt
             // For signed comparison: compare sign bits, then use unsigned comparison
-            LirOp::Slt { width } => {
-                if node.inputs.len() >= 2 {
-                    let a = expander.dual_rail_map.get(&node.inputs[0]).copied();
-                    let b = expander.dual_rail_map.get(&node.inputs[1]).copied();
-                    if let (Some(a), Some(b), Some(dest)) = (a, b, output_pair) {
-                        expander.expand_signed_lt(a, b, dest, *width);
-                    }
+            LirOp::Slt { width } if node.inputs.len() >= 2 => {
+                let a = expander.dual_rail_map.get(&node.inputs[0]).copied();
+                let b = expander.dual_rail_map.get(&node.inputs[1]).copied();
+                if let (Some(a), Some(b), Some(dest)) = (a, b, output_pair) {
+                    expander.expand_signed_lt(a, b, dest, *width);
                 }
             }
             // Signed greater than or equal: Sge = NOT(Slt)
-            LirOp::Sge { width } => {
-                if node.inputs.len() >= 2 {
-                    let a = expander.dual_rail_map.get(&node.inputs[0]).copied();
-                    let b = expander.dual_rail_map.get(&node.inputs[1]).copied();
-                    if let (Some(a), Some(b), Some(dest)) = (a, b, output_pair) {
-                        // Sge = NOT(Slt), swap output rails
-                        let swapped_dest = DualRailPair {
-                            t: dest.f,
-                            f: dest.t,
-                        };
-                        expander.expand_signed_lt(a, b, swapped_dest, *width);
-                    }
+            LirOp::Sge { width } if node.inputs.len() >= 2 => {
+                let a = expander.dual_rail_map.get(&node.inputs[0]).copied();
+                let b = expander.dual_rail_map.get(&node.inputs[1]).copied();
+                if let (Some(a), Some(b), Some(dest)) = (a, b, output_pair) {
+                    // Sge = NOT(Slt), swap output rails
+                    let swapped_dest = DualRailPair {
+                        t: dest.f,
+                        f: dest.t,
+                    };
+                    expander.expand_signed_lt(a, b, swapped_dest, *width);
                 }
             }
             // Signed greater than: Sgt(a, b) = Slt(b, a)
-            LirOp::Sgt { width } => {
-                if node.inputs.len() >= 2 {
-                    let a = expander.dual_rail_map.get(&node.inputs[0]).copied();
-                    let b = expander.dual_rail_map.get(&node.inputs[1]).copied();
-                    if let (Some(a), Some(b), Some(dest)) = (a, b, output_pair) {
-                        // Swap inputs: Sgt(a, b) = Slt(b, a)
-                        expander.expand_signed_lt(b, a, dest, *width);
-                    }
+            LirOp::Sgt { width } if node.inputs.len() >= 2 => {
+                let a = expander.dual_rail_map.get(&node.inputs[0]).copied();
+                let b = expander.dual_rail_map.get(&node.inputs[1]).copied();
+                if let (Some(a), Some(b), Some(dest)) = (a, b, output_pair) {
+                    // Swap inputs: Sgt(a, b) = Slt(b, a)
+                    expander.expand_signed_lt(b, a, dest, *width);
                 }
             }
             // Signed less than or equal: Sle(a, b) = NOT(Sgt(a, b)) = NOT(Slt(b, a))
-            LirOp::Sle { width } => {
-                if node.inputs.len() >= 2 {
-                    let a = expander.dual_rail_map.get(&node.inputs[0]).copied();
-                    let b = expander.dual_rail_map.get(&node.inputs[1]).copied();
-                    if let (Some(a), Some(b), Some(dest)) = (a, b, output_pair) {
-                        // Swap both inputs and outputs: Sle(a, b) = NOT(Slt(b, a))
-                        let swapped_dest = DualRailPair {
-                            t: dest.f,
-                            f: dest.t,
-                        };
-                        expander.expand_signed_lt(b, a, swapped_dest, *width);
-                    }
+            LirOp::Sle { width } if node.inputs.len() >= 2 => {
+                let a = expander.dual_rail_map.get(&node.inputs[0]).copied();
+                let b = expander.dual_rail_map.get(&node.inputs[1]).copied();
+                if let (Some(a), Some(b), Some(dest)) = (a, b, output_pair) {
+                    // Swap both inputs and outputs: Sle(a, b) = NOT(Slt(b, a))
+                    let swapped_dest = DualRailPair {
+                        t: dest.f,
+                        f: dest.t,
+                    };
+                    expander.expand_signed_lt(b, a, swapped_dest, *width);
                 }
             }
             // BUG #184 FIX: ZeroExtend - copy lower bits, pad upper bits with NCL DATA_FALSE (t=0, f=1)
-            LirOp::ZeroExtend { from, to } => {
-                if !node.inputs.is_empty() {
-                    let input = expander.dual_rail_map.get(&node.inputs[0]).copied();
-                    if let (Some(input), Some(dest)) = (input, output_pair) {
-                        expander.expand_zero_extend(input, dest, *from, *to);
-                    }
+            LirOp::ZeroExtend { from, to } if !node.inputs.is_empty() => {
+                let input = expander.dual_rail_map.get(&node.inputs[0]).copied();
+                if let (Some(input), Some(dest)) = (input, output_pair) {
+                    expander.expand_zero_extend(input, dest, *from, *to);
                 }
             }
             // BUG #184 FIX: SignExtend - copy lower bits, replicate sign bit to upper bits
-            LirOp::SignExtend { from, to } => {
-                if !node.inputs.is_empty() {
-                    let input = expander.dual_rail_map.get(&node.inputs[0]).copied();
-                    if let (Some(input), Some(dest)) = (input, output_pair) {
-                        expander.expand_sign_extend(input, dest, *from, *to);
-                    }
+            LirOp::SignExtend { from, to } if !node.inputs.is_empty() => {
+                let input = expander.dual_rail_map.get(&node.inputs[0]).copied();
+                if let (Some(input), Some(dest)) = (input, output_pair) {
+                    expander.expand_sign_extend(input, dest, *from, *to);
                 }
             }
             // Reduction OR: result = |a (any bit true)
             // NCL: true rail is TH12 chain (OR of all input t rails)
             // false rail is TH22 chain (AND of all input f rails)
-            LirOp::RedOr { width } => {
-                if !node.inputs.is_empty() {
-                    let a = expander.dual_rail_map.get(&node.inputs[0]).copied();
-                    if let (Some(a), Some(dest)) = (a, output_pair) {
-                        expander.expand_reduce_or(a, dest, *width);
-                    }
+            LirOp::RedOr { width } if !node.inputs.is_empty() => {
+                let a = expander.dual_rail_map.get(&node.inputs[0]).copied();
+                if let (Some(a), Some(dest)) = (a, output_pair) {
+                    expander.expand_reduce_or(a, dest, *width);
                 }
             }
             // Reduction AND: result = &a (all bits true)
             // NCL: true rail is TH22 chain (AND of all input t rails)
             // false rail is TH12 chain (OR of all input f rails)
-            LirOp::RedAnd { width } => {
-                if !node.inputs.is_empty() {
-                    let a = expander.dual_rail_map.get(&node.inputs[0]).copied();
-                    if let (Some(a), Some(dest)) = (a, output_pair) {
-                        expander.expand_reduce_and(a, dest, *width);
-                    }
+            LirOp::RedAnd { width } if !node.inputs.is_empty() => {
+                let a = expander.dual_rail_map.get(&node.inputs[0]).copied();
+                if let (Some(a), Some(dest)) = (a, output_pair) {
+                    expander.expand_reduce_and(a, dest, *width);
                 }
             }
             // Reduction XOR: result = ^a (parity)
             // NCL: XOR reduction tree using NCL XOR gates
-            LirOp::RedXor { width } => {
-                if !node.inputs.is_empty() {
-                    let a = expander.dual_rail_map.get(&node.inputs[0]).copied();
-                    if let (Some(a), Some(dest)) = (a, output_pair) {
-                        expander.expand_reduce_xor(a, dest, *width);
-                    }
+            LirOp::RedXor { width } if !node.inputs.is_empty() => {
+                let a = expander.dual_rail_map.get(&node.inputs[0]).copied();
+                if let (Some(a), Some(dest)) = (a, output_pair) {
+                    expander.expand_reduce_xor(a, dest, *width);
                 }
             }
             // Handle other operations by passing through or generating placeholders

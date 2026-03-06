@@ -700,7 +700,7 @@ impl Pass for Rewrite {
         }
 
         // Sort by gain (highest first)
-        candidates.sort_by(|a, b| b.gain.cmp(&a.gain));
+        candidates.sort_by_key(|b| std::cmp::Reverse(b.gain));
 
         // Track which nodes have been rewritten (to avoid conflicts)
         let mut rewritten_nodes: std::collections::HashSet<AigNodeId> =

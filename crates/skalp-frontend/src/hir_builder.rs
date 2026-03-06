@@ -7566,12 +7566,13 @@ impl HirBuilderContext {
 
         for child_or_token in node.children_with_tokens() {
             match child_or_token {
-                rowan::NodeOrToken::Token(t) if t.kind() == SyntaxKind::Comma => {
+                rowan::NodeOrToken::Token(t)
+                    if t.kind() == SyntaxKind::Comma
                     // Comma delimits elements
-                    if !current_group.is_empty() {
-                        element_groups.push(current_group);
-                        current_group = Vec::new();
-                    }
+                    && !current_group.is_empty() =>
+                {
+                    element_groups.push(current_group);
+                    current_group = Vec::new();
                 }
                 rowan::NodeOrToken::Node(n) => {
                     // Only collect expression nodes, not parens
@@ -11621,14 +11622,13 @@ impl HirBuilderContext {
                             current_key = Some("domain");
                         }
                     }
-                    SyntaxKind::Lifetime => {
+                    SyntaxKind::Lifetime
                         // Accept lifetime if we saw "domain =" OR just "power" with no key
-                        if current_key == Some("domain") || config.domain_name.is_none() {
+                        if (current_key == Some("domain") || config.domain_name.is_none()) => {
                             let domain_name = token.text().trim_start_matches('\'').to_string();
                             config.domain_name = Some(domain_name);
                             current_key = None;
                         }
-                    }
                     _ => {}
                 }
             }
@@ -11660,23 +11660,21 @@ impl HirBuilderContext {
                         "save" | "save_signal" => current_key = Some("save"),
                         "restore" | "restore_signal" => current_key = Some("restore"),
                         // Strategy values
-                        "auto" | "Auto" => {
-                            if current_key == Some("strategy") {
-                                strategy = RetentionStrategy::Auto;
-                                current_key = None;
-                            }
+                        "auto" | "Auto" if current_key == Some("strategy") => {
+                            strategy = RetentionStrategy::Auto;
+                            current_key = None;
                         }
-                        "balloon" | "balloon_latch" | "BalloonLatch" => {
-                            if current_key == Some("strategy") {
-                                strategy = RetentionStrategy::BalloonLatch;
-                                current_key = None;
-                            }
+                        "balloon" | "balloon_latch" | "BalloonLatch"
+                            if current_key == Some("strategy") =>
+                        {
+                            strategy = RetentionStrategy::BalloonLatch;
+                            current_key = None;
                         }
-                        "shadow" | "shadow_register" | "ShadowRegister" => {
-                            if current_key == Some("strategy") {
-                                strategy = RetentionStrategy::ShadowRegister;
-                                current_key = None;
-                            }
+                        "shadow" | "shadow_register" | "ShadowRegister"
+                            if current_key == Some("strategy") =>
+                        {
+                            strategy = RetentionStrategy::ShadowRegister;
+                            current_key = None;
                         }
                         // Signal names as identifiers
                         _ if text != "retention" => match current_key {
@@ -11737,30 +11735,31 @@ impl HirBuilderContext {
                         "enable" | "enable_signal" => current_key = Some("enable"),
                         "active_high" | "polarity" => current_key = Some("polarity"),
                         // Clamp values
-                        "low" | "Low" | "clamp_low" => {
-                            if current_key == Some("clamp") || current_key.is_none() {
-                                clamp = IsolationClamp::Low;
-                                current_key = None;
-                            }
+                        "low" | "Low" | "clamp_low"
+                            if (current_key == Some("clamp") || current_key.is_none()) =>
+                        {
+                            clamp = IsolationClamp::Low;
+                            current_key = None;
                         }
-                        "high" | "High" | "clamp_high" => {
-                            if current_key == Some("clamp") || current_key.is_none() {
-                                clamp = IsolationClamp::High;
-                                current_key = None;
-                            }
+                        "high" | "High" | "clamp_high"
+                            if (current_key == Some("clamp") || current_key.is_none()) =>
+                        {
+                            clamp = IsolationClamp::High;
+                            current_key = None;
                         }
-                        "latch" | "Latch" | "hold" => {
-                            if current_key == Some("clamp") || current_key.is_none() {
-                                clamp = IsolationClamp::Latch;
-                                current_key = None;
-                            }
+                        "latch" | "Latch" | "hold"
+                            if (current_key == Some("clamp") || current_key.is_none()) =>
+                        {
+                            clamp = IsolationClamp::Latch;
+                            current_key = None;
                         }
                         // Enable signal name
-                        _ if text != "isolation" && text != "pdc" => {
-                            if current_key == Some("enable") {
-                                enable_signal = Some(text.to_string());
-                                current_key = None;
-                            }
+                        _ if text != "isolation"
+                            && text != "pdc"
+                            && current_key == Some("enable") =>
+                        {
+                            enable_signal = Some(text.to_string());
+                            current_key = None;
                         }
                         _ => {}
                     }
@@ -11819,23 +11818,17 @@ impl HirBuilderContext {
                         "to" | "destination" | "dst" => current_key = Some("to"),
                         "shifter" | "shifter_type" | "direction" => current_key = Some("shifter"),
                         // Shifter type values
-                        "auto" | "Auto" => {
-                            if current_key == Some("shifter") {
-                                shifter_type = LevelShifterType::Auto;
-                                current_key = None;
-                            }
+                        "auto" | "Auto" if current_key == Some("shifter") => {
+                            shifter_type = LevelShifterType::Auto;
+                            current_key = None;
                         }
-                        "low_to_high" | "LowToHigh" | "up" => {
-                            if current_key == Some("shifter") {
-                                shifter_type = LevelShifterType::LowToHigh;
-                                current_key = None;
-                            }
+                        "low_to_high" | "LowToHigh" | "up" if current_key == Some("shifter") => {
+                            shifter_type = LevelShifterType::LowToHigh;
+                            current_key = None;
                         }
-                        "high_to_low" | "HighToLow" | "down" => {
-                            if current_key == Some("shifter") {
-                                shifter_type = LevelShifterType::HighToLow;
-                                current_key = None;
-                            }
+                        "high_to_low" | "HighToLow" | "down" if current_key == Some("shifter") => {
+                            shifter_type = LevelShifterType::HighToLow;
+                            current_key = None;
                         }
                         // Domain names as identifiers
                         _ if !["level_shift", "pdc", "isolation", "clamp", "enable"]
@@ -12106,16 +12099,15 @@ impl HirBuilderContext {
                         }
                     }
                 }
-                SyntaxKind::StringLiteral => {
+                SyntaxKind::StringLiteral
                     // Handle string literals for type: "crc"
-                    if current_key == Some("type") {
+                    if current_key == Some("type") => {
                         // Remove quotes from string literal
                         let text = token.text();
                         let unquoted = text.trim_matches('"').trim_matches('\'');
                         mechanism_type = Some(unquoted.to_string());
                         current_key = None;
                     }
-                }
                 _ => {}
             }
         }

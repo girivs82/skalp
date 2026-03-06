@@ -2753,11 +2753,8 @@ impl VhdlHirBuilder {
                 // entity work.Name style — extract last ident (entity name)
                 let sel_idents = ident_texts(&sel_name);
                 sel_idents.last().cloned().unwrap_or_default()
-            } else if let Some(name) = first_ident_recursive(node) {
-                // Component name wrapped in a Name node (from parse_selected_name)
-                name
             } else {
-                return None;
+                first_ident_recursive(node)?
             }
         };
         let pascal_name = to_pascal_case(&comp_name);

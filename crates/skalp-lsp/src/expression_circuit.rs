@@ -503,10 +503,10 @@ fn extract_port_roles_from_entity(
             let mut port_role = None;
             for child in desc.children_with_tokens() {
                 match &child {
-                    rowan::NodeOrToken::Token(t) if t.kind() == SyntaxKind::Ident => {
-                        if port_name.is_empty() {
-                            port_name = t.text().to_string();
-                        }
+                    rowan::NodeOrToken::Token(t)
+                        if t.kind() == SyntaxKind::Ident && port_name.is_empty() =>
+                    {
+                        port_name = t.text().to_string();
                     }
                     rowan::NodeOrToken::Node(n) if n.kind() == SyntaxKind::TypeAnnotation => {
                         for tc in n.descendants() {
@@ -696,10 +696,10 @@ fn walk_expression_chain(children: &[SyntaxNode], builder: &mut CircuitBuilder) 
 
             for c in child.children_with_tokens() {
                 match c {
-                    rowan::NodeOrToken::Token(t) if is_operator_token(t.kind()) => {
-                        if op_text.is_none() {
-                            op_text = Some(t.text().to_string());
-                        }
+                    rowan::NodeOrToken::Token(t)
+                        if is_operator_token(t.kind()) && op_text.is_none() =>
+                    {
+                        op_text = Some(t.text().to_string());
                     }
                     rowan::NodeOrToken::Node(n) => operand_nodes.push(n),
                     _ => {}

@@ -528,11 +528,9 @@ impl<'a> SharedCodegen<'a> {
                             }
                         }
                         // ArrayWrite outputs same type as input array
-                        SirNodeKind::ArrayWrite => {
-                            if !node.inputs.is_empty() {
-                                let array_signal = &node.inputs[0].signal_id;
-                                return self.get_array_type_for_signal(array_signal);
-                            }
+                        SirNodeKind::ArrayWrite if !node.inputs.is_empty() => {
+                            let array_signal = &node.inputs[0].signal_id;
+                            return self.get_array_type_for_signal(array_signal);
                         }
                         _ => {}
                     }

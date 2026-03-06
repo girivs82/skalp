@@ -244,13 +244,13 @@ impl VerificationResults {
             PropertyStatus::Violated => {
                 self.status = VerificationStatus::SomeFailed;
             }
-            PropertyStatus::Unknown | PropertyStatus::Timeout => {
+            PropertyStatus::Unknown | PropertyStatus::Timeout
                 if !matches!(
                     self.status,
                     VerificationStatus::SomeFailed | VerificationStatus::Error
-                ) {
-                    self.status = VerificationStatus::AllUnknown;
-                }
+                ) =>
+            {
+                self.status = VerificationStatus::AllUnknown;
             }
             PropertyStatus::Error(_) => {
                 self.status = VerificationStatus::Error;

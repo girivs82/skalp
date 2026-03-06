@@ -405,15 +405,15 @@ impl<'a> MirToSirConverter<'a> {
     ) -> bool {
         for stmt in &block.statements {
             match stmt {
-                Statement::Assignment(assign) => {
-                    if self.lvalue_contains_signal(&assign.lhs, signal_id) {
-                        return true;
-                    }
+                Statement::Assignment(assign)
+                    if self.lvalue_contains_signal(&assign.lhs, signal_id) =>
+                {
+                    return true;
                 }
-                Statement::Block(inner_block) => {
-                    if self.is_signal_assigned_in_block(inner_block, signal_id) {
-                        return true;
-                    }
+                Statement::Block(inner_block)
+                    if self.is_signal_assigned_in_block(inner_block, signal_id) =>
+                {
+                    return true;
                 }
                 Statement::If(if_stmt) => {
                     if self.is_signal_assigned_in_block(&if_stmt.then_block, signal_id) {
@@ -425,10 +425,10 @@ impl<'a> MirToSirConverter<'a> {
                         }
                     }
                 }
-                Statement::ResolvedConditional(resolved) => {
-                    if self.lvalue_contains_signal(&resolved.target, signal_id) {
-                        return true;
-                    }
+                Statement::ResolvedConditional(resolved)
+                    if self.lvalue_contains_signal(&resolved.target, signal_id) =>
+                {
+                    return true;
                 }
                 Statement::Case(case_stmt) => {
                     // Check all case arms
@@ -457,15 +457,15 @@ impl<'a> MirToSirConverter<'a> {
     ) -> bool {
         for stmt in &block.statements {
             match stmt {
-                Statement::Assignment(assign) => {
-                    if self.lvalue_contains_port(&assign.lhs, port_id) {
-                        return true;
-                    }
+                Statement::Assignment(assign)
+                    if self.lvalue_contains_port(&assign.lhs, port_id) =>
+                {
+                    return true;
                 }
-                Statement::Block(inner_block) => {
-                    if self.is_port_assigned_in_block(inner_block, port_id) {
-                        return true;
-                    }
+                Statement::Block(inner_block)
+                    if self.is_port_assigned_in_block(inner_block, port_id) =>
+                {
+                    return true;
                 }
                 Statement::If(if_stmt) => {
                     if self.is_port_assigned_in_block(&if_stmt.then_block, port_id) {
@@ -477,10 +477,10 @@ impl<'a> MirToSirConverter<'a> {
                         }
                     }
                 }
-                Statement::ResolvedConditional(resolved) => {
-                    if self.lvalue_contains_port(&resolved.target, port_id) {
-                        return true;
-                    }
+                Statement::ResolvedConditional(resolved)
+                    if self.lvalue_contains_port(&resolved.target, port_id) =>
+                {
+                    return true;
                 }
                 Statement::Case(case_stmt) => {
                     // Check all case arms
@@ -999,24 +999,20 @@ impl<'a> MirToSirConverter<'a> {
                         result_value,
                     ));
                 }
-                Statement::If(if_stmt) => {
-                    // If this if-statement assigns to our target, create conditional logic
-                    if self.if_assigns_to_target(if_stmt, target) {
-                        // BUG #226 FIX: Pass prior assignment value as default
-                        // This ensures that unconditional assignments before the if-statement
-                        // are used as the default when a branch doesn't assign to the target.
-                        result_value = Some(self.synthesize_conditional_assignment_with_default(
-                            if_stmt,
-                            target,
-                            result_value,
-                        ));
-                    }
+                Statement::If(if_stmt) if self.if_assigns_to_target(if_stmt, target) => {
+                    // BUG #226 FIX: Pass prior assignment value as default
+                    // This ensures that unconditional assignments before the if-statement
+                    // are used as the default when a branch doesn't assign to the target.
+                    result_value = Some(self.synthesize_conditional_assignment_with_default(
+                        if_stmt,
+                        target,
+                        result_value,
+                    ));
                 }
-                Statement::ResolvedConditional(resolved) => {
-                    let resolved_target = self.lvalue_to_string(&resolved.target);
-                    if resolved_target == target {
-                        result_value = Some(self.create_priority_mux_node(&resolved.resolved));
-                    }
+                Statement::ResolvedConditional(resolved)
+                    if self.lvalue_to_string(&resolved.target) == target =>
+                {
+                    result_value = Some(self.create_priority_mux_node(&resolved.resolved));
                 }
                 _ => {}
             }
@@ -1045,15 +1041,13 @@ impl<'a> MirToSirConverter<'a> {
                         return true;
                     }
                 }
-                Statement::Block(block) => {
-                    if self.block_assigns_to_target(&block.statements, target) {
-                        return true;
-                    }
+                Statement::Block(block)
+                    if self.block_assigns_to_target(&block.statements, target) =>
+                {
+                    return true;
                 }
-                Statement::If(if_stmt) => {
-                    if self.if_assigns_to_target(if_stmt, target) {
-                        return true;
-                    }
+                Statement::If(if_stmt) if self.if_assigns_to_target(if_stmt, target) => {
+                    return true;
                 }
                 Statement::Case(case_stmt) => {
                     // Check case arms and default block for target assignments
@@ -2406,25 +2400,22 @@ impl<'a> MirToSirConverter<'a> {
                         found_target = true;
                     }
                 }
-                Statement::If(nested_if) => {
-                    // Only process if this if actually assigns to target
-                    if self.if_assigns_to_target(nested_if, target) {
-                        // Use current_value (from prior direct assignment) as the default
-                        // so the mux uses it when the condition is false
-                        let result = self.synthesize_conditional_assignment_with_default(
-                            nested_if,
-                            target,
-                            current_value.or(default_value),
-                        );
-                        // Check if the result is not just a keep-value SignalRef
-                        let is_keep_value = self.sir.combinational_nodes.iter().any(|n| {
-                            n.id == result
-                                && matches!(n.kind, SirNodeKind::SignalRef { ref signal } if signal == target)
-                        });
-                        if !is_keep_value {
-                            current_value = Some(result);
-                            found_target = true;
-                        }
+                Statement::If(nested_if) if self.if_assigns_to_target(nested_if, target) => {
+                    // Use current_value (from prior direct assignment) as the default
+                    // so the mux uses it when the condition is false
+                    let result = self.synthesize_conditional_assignment_with_default(
+                        nested_if,
+                        target,
+                        current_value.or(default_value),
+                    );
+                    // Check if the result is not just a keep-value SignalRef
+                    let is_keep_value = self.sir.combinational_nodes.iter().any(|n| {
+                        n.id == result
+                            && matches!(n.kind, SirNodeKind::SignalRef { ref signal } if signal == target)
+                    });
+                    if !is_keep_value {
+                        current_value = Some(result);
+                        found_target = true;
                     }
                 }
                 Statement::Case(nested_case) => {
@@ -2573,30 +2564,29 @@ impl<'a> MirToSirConverter<'a> {
                         }
                     }
                 }
-                Statement::If(nested_if) => {
+                Statement::If(nested_if) if self.if_assigns_to_target(nested_if, target) => {
                     // Only process if-statements that actually assign to our target.
                     // Without this guard, unrelated if-statements (e.g., `if (bit_counter == 7) { state = 3 }`)
                     // produce keep-value mux nodes that get pushed to conditional_results,
                     // which then override later direct assignments to the target
                     // (e.g., `baud_counter = 434` after the unrelated if).
-                    if self.if_assigns_to_target(nested_if, target) {
-                        // BUG #222 FIX: Pass current_default to use as the "keep" value
-                        let nested_result = self.synthesize_conditional_assignment_with_default(
-                            nested_if,
-                            target,
-                            current_default,
-                        );
-                        conditional_results.push(nested_result);
 
-                        // BUG #235 FIX: Update current_default for subsequent if statements
-                        // When there are multiple independent if statements for the same target,
-                        // each subsequent if should use the previous if's result as its default.
-                        // This ensures proper "last-write-wins" semantics:
-                        //   if cond1 { target = val1 }  // produces result1
-                        //   if cond2 { target = val2 }  // should use result1 as default, not original target
-                        // Final value: cond2 ? val2 : (cond1 ? val1 : original_target)
-                        current_default = Some(nested_result);
-                    }
+                    // BUG #222 FIX: Pass current_default to use as the "keep" value
+                    let nested_result = self.synthesize_conditional_assignment_with_default(
+                        nested_if,
+                        target,
+                        current_default,
+                    );
+                    conditional_results.push(nested_result);
+
+                    // BUG #235 FIX: Update current_default for subsequent if statements
+                    // When there are multiple independent if statements for the same target,
+                    // each subsequent if should use the previous if's result as its default.
+                    // This ensures proper "last-write-wins" semantics:
+                    //   if cond1 { target = val1 }  // produces result1
+                    //   if cond2 { target = val2 }  // should use result1 as default, not original target
+                    // Final value: cond2 ? val2 : (cond1 ? val1 : original_target)
+                    current_default = Some(nested_result);
                 }
                 Statement::Block(block) => {
                     // CRITICAL FIX: Recurse into nested blocks (same bug as Bug #19)
@@ -3032,13 +3022,13 @@ impl<'a> MirToSirConverter<'a> {
         if let Some(else_block) = &if_stmt.else_block {
             for stmt in &else_block.statements {
                 match stmt {
-                    Statement::Assignment(assign) => {
-                        if self.lvalue_to_string(&assign.lhs) == target {
-                            // Direct assignment in else block (final else case)
-                            let value = self.create_expression_node(&assign.rhs);
-                            cases.push((0, value)); // condition=0 means "default case"
-                            return;
-                        }
+                    Statement::Assignment(assign)
+                        if self.lvalue_to_string(&assign.lhs) == target =>
+                    {
+                        // Direct assignment in else block (final else case)
+                        let value = self.create_expression_node(&assign.rhs);
+                        cases.push((0, value)); // condition=0 means "default case"
+                        return;
                     }
                     Statement::If(nested_if) => {
                         // Recursive else-if - this is the key part!

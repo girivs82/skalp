@@ -742,10 +742,10 @@ impl FloorplanEditor {
                         }
                     }
                 }
-                ValidationRule::MaxUtilization { threshold } => {
-                    if self.floorplan.calculate_utilization() > *threshold {
-                        return false;
-                    }
+                ValidationRule::MaxUtilization { threshold }
+                    if self.floorplan.calculate_utilization() > *threshold =>
+                {
+                    return false;
                 }
                 _ => {}
             }
