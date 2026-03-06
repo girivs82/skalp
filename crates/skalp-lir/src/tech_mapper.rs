@@ -7804,11 +7804,22 @@ mod tests {
             .collect();
         assert_eq!(and_cells.len(), 1, "Should have 1 AND cell for first bit");
 
-        // Total cells = 1 TieLow + 1 XOR + 1 AND (bit 0) + 3 * (2 XOR + 1 Carry) (bits 1-3)
-        // = 1 + 2 + 9 = 12 cells
+        // Core adder cells = 1 SB_GND + 1 XOR + 1 AND (bit 0) + 3 * (2 XOR + 1 Carry) (bits 1-3) = 12
+        // IO buffers = 8 SB_IO (4 inputs a + 4 inputs b) + 4 SB_IO (4 outputs sum) + 1 SB_VCC = 13
+        // Total = 25
+        let logic_cells = result
+            .netlist
+            .cells
+            .iter()
+            .filter(|c| c.cell_type != "SB_IO" && c.cell_type != "SB_VCC")
+            .count();
         assert_eq!(
-            result.stats.cells_created, 12,
-            "Should have 12 cells total for 4-bit ice40 adder"
+            logic_cells, 12,
+            "Should have 12 logic cells for 4-bit ice40 adder"
+        );
+        assert_eq!(
+            result.stats.cells_created, 25,
+            "Should have 25 cells total (12 logic + 12 SB_IO + 1 SB_VCC)"
         );
     }
 }
