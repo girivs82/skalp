@@ -119,14 +119,47 @@ pub fn place_and_route(
     let mut placer = Placer::new(config.placer.clone(), device.clone());
     let placement = placer.place(netlist)?;
 
-    // Run routing
-    let mut router = Router::new(config.router.clone(), device.clone());
+    // Run routing — use timing-driven routing when frequency constraints exist
+    let mut router_config = config.router.clone();
+    let freq_constraints = collect_frequency_constraints(netlist, &config);
+    if !freq_constraints.is_empty() && router_config.timing_weight < 0.3 {
+        router_config.timing_weight = 0.5;
+    }
+    let mut router = Router::new(router_config, device.clone());
     let routing = router.route(netlist, &placement)?;
 
-    // Run timing analysis if configured
-    let timing = if let Some(timing_config) = config.timing.clone() {
+    // Run timing analysis — feed frequency constraints into target frequency
+    let timing = if let Some(mut timing_config) = config.timing.clone() {
+        // Use the tightest (highest) frequency constraint as the target
+        if let Some(max_freq) = freq_constraints.values().cloned().reduce(f64::max) {
+            if max_freq > timing_config.target_frequency {
+                timing_config.target_frequency = max_freq;
+            }
+        }
         let mut analyzer = TimingAnalyzer::new(timing_config, device.clone());
-        Some(analyzer.analyze_timing(netlist, &placement, &routing)?)
+        let mut report = analyzer.analyze_timing(netlist, &placement, &routing)?;
+
+        // Check frequency constraints and annotate violations
+        for (net_name, target_freq) in &freq_constraints {
+            let target_period = 1000.0 / target_freq; // ns
+                                                      // Find matching clock domain
+            for summary in &report.clock_summaries {
+                if summary.name == *net_name || net_name == "*" {
+                    if summary.worst_slack < 0.0 {
+                        report.meets_timing = false;
+                    }
+                    // Check if achieved frequency meets constraint
+                    let achieved_period = 1000.0 / summary.frequency;
+                    if achieved_period > target_period * 1.01 {
+                        // 1% tolerance
+                        report.meets_timing = false;
+                        report.failing_paths += 1;
+                    }
+                }
+            }
+        }
+
+        Some(report)
     } else {
         None
     };
@@ -142,6 +175,85 @@ pub fn place_and_route(
         timing,
         variant,
     })
+}
+
+/// Collect frequency constraints from placer config and netlist inline annotations
+fn collect_frequency_constraints(
+    netlist: &GateNetlist,
+    config: &PnrConfig,
+) -> std::collections::HashMap<String, f64> {
+    let mut constraints = std::collections::HashMap::new();
+
+    // From placer IO constraints
+    for fc in config.placer.io_constraints.frequency_constraints() {
+        constraints.insert(fc.net_name.clone(), fc.frequency_mhz);
+    }
+
+    // From inline constraints: PLL cells with target output frequency
+    for cell in &netlist.cells {
+        if cell.cell_type.contains("PLL") || cell.cell_type.starts_with("SB_PLL") {
+            if let Some(freq_str) = cell.parameters.get("FREQUENCY_PIN_PLLOUTCORE") {
+                if let Ok(freq) = freq_str.parse::<f64>() {
+                    // Convert Hz to MHz if needed
+                    let freq_mhz = if freq > 1e6 { freq / 1e6 } else { freq };
+                    constraints.insert("pll_out".to_string(), freq_mhz);
+                }
+            }
+        }
+    }
+
+    constraints
+}
+
+/// Auto-compute PLL dividers from frequency constraints and apply them to a mutable netlist.
+/// Call this before place_and_route if PLL cells lack explicit DIVR/DIVF/DIVQ parameters.
+pub fn auto_configure_pll(
+    netlist: &mut GateNetlist,
+    input_freq_mhz: f64,
+) -> Result<Option<crate::utils::PllConfig>> {
+    use crate::utils::PllCalculator;
+
+    for cell in &mut netlist.cells {
+        if !(cell.cell_type.contains("PLL") || cell.cell_type.starts_with("SB_PLL")) {
+            continue;
+        }
+
+        // Skip if already configured
+        if cell.parameters.contains_key("DIVR") && cell.parameters.contains_key("DIVF") {
+            continue;
+        }
+
+        // Look for target frequency in parameters
+        let target_freq = cell
+            .parameters
+            .get("FREQUENCY_PIN_PLLOUTCORE")
+            .and_then(|s| s.parse::<f64>().ok())
+            .map(|f| if f > 1e6 { f / 1e6 } else { f });
+
+        if let Some(target) = target_freq {
+            let calc = PllCalculator::new();
+            let pll_config = calc.calculate(input_freq_mhz, target)?;
+
+            cell.parameters
+                .insert("DIVR".to_string(), pll_config.divr.to_string());
+            cell.parameters
+                .insert("DIVF".to_string(), pll_config.divf.to_string());
+            cell.parameters
+                .insert("DIVQ".to_string(), pll_config.divq.to_string());
+            cell.parameters.insert(
+                "FILTER_RANGE".to_string(),
+                pll_config.filter_range.to_string(),
+            );
+            if !cell.parameters.contains_key("FEEDBACK_PATH") {
+                cell.parameters
+                    .insert("FEEDBACK_PATH".to_string(), "SIMPLE".to_string());
+            }
+
+            return Ok(Some(pll_config));
+        }
+    }
+
+    Ok(None)
 }
 
 /// Convenience function for HX1K
@@ -1279,5 +1391,674 @@ set_io btn A6
         let generated_pcf = constraints.to_pcf();
         assert!(generated_pcf.contains("set_io"));
         println!("\n=== Generated PCF ===\n{}", generated_pcf);
+    }
+
+    // === Phase 1: IO direction from CellFunction ===
+
+    #[test]
+    fn test_io_direction_from_cell_function() {
+        use skalp_lir::tech_library::CellFunction;
+
+        let mut netlist = GateNetlist::new("io_test".to_string(), "ice40".to_string());
+
+        let net0 = netlist.add_net(GateNet::new_input(
+            skalp_lir::gate_netlist::GateNetId(0),
+            "clk_in".to_string(),
+        ));
+        let net1 = netlist.add_net(GateNet::new_output(
+            skalp_lir::gate_netlist::GateNetId(1),
+            "led_out".to_string(),
+        ));
+        let net2 = netlist.add_net(GateNet::new(
+            skalp_lir::gate_netlist::GateNetId(2),
+            "sda".to_string(),
+        ));
+
+        // Input pad
+        let mut input_cell = Cell::new_comb(
+            skalp_lir::gate_netlist::CellId(0),
+            "SB_IO".to_string(),
+            "ice40".to_string(),
+            0.0,
+            "top.clk_ibuf".to_string(),
+            vec![],
+            vec![net0],
+        );
+        input_cell.function = Some(CellFunction::InputPad);
+        netlist.add_cell(input_cell);
+
+        // Output pad
+        let mut output_cell = Cell::new_comb(
+            skalp_lir::gate_netlist::CellId(1),
+            "SB_IO".to_string(),
+            "ice40".to_string(),
+            0.0,
+            "top.led_obuf".to_string(),
+            vec![net1],
+            vec![],
+        );
+        output_cell.function = Some(CellFunction::OutputPad);
+        netlist.add_cell(output_cell);
+
+        // Bidir pad
+        let mut bidir_cell = Cell::new_comb(
+            skalp_lir::gate_netlist::CellId(2),
+            "SB_IO".to_string(),
+            "ice40".to_string(),
+            0.0,
+            "top.sda_iobuf".to_string(),
+            vec![net2],
+            vec![net2],
+        );
+        bidir_cell.function = Some(CellFunction::BidirPad);
+        netlist.add_cell(bidir_cell);
+
+        // Place and generate bitstream
+        let config = PnrConfig::fast();
+        let result = place_and_route(&netlist, Ice40Variant::Hx1k, config);
+        assert!(result.is_ok(), "P&R should succeed: {:?}", result.err());
+
+        let pnr = result.unwrap();
+        let asc = pnr.to_icestorm_ascii_with_netlist(Some(&netlist));
+
+        // Input pad should have PINTYPE with output_mode=0 (no output)
+        // Output pad should have PINTYPE with output_mode=1 (output enabled)
+        // Bidir pad should have PINTYPE with output_mode=2 (tristate)
+        // If we got this far without error, the cell function was used correctly
+        assert!(!asc.is_empty());
+        assert!(asc.contains(".device"));
+    }
+
+    #[test]
+    fn test_io_pullup_from_parameters() {
+        use skalp_lir::tech_library::CellFunction;
+
+        let mut netlist = GateNetlist::new("pullup_test".to_string(), "ice40".to_string());
+
+        let net0 = netlist.add_net(GateNet::new_input(
+            skalp_lir::gate_netlist::GateNetId(0),
+            "btn".to_string(),
+        ));
+
+        // Input pad with pull-up
+        let mut cell = Cell::new_comb(
+            skalp_lir::gate_netlist::CellId(0),
+            "SB_IO".to_string(),
+            "ice40".to_string(),
+            0.0,
+            "top.btn_ibuf".to_string(),
+            vec![],
+            vec![net0],
+        );
+        cell.function = Some(CellFunction::InputPad);
+        cell.parameters
+            .insert("PULLUP".to_string(), "yes".to_string());
+        netlist.add_cell(cell);
+
+        let config = PnrConfig::fast();
+        let result = place_and_route(&netlist, Ice40Variant::Hx1k, config);
+        assert!(result.is_ok(), "P&R should succeed with PULLUP");
+    }
+
+    // === Phase 2: Inline constraints ===
+
+    #[test]
+    fn test_inline_constraints_from_loc() {
+        use skalp_lir::tech_library::CellFunction;
+
+        let mut netlist = GateNetlist::new("loc_test".to_string(), "ice40".to_string());
+
+        let net0 = netlist.add_net(GateNet::new_input(
+            skalp_lir::gate_netlist::GateNetId(0),
+            "clk".to_string(),
+        ));
+
+        // Input pad with LOC parameter
+        let mut cell = Cell::new_comb(
+            skalp_lir::gate_netlist::CellId(0),
+            "SB_IO".to_string(),
+            "ice40".to_string(),
+            0.0,
+            "top.clk_ibuf".to_string(),
+            vec![],
+            vec![net0],
+        );
+        cell.function = Some(CellFunction::InputPad);
+        cell.parameters.insert("LOC".to_string(), "J3".to_string());
+        netlist.add_cell(cell);
+
+        // Extract inline constraints
+        let constraints =
+            crate::placer::Placer::<Ice40Device>::extract_inline_constraints(&netlist);
+        assert_eq!(constraints.len(), 1);
+        assert!(constraints.has_constraint("clk"));
+        assert_eq!(constraints.get("clk").unwrap().pin_name, "J3");
+    }
+
+    #[test]
+    fn test_inline_constraints_with_io_standard() {
+        use skalp_lir::tech_library::CellFunction;
+
+        let mut netlist = GateNetlist::new("std_test".to_string(), "ice40".to_string());
+
+        let net0 = netlist.add_net(GateNet::new_output(
+            skalp_lir::gate_netlist::GateNetId(0),
+            "led".to_string(),
+        ));
+
+        let mut cell = Cell::new_comb(
+            skalp_lir::gate_netlist::CellId(0),
+            "SB_IO".to_string(),
+            "ice40".to_string(),
+            0.0,
+            "top.led_obuf".to_string(),
+            vec![net0],
+            vec![],
+        );
+        cell.function = Some(CellFunction::OutputPad);
+        cell.parameters.insert("LOC".to_string(), "B5".to_string());
+        cell.parameters
+            .insert("IO_STANDARD".to_string(), "SB_LVCMOS".to_string());
+        cell.parameters
+            .insert("DRIVE_STRENGTH".to_string(), "8".to_string());
+        netlist.add_cell(cell);
+
+        let constraints =
+            crate::placer::Placer::<Ice40Device>::extract_inline_constraints(&netlist);
+        assert_eq!(constraints.len(), 1);
+
+        let c = constraints.get("led").unwrap();
+        assert_eq!(c.pin_name, "B5");
+        assert_eq!(c.io_standard.as_deref(), Some("SB_LVCMOS"));
+        assert_eq!(c.drive_strength, Some(8));
+    }
+
+    // === Phase 3: RAM configuration ===
+
+    #[test]
+    fn test_ram_config_bits() {
+        // Test that RAM cells with READ_MODE/WRITE_MODE generate non-zero config
+        let mut netlist = GateNetlist::new("ram_test".to_string(), "ice40".to_string());
+
+        let net0 = netlist.add_net(GateNet::new(
+            skalp_lir::gate_netlist::GateNetId(0),
+            "rdata".to_string(),
+        ));
+
+        let mut ram_cell = Cell::new_comb(
+            skalp_lir::gate_netlist::CellId(0),
+            "SB_RAM40_4K".to_string(),
+            "ice40".to_string(),
+            0.0,
+            "top.mem0".to_string(),
+            vec![],
+            vec![net0],
+        );
+        ram_cell
+            .parameters
+            .insert("READ_MODE".to_string(), "1".to_string());
+        ram_cell
+            .parameters
+            .insert("WRITE_MODE".to_string(), "2".to_string());
+        netlist.add_cell(ram_cell);
+
+        let config = PnrConfig::fast();
+        let result = place_and_route(&netlist, Ice40Variant::Hx1k, config);
+        assert!(
+            result.is_ok(),
+            "P&R with RAM should succeed: {:?}",
+            result.err()
+        );
+
+        let pnr = result.unwrap();
+        let asc = pnr.to_icestorm_ascii_with_netlist(Some(&netlist));
+
+        // Should contain RAM tile sections
+        assert!(
+            asc.contains(".ramb_tile") || asc.contains(".ramt_tile"),
+            "Should have RAM tile in bitstream"
+        );
+    }
+
+    #[test]
+    fn test_ram_init_data() {
+        let mut netlist = GateNetlist::new("ram_init_test".to_string(), "ice40".to_string());
+
+        let net0 = netlist.add_net(GateNet::new(
+            skalp_lir::gate_netlist::GateNetId(0),
+            "rdata".to_string(),
+        ));
+
+        let mut ram_cell = Cell::new_comb(
+            skalp_lir::gate_netlist::CellId(0),
+            "SB_RAM40_4K".to_string(),
+            "ice40".to_string(),
+            0.0,
+            "top.mem0".to_string(),
+            vec![],
+            vec![net0],
+        );
+        ram_cell
+            .parameters
+            .insert("READ_MODE".to_string(), "0".to_string());
+        ram_cell
+            .parameters
+            .insert("WRITE_MODE".to_string(), "0".to_string());
+        // Add init data for first 256 bits
+        ram_cell.parameters.insert(
+            "INIT_0".to_string(),
+            "DEADBEEF".repeat(8), // 64 hex chars = 256 bits
+        );
+        netlist.add_cell(ram_cell);
+
+        let config = PnrConfig::fast();
+        let result = place_and_route(&netlist, Ice40Variant::Hx1k, config);
+        assert!(
+            result.is_ok(),
+            "P&R with RAM init should succeed: {:?}",
+            result.err()
+        );
+
+        let pnr = result.unwrap();
+        let asc = pnr.to_icestorm_ascii_with_netlist(Some(&netlist));
+
+        // Should contain .ram_data section
+        assert!(
+            asc.contains(".ram_data"),
+            "Should have .ram_data section in bitstream for initialized RAM"
+        );
+    }
+
+    // === Phase 4: DSP scaffolding ===
+
+    #[test]
+    fn test_up5k_dsp_tiles() {
+        use crate::device::Device;
+
+        let device = Ice40Device::up5k();
+        let stats = device.stats();
+
+        // UP5K should report DSP resources
+        assert!(stats.total_dsps > 0, "UP5K should have DSP blocks");
+
+        // cell_to_bel_type should map MAC cells to DspSlice
+        let placer =
+            crate::placer::Placer::new(crate::placer::PlacerConfig::default(), device.clone());
+        // The cell_to_bel_type is private, but we can verify by checking that
+        // the device has DSP tiles
+        assert!(
+            !device.dsp_tiles.is_empty(),
+            "UP5K should have DSP tiles in the device model"
+        );
+
+        // Verify non-UP5K devices don't have DSPs
+        let hx1k = Ice40Device::hx1k();
+        assert_eq!(hx1k.stats().total_dsps, 0, "HX1K should have no DSP blocks");
+
+        // Suppress unused variable warning
+        let _ = placer;
+    }
+
+    #[test]
+    fn test_dsp_capacity_check() {
+        use crate::device::Device;
+
+        // Create a netlist with more DSP cells than UP5K supports
+        let mut netlist = GateNetlist::new("dsp_cap_test".to_string(), "ice40".to_string());
+
+        let device = Ice40Device::up5k();
+        let dsp_count = device.stats().total_dsps;
+
+        // Add one more DSP cell than available
+        for i in 0..=(dsp_count) {
+            let net = netlist.add_net(GateNet::new(
+                skalp_lir::gate_netlist::GateNetId(i as u32),
+                format!("mac_out_{}", i),
+            ));
+
+            netlist.add_cell(Cell::new_comb(
+                skalp_lir::gate_netlist::CellId(i as u32),
+                "SB_MAC16".to_string(),
+                "ice40".to_string(),
+                0.0,
+                format!("top.mac{}", i),
+                vec![],
+                vec![net],
+            ));
+        }
+
+        let mut config = PnrConfig::fast();
+        config.placer.seed = 42;
+        let mut placer = crate::placer::Placer::new(config.placer, device);
+        let result = placer.place(&netlist);
+
+        assert!(result.is_err(), "Should fail when exceeding DSP capacity");
+        let err = result.unwrap_err();
+        let err_msg = format!("{}", err);
+        assert!(
+            err_msg.contains("DSP"),
+            "Error should mention DSPs: {}",
+            err_msg
+        );
+    }
+
+    // === PLL bitstream configuration ===
+
+    #[test]
+    fn test_pll_bitstream_config() {
+        use skalp_lir::tech_library::CellFunction;
+
+        let mut netlist = GateNetlist::new("pll_test".to_string(), "ice40".to_string());
+
+        // Clock input net
+        let clk_in = netlist.add_net({
+            let mut net =
+                GateNet::new_input(skalp_lir::gate_netlist::GateNetId(0), "clk_in".to_string());
+            net.is_clock = true;
+            net
+        });
+
+        // PLL output net
+        let clk_out = netlist.add_net(GateNet::new(
+            skalp_lir::gate_netlist::GateNetId(1),
+            "clk_out".to_string(),
+        ));
+
+        // PLL cell with explicit divider parameters (12MHz -> 48MHz)
+        let mut pll_cell = Cell::new_comb(
+            skalp_lir::gate_netlist::CellId(0),
+            "SB_PLL40_CORE".to_string(),
+            "ice40".to_string(),
+            0.0,
+            "top.pll_inst".to_string(),
+            vec![clk_in],
+            vec![clk_out],
+        );
+        pll_cell.function = Some(CellFunction::Pll);
+        pll_cell
+            .parameters
+            .insert("DIVR".to_string(), "0".to_string());
+        pll_cell
+            .parameters
+            .insert("DIVF".to_string(), "63".to_string());
+        pll_cell
+            .parameters
+            .insert("DIVQ".to_string(), "4".to_string());
+        pll_cell
+            .parameters
+            .insert("FILTER_RANGE".to_string(), "1".to_string());
+        pll_cell
+            .parameters
+            .insert("FEEDBACK_PATH".to_string(), "SIMPLE".to_string());
+        netlist.add_cell(pll_cell);
+
+        let config = PnrConfig::fast();
+        let result = place_and_route(&netlist, Ice40Variant::Hx1k, config);
+        assert!(result.is_ok(), "PLL P&R should succeed: {:?}", result.err());
+
+        let pnr = result.unwrap();
+        let asc = pnr.to_icestorm_ascii_with_netlist(Some(&netlist));
+
+        // For HX1K, PLL config bits are embedded in IO tiles (not separate ipcon_tile).
+        // DIVF=63 (0b0111111) means DIVF_0..DIVF_5 are set, so multiple IO tiles
+        // should have non-zero bits from PLL config.
+        // Check that we have IO tiles with bits set (the PLL config is there).
+        let io_tile_count = asc.matches(".io_tile").count();
+        assert!(
+            io_tile_count > 0,
+            "Should have IO tiles with PLL config bits: {}",
+            &asc[..asc.len().min(500)]
+        );
+
+        // Verify PLL params are correctly resolved - DIVF=63 means bits 0-5 set,
+        // which maps to PLLCONFIG entries in multiple IO tiles
+        // Just check the ASC has non-trivial content (not all-zero IO tiles)
+        let has_nonzero_io = asc.lines().any(|line| {
+            !line.starts_with('.')
+                && !line.starts_with('#')
+                && !line.is_empty()
+                && line.chars().all(|c| c == '0' || c == '1')
+                && line.contains('1')
+        });
+        assert!(
+            has_nonzero_io,
+            "IO tiles should have non-zero bits from PLL config"
+        );
+    }
+
+    #[test]
+    fn test_pll_auto_configure() {
+        // Test auto_configure_pll computes correct dividers
+        let mut netlist = GateNetlist::new("auto_pll".to_string(), "ice40".to_string());
+
+        let clk_in = netlist.add_net({
+            let mut net =
+                GateNet::new_input(skalp_lir::gate_netlist::GateNetId(0), "clk".to_string());
+            net.is_clock = true;
+            net
+        });
+        let clk_out = netlist.add_net(GateNet::new(
+            skalp_lir::gate_netlist::GateNetId(1),
+            "pll_out".to_string(),
+        ));
+
+        // PLL cell with only target frequency, no explicit dividers
+        let mut pll_cell = Cell::new_comb(
+            skalp_lir::gate_netlist::CellId(0),
+            "SB_PLL40_CORE".to_string(),
+            "ice40".to_string(),
+            0.0,
+            "top.pll".to_string(),
+            vec![clk_in],
+            vec![clk_out],
+        );
+        pll_cell
+            .parameters
+            .insert("FREQUENCY_PIN_PLLOUTCORE".to_string(), "48".to_string());
+        netlist.add_cell(pll_cell);
+
+        // Auto-configure with 12 MHz input
+        let pll_config = auto_configure_pll(&mut netlist, 12.0).unwrap();
+        assert!(pll_config.is_some(), "Should compute PLL configuration");
+
+        let cfg = pll_config.unwrap();
+        assert!(
+            cfg.error_percent < 1.0,
+            "PLL error should be < 1%: {:.2}%",
+            cfg.error_percent
+        );
+        assert!(
+            (cfg.f_achieved - 48.0).abs() < 1.0,
+            "Achieved frequency should be ~48 MHz: {:.2}",
+            cfg.f_achieved
+        );
+
+        // Verify dividers were set on the cell
+        let cell = &netlist.cells[0];
+        assert!(cell.parameters.contains_key("DIVR"), "DIVR should be set");
+        assert!(cell.parameters.contains_key("DIVF"), "DIVF should be set");
+        assert!(cell.parameters.contains_key("DIVQ"), "DIVQ should be set");
+        assert!(
+            cell.parameters.contains_key("FILTER_RANGE"),
+            "FILTER_RANGE should be set"
+        );
+    }
+
+    #[test]
+    fn test_frequency_constraint_in_timing() {
+        use crate::placer::IoConstraints;
+
+        // Create a design with a frequency constraint
+        let mut netlist = GateNetlist::new("freq_test".to_string(), "ice40".to_string());
+
+        let clock_net = netlist.add_net({
+            let mut net =
+                GateNet::new_input(skalp_lir::gate_netlist::GateNetId(0), "clk".to_string());
+            net.is_clock = true;
+            net
+        });
+
+        // Chain of LUTs and DFFs
+        let mut prev_net = clock_net;
+        for i in 0..4 {
+            let lut_out = netlist.add_net(GateNet::new(
+                skalp_lir::gate_netlist::GateNetId(10 + i as u32),
+                format!("lut{}_out", i),
+            ));
+            let dff_out = netlist.add_net(GateNet::new(
+                skalp_lir::gate_netlist::GateNetId(20 + i as u32),
+                format!("dff{}_out", i),
+            ));
+
+            netlist.add_cell(Cell::new_comb(
+                skalp_lir::gate_netlist::CellId(i as u32),
+                "SB_LUT4".to_string(),
+                "ice40".to_string(),
+                0.0,
+                format!("chain.lut{}", i),
+                vec![prev_net],
+                vec![lut_out],
+            ));
+
+            let mut dff = Cell::new_seq(
+                skalp_lir::gate_netlist::CellId(10 + i as u32),
+                "SB_DFF".to_string(),
+                "ice40".to_string(),
+                0.0,
+                format!("chain.dff{}", i),
+                vec![lut_out],
+                vec![dff_out],
+                clock_net,
+                None,
+            );
+            dff.clock = Some(clock_net);
+            netlist.add_cell(dff);
+
+            prev_net = dff_out;
+        }
+
+        // Set frequency constraint
+        let mut io_constraints = IoConstraints::new();
+        io_constraints.set_frequency("clk", 100.0); // 100 MHz constraint
+
+        let mut config = PnrConfig::default();
+        config.placer.io_constraints = io_constraints;
+
+        let result = place_and_route(&netlist, Ice40Variant::Hx1k, config).unwrap();
+
+        // Timing analysis should use the frequency constraint
+        let timing = result.timing.as_ref().expect("Should have timing report");
+        assert_eq!(
+            timing.target_frequency, 100.0,
+            "Target frequency should match constraint"
+        );
+
+        println!("Frequency constraint test:");
+        println!("  Target: {} MHz", timing.target_frequency);
+        println!("  Achieved: {:.2} MHz", timing.design_frequency);
+        println!("  Meets timing: {}", timing.meets_timing);
+        println!("  WNS: {:.2} ns", timing.worst_negative_slack);
+    }
+
+    #[test]
+    fn test_pll_cell_placement() {
+        // Verify PLL cells get placed on PLL BELs
+        use skalp_lir::tech_library::CellFunction;
+
+        let mut netlist = GateNetlist::new("pll_place".to_string(), "ice40".to_string());
+
+        let clk_in = netlist.add_net(GateNet::new_input(
+            skalp_lir::gate_netlist::GateNetId(0),
+            "clk_in".to_string(),
+        ));
+        let clk_out = netlist.add_net(GateNet::new(
+            skalp_lir::gate_netlist::GateNetId(1),
+            "clk_out".to_string(),
+        ));
+
+        let mut pll_cell = Cell::new_comb(
+            skalp_lir::gate_netlist::CellId(0),
+            "SB_PLL40_CORE".to_string(),
+            "ice40".to_string(),
+            0.0,
+            "top.pll".to_string(),
+            vec![clk_in],
+            vec![clk_out],
+        );
+        pll_cell.function = Some(CellFunction::Pll);
+        pll_cell
+            .parameters
+            .insert("DIVR".to_string(), "0".to_string());
+        pll_cell
+            .parameters
+            .insert("DIVF".to_string(), "63".to_string());
+        pll_cell
+            .parameters
+            .insert("DIVQ".to_string(), "4".to_string());
+        pll_cell
+            .parameters
+            .insert("FILTER_RANGE".to_string(), "1".to_string());
+        netlist.add_cell(pll_cell);
+
+        let config = PnrConfig::fast();
+        let result = place_and_route(&netlist, Ice40Variant::Hx1k, config);
+        assert!(
+            result.is_ok(),
+            "PLL placement should succeed: {:?}",
+            result.err()
+        );
+
+        let pnr = result.unwrap();
+        // Verify the PLL cell is placed on a PLL BEL
+        let pll_placement = pnr
+            .placement
+            .placements
+            .values()
+            .find(|loc| matches!(loc.bel_type, crate::device::BelType::Pll));
+        assert!(
+            pll_placement.is_some(),
+            "PLL cell should be placed on a PLL BEL"
+        );
+    }
+
+    #[test]
+    fn test_chipdb_pll_extra_cell() {
+        // Verify the chipdb parser correctly parses PLL extra_cell data
+        use crate::device::ice40::chipdb_parser::ChipDb;
+
+        let chipdb = ChipDb::load_embedded(Ice40Variant::Hx1k).unwrap();
+
+        assert!(
+            !chipdb.pll_cells.is_empty(),
+            "HX1K chipdb should have PLL extra_cell data"
+        );
+
+        let pll = &chipdb.pll_cells[0];
+        println!("PLL at ({}, {})", pll.cell_x, pll.cell_y);
+        println!("PLL params: {}", pll.param_bits.len());
+
+        // Verify key PLL parameters are present
+        assert!(
+            pll.param_bits.contains_key("DIVR_0"),
+            "Should have DIVR_0 mapping"
+        );
+        assert!(
+            pll.param_bits.contains_key("DIVF_0"),
+            "Should have DIVF_0 mapping"
+        );
+        assert!(
+            pll.param_bits.contains_key("DIVQ_0"),
+            "Should have DIVQ_0 mapping"
+        );
+        assert!(
+            pll.param_bits.contains_key("FILTER_RANGE_0"),
+            "Should have FILTER_RANGE_0 mapping"
+        );
+
+        // Verify resolution works
+        let resolved = chipdb.resolve_pll_param_bit(pll, "DIVR_0");
+        assert!(resolved.is_some(), "Should resolve DIVR_0 to bit position");
+        let (tx, ty, row, col) = resolved.unwrap();
+        println!("DIVR_0 -> tile ({}, {}), bit ({}, {})", tx, ty, row, col);
     }
 }

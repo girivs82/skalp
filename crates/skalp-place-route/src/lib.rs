@@ -77,8 +77,8 @@ pub use placer::{
     RegionConstraint,
 };
 pub use pnr::{
-    place_and_route, place_and_route_hx1k, place_and_route_hx8k, place_and_route_up5k, PnrConfig,
-    PnrResult,
+    auto_configure_pll, place_and_route, place_and_route_hx1k, place_and_route_hx8k,
+    place_and_route_up5k, PnrConfig, PnrResult,
 };
 pub use router::{Route, Router, RouterConfig, RoutingAlgorithm, RoutingResult};
 pub use timing::{DelayModel, TimingAnalyzer, TimingConfig, TimingDrivenPlacer, TimingReport};

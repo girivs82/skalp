@@ -14,6 +14,18 @@ use super::{Ice40Variant, TileType};
 use crate::device::{Bel, BelId, BelType, Pip, PipId, Wire, WireId, WireType};
 use std::collections::HashMap;
 
+/// PLL extra_cell configuration: maps PLL parameter bits to PLLCONFIG registers
+/// Each entry describes where a single PLL parameter bit lives in the ipcon/io tile
+#[derive(Debug, Clone)]
+pub struct PllExtraCell {
+    /// PLL cell location (from `.extra_cell X Y PLL`)
+    pub cell_x: u32,
+    pub cell_y: u32,
+    /// Parameter bit mappings: param_name -> (tile_x, tile_y, pllconfig_name)
+    /// e.g., "DIVR_0" -> (1, 0, "PLLCONFIG_1")
+    pub param_bits: HashMap<String, (u32, u32, String)>,
+}
+
 /// Parsed chipdb data
 #[derive(Debug, Clone)]
 pub struct ChipDb {
@@ -44,6 +56,8 @@ pub struct ChipDb {
     /// BEL pin to wire mapping: (tile_x, tile_y, pin_name) -> wire_id
     /// Pin names are like "lutff_0/out", "lutff_0/in_0", "io_0/D_OUT_0", etc.
     pub bel_wires: HashMap<(u32, u32, String), u32>,
+    /// PLL extra_cell definitions
+    pub pll_cells: Vec<PllExtraCell>,
 }
 
 /// Wire information
@@ -168,6 +182,7 @@ impl ChipDb {
             tile_dimensions: HashMap::new(),
             lc_mappings: Vec::new(),
             bel_wires: HashMap::new(),
+            pll_cells: Vec::new(),
         };
 
         let mut current_section = Section::None;
@@ -175,6 +190,7 @@ impl ChipDb {
         let mut current_package: Option<String> = None;
         let mut current_tile_type: Option<TileType> = None;
         let mut current_buffer: Option<BufferContext> = None;
+        let mut current_pll_extra: Option<PllExtraCell> = None;
 
         for line in content.lines() {
             let line = line.trim();
@@ -361,6 +377,44 @@ impl ChipDb {
                             );
                         }
                     }
+                    ".ipcon_tile_bits" => {
+                        // IpCon tiles use the same format as IO tiles for PLL config
+                        current_tile_type = Some(TileType::Pll);
+                        current_section = Section::TileBits;
+                        if parts.len() >= 3 {
+                            let cols: u8 = parts[1].parse().unwrap_or(18);
+                            let rows: u8 = parts[2].parse().unwrap_or(16);
+                            chipdb.tile_dimensions.insert(
+                                TileType::Pll,
+                                TileBitDimensions {
+                                    columns: cols,
+                                    rows,
+                                },
+                            );
+                        }
+                    }
+                    ".extra_cell" => {
+                        // Save any previous PLL extra_cell
+                        if let Some(pll) = current_pll_extra.take() {
+                            chipdb.pll_cells.push(pll);
+                        }
+                        // Format: .extra_cell X Y TYPE  or  .extra_cell X Y Z TYPE
+                        if parts.len() >= 4 {
+                            let cell_type = parts.last().unwrap();
+                            if *cell_type == "PLL" {
+                                let x: u32 = parts[1].parse().unwrap_or(0);
+                                let y: u32 = parts[2].parse().unwrap_or(0);
+                                current_pll_extra = Some(PllExtraCell {
+                                    cell_x: x,
+                                    cell_y: y,
+                                    param_bits: HashMap::new(),
+                                });
+                                current_section = Section::ExtraCell;
+                            } else {
+                                current_section = Section::ExtraCell;
+                            }
+                        }
+                    }
                     _ => {
                         current_section = Section::None;
                     }
@@ -494,8 +548,33 @@ impl ChipDb {
                         }
                     }
                 }
+                Section::ExtraCell => {
+                    // Parse PLL parameter bit mappings
+                    // Format: PARAM_NAME Y X PLLCONFIG_N  (for config bits)
+                    // Format: PARAM_NAME pin_list  (for pin connections like LOCKED)
+                    if let Some(ref mut pll) = current_pll_extra {
+                        let parts: Vec<&str> = line.split_whitespace().collect();
+                        if parts.len() >= 4 {
+                            let param_name = parts[0].to_string();
+                            // Check if this looks like a config bit reference
+                            // (3rd field is a PLLCONFIG_N name)
+                            if parts[3].starts_with("PLLCONFIG_") {
+                                let tile_y: u32 = parts[1].parse().unwrap_or(0);
+                                let tile_x: u32 = parts[2].parse().unwrap_or(0);
+                                let config_name = parts[3].to_string();
+                                pll.param_bits
+                                    .insert(param_name, (tile_x, tile_y, config_name));
+                            }
+                        }
+                    }
+                }
                 Section::None => {}
             }
+        }
+
+        // Save any pending PLL extra_cell
+        if let Some(pll) = current_pll_extra.take() {
+            chipdb.pll_cells.push(pll);
         }
 
         // Build BEL pin to wire mapping from wire segments
@@ -623,6 +702,41 @@ impl ChipDb {
             .collect()
     }
 
+    /// Get PLL extra_cell data (first PLL if multiple exist)
+    pub fn pll_extra_cell(&self) -> Option<&PllExtraCell> {
+        self.pll_cells.first()
+    }
+
+    /// Resolve a PLL parameter bit to a (tile_x, tile_y, row, col) position in the bitstream.
+    /// Returns None if the parameter or PLLCONFIG bit position is not found.
+    pub fn resolve_pll_param_bit(
+        &self,
+        pll_cell: &PllExtraCell,
+        param_name: &str,
+    ) -> Option<(u32, u32, u8, u8)> {
+        let (tile_x, tile_y, config_name) = pll_cell.param_bits.get(param_name)?;
+
+        // Find the PLLCONFIG bit position in tile_bits
+        // Look in Pll tile bits first, then IO tile bits (for HX/LP devices)
+        let full_name = format!("PLL.{}", config_name);
+        for tile_type in &[
+            TileType::Pll,
+            TileType::IoTop,
+            TileType::IoBottom,
+            TileType::IoLeft,
+            TileType::IoRight,
+        ] {
+            if let Some(bits) = self.tile_bits.get(tile_type) {
+                for cb in bits {
+                    if cb.name == full_name {
+                        return Some((*tile_x, *tile_y, cb.row, cb.col));
+                    }
+                }
+            }
+        }
+        None
+    }
+
     /// Build BELs for a tile
     pub fn build_bels_for_tile(&self, x: u32, y: u32) -> Vec<Bel> {
         let tile_type = self.tiles.get(&(x, y)).copied().unwrap_or(TileType::Empty);
@@ -671,6 +785,19 @@ impl ChipDb {
                     });
                     bel_id += 1;
                 }
+                // Add PLL BEL if this IO tile is at a PLL extra_cell position
+                if self
+                    .pll_cells
+                    .iter()
+                    .any(|p| p.cell_x == x && p.cell_y == y)
+                {
+                    bels.push(Bel {
+                        id: BelId(bel_id),
+                        name: "PLL".to_string(),
+                        bel_type: BelType::Pll,
+                        pins: vec![],
+                    });
+                }
             }
             TileType::RamTop | TileType::RamBottom => {
                 bels.push(Bel {
@@ -685,6 +812,14 @@ impl ChipDb {
                     id: BelId(bel_id),
                     name: "PLL".to_string(),
                     bel_type: BelType::Pll,
+                    pins: vec![],
+                });
+            }
+            TileType::Dsp => {
+                bels.push(Bel {
+                    id: BelId(bel_id),
+                    name: "MAC16".to_string(),
+                    bel_type: BelType::DspSlice,
                     pins: vec![],
                 });
             }
@@ -704,6 +839,7 @@ enum Section {
     Pins,
     GbufIn,
     TileBits,
+    ExtraCell,
 }
 
 /// Parse a config bit reference like "B1[5]" or "!B0[3]"

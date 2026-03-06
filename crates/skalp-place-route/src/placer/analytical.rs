@@ -238,6 +238,15 @@ impl<'a, D: Device> AnalyticalPlacer<'a, D> {
             BelType::IoCell
         } else if cell_type.contains("RAM") || cell_type.starts_with("SB_RAM") {
             BelType::RamSlice
+        } else if cell_type.contains("GB") || cell_type.starts_with("SB_GB") {
+            BelType::GlobalBuf
+        } else if cell_type.contains("PLL") || cell_type.starts_with("SB_PLL") {
+            BelType::Pll
+        } else if cell_type.contains("MAC")
+            || cell_type.starts_with("SB_MAC")
+            || cell_type.contains("MULT")
+        {
+            BelType::DspSlice
         } else {
             BelType::Lut4
         }

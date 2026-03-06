@@ -16,6 +16,7 @@ use crate::error::Result;
 use crate::placer::PlacementResult;
 use crate::router::RoutingResult;
 use skalp_lir::gate_netlist::GateNetlist;
+use skalp_lir::tech_library::CellFunction;
 use std::collections::HashMap;
 
 /// DFF configuration bits for an LC
@@ -54,6 +55,34 @@ struct IoConfig {
 struct GlobalNetworkConfig {
     /// Bitmask of active global networks (bit N = glb_netwk_N is active)
     active_networks: u8,
+}
+
+/// RAM block configuration for SB_RAM40_4K
+#[derive(Debug, Clone, Default)]
+struct RamConfig {
+    /// Read mode: 0=256x16, 1=512x8, 2=1024x4, 3=2048x2
+    read_mode: u8,
+    /// Write mode: 0=256x16, 1=512x8, 2=1024x4, 3=2048x2
+    write_mode: u8,
+    /// Initialization data (4096 bits = 512 bytes)
+    init_data: Option<Vec<u8>>,
+}
+
+/// PLL configuration for bitstream generation
+#[derive(Debug, Clone)]
+struct PllBitstreamConfig {
+    /// DIVR (reference divider, 4-bit, value 0-15)
+    divr: u8,
+    /// DIVF (feedback divider, 7-bit, value 0-127)
+    divf: u8,
+    /// DIVQ (output divider, 3-bit, value 1-6)
+    divq: u8,
+    /// FILTER_RANGE (3-bit)
+    filter_range: u8,
+    /// Feedback path: 0=SIMPLE, 1=DELAY, 2=PHASE_AND_DELAY, 4=EXTERNAL
+    feedback_path: u8,
+    /// PLLTYPE (3-bit): 0=SB_PLL40_CORE, 1=SB_PLL40_PAD, etc.
+    plltype: u8,
 }
 
 impl IoConfig {
@@ -146,6 +175,16 @@ impl<'a> IceStormAscii<'a> {
         // Collect global network configuration
         let global_config = self.collect_global_config(placement);
 
+        // Collect RAM configurations from placement and netlist
+        let ram_configs = self.collect_ram_configs(placement, netlist);
+
+        // Collect PLL configurations from placement and netlist
+        let pll_configs = self.collect_pll_configs(placement, netlist);
+
+        // Resolve PLL config bits to target tile coordinates
+        // For HX/LP devices, these target IO tiles; for UP5K, they target ipcon tiles
+        let pll_resolved_bits = self.resolve_pll_bits(&pll_configs);
+
         // Generate tile configurations
         for y in 0..height {
             for x in 0..width {
@@ -167,17 +206,76 @@ impl<'a> IceStormAscii<'a> {
                         | TileType::IoBottom
                         | TileType::IoLeft
                         | TileType::IoRight => {
-                            self.generate_io_tile(&mut asc, x, y, placement, routing, &io_configs);
+                            self.generate_io_tile(
+                                &mut asc,
+                                x,
+                                y,
+                                placement,
+                                routing,
+                                &io_configs,
+                                &pll_resolved_bits,
+                            );
                         }
                         TileType::RamTop => {
-                            self.generate_ramt_tile(&mut asc, x, y, placement);
+                            self.generate_ramt_tile(&mut asc, x, y, placement, &ram_configs);
                         }
                         TileType::RamBottom => {
-                            self.generate_ramb_tile(&mut asc, x, y, placement);
+                            self.generate_ramb_tile(&mut asc, x, y, placement, &ram_configs);
+                        }
+                        TileType::Pll => {
+                            self.generate_pll_tile(&mut asc, x, y, &pll_resolved_bits);
+                        }
+                        TileType::Dsp => {
+                            self.generate_dsp_tile(&mut asc, x, y, placement);
                         }
                         _ => {}
                     }
                 }
+            }
+        }
+
+        // Emit .ipcon_tile sections for PLL bits that target tiles without
+        // their own tile type (i.e., PLL bits resolved to non-Pll, non-IO tiles).
+        // For HX/LP, PLL bits target IO tiles and are already included above.
+        // For UP5K, PLL bits target ipcon tiles which are TileType::Pll in the grid.
+        // This handles edge cases where resolved bits target uncovered tiles.
+        for ((tx, ty), bits_to_set) in &pll_resolved_bits {
+            // Skip tiles already handled in the main loop
+            if let Some(tile) = self.device.tile_at(*tx, *ty) {
+                match tile.tile_type() {
+                    TileType::IoTop
+                    | TileType::IoBottom
+                    | TileType::IoLeft
+                    | TileType::IoRight
+                    | TileType::Pll => continue,
+                    _ => {}
+                }
+            }
+            // Emit standalone .ipcon_tile for bits targeting other tile positions
+            if let Some(ref chipdb) = self.chipdb {
+                let dims = chipdb
+                    .tile_dimensions
+                    .get(&TileType::Pll)
+                    .or_else(|| chipdb.tile_dimensions.get(&TileType::IoBottom))
+                    .copied()
+                    .unwrap_or(crate::device::ice40::chipdb_parser::TileBitDimensions {
+                        columns: 18,
+                        rows: 16,
+                    });
+                asc.push_str(&format!(".ipcon_tile {} {}\n", tx, ty));
+                let mut bits = vec![vec![false; dims.columns as usize]; dims.rows as usize];
+                for &(row, col) in bits_to_set {
+                    if (row as usize) < bits.len() && (col as usize) < bits[0].len() {
+                        bits[row as usize][col as usize] = true;
+                    }
+                }
+                for row in &bits {
+                    for &bit in row {
+                        asc.push(if bit { '1' } else { '0' });
+                    }
+                    asc.push('\n');
+                }
+                asc.push('\n');
             }
         }
 
@@ -359,13 +457,29 @@ impl<'a> IceStormAscii<'a> {
 
         for (cell_id, loc) in &placement.placements {
             if matches!(loc.bel_type, BelType::IoCell) {
-                // Get cell type from netlist to determine I/O direction
+                // Get I/O direction from cell function (primary) or cell type (fallback)
                 let config = if let Some(netlist) = netlist {
                     netlist
                         .cells
                         .iter()
                         .find(|c| c.id.0 == cell_id.0)
-                        .map(|cell| Self::derive_io_config(&cell.cell_type))
+                        .map(|cell| {
+                            let mut cfg = match &cell.function {
+                                Some(CellFunction::InputPad) | Some(CellFunction::ClockPad) => {
+                                    IoConfig::simple_input()
+                                }
+                                Some(CellFunction::OutputPad) => IoConfig::simple_output(),
+                                Some(CellFunction::BidirPad) => IoConfig::bidirectional(),
+                                _ => Self::derive_io_config(&cell.cell_type),
+                            };
+                            // Apply pull-up from cell parameters
+                            if let Some(pullup) = cell.parameters.get("PULLUP") {
+                                if pullup.eq_ignore_ascii_case("yes") || pullup == "1" {
+                                    cfg.pullup_enable = true;
+                                }
+                            }
+                            cfg
+                        })
                         .unwrap_or_default()
                 } else {
                     IoConfig::default()
@@ -568,6 +682,7 @@ impl<'a> IceStormAscii<'a> {
 
     /// Generate I/O tile configuration
     /// I/O tiles have 18 columns x 16 rows of config bits
+    #[allow(clippy::too_many_arguments)]
     fn generate_io_tile(
         &self,
         asc: &mut String,
@@ -576,6 +691,7 @@ impl<'a> IceStormAscii<'a> {
         placement: &PlacementResult,
         routing: &RoutingResult,
         io_configs: &HashMap<(u32, u32, usize), IoConfig>,
+        pll_resolved_bits: &HashMap<(u32, u32), Vec<(u8, u8)>>,
     ) {
         let cells_in_tile: Vec<_> = placement
             .placements
@@ -599,7 +715,10 @@ impl<'a> IceStormAscii<'a> {
             .copied()
             .collect();
 
-        if cells_in_tile.is_empty() && pips_in_tile.is_empty() {
+        // Check if this IO tile has PLL config bits
+        let has_pll_bits = pll_resolved_bits.contains_key(&(x, y));
+
+        if cells_in_tile.is_empty() && pips_in_tile.is_empty() && !has_pll_bits {
             return;
         }
 
@@ -672,6 +791,15 @@ impl<'a> IceStormAscii<'a> {
             }
         }
 
+        // Set PLL config bits that target this IO tile (HX/LP devices)
+        if let Some(pll_bits) = pll_resolved_bits.get(&(x, y)) {
+            for &(row, col) in pll_bits {
+                if (row as usize) < 16 && (col as usize) < 18 {
+                    bits[row as usize][col as usize] = true;
+                }
+            }
+        }
+
         // Output the 16 rows of 18 bits each
         for row in &bits {
             for &bit in row {
@@ -683,9 +811,308 @@ impl<'a> IceStormAscii<'a> {
         asc.push('\n');
     }
 
+    /// Collect RAM configurations from placement and netlist
+    fn collect_ram_configs(
+        &self,
+        placement: &PlacementResult,
+        netlist: Option<&GateNetlist>,
+    ) -> HashMap<(u32, u32), RamConfig> {
+        let mut ram_configs = HashMap::new();
+
+        let netlist = match netlist {
+            Some(n) => n,
+            None => return ram_configs,
+        };
+
+        for (cell_id, loc) in &placement.placements {
+            if !matches!(loc.bel_type, BelType::RamSlice) {
+                continue;
+            }
+
+            if let Some(cell) = netlist.cells.iter().find(|c| c.id.0 == cell_id.0) {
+                let read_mode = cell
+                    .parameters
+                    .get("READ_MODE")
+                    .and_then(|v| v.parse::<u8>().ok())
+                    .unwrap_or(0);
+                let write_mode = cell
+                    .parameters
+                    .get("WRITE_MODE")
+                    .and_then(|v| v.parse::<u8>().ok())
+                    .unwrap_or(0);
+
+                let init_data = Self::parse_ram_init_data(&cell.parameters);
+
+                ram_configs.insert(
+                    (loc.tile_x, loc.tile_y),
+                    RamConfig {
+                        read_mode,
+                        write_mode,
+                        init_data,
+                    },
+                );
+            }
+        }
+
+        ram_configs
+    }
+
+    /// Parse RAM initialization data from INIT_0..INIT_F parameters
+    /// Each INIT_x is a 256-bit hex string (64 hex chars), 16 total = 4096 bits
+    fn parse_ram_init_data(parameters: &indexmap::IndexMap<String, String>) -> Option<Vec<u8>> {
+        let mut has_any = false;
+        let mut data = vec![0u8; 512]; // 4096 bits = 512 bytes
+
+        for i in 0..16u8 {
+            let key = format!("INIT_{:X}", i);
+            if let Some(hex_str) = parameters.get(&key) {
+                has_any = true;
+                let hex = hex_str.trim_start_matches("0x").trim_start_matches("0X");
+                let offset = i as usize * 32; // 256 bits = 32 bytes per INIT_x
+                for (j, chunk) in hex.as_bytes().chunks(2).enumerate() {
+                    if offset + j < data.len() {
+                        if let Ok(byte) =
+                            u8::from_str_radix(std::str::from_utf8(chunk).unwrap_or("00"), 16)
+                        {
+                            data[offset + j] = byte;
+                        }
+                    }
+                }
+            }
+        }
+
+        if has_any {
+            Some(data)
+        } else {
+            None
+        }
+    }
+
+    /// Collect PLL configurations from placement and netlist
+    fn collect_pll_configs(
+        &self,
+        placement: &PlacementResult,
+        netlist: Option<&GateNetlist>,
+    ) -> HashMap<(u32, u32), PllBitstreamConfig> {
+        let mut pll_configs = HashMap::new();
+
+        let netlist = match netlist {
+            Some(n) => n,
+            None => return pll_configs,
+        };
+
+        for (cell_id, loc) in &placement.placements {
+            if !matches!(loc.bel_type, BelType::Pll) {
+                continue;
+            }
+
+            if let Some(cell) = netlist.cells.iter().find(|c| c.id.0 == cell_id.0) {
+                let divr = cell
+                    .parameters
+                    .get("DIVR")
+                    .and_then(|v| v.parse::<u8>().ok())
+                    .unwrap_or(0);
+                let divf = cell
+                    .parameters
+                    .get("DIVF")
+                    .and_then(|v| v.parse::<u8>().ok())
+                    .unwrap_or(0);
+                let divq = cell
+                    .parameters
+                    .get("DIVQ")
+                    .and_then(|v| v.parse::<u8>().ok())
+                    .unwrap_or(0);
+                let filter_range = cell
+                    .parameters
+                    .get("FILTER_RANGE")
+                    .and_then(|v| v.parse::<u8>().ok())
+                    .unwrap_or(0);
+                let feedback_path = match cell.parameters.get("FEEDBACK_PATH").map(|s| s.as_str()) {
+                    Some("SIMPLE") | None => 0,
+                    Some("DELAY") => 1,
+                    Some("PHASE_AND_DELAY") => 2,
+                    Some("EXTERNAL") => 4,
+                    _ => 0,
+                };
+                let plltype = match cell.cell_type.as_str() {
+                    "SB_PLL40_PAD" => 1,
+                    "SB_PLL40_2_PAD" => 4,
+                    "SB_PLL40_2F_PAD" => 6,
+                    "SB_PLL40_2F_CORE" => 7,
+                    _ => 0, // SB_PLL40_CORE
+                };
+
+                pll_configs.insert(
+                    (loc.tile_x, loc.tile_y),
+                    PllBitstreamConfig {
+                        divr,
+                        divf,
+                        divq,
+                        filter_range,
+                        feedback_path,
+                        plltype,
+                    },
+                );
+            }
+        }
+
+        pll_configs
+    }
+
+    /// Resolve all PLL config parameters to their actual bit positions in target tiles.
+    /// Returns a map of (tile_x, tile_y) -> [(row, col)] for all bits that need to be set.
+    /// For HX/LP devices, the target tiles are IO tiles. For UP5K, they are ipcon tiles.
+    fn resolve_pll_bits(
+        &self,
+        pll_configs: &HashMap<(u32, u32), PllBitstreamConfig>,
+    ) -> HashMap<(u32, u32), Vec<(u8, u8)>> {
+        let mut tile_bits: HashMap<(u32, u32), Vec<(u8, u8)>> = HashMap::new();
+
+        let chipdb = match &self.chipdb {
+            Some(db) => db,
+            None => return tile_bits,
+        };
+
+        let pll_extra = match chipdb.pll_extra_cell() {
+            Some(p) => p,
+            None => return tile_bits,
+        };
+
+        for config in pll_configs.values() {
+            // Set DIVR bits (4-bit)
+            for i in 0..4u8 {
+                if (config.divr >> i) & 1 == 1 {
+                    let param = format!("DIVR_{}", i);
+                    if let Some((tx, ty, row, col)) =
+                        chipdb.resolve_pll_param_bit(pll_extra, &param)
+                    {
+                        tile_bits.entry((tx, ty)).or_default().push((row, col));
+                    }
+                }
+            }
+
+            // Set DIVF bits (7-bit)
+            for i in 0..7u8 {
+                if (config.divf >> i) & 1 == 1 {
+                    let param = format!("DIVF_{}", i);
+                    if let Some((tx, ty, row, col)) =
+                        chipdb.resolve_pll_param_bit(pll_extra, &param)
+                    {
+                        tile_bits.entry((tx, ty)).or_default().push((row, col));
+                    }
+                }
+            }
+
+            // Set DIVQ bits (3-bit)
+            for i in 0..3u8 {
+                if (config.divq >> i) & 1 == 1 {
+                    let param = format!("DIVQ_{}", i);
+                    if let Some((tx, ty, row, col)) =
+                        chipdb.resolve_pll_param_bit(pll_extra, &param)
+                    {
+                        tile_bits.entry((tx, ty)).or_default().push((row, col));
+                    }
+                }
+            }
+
+            // Set FILTER_RANGE bits (3-bit)
+            for i in 0..3u8 {
+                if (config.filter_range >> i) & 1 == 1 {
+                    let param = format!("FILTER_RANGE_{}", i);
+                    if let Some((tx, ty, row, col)) =
+                        chipdb.resolve_pll_param_bit(pll_extra, &param)
+                    {
+                        tile_bits.entry((tx, ty)).or_default().push((row, col));
+                    }
+                }
+            }
+
+            // Set FEEDBACK_PATH bits (3-bit)
+            for i in 0..3u8 {
+                if (config.feedback_path >> i) & 1 == 1 {
+                    let param = format!("FEEDBACK_PATH_{}", i);
+                    if let Some((tx, ty, row, col)) =
+                        chipdb.resolve_pll_param_bit(pll_extra, &param)
+                    {
+                        tile_bits.entry((tx, ty)).or_default().push((row, col));
+                    }
+                }
+            }
+
+            // Set PLLTYPE bits (3-bit)
+            for i in 0..3u8 {
+                if (config.plltype >> i) & 1 == 1 {
+                    let param = format!("PLLTYPE_{}", i);
+                    if let Some((tx, ty, row, col)) =
+                        chipdb.resolve_pll_param_bit(pll_extra, &param)
+                    {
+                        tile_bits.entry((tx, ty)).or_default().push((row, col));
+                    }
+                }
+            }
+        }
+
+        tile_bits
+    }
+
+    /// Generate PLL/IpCon tile configuration for dedicated ipcon tiles (UP5K).
+    /// Uses pre-resolved PLL bits from resolve_pll_bits().
+    fn generate_pll_tile(
+        &self,
+        asc: &mut String,
+        x: u32,
+        y: u32,
+        pll_resolved_bits: &HashMap<(u32, u32), Vec<(u8, u8)>>,
+    ) {
+        // Check if any resolved PLL bits target this tile
+        let bits_to_set = match pll_resolved_bits.get(&(x, y)) {
+            Some(bits) if !bits.is_empty() => bits,
+            _ => return,
+        };
+
+        let chipdb = match &self.chipdb {
+            Some(db) => db,
+            None => return,
+        };
+
+        let dims = chipdb
+            .tile_dimensions
+            .get(&TileType::Pll)
+            .copied()
+            .unwrap_or(crate::device::ice40::chipdb_parser::TileBitDimensions {
+                columns: 18,
+                rows: 16,
+            });
+
+        asc.push_str(&format!(".ipcon_tile {} {}\n", x, y));
+
+        let mut bits = vec![vec![false; dims.columns as usize]; dims.rows as usize];
+
+        for &(row, col) in bits_to_set {
+            if (row as usize) < bits.len() && (col as usize) < bits[0].len() {
+                bits[row as usize][col as usize] = true;
+            }
+        }
+
+        for row in &bits {
+            for &bit in row {
+                asc.push(if bit { '1' } else { '0' });
+            }
+            asc.push('\n');
+        }
+        asc.push('\n');
+    }
+
     /// Generate RAM bottom tile configuration
     /// RAM tiles have 42 columns x 16 rows of config bits
-    fn generate_ramb_tile(&self, asc: &mut String, x: u32, y: u32, placement: &PlacementResult) {
+    fn generate_ramb_tile(
+        &self,
+        asc: &mut String,
+        x: u32,
+        y: u32,
+        placement: &PlacementResult,
+        ram_configs: &HashMap<(u32, u32), RamConfig>,
+    ) {
         let cells_in_tile: Vec<_> = placement
             .placements
             .iter()
@@ -701,7 +1128,31 @@ impl<'a> IceStormAscii<'a> {
         asc.push_str(&format!(".ramb_tile {} {}\n", x, y));
 
         // Create a 16x42 bit array (16 rows, 42 columns)
-        let bits = [[false; 42]; 16];
+        let mut bits = [[false; 42]; 16];
+
+        // Set READ_MODE/WRITE_MODE config bits from chipdb CBIT positions
+        if let Some(config) = ram_configs.get(&(x, y)) {
+            if let Some(ref chipdb) = self.chipdb {
+                if let Some(tile_bits) = chipdb.tile_bits.get(&TileType::RamBottom) {
+                    for cb in tile_bits {
+                        let value = match cb.name.as_str() {
+                            "RamConfig.CBIT_0" => config.read_mode & 1 != 0,
+                            "RamConfig.CBIT_1" => (config.read_mode >> 1) & 1 != 0,
+                            "RamConfig.CBIT_2" => config.write_mode & 1 != 0,
+                            "RamConfig.CBIT_3" => (config.write_mode >> 1) & 1 != 0,
+                            _ => false,
+                        };
+                        if value {
+                            let row = cb.row as usize;
+                            let col = cb.col as usize;
+                            if row < 16 && col < 42 {
+                                bits[row][col] = true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
 
         // Output the 16 rows of 42 bits each
         for row in &bits {
@@ -712,10 +1163,38 @@ impl<'a> IceStormAscii<'a> {
         }
 
         asc.push('\n');
+
+        // Emit .ram_data section for initialization data
+        if let Some(config) = ram_configs.get(&(x, y)) {
+            if let Some(ref init_data) = config.init_data {
+                asc.push_str(&format!(".ram_data {} {}\n", x, y));
+                // 16 lines (INIT_0..INIT_F), each 64 hex chars (256 bits)
+                for line in 0..16 {
+                    let offset = line * 32;
+                    for j in 0..32 {
+                        let byte = if offset + j < init_data.len() {
+                            init_data[offset + j]
+                        } else {
+                            0
+                        };
+                        asc.push_str(&format!("{:02x}", byte));
+                    }
+                    asc.push('\n');
+                }
+                asc.push('\n');
+            }
+        }
     }
 
     /// Generate RAM top tile configuration
-    fn generate_ramt_tile(&self, asc: &mut String, x: u32, y: u32, placement: &PlacementResult) {
+    fn generate_ramt_tile(
+        &self,
+        asc: &mut String,
+        x: u32,
+        y: u32,
+        placement: &PlacementResult,
+        ram_configs: &HashMap<(u32, u32), RamConfig>,
+    ) {
         let cells_in_tile: Vec<_> = placement
             .placements
             .iter()
@@ -731,9 +1210,86 @@ impl<'a> IceStormAscii<'a> {
         asc.push_str(&format!(".ramt_tile {} {}\n", x, y));
 
         // Create a 16x42 bit array (16 rows, 42 columns)
-        let bits = [[false; 42]; 16];
+        let mut bits = [[false; 42]; 16];
+
+        // Set READ_MODE/WRITE_MODE config bits from chipdb CBIT positions
+        if let Some(config) = ram_configs.get(&(x, y)) {
+            if let Some(ref chipdb) = self.chipdb {
+                if let Some(tile_bits) = chipdb.tile_bits.get(&TileType::RamTop) {
+                    for cb in tile_bits {
+                        let value = match cb.name.as_str() {
+                            "RamConfig.CBIT_0" => config.read_mode & 1 != 0,
+                            "RamConfig.CBIT_1" => (config.read_mode >> 1) & 1 != 0,
+                            "RamConfig.CBIT_2" => config.write_mode & 1 != 0,
+                            "RamConfig.CBIT_3" => (config.write_mode >> 1) & 1 != 0,
+                            _ => false,
+                        };
+                        if value {
+                            let row = cb.row as usize;
+                            let col = cb.col as usize;
+                            if row < 16 && col < 42 {
+                                bits[row][col] = true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
 
         // Output the 16 rows of 42 bits each
+        for row in &bits {
+            for &bit in row {
+                asc.push(if bit { '1' } else { '0' });
+            }
+            asc.push('\n');
+        }
+
+        asc.push('\n');
+
+        // Emit .ram_data section for initialization data
+        if let Some(config) = ram_configs.get(&(x, y)) {
+            if let Some(ref init_data) = config.init_data {
+                asc.push_str(&format!(".ram_data {} {}\n", x, y));
+                // 16 lines (INIT_0..INIT_F), each 64 hex chars (256 bits)
+                for line in 0..16 {
+                    let offset = line * 32;
+                    for j in 0..32 {
+                        let byte = if offset + j < init_data.len() {
+                            init_data[offset + j]
+                        } else {
+                            0
+                        };
+                        asc.push_str(&format!("{:02x}", byte));
+                    }
+                    asc.push('\n');
+                }
+                asc.push('\n');
+            }
+        }
+    }
+
+    /// Generate DSP tile configuration (placeholder)
+    /// DSP tiles use the same 42x16 format as RAM tiles in iCE40 UP5K
+    fn generate_dsp_tile(&self, asc: &mut String, x: u32, y: u32, placement: &PlacementResult) {
+        let cells_in_tile: Vec<_> = placement
+            .placements
+            .iter()
+            .filter(|(_, loc)| {
+                loc.tile_x == x && loc.tile_y == y && matches!(loc.bel_type, BelType::DspSlice)
+            })
+            .collect();
+
+        if cells_in_tile.is_empty() {
+            return;
+        }
+
+        // DSP tiles are emitted as .dsp0_tile through .dsp3_tile in icestorm
+        // For now, use a generic format
+        asc.push_str(&format!(".dsp0_tile {} {}\n", x, y));
+
+        // Create a 16x42 bit array (all zeros — placeholder)
+        let bits = [[false; 42]; 16];
+
         for row in &bits {
             for &bit in row {
                 asc.push(if bit { '1' } else { '0' });

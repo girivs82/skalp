@@ -12,9 +12,10 @@ pub use chipdb_parser::ChipDb;
 pub use tiles::Ice40Tile;
 
 use super::{
-    Bel, BelId, BelPin, BelType, ClockResources, Device, DeviceFamily, DeviceStats, IoSide, IoTile,
-    LogicTile, MemoryBlock, PackagePins, PinDirection, Pip, PipId, RoutingArchitecture,
-    SwitchPattern, Tile, TileType, Wire, WireDirection, WireId, WireSegment, WireType,
+    Bel, BelId, BelPin, BelType, ClockResources, Device, DeviceFamily, DeviceStats, DspTile,
+    IoSide, IoTile, LogicTile, MemoryBlock, PackagePins, PinDirection, Pip, PipId,
+    RoutingArchitecture, SwitchPattern, Tile, TileType, Wire, WireDirection, WireId, WireSegment,
+    WireType,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -131,6 +132,8 @@ pub struct Ice40Device {
     pub io_tiles: Vec<IoTile>,
     /// Memory blocks
     pub memory_blocks: Vec<MemoryBlock>,
+    /// DSP tiles
+    pub dsp_tiles: Vec<DspTile>,
 }
 
 impl Ice40Device {
@@ -182,6 +185,7 @@ impl Ice40Device {
             logic_tiles: Vec::new(),
             io_tiles: Vec::new(),
             memory_blocks: Vec::new(),
+            dsp_tiles: Vec::new(),
         };
 
         // Build wires from chipdb
@@ -264,6 +268,9 @@ impl Ice40Device {
                         widths: vec![1, 2, 4, 8, 16],
                     });
                 }
+                TileType::Dsp => {
+                    device.dsp_tiles.push(DspTile { x, y, mac_count: 1 });
+                }
                 _ => {}
             }
 
@@ -314,6 +321,7 @@ impl Ice40Device {
             logic_tiles: Vec::new(),
             io_tiles: Vec::new(),
             memory_blocks: Vec::new(),
+            dsp_tiles: Vec::new(),
         };
         device.build_architecture();
         device
@@ -572,6 +580,9 @@ impl Ice40Device {
                                 widths: vec![1, 2, 4, 8, 16],
                             });
                         }
+                        TileType::Dsp => {
+                            self.dsp_tiles.push(DspTile { x, y, mac_count: 1 });
+                        }
                         _ => {}
                     }
 
@@ -627,6 +638,11 @@ impl Ice40Device {
             } else {
                 return TileType::RamBottom;
             }
+        }
+
+        // DSP columns (UP5K only)
+        if self.variant.has_dsp() && x == 23 && (1..=8).contains(&y) {
+            return TileType::Dsp;
         }
 
         // Everything else is logic
@@ -821,6 +837,53 @@ impl Ice40Device {
                 };
                 *bel_id += 1;
                 bels.push(ram_bel);
+            }
+            TileType::Dsp => {
+                // DSP tile with MAC16 primitive
+                let dsp_bel = Bel {
+                    id: BelId(*bel_id),
+                    bel_type: BelType::DspSlice,
+                    name: "MAC16".to_string(),
+                    pins: vec![
+                        BelPin {
+                            name: "A".to_string(),
+                            direction: PinDirection::Input,
+                            wire: None,
+                        },
+                        BelPin {
+                            name: "B".to_string(),
+                            direction: PinDirection::Input,
+                            wire: None,
+                        },
+                        BelPin {
+                            name: "C".to_string(),
+                            direction: PinDirection::Input,
+                            wire: None,
+                        },
+                        BelPin {
+                            name: "D".to_string(),
+                            direction: PinDirection::Input,
+                            wire: None,
+                        },
+                        BelPin {
+                            name: "CLK".to_string(),
+                            direction: PinDirection::Input,
+                            wire: None,
+                        },
+                        BelPin {
+                            name: "CE".to_string(),
+                            direction: PinDirection::Input,
+                            wire: None,
+                        },
+                        BelPin {
+                            name: "O".to_string(),
+                            direction: PinDirection::Output,
+                            wire: None,
+                        },
+                    ],
+                };
+                *bel_id += 1;
+                bels.push(dsp_bel);
             }
             _ => {}
         }
@@ -1329,6 +1392,12 @@ impl Device for Ice40Device {
             }
             BelType::RamSlice => cell_type.starts_with("SB_RAM") || cell_type.contains("RAM"),
             BelType::GlobalBuf => cell_type == "SB_GB" || cell_type.contains("GBUF"),
+            BelType::DspSlice => {
+                cell_type.starts_with("SB_MAC")
+                    || cell_type.contains("MAC")
+                    || cell_type.contains("MULT")
+            }
+            BelType::Pll => cell_type.starts_with("SB_PLL") || cell_type.contains("PLL"),
             _ => false,
         }
     }

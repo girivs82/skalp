@@ -208,6 +208,16 @@ pub struct MemoryBlock {
     pub widths: Vec<u8>,
 }
 
+/// DSP block description
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DspTile {
+    /// Tile coordinates
+    pub x: u32,
+    pub y: u32,
+    /// Number of MAC16 units at this location
+    pub mac_count: u8,
+}
+
 /// Package pin mapping
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PackagePins {

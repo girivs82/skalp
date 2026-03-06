@@ -23,6 +23,7 @@ use crate::device::{BelType, Device, TileType};
 use crate::error::{PlaceRouteError, Result};
 use serde::{Deserialize, Serialize};
 use skalp_lir::gate_netlist::{CellId, GateNetlist};
+use skalp_lir::tech_library::CellFunction;
 use std::collections::HashMap;
 
 /// Placement algorithm selection
@@ -193,6 +194,20 @@ impl<D: Device + Clone> Placer<D> {
         // Check device capacity
         self.check_capacity(netlist)?;
 
+        // Extract inline constraints from cell parameters (LOC, IO_STANDARD, etc.)
+        let inline_constraints = Self::extract_inline_constraints(netlist);
+        if !inline_constraints.is_empty() {
+            for constraint in inline_constraints.all() {
+                if !self
+                    .config
+                    .io_constraints
+                    .has_constraint(&constraint.signal_name)
+                {
+                    self.config.io_constraints.add(constraint.clone());
+                }
+            }
+        }
+
         // Validate and resolve I/O constraints
         let resolved_constraints = if !self.config.io_constraints.is_empty() {
             self.config.io_constraints.validate(&self.device)?;
@@ -296,6 +311,52 @@ impl<D: Device + Clone> Placer<D> {
         Ok(result)
     }
 
+    /// Extract inline IO constraints from cell parameters
+    ///
+    /// Reads LOC, IO_STANDARD, and DRIVE_STRENGTH from IO cell parameters
+    /// (set by tech mapper from inline annotations like `@ { pin: "A1" }`)
+    pub(crate) fn extract_inline_constraints(netlist: &GateNetlist) -> IoConstraints {
+        let mut constraints = IoConstraints::new();
+
+        for cell in &netlist.cells {
+            let is_io = matches!(
+                &cell.function,
+                Some(CellFunction::InputPad)
+                    | Some(CellFunction::OutputPad)
+                    | Some(CellFunction::BidirPad)
+                    | Some(CellFunction::ClockPad)
+            );
+
+            if !is_io {
+                continue;
+            }
+
+            if let Some(loc) = cell.parameters.get("LOC") {
+                // Extract signal name from path, stripping buffer suffixes
+                let signal_name = cell.path.split('.').next_back().unwrap_or(&cell.path);
+                let signal_name = signal_name
+                    .strip_suffix("_ibuf")
+                    .or_else(|| signal_name.strip_suffix("_obuf"))
+                    .unwrap_or(signal_name);
+
+                let mut constraint = PinConstraint::new(signal_name, loc.as_str());
+
+                if let Some(standard) = cell.parameters.get("IO_STANDARD") {
+                    constraint = constraint.with_io_standard(standard.as_str());
+                }
+                if let Some(drive) = cell.parameters.get("DRIVE_STRENGTH") {
+                    if let Ok(strength) = drive.parse::<u8>() {
+                        constraint = constraint.with_drive_strength(strength);
+                    }
+                }
+
+                constraints.add(constraint);
+            }
+        }
+
+        constraints
+    }
+
     /// Check if design fits on device
     fn check_capacity(&self, netlist: &GateNetlist) -> Result<()> {
         let stats = self.device.stats();
@@ -305,6 +366,7 @@ impl<D: Device + Clone> Placer<D> {
         let mut required_ffs = 0usize;
         let mut required_ios = 0usize;
         let mut required_brams = 0usize;
+        let mut required_dsps = 0usize;
 
         for cell in &netlist.cells {
             let cell_type = &cell.cell_type;
@@ -316,6 +378,11 @@ impl<D: Device + Clone> Placer<D> {
                 required_ios += 1;
             } else if cell_type.contains("RAM") || cell_type.starts_with("SB_RAM") {
                 required_brams += 1;
+            } else if cell_type.contains("MAC")
+                || cell_type.starts_with("SB_MAC")
+                || cell_type.contains("MULT")
+            {
+                required_dsps += 1;
             }
         }
 
@@ -346,6 +413,13 @@ impl<D: Device + Clone> Placer<D> {
                 resource: "BRAMs".to_string(),
                 required: required_brams,
                 available: stats.total_brams,
+            });
+        }
+        if required_dsps > stats.total_dsps {
+            return Err(PlaceRouteError::CapacityExceeded {
+                resource: "DSPs".to_string(),
+                required: required_dsps,
+                available: stats.total_dsps,
             });
         }
 
@@ -439,7 +513,14 @@ impl<D: Device + Clone> Placer<D> {
                 let y = rng.gen_range(0..height);
 
                 if let Some(tile) = self.device.tile_at(x, y) {
-                    if tile.tile_type() == tile_type {
+                    // Check tile type match, or fallback: check if tile has a compatible BEL
+                    // (needed for BELs like PLL that live in IO tiles on HX/LP devices)
+                    let tile_ok = tile.tile_type() == tile_type
+                        || tile
+                            .bels()
+                            .iter()
+                            .any(|b| Self::bel_types_compatible(b.bel_type, bel_type));
+                    if tile_ok {
                         // Find an unused BEL
                         for (bel_idx, bel) in tile.bels().iter().enumerate() {
                             if Self::bel_types_compatible(bel.bel_type, bel_type)
@@ -492,6 +573,13 @@ impl<D: Device + Clone> Placer<D> {
             BelType::RamSlice
         } else if cell_type.contains("GB") || cell_type.starts_with("SB_GB") {
             BelType::GlobalBuf
+        } else if cell_type.contains("PLL") || cell_type.starts_with("SB_PLL") {
+            BelType::Pll
+        } else if cell_type.contains("MAC")
+            || cell_type.starts_with("SB_MAC")
+            || cell_type.contains("MULT")
+        {
+            BelType::DspSlice
         } else {
             // Default to LUT for unknown cells
             BelType::Lut4
