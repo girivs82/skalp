@@ -278,10 +278,34 @@ impl<'a> CellPacker<'a> {
         self.stats.total_lcs =
             self.stats.lut_only + self.stats.lut_dff + self.stats.dff_only + self.stats.carry_only;
 
+        // Detect carry chains and co-pack LUT+carry pairs
+        let carry_chains = self.detect_carry_chains();
+
+        // Co-pack carry+LUT pairs: upgrade CarryOnly to LutCarry where a LUT feeds the carry
+        for chain in &carry_chains {
+            for (i, &carry_id) in chain.cells.iter().enumerate() {
+                if let Some(lut_id) = chain.associated_luts[i] {
+                    // Find the packed cell for this carry
+                    if let Some(&packed_idx) = self.cell_to_packed.get(&carry_id) {
+                        let packed = &mut self.packed_cells[packed_idx];
+                        if packed.cell_type == PackedCellType::CarryOnly {
+                            packed.cell_type = PackedCellType::LutCarry;
+                            packed.lut_cell = Some(lut_id);
+                            // Copy LUT init
+                            if let Some(lut_cell) = self.netlist.cells.get(lut_id.0 as usize) {
+                                packed.lut_init = Some(Self::get_lut_init(lut_cell));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         PackingResult {
             packed_cells: self.packed_cells.clone(),
             cell_to_packed: self.cell_to_packed.clone(),
             stats: self.stats.clone(),
+            carry_chains,
         }
     }
 
@@ -337,6 +361,125 @@ impl<'a> CellPacker<'a> {
     fn find_dff_d_input_net(&self, dff: &Cell) -> Option<usize> {
         // DFF inputs: first input is typically D
         dff.inputs.first().map(|n| n.0 as usize)
+    }
+
+    /// Detect carry chains by tracing carry_out→carry_in connectivity
+    ///
+    /// Builds ordered chains from chain head (no carry input) to tail,
+    /// and finds associated LUTs and DFFs at each position.
+    fn detect_carry_chains(&self) -> Vec<CarryChain> {
+        // Find all carry cells
+        let carry_cells: Vec<CellId> = self
+            .netlist
+            .cells
+            .iter()
+            .filter(|c| c.cell_type.to_uppercase().contains("CARRY"))
+            .map(|c| c.id)
+            .collect();
+
+        if carry_cells.is_empty() {
+            return Vec::new();
+        }
+
+        let carry_set: HashSet<CellId> = carry_cells.iter().copied().collect();
+
+        // Build carry_out→carry_in map by tracing nets where driver is SB_CARRY
+        // and sink is SB_CARRY. The carry output (CO) drives the next carry's CI input.
+        let mut carry_successor: HashMap<CellId, CellId> = HashMap::new();
+        let mut carry_predecessor: HashSet<CellId> = HashSet::new();
+
+        for net in &self.netlist.nets {
+            let driver = match net.driver {
+                Some(d) if carry_set.contains(&d) => d,
+                _ => continue,
+            };
+
+            for (sink_id, _pin) in &net.fanout {
+                if carry_set.contains(sink_id) && *sink_id != driver {
+                    carry_successor.insert(driver, *sink_id);
+                    carry_predecessor.insert(*sink_id);
+                }
+            }
+        }
+
+        // Find chain heads: carry cells NOT driven by another carry
+        let heads: Vec<CellId> = carry_cells
+            .iter()
+            .filter(|c| !carry_predecessor.contains(c))
+            .copied()
+            .collect();
+
+        let mut chains = Vec::new();
+
+        for head in heads {
+            let mut cells = Vec::new();
+            let mut current = head;
+
+            loop {
+                cells.push(current);
+                match carry_successor.get(&current) {
+                    Some(&next) => current = next,
+                    None => break,
+                }
+            }
+
+            // Find associated LUTs and DFFs for each carry position
+            let associated_luts: Vec<Option<CellId>> = cells
+                .iter()
+                .map(|&carry_id| self.find_associated_lut(carry_id))
+                .collect();
+
+            let associated_dffs: Vec<Option<CellId>> = cells
+                .iter()
+                .map(|&carry_id| self.find_associated_dff(carry_id))
+                .collect();
+
+            let chain_id = chains.len();
+            chains.push(CarryChain {
+                cells,
+                associated_luts,
+                associated_dffs,
+                chain_id,
+            });
+        }
+
+        chains
+    }
+
+    /// Find the LUT whose output drives this carry cell's I1 or I2 input
+    fn find_associated_lut(&self, carry_id: CellId) -> Option<CellId> {
+        let carry_cell = &self.netlist.cells[carry_id.0 as usize];
+
+        // Check each input net of the carry — look for a LUT driver
+        for &input_net_id in &carry_cell.inputs {
+            let net = &self.netlist.nets[input_net_id.0 as usize];
+            if let Some(driver_id) = net.driver {
+                if driver_id != carry_id {
+                    let driver = &self.netlist.cells[driver_id.0 as usize];
+                    if Self::is_lut(driver) {
+                        return Some(driver_id);
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Find a DFF driven by this carry cell's CO output
+    fn find_associated_dff(&self, carry_id: CellId) -> Option<CellId> {
+        let carry_cell = &self.netlist.cells[carry_id.0 as usize];
+
+        // Check each output net of the carry — look for a DFF sink
+        for &output_net_id in &carry_cell.outputs {
+            let net = &self.netlist.nets[output_net_id.0 as usize];
+            for (sink_id, _pin) in &net.fanout {
+                let sink = &self.netlist.cells[sink_id.0 as usize];
+                if Self::is_dff(sink) {
+                    return Some(*sink_id);
+                }
+            }
+        }
+        None
     }
 
     /// Pack a single cell
@@ -433,6 +576,19 @@ impl<'a> CellPacker<'a> {
     }
 }
 
+/// A detected carry chain (ordered sequence of carry cells)
+#[derive(Debug, Clone)]
+pub struct CarryChain {
+    /// Carry cells in LSB→MSB order
+    pub cells: Vec<CellId>,
+    /// LUT paired with each carry (same LC slot)
+    pub associated_luts: Vec<Option<CellId>>,
+    /// Output DFF at each position
+    pub associated_dffs: Vec<Option<CellId>>,
+    /// Unique chain identifier
+    pub chain_id: usize,
+}
+
 /// Result of packing
 #[derive(Debug, Clone)]
 pub struct PackingResult {
@@ -442,6 +598,8 @@ pub struct PackingResult {
     pub cell_to_packed: HashMap<CellId, usize>,
     /// Packing statistics
     pub stats: PackingStats,
+    /// Detected carry chains (ordered LSB→MSB)
+    pub carry_chains: Vec<CarryChain>,
 }
 
 impl PackingResult {
@@ -619,5 +777,170 @@ mod tests {
         assert!(!config.has_set);
         assert!(!config.has_enable);
         assert!(!config.neg_clock);
+    }
+
+    /// Build an N-bit adder netlist: N LUTs + N carry cells chained together
+    fn create_adder_netlist(n: usize) -> GateNetlist {
+        let mut netlist = GateNetlist::new("adder".to_string(), "ice40".to_string());
+
+        // Create nets for carry chain connections: cin, c0, c1, ..., c(n-1)
+        // Net 0 = carry_in (ground), nets 1..n = carry propagation, net n = carry_out
+        let mut carry_nets = Vec::new();
+        for i in 0..=n {
+            let net = GateNet::new(GateNetId(i as u32), format!("carry_{}", i));
+            carry_nets.push(netlist.add_net(net));
+        }
+
+        // Create LUT output nets
+        let mut lut_out_nets = Vec::new();
+        for i in 0..n {
+            let net = GateNet::new(
+                GateNetId((n + 1 + i) as u32),
+                format!("lut{}_out", i),
+            );
+            lut_out_nets.push(netlist.add_net(net));
+        }
+
+        // Create DFF output nets
+        let mut dff_out_nets = Vec::new();
+        for i in 0..n {
+            let net = GateNet::new(
+                GateNetId((2 * n + 1 + i) as u32),
+                format!("dff{}_out", i),
+            );
+            dff_out_nets.push(netlist.add_net(net));
+        }
+
+        // Create N LUT cells
+        for i in 0..n {
+            let lut = Cell::new_comb(
+                CellId(0),
+                "SB_LUT4".to_string(),
+                "ice40".to_string(),
+                0.0,
+                format!("adder.lut{}", i),
+                vec![carry_nets[i]],
+                vec![lut_out_nets[i]],
+            );
+            let lut_id = netlist.add_cell(lut);
+            netlist.nets[lut_out_nets[i].0 as usize].driver = Some(lut_id);
+        }
+
+        // Create N carry cells chained: carry_in → carry[0] → carry[1] → ... → carry[n-1]
+        for i in 0..n {
+            let carry = Cell::new_comb(
+                CellId(0),
+                "SB_CARRY".to_string(),
+                "ice40".to_string(),
+                0.0,
+                format!("adder.carry{}", i),
+                vec![lut_out_nets[i], carry_nets[i]], // I1=LUT, CI=prev carry
+                vec![carry_nets[i + 1]],              // CO=next carry
+            );
+            let carry_id = netlist.add_cell(carry);
+            netlist.nets[carry_nets[i + 1].0 as usize].driver = Some(carry_id);
+            // LUT output drives carry input
+            netlist.nets[lut_out_nets[i].0 as usize]
+                .fanout
+                .push((carry_id, 0));
+            // Previous carry drives this carry
+            netlist.nets[carry_nets[i].0 as usize]
+                .fanout
+                .push((carry_id, 1));
+        }
+
+        // Create N DFF cells driven by carry outputs
+        for i in 0..n {
+            let dff = Cell::new_comb(
+                CellId(0),
+                "SB_DFF".to_string(),
+                "ice40".to_string(),
+                0.0,
+                format!("adder.dff{}", i),
+                vec![carry_nets[i + 1]],
+                vec![dff_out_nets[i]],
+            );
+            let dff_id = netlist.add_cell(dff);
+            netlist.nets[dff_out_nets[i].0 as usize].driver = Some(dff_id);
+            netlist.nets[carry_nets[i + 1].0 as usize]
+                .fanout
+                .push((dff_id, 0));
+        }
+
+        netlist
+    }
+
+    #[test]
+    fn test_carry_chain_detection() {
+        let netlist = create_adder_netlist(8);
+        let mut packer = CellPacker::new(&netlist);
+        let result = packer.pack();
+
+        // Should detect exactly 1 carry chain
+        assert_eq!(
+            result.carry_chains.len(),
+            1,
+            "Should detect one carry chain"
+        );
+
+        let chain = &result.carry_chains[0];
+        assert_eq!(chain.cells.len(), 8, "Chain should have 8 carry cells");
+
+        // Verify ordering: cell[0] should be the head (driven by external carry_in)
+        // and each subsequent cell should be the successor
+        for i in 0..7 {
+            // Verify chain[i]'s output drives chain[i+1]'s input
+            let carry_cell = &netlist.cells[chain.cells[i].0 as usize];
+            let next_carry = chain.cells[i + 1];
+            let output_net_id = carry_cell.outputs[0];
+            let net = &netlist.nets[output_net_id.0 as usize];
+            let drives_next = net.fanout.iter().any(|(id, _)| *id == next_carry);
+            assert!(
+                drives_next,
+                "Carry {} should drive carry {}",
+                i,
+                i + 1
+            );
+        }
+
+        // Each carry should have an associated LUT
+        for (i, lut) in chain.associated_luts.iter().enumerate() {
+            assert!(
+                lut.is_some(),
+                "Carry {} should have an associated LUT",
+                i
+            );
+        }
+
+        // Each carry should have an associated DFF (driven by CO)
+        for (i, dff) in chain.associated_dffs.iter().enumerate() {
+            assert!(
+                dff.is_some(),
+                "Carry {} should have an associated DFF",
+                i
+            );
+        }
+    }
+
+    #[test]
+    fn test_carry_chain_lut_carry_copacking() {
+        let netlist = create_adder_netlist(4);
+        let mut packer = CellPacker::new(&netlist);
+        let result = packer.pack();
+
+        // After co-packing, carry cells with associated LUTs should be LutCarry type
+        let chain = &result.carry_chains[0];
+        for &carry_id in &chain.cells {
+            let packed = result.get_packed(carry_id).unwrap();
+            assert_eq!(
+                packed.cell_type,
+                PackedCellType::LutCarry,
+                "Carry with associated LUT should be LutCarry"
+            );
+            assert!(
+                packed.lut_cell.is_some(),
+                "LutCarry should have lut_cell set"
+            );
+        }
     }
 }

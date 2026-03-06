@@ -7,6 +7,7 @@
 use super::{PlacementLoc, PlacementResult};
 use crate::device::{BelType, Device};
 use crate::error::Result;
+use crate::packing::CarryChain;
 use crate::timing::DelayModel;
 use rand::{Rng, SeedableRng};
 use rayon::prelude::*;
@@ -21,6 +22,8 @@ enum Move {
     Swap(CellId, CellId),
     /// Move a cell to a new location
     Relocate(CellId, PlacementLoc),
+    /// Relocate an entire carry chain to a new column/start position
+    RelocateCarryChain(usize, u32, u32), // chain_id, new_x, new_start_y
 }
 
 /// Simulated annealing optimizer
@@ -37,6 +40,10 @@ pub struct SimulatedAnnealing<'a, D: Device> {
     parallel: bool,
     /// Number of parallel moves to evaluate per batch
     parallel_batch_size: usize,
+    /// Carry chain membership: cell_id → chain_id
+    carry_chain_membership: HashMap<CellId, usize>,
+    /// Carry chains for chain-aware moves
+    carry_chains: Vec<CarryChain>,
 }
 
 impl<'a, D: Device> SimulatedAnnealing<'a, D> {
@@ -51,6 +58,8 @@ impl<'a, D: Device> SimulatedAnnealing<'a, D> {
             delay_model: DelayModel::ice40_default(),
             parallel: false,
             parallel_batch_size: 64,
+            carry_chain_membership: HashMap::new(),
+            carry_chains: Vec::new(),
         }
     }
 
@@ -71,7 +80,21 @@ impl<'a, D: Device> SimulatedAnnealing<'a, D> {
             delay_model: DelayModel::ice40_default(),
             parallel: false,
             parallel_batch_size: 64,
+            carry_chain_membership: HashMap::new(),
+            carry_chains: Vec::new(),
         }
+    }
+
+    /// Set carry chains for chain-aware moves
+    pub fn with_carry_chains(mut self, carry_chains: Vec<CarryChain>) -> Self {
+        for chain in &carry_chains {
+            for &cell_id in &chain.cells {
+                self.carry_chain_membership
+                    .insert(cell_id, chain.chain_id);
+            }
+        }
+        self.carry_chains = carry_chains;
+        self
     }
 
     /// Create with a specific delay model
@@ -349,33 +372,51 @@ impl<'a, D: Device> SimulatedAnnealing<'a, D> {
         rng: &mut R,
     ) -> Move {
         if cells.len() < 2 {
-            // Can't swap with only one cell
             return Move::Relocate(cells[0], placement.placements[&cells[0]]);
+        }
+
+        // Select a random cell
+        let idx = rng.gen_range(0..cells.len());
+        let cell = cells[idx];
+
+        // If this cell is in a carry chain, generate a chain move instead
+        if let Some(&chain_id) = self.carry_chain_membership.get(&cell) {
+            if rng.gen::<f64>() < 0.5 {
+                // Move entire chain
+                let (width, height) = self.device.grid_size();
+                let new_x = rng.gen_range(1..width.saturating_sub(1).max(2));
+                let new_y = rng.gen_range(1..height.saturating_sub(1).max(2));
+                return Move::RelocateCarryChain(chain_id, new_x, new_y);
+            }
+            // Otherwise fall through to normal move (for non-chain cells)
         }
 
         // Choose move type: 70% swap, 30% relocate
         if rng.gen::<f64>() < 0.7 {
-            // Swap two cells of the same BEL type
-            let idx1 = rng.gen_range(0..cells.len());
-            let cell1 = cells[idx1];
+            let cell1 = cell;
             let loc1 = &placement.placements[&cell1];
 
-            // Find another cell with same BEL type
+            // Don't swap carry chain cells individually
+            if self.carry_chain_membership.contains_key(&cell1) {
+                return self.generate_relocate_move(placement, cell1, rng);
+            }
+
             let candidates: Vec<_> = cells
                 .iter()
-                .filter(|&&c| c != cell1 && placement.placements[&c].bel_type == loc1.bel_type)
+                .filter(|&&c| {
+                    c != cell1
+                        && placement.placements[&c].bel_type == loc1.bel_type
+                        && !self.carry_chain_membership.contains_key(&c)
+                })
                 .collect();
 
             if let Some(&&cell2) = candidates.get(rng.gen_range(0..candidates.len().max(1))) {
                 Move::Swap(cell1, cell2)
             } else {
-                // No compatible cell found, do relocate instead
                 self.generate_relocate_move(placement, cell1, rng)
             }
         } else {
-            // Relocate a random cell
-            let idx = rng.gen_range(0..cells.len());
-            self.generate_relocate_move(placement, cells[idx], rng)
+            self.generate_relocate_move(placement, cell, rng)
         }
     }
 
@@ -459,6 +500,43 @@ impl<'a, D: Device> SimulatedAnnealing<'a, D> {
                     let old_key = (old_loc.tile_x, old_loc.tile_y, old_loc.bel_index);
                     new_loc_map.remove(&old_key);
                     new_loc_map.insert(new_key, *cell_id);
+                }
+            }
+            Move::RelocateCarryChain(chain_id, new_x, new_start_y) => {
+                // Move entire carry chain to new column/start position
+                if let Some(chain) = self.carry_chains.get(*chain_id) {
+                    let (_, height) = self.device.grid_size();
+                    for (i, &cell_id) in chain.cells.iter().enumerate() {
+                        if let Some(&old_loc) = placement.placements.get(&cell_id) {
+                            let old_key =
+                                (old_loc.tile_x, old_loc.tile_y, old_loc.bel_index);
+                            new_loc_map.remove(&old_key);
+
+                            // Place consecutively: tile_y advances every 8 LCs
+                            let lc_offset = i;
+                            let tile_y = (*new_start_y + (lc_offset as u32 / 8))
+                                .min(height.saturating_sub(2).max(1));
+                            let bel_idx = lc_offset % 8;
+
+                            let new_loc = PlacementLoc::new(
+                                *new_x,
+                                tile_y,
+                                bel_idx,
+                                BelType::Carry,
+                            );
+
+                            let new_key = (new_loc.tile_x, new_loc.tile_y, new_loc.bel_index);
+                            // If occupied by non-chain cell, swap
+                            if let Some(&occupant) = loc_map.get(&new_key) {
+                                if !chain.cells.contains(&occupant) {
+                                    new_placement.placements.insert(occupant, old_loc);
+                                    new_loc_map.insert(old_key, occupant);
+                                }
+                            }
+                            new_placement.placements.insert(cell_id, new_loc);
+                            new_loc_map.insert(new_key, cell_id);
+                        }
+                    }
                 }
             }
         }

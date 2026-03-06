@@ -2,6 +2,7 @@
 //!
 //! Provides timing delay models for cells and routing.
 
+use crate::device::ice40::Ice40Variant;
 use serde::{Deserialize, Serialize};
 
 /// Delay model for timing analysis
@@ -29,12 +30,30 @@ pub struct DelayModel {
     pub span12_delay: f64,
     /// Global clock delay (ns)
     pub global_clock_delay: f64,
-    /// PIP switch delay (ns)
+    /// PIP switch delay (ns) — flat fallback, prefer pip_delay_typed()
     pub pip_delay: f64,
     /// RAM read delay (ns)
     pub ram_read_delay: f64,
     /// RAM write delay (ns)
     pub ram_write_delay: f64,
+    /// BelPin→Local PIP delay (ns)
+    pub pip_belpin_to_local: f64,
+    /// Local→Local PIP delay (ns)
+    pub pip_local_to_local: f64,
+    /// Local→Span4 PIP delay (ns)
+    pub pip_local_to_span4: f64,
+    /// Span4→Span4 PIP delay (ns)
+    pub pip_span4_to_span4: f64,
+    /// Span4→Local PIP delay (ns)
+    pub pip_span4_to_local: f64,
+    /// Span12→Span12 PIP delay (ns)
+    pub pip_span12_to_span12: f64,
+    /// Local→BelPin PIP delay (ns)
+    pub pip_local_to_belpin: f64,
+    /// Global→Local PIP delay (ns)
+    pub pip_global_to_local: f64,
+    /// Fanout delay per additional load (ns)
+    pub fanout_delay_per_load: f64,
 }
 
 impl Default for DelayModel {
@@ -59,9 +78,28 @@ impl DelayModel {
             span4_delay: 0.2,        // 200ps
             span12_delay: 0.4,       // 400ps
             global_clock_delay: 0.1, // 100ps
-            pip_delay: 0.1,          // 100ps per switch
+            pip_delay: 0.1,          // 100ps per switch (flat fallback)
             ram_read_delay: 3.5,     // 3.5ns
             ram_write_delay: 0.0,    // Write is synchronous
+            // Wire-type-aware PIP delays (from iCE40 datasheet Table 4.2)
+            pip_belpin_to_local: 0.03,    // 30ps — direct connection
+            pip_local_to_local: 0.05,     // 50ps — intra-tile switch
+            pip_local_to_span4: 0.15,     // 150ps — mux into span wire
+            pip_span4_to_span4: 0.10,     // 100ps — switch box traversal
+            pip_span4_to_local: 0.10,     // 100ps — entering tile from span
+            pip_span12_to_span12: 0.15,   // 150ps — long-distance switch
+            pip_local_to_belpin: 0.02,    // 20ps — entering BEL input
+            pip_global_to_local: 0.05,    // 50ps — clock distribution
+            fanout_delay_per_load: 0.02,  // 20ps per additional fanout (capacitive)
+        }
+    }
+
+    /// Select delay model for a specific iCE40 variant
+    pub fn for_variant(variant: Ice40Variant) -> Self {
+        match variant {
+            Ice40Variant::Hx1k | Ice40Variant::Hx4k | Ice40Variant::Hx8k => Self::ice40_hx(),
+            Ice40Variant::Lp1k | Ice40Variant::Lp4k | Ice40Variant::Lp8k => Self::ice40_lp(),
+            Ice40Variant::Up5k => Self::ice40_up(),
         }
     }
 
@@ -82,10 +120,19 @@ impl DelayModel {
             pip_delay: 0.09,
             ram_read_delay: 3.2,
             ram_write_delay: 0.0,
+            pip_belpin_to_local: 0.025,
+            pip_local_to_local: 0.04,
+            pip_local_to_span4: 0.13,
+            pip_span4_to_span4: 0.09,
+            pip_span4_to_local: 0.09,
+            pip_span12_to_span12: 0.13,
+            pip_local_to_belpin: 0.018,
+            pip_global_to_local: 0.04,
+            fanout_delay_per_load: 0.018,
         }
     }
 
-    /// Delay model for iCE40 LP series (lower power)
+    /// Delay model for iCE40 LP series (lower power, ~15% slower than HX)
     pub fn ice40_lp() -> Self {
         Self {
             lut4_delay: 0.65,
@@ -102,6 +149,15 @@ impl DelayModel {
             pip_delay: 0.11,
             ram_read_delay: 3.8,
             ram_write_delay: 0.0,
+            pip_belpin_to_local: 0.035,
+            pip_local_to_local: 0.058,
+            pip_local_to_span4: 0.17,
+            pip_span4_to_span4: 0.115,
+            pip_span4_to_local: 0.115,
+            pip_span12_to_span12: 0.17,
+            pip_local_to_belpin: 0.023,
+            pip_global_to_local: 0.058,
+            fanout_delay_per_load: 0.023,
         }
     }
 
@@ -122,6 +178,15 @@ impl DelayModel {
             pip_delay: 0.12,
             ram_read_delay: 4.0,
             ram_write_delay: 0.0,
+            pip_belpin_to_local: 0.04,
+            pip_local_to_local: 0.065,
+            pip_local_to_span4: 0.19,
+            pip_span4_to_span4: 0.13,
+            pip_span4_to_local: 0.13,
+            pip_span12_to_span12: 0.19,
+            pip_local_to_belpin: 0.026,
+            pip_global_to_local: 0.065,
+            fanout_delay_per_load: 0.026,
         }
     }
 
@@ -156,6 +221,44 @@ impl DelayModel {
     /// Get register hold time
     pub fn register_hold(&self) -> f64 {
         self.dff_hold
+    }
+
+    /// Get wire-type-aware PIP delay based on source and destination wire types
+    pub fn pip_delay_typed(
+        &self,
+        src_type: &crate::device::WireType,
+        dst_type: &crate::device::WireType,
+    ) -> f64 {
+        use crate::device::WireType;
+        match (src_type, dst_type) {
+            (WireType::BelPin, WireType::Local(_)) => self.pip_belpin_to_local,
+            (WireType::Local(_), WireType::Local(_)) => self.pip_local_to_local,
+            (WireType::Local(_), WireType::Span4H(_) | WireType::Span4V(_)) => {
+                self.pip_local_to_span4
+            }
+            (WireType::Span4H(_) | WireType::Span4V(_), WireType::Span4H(_) | WireType::Span4V(_)) => {
+                self.pip_span4_to_span4
+            }
+            (WireType::Span4H(_) | WireType::Span4V(_), WireType::Local(_)) => {
+                self.pip_span4_to_local
+            }
+            (
+                WireType::Span12H(_) | WireType::Span12V(_),
+                WireType::Span12H(_) | WireType::Span12V(_),
+            ) => self.pip_span12_to_span12,
+            (WireType::Local(_), WireType::BelPin) => self.pip_local_to_belpin,
+            (WireType::Global(_), WireType::Local(_)) => self.pip_global_to_local,
+            _ => self.pip_delay, // Conservative fallback
+        }
+    }
+
+    /// Compute fanout-dependent delay (capacitive loading)
+    pub fn fanout_delay(&self, fanout: usize) -> f64 {
+        if fanout <= 1 {
+            0.0
+        } else {
+            (fanout as f64 - 1.0) * self.fanout_delay_per_load
+        }
     }
 
     /// Get wire delay based on wire type

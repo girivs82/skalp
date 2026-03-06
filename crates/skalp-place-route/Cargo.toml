@@ -24,4 +24,4 @@ log = "0.4"
 libftd2xx = { version = "0.32", optional = true }
 
 [dev-dependencies]
-# For testing
+tempfile = "3"

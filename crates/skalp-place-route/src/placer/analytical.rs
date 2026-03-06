@@ -9,6 +9,7 @@
 use super::{BelType, PlacementLoc, PlacementResult};
 use crate::device::Device;
 use crate::error::{PlaceRouteError, Result};
+use crate::packing::CarryChain;
 use skalp_lir::gate_netlist::{CellId, GateNetlist};
 use std::collections::HashMap;
 
@@ -23,6 +24,35 @@ impl<'a, D: Device> AnalyticalPlacer<'a, D> {
         Self { device }
     }
 
+    /// Perform analytical placement with carry chain column constraints
+    pub fn place_with_carry_chains(
+        &self,
+        netlist: &GateNetlist,
+        carry_chains: &[CarryChain],
+    ) -> Result<PlacementResult> {
+        let n = netlist.cells.len();
+        if n == 0 {
+            return Ok(PlacementResult::new());
+        }
+
+        // Build cell index map
+        let cell_indices: HashMap<CellId, usize> = netlist
+            .cells
+            .iter()
+            .enumerate()
+            .map(|(i, cell)| (cell.id, i))
+            .collect();
+
+        // Solve for continuous positions (same as place())
+        let (mut x_positions, y_positions) = self.solve_positions(netlist, &cell_indices)?;
+
+        // Anchor carry chains: force all cells in a chain to same x-coordinate
+        self.anchor_carry_chains(&mut x_positions, carry_chains, &cell_indices);
+
+        // Convert to discrete placements
+        self.positions_to_placement(netlist, &cell_indices, &x_positions, &y_positions)
+    }
+
     /// Perform analytical placement
     pub fn place(&self, netlist: &GateNetlist) -> Result<PlacementResult> {
         let n = netlist.cells.len();
@@ -30,14 +60,24 @@ impl<'a, D: Device> AnalyticalPlacer<'a, D> {
             return Ok(PlacementResult::new());
         }
 
-        // Map cells to indices using their position in the Vec (more reliable than cell.id)
-        // This handles cases where cell.id might not match the Vec index
         let cell_indices: HashMap<CellId, usize> = netlist
             .cells
             .iter()
             .enumerate()
             .map(|(i, cell)| (cell.id, i))
             .collect();
+
+        let (x_positions, y_positions) = self.solve_positions(netlist, &cell_indices)?;
+        self.positions_to_placement(netlist, &cell_indices, &x_positions, &y_positions)
+    }
+
+    /// Solve for continuous x, y positions via Laplacian + conjugate gradient
+    fn solve_positions(
+        &self,
+        netlist: &GateNetlist,
+        cell_indices: &HashMap<CellId, usize>,
+    ) -> Result<(Vec<f64>, Vec<f64>)> {
+        let n = netlist.cells.len();
 
         // Build connectivity matrix (Laplacian)
         let mut laplacian = vec![vec![0.0f64; n]; n];
@@ -48,29 +88,24 @@ impl<'a, D: Device> AnalyticalPlacer<'a, D> {
         for net in &netlist.nets {
             let mut connected_cells: Vec<CellId> = Vec::new();
 
-            // Add driver (only if it exists in the cell list)
             if let Some(driver) = net.driver {
                 if cell_indices.contains_key(&driver) {
                     connected_cells.push(driver);
                 }
             }
 
-            // Add fanout cells (only if they exist in the cell list)
             for (cell_id, _) in &net.fanout {
                 if cell_indices.contains_key(cell_id) {
                     connected_cells.push(*cell_id);
                 }
             }
 
-            // Skip nets with 0 or 1 connections
             if connected_cells.len() < 2 {
                 continue;
             }
 
-            // Weight inversely proportional to net size (clique model)
             let weight = 1.0 / connected_cells.len() as f64;
 
-            // Add connections to Laplacian
             for i in 0..connected_cells.len() {
                 for j in (i + 1)..connected_cells.len() {
                     let ci = cell_indices[&connected_cells[i]];
@@ -87,21 +122,16 @@ impl<'a, D: Device> AnalyticalPlacer<'a, D> {
         // Add anchor points for I/O cells
         let (width, height) = self.device.grid_size();
         for cell in &netlist.cells {
-            let cell_id = cell.id;
-            let idx = cell_indices[&cell_id];
+            let idx = cell_indices[&cell.id];
 
-            // Check if this is an I/O cell - anchor to boundary
             if cell.cell_type.contains("IO") || cell.cell_type.starts_with("SB_IO") {
-                // I/O cells get fixed positions at boundaries
                 let anchor_weight = 100.0;
                 laplacian[idx][idx] += anchor_weight;
 
-                // Place on boundary based on net name hints
                 let (ax, ay) = self.get_io_anchor(&cell.path, width, height);
                 bx[idx] += anchor_weight * ax;
                 by[idx] += anchor_weight * ay;
             } else {
-                // Non-I/O cells get weak center pull
                 let center_weight = 0.01;
                 laplacian[idx][idx] += center_weight;
                 bx[idx] += center_weight * (width as f64 / 2.0);
@@ -109,11 +139,21 @@ impl<'a, D: Device> AnalyticalPlacer<'a, D> {
             }
         }
 
-        // Solve using conjugate gradient
         let x_positions = self.conjugate_gradient(&laplacian, &bx, n)?;
         let y_positions = self.conjugate_gradient(&laplacian, &by, n)?;
 
-        // Convert continuous positions to discrete placements
+        Ok((x_positions, y_positions))
+    }
+
+    /// Convert continuous positions to discrete BEL placements
+    fn positions_to_placement(
+        &self,
+        netlist: &GateNetlist,
+        _cell_indices: &HashMap<CellId, usize>,
+        x_positions: &[f64],
+        y_positions: &[f64],
+    ) -> Result<PlacementResult> {
+        let (width, height) = self.device.grid_size();
         let mut result = PlacementResult::new();
         let mut used_locations: HashMap<(u32, u32, usize), bool> = HashMap::new();
 
@@ -121,11 +161,9 @@ impl<'a, D: Device> AnalyticalPlacer<'a, D> {
             let cell_id = cell.id;
             let bel_type = self.cell_to_bel_type(&cell.cell_type);
 
-            // Get continuous position
             let x = x_positions[idx].clamp(0.0, (width - 1) as f64);
             let y = y_positions[idx].clamp(0.0, (height - 1) as f64);
 
-            // Find nearest valid tile
             let (tile_x, tile_y, bel_index) =
                 self.find_nearest_valid_location(x, y, bel_type, &mut used_locations)?;
 
@@ -136,6 +174,55 @@ impl<'a, D: Device> AnalyticalPlacer<'a, D> {
         }
 
         Ok(result)
+    }
+
+    /// Anchor carry chain cells to the same x-coordinate (column constraint)
+    fn anchor_carry_chains(
+        &self,
+        x_positions: &mut [f64],
+        carry_chains: &[CarryChain],
+        cell_indices: &HashMap<CellId, usize>,
+    ) {
+        for chain in carry_chains {
+            if chain.cells.is_empty() {
+                continue;
+            }
+
+            // Compute centroid x of all chain cells
+            let mut sum_x = 0.0;
+            let mut count = 0;
+            for &cell_id in &chain.cells {
+                if let Some(&idx) = cell_indices.get(&cell_id) {
+                    sum_x += x_positions[idx];
+                    count += 1;
+                }
+            }
+
+            if count == 0 {
+                continue;
+            }
+
+            let centroid_x = sum_x / count as f64;
+
+            // Force all chain cells to the centroid x
+            for &cell_id in &chain.cells {
+                if let Some(&idx) = cell_indices.get(&cell_id) {
+                    x_positions[idx] = centroid_x;
+                }
+            }
+
+            // Also anchor associated LUTs and DFFs to same column
+            for lut_id in chain.associated_luts.iter().flatten() {
+                if let Some(&idx) = cell_indices.get(lut_id) {
+                    x_positions[idx] = centroid_x;
+                }
+            }
+            for dff_id in chain.associated_dffs.iter().flatten() {
+                if let Some(&idx) = cell_indices.get(dff_id) {
+                    x_positions[idx] = centroid_x;
+                }
+            }
+        }
     }
 
     /// Conjugate gradient solver for Ax = b

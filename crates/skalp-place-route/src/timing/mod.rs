@@ -129,6 +129,15 @@ impl<D: Device + Clone> TimingAnalyzer<D> {
         }
     }
 
+    /// Create a timing analyzer with a specific delay model (e.g., variant-aware)
+    pub fn with_delay_model(config: TimingConfig, device: D, delay_model: DelayModel) -> Self {
+        Self {
+            config,
+            device,
+            delay_model,
+        }
+    }
+
     /// Analyze timing for a design
     pub fn analyze_timing(
         &mut self,
@@ -353,6 +362,9 @@ impl<D: Device + Clone> TimingAnalyzer<D> {
         // Driver is combinational - get its delay and trace inputs
         let cell_delay = self.delay_model.cell_delay(&driver.cell_type);
 
+        // Add fanout-dependent delay (capacitive loading)
+        let fanout_delay = self.delay_model.fanout_delay(net.fanout.len());
+
         // Find maximum input delay
         let mut max_input_delay = 0.0f64;
         for &input_net in &driver.inputs {
@@ -361,7 +373,7 @@ impl<D: Device + Clone> TimingAnalyzer<D> {
             max_input_delay = max_input_delay.max(input_delay);
         }
 
-        max_input_delay + cell_delay + routing_delay
+        max_input_delay + cell_delay + routing_delay + fanout_delay
     }
 
     /// Find critical paths

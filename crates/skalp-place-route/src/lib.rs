@@ -84,7 +84,9 @@ pub use router::{Route, Router, RouterConfig, RoutingAlgorithm, RoutingResult};
 pub use timing::{DelayModel, TimingAnalyzer, TimingConfig, TimingDrivenPlacer, TimingReport};
 
 // Packing and utilities
-pub use packing::{CellPacker, DffConfig, PackedCell, PackedCellType, PackingResult, PackingStats};
+pub use packing::{
+    CarryChain, CellPacker, DffConfig, PackedCell, PackedCellType, PackingResult, PackingStats,
+};
 pub use utils::{BramContent, BramSwapper, PllCalculator, PllConfig};
 
 // Programmer support (requires "programmer" feature)

@@ -4,6 +4,7 @@
 
 use crate::device::{Device, PipId, WireId};
 use crate::error::{PlaceRouteError, Result};
+use crate::timing::DelayModel;
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap, HashSet};
 
@@ -44,12 +45,24 @@ impl PartialOrd for AStarNode {
 /// A* router
 pub struct AStarRouter<'a, D: Device> {
     device: &'a D,
+    delay_model: Option<DelayModel>,
 }
 
 impl<'a, D: Device> AStarRouter<'a, D> {
     /// Create a new A* router
     pub fn new(device: &'a D) -> Self {
-        Self { device }
+        Self {
+            device,
+            delay_model: None,
+        }
+    }
+
+    /// Create an A* router with a delay model for wire-type-aware PIP costs
+    pub fn with_delay_model(device: &'a D, delay_model: DelayModel) -> Self {
+        Self {
+            device,
+            delay_model: Some(delay_model),
+        }
     }
 
     /// Find a path from source to sink wire
@@ -146,11 +159,23 @@ impl<'a, D: Device> AStarRouter<'a, D> {
                 }
 
                 // Calculate cost with optional timing awareness
-                // pip_cost includes base cost + delay contribution
+                // Use wire-type-aware PIP delay when a delay model is available
                 let base_pip_cost = pip.cost() as f64;
-                // For timing-driven routing, add extra cost for high-delay PIPs
                 let timing_cost = if timing_weight > 0.0 {
-                    timing_weight * (pip.delay as f64 / 50.0) // Normalize delay contribution
+                    if let Some(ref model) = self.delay_model {
+                        // Compute PIP delay from source/destination wire types
+                        let src_wire = self.device.wire(current.wire);
+                        let dst_wire = self.device.wire(neighbor);
+                        let typed_delay = match (src_wire, dst_wire) {
+                            (Some(sw), Some(dw)) => {
+                                model.pip_delay_typed(&sw.wire_type, &dw.wire_type)
+                            }
+                            _ => model.pip_delay,
+                        };
+                        timing_weight * (typed_delay / 0.05) // Normalize: 50ps = 1.0 cost unit
+                    } else {
+                        timing_weight * (pip.delay as f64 / 50.0)
+                    }
                 } else {
                     0.0
                 };

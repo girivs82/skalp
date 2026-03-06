@@ -21,6 +21,7 @@ pub use legalization::Legalizer;
 
 use crate::device::{BelType, Device, TileType};
 use crate::error::{PlaceRouteError, Result};
+use crate::packing::CarryChain;
 use serde::{Deserialize, Serialize};
 use skalp_lir::gate_netlist::{CellId, GateNetlist};
 use skalp_lir::tech_library::CellFunction;
@@ -187,6 +188,105 @@ impl<D: Device + Clone> Placer<D> {
     /// Create a new placer
     pub fn new(config: PlacerConfig, device: D) -> Self {
         Self { config, device }
+    }
+
+    /// Place a design with carry chain constraints
+    pub fn place_with_carry_chains(
+        &mut self,
+        netlist: &GateNetlist,
+        carry_chains: &[CarryChain],
+    ) -> Result<PlacementResult> {
+        // Check device capacity
+        self.check_capacity(netlist)?;
+
+        // Extract inline constraints
+        let inline_constraints = Self::extract_inline_constraints(netlist);
+        if !inline_constraints.is_empty() {
+            for constraint in inline_constraints.all() {
+                if !self
+                    .config
+                    .io_constraints
+                    .has_constraint(&constraint.signal_name)
+                {
+                    self.config.io_constraints.add(constraint.clone());
+                }
+            }
+        }
+
+        // Validate and resolve I/O constraints
+        let resolved_constraints = if !self.config.io_constraints.is_empty() {
+            self.config.io_constraints.validate(&self.device)?;
+            self.config.io_constraints.resolve(&self.device)?
+        } else {
+            HashMap::new()
+        };
+
+        // Run placement with carry chain awareness
+        let mut result = match self.config.algorithm {
+            PlacementAlgorithm::AnalyticalWithRefinement
+            | PlacementAlgorithm::AnalyticalTimingDriven => {
+                // Analytical with carry chain column constraints
+                let analytical = AnalyticalPlacer::new(&self.device);
+                let initial = if carry_chains.is_empty() {
+                    analytical.place(netlist)?
+                } else {
+                    analytical.place_with_carry_chains(netlist, carry_chains)?
+                };
+
+                // Legalize with carry chain consecutive-row constraints
+                let legalizer = Legalizer::new(&self.device);
+                let legalized =
+                    legalizer.legalize_with_carry_chains(initial, netlist, carry_chains)?;
+
+                // SA refinement with carry chain awareness
+                let timing_weight = if matches!(
+                    self.config.algorithm,
+                    PlacementAlgorithm::AnalyticalTimingDriven
+                ) {
+                    self.config.timing_weight
+                } else {
+                    0.0
+                };
+
+                let annealer = if timing_weight > 0.0 {
+                    SimulatedAnnealing::new_timing_driven(
+                        &self.device,
+                        self.config.initial_temperature * 0.5,
+                        self.config.cooling_rate,
+                        self.config.max_iterations / 2,
+                        timing_weight,
+                    )
+                } else {
+                    SimulatedAnnealing::new(
+                        &self.device,
+                        self.config.initial_temperature * 0.5,
+                        self.config.cooling_rate,
+                        self.config.max_iterations / 2,
+                    )
+                }
+                .with_parallel(self.config.parallel)
+                .with_batch_size(self.config.parallel_batch_size)
+                .with_carry_chains(carry_chains.to_vec());
+
+                annealer.optimize(legalized, netlist)?
+            }
+            _ => {
+                // For other algorithms, fall back to regular placement
+                return self.place(netlist);
+            }
+        };
+
+        // Apply I/O constraints
+        if !resolved_constraints.is_empty() {
+            self.apply_io_constraints(&mut result, netlist, &resolved_constraints)?;
+        }
+
+        // Calculate final metrics
+        result.wirelength = self.calculate_wirelength(&result, netlist);
+        result.utilization = self.calculate_utilization(&result);
+        result.cost = self.calculate_cost(&result, netlist);
+
+        Ok(result)
     }
 
     /// Place a design

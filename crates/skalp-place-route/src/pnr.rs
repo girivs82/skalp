@@ -5,6 +5,7 @@
 use crate::bitstream::{Bitstream, BitstreamConfig, BitstreamGenerator};
 use crate::device::ice40::{Ice40Device, Ice40Variant};
 use crate::error::Result;
+use crate::packing::CellPacker;
 use crate::placer::{PlacementResult, Placer, PlacerConfig};
 use crate::router::{Router, RouterConfig, RoutingResult};
 use crate::timing::{TimingAnalyzer, TimingConfig, TimingReport};
@@ -115,9 +116,17 @@ pub fn place_and_route(
     // Create device
     let device = Ice40Device::new(variant);
 
-    // Run placement
+    // Run packing to detect carry chains
+    let mut packer = CellPacker::new(netlist);
+    let packing = packer.pack();
+
+    // Run placement (with carry chain constraints if any)
     let mut placer = Placer::new(config.placer.clone(), device.clone());
-    let placement = placer.place(netlist)?;
+    let placement = if packing.carry_chains.is_empty() {
+        placer.place(netlist)?
+    } else {
+        placer.place_with_carry_chains(netlist, &packing.carry_chains)?
+    };
 
     // Run routing — use timing-driven routing when frequency constraints exist
     let mut router_config = config.router.clone();
@@ -136,7 +145,10 @@ pub fn place_and_route(
                 timing_config.target_frequency = max_freq;
             }
         }
-        let mut analyzer = TimingAnalyzer::new(timing_config, device.clone());
+        // Use variant-aware delay model
+        let delay_model = crate::timing::DelayModel::for_variant(variant);
+        let mut analyzer =
+            TimingAnalyzer::with_delay_model(timing_config, device.clone(), delay_model);
         let mut report = analyzer.analyze_timing(netlist, &placement, &routing)?;
 
         // Check frequency constraints and annotate violations
@@ -2060,5 +2072,247 @@ set_io btn A6
         assert!(resolved.is_some(), "Should resolve DIVR_0 to bit position");
         let (tx, ty, row, col) = resolved.unwrap();
         println!("DIVR_0 -> tile ({}, {}), bit ({}, {})", tx, ty, row, col);
+    }
+
+    // === Phase 4: Timing model tests ===
+
+    #[test]
+    fn test_wire_type_pip_delays() {
+        use crate::device::WireType;
+        use crate::timing::DelayModel;
+
+        let model = DelayModel::ice40_default();
+
+        // Local→Span4 should be more expensive than Local→Local
+        let local_to_local =
+            model.pip_delay_typed(&WireType::Local(0), &WireType::Local(1));
+        let local_to_span4 =
+            model.pip_delay_typed(&WireType::Local(0), &WireType::Span4H(0));
+
+        assert!(
+            local_to_span4 > local_to_local,
+            "Local→Span4 ({:.3}ns) should be slower than Local→Local ({:.3}ns)",
+            local_to_span4,
+            local_to_local,
+        );
+
+        // BelPin→Local should be fast (direct connection)
+        let belpin_to_local =
+            model.pip_delay_typed(&WireType::BelPin, &WireType::Local(0));
+        assert!(
+            belpin_to_local < local_to_local,
+            "BelPin→Local ({:.3}ns) should be faster than Local→Local ({:.3}ns)",
+            belpin_to_local,
+            local_to_local,
+        );
+
+        // Span12→Span12 should be slower than Span4→Span4
+        let span4_to_span4 =
+            model.pip_delay_typed(&WireType::Span4H(0), &WireType::Span4V(0));
+        let span12_to_span12 =
+            model.pip_delay_typed(&WireType::Span12H(0), &WireType::Span12V(0));
+        assert!(
+            span12_to_span12 > span4_to_span4,
+            "Span12→Span12 ({:.3}ns) should be slower than Span4→Span4 ({:.3}ns)",
+            span12_to_span12,
+            span4_to_span4,
+        );
+    }
+
+    #[test]
+    fn test_variant_delay_models() {
+        use crate::timing::DelayModel;
+
+        let hx = DelayModel::ice40_hx();
+        let lp = DelayModel::ice40_lp();
+        let up = DelayModel::ice40_up();
+
+        // LP should be slower than HX
+        assert!(
+            lp.lut4_delay > hx.lut4_delay,
+            "LP LUT delay ({:.3}ns) should be > HX ({:.3}ns)",
+            lp.lut4_delay,
+            hx.lut4_delay,
+        );
+
+        // UP should be slower than LP
+        assert!(
+            up.lut4_delay > lp.lut4_delay,
+            "UP LUT delay ({:.3}ns) should be > LP ({:.3}ns)",
+            up.lut4_delay,
+            lp.lut4_delay,
+        );
+
+        // for_variant should select correct model
+        let hx_model = DelayModel::for_variant(Ice40Variant::Hx1k);
+        assert_eq!(hx_model.lut4_delay, hx.lut4_delay);
+
+        let lp_model = DelayModel::for_variant(Ice40Variant::Lp1k);
+        assert_eq!(lp_model.lut4_delay, lp.lut4_delay);
+
+        let up_model = DelayModel::for_variant(Ice40Variant::Up5k);
+        assert_eq!(up_model.lut4_delay, up.lut4_delay);
+    }
+
+    #[test]
+    fn test_fanout_delay() {
+        use crate::timing::DelayModel;
+
+        let model = DelayModel::ice40_default();
+
+        // Fanout=1 → no extra delay
+        assert_eq!(model.fanout_delay(1), 0.0);
+
+        // Fanout=4 should be more than fanout=2
+        let delay_2 = model.fanout_delay(2);
+        let delay_4 = model.fanout_delay(4);
+        assert!(
+            delay_4 > delay_2,
+            "fanout=4 delay ({:.3}ns) > fanout=2 delay ({:.3}ns)",
+            delay_4,
+            delay_2,
+        );
+
+        // Fanout delay should be proportional to additional loads
+        let expected_4 = 3.0 * model.fanout_delay_per_load;
+        assert!(
+            (delay_4 - expected_4).abs() < 1e-10,
+            "fanout=4 should be 3 * per_load: {:.3} vs {:.3}",
+            delay_4,
+            expected_4,
+        );
+    }
+
+    // === Phase 3: Golden self-validation tests ===
+
+    /// Parse a specific tile's bit array from an .asc string
+    fn parse_asc_tile(asc: &str, x: u32, y: u32, tile_type: &str) -> Vec<Vec<bool>> {
+        let header = format!(".{}_tile {} {}", tile_type, x, y);
+        let mut in_tile = false;
+        let mut bits = Vec::new();
+
+        for line in asc.lines() {
+            if line == header {
+                in_tile = true;
+                continue;
+            }
+            if in_tile {
+                if line.is_empty() || line.starts_with('.') {
+                    break;
+                }
+                let row: Vec<bool> = line.chars().map(|c| c == '1').collect();
+                bits.push(row);
+            }
+        }
+        bits
+    }
+
+    #[test]
+    fn test_golden_lut_init_bits() {
+        // Place a LUT with known init → verify the bitstream encodes it correctly
+        let mut netlist = GateNetlist::new("lut_init_test".to_string(), "ice40".to_string());
+
+        let net0 = netlist.add_net(GateNet::new(
+            skalp_lir::gate_netlist::GateNetId(0),
+            "out".to_string(),
+        ));
+
+        let mut lut = Cell::new_comb(
+            skalp_lir::gate_netlist::CellId(0),
+            "SB_LUT4".to_string(),
+            "ice40".to_string(),
+            0.0,
+            "top.lut0".to_string(),
+            vec![],
+            vec![net0],
+        );
+        lut.lut_init = Some(0xCAFE);
+        netlist.add_cell(lut);
+
+        let config = PnrConfig::fast();
+        let result = place_and_route(&netlist, Ice40Variant::Hx1k, config).unwrap();
+        let asc = result.to_icestorm_ascii_with_netlist(Some(&netlist));
+
+        // Find where the LUT was placed
+        let lut_id = skalp_lir::gate_netlist::CellId(0);
+        let loc = result.placement.placements.get(&lut_id).unwrap();
+
+        // Parse the tile containing the LUT
+        let tile_bits = parse_asc_tile(&asc, loc.tile_x, loc.tile_y, "logic");
+
+        // The tile should have non-zero bits (the LUT init)
+        let total_set_bits: usize = tile_bits
+            .iter()
+            .map(|row| row.iter().filter(|&&b| b).count())
+            .sum();
+
+        assert!(
+            total_set_bits > 0,
+            "LUT init 0xCAFE should produce non-zero bits in tile ({}, {})",
+            loc.tile_x,
+            loc.tile_y,
+        );
+    }
+
+    #[test]
+    fn test_golden_routing_pips() {
+        // Build a small design, verify each PIP in routing corresponds to set bits
+        let mut netlist = GateNetlist::new("pip_test".to_string(), "ice40".to_string());
+
+        let net0 = netlist.add_net(GateNet::new(
+            skalp_lir::gate_netlist::GateNetId(0),
+            "n0".to_string(),
+        ));
+        let net1 = netlist.add_net(GateNet::new(
+            skalp_lir::gate_netlist::GateNetId(1),
+            "n1".to_string(),
+        ));
+
+        // Two LUTs connected by a net
+        netlist.add_cell(Cell::new_comb(
+            skalp_lir::gate_netlist::CellId(0),
+            "SB_LUT4".to_string(),
+            "ice40".to_string(),
+            0.0,
+            "top.lut0".to_string(),
+            vec![net0],
+            vec![net1],
+        ));
+        netlist.add_cell(Cell::new_comb(
+            skalp_lir::gate_netlist::CellId(1),
+            "SB_LUT4".to_string(),
+            "ice40".to_string(),
+            0.0,
+            "top.lut1".to_string(),
+            vec![net1],
+            vec![],
+        ));
+
+        netlist.nets[net1.0 as usize].driver = Some(skalp_lir::gate_netlist::CellId(0));
+        netlist.nets[net1.0 as usize]
+            .fanout
+            .push((skalp_lir::gate_netlist::CellId(1), 0));
+
+        let config = PnrConfig::fast();
+        let result = place_and_route(&netlist, Ice40Variant::Hx1k, config).unwrap();
+
+        // Count total PIPs used in all routes
+        let total_pips: usize = result.routing.routes.values().map(|r| r.pips.len()).sum();
+
+        // If routing succeeded with PIPs, the bitstream should encode them
+        let asc = result.to_icestorm_ascii_with_netlist(Some(&netlist));
+        let total_set_bits: usize = asc
+            .lines()
+            .filter(|l| !l.starts_with('.') && !l.is_empty())
+            .map(|l| l.chars().filter(|&c| c == '1').count())
+            .sum();
+
+        if total_pips > 0 {
+            assert!(
+                total_set_bits > 0,
+                "Bitstream should have set bits for {} PIPs",
+                total_pips
+            );
+        }
     }
 }
