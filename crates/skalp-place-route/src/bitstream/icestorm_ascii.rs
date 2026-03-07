@@ -169,6 +169,9 @@ fn ramb_colbuf_source_rows(grid_height: u32) -> [u32; 4] {
 pub struct IceStormAscii<'a> {
     device: &'a Ice40Device,
     chipdb: Option<ChipDb>,
+    /// IO tile positions that have physical pads (derived from chipdb package pins).
+    /// Tiles NOT in this set should skip IE defaults.
+    padded_io_tiles: HashSet<(u32, u32)>,
 }
 
 impl<'a> IceStormAscii<'a> {
@@ -176,7 +179,23 @@ impl<'a> IceStormAscii<'a> {
     pub fn new(device: &'a Ice40Device) -> Self {
         // Try to load chipdb for real bit mappings
         let chipdb = ChipDb::load_embedded(device.variant).ok();
-        Self { device, chipdb }
+
+        // Derive which IO tiles have physical pads from chipdb package pin data.
+        // Union all packages: any tile that has a pin in ANY package has a pad.
+        let mut padded_io_tiles = HashSet::new();
+        if let Some(ref db) = chipdb {
+            for pins in db.packages.values() {
+                for pin in pins {
+                    padded_io_tiles.insert((pin.tile_x, pin.tile_y));
+                }
+            }
+        }
+
+        Self {
+            device,
+            chipdb,
+            padded_io_tiles,
+        }
     }
 
     /// Generate ASCII bitstream
@@ -789,10 +808,23 @@ impl<'a> IceStormAscii<'a> {
             }
         }
 
-        // Set CarryInSet bit: B1[50] forces the carry chain input for this tile to 1.
-        // This is needed at the start of carry chains where CI should be 1 (e.g., +1 counters).
+        // Set CarryInSet bit (forces carry chain input for this tile to 1).
+        // Position is read from chipdb tile_bits for TileType::Logic.
         if carry_in_set_tiles.contains(&(x, y)) {
-            bits[1][50] = true;
+            if let Some(ref chipdb) = self.chipdb {
+                if let Some(logic_bits) = chipdb.tile_bits.get(&TileType::Logic) {
+                    for cb in logic_bits {
+                        if cb.name == "CarryInSet" {
+                            let r = cb.row as usize;
+                            let c = cb.col as usize;
+                            if r < 16 && c < 54 {
+                                bits[r][c] = true;
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
         }
 
         // Output the 16 rows of 54 bits each
@@ -861,9 +893,8 @@ impl<'a> IceStormAscii<'a> {
         // Set default Input Enable (IE) bits for unused IO pads.
         // This prevents floating inputs and matches nextpnr/icestorm behavior.
         // IE_0 at B9[3], IE_1 at B6[3]
-        // Skip IE on IO tile positions that lack physical pads (no bond wires).
-        // On HX1K/LP1K (14x18): 7 padless positions are corner/gap tiles.
-        let has_pads = !Self::is_padless_io_tile(x, y, self.device.variant);
+        // Skip IE on IO tile positions that lack physical pads (derived from chipdb).
+        let has_pads = self.padded_io_tiles.is_empty() || self.padded_io_tiles.contains(&(x, y));
         if !has_cells_or_pips && has_pads {
             bits[9][3] = true; // IE_0 — input enable for IOB_0
             bits[6][3] = true; // IE_1 — input enable for IOB_1
@@ -1495,21 +1526,4 @@ impl<'a> IceStormAscii<'a> {
         asc.push('\n');
     }
 
-    /// Check if an IO tile position lacks physical pads (no bond wires).
-    /// These positions exist in the device grid as IO tiles but have no actual
-    /// package pins, so IE defaults should not be set.
-    fn is_padless_io_tile(x: u32, y: u32, variant: Ice40Variant) -> bool {
-        match variant {
-            Ice40Variant::Hx1k | Ice40Variant::Lp1k => {
-                // HX1K/LP1K (14x18 grid): 7 IO tile positions without pads.
-                // Left edge (x=0) gaps and right edge (x=13) gaps.
-                matches!(
-                    (x, y),
-                    (0, 1) | (0, 7) | (0, 15) | (0, 16) | (13, 5) | (13, 12) | (13, 16)
-                )
-            }
-            // Other variants: assume all IO tiles have pads (conservative)
-            _ => false,
-        }
-    }
 }

@@ -83,8 +83,10 @@ physical pads.
 **Impact**: 7 IO tile positions on HX1K lack physical pads: (0,1), (0,7),
 (0,15), (0,16), (13,5), (13,12), (13,16). Setting IE there wastes bits.
 
-**Fix**: Added `is_padless_io_tile()` check in `generate_io_tile()`. Skips IE
-defaults for the 7 known padless positions on HX1K/LP1K.
+**Fix**: At construction time, `IceStormAscii` builds a set of padded IO tile
+positions from chipdb package pin data (union of all packages). The IE default
+section in `generate_io_tile()` skips tiles not in this set. This is
+data-driven and works for all iCE40 variants (HX1K, HX8K, UP5K, etc.).
 
 **Result**: IE reduced from 111→97 (inverter), 109→97 (counter-4).
 
@@ -155,7 +157,8 @@ chain head. skalp didn't set it.
 
 **Fix**: Added `collect_carry_in_set_tiles()` that detects carry chain heads
 (carry cells not driven by another carry) with CI driven by VCC/TIE_HIGH.
-Sets B1[50] in the corresponding logic tile.
+The CarryInSet bit position is read from the chipdb `tile_bits` for
+`TileType::Logic` (not hardcoded), so it works for all iCE40 variants.
 
 **Note**: Detection depends on the netlist having explicit VCC driver cells.
 Some test netlists don't have this, so CarryInSet may still be missing in
