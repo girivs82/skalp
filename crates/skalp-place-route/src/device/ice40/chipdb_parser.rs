@@ -58,6 +58,22 @@ pub struct ChipDb {
     pub bel_wires: HashMap<(u32, u32, String), u32>,
     /// PLL extra_cell definitions
     pub pll_cells: Vec<PllExtraCell>,
+    /// Column buffer entries: (src_x, src_y, dst_x, dst_y)
+    /// From the .colbuf section — declares which tile distributes global signals to which tile
+    pub colbuf_entries: Vec<ColBufEntry>,
+}
+
+/// Column buffer entry from chipdb .colbuf section
+#[derive(Debug, Clone)]
+pub struct ColBufEntry {
+    /// Source tile X (tile containing ColBufCtrl bits)
+    pub src_x: u32,
+    /// Source tile Y
+    pub src_y: u32,
+    /// Destination tile X
+    pub dst_x: u32,
+    /// Destination tile Y
+    pub dst_y: u32,
 }
 
 /// Wire information
@@ -183,6 +199,7 @@ impl ChipDb {
             lc_mappings: Vec::new(),
             bel_wires: HashMap::new(),
             pll_cells: Vec::new(),
+            colbuf_entries: Vec::new(),
         };
 
         let mut current_section = Section::None;
@@ -415,6 +432,9 @@ impl ChipDb {
                             }
                         }
                     }
+                    ".colbuf" => {
+                        current_section = Section::ColBuf;
+                    }
                     _ => {
                         current_section = Section::None;
                     }
@@ -568,6 +588,22 @@ impl ChipDb {
                         }
                     }
                 }
+                Section::ColBuf => {
+                    // Format: SRC_X SRC_Y DST_X DST_Y
+                    let parts: Vec<&str> = line.split_whitespace().collect();
+                    if parts.len() >= 4 {
+                        let src_x: u32 = parts[0].parse().unwrap_or(0);
+                        let src_y: u32 = parts[1].parse().unwrap_or(0);
+                        let dst_x: u32 = parts[2].parse().unwrap_or(0);
+                        let dst_y: u32 = parts[3].parse().unwrap_or(0);
+                        chipdb.colbuf_entries.push(ColBufEntry {
+                            src_x,
+                            src_y,
+                            dst_x,
+                            dst_y,
+                        });
+                    }
+                }
                 Section::None => {}
             }
         }
@@ -700,6 +736,52 @@ impl ChipDb {
                 configurable: true,
             })
             .collect()
+    }
+
+    /// Derive unique colbuf source rows for non-RAM columns from parsed .colbuf entries.
+    /// Returns sorted, deduplicated Y coordinates of source tiles for columns where
+    /// the source tile is a logic or IO tile (not a RAM tile).
+    pub fn colbuf_source_rows(&self) -> Option<Vec<u32>> {
+        if self.colbuf_entries.is_empty() {
+            return None;
+        }
+        let mut rows: Vec<u32> = self
+            .colbuf_entries
+            .iter()
+            .filter(|e| {
+                // Non-RAM columns: source tile is not a RAM tile
+                !matches!(
+                    self.tiles.get(&(e.src_x, e.src_y)),
+                    Some(TileType::RamBottom) | Some(TileType::RamTop)
+                )
+            })
+            .map(|e| e.src_y)
+            .collect();
+        rows.sort_unstable();
+        rows.dedup();
+        if rows.is_empty() { None } else { Some(rows) }
+    }
+
+    /// Derive unique colbuf source rows for RAM columns from parsed .colbuf entries.
+    /// Returns sorted, deduplicated Y coordinates of source tiles in RAM columns.
+    pub fn ramb_colbuf_source_rows(&self) -> Option<Vec<u32>> {
+        if self.colbuf_entries.is_empty() {
+            return None;
+        }
+        let mut rows: Vec<u32> = self
+            .colbuf_entries
+            .iter()
+            .filter(|e| {
+                matches!(
+                    self.tiles.get(&(e.src_x, e.src_y)),
+                    Some(TileType::RamBottom) | Some(TileType::RamTop)
+                )
+            })
+            .map(|e| e.src_y)
+            .collect();
+        rows.sort_unstable();
+        rows.dedup();
+        if rows.is_empty() { None } else { Some(rows) }
     }
 
     /// Get PLL extra_cell data (first PLL if multiple exist)
@@ -840,6 +922,7 @@ enum Section {
     GbufIn,
     TileBits,
     ExtraCell,
+    ColBuf,
 }
 
 /// Parse a config bit reference like "B1[5]" or "!B0[3]"

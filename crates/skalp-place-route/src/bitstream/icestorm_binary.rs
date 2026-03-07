@@ -11,7 +11,8 @@
 //! - Wake up sequence
 
 use super::IceStormAscii;
-use crate::device::ice40::{Ice40Device, Ice40Variant};
+use crate::device::ice40::Ice40Device;
+use crate::device::Device;
 use crate::error::Result;
 use crate::placer::PlacementResult;
 use crate::router::RoutingResult;
@@ -54,7 +55,9 @@ impl<'a> IceStormBinary<'a> {
         data.extend_from_slice(&PREAMBLE);
 
         // Parse ASCII format and build CRAM
-        let mut cram = CramBuilder::new(self.device.variant);
+        // Use device grid_size() which comes from chipdb dimensions
+        let grid_size = self.device.grid_size();
+        let mut cram = CramBuilder::new(grid_size);
 
         for line in ascii.lines() {
             let line = line.trim();
@@ -167,7 +170,7 @@ enum TileKind {
 
 /// CRAM builder for converting ASCII to binary
 struct CramBuilder {
-    variant: Ice40Variant,
+    grid_size: (u32, u32),
     current_tile: Option<(u32, u32, TileKind)>,
     current_row: usize,
     // CRAM data organized by (x, y, kind) -> rows of bits
@@ -175,9 +178,9 @@ struct CramBuilder {
 }
 
 impl CramBuilder {
-    fn new(variant: Ice40Variant) -> Self {
+    fn new(grid_size: (u32, u32)) -> Self {
         Self {
-            variant,
+            grid_size,
             current_tile: None,
             current_row: 0,
             tiles: std::collections::HashMap::new(),
@@ -201,17 +204,18 @@ impl CramBuilder {
     }
 
     fn build(&self) -> Vec<u8> {
-        // Get device dimensions
-        let (width, height) = match self.variant {
-            Ice40Variant::Hx1k | Ice40Variant::Lp1k => (14, 18), // Including I/O columns
-            Ice40Variant::Hx4k | Ice40Variant::Lp4k | Ice40Variant::Up5k => (20, 32),
-            Ice40Variant::Hx8k | Ice40Variant::Lp8k => (34, 34),
-        };
+        // Grid dimensions from device (comes from chipdb)
+        let (width, height) = self.grid_size;
+        let width = width as usize;
+        let height = height as usize;
 
-        // Calculate CRAM size
-        // For 1k: 332 bits per column, 144 columns = 47808 bits = 5976 bytes
-        let bits_per_col = height * 16; // 16 rows per tile, variable columns
-        let cols_per_bank = width * 54; // Approximate - logic tiles are 54 bits
+        // TODO: CRAM layout limitation — this treats all tiles as 54 columns wide,
+        // which is wrong for IO (18) and RAM (42) tiles. A proper CRAM layout
+        // algorithm would use per-tile-type column widths from chipdb tile_dimensions.
+        // For now, the binary generator produces incorrect output for tiles that aren't
+        // 54 columns wide. The ASCII generator (.asc) is correct and should be preferred.
+        let bits_per_col = height * 16; // 16 rows per tile
+        let cols_per_bank = width * 54; // Approximate - all tiles treated as 54 bits
 
         // Build raw CRAM data
         let mut cram_bits: Vec<bool> = Vec::new();
@@ -220,12 +224,12 @@ impl CramBuilder {
         for col in 0..cols_per_bank {
             for row in 0..bits_per_col {
                 // Find which tile and bit this corresponds to
-                let tile_x = col / 54;
-                let tile_y = row / 16;
+                let tile_x = (col / 54) as u32;
+                let tile_y = (row / 16) as u32;
                 let bit_col = col % 54;
                 let bit_row = row % 16;
 
-                if let Some(tile_data) = self.tiles.get(&(tile_x as u32, tile_y as u32)) {
+                if let Some(tile_data) = self.tiles.get(&(tile_x, tile_y)) {
                     if bit_row < tile_data.len() && bit_col < tile_data[bit_row].len() {
                         cram_bits.push(tile_data[bit_row][bit_col]);
                     } else {
