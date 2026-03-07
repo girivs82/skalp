@@ -127,6 +127,38 @@ impl IoConfig {
     }
 }
 
+/// Return the Y coordinates of logic/IO tiles that host column buffer control bits.
+/// These tiles distribute global signals and need ColBufCtrl bits set.
+/// Derived from the .colbuf section of the IceStorm chipdb.
+fn colbuf_source_rows(grid_height: u32) -> [u32; 4] {
+    match grid_height {
+        18 => [4, 5, 12, 13],       // HX1K / LP1K (14x18)
+        34 => [8, 9, 25, 26],       // HX8K / LP8K (34x34)
+        33 => [8, 9, 24, 25],       // UP5K (26x33)
+        _ => {
+            // Conservative fallback: compute quadrant boundaries
+            let q = grid_height / 4;
+            [q, q + 1, 3 * q, 3 * q + 1]
+        }
+    }
+}
+
+/// Return the Y coordinates of ramb tiles that host column buffer control bits.
+/// RAM columns have different colbuf rows than logic columns because RAM tiles
+/// occupy odd rows (ramb at odd y, ramt at even y).
+/// Derived from the .colbuf section of the IceStorm chipdb for RAM columns.
+fn ramb_colbuf_source_rows(grid_height: u32) -> [u32; 4] {
+    match grid_height {
+        18 => [3, 5, 11, 13],       // HX1K / LP1K
+        34 => [7, 9, 23, 25],       // HX8K / LP8K
+        33 => [7, 9, 23, 25],       // UP5K
+        _ => {
+            let q = grid_height / 4;
+            [q - 1, q + 1, 3 * q - 1, 3 * q + 1]
+        }
+    }
+}
+
 /// IceStorm ASCII format generator
 pub struct IceStormAscii<'a> {
     device: &'a Ice40Device,
@@ -173,7 +205,7 @@ impl<'a> IceStormAscii<'a> {
         let io_configs = self.collect_io_configs(placement, netlist);
 
         // Collect global network configuration
-        let global_config = self.collect_global_config(placement);
+        let global_config = self.collect_global_config(placement, netlist);
 
         // Collect RAM configurations from placement and netlist
         let ram_configs = self.collect_ram_configs(placement, netlist);
@@ -214,13 +246,21 @@ impl<'a> IceStormAscii<'a> {
                                 routing,
                                 &io_configs,
                                 &pll_resolved_bits,
+                                &global_config,
                             );
                         }
                         TileType::RamTop => {
                             self.generate_ramt_tile(&mut asc, x, y, placement, &ram_configs);
                         }
                         TileType::RamBottom => {
-                            self.generate_ramb_tile(&mut asc, x, y, placement, &ram_configs);
+                            self.generate_ramb_tile(
+                                &mut asc,
+                                x,
+                                y,
+                                placement,
+                                &ram_configs,
+                                &global_config,
+                            );
                         }
                         TileType::Pll => {
                             self.generate_pll_tile(&mut asc, x, y, &pll_resolved_bits);
@@ -513,37 +553,22 @@ impl<'a> IceStormAscii<'a> {
         }
     }
 
-    /// Collect global network configuration from placement
-    /// Determines which global networks (0-7) are in use based on SB_GB placements
-    fn collect_global_config(&self, placement: &PlacementResult) -> GlobalNetworkConfig {
-        let mut config = GlobalNetworkConfig::default();
-
-        // Check for global buffer cells
-        for loc in placement.placements.values() {
-            if matches!(loc.bel_type, BelType::GlobalBuf) {
-                // Map global buffer placement to global network index
-                // In iCE40, the global network index is typically related to the gbufin location
-                // For simplicity, enable all global networks when any global buffer is used
-                config.active_networks = 0xFF; // Enable all 8 global networks
-                break;
-            }
+    /// Collect global network configuration from placement and netlist.
+    /// Determines which global networks (0-7) are in use.
+    /// Enables all 8 column buffer networks for any design that uses clocks or
+    /// global buffers, matching nextpnr's behavior (unused column buffers are harmless).
+    fn collect_global_config(
+        &self,
+        _placement: &PlacementResult,
+        _netlist: Option<&GateNetlist>,
+    ) -> GlobalNetworkConfig {
+        // Always enable all 8 global networks. nextpnr unconditionally sets ColBufCtrl
+        // bits in all column buffer rows, even for purely combinational designs.
+        // Unused column buffers pass the default low signal and are harmless.
+        // This ensures clock/reset/global signals can reach all tiles when needed.
+        GlobalNetworkConfig {
+            active_networks: 0xFF,
         }
-
-        // Also check for DFF cells which need clock distribution
-        // DFFs require global networks to be active for clock signals
-        let has_dffs = placement.placements.values().any(|loc| {
-            matches!(
-                loc.bel_type,
-                BelType::Dff | BelType::DffE | BelType::DffSr | BelType::DffSrE
-            )
-        });
-
-        if has_dffs {
-            // Enable global network 0 (typically used for primary clock)
-            config.active_networks |= 0x01;
-        }
-
-        config
     }
 
     /// Generate logic tile configuration
@@ -581,7 +606,16 @@ impl<'a> IceStormAscii<'a> {
             .copied()
             .collect();
 
-        if cells_in_tile.is_empty() && pips_in_tile.is_empty() {
+        // ColBufCtrl bits are only set in tiles at the column buffer rows.
+        // For HX1K/LP1K: y = {4, 5, 12, 13}
+        // For HX8K/LP8K: y = {8, 9, 25, 26}
+        // These rows contain the column buffers that distribute global signals.
+        let (_, height) = self.device.grid_size();
+        let colbuf_rows = colbuf_source_rows(height);
+        let is_colbuf_row = colbuf_rows.contains(&y);
+        let needs_colbuf = global_config.active_networks != 0 && is_colbuf_row;
+
+        if cells_in_tile.is_empty() && pips_in_tile.is_empty() && !needs_colbuf {
             return;
         }
 
@@ -692,6 +726,7 @@ impl<'a> IceStormAscii<'a> {
         routing: &RoutingResult,
         io_configs: &HashMap<(u32, u32, usize), IoConfig>,
         pll_resolved_bits: &HashMap<(u32, u32), Vec<(u8, u8)>>,
+        global_config: &GlobalNetworkConfig,
     ) {
         let cells_in_tile: Vec<_> = placement
             .placements
@@ -718,14 +753,29 @@ impl<'a> IceStormAscii<'a> {
         // Check if this IO tile has PLL config bits
         let has_pll_bits = pll_resolved_bits.contains_key(&(x, y));
 
-        if cells_in_tile.is_empty() && pips_in_tile.is_empty() && !has_pll_bits {
-            return;
-        }
+        // IO tiles at column buffer rows also need ColBufCtrl bits
+        let (_, height) = self.device.grid_size();
+        let colbuf_rows = colbuf_source_rows(height);
+        let is_colbuf_row = colbuf_rows.contains(&y);
+        let needs_colbuf = global_config.active_networks != 0 && is_colbuf_row;
+
+        let has_cells_or_pips = !cells_in_tile.is_empty() || !pips_in_tile.is_empty() || has_pll_bits;
 
         asc.push_str(&format!(".io_tile {} {}\n", x, y));
 
         // Create a 16x18 bit array (16 rows, 18 columns)
         let mut bits = [[false; 18]; 16];
+
+        // Set default Input Enable (IE) bits for unused IO pads.
+        // This prevents floating inputs and matches nextpnr/icestorm behavior.
+        // IE_0 at B9[3], IE_1 at B6[3]
+        // Note: tiles without physical pads (e.g. corner tiles) don't need IE bits,
+        // but our tile iteration only visits tiles present in the device grid,
+        // so all io_tiles we emit should have pads.
+        if !has_cells_or_pips {
+            bits[9][3] = true; // IE_0 — input enable for IOB_0
+            bits[6][3] = true; // IE_1 — input enable for IOB_1
+        }
 
         if let Some(ref chipdb) = self.chipdb {
             // Set I/O cell configuration bits
@@ -796,6 +846,30 @@ impl<'a> IceStormAscii<'a> {
             for &(row, col) in pll_bits {
                 if (row as usize) < 16 && (col as usize) < 18 {
                     bits[row as usize][col as usize] = true;
+                }
+            }
+        }
+
+        // Set column buffer control bits for global networks in IO tiles.
+        // IO tile ColBufCtrl bit positions (from chipdb) differ from logic tiles:
+        //   glb_netwk_0: B1[9],  glb_netwk_1: B0[9],  glb_netwk_2: B3[9]
+        //   glb_netwk_3: B2[9],  glb_netwk_4: B5[9],  glb_netwk_5: B4[9]
+        //   glb_netwk_6: B7[9],  glb_netwk_7: B6[9]
+        if needs_colbuf {
+            let io_colbuf_positions: [(usize, usize, u8); 8] = [
+                (1, 9, 0), // glb_netwk_0 at B1[9]
+                (0, 9, 1), // glb_netwk_1 at B0[9]
+                (3, 9, 2), // glb_netwk_2 at B3[9]
+                (2, 9, 3), // glb_netwk_3 at B2[9]
+                (5, 9, 4), // glb_netwk_4 at B5[9]
+                (4, 9, 5), // glb_netwk_5 at B4[9]
+                (7, 9, 6), // glb_netwk_6 at B7[9]
+                (6, 9, 7), // glb_netwk_7 at B6[9]
+            ];
+
+            for (row, col, glb_idx) in io_colbuf_positions {
+                if (global_config.active_networks >> glb_idx) & 1 == 1 {
+                    bits[row][col] = true;
                 }
             }
         }
@@ -1105,30 +1179,33 @@ impl<'a> IceStormAscii<'a> {
 
     /// Generate RAM bottom tile configuration
     /// RAM tiles have 42 columns x 16 rows of config bits
+    #[allow(clippy::too_many_arguments)]
     fn generate_ramb_tile(
         &self,
         asc: &mut String,
         x: u32,
         y: u32,
-        placement: &PlacementResult,
+        _placement: &PlacementResult,
         ram_configs: &HashMap<(u32, u32), RamConfig>,
+        global_config: &GlobalNetworkConfig,
     ) {
-        let cells_in_tile: Vec<_> = placement
-            .placements
-            .iter()
-            .filter(|(_, loc)| {
-                loc.tile_x == x && loc.tile_y == y && matches!(loc.bel_type, BelType::RamSlice)
-            })
-            .collect();
+        // RAM bottom tiles always need to be emitted for:
+        // 1. RamConfig.PowerUp B1[7] — set on ALL ramb tiles
+        // 2. ColBufCtrl — set on ramb tiles at column buffer rows
+        // 3. RAM config bits — for tiles with placed RAM cells
 
-        if cells_in_tile.is_empty() {
-            return;
-        }
+        let (_, height) = self.device.grid_size();
+        let ram_colbuf_rows = ramb_colbuf_source_rows(height);
+        let is_colbuf_row = ram_colbuf_rows.contains(&y);
+        let needs_colbuf = global_config.active_networks != 0 && is_colbuf_row;
 
         asc.push_str(&format!(".ramb_tile {} {}\n", x, y));
 
         // Create a 16x42 bit array (16 rows, 42 columns)
         let mut bits = [[false; 42]; 16];
+
+        // RamConfig.PowerUp B1[7] — always set on all ramb tiles
+        bits[1][7] = true;
 
         // Set READ_MODE/WRITE_MODE config bits from chipdb CBIT positions
         if let Some(config) = ram_configs.get(&(x, y)) {
@@ -1150,6 +1227,30 @@ impl<'a> IceStormAscii<'a> {
                             }
                         }
                     }
+                }
+            }
+        }
+
+        // Set ColBufCtrl bits for global networks at column buffer rows.
+        // RAM tile ColBufCtrl bit positions are the same as logic tiles:
+        //   glb_netwk_0: B0[1], glb_netwk_1: B1[2], glb_netwk_2: B5[2]
+        //   glb_netwk_3: B7[2], glb_netwk_4: B9[2], glb_netwk_5: B11[2]
+        //   glb_netwk_6: B13[2], glb_netwk_7: B15[2]
+        if needs_colbuf {
+            let colbuf_positions: [(usize, usize, u8); 8] = [
+                (0, 1, 0),  // glb_netwk_0 at B0[1]
+                (1, 2, 1),  // glb_netwk_1 at B1[2]
+                (5, 2, 2),  // glb_netwk_2 at B5[2]
+                (7, 2, 3),  // glb_netwk_3 at B7[2]
+                (9, 2, 4),  // glb_netwk_4 at B9[2]
+                (11, 2, 5), // glb_netwk_5 at B11[2]
+                (13, 2, 6), // glb_netwk_6 at B13[2]
+                (15, 2, 7), // glb_netwk_7 at B15[2]
+            ];
+
+            for (row, col, glb_idx) in colbuf_positions {
+                if (global_config.active_networks >> glb_idx) & 1 == 1 {
+                    bits[row][col] = true;
                 }
             }
         }

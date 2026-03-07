@@ -579,6 +579,32 @@ fn build_counter(n: usize) -> GateNetlist {
             .push((dff_id, 0));
     }
 
+    // Output IO buffers for counter bits (needed for icetime path tracing)
+    #[allow(clippy::needless_range_loop)]
+    for i in 0..n {
+        let out_net = netlist.add_net(GateNet::new_output(
+            GateNetId(next()),
+            format!("count_{}", i),
+        ));
+
+        // Buffer LUT: pass DFF output to IO (init=0xAAAA = buffer on I0)
+        let mut buf_lut = Cell::new_comb(
+            CellId(0),
+            "SB_LUT4".to_string(),
+            "ice40".to_string(),
+            0.0,
+            format!("io_buf.lut{}", i),
+            vec![dff_out_nets[i]],
+            vec![out_net],
+        );
+        buf_lut.lut_init = Some(0xAAAA);
+        let buf_id = netlist.add_cell(buf_lut);
+        netlist.nets[out_net.0 as usize].driver = Some(buf_id);
+        netlist.nets[dff_out_nets[i].0 as usize]
+            .fanout
+            .push((buf_id, 0));
+    }
+
     // Clock IO buffer
     let clk_io = Cell::new_comb(
         CellId(0),
@@ -714,16 +740,40 @@ fn build_shift_register(n: usize) -> GateNetlist {
         )));
     }
 
+    // LUT buffers: each DFF needs a LUT in front (iCE40 LC = LUT+DFF pair)
+    let mut lut_out_nets = Vec::new();
+    for i in 0..n {
+        lut_out_nets.push(netlist.add_net(GateNet::new(
+            GateNetId(next()),
+            format!("lut_out_{}", i),
+        )));
+    }
+
     let mut prev_net = data_in;
     #[allow(clippy::needless_range_loop)]
     for i in 0..n {
+        // Buffer LUT: pass input through (init=0xAAAA = buffer on I0)
+        let mut buf_lut = Cell::new_comb(
+            CellId(0),
+            "SB_LUT4".to_string(),
+            "ice40".to_string(),
+            0.0,
+            format!("sr.lut{}", i),
+            vec![prev_net],
+            vec![lut_out_nets[i]],
+        );
+        buf_lut.lut_init = Some(0xAAAA);
+        let lut_id = netlist.add_cell(buf_lut);
+        netlist.nets[lut_out_nets[i].0 as usize].driver = Some(lut_id);
+        netlist.nets[prev_net.0 as usize].fanout.push((lut_id, 0));
+
         let mut dff = Cell::new_seq(
             CellId(0),
             "SB_DFF".to_string(),
             "ice40".to_string(),
             0.0,
             format!("sr.dff{}", i),
-            vec![prev_net],
+            vec![lut_out_nets[i]],
             vec![dff_out_nets[i]],
             clock_net,
             None,
@@ -731,9 +781,32 @@ fn build_shift_register(n: usize) -> GateNetlist {
         dff.clock = Some(clock_net);
         let dff_id = netlist.add_cell(dff);
         netlist.nets[dff_out_nets[i].0 as usize].driver = Some(dff_id);
-        netlist.nets[prev_net.0 as usize].fanout.push((dff_id, 0));
+        netlist.nets[lut_out_nets[i].0 as usize]
+            .fanout
+            .push((dff_id, 0));
         prev_net = dff_out_nets[i];
     }
+
+    // Output: last DFF output goes to IO
+    let data_out = netlist.add_net(GateNet::new_output(
+        GateNetId(next()),
+        "data_out".to_string(),
+    ));
+    let mut out_lut = Cell::new_comb(
+        CellId(0),
+        "SB_LUT4".to_string(),
+        "ice40".to_string(),
+        0.0,
+        "sr.out_lut".to_string(),
+        vec![dff_out_nets[n - 1]],
+        vec![data_out],
+    );
+    out_lut.lut_init = Some(0xAAAA);
+    let out_lut_id = netlist.add_cell(out_lut);
+    netlist.nets[data_out.0 as usize].driver = Some(out_lut_id);
+    netlist.nets[dff_out_nets[n - 1].0 as usize]
+        .fanout
+        .push((out_lut_id, 0));
 
     // Clock IO
     let clk_io = Cell::new_comb(

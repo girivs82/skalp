@@ -2315,4 +2315,116 @@ set_io btn A6
             );
         }
     }
+
+    #[test]
+    #[ignore] // diagnostic — dumps .asc files to /tmp for manual comparison
+    fn test_dump_asc_for_comparison() {
+        use skalp_lir::gate_netlist::{Cell, CellId, GateNet, GateNetId};
+
+        // --- Inverter ---
+        let mut netlist = GateNetlist::new("inverter".to_string(), "ice40".to_string());
+        let in_net = netlist.add_net(GateNet::new_input(GateNetId(0), "a".to_string()));
+        let out_net = netlist.add_net(GateNet::new_output(GateNetId(1), "y".to_string()));
+        let mut lut = Cell::new_comb(
+            CellId(0), "SB_LUT4".to_string(), "ice40".to_string(), 0.0,
+            "top.inv_lut".to_string(), vec![in_net], vec![out_net],
+        );
+        lut.lut_init = Some(0x5555);
+        let lut_id = netlist.add_cell(lut);
+        netlist.nets[out_net.0 as usize].driver = Some(lut_id);
+        netlist.nets[in_net.0 as usize].fanout.push((lut_id, 0));
+        let io_in = Cell::new_comb(
+            CellId(0), "SB_IO".to_string(), "ice40".to_string(), 0.0,
+            "io.a".to_string(), vec![], vec![in_net],
+        );
+        let io_in_id = netlist.add_cell(io_in);
+        netlist.nets[in_net.0 as usize].driver = Some(io_in_id);
+
+        let config = PnrConfig::fast();
+        let result = place_and_route(&netlist, Ice40Variant::Hx1k, config).unwrap();
+        let asc = result.to_icestorm_ascii_with_netlist(Some(&netlist));
+        std::fs::write("/tmp/skalp_inverter.asc", &asc).unwrap();
+
+        println!("Placement: {:?}", result.placement.placements);
+        println!("Routes: {} nets", result.routing.routes.len());
+        for (net_id, route) in &result.routing.routes {
+            println!("  net {:?}: {} wires, {} pips, delay={}ps",
+                net_id, route.wires.len(), route.pips.len(), route.delay);
+        }
+        println!("Routing success: {}", result.routing.success);
+        println!("Wirelength: {}", result.routing.wirelength);
+
+        // --- 4-bit counter ---
+        let mut netlist2 = GateNetlist::new("counter_4".to_string(), "ice40".to_string());
+        let mut nid = 0u32;
+        let mut next = || { let id = nid; nid += 1; id };
+
+        let clock_net = netlist2.add_net({
+            let mut net = GateNet::new_input(GateNetId(next()), "clk".to_string());
+            net.is_clock = true;
+            net
+        });
+        let carry_in = netlist2.add_net(GateNet::new(GateNetId(next()), "carry_in".to_string()));
+        let mut carry_nets = vec![carry_in];
+        for i in 0..4 {
+            carry_nets.push(netlist2.add_net(GateNet::new(GateNetId(next()), format!("carry_{}", i))));
+        }
+        let mut dff_out_nets = Vec::new();
+        let mut lut_out_nets = Vec::new();
+        for i in 0..4 {
+            dff_out_nets.push(netlist2.add_net(GateNet::new(GateNetId(next()), format!("q_{}", i))));
+            lut_out_nets.push(netlist2.add_net(GateNet::new(GateNetId(next()), format!("lut_{}", i))));
+        }
+        for i in 0..4 {
+            let mut lut = Cell::new_comb(
+                CellId(0), "SB_LUT4".to_string(), "ice40".to_string(), 0.0,
+                format!("cnt.lut{}", i), vec![dff_out_nets[i], carry_nets[i]], vec![lut_out_nets[i]],
+            );
+            lut.lut_init = Some(0x6666);
+            let lut_id = netlist2.add_cell(lut);
+            netlist2.nets[lut_out_nets[i].0 as usize].driver = Some(lut_id);
+            netlist2.nets[dff_out_nets[i].0 as usize].fanout.push((lut_id, 0));
+            netlist2.nets[carry_nets[i].0 as usize].fanout.push((lut_id, 1));
+
+            let carry = Cell::new_comb(
+                CellId(0), "SB_CARRY".to_string(), "ice40".to_string(), 0.0,
+                format!("cnt.carry{}", i), vec![lut_out_nets[i], carry_nets[i]], vec![carry_nets[i + 1]],
+            );
+            let carry_id = netlist2.add_cell(carry);
+            netlist2.nets[carry_nets[i + 1].0 as usize].driver = Some(carry_id);
+            netlist2.nets[lut_out_nets[i].0 as usize].fanout.push((carry_id, 0));
+            netlist2.nets[carry_nets[i].0 as usize].fanout.push((carry_id, 1));
+
+            let mut dff = Cell::new_seq(
+                CellId(0), "SB_DFF".to_string(), "ice40".to_string(), 0.0,
+                format!("cnt.dff{}", i), vec![lut_out_nets[i]], vec![dff_out_nets[i]],
+                clock_net, None,
+            );
+            dff.clock = Some(clock_net);
+            let dff_id = netlist2.add_cell(dff);
+            netlist2.nets[dff_out_nets[i].0 as usize].driver = Some(dff_id);
+            netlist2.nets[lut_out_nets[i].0 as usize].fanout.push((dff_id, 0));
+        }
+        let clk_io = Cell::new_comb(
+            CellId(0), "SB_IO".to_string(), "ice40".to_string(), 0.0,
+            "io.clk".to_string(), vec![], vec![clock_net],
+        );
+        let clk_io_id = netlist2.add_cell(clk_io);
+        netlist2.nets[clock_net.0 as usize].driver = Some(clk_io_id);
+
+        let config2 = PnrConfig::fast();
+        let result2 = place_and_route(&netlist2, Ice40Variant::Hx1k, config2).unwrap();
+        let asc2 = result2.to_icestorm_ascii_with_netlist(Some(&netlist2));
+        std::fs::write("/tmp/skalp_counter4.asc", &asc2).unwrap();
+
+        println!("\n--- Counter-4 ---");
+        println!("Placement: {:?}", result2.placement.placements);
+        println!("Routes: {} nets", result2.routing.routes.len());
+        for (net_id, route) in &result2.routing.routes {
+            println!("  net {:?}: {} wires, {} pips, delay={}ps",
+                net_id, route.wires.len(), route.pips.len(), route.delay);
+        }
+        println!("Routing success: {}", result2.routing.success);
+        println!("Wirelength: {}", result2.routing.wirelength);
+    }
 }
