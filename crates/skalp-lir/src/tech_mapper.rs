@@ -7119,6 +7119,11 @@ pub fn map_lir_to_gates_optimized(lir: &Lir, library: &TechLibrary) -> TechMapRe
     let mut optimizer = GateOptimizer::new();
     let opt_stats = optimizer.optimize(&mut result.netlist);
 
+    // LUT post-mapping optimization for FPGA targets
+    if library.is_fpga() {
+        crate::gate_lut_opt::optimize_luts(&mut result.netlist);
+    }
+
     // Update stats with optimization info
     result.stats.cells_created = result.netlist.cells.len();
     result.stats.nets_created = result.netlist.nets.len();
@@ -7234,7 +7239,14 @@ pub fn synthesize(
 
     // Step 2: Run synthesis engine with AIG optimization
     let mut engine = SynthEngine::with_preset(preset);
-    engine.optimize(&initial_result.netlist, library)
+    let mut result = engine.optimize(&initial_result.netlist, library);
+
+    // Step 3: LUT post-mapping optimization for FPGA targets
+    if library.is_fpga() {
+        crate::gate_lut_opt::optimize_luts(&mut result.netlist);
+    }
+
+    result
 }
 
 /// Full synthesis with default balanced preset

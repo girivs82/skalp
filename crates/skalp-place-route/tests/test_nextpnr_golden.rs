@@ -299,7 +299,10 @@ fn compare_asc(skalp_asc: &str, nextpnr_asc: &str, label: &str) -> ComparisonRep
 
 // ===== Skalp synthesis helper =====
 
-/// Compile skalp source through the full pipeline to produce a GateNetlist
+/// Compile skalp source through the full synthesis pipeline to produce a GateNetlist
+///
+/// Uses SynthPreset::Auto (runs Resyn2 + Compress2 in parallel, picks best)
+/// for optimization quality comparable to Yosys.
 fn synthesize_skalp(source: &str) -> GateNetlist {
     let hir = parse_and_build_hir(source).expect("skalp parse failed");
     let mir = MirCompiler::new()
@@ -307,7 +310,7 @@ fn synthesize_skalp(source: &str) -> GateNetlist {
         .expect("MIR compilation failed");
     let lir = lower_mir_module_to_lir(mir.modules.first().expect("no modules")).lir;
     let library = get_stdlib_library("ice40").expect("ice40 library");
-    map_lir_to_gates_optimized(&lir, &library).netlist
+    synthesize(&lir, &library, SynthPreset::Auto).netlist
 }
 
 // ===== Skalp source designs (matching Verilog) =====

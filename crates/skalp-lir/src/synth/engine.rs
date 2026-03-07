@@ -255,8 +255,15 @@ impl SynthEngine {
         let start = Instant::now();
         self.pass_results.clear();
 
-        // Phase 1: Build AIG
-        let builder = AigBuilder::new(netlist);
+        // Phase 0: Partition — extract AIG-incompatible cells (RAM, DSP, PLL, etc.)
+        let partition = super::partition::partition_for_aig(netlist);
+        let aig_input = partition
+            .as_ref()
+            .map(|p| &p.optimizable)
+            .unwrap_or(netlist);
+
+        // Phase 1: Build AIG (only from AIG-compatible cells)
+        let builder = AigBuilder::new(aig_input);
         let mut aig = builder.build();
 
         let initial_stats = aig.compute_stats();
@@ -281,6 +288,11 @@ impl SynthEngine {
             AigWriter::new(library)
         };
         let mut optimized = writer.write(&aig);
+
+        // Phase 5b: Merge physical cells back if we partitioned
+        if let Some(ref part) = partition {
+            optimized = super::partition::merge_after_aig(optimized, part);
+        }
 
         // Preserve NCL flag from input netlist - needed for async-STA
         optimized.is_ncl = netlist.is_ncl;

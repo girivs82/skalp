@@ -1804,11 +1804,11 @@ impl GateNetlist {
         (true_rail, false_rail)
     }
 
-    /// Propagate constants through the netlist (lightweight optimization)
-    pub fn propagate_constants(&mut self) {
-        // Find tie cells and their driven nets
+    /// Get a map of nets driven by constant (TIE) cells.
+    ///
+    /// Returns net_id → constant value (false = 0, true = 1).
+    pub fn get_constant_nets(&self) -> IndexMap<GateNetId, bool> {
         let mut constant_nets: IndexMap<GateNetId, bool> = IndexMap::new();
-
         for cell in &self.cells {
             if cell.cell_type.starts_with("TIE0") {
                 for &output in &cell.outputs {
@@ -1820,11 +1820,15 @@ impl GateNetlist {
                 }
             }
         }
+        constant_nets
+    }
 
+    /// Propagate constants through the netlist (lightweight optimization)
+    pub fn propagate_constants(&mut self) {
+        let _constant_nets = self.get_constant_nets();
         // For now, just record constants - full propagation would require
         // evaluating each cell type's truth table
         // This is a placeholder for more sophisticated constant propagation
-        let _ = constant_nets;
     }
 }
 

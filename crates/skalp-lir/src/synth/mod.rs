@@ -42,6 +42,7 @@ mod engine;
 pub mod liberty;
 pub mod mapping;
 pub mod npn;
+pub mod partition;
 pub mod passes;
 pub mod sat;
 pub mod sta;

@@ -982,6 +982,50 @@ pub enum CellFunction {
 }
 
 impl CellFunction {
+    /// Returns true if this cell function can be represented in an AIG.
+    ///
+    /// Physical/technology-specific cells (RAM, DSP, PLL, clock infrastructure),
+    /// NCL threshold gates, and blackbox cells cannot be decomposed into
+    /// AND-inverter graphs and must be extracted before AIG optimization.
+    pub fn is_aig_compatible(&self) -> bool {
+        match self {
+            // Physical/technology cells — panic in AigBuilder
+            CellFunction::ClkBuf
+            | CellFunction::Pll
+            | CellFunction::ClkDiv
+            | CellFunction::Ram
+            | CellFunction::Dsp
+            | CellFunction::Blackbox { .. } => false,
+
+            // NCL threshold gates — stateful (hysteresis), not representable in AIG
+            CellFunction::Th12
+            | CellFunction::Th22
+            | CellFunction::Th13
+            | CellFunction::Th23
+            | CellFunction::Th33
+            | CellFunction::Th14
+            | CellFunction::Th24
+            | CellFunction::Th34
+            | CellFunction::Th44
+            | CellFunction::Thmn { .. }
+            | CellFunction::NclCompletion { .. } => false,
+
+            // FP soft macros — AigBuilder passes them through (lossy), extract instead
+            CellFunction::FpAdd32
+            | CellFunction::FpSub32
+            | CellFunction::FpMul32
+            | CellFunction::FpDiv32
+            | CellFunction::FpLt32
+            | CellFunction::FpGt32
+            | CellFunction::FpLe32
+            | CellFunction::FpGe32 => false,
+
+            // Everything else: basic gates, complex gates, muxes, arithmetic,
+            // sequential, tie cells, I/O pads, power infrastructure, custom, etc.
+            _ => true,
+        }
+    }
+
     /// Get default input/output pin names for this function
     pub fn default_pins(&self) -> (Vec<String>, Vec<String>) {
         match self {
