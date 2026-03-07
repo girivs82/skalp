@@ -6,7 +6,7 @@
 
 use skalp_frontend::parse_and_build_hir;
 use skalp_lir::gate_netlist::GateNetlist;
-use skalp_lir::{get_stdlib_library, lower_mir_module_to_lir, map_lir_to_gates_optimized};
+use skalp_lir::{get_stdlib_library, lower_mir_module_to_lir, synthesize_balanced};
 use skalp_mir::MirCompiler;
 use skalp_place_route::device::ice40::chipdb_parser::{ChipDb, LcBitMapping};
 use skalp_place_route::{place_and_route, Ice40Variant, PnrConfig};
@@ -307,7 +307,7 @@ fn synthesize_skalp(source: &str) -> GateNetlist {
         .expect("MIR compilation failed");
     let lir = lower_mir_module_to_lir(mir.modules.first().expect("no modules")).lir;
     let library = get_stdlib_library("ice40").expect("ice40 library");
-    map_lir_to_gates_optimized(&lir, &library).netlist
+    synthesize_balanced(&lir, &library).netlist
 }
 
 // ===== Skalp source designs (matching Verilog) =====

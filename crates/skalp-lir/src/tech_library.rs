@@ -1032,8 +1032,11 @@ impl CellFunction {
             // Tristate — has high-impedance state, not AIG-representable
             CellFunction::Tristate => false,
 
+            // Custom — unknown to AIG decomposition, AigBuilder would destroy the logic
+            CellFunction::Custom(_) => false,
+
             // Everything else: basic gates, complex gates, muxes, arithmetic,
-            // sequential, power infrastructure, custom, etc.
+            // sequential, power infrastructure, etc.
             _ => true,
         }
     }

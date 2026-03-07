@@ -207,8 +207,11 @@ impl<'a> AigBuilder<'a> {
             .map(|&net_id| self.get_or_create_net_lit(net_id))
             .collect();
 
-        // Parse cell function from name or type
-        let function = self.parse_cell_function(&cell.cell_type);
+        // Use cell's function field if available, otherwise parse from cell type name
+        let function = cell
+            .function
+            .clone()
+            .unwrap_or_else(|| self.parse_cell_function(&cell.cell_type));
 
         // Build AIG for this cell
         let safety =
@@ -762,9 +765,8 @@ impl<'a> AigBuilder<'a> {
                 inputs.first().copied().unwrap_or(AigLit::true_lit())
             }
 
-            CellFunction::Custom(_) => {
-                // Unknown cell - just pass through first input
-                inputs.first().copied().unwrap_or(AigLit::false_lit())
+            CellFunction::Custom(name) => {
+                panic!("Cannot convert Custom('{}') cell to AIG — should be partitioned out", name);
             }
 
             // NCL Threshold Gates - These are stateful (hysteresis) and should not be
