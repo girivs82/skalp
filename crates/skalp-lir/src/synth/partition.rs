@@ -25,6 +25,8 @@ pub struct NetlistPartition {
     /// Original netlist metadata preserved for merge.
     pub orig_name: String,
     pub orig_library: String,
+    pub orig_inputs: Vec<GateNetId>,
+    pub orig_outputs: Vec<GateNetId>,
     pub orig_clocks: Vec<GateNetId>,
     pub orig_resets: Vec<GateNetId>,
     pub orig_is_ncl: bool,
@@ -293,6 +295,8 @@ pub fn partition_for_aig(netlist: &GateNetlist) -> Option<NetlistPartition> {
         boundary_outputs,
         orig_name: netlist.name.clone(),
         orig_library: netlist.library_name.clone(),
+        orig_inputs: netlist.inputs.clone(),
+        orig_outputs: netlist.outputs.clone(),
         orig_clocks: netlist.clocks.clone(),
         orig_resets: netlist.resets.clone(),
         orig_is_ncl: netlist.is_ncl,
@@ -302,49 +306,50 @@ pub fn partition_for_aig(netlist: &GateNetlist) -> Option<NetlistPartition> {
 /// Merge physical cells back into an optimized netlist.
 ///
 /// The optimized netlist came from AIG optimization of the `optimizable` partition.
-/// We need to:
-/// 1. Map optimized net names back to original IDs
-/// 2. Insert physical cells with their original connectivity
-/// 3. Reconnect boundary nets
+/// The AIG round-trip creates a new netlist with independent net IDs, but preserves
+/// net **names** for inputs and outputs. We use name-based matching to bridge the
+/// optimized netlist's ID space back to the original.
 pub fn merge_after_aig(
     optimized: GateNetlist,
     partition: &NetlistPartition,
 ) -> GateNetlist {
     let mut merged = GateNetlist::new(partition.orig_name.clone(), partition.orig_library.clone());
 
-    // Build name→id map from optimized netlist for reconnection
-    let mut opt_name_to_id: HashMap<String, GateNetId> = HashMap::new();
-    for net in &optimized.nets {
-        opt_name_to_id.insert(net.name.clone(), net.id);
+    // Step 1: Build name-based bridge: optimizable net name → original net ID.
+    // The AIG round-trip preserves names for I/O nets, so matching by name lets us
+    // connect the optimized netlist back to the original net IDs.
+    let mut opt_name_to_orig: HashMap<String, GateNetId> = HashMap::new();
+    for net in &partition.optimizable.nets {
+        if let Some(&orig_id) = partition.opt_to_orig.get(&net.id) {
+            opt_name_to_orig.insert(net.name.clone(), orig_id);
+        }
     }
 
-    // Step 1: Copy all nets from optimized netlist into merged
+    // Step 2: Copy all optimized nets into merged.
+    // Clear I/O flags — we restore the correct ones from orig_inputs/orig_outputs.
     let mut opt_to_merged: HashMap<GateNetId, GateNetId> = HashMap::new();
+    let mut orig_to_merged: HashMap<GateNetId, GateNetId> = HashMap::new();
+
     for net in &optimized.nets {
         let mut new_net = GateNet::new(GateNetId(0), net.name.clone());
-        new_net.is_input = net.is_input;
-        new_net.is_output = net.is_output;
         new_net.is_clock = net.is_clock;
         new_net.is_reset = net.is_reset;
         new_net.is_detection = net.is_detection;
         new_net.detection_config = net.detection_config.clone();
+        // is_input / is_output left false — set from orig_inputs/orig_outputs later
+
         let merged_id = merged.add_net(new_net);
         opt_to_merged.insert(net.id, merged_id);
-    }
 
-    // Step 2: Add nets from physical cells that aren't already in merged
-    // Build a map from original net ID → merged net ID
-    let mut orig_to_merged: HashMap<GateNetId, GateNetId> = HashMap::new();
-
-    // First, map via opt_to_orig → opt_to_merged
-    for (&opt_id, &orig_id) in &partition.opt_to_orig {
-        if let Some(&merged_id) = opt_to_merged.get(&opt_id) {
+        // Name-based bridge: if this net name matches an optimizable net that maps
+        // to an original net, record the original→merged mapping.
+        if let Some(&orig_id) = opt_name_to_orig.get(&net.name) {
             orig_to_merged.insert(orig_id, merged_id);
         }
     }
 
-    // For physical cell nets not already in merged, try matching by name or create new
-    let orig_netlist_nets = &partition.optimizable; // we'll use the original partition info
+    // Step 3: Create nets for physical cell connections not yet in merged.
+    // These are nets used only by physical cells (not in the optimizable partition).
     for cell in &partition.physical_cells {
         let all_nets = cell
             .inputs
@@ -357,16 +362,6 @@ pub fn merge_after_aig(
             if orig_to_merged.contains_key(&net_id) {
                 continue;
             }
-
-            // If the net was in orig_to_opt, it's already in merged via opt_to_merged.
-            if let Some(&opt_id) = partition.orig_to_opt.get(&net_id) {
-                if let Some(&merged_id) = opt_to_merged.get(&opt_id) {
-                    orig_to_merged.insert(net_id, merged_id);
-                    continue;
-                }
-            }
-
-            // Net not in optimizable partition — create a new net
             let net_name = format!("__phys_net_{}", net_id.0);
             let new_net = GateNet::new(GateNetId(0), net_name);
             let merged_id = merged.add_net(new_net);
@@ -374,25 +369,8 @@ pub fn merge_after_aig(
         }
     }
 
-    // Step 3: Copy all cells from optimized netlist
+    // Step 4: Copy optimized cells (remap via opt_to_merged).
     for cell in &optimized.cells {
-        let new_inputs: Vec<GateNetId> = cell
-            .inputs
-            .iter()
-            .map(|&id| *opt_to_merged.get(&id).unwrap_or(&id))
-            .collect();
-        let new_outputs: Vec<GateNetId> = cell
-            .outputs
-            .iter()
-            .map(|&id| *opt_to_merged.get(&id).unwrap_or(&id))
-            .collect();
-        let new_clock = cell
-            .clock
-            .map(|id| *opt_to_merged.get(&id).unwrap_or(&id));
-        let new_reset = cell
-            .reset
-            .map(|id| *opt_to_merged.get(&id).unwrap_or(&id));
-
         let new_cell = Cell {
             id: CellId(0),
             cell_type: cell.cell_type.clone(),
@@ -400,11 +378,11 @@ pub fn merge_after_aig(
             function: cell.function.clone(),
             fit: cell.fit,
             failure_modes: cell.failure_modes.clone(),
-            inputs: new_inputs,
-            outputs: new_outputs,
+            inputs: cell.inputs.iter().map(|&id| opt_to_merged[&id]).collect(),
+            outputs: cell.outputs.iter().map(|&id| opt_to_merged[&id]).collect(),
             path: cell.path.clone(),
-            clock: new_clock,
-            reset: new_reset,
+            clock: cell.clock.map(|id| opt_to_merged[&id]),
+            reset: cell.reset.map(|id| opt_to_merged[&id]),
             source_op: cell.source_op.clone(),
             safety_classification: cell.safety_classification.clone(),
             lut_init: cell.lut_init,
@@ -413,25 +391,8 @@ pub fn merge_after_aig(
         merged.add_cell(new_cell);
     }
 
-    // Step 4: Insert physical cells with remapped net IDs
+    // Step 5: Insert physical cells (remap via orig_to_merged).
     for cell in &partition.physical_cells {
-        let new_inputs: Vec<GateNetId> = cell
-            .inputs
-            .iter()
-            .map(|&id| *orig_to_merged.get(&id).unwrap_or(&id))
-            .collect();
-        let new_outputs: Vec<GateNetId> = cell
-            .outputs
-            .iter()
-            .map(|&id| *orig_to_merged.get(&id).unwrap_or(&id))
-            .collect();
-        let new_clock = cell
-            .clock
-            .map(|id| *orig_to_merged.get(&id).unwrap_or(&id));
-        let new_reset = cell
-            .reset
-            .map(|id| *orig_to_merged.get(&id).unwrap_or(&id));
-
         let new_cell = Cell {
             id: CellId(0),
             cell_type: cell.cell_type.clone(),
@@ -439,11 +400,11 @@ pub fn merge_after_aig(
             function: cell.function.clone(),
             fit: cell.fit,
             failure_modes: cell.failure_modes.clone(),
-            inputs: new_inputs,
-            outputs: new_outputs,
+            inputs: cell.inputs.iter().map(|&id| orig_to_merged[&id]).collect(),
+            outputs: cell.outputs.iter().map(|&id| orig_to_merged[&id]).collect(),
             path: cell.path.clone(),
-            clock: new_clock,
-            reset: new_reset,
+            clock: cell.clock.map(|id| orig_to_merged[&id]),
+            reset: cell.reset.map(|id| orig_to_merged[&id]),
             source_op: cell.source_op.clone(),
             safety_classification: cell.safety_classification.clone(),
             lut_init: cell.lut_init,
@@ -452,51 +413,19 @@ pub fn merge_after_aig(
         merged.add_cell(new_cell);
     }
 
-    // Step 5: Set up primary inputs/outputs from the original + optimized
-    // Use the optimized netlist's inputs (minus pseudo-inputs) + original primary inputs
-    for &opt_id in &optimized.inputs {
-        if let Some(&merged_id) = opt_to_merged.get(&opt_id) {
-            // Skip pseudo-primary-inputs that were boundary inputs (driven by physical cells)
-            let is_boundary = partition.boundary_inputs.iter().any(|&orig_id| {
-                partition
-                    .orig_to_opt
-                    .get(&orig_id)
-                    .is_some_and(|&oid| oid == opt_id)
-            });
-            if !is_boundary && !merged.inputs.contains(&merged_id) {
+    // Step 6: Set primary I/O from original netlist (mapped to merged IDs).
+    for &orig_id in &partition.orig_inputs {
+        if let Some(&merged_id) = orig_to_merged.get(&orig_id) {
+            merged.nets[merged_id.0 as usize].is_input = true;
+            if !merged.inputs.contains(&merged_id) {
                 merged.inputs.push(merged_id);
             }
         }
     }
-    // Re-add boundary inputs only if they're actual primary inputs in the original
-    for &opt_id in &optimized.inputs {
-        if let Some(&merged_id) = opt_to_merged.get(&opt_id) {
-            if !merged.inputs.contains(&merged_id) {
-                // Check if this was an original primary input
-                let is_orig_input = partition.opt_to_orig.get(&opt_id).is_some_and(|&orig_id| {
-                    let orig_net = &partition.optimizable.nets[0]; // dummy
-                    // Check original netlist inputs
-                    // We stored original inputs through orig_to_opt
-                    // A net is an original primary input if it was in the original inputs list
-                    // We can check by looking at whether it's NOT a boundary_input
-                    !partition.boundary_inputs.contains(&orig_id)
-                });
-                // If not already added and it's not a pseudo-input, skip
-            }
-        }
-    }
-
-    // Outputs: use original primary outputs
-    for &opt_id in &optimized.outputs {
-        if let Some(&merged_id) = opt_to_merged.get(&opt_id) {
-            // Skip pseudo-primary-outputs that were boundary outputs
-            let is_boundary = partition.boundary_outputs.iter().any(|&orig_id| {
-                partition
-                    .orig_to_opt
-                    .get(&orig_id)
-                    .is_some_and(|&oid| oid == opt_id)
-            });
-            if !is_boundary && !merged.outputs.contains(&merged_id) {
+    for &orig_id in &partition.orig_outputs {
+        if let Some(&merged_id) = orig_to_merged.get(&orig_id) {
+            merged.nets[merged_id.0 as usize].is_output = true;
+            if !merged.outputs.contains(&merged_id) {
                 merged.outputs.push(merged_id);
             }
         }
@@ -606,9 +535,9 @@ mod tests {
         assert!(partition.boundary_inputs.contains(&ram_out));
     }
 
-    /// Test round-trip: partition → merge preserves cell count
-    #[test]
-    fn test_partition_merge_roundtrip() {
+    /// Helper: build a test netlist with logic + RAM cells.
+    /// Returns (netlist, primary_input_a, primary_output_y).
+    fn make_logic_plus_ram() -> (GateNetlist, GateNetId, GateNetId) {
         let mut netlist = GateNetlist::new("test".to_string(), "generic".to_string());
         let a = netlist.add_input("a".to_string());
         let clk = netlist.add_input("clk".to_string());
@@ -656,6 +585,14 @@ mod tests {
         ram_cell.function = Some(CellFunction::Ram);
         netlist.add_cell(ram_cell);
 
+        (netlist, a, y_net)
+    }
+
+    /// Test round-trip: partition → merge preserves cell count (identity transform)
+    #[test]
+    fn test_partition_merge_roundtrip() {
+        let (netlist, _, _) = make_logic_plus_ram();
+
         let partition = partition_for_aig(&netlist).expect("Should partition");
         assert_eq!(partition.optimizable.cells.len(), 2); // AND + BUF
         assert_eq!(partition.physical_cells.len(), 1); // RAM
@@ -665,5 +602,115 @@ mod tests {
 
         // Should have all 3 cells back
         assert_eq!(merged.cells.len(), 3);
+        // Primary I/O should match original
+        assert_eq!(merged.inputs.len(), netlist.inputs.len());
+        assert_eq!(merged.outputs.len(), netlist.outputs.len());
+        assert_eq!(merged.clocks.len(), netlist.clocks.len());
+    }
+
+    /// Test full AIG round-trip: partition → AIG build → AIG write → merge.
+    /// This exercises the name-based bridging across independent ID spaces.
+    #[test]
+    fn test_partition_merge_aig_roundtrip() {
+        use crate::synth::AigBuilder;
+        use crate::synth::AigWriter;
+        use crate::tech_library::{LibraryCell, TechLibrary};
+
+        let (netlist, _, _) = make_logic_plus_ram();
+
+        let partition = partition_for_aig(&netlist).expect("Should partition");
+        assert_eq!(partition.optimizable.cells.len(), 2); // AND + BUF
+        assert_eq!(partition.physical_cells.len(), 1); // RAM
+
+        // Run the actual AIG round-trip (new ID space after this)
+        let builder = AigBuilder::new(&partition.optimizable);
+        let aig = builder.build();
+
+        let mut lib = TechLibrary::new("generic");
+        lib.add_cell(LibraryCell::new_comb("AND2", CellFunction::And2, 0.1));
+        lib.add_cell(LibraryCell::new_comb("BUF", CellFunction::Buf, 0.05));
+        lib.add_cell(LibraryCell::new_comb("INV", CellFunction::Inv, 0.05));
+
+        let writer = AigWriter::new(&lib);
+        let optimized = writer.write(&aig);
+
+        // The optimized netlist has completely different net IDs — merge must bridge them
+        let merged = merge_after_aig(optimized, &partition);
+
+        // All cells must be present (logic cells from AIG + physical RAM)
+        assert!(
+            merged.cells.len() >= 2,
+            "merged should have at least 2 cells (logic + RAM), got {}",
+            merged.cells.len()
+        );
+
+        // The RAM cell must survive
+        let ram_cells: Vec<_> = merged
+            .cells
+            .iter()
+            .filter(|c| c.function == Some(CellFunction::Ram))
+            .collect();
+        assert_eq!(ram_cells.len(), 1, "RAM cell must be preserved in merge");
+
+        // Primary I/O must match original
+        assert_eq!(
+            merged.inputs.len(),
+            netlist.inputs.len(),
+            "merged inputs count must match original"
+        );
+        assert_eq!(
+            merged.outputs.len(),
+            netlist.outputs.len(),
+            "merged outputs count must match original"
+        );
+        assert_eq!(
+            merged.clocks.len(),
+            netlist.clocks.len(),
+            "merged clocks count must match original"
+        );
+
+        // All nets referenced by cells must be valid
+        for cell in &merged.cells {
+            for &net_id in cell
+                .inputs
+                .iter()
+                .chain(cell.outputs.iter())
+                .chain(cell.clock.iter())
+                .chain(cell.reset.iter())
+            {
+                assert!(
+                    (net_id.0 as usize) < merged.nets.len(),
+                    "cell {} references invalid net {}",
+                    cell.cell_type,
+                    net_id.0
+                );
+            }
+        }
+
+        // Verify I/O flags on nets are consistent with the lists
+        for &input_id in &merged.inputs {
+            assert!(
+                merged.nets[input_id.0 as usize].is_input,
+                "input net {} should have is_input=true",
+                merged.nets[input_id.0 as usize].name
+            );
+        }
+        for &output_id in &merged.outputs {
+            assert!(
+                merged.nets[output_id.0 as usize].is_output,
+                "output net {} should have is_output=true",
+                merged.nets[output_id.0 as usize].name
+            );
+        }
+
+        // Verify connectivity was rebuilt (RAM should drive something)
+        let ram_cell = &ram_cells[0];
+        let ram_out_id = ram_cell.outputs[0];
+        let ram_out_net = &merged.nets[ram_out_id.0 as usize];
+        assert_eq!(
+            ram_out_net.driver,
+            Some(ram_cell.id),
+            "RAM output net must be driven by RAM cell"
+        );
     }
 }
