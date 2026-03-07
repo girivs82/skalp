@@ -39,9 +39,27 @@ pub fn partition_for_aig(netlist: &GateNetlist) -> Option<NetlistPartition> {
         .cells
         .iter()
         .filter(|c| {
-            c.function
+            // Cells with a known incompatible function
+            if c.function
                 .as_ref()
                 .is_some_and(|f| !f.is_aig_compatible())
+            {
+                return true;
+            }
+            // Cells with no function that are infrastructure (SB_GND, SB_VCC, SB_IO, etc.)
+            // The AIG builder can't handle these — they have no CellFunction mapping
+            if c.function.is_none() {
+                let upper = c.cell_type.to_uppercase();
+                if upper.starts_with("SB_GND")
+                    || upper.starts_with("SB_VCC")
+                    || upper.starts_with("SB_IO")
+                    || upper.starts_with("SB_GB")
+                    || upper.starts_with("TIE")
+                {
+                    return true;
+                }
+            }
+            false
         })
         .map(|c| c.id)
         .collect();

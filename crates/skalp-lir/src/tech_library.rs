@@ -1020,8 +1020,20 @@ impl CellFunction {
             | CellFunction::FpLe32
             | CellFunction::FpGe32 => false,
 
+            // I/O pads — physical interface cells, not representable in AIG
+            CellFunction::InputPad
+            | CellFunction::OutputPad
+            | CellFunction::BidirPad
+            | CellFunction::ClockPad => false,
+
+            // Tie cells — constant generators, must be preserved
+            CellFunction::TieHigh | CellFunction::TieLow => false,
+
+            // Tristate — has high-impedance state, not AIG-representable
+            CellFunction::Tristate => false,
+
             // Everything else: basic gates, complex gates, muxes, arithmetic,
-            // sequential, tie cells, I/O pads, power infrastructure, custom, etc.
+            // sequential, power infrastructure, custom, etc.
             _ => true,
         }
     }
