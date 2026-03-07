@@ -305,7 +305,12 @@ fn count_cone_nodes(
 /// This is necessary after applying substitutions because nodes may reference
 /// other nodes that come later in the nodes vector. Processing in topological
 /// order ensures all references are resolved before they're needed.
-fn rebuild_aig_topological(aig: &mut Aig) {
+///
+/// **Must be called after `apply_substitutions()`** whenever new nodes were
+/// added at higher IDs (e.g., by rewrite/refactor) — `apply_substitutions`
+/// can create forward references that cause downstream passes (DCE, strash)
+/// to encounter unresolved node IDs.
+pub(crate) fn rebuild_aig_topological(aig: &mut Aig) {
     use std::collections::HashSet;
 
     // Find all reachable nodes starting from outputs AND latches using DFS
@@ -636,9 +641,11 @@ fn resolve_lit(map: &IndexMap<AigNodeId, AigLit>, lit: AigLit) -> AigLit {
             mapped
         }
     } else {
-        // Node not found in map - this can happen when the node was removed
-        // by optimization or doesn't exist after rebuild. Return FALSE as safe default.
-        AigLit::false_lit()
+        panic!(
+            "resolve_lit: node {:?} not found in map — likely forward reference \
+             from apply_substitutions without topological rebuild",
+            lit.node
+        );
     }
 }
 

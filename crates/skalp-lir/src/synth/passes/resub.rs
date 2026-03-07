@@ -626,6 +626,10 @@ impl Pass for Resub {
         if !substitutions.is_empty() {
             aig.apply_substitutions(&substitutions);
 
+            // Rebuild in topological order to resolve forward references
+            // created by apply_substitutions before DCE iterates nodes
+            super::rebuild_aig_topological(aig);
+
             // Clean up
             let mut dce = super::Dce::new();
             dce.run(aig);

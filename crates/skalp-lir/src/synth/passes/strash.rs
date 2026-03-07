@@ -208,8 +208,11 @@ fn resolve_lit(map: &IndexMap<AigNodeId, AigLit>, lit: AigLit) -> AigLit {
             mapped
         }
     } else {
-        // Node not found in map - return FALSE as safe default
-        AigLit::false_lit()
+        panic!(
+            "resolve_lit: node {:?} not found in map — likely forward reference \
+             from apply_substitutions without topological rebuild",
+            lit.node
+        );
     }
 }
 

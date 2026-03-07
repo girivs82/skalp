@@ -972,4 +972,67 @@ mod tests {
         assert!((result.level_reduction() - 0.3).abs() < 0.001);
         assert!(result.timing_met()); // No timing constraint
     }
+
+    /// Regression test: AIG optimization must not collapse an 8-bit adder to constant.
+    ///
+    /// Before the fix, `resolve_lit` returned `AigLit::false_lit()` when a node
+    /// wasn't found in the rebuild map, silently collapsing live logic to 0.
+    /// This happened when `apply_substitutions` created forward references and
+    /// a downstream pass (DCE) iterated in index order without a topological
+    /// rebuild first.
+    #[test]
+    fn test_balanced_optimization_preserves_adder_logic() {
+        use crate::synth::{Aig, AigLit};
+
+        // Build an 8-bit ripple-carry adder: sum[i] = a[i] ^ b[i] ^ carry[i]
+        let mut aig = Aig::new("adder8".to_string());
+
+        let mut a_inputs = Vec::new();
+        let mut b_inputs = Vec::new();
+        for i in 0..8 {
+            a_inputs.push(aig.add_input(format!("a{}", i), None));
+            b_inputs.push(aig.add_input(format!("b{}", i), None));
+        }
+        let cin = aig.add_input("cin".to_string(), None);
+
+        let mut carry = AigLit::new(cin);
+        for i in 0..8 {
+            let a = AigLit::new(a_inputs[i]);
+            let b = AigLit::new(b_inputs[i]);
+
+            // sum = a ^ b ^ carry
+            let ab_xor = aig.add_xor(a, b);
+            let sum = aig.add_xor(ab_xor, carry);
+            aig.add_output(format!("sum{}", i), sum);
+
+            // carry_out = (a & b) | (carry & (a ^ b))
+            let ab_and = aig.add_and(a, b);
+            let carry_ab_xor = aig.add_and(carry, ab_xor);
+            carry = aig.add_or(ab_and, carry_ab_xor);
+        }
+        aig.add_output("cout".to_string(), carry);
+
+        let ands_before = aig.and_count();
+        assert!(
+            ands_before > 20,
+            "adder should have significant AND count before optimization, got {}",
+            ands_before
+        );
+
+        // Run Balanced preset optimization (the preset that triggered the bug)
+        let mut engine = SynthEngine::with_preset(SynthPreset::Balanced);
+        engine.optimize_aig(&mut aig, None);
+
+        let ands_after = aig.and_count();
+
+        // The adder MUST retain meaningful logic. Before the fix, this collapsed
+        // to ~0 AND nodes. A correct optimization should leave at least 10 ANDs
+        // for an 8-bit adder (ABC typically gets ~24 for ripple-carry).
+        assert!(
+            ands_after >= 10,
+            "8-bit adder collapsed to {} AND nodes after Balanced optimization — \
+             resolve_lit may be silently returning FALSE for unresolved nodes",
+            ands_after
+        );
+    }
 }
