@@ -5,6 +5,7 @@
 //! by default. Run with `cargo test --test test_nextpnr_golden -- --ignored`.
 
 use skalp_lir::gate_netlist::{Cell, CellId, GateNet, GateNetId, GateNetlist};
+use skalp_place_route::device::ice40::chipdb_parser::{ChipDb, LcBitMapping};
 use skalp_place_route::{place_and_route, Ice40Variant, PnrConfig};
 use std::path::Path;
 use std::process::Command;
@@ -126,13 +127,23 @@ fn run_icetime(asc_contents: &str) -> Option<f64> {
 
 // ===== ASC parsing helpers =====
 
-/// Extract LUT init values from an .asc file (multiset of init values, location-independent)
+/// Load chipdb LC bit mappings for HX1K (cached across calls via lazy init)
+fn hx1k_lc_mappings() -> &'static Vec<LcBitMapping> {
+    use std::sync::OnceLock;
+    static LC_MAPPINGS: OnceLock<Vec<LcBitMapping>> = OnceLock::new();
+    LC_MAPPINGS.get_or_init(|| {
+        let chipdb = ChipDb::load_embedded(Ice40Variant::Hx1k)
+            .expect("HX1K chipdb should load");
+        chipdb.lc_mappings
+    })
+}
+
+/// Extract LUT init values from an .asc file using real chipdb LC bit mappings.
+/// Returns a sorted multiset of non-zero 16-bit init values (location-independent).
 fn extract_lut_inits(asc: &str) -> Vec<u16> {
+    let lc_mappings = hx1k_lc_mappings();
     let mut inits = Vec::new();
 
-    // Parse each logic tile and extract LUT init bits
-    // In iCE40, each logic tile has 8 LCs, each with 16-bit LUT init
-    // The LUT init bits are stored in specific rows/columns per LC within the tile
     let mut in_logic_tile = false;
     let mut tile_bits: Vec<Vec<bool>> = Vec::new();
 
@@ -145,10 +156,9 @@ fn extract_lut_inits(asc: &str) -> Vec<u16> {
 
         if in_logic_tile {
             if line.is_empty() || line.starts_with('.') {
-                // End of tile — extract LUT inits from tile_bits
                 if !tile_bits.is_empty() {
-                    for lc in 0..8 {
-                        let init = extract_lc_lut_init(&tile_bits, lc);
+                    for mapping in lc_mappings {
+                        let init = extract_lc_lut_init_chipdb(&tile_bits, mapping);
                         if init != 0 {
                             inits.push(init);
                         }
@@ -167,33 +177,17 @@ fn extract_lut_inits(asc: &str) -> Vec<u16> {
     inits
 }
 
-/// Extract LUT init value for a specific LC within a logic tile bit array
-/// iCE40 LUT init bits are stored in rows 0-15, columns depend on LC index
-fn extract_lc_lut_init(tile_bits: &[Vec<bool>], lc: usize) -> u16 {
-    // iCE40 logic tile column layout per LC:
-    // LC0: cols 45-30 (lut_init[15:0])
-    // LC1: cols 29-14
-    // ...etc (each LC uses 16 columns for LUT init)
-    // The exact mapping varies — use chipdb for precision.
-    // For cross-validation we compare multisets, not exact positions.
-
+/// Extract LUT init value for a specific LC using chipdb bit position mappings.
+/// The first 16 entries in `mapping.bit_positions` are the LUT init bits.
+fn extract_lc_lut_init_chipdb(tile_bits: &[Vec<bool>], mapping: &LcBitMapping) -> u16 {
     let mut init = 0u16;
-    // Simplified: check if any bits are set in the LC's region
-    // The actual mapping comes from the chipdb lc_mapping
-    // For now, check rows across the LC's column range
-    let cols_per_lc = 2; // Each LC occupies 2 columns in the 54-col tile
-    let base_col = lc * cols_per_lc;
-
-    for bit in 0..16 {
-        let row = bit;
-        if row < tile_bits.len()
-            && base_col < tile_bits[row].len()
-            && tile_bits[row][base_col]
-        {
-            init |= 1 << bit;
+    for (bit_num, &(row, col)) in mapping.bit_positions.iter().take(16).enumerate() {
+        let r = row as usize;
+        let c = col as usize;
+        if r < tile_bits.len() && c < tile_bits[r].len() && tile_bits[r][c] {
+            init |= 1 << bit_num;
         }
     }
-
     init
 }
 

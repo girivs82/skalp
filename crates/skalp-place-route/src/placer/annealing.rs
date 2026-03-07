@@ -485,9 +485,16 @@ impl<'a, D: Device> SimulatedAnnealing<'a, D> {
                 let new_key = (new_loc.tile_x, new_loc.tile_y, new_loc.bel_index);
                 if let Some(&occupant) = loc_map.get(&new_key) {
                     if occupant != *cell_id {
-                        // Swap with occupant
+                        // Swap with occupant, preserving each cell's bel_type
                         new_placement.placements.insert(*cell_id, *new_loc);
-                        new_placement.placements.insert(occupant, old_loc);
+                        let occupant_bel_type = placement.placements[&occupant].bel_type;
+                        let displaced_loc = PlacementLoc::new(
+                            old_loc.tile_x,
+                            old_loc.tile_y,
+                            old_loc.bel_index,
+                            occupant_bel_type,
+                        );
+                        new_placement.placements.insert(occupant, displaced_loc);
 
                         let old_key = (old_loc.tile_x, old_loc.tile_y, old_loc.bel_index);
                         new_loc_map.insert(new_key, *cell_id);
@@ -526,10 +533,21 @@ impl<'a, D: Device> SimulatedAnnealing<'a, D> {
                             );
 
                             let new_key = (new_loc.tile_x, new_loc.tile_y, new_loc.bel_index);
-                            // If occupied by non-chain cell, swap
+                            // If occupied by non-chain cell, displace it to the carry's old position
+                            // but preserve the displaced cell's original bel_type
                             if let Some(&occupant) = loc_map.get(&new_key) {
                                 if !chain.cells.contains(&occupant) {
-                                    new_placement.placements.insert(occupant, old_loc);
+                                    let occupant_bel_type = placement.placements
+                                        .get(&occupant)
+                                        .map(|loc| loc.bel_type)
+                                        .unwrap_or(old_loc.bel_type);
+                                    let displaced_loc = PlacementLoc::new(
+                                        old_loc.tile_x,
+                                        old_loc.tile_y,
+                                        old_loc.bel_index,
+                                        occupant_bel_type,
+                                    );
+                                    new_placement.placements.insert(occupant, displaced_loc);
                                     new_loc_map.insert(old_key, occupant);
                                 }
                             }
