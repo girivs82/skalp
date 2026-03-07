@@ -879,6 +879,16 @@ impl ChipDb {
                         bel_type: BelType::Pll,
                         pins: vec![],
                     });
+                    bel_id += 1;
+                }
+                // Add GlobalBuf BEL if this IO tile has a gbufin entry
+                if self.gbufin.iter().any(|g| g.tile_x == x && g.tile_y == y) {
+                    bels.push(Bel {
+                        id: BelId(bel_id),
+                        name: "SB_GB".to_string(),
+                        bel_type: BelType::GlobalBuf,
+                        pins: vec![],
+                    });
                 }
             }
             TileType::RamTop | TileType::RamBottom => {

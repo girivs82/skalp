@@ -512,8 +512,22 @@ impl<'a> CellPacker<'a> {
             (PackedCellType::Ram, None, None)
         } else if cell_type_str.contains("PLL") {
             (PackedCellType::Pll, None, None)
-        } else if cell_type_str.contains("GBUF") || cell_type_str.contains("GB_IO") {
+        } else if cell_type_str.contains("GBUF")
+            || cell_type_str.contains("GB_IO")
+            || cell_type_str == "SB_GB"
+        {
             (PackedCellType::GlobalBuf, None, None)
+        } else if cell_type_str.starts_with("TIE_")
+            || cell_type_str == "SB_GND"
+            || cell_type_str == "GND"
+            || cell_type_str == "VCC"
+        {
+            // FPGA: constant cells become LUT4 with all-0 or all-1 init
+            let is_high = cell_type_str.contains("HIGH")
+                || cell_type_str == "VCC"
+                || cell_type_str.contains("HI");
+            let init = if is_high { 0xFFFF } else { 0x0000 };
+            (PackedCellType::Lut4Only, Some(init), None)
         } else {
             (PackedCellType::Other(cell_type_str), None, None)
         };
@@ -530,16 +544,21 @@ impl<'a> CellPacker<'a> {
             dff_config,
         };
 
-        // Set appropriate cell reference
-        if Self::is_lut(cell) {
-            packed.lut_cell = Some(cell.id);
-            packed.other_cells.clear();
-        } else if Self::is_dff(cell) {
-            packed.dff_cell = Some(cell.id);
-            packed.other_cells.clear();
-        } else if cell.cell_type.to_uppercase().contains("CARRY") {
-            packed.carry_cell = Some(cell.id);
-            packed.other_cells.clear();
+        // Set appropriate cell reference based on packed type
+        match packed.cell_type {
+            PackedCellType::Lut4Only => {
+                packed.lut_cell = Some(cell.id);
+                packed.other_cells.clear();
+            }
+            PackedCellType::DffOnly => {
+                packed.dff_cell = Some(cell.id);
+                packed.other_cells.clear();
+            }
+            PackedCellType::CarryOnly => {
+                packed.carry_cell = Some(cell.id);
+                packed.other_cells.clear();
+            }
+            _ => {}
         }
 
         packed

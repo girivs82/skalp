@@ -1188,6 +1188,28 @@ impl GateOptimizer {
             .cells
             .retain(|cell| !self.cells_to_remove.contains(&cell.id));
 
+        // Re-assign cell IDs to match new array positions and update net references
+        let mut old_to_new: IndexMap<CellId, CellId> = IndexMap::new();
+        for (new_idx, cell) in netlist.cells.iter_mut().enumerate() {
+            old_to_new.insert(cell.id, CellId(new_idx as u32));
+            cell.id = CellId(new_idx as u32);
+        }
+        for net in &mut netlist.nets {
+            if let Some(old_driver) = net.driver {
+                if let Some(&new_driver) = old_to_new.get(&old_driver) {
+                    net.driver = Some(new_driver);
+                } else {
+                    net.driver = None;
+                    net.driver_pin = None;
+                }
+            }
+            for (cell_id, _) in &mut net.fanout {
+                if let Some(&new_id) = old_to_new.get(cell_id) {
+                    *cell_id = new_id;
+                }
+            }
+        }
+
         // Update statistics
         netlist.update_stats();
     }

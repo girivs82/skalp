@@ -4,7 +4,10 @@
 //! All tests require external tools (yosys, nextpnr-ice40, icetime) and are `#[ignore]`
 //! by default. Run with `cargo test --test test_nextpnr_golden -- --ignored`.
 
-use skalp_lir::gate_netlist::{Cell, CellId, GateNet, GateNetId, GateNetlist};
+use skalp_frontend::parse_and_build_hir;
+use skalp_lir::gate_netlist::GateNetlist;
+use skalp_lir::{get_stdlib_library, lower_mir_module_to_lir, map_lir_to_gates_optimized};
+use skalp_mir::MirCompiler;
 use skalp_place_route::device::ice40::chipdb_parser::{ChipDb, LcBitMapping};
 use skalp_place_route::{place_and_route, Ice40Variant, PnrConfig};
 use std::path::Path;
@@ -294,529 +297,115 @@ fn compare_asc(skalp_asc: &str, nextpnr_asc: &str, label: &str) -> ComparisonRep
     report
 }
 
-// ===== Netlist builders (matching Verilog designs) =====
+// ===== Skalp synthesis helper =====
 
-/// Build a single inverter netlist: 1 LUT + 2 IO
-fn build_inverter() -> GateNetlist {
-    let mut netlist = GateNetlist::new("inverter".to_string(), "ice40".to_string());
-    let mut nid = 0u32;
-    let mut next = || {
-        let id = nid;
-        nid += 1;
-        id
-    };
-
-    let in_net = netlist.add_net(GateNet::new_input(GateNetId(next()), "a".to_string()));
-    let out_net = netlist.add_net(GateNet::new_output(GateNetId(next()), "y".to_string()));
-
-    // LUT4 configured as inverter: init = 0x5555 (output = ~input[0])
-    let mut lut = Cell::new_comb(
-        CellId(0),
-        "SB_LUT4".to_string(),
-        "ice40".to_string(),
-        0.0,
-        "top.inv_lut".to_string(),
-        vec![in_net],
-        vec![out_net],
-    );
-    lut.lut_init = Some(0x5555);
-    let lut_id = netlist.add_cell(lut);
-    netlist.nets[out_net.0 as usize].driver = Some(lut_id);
-    netlist.nets[in_net.0 as usize].fanout.push((lut_id, 0));
-
-    // Input IO buffer
-    let io_in = Cell::new_comb(
-        CellId(0),
-        "SB_IO".to_string(),
-        "ice40".to_string(),
-        0.0,
-        "io.a".to_string(),
-        vec![],
-        vec![in_net],
-    );
-    let io_in_id = netlist.add_cell(io_in);
-    netlist.nets[in_net.0 as usize].driver = Some(io_in_id);
-
-    netlist
+/// Compile skalp source through the full pipeline to produce a GateNetlist
+fn synthesize_skalp(source: &str) -> GateNetlist {
+    let hir = parse_and_build_hir(source).expect("skalp parse failed");
+    let mir = MirCompiler::new()
+        .compile_to_mir(&hir)
+        .expect("MIR compilation failed");
+    let lir = lower_mir_module_to_lir(mir.modules.first().expect("no modules")).lir;
+    let library = get_stdlib_library("ice40").expect("ice40 library");
+    map_lir_to_gates_optimized(&lir, &library).netlist
 }
 
-/// Build a 2-input AND gate: 1 LUT + 3 IO
-fn build_and_gate() -> GateNetlist {
-    let mut netlist = GateNetlist::new("and_gate".to_string(), "ice40".to_string());
-    let mut nid = 0u32;
-    let mut next = || {
-        let id = nid;
-        nid += 1;
-        id
-    };
+// ===== Skalp source designs (matching Verilog) =====
 
-    let a_net = netlist.add_net(GateNet::new_input(GateNetId(next()), "a".to_string()));
-    let b_net = netlist.add_net(GateNet::new_input(GateNetId(next()), "b".to_string()));
-    let y_net = netlist.add_net(GateNet::new_output(GateNetId(next()), "y".to_string()));
-
-    // LUT4 configured as AND: init = 0x8888 (output = a & b)
-    let mut lut = Cell::new_comb(
-        CellId(0),
-        "SB_LUT4".to_string(),
-        "ice40".to_string(),
-        0.0,
-        "top.and_lut".to_string(),
-        vec![a_net, b_net],
-        vec![y_net],
-    );
-    lut.lut_init = Some(0x8888);
-    let lut_id = netlist.add_cell(lut);
-    netlist.nets[y_net.0 as usize].driver = Some(lut_id);
-    netlist.nets[a_net.0 as usize].fanout.push((lut_id, 0));
-    netlist.nets[b_net.0 as usize].fanout.push((lut_id, 1));
-
-    // Input IO buffers
-    let io_a = Cell::new_comb(
-        CellId(0),
-        "SB_IO".to_string(),
-        "ice40".to_string(),
-        0.0,
-        "io.a".to_string(),
-        vec![],
-        vec![a_net],
-    );
-    let io_a_id = netlist.add_cell(io_a);
-    netlist.nets[a_net.0 as usize].driver = Some(io_a_id);
-
-    let io_b = Cell::new_comb(
-        CellId(0),
-        "SB_IO".to_string(),
-        "ice40".to_string(),
-        0.0,
-        "io.b".to_string(),
-        vec![],
-        vec![b_net],
-    );
-    let io_b_id = netlist.add_cell(io_b);
-    netlist.nets[b_net.0 as usize].driver = Some(io_b_id);
-
-    netlist
+const INVERTER_SK: &str = r#"
+entity Inverter {
+    in a: bit
+    out y: bit
 }
-
-/// Build a D flip-flop with async reset: 1 DFF + 2 LUT + IO
-fn build_dff_with_reset() -> GateNetlist {
-    let mut netlist = GateNetlist::new("dff_reset".to_string(), "ice40".to_string());
-    let mut nid = 0u32;
-    let mut next = || {
-        let id = nid;
-        nid += 1;
-        id
-    };
-
-    let clk_net = netlist.add_net({
-        let mut net = GateNet::new_input(GateNetId(next()), "clk".to_string());
-        net.is_clock = true;
-        net
-    });
-    let d_net = netlist.add_net(GateNet::new_input(GateNetId(next()), "d".to_string()));
-    let rst_net = netlist.add_net(GateNet::new_input(GateNetId(next()), "rst".to_string()));
-    let q_net = netlist.add_net(GateNet::new_output(GateNetId(next()), "q".to_string()));
-    let lut_out = netlist.add_net(GateNet::new(GateNetId(next()), "lut_out".to_string()));
-
-    // LUT passes data through (buffer): init = 0xAAAA
-    let mut buf_lut = Cell::new_comb(
-        CellId(0),
-        "SB_LUT4".to_string(),
-        "ice40".to_string(),
-        0.0,
-        "top.buf_lut".to_string(),
-        vec![d_net],
-        vec![lut_out],
-    );
-    buf_lut.lut_init = Some(0xAAAA);
-    let lut_id = netlist.add_cell(buf_lut);
-    netlist.nets[lut_out.0 as usize].driver = Some(lut_id);
-    netlist.nets[d_net.0 as usize].fanout.push((lut_id, 0));
-
-    // DFF with async reset (SB_DFFR)
-    let mut dff = Cell::new_seq(
-        CellId(0),
-        "SB_DFFR".to_string(),
-        "ice40".to_string(),
-        0.0,
-        "top.dff0".to_string(),
-        vec![lut_out],
-        vec![q_net],
-        clk_net,
-        Some(rst_net),
-    );
-    dff.clock = Some(clk_net);
-    let dff_id = netlist.add_cell(dff);
-    netlist.nets[q_net.0 as usize].driver = Some(dff_id);
-    netlist.nets[lut_out.0 as usize].fanout.push((dff_id, 0));
-
-    // IO cells
-    let io_clk = Cell::new_comb(
-        CellId(0),
-        "SB_IO".to_string(),
-        "ice40".to_string(),
-        0.0,
-        "io.clk".to_string(),
-        vec![],
-        vec![clk_net],
-    );
-    let io_clk_id = netlist.add_cell(io_clk);
-    netlist.nets[clk_net.0 as usize].driver = Some(io_clk_id);
-
-    netlist
+impl Inverter {
+    y = ~a
 }
+"#;
 
-/// Build a 4-bit counter (blinky): 4 LUTs + 4 DFFs + 4 carry + clock + IO
-fn build_blinky() -> GateNetlist {
-    build_counter(4)
+const AND_GATE_SK: &str = r#"
+entity AndGate {
+    in a: bit
+    in b: bit
+    out y: bit
 }
-
-/// Build an N-bit counter: N LUTs + N DFFs + N carry cells + clock + IO
-fn build_counter(n: usize) -> GateNetlist {
-    let mut netlist = GateNetlist::new(format!("counter_{}", n), "ice40".to_string());
-    let mut nid = 0u32;
-    let mut next = || {
-        let id = nid;
-        nid += 1;
-        id
-    };
-
-    // Clock net
-    let clock_net = netlist.add_net({
-        let mut net = GateNet::new_input(GateNetId(next()), "clk".to_string());
-        net.is_clock = true;
-        net
-    });
-
-    // Carry chain
-    let carry_in = netlist.add_net(GateNet::new(GateNetId(next()), "carry_in".to_string()));
-    let mut carry_nets = vec![carry_in];
-    for i in 0..n {
-        carry_nets.push(netlist.add_net(GateNet::new(
-            GateNetId(next()),
-            format!("carry_{}", i),
-        )));
-    }
-
-    // DFF feedback and LUT output nets
-    let mut dff_out_nets = Vec::new();
-    let mut lut_out_nets = Vec::new();
-    for i in 0..n {
-        dff_out_nets.push(netlist.add_net(GateNet::new(
-            GateNetId(next()),
-            format!("q_{}", i),
-        )));
-        lut_out_nets.push(netlist.add_net(GateNet::new(
-            GateNetId(next()),
-            format!("lut_{}", i),
-        )));
-    }
-
-    // Build counter stages
-    for i in 0..n {
-        // LUT: XOR toggle
-        let mut lut = Cell::new_comb(
-            CellId(0),
-            "SB_LUT4".to_string(),
-            "ice40".to_string(),
-            0.0,
-            format!("cnt.lut{}", i),
-            vec![dff_out_nets[i], carry_nets[i]],
-            vec![lut_out_nets[i]],
-        );
-        lut.lut_init = Some(0x6666); // XOR
-        let lut_id = netlist.add_cell(lut);
-        netlist.nets[lut_out_nets[i].0 as usize].driver = Some(lut_id);
-        netlist.nets[dff_out_nets[i].0 as usize]
-            .fanout
-            .push((lut_id, 0));
-        netlist.nets[carry_nets[i].0 as usize]
-            .fanout
-            .push((lut_id, 1));
-
-        // CARRY
-        let carry = Cell::new_comb(
-            CellId(0),
-            "SB_CARRY".to_string(),
-            "ice40".to_string(),
-            0.0,
-            format!("cnt.carry{}", i),
-            vec![lut_out_nets[i], carry_nets[i]],
-            vec![carry_nets[i + 1]],
-        );
-        let carry_id = netlist.add_cell(carry);
-        netlist.nets[carry_nets[i + 1].0 as usize].driver = Some(carry_id);
-        netlist.nets[lut_out_nets[i].0 as usize]
-            .fanout
-            .push((carry_id, 0));
-        netlist.nets[carry_nets[i].0 as usize]
-            .fanout
-            .push((carry_id, 1));
-
-        // DFF
-        let mut dff = Cell::new_seq(
-            CellId(0),
-            "SB_DFF".to_string(),
-            "ice40".to_string(),
-            0.0,
-            format!("cnt.dff{}", i),
-            vec![lut_out_nets[i]],
-            vec![dff_out_nets[i]],
-            clock_net,
-            None,
-        );
-        dff.clock = Some(clock_net);
-        let dff_id = netlist.add_cell(dff);
-        netlist.nets[dff_out_nets[i].0 as usize].driver = Some(dff_id);
-        netlist.nets[lut_out_nets[i].0 as usize]
-            .fanout
-            .push((dff_id, 0));
-    }
-
-    // Output IO buffers for counter bits (needed for icetime path tracing)
-    #[allow(clippy::needless_range_loop)]
-    for i in 0..n {
-        let out_net = netlist.add_net(GateNet::new_output(
-            GateNetId(next()),
-            format!("count_{}", i),
-        ));
-
-        // Buffer LUT: pass DFF output to IO (init=0xAAAA = buffer on I0)
-        let mut buf_lut = Cell::new_comb(
-            CellId(0),
-            "SB_LUT4".to_string(),
-            "ice40".to_string(),
-            0.0,
-            format!("io_buf.lut{}", i),
-            vec![dff_out_nets[i]],
-            vec![out_net],
-        );
-        buf_lut.lut_init = Some(0xAAAA);
-        let buf_id = netlist.add_cell(buf_lut);
-        netlist.nets[out_net.0 as usize].driver = Some(buf_id);
-        netlist.nets[dff_out_nets[i].0 as usize]
-            .fanout
-            .push((buf_id, 0));
-    }
-
-    // Clock IO buffer
-    let clk_io = Cell::new_comb(
-        CellId(0),
-        "SB_IO".to_string(),
-        "ice40".to_string(),
-        0.0,
-        "io.clk".to_string(),
-        vec![],
-        vec![clock_net],
-    );
-    let clk_io_id = netlist.add_cell(clk_io);
-    netlist.nets[clock_net.0 as usize].driver = Some(clk_io_id);
-
-    netlist
+impl AndGate {
+    y = a & b
 }
+"#;
 
-/// Build an 8-bit adder with IO
-fn build_adder_with_io(n: usize) -> GateNetlist {
-    let mut netlist = GateNetlist::new(format!("adder_{}", n), "ice40".to_string());
-    let mut nid = 0u32;
-    let mut next = || {
-        let id = nid;
-        nid += 1;
-        id
-    };
-
-    // Input nets
-    let mut a_nets = Vec::new();
-    let mut b_nets = Vec::new();
-    for i in 0..n {
-        a_nets.push(netlist.add_net(GateNet::new_input(
-            GateNetId(next()),
-            format!("a_{}", i),
-        )));
-        b_nets.push(netlist.add_net(GateNet::new_input(
-            GateNetId(next()),
-            format!("b_{}", i),
-        )));
-    }
-
-    // Carry chain
-    let carry_in = netlist.add_net(GateNet::new(GateNetId(next()), "cin".to_string()));
-    let mut carry_nets = vec![carry_in];
-    for i in 0..n {
-        carry_nets.push(netlist.add_net(GateNet::new(
-            GateNetId(next()),
-            format!("carry_{}", i),
-        )));
-    }
-
-    // Sum outputs
-    let mut sum_nets = Vec::new();
-    for i in 0..n {
-        sum_nets.push(netlist.add_net(GateNet::new_output(
-            GateNetId(next()),
-            format!("sum_{}", i),
-        )));
-    }
-
-    // Build adder stages
-    for i in 0..n {
-        // LUT: XOR for sum
-        let mut lut = Cell::new_comb(
-            CellId(0),
-            "SB_LUT4".to_string(),
-            "ice40".to_string(),
-            0.0,
-            format!("add.lut{}", i),
-            vec![a_nets[i], b_nets[i], carry_nets[i]],
-            vec![sum_nets[i]],
-        );
-        lut.lut_init = Some(0x9696); // a ^ b ^ cin
-        let lut_id = netlist.add_cell(lut);
-        netlist.nets[sum_nets[i].0 as usize].driver = Some(lut_id);
-        netlist.nets[a_nets[i].0 as usize].fanout.push((lut_id, 0));
-        netlist.nets[b_nets[i].0 as usize].fanout.push((lut_id, 1));
-        netlist.nets[carry_nets[i].0 as usize]
-            .fanout
-            .push((lut_id, 2));
-
-        // CARRY
-        let carry = Cell::new_comb(
-            CellId(0),
-            "SB_CARRY".to_string(),
-            "ice40".to_string(),
-            0.0,
-            format!("add.carry{}", i),
-            vec![a_nets[i], b_nets[i], carry_nets[i]],
-            vec![carry_nets[i + 1]],
-        );
-        let carry_id = netlist.add_cell(carry);
-        netlist.nets[carry_nets[i + 1].0 as usize].driver = Some(carry_id);
-        netlist.nets[a_nets[i].0 as usize]
-            .fanout
-            .push((carry_id, 0));
-        netlist.nets[b_nets[i].0 as usize]
-            .fanout
-            .push((carry_id, 1));
-        netlist.nets[carry_nets[i].0 as usize]
-            .fanout
-            .push((carry_id, 2));
-    }
-
-    netlist
+const DFF_RESET_SK: &str = r#"
+entity DffReset {
+    in clk: clock
+    in d: bit
+    in rst: reset
+    out q: bit
 }
-
-/// Build an 8-bit shift register
-fn build_shift_register(n: usize) -> GateNetlist {
-    let mut netlist = GateNetlist::new(format!("shiftreg_{}", n), "ice40".to_string());
-    let mut nid = 0u32;
-    let mut next = || {
-        let id = nid;
-        nid += 1;
-        id
-    };
-
-    let clock_net = netlist.add_net({
-        let mut net = GateNet::new_input(GateNetId(next()), "clk".to_string());
-        net.is_clock = true;
-        net
-    });
-
-    let data_in = netlist.add_net(GateNet::new_input(
-        GateNetId(next()),
-        "data_in".to_string(),
-    ));
-
-    let mut dff_out_nets = Vec::new();
-    for i in 0..n {
-        dff_out_nets.push(netlist.add_net(GateNet::new(
-            GateNetId(next()),
-            format!("q_{}", i),
-        )));
+impl DffReset {
+    signal q_reg: bit = 0
+    on(clk.rise) {
+        if rst {
+            q_reg = 0
+        } else {
+            q_reg = d
+        }
     }
-
-    // LUT buffers: each DFF needs a LUT in front (iCE40 LC = LUT+DFF pair)
-    let mut lut_out_nets = Vec::new();
-    for i in 0..n {
-        lut_out_nets.push(netlist.add_net(GateNet::new(
-            GateNetId(next()),
-            format!("lut_out_{}", i),
-        )));
-    }
-
-    let mut prev_net = data_in;
-    #[allow(clippy::needless_range_loop)]
-    for i in 0..n {
-        // Buffer LUT: pass input through (init=0xAAAA = buffer on I0)
-        let mut buf_lut = Cell::new_comb(
-            CellId(0),
-            "SB_LUT4".to_string(),
-            "ice40".to_string(),
-            0.0,
-            format!("sr.lut{}", i),
-            vec![prev_net],
-            vec![lut_out_nets[i]],
-        );
-        buf_lut.lut_init = Some(0xAAAA);
-        let lut_id = netlist.add_cell(buf_lut);
-        netlist.nets[lut_out_nets[i].0 as usize].driver = Some(lut_id);
-        netlist.nets[prev_net.0 as usize].fanout.push((lut_id, 0));
-
-        let mut dff = Cell::new_seq(
-            CellId(0),
-            "SB_DFF".to_string(),
-            "ice40".to_string(),
-            0.0,
-            format!("sr.dff{}", i),
-            vec![lut_out_nets[i]],
-            vec![dff_out_nets[i]],
-            clock_net,
-            None,
-        );
-        dff.clock = Some(clock_net);
-        let dff_id = netlist.add_cell(dff);
-        netlist.nets[dff_out_nets[i].0 as usize].driver = Some(dff_id);
-        netlist.nets[lut_out_nets[i].0 as usize]
-            .fanout
-            .push((dff_id, 0));
-        prev_net = dff_out_nets[i];
-    }
-
-    // Output: last DFF output goes to IO
-    let data_out = netlist.add_net(GateNet::new_output(
-        GateNetId(next()),
-        "data_out".to_string(),
-    ));
-    let mut out_lut = Cell::new_comb(
-        CellId(0),
-        "SB_LUT4".to_string(),
-        "ice40".to_string(),
-        0.0,
-        "sr.out_lut".to_string(),
-        vec![dff_out_nets[n - 1]],
-        vec![data_out],
-    );
-    out_lut.lut_init = Some(0xAAAA);
-    let out_lut_id = netlist.add_cell(out_lut);
-    netlist.nets[data_out.0 as usize].driver = Some(out_lut_id);
-    netlist.nets[dff_out_nets[n - 1].0 as usize]
-        .fanout
-        .push((out_lut_id, 0));
-
-    // Clock IO
-    let clk_io = Cell::new_comb(
-        CellId(0),
-        "SB_IO".to_string(),
-        "ice40".to_string(),
-        0.0,
-        "io.clk".to_string(),
-        vec![],
-        vec![clock_net],
-    );
-    let clk_io_id = netlist.add_cell(clk_io);
-    netlist.nets[clock_net.0 as usize].driver = Some(clk_io_id);
-
-    netlist
+    q = q_reg
 }
+"#;
+
+const COUNTER_4_SK: &str = r#"
+entity Counter4 {
+    in clk: clock
+    out count: bit[4]
+}
+impl Counter4 {
+    signal cnt: bit[4] = 0
+    on(clk.rise) {
+        cnt = cnt + 1
+    }
+    count = cnt
+}
+"#;
+
+const ADDER_8_SK: &str = r#"
+entity Adder8 {
+    in a: bit[8]
+    in b: bit[8]
+    out sum: bit[9]
+}
+impl Adder8 {
+    sum = a + b
+}
+"#;
+
+const COUNTER_16_SK: &str = r#"
+entity Counter16 {
+    in clk: clock
+    out count: bit[16]
+}
+impl Counter16 {
+    signal cnt: bit[16] = 0
+    on(clk.rise) {
+        cnt = cnt + 1
+    }
+    count = cnt
+}
+"#;
+
+const SHIFTREG_8_SK: &str = r#"
+entity ShiftReg8 {
+    in clk: clock
+    in data_in: bit
+    out data_out: bit
+}
+impl ShiftReg8 {
+    signal sr: bit[8] = 0
+    on(clk.rise) {
+        sr = {sr[6:0], data_in}
+    }
+    data_out = sr[7]
+}
+"#;
 
 // ===== Verilog for reference flow =====
 
@@ -881,7 +470,7 @@ fn test_cross_level1_inverter() {
     }
 
     // Skalp
-    let netlist = build_inverter();
+    let netlist = synthesize_skalp(INVERTER_SK);
     let config = PnrConfig::fast();
     let result = place_and_route(&netlist, Ice40Variant::Hx1k, config).unwrap();
     let skalp_asc = result.to_icestorm_ascii_with_netlist(Some(&netlist));
@@ -914,7 +503,7 @@ fn test_cross_level2_and_gate() {
         return;
     }
 
-    let netlist = build_and_gate();
+    let netlist = synthesize_skalp(AND_GATE_SK);
     let config = PnrConfig::fast();
     let result = place_and_route(&netlist, Ice40Variant::Hx1k, config).unwrap();
     let skalp_asc = result.to_icestorm_ascii_with_netlist(Some(&netlist));
@@ -938,7 +527,7 @@ fn test_cross_level3_dff_reset() {
         return;
     }
 
-    let netlist = build_dff_with_reset();
+    let netlist = synthesize_skalp(DFF_RESET_SK);
     let config = PnrConfig::fast();
     let result = place_and_route(&netlist, Ice40Variant::Hx1k, config).unwrap();
     let skalp_asc = result.to_icestorm_ascii_with_netlist(Some(&netlist));
@@ -963,7 +552,7 @@ fn test_cross_level4_counter_4() {
         return;
     }
 
-    let netlist = build_blinky();
+    let netlist = synthesize_skalp(COUNTER_4_SK);
     let config = PnrConfig::fast();
     let result = place_and_route(&netlist, Ice40Variant::Hx1k, config).unwrap();
     let skalp_asc = result.to_icestorm_ascii_with_netlist(Some(&netlist));
@@ -992,7 +581,7 @@ fn test_cross_level5_adder_8() {
         return;
     }
 
-    let netlist = build_adder_with_io(8);
+    let netlist = synthesize_skalp(ADDER_8_SK);
     let config = PnrConfig::fast();
     let result = place_and_route(&netlist, Ice40Variant::Hx1k, config).unwrap();
     let skalp_asc = result.to_icestorm_ascii_with_netlist(Some(&netlist));
@@ -1017,7 +606,7 @@ fn test_cross_level6_counter_16() {
         return;
     }
 
-    let netlist = build_counter(16);
+    let netlist = synthesize_skalp(COUNTER_16_SK);
     let config = PnrConfig::default();
     let result = place_and_route(&netlist, Ice40Variant::Hx1k, config).unwrap();
     let skalp_asc = result.to_icestorm_ascii_with_netlist(Some(&netlist));
@@ -1054,7 +643,7 @@ fn test_cross_level7_shiftreg_8() {
         return;
     }
 
-    let netlist = build_shift_register(8);
+    let netlist = synthesize_skalp(SHIFTREG_8_SK);
     let config = PnrConfig::default();
     let result = place_and_route(&netlist, Ice40Variant::Hx1k, config).unwrap();
     let skalp_asc = result.to_icestorm_ascii_with_netlist(Some(&netlist));
@@ -1087,27 +676,15 @@ fn test_cross_validation_summary() {
     );
     println!("{}", "-".repeat(85));
 
-    type DesignEntry<'a> = (&'a str, &'a str, Box<dyn Fn() -> GateNetlist>);
+    type DesignEntry<'a> = (&'a str, &'a str, &'a str);
     let designs: Vec<DesignEntry<'_>> = vec![
-        ("Inverter", INVERTER_V, Box::new(build_inverter)),
-        ("AND gate", AND_GATE_V, Box::new(build_and_gate)),
-        (
-            "DFF+reset",
-            DFF_RESET_V,
-            Box::new(build_dff_with_reset),
-        ),
-        ("Counter-4", COUNTER_4_V, Box::new(build_blinky)),
-        (
-            "Adder-8",
-            ADDER_8_V,
-            Box::new(|| build_adder_with_io(8)),
-        ),
-        ("Counter-16", COUNTER_16_V, Box::new(|| build_counter(16))),
-        (
-            "ShiftReg-8",
-            SHIFTREG_8_V,
-            Box::new(|| build_shift_register(8)),
-        ),
+        ("Inverter", INVERTER_V, INVERTER_SK),
+        ("AND gate", AND_GATE_V, AND_GATE_SK),
+        ("DFF+reset", DFF_RESET_V, DFF_RESET_SK),
+        ("Counter-4", COUNTER_4_V, COUNTER_4_SK),
+        ("Adder-8", ADDER_8_V, ADDER_8_SK),
+        ("Counter-16", COUNTER_16_V, COUNTER_16_SK),
+        ("ShiftReg-8", SHIFTREG_8_V, SHIFTREG_8_SK),
     ];
 
     let top_names = [
@@ -1120,8 +697,8 @@ fn test_cross_validation_summary() {
         "shiftreg_8",
     ];
 
-    for (i, (name, verilog, builder)) in designs.iter().enumerate() {
-        let netlist = builder();
+    for (i, (name, verilog, sk_source)) in designs.iter().enumerate() {
+        let netlist = synthesize_skalp(sk_source);
         let config = PnrConfig::fast();
         let skalp_result = match place_and_route(&netlist, Ice40Variant::Hx1k, config) {
             Ok(r) => r,
@@ -1164,4 +741,57 @@ fn test_cross_validation_summary() {
     }
 
     println!("{}", "-".repeat(85));
+}
+
+// ===== Compile smoke test (non-ignored) =====
+
+#[test]
+fn test_skalp_sources_compile() {
+    let designs: &[(&str, &str)] = &[
+        ("Inverter", INVERTER_SK),
+        ("AND gate", AND_GATE_SK),
+        ("DFF+reset", DFF_RESET_SK),
+        ("Counter-4", COUNTER_4_SK),
+        ("Adder-8", ADDER_8_SK),
+        ("Counter-16", COUNTER_16_SK),
+        ("ShiftReg-8", SHIFTREG_8_SK),
+    ];
+
+    for (name, source) in designs {
+        let netlist = synthesize_skalp(source);
+        assert!(
+            !netlist.cells.is_empty(),
+            "{} should produce cells",
+            name
+        );
+
+        // Verify no stale cell ID references (regression for gate_optimizer fix)
+        let max_cell_id = netlist.cells.len() as u32;
+        for net in &netlist.nets {
+            if let Some(d) = net.driver {
+                assert!(
+                    d.0 < max_cell_id,
+                    "{}: stale driver CellId({}) in net '{}' (max={})",
+                    name, d.0, net.name, max_cell_id
+                );
+            }
+            for (cid, _) in &net.fanout {
+                assert!(
+                    cid.0 < max_cell_id,
+                    "{}: stale fanout CellId({}) in net '{}' (max={})",
+                    name, cid.0, net.name, max_cell_id
+                );
+            }
+        }
+
+        // Verify P&R succeeds
+        let config = PnrConfig::fast();
+        let result = place_and_route(&netlist, Ice40Variant::Hx1k, config);
+        assert!(
+            result.is_ok(),
+            "{}: P&R failed: {}",
+            name,
+            result.unwrap_err()
+        );
+    }
 }

@@ -653,8 +653,8 @@ impl Ice40Device {
     fn create_tile_bels(
         &self,
         tile_type: TileType,
-        _x: u32,
-        _y: u32,
+        x: u32,
+        y: u32,
         bel_id: &mut u32,
     ) -> Vec<Bel> {
         let mut bels = Vec::new();
@@ -886,6 +886,29 @@ impl Ice40Device {
                 bels.push(dsp_bel);
             }
             _ => {}
+        }
+
+        // Add GlobalBuf BEL if this tile has a gbufin entry
+        if self.gbufin.iter().any(|&(gx, gy, _)| gx == x && gy == y) {
+            let gb_bel = Bel {
+                id: BelId(*bel_id),
+                bel_type: BelType::GlobalBuf,
+                name: "SB_GB".to_string(),
+                pins: vec![
+                    BelPin {
+                        name: "GLOBAL_BUFFER_OUTPUT".to_string(),
+                        direction: PinDirection::Output,
+                        wire: None,
+                    },
+                    BelPin {
+                        name: "USER_SIGNAL_TO_GLOBAL_BUFFER".to_string(),
+                        direction: PinDirection::Input,
+                        wire: None,
+                    },
+                ],
+            };
+            *bel_id += 1;
+            bels.push(gb_bel);
         }
 
         bels
