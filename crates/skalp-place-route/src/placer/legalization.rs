@@ -196,6 +196,11 @@ impl<'a, D: Device> Legalizer<'a, D> {
 
     /// Try to find N consecutive LC slots in a given column.
     /// Returns true if successful and updates result + used_bels.
+    ///
+    /// Each iCE40 logic tile has 8 Logic Cells (LC 0-7). In the device model,
+    /// each LC has a LUT4 BEL at even index (2*lc) and a DFF BEL at odd index
+    /// (2*lc+1). Carry chains need consecutive LCs, so we track LC indices (0-7)
+    /// and map back to device BEL indices when placing.
     #[allow(clippy::too_many_arguments)]
     fn find_consecutive_lc_slots(
         &self,
@@ -207,19 +212,23 @@ impl<'a, D: Device> Legalizer<'a, D> {
         used_bels: &mut HashMap<(u32, u32, usize), CellId>,
         result: &mut PlacementResult,
     ) -> bool {
-        // Collect all available LC slots in this column (sorted by tile_y, then lc_index)
-        let mut available_slots: Vec<(u32, usize)> = Vec::new(); // (tile_y, bel_index)
+        // Collect available LC slots (one per LC, indexed 0-7) sorted by tile_y, then lc
+        let mut available_slots: Vec<(u32, usize)> = Vec::new(); // (tile_y, lc_index)
 
         for ty in 1..height.saturating_sub(1) {
             // Skip boundary tiles (0 and height-1 are IO)
             if let Some(tile) = self.device.tile_at(col, ty) {
-                for (bel_idx, bel) in tile.bels().iter().enumerate() {
-                    if (bel.bel_type == BelType::Carry
-                        || bel.bel_type == BelType::Lut4
-                        || bel.bel_type == BelType::Dff)
-                        && !used_bels.contains_key(&(col, ty, bel_idx))
+                let bels = tile.bels();
+                for lc in 0..8usize {
+                    let lut_bel_idx = lc * 2;
+                    let dff_bel_idx = lc * 2 + 1;
+                    // LC is available if it has a LUT4 BEL and neither slot is used
+                    if lut_bel_idx < bels.len()
+                        && bels[lut_bel_idx].bel_type == BelType::Lut4
+                        && !used_bels.contains_key(&(col, ty, lut_bel_idx))
+                        && !used_bels.contains_key(&(col, ty, dff_bel_idx))
                     {
-                        available_slots.push((ty, bel_idx));
+                        available_slots.push((ty, lc));
                     }
                 }
             }
@@ -230,8 +239,8 @@ impl<'a, D: Device> Legalizer<'a, D> {
             return false;
         }
 
-        // Try to find N consecutive slots (consecutive means bel_idx increments,
-        // wrapping across tiles: tile_y increments when bel_idx reaches 8)
+        // Try to find N consecutive LC slots. Consecutive means LC index increments
+        // by 1 each step, wrapping across tiles (tile_y increments when LC reaches 8).
         for start in 0..=(available_slots.len() - n) {
             let first = available_slots[start];
             let mut consecutive = true;
@@ -249,11 +258,15 @@ impl<'a, D: Device> Legalizer<'a, D> {
             }
 
             if consecutive {
-                // Place chain cells in these slots
+                // Place chain cells at the LUT BEL index of each LC
                 for (i, &cell_id) in chain.cells.iter().enumerate() {
-                    let (ty, bel_idx) = available_slots[start + i];
+                    let (ty, lc_idx) = available_slots[start + i];
+                    let bel_idx = lc_idx * 2; // Map LC index to device LUT4 BEL index
                     let loc = PlacementLoc::new(col, ty, bel_idx, BelType::Carry);
+                    // Mark both LUT and DFF slots as used to prevent other cells
+                    // from being placed in the same LC
                     used_bels.insert((col, ty, bel_idx), cell_id);
+                    used_bels.insert((col, ty, bel_idx + 1), cell_id);
                     result.placements.insert(cell_id, loc);
                 }
                 return true;

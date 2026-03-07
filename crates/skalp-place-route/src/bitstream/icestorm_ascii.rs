@@ -17,7 +17,7 @@ use crate::placer::PlacementResult;
 use crate::router::RoutingResult;
 use skalp_lir::gate_netlist::GateNetlist;
 use skalp_lir::tech_library::CellFunction;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// DFF configuration bits for an LC
 /// In iCE40, each LC has 20 configuration bits: 16 for LUT init, 4 for DFF config
@@ -34,16 +34,21 @@ struct DffConfig {
 }
 
 /// I/O cell configuration for iCE40
-/// Each I/O tile has 2 IOBs (IOB_0 and IOB_1) with 6-bit PINTYPE configuration
+/// Each I/O tile has 2 IOBs (IOB_0 and IOB_1) with 6-bit PINTYPE configuration.
+///
+/// PIN_TYPE encoding (from iCE40 LP/HX Family Data Sheet, Table 3.3):
+///   [1:0] = Output Enable Select: 00=none, 01=always, 10=OE registered, 11=OE fabric
+///   [3:2] = Output Driver Select: 00=D_OUT_0, 01=registered, 10=DDR, 11=reserved
+///   [5:4] = Input Pin Select: 00=registered, 01=simple input, 10=DDR, 11=latch
 #[derive(Debug, Clone, Copy, Default)]
 struct IoConfig {
-    /// PINTYPE[1:0]: Input mode (0=pin, 1=registered, 2=DDR, 3=latched)
-    input_mode: u8,
-    /// PINTYPE[3:2]: Output select (0=DQ, 1=registered, 2=DDR, 3=latched)
-    output_select: u8,
-    /// PINTYPE[5:4]: Output mode (0=none, 1=output, 2=tristate, 3=enable)
-    output_mode: u8,
-    /// Input enable
+    /// PINTYPE[1:0]: Output enable select (0=none, 1=always, 2=OE registered, 3=OE fabric)
+    output_enable: u8,
+    /// PINTYPE[3:2]: Output driver select (0=DQ, 1=registered, 2=DDR, 3=reserved)
+    output_driver: u8,
+    /// PINTYPE[5:4]: Input pin select (0=registered, 1=simple, 2=DDR, 3=latch)
+    input_pin: u8,
+    /// Input enable (IE bit — enables input buffer)
     input_enable: bool,
     /// Pull-up resistor enable
     pullup_enable: bool,
@@ -89,10 +94,10 @@ impl IoConfig {
     /// Create config for simple input
     fn simple_input() -> Self {
         Self {
-            input_mode: 0,      // Direct pin input
-            output_select: 0,   // Not used
-            output_mode: 0,     // No output
-            input_enable: true, // Enable input
+            output_enable: 0,   // No output
+            output_driver: 0,   // Not used
+            input_pin: 1,       // Simple input (PIN_TYPE[5:4] = 01)
+            input_enable: true, // Enable input buffer
             pullup_enable: false,
         }
     }
@@ -100,10 +105,10 @@ impl IoConfig {
     /// Create config for simple output
     fn simple_output() -> Self {
         Self {
-            input_mode: 0,       // Not used
-            output_select: 0,    // Direct output
-            output_mode: 1,      // Output enabled
-            input_enable: false, // No input
+            output_enable: 1,    // Output always enabled (PIN_TYPE[1:0] = 01)
+            output_driver: 0,    // D_OUT_0 combinational (PIN_TYPE[3:2] = 00)
+            input_pin: 0,        // Not used
+            input_enable: false,  // No input
             pullup_enable: false,
         }
     }
@@ -111,19 +116,20 @@ impl IoConfig {
     /// Create config for bidirectional I/O
     fn bidirectional() -> Self {
         Self {
-            input_mode: 0,      // Direct pin input
-            output_select: 0,   // Direct output
-            output_mode: 2,     // Tristate output
-            input_enable: true, // Enable input
+            output_enable: 3,   // Output enable from fabric (PIN_TYPE[1:0] = 11)
+            output_driver: 0,   // D_OUT_0 combinational (PIN_TYPE[3:2] = 00)
+            input_pin: 1,       // Simple input (PIN_TYPE[5:4] = 01)
+            input_enable: true, // Enable input buffer
             pullup_enable: false,
         }
     }
 
     /// Get the 6-bit PINTYPE value
+    /// Layout: [5:4]=input_pin, [3:2]=output_driver, [1:0]=output_enable
     fn pintype(&self) -> u8 {
-        ((self.output_mode & 0x3) << 4)
-            | ((self.output_select & 0x3) << 2)
-            | (self.input_mode & 0x3)
+        ((self.input_pin & 0x3) << 4)
+            | ((self.output_driver & 0x3) << 2)
+            | (self.output_enable & 0x3)
     }
 }
 
@@ -204,6 +210,9 @@ impl<'a> IceStormAscii<'a> {
         // Collect I/O configurations from placement and netlist
         let io_configs = self.collect_io_configs(placement, netlist);
 
+        // Collect tiles that need CarryInSet (carry chain head with CI = VCC)
+        let carry_in_set_tiles = self.collect_carry_in_set_tiles(placement, netlist);
+
         // Collect global network configuration
         let global_config = self.collect_global_config(placement, netlist);
 
@@ -232,6 +241,7 @@ impl<'a> IceStormAscii<'a> {
                                 &lut_inits,
                                 &dff_configs,
                                 &global_config,
+                                &carry_in_set_tiles,
                             );
                         }
                         TileType::IoTop
@@ -349,9 +359,11 @@ impl<'a> IceStormAscii<'a> {
                 } else {
                     0x0000
                 };
-                // Convert bel_index to LC index: LUTs are at even indices (0, 2, 4, ...)
-                // LC_idx = bel_index / 2
-                let lc_idx = loc.bel_index / 2;
+                // Convert bel_index to LC index:
+                // - Normal LUTs: even bel indices (0, 2, 4, ..., 14) → lc_idx = bel_index / 2
+                // - Carry-associated LUTs from legalization: same bel_index as carry (0-14)
+                // - Fallback carry LUTs at bel_index=16: map to LC 0 in the tile
+                let lc_idx = if loc.bel_index >= 16 { 0 } else { loc.bel_index / 2 };
                 lut_inits.insert((loc.tile_x, loc.tile_y, lc_idx), init);
             }
         }
@@ -442,15 +454,20 @@ impl<'a> IceStormAscii<'a> {
 
             // Also check for carry cells (they set carry_enable bit)
             if matches!(loc.bel_type, BelType::Carry) {
-                // Carry cells set the carry_enable bit on their associated LC
-                // In iCE40, carry chain spans LC 0-7, and multiple carry cells form a chain
-                // We enable carry_enable on all LCs that might be part of the chain
-                // The bel_index for carry is typically 16 (after LUT/DFF pairs)
-                // We need to track which tile has carry cells and enable carry on all relevant LCs
-                let tile_key = (loc.tile_x, loc.tile_y);
-                for lc_idx in 0..8 {
+                if loc.bel_index < 16 {
+                    // Carry placed at specific LC by chain legalization (bel_index = 2*lc).
+                    // Only set carry_enable on that specific LC.
+                    let lc_idx = loc.bel_index / 2;
                     let entry = dff_configs
-                        .entry((tile_key.0, tile_key.1, lc_idx))
+                        .entry((loc.tile_x, loc.tile_y, lc_idx))
+                        .or_insert(DffConfig::default());
+                    entry.carry_enable = true;
+                } else {
+                    // Carry placed at tile-level BEL (index 16) by fallback path.
+                    // We don't know which specific LC, so enable carry on LC 0
+                    // (the carry chain always starts from LC 0 within a tile).
+                    let entry = dff_configs
+                        .entry((loc.tile_x, loc.tile_y, 0))
                         .or_insert(DffConfig::default());
                     entry.carry_enable = true;
                 }
@@ -458,6 +475,74 @@ impl<'a> IceStormAscii<'a> {
         }
 
         dff_configs
+    }
+
+    /// Detect tiles that need CarryInSet (carry chain head with carry-in = 1).
+    ///
+    /// CarryInSet (B1[50] in logic tile) forces the carry-in of LC 0 in a tile
+    /// to 1 instead of 0. This is needed at the start of carry chains that
+    /// require an initial carry of 1 (e.g., +1 counters).
+    ///
+    /// Detection: find carry cells that are NOT driven by another carry cell
+    /// (chain heads), then check if their CI input is driven by a constant-1
+    /// source (VCC/TIE_HIGH).
+    fn collect_carry_in_set_tiles(
+        &self,
+        placement: &PlacementResult,
+        netlist: Option<&GateNetlist>,
+    ) -> HashSet<(u32, u32)> {
+        let mut carry_in_set_tiles = HashSet::new();
+
+        let netlist = match netlist {
+            Some(n) => n,
+            None => return carry_in_set_tiles,
+        };
+
+        // Find all carry cells and their locations
+        let carry_cells: Vec<_> = placement
+            .placements
+            .iter()
+            .filter(|(_, loc)| matches!(loc.bel_type, BelType::Carry))
+            .collect();
+
+        // Build set of carry cell IDs for quick lookup
+        let carry_cell_ids: HashSet<_> = carry_cells.iter().map(|(id, _)| **id).collect();
+
+        // For each carry cell, check if it's a chain head (CI not driven by another carry)
+        for (&cell_id, loc) in &carry_cells {
+            if let Some(cell) = netlist.cells.iter().find(|c| c.id.0 == cell_id.0) {
+                // SB_CARRY has 3 inputs: I0, I1, CI. CI is typically the last input.
+                // Check if CI is driven by a constant source or by a non-carry cell.
+                let ci_input_idx = if cell.inputs.len() >= 3 { 2 } else { continue };
+                let ci_net_id = cell.inputs[ci_input_idx];
+
+                if let Some(ci_net) = netlist.nets.iter().find(|n| n.id == ci_net_id) {
+                    let ci_driven_by_carry = ci_net
+                        .driver
+                        .map(|drv| carry_cell_ids.contains(&drv))
+                        .unwrap_or(false);
+
+                    if !ci_driven_by_carry {
+                        // This is a chain head. Check if CI is driven by VCC/constant-1.
+                        let ci_is_vcc = ci_net
+                            .driver
+                            .and_then(|drv| netlist.cells.iter().find(|c| c.id == drv))
+                            .map(|driver_cell| {
+                                driver_cell.cell_type.contains("VCC")
+                                    || driver_cell.cell_type.contains("TIE_HIGH")
+                                    || driver_cell.cell_type == "SB_LUT4_BUF"
+                            })
+                            .unwrap_or(false);
+
+                        if ci_is_vcc {
+                            carry_in_set_tiles.insert((loc.tile_x, loc.tile_y));
+                        }
+                    }
+                }
+            }
+        }
+
+        carry_in_set_tiles
     }
 
     /// Derive DFF configuration from cell type name
@@ -584,6 +669,7 @@ impl<'a> IceStormAscii<'a> {
         lut_inits: &HashMap<(u32, u32, usize), u16>,
         dff_configs: &HashMap<(u32, u32, usize), DffConfig>,
         global_config: &GlobalNetworkConfig,
+        carry_in_set_tiles: &HashSet<(u32, u32)>,
     ) {
         // Check if any cells are placed in this tile
         let cells_in_tile: Vec<_> = placement
@@ -703,6 +789,12 @@ impl<'a> IceStormAscii<'a> {
             }
         }
 
+        // Set CarryInSet bit: B1[50] forces the carry chain input for this tile to 1.
+        // This is needed at the start of carry chains where CI should be 1 (e.g., +1 counters).
+        if carry_in_set_tiles.contains(&(x, y)) {
+            bits[1][50] = true;
+        }
+
         // Output the 16 rows of 54 bits each
         for row in &bits {
             for &bit in row {
@@ -769,10 +861,10 @@ impl<'a> IceStormAscii<'a> {
         // Set default Input Enable (IE) bits for unused IO pads.
         // This prevents floating inputs and matches nextpnr/icestorm behavior.
         // IE_0 at B9[3], IE_1 at B6[3]
-        // Note: tiles without physical pads (e.g. corner tiles) don't need IE bits,
-        // but our tile iteration only visits tiles present in the device grid,
-        // so all io_tiles we emit should have pads.
-        if !has_cells_or_pips {
+        // Skip IE on IO tile positions that lack physical pads (no bond wires).
+        // On HX1K/LP1K (14x18): 7 padless positions are corner/gap tiles.
+        let has_pads = !Self::is_padless_io_tile(x, y, self.device.variant);
+        if !has_cells_or_pips && has_pads {
             bits[9][3] = true; // IE_0 — input enable for IOB_0
             bits[6][3] = true; // IE_1 — input enable for IOB_1
         }
@@ -803,8 +895,10 @@ impl<'a> IceStormAscii<'a> {
                 // Set input enable (IE_0)
                 bits[9][3] = config.input_enable;
 
-                // Set pull-up resistor enable (REN_0)
-                bits[6][2] = config.pullup_enable;
+                // REN_0: disable pull-up on active IO. REN=1 means pull-up disabled.
+                // When pullup_enable is explicitly set, leave REN=0 (pull-up on).
+                // Otherwise, disable pull-up on active pins to prevent contention.
+                bits[6][2] = !config.pullup_enable;
             }
 
             // IOB_1 configuration
@@ -821,8 +915,8 @@ impl<'a> IceStormAscii<'a> {
                 // Set input enable (IE_1)
                 bits[6][3] = config.input_enable;
 
-                // Set pull-up resistor enable (REN_1)
-                bits[1][3] = config.pullup_enable;
+                // REN_1: disable pull-up on active IO (same logic as REN_0)
+                bits[1][3] = !config.pullup_enable;
             }
 
             // Set routing configuration bits for PIPs
@@ -1399,5 +1493,23 @@ impl<'a> IceStormAscii<'a> {
         }
 
         asc.push('\n');
+    }
+
+    /// Check if an IO tile position lacks physical pads (no bond wires).
+    /// These positions exist in the device grid as IO tiles but have no actual
+    /// package pins, so IE defaults should not be set.
+    fn is_padless_io_tile(x: u32, y: u32, variant: Ice40Variant) -> bool {
+        match variant {
+            Ice40Variant::Hx1k | Ice40Variant::Lp1k => {
+                // HX1K/LP1K (14x18 grid): 7 IO tile positions without pads.
+                // Left edge (x=0) gaps and right edge (x=13) gaps.
+                matches!(
+                    (x, y),
+                    (0, 1) | (0, 7) | (0, 15) | (0, 16) | (13, 5) | (13, 12) | (13, 16)
+                )
+            }
+            // Other variants: assume all IO tiles have pads (conservative)
+            _ => false,
+        }
     }
 }
