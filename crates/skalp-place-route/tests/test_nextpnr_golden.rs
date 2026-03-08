@@ -699,7 +699,8 @@ fn test_cross_validation_summary() {
 
     for (i, (name, verilog, sk_source)) in designs.iter().enumerate() {
         let netlist = synthesize_skalp(sk_source);
-        let config = PnrConfig::fast();
+        let mut config = PnrConfig::fast();
+        config.timing = Some(skalp_place_route::TimingConfig::default());
         let skalp_result = match place_and_route(&netlist, Ice40Variant::Hx1k, config) {
             Ok(r) => r,
             Err(e) => {
@@ -721,7 +722,11 @@ fn test_cross_validation_summary() {
         let n_luts = extract_lut_inits(&nextpnr_asc).len();
         let s_bits = count_routing_bits(&skalp_asc);
         let n_bits = count_routing_bits(&nextpnr_asc);
-        let s_fmax = run_icetime(&skalp_asc);
+        // Use skalp's internal STA for S-Fmax (icetime can't trace skalp's routing)
+        let s_fmax = skalp_result
+            .timing
+            .as_ref()
+            .map(|t| t.design_frequency);
         let n_fmax = run_icetime(&nextpnr_asc);
 
         println!(

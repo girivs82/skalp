@@ -246,26 +246,50 @@ impl<D: Device + Clone> TimingAnalyzer<D> {
         // Calculate worst path delay in this domain
         let mut worst_delay = 0.0f64;
 
-        for &reg_id in registers {
-            // Find paths to this register
-            let paths = self.find_paths_to_register(reg_id, netlist, placement, routing);
-            for path_delay in paths {
-                worst_delay = worst_delay.max(path_delay);
+        if registers.is_empty() {
+            // Combinational-only design: trace PI→PO paths
+            for net in &netlist.nets {
+                if net.is_output {
+                    let delay = self.trace_path_delay(
+                        net.id,
+                        netlist,
+                        placement,
+                        routing,
+                        &mut HashSet::new(),
+                    );
+                    // Add IO output delay for the output pad
+                    let total = delay + self.delay_model.io_output_delay;
+                    worst_delay = worst_delay.max(total);
+                }
+            }
+        } else {
+            for &reg_id in registers {
+                // Find paths to this register
+                let paths = self.find_paths_to_register(reg_id, netlist, placement, routing);
+                for path_delay in paths {
+                    worst_delay = worst_delay.max(path_delay);
+                }
             }
         }
 
         // Ensure minimum realistic path delay for iCE40
-        // Even the simplest path has at least: clock-to-Q + routing + setup
-        // Minimum realistic delay: ~2ns (for a reg->reg path with minimal logic)
+        // Even the simplest reg→reg path has: clk-to-Q + routing (2 local + 1 span4 + 3 PIPs) + setup
         let min_realistic_delay = self.delay_model.dff_clk_to_q
-            + self.delay_model.local_wire_delay
-            + self.delay_model.dff_setup;
+            + self.delay_model.dff_setup
+            + self.delay_model.local_wire_delay * 2.0
+            + self.delay_model.span4_delay
+            + self.delay_model.pip_delay * 3.0;
         worst_delay = worst_delay.max(min_realistic_delay);
 
-        // Convert to frequency
-        let period = worst_delay + self.config.setup_margin + self.config.clock_uncertainty;
-        // Cap maximum frequency to realistic iCE40 limits (275 MHz max)
-        let frequency = (1000.0 / period).min(275.0); // MHz
+        // For sequential designs, add setup time of destination register
+        let setup_time = if !registers.is_empty() {
+            self.delay_model.dff_setup
+        } else {
+            0.0
+        };
+        let period =
+            worst_delay + setup_time + self.config.setup_margin + self.config.clock_uncertainty;
+        let frequency = 1000.0 / period; // MHz
 
         let target_period = 1000.0 / self.config.target_frequency;
         let worst_slack = target_period - worst_delay - self.config.setup_margin;
@@ -339,7 +363,12 @@ impl<D: Device + Clone> TimingAnalyzer<D> {
 
         // If this is a primary input or clock, stop here
         if net.is_input || net.is_clock {
-            return routing_delay;
+            let io_delay = if net.is_input && !net.is_clock {
+                self.delay_model.io_input_delay
+            } else {
+                0.0
+            };
+            return routing_delay + io_delay;
         }
 
         // Get the driver cell
