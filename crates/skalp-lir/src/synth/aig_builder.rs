@@ -64,14 +64,30 @@ impl<'a> AigBuilder<'a> {
     /// This ensures latch output nets are mapped before combinational cells try to read them
     fn pre_create_latches(&mut self) {
         for cell in &self.netlist.cells {
-            let cell_type = cell.cell_type.to_uppercase();
-            let base = cell_type.split('_').next().unwrap_or(&cell_type);
+            // Use cell.function (set by tech mapper) for reliable detection,
+            // with name-based fallback for cells without a function field
+            let is_dff = match &cell.function {
+                Some(
+                    CellFunction::Dff
+                    | CellFunction::DffR
+                    | CellFunction::DffE
+                    | CellFunction::DffRE
+                    | CellFunction::Latch,
+                ) => true,
+                _ => {
+                    // Fallback: check cell type name segments for cells without function field.
+                    // Use .any() so vendor-prefixed names like "SB_DFF" match on the "DFF" segment.
+                    let cell_type = cell.cell_type.to_uppercase();
+                    cell_type.split('_').any(|seg| {
+                        matches!(
+                            seg,
+                            "DFF" | "DFFR" | "DFFE" | "DFFRE" | "DFFRQ" | "DFFQ" | "LATCH"
+                        )
+                    })
+                }
+            };
 
-            // Check if this is a DFF/latch cell
-            if matches!(
-                base,
-                "DFF" | "DFFR" | "DFFE" | "DFFRE" | "DFFRQ" | "DFFQ" | "LATCH"
-            ) {
+            if is_dff {
                 // Pre-create latch node with placeholder input
                 // The real input will be connected when the cell is processed
                 let clock = cell
@@ -797,10 +813,28 @@ impl<'a> AigBuilder<'a> {
             return lit;
         }
 
-        // Check if this is a constant net
         let net = &self.netlist.nets[net_id.0 as usize];
 
-        // Handle special constant nets
+        // Generic: check if driven by a constant tie cell (technology-independent)
+        if let Some(driver_id) = net.driver {
+            if let Some(cell) = self.netlist.get_cell(driver_id) {
+                match &cell.function {
+                    Some(CellFunction::TieLow) => {
+                        let lit = AigLit::false_lit();
+                        self.net_map[net_id.0 as usize] = Some(lit);
+                        return lit;
+                    }
+                    Some(CellFunction::TieHigh) => {
+                        let lit = AigLit::true_lit();
+                        self.net_map[net_id.0 as usize] = Some(lit);
+                        return lit;
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        // Fallback: name-based detection for nets without driver info
         if net.name.contains("const_0") || net.name.contains("gnd") || net.name.contains("vss") {
             let lit = AigLit::false_lit();
             self.net_map[net_id.0 as usize] = Some(lit);
